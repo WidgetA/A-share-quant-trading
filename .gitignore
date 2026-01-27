@@ -1,0 +1,72 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === Virtual Environment ===
+venv/
+.venv/
+ENV/
+env/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === Testing ===
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# === Type Checking ===
+.mypy_cache/
+
+# === Logs ===
+*.log
+logs/
+
+# === Environment & Secrets ===
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+secrets.yaml
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Vendor ===
+# SDK files are tracked for team convenience
+# vendor/*.tar.gz  # Uncomment to ignore large SDK files
+
+# === Data (local data not tracked) ===
+data/
+*.csv
+*.parquet
+*.db
+*.sqlite

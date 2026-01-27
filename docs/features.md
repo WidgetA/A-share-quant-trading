@@ -8,6 +8,7 @@
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-01-27 | - | Initial document structure |
+| 0.1.1 | 2026-01-27 | - | Add THS SDK installation scripts |
 
 ---
 
@@ -204,6 +205,44 @@
 - [ ] Config loader implemented
 - [ ] Config hot-reload mechanism
 - [ ] Secrets handled securely
+
+---
+
+### [INF-004] THS SDK Installation
+
+**Status**: Completed
+
+**Description**: Installation scripts for TongHuaShun iFinD SDK on Linux servers.
+
+**Requirements**:
+- Auto-detect system architecture (32/64-bit)
+- Extract SDK tarball to installation directory
+- Check library dependencies via ldd
+- Install missing dependencies via apt-get/yum
+- Run official installiFinDPy.py installer
+- Configure LD_LIBRARY_PATH for runtime
+
+**Files**:
+- `scripts/install_ths_sdk.sh` - Main installation script
+- `scripts/check_ths_deps.sh` - Dependency checker utility
+
+**Usage**:
+```bash
+# Full installation
+sudo ./scripts/install_ths_sdk.sh
+
+# With custom options
+sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
+
+# Check dependencies only
+./scripts/check_ths_deps.sh /opt/ths_sdk
+```
+
+**Acceptance Criteria**:
+- [x] Installation script created
+- [x] Dependency checking implemented
+- [x] Support for apt-get and yum package managers
+- [x] Auto-detection of 32/64-bit architecture
 
 ---
 
