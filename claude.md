@@ -177,12 +177,70 @@ Before starting any development task:
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Language | Python 3.11+ | Ecosystem, quant libraries |
+| Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
 | Message Queue | Redis Pub/Sub or ZeroMQ | Low latency, simple setup |
-| Data Storage | PostgreSQL + TimescaleDB | Time-series optimized |
+| Trading Data | SQLite | Zero-config, positions/orders/transactions |
+| Historical Data | PostgreSQL + TimescaleDB (optional) | Time-series optimized, for large datasets |
 | Task Queue | Celery (optional) | Async task processing |
 | Config Format | YAML | Human-readable, supports hot-reload |
+| Market Data SDK | THS iFinD | A-share real-time and historical data |
 
-### 9. Glossary
+### 9. Environment Management (uv)
+
+This project uses **uv** for Python environment and package management.
+
+#### Quick Start
+
+```bash
+# Install uv (if not installed)
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment and install dependencies
+uv venv
+uv sync
+```
+
+#### Common Commands
+
+```bash
+# Activate virtual environment
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
+
+# Add a new dependency
+uv add <package>
+
+# Add a dev dependency
+uv add --dev <package>
+
+# Remove a dependency
+uv remove <package>
+
+# Update all dependencies
+uv lock --upgrade
+
+# Sync environment with lock file
+uv sync
+
+# Run a command in the virtual environment (without activating)
+uv run python script.py
+uv run pytest
+```
+
+#### Why uv?
+
+- **10-100x faster** than pip for dependency resolution and installation
+- **Built-in virtual environment** management (replaces venv)
+- **Lock file support** (`uv.lock`) for reproducible builds
+- **Drop-in replacement** for pip commands
+
+### 10. Glossary
 
 - **Signal**: Trading recommendation from strategy (BUY/SELL/HOLD)
 - **Position**: Current stock holdings with quantity and cost basis

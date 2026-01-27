@@ -9,6 +9,7 @@
 |---------|------|--------|---------|
 | 0.1.0 | 2026-01-27 | - | Initial document structure |
 | 0.1.1 | 2026-01-27 | - | Add THS SDK installation scripts |
+| 0.1.2 | 2026-01-27 | - | TRD-002: Add SQLite as trading data storage |
 
 ---
 
@@ -83,8 +84,17 @@
 - Use real market data for simulation
 - Export trading records for analysis
 
+**Technical Design**:
+- Database: SQLite (zero-config, single file)
+- Tables:
+  - `account` - Cash balance, total value
+  - `positions` - Current holdings (stock_code, qty, avg_cost)
+  - `orders` - Order records (id, stock, direction, price, status)
+  - `transactions` - Fill records (order_id, fill_price, fill_qty, timestamp)
+
 **Acceptance Criteria**:
 - [ ] Paper trading executor implemented
+- [ ] SQLite database schema implemented
 - [ ] Slippage model configurable
 - [ ] Trade log export functionality
 
