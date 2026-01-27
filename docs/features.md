@@ -13,6 +13,143 @@
 | 0.1.3 | 2026-01-27 | - | DAT-003: Message collection module implemented |
 | 0.1.4 | 2026-01-27 | - | DAT-004: Real data sources (akshare announcements, CLS, eastmoney, sina) |
 | 0.1.5 | 2026-01-27 | - | DAT-005: Limit-up stocks data collection via iFinD |
+| 0.2.0 | 2026-01-28 | - | SYS-001/002/003: Main program, state management, scheduler |
+| 0.2.1 | 2026-01-28 | - | STR-001/002: Strategy base interface and hot-reload |
+
+---
+
+## Module: System
+
+### [SYS-001] Main Program Entry
+
+**Status**: Completed
+
+**Description**: Central entry point that orchestrates all modules for 24/7 operation.
+
+**Requirements**:
+- Single entry point for entire trading system
+- Coordinate startup/shutdown of all modules
+- Signal handling (SIGINT, SIGTERM) for graceful shutdown
+- Periodic statistics logging
+- Event-driven module coordination
+
+**Technical Design**:
+- `SystemManager` class orchestrates all components
+- `ModuleCoordinator` provides event pub/sub for loose coupling
+- Event types: NEWS_RECEIVED, SIGNAL_GENERATED, SESSION_CHANGED, etc.
+
+**Files**:
+- `scripts/main.py` - Main entry point
+- `src/common/coordinator.py` - Event coordinator
+- `config/main-config.yaml` - System configuration
+
+**Usage**:
+```bash
+# Start the system
+uv run python scripts/main.py
+
+# With custom config
+uv run python scripts/main.py --config config/main-config.yaml
+```
+
+**Acceptance Criteria**:
+- [x] SystemManager class implemented
+- [x] ModuleCoordinator with event pub/sub
+- [x] Signal handlers for graceful shutdown
+- [x] Statistics logging
+- [x] YAML configuration support
+
+---
+
+### [SYS-002] State Persistence and Recovery
+
+**Status**: Completed
+
+**Description**: Enable system recovery from crashes by persisting state to SQLite.
+
+**Requirements**:
+- Persist system state (STARTING, RUNNING, STOPPED, etc.)
+- Save module checkpoints periodically
+- Detect crash on startup (last state was RUNNING)
+- Restore from checkpoints after crash
+- Configurable checkpoint age limit
+
+**Technical Design**:
+- `StateManager` class manages SQLite persistence
+- Database: `data/system_state.db`
+- Tables:
+  - `system_state` - Overall system state
+  - `module_checkpoints` - Per-module recovery data
+- Checkpoint interval: configurable (default 60s)
+- Recovery: load checkpoints, resume modules, clear old checkpoints
+
+**Files**:
+- `src/common/state_manager.py` - State persistence manager
+
+**Acceptance Criteria**:
+- [x] SystemState enum (STARTING, RUNNING, STOPPED, etc.)
+- [x] Checkpoint save/load operations
+- [x] Crash detection on startup
+- [x] Recovery flow implemented
+- [x] Configurable checkpoint age limit
+
+---
+
+### [SYS-003] Trading Session Scheduler
+
+**Status**: Completed
+
+**Description**: Automatic detection of A-share trading sessions for session-aware scheduling.
+
+**Requirements**:
+- Detect current trading session (PRE_MARKET, MORNING, LUNCH_BREAK, AFTERNOON, AFTER_HOURS, CLOSED)
+- Check if market is in trading hours
+- Check if date is a trading day (exclude weekends)
+- Calculate time until next session
+- Callback registration for session changes
+
+**Technical Design**:
+- `TradingScheduler` class with session detection
+- `MarketSession` enum for session types
+- Trading hours (Beijing Time):
+  - Morning Auction: 9:15-9:30
+  - Morning Session: 9:30-11:30
+  - Lunch Break: 11:30-13:00
+  - Afternoon Session: 13:00-15:00
+- Note: Holiday calendar not included (integrate with external source for production)
+
+**Files**:
+- `src/common/scheduler.py` - Trading session scheduler
+
+**Usage**:
+```python
+from src.common.scheduler import TradingScheduler, MarketSession
+
+scheduler = TradingScheduler()
+
+# Check current session
+session = scheduler.get_current_session()
+if scheduler.is_trading_hours():
+    # Execute trading logic
+    pass
+
+# Get time until next session
+next_session, time_delta = scheduler.time_until_next_session()
+print(f"Next: {next_session.value} in {time_delta}")
+
+# Register callback
+def on_change(old, new):
+    print(f"Session: {old.value} -> {new.value}")
+scheduler.add_session_callback(on_change)
+```
+
+**Acceptance Criteria**:
+- [x] MarketSession enum defined
+- [x] Session detection implemented
+- [x] Trading hours check
+- [x] Trading day check (weekday)
+- [x] Time until next session calculation
+- [x] Session change callbacks
 
 ---
 
@@ -20,37 +157,114 @@
 
 ### [STR-001] Base Strategy Interface
 
-**Status**: Planned
+**Status**: Completed
 
 **Description**: Define the base interface that all trading strategies must implement.
 
 **Requirements**:
-- Strategies must implement `generate_signal(market_data) -> Signal`
+- Strategies must implement `generate_signals(context) -> AsyncIterator[TradingSignal]`
 - Strategies must be loadable at runtime without system restart
 - Support strategy parameter configuration via YAML
+- Lifecycle hooks: on_load(), on_unload(), on_reload()
+
+**Technical Design**:
+- `BaseStrategy` abstract class defines the interface
+- `TradingSignal` dataclass with: signal_type, stock_code, quantity, price, confidence, reason
+- `SignalType` enum: BUY, SELL, HOLD
+- `StrategyContext` provides market data, news, positions to strategies
+
+**Files**:
+- `src/strategy/__init__.py` - Module exports
+- `src/strategy/base.py` - BaseStrategy abstract class
+- `src/strategy/signals.py` - TradingSignal and SignalType
+- `src/strategy/strategies/example_strategy.py` - Example implementation
+
+**Usage**:
+```python
+from src.strategy.base import BaseStrategy, StrategyContext
+from src.strategy.signals import TradingSignal, SignalType
+
+class MyStrategy(BaseStrategy):
+    @property
+    def strategy_name(self) -> str:
+        return "my_strategy"
+
+    async def generate_signals(
+        self, context: StrategyContext
+    ) -> AsyncIterator[TradingSignal]:
+        if some_condition:
+            yield TradingSignal(
+                signal_type=SignalType.BUY,
+                stock_code="000001.SZ",
+                quantity=100,
+                strategy_name=self.strategy_name,
+            )
+```
 
 **Acceptance Criteria**:
-- [ ] Base strategy class defined
-- [ ] Signal data model defined (BUY/SELL/HOLD with metadata)
-- [ ] Strategy hot-reload mechanism implemented
+- [x] BaseStrategy abstract class defined
+- [x] TradingSignal dataclass with metadata
+- [x] SignalType enum (BUY/SELL/HOLD)
+- [x] StrategyContext for market data/news
+- [x] Lifecycle hooks (on_load, on_unload, on_reload)
+- [x] Example strategy implementation
 
 ---
 
 ### [STR-002] Strategy Hot-Reload
 
-**Status**: Planned
+**Status**: Completed
 
 **Description**: Enable updating strategies during market hours without stopping the trading system.
 
 **Requirements**:
-- Trading module subscribes to strategy update events
+- File watcher detects strategy file changes
 - New strategy takes effect on next signal generation cycle
 - Rollback mechanism if new strategy fails validation
+- Strategy validation before activation
+
+**Technical Design**:
+- `StrategyEngine` manages strategy lifecycle
+- File watcher checks strategy files every 5 seconds
+- Hot-reload flow:
+  1. Detect file change via hash comparison
+  2. Load new strategy class
+  3. Validate new strategy
+  4. Call on_unload() on old strategy
+  5. Swap strategy instance
+  6. Call on_load() and on_reload() on new strategy
+  7. On failure, keep old strategy
+
+**Files**:
+- `src/strategy/engine.py` - StrategyEngine with hot-reload
+- `src/strategy/strategies/` - Strategy files directory
+
+**Usage**:
+```python
+from src.strategy.engine import StrategyEngine
+
+engine = StrategyEngine(
+    strategy_dir=Path("src/strategy/strategies"),
+    hot_reload=True
+)
+await engine.start()
+
+# Strategies are loaded automatically from directory
+# Modify a .py file -> engine detects and reloads
+
+async for signal in engine.generate_all_signals(context):
+    # Process signals
+    pass
+
+await engine.stop()
+```
 
 **Acceptance Criteria**:
-- [ ] Strategy file change detection
-- [ ] Graceful strategy swap without order interruption
-- [ ] Strategy validation before activation
+- [x] StrategyEngine class implemented
+- [x] Strategy file change detection
+- [x] Graceful strategy swap without interruption
+- [x] Strategy validation before activation
+- [x] Rollback on reload failure
 
 ---
 

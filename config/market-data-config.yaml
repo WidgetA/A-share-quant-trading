@@ -1,0 +1,30 @@
+# Market Data Module Configuration
+# This file configures market data collection services
+
+market_data:
+  # Limit-up stocks data settings
+  limit_up:
+    # Database settings
+    database:
+      # Path to SQLite database file (relative to project root)
+      path: "data/limit_up.db"
+
+    # Data source settings
+    source:
+      # Enable/disable limit-up data collection
+      enabled: true
+      # Fetch time (after market close) - format: HH:MM
+      # Set to empty string to disable scheduled fetch
+      fetch_time: "15:30"
+
+    # Historical data settings (for backfill)
+    historical:
+      # Whether to fetch historical data on first start
+      enabled: false
+      # Number of trading days of historical data to fetch
+      days: 30
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

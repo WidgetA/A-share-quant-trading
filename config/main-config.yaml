@@ -1,0 +1,76 @@
+# === A-Share Quantitative Trading System - Main Configuration ===
+#
+# This is the main configuration file for the trading system.
+# It coordinates all modules and system-level settings.
+#
+# Usage:
+#   uv run python scripts/main.py
+#   uv run python scripts/main.py --config config/main-config.yaml
+
+# === System Settings ===
+system:
+  # State database for persistence and recovery
+  state_database: "data/system_state.db"
+
+  # Checkpoint interval in seconds
+  # System state is saved periodically for crash recovery
+  checkpoint_interval: 60
+
+  # Recovery settings
+  recovery:
+    enabled: true
+    # Ignore checkpoints older than this (hours)
+    max_age_hours: 24
+
+# === Scheduler Settings ===
+scheduler:
+  # Timezone for trading session calculation
+  # Note: System uses local time, this is for reference
+  timezone: "Asia/Shanghai"
+
+  # Trading session times (for reference, hardcoded in scheduler)
+  # morning_auction: "09:15-09:30"
+  # morning_session: "09:30-11:30"
+  # lunch_break: "11:30-13:00"
+  # afternoon_session: "13:00-15:00"
+
+# === Module Configurations ===
+modules:
+  # Data module (news collection)
+  data:
+    enabled: true
+    # Path to message service configuration
+    config_path: "config/message-config.yaml"
+
+  # Strategy module
+  strategy:
+    enabled: true
+    # Directory containing strategy Python files
+    strategy_dir: "src/strategy/strategies"
+    # Enable file watching for hot-reload
+    hot_reload: true
+
+  # Trading module (future implementation)
+  trading:
+    enabled: false
+    # Trading mode: "paper" or "live"
+    mode: "paper"
+    # Path to trading configuration
+    config_path: "config/trading-config.yaml"
+
+# === Logging Configuration ===
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+
+  # Log format
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+  # Log file (optional, logs to console if not specified)
+  file: "logs/system.log"
+
+  # Max log file size in MB (for rotation)
+  max_size_mb: 100
+
+  # Number of backup log files to keep
+  backup_count: 10
