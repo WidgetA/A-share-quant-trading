@@ -248,3 +248,127 @@ uv run pytest
 - **Paper Trading**: Simulated trading without real money
 - **Live Trading**: Real trading with actual broker connection
 - **Hot-Reload**: Ability to update code/config without system restart
+
+### 11. Data Source Testing Requirements
+
+**MANDATORY: Every new data source MUST have accompanying tests. Do not merge/commit a data source without its test file.**
+
+Every data source must include the following tests to detect when external APIs become unavailable:
+
+| Test Type | Purpose | Example |
+|-----------|---------|---------|
+| **Connectivity** | Verify API is accessible | `test_connectivity()` |
+| **Data Format** | Verify response structure matches expectations | `test_message_format()` |
+| **Deduplication** | Verify duplicate messages are filtered | `test_deduplication()` |
+| **Error Handling** | Verify graceful handling of network errors | `test_network_error()` |
+
+Run data source tests:
+
+```bash
+# Run all data source tests
+uv run pytest tests/unit/data/sources/ -v
+
+# Run specific source test
+uv run pytest tests/unit/data/sources/test_cls_news.py -v
+```
+
+Test implementation guidelines:
+- **New data source = New test file** (e.g., `xxx_news.py` → `test_xxx_news.py`)
+- Use `pytest.mark.asyncio` for async tests
+- Use `pytest-mock` to mock external API calls for unit tests
+- Include at least one "live" test (marked with `@pytest.mark.live`) that actually hits the API
+- Live tests should be skipped in CI but run locally for debugging
+
+Test file naming convention:
+```
+src/data/sources/xxx_news.py      → tests/unit/data/sources/test_xxx_news.py
+src/data/sources/yyy_source.py    → tests/unit/data/sources/test_yyy_source.py
+```
+
+### 12. Trading Safety Priority Principle
+
+**Core Principle: Trading Safety > Program Robustness**
+
+When facing design decisions where:
+- Option A: May cause program crash
+- Option B: May cause financial loss
+
+**ALWAYS choose Option A (let it crash)**
+
+#### Guidelines
+
+1. **Stop rather than trade incorrectly**
+   - If order status is uncertain, halt trading instead of guessing
+   - If data is incomplete, skip the trading decision
+
+2. **Miss opportunities rather than take risks**
+   - Do not execute trades with stale or cached data
+   - Do not assume market conditions when data fetch fails
+
+3. **Communicate immediately**
+   - Any design decision that may affect fund safety MUST be discussed with user first
+   - Do not silently implement degraded fallback for trading-related code
+
+4. **Fail fast**
+   - Terminate immediately on anomalies instead of attempting recovery
+   - Prefer explicit errors over silent degradation
+
+5. **Audit first**
+   - All trading operations must have complete logs
+   - Never skip logging to "improve performance"
+
+#### Prohibited Degradation Patterns
+
+These patterns are **FORBIDDEN** in trading-related code:
+
+```python
+# FORBIDDEN: Using cache when real-time data fails
+def get_price(stock_code):
+    try:
+        return fetch_realtime_price(stock_code)
+    except NetworkError:
+        return self.cache.get(stock_code)  # DANGEROUS!
+
+# FORBIDDEN: Assuming order status on timeout
+def check_order_status(order_id):
+    try:
+        return broker.get_status(order_id)
+    except Timeout:
+        return "FILLED"  # DANGEROUS ASSUMPTION!
+
+# FORBIDDEN: Auto-retry that may cause duplicate orders
+def place_order(order):
+    for _ in range(3):  # DANGEROUS RETRY!
+        try:
+            return broker.submit(order)
+        except NetworkError:
+            continue
+```
+
+#### Correct Patterns
+
+```python
+# CORRECT: Fail explicitly when data unavailable
+def get_price(stock_code):
+    try:
+        return fetch_realtime_price(stock_code)
+    except NetworkError as e:
+        logger.error(f"Failed to fetch price for {stock_code}: {e}")
+        raise TradingHaltError("Cannot proceed without real-time data")
+
+# CORRECT: Mark status as unknown and halt
+def check_order_status(order_id):
+    try:
+        return broker.get_status(order_id)
+    except Timeout:
+        logger.critical(f"Order {order_id} status unknown - HALTING")
+        raise OrderStatusUnknownError(order_id)
+
+# CORRECT: No retry for order submission
+def place_order(order):
+    try:
+        return broker.submit(order)
+    except NetworkError as e:
+        logger.error(f"Order submission failed: {e}")
+        raise OrderSubmissionError("Manual intervention required")
+```

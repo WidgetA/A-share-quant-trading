@@ -10,6 +10,8 @@
 | 0.1.0 | 2026-01-27 | - | Initial document structure |
 | 0.1.1 | 2026-01-27 | - | Add THS SDK installation scripts |
 | 0.1.2 | 2026-01-27 | - | TRD-002: Add SQLite as trading data storage |
+| 0.1.3 | 2026-01-27 | - | DAT-003: Message collection module implemented |
+| 0.1.4 | 2026-01-27 | - | DAT-004: Real data sources (baostock, CLS, eastmoney, sina) |
 
 ---
 
@@ -156,6 +158,127 @@
 - [ ] Historical data fetcher implemented
 - [ ] Database schema designed
 - [ ] Query API available
+
+---
+
+### [DAT-003] Message Collection
+
+**Status**: Completed
+
+**Description**: Continuous collection of news, announcements, and social media content for sentiment analysis and event-driven trading.
+
+**Requirements**:
+- Support multiple message source types: stock announcements, financial news, social media
+- Plugin architecture for dynamic source addition/removal at runtime
+- Stream-based message fetching with real-time database storage
+- Continuous background operation with configurable polling intervals
+- SQLite storage for collected messages
+
+**Technical Design**:
+- Architecture: Plugin-based with BaseMessageSource interface
+- Components:
+  - `MessageService`: Main service orchestrating all sources
+  - `SourceRegistry`: Dynamic source registration/removal
+  - `MessageDatabase`: Async SQLite storage layer
+  - `BaseMessageSource`: Abstract base for all sources
+- Database: SQLite with messages table
+  - Fields: id, source_type, source_name, title, content, url, stock_codes, publish_time, fetch_time, raw_data
+  - Indexes: source_type, publish_time, source_name
+
+**Files**:
+- `src/data/models/message.py` - Message data model
+- `src/data/database/message_db.py` - SQLite database layer
+- `src/data/sources/base.py` - Base source interface
+- `src/data/sources/registry.py` - Source registry
+- `src/data/sources/announcement.py` - Announcement source
+- `src/data/sources/news.py` - News source
+- `src/data/sources/social.py` - Social media source
+- `src/data/services/message_service.py` - Main service
+- `src/common/config.py` - Configuration loader
+- `config/message-config.yaml` - Module configuration
+- `scripts/run_message_service.py` - Startup script
+
+**Usage**:
+```bash
+# Start the message service
+uv run python scripts/run_message_service.py
+
+# With custom config
+uv run python scripts/run_message_service.py --config config/message-config.yaml
+```
+
+**Acceptance Criteria**:
+- [x] Plugin architecture for message sources
+- [x] Dynamic source add/remove at runtime
+- [x] Async stream-based message fetching
+- [x] SQLite database storage
+- [x] YAML configuration support
+- [x] Sample implementations for all three source types
+
+---
+
+### [DAT-004] Real Data Sources
+
+**Status**: Completed
+
+**Description**: Production-ready data sources for fetching real financial news and announcements.
+
+**Requirements**:
+- Baostock announcements: Performance reports and forecasts
+- CLS (财联社): Real-time financial telegraph
+- East Money (东方财富): Global financial news
+- Sina Finance (新浪财经): Financial news
+- Historical batch fetch support for initial data population
+- Content-based deduplication to prevent duplicate messages
+- Comprehensive tests to detect API failures
+
+**Technical Design**:
+- Libraries:
+  - `akshare` for CLS, East Money, Sina news
+  - `baostock` for announcements
+- Deduplication:
+  - Content-based ID using SHA256(source_name + title + publish_time)
+  - LRU cache (10,000 entries) for session deduplication
+  - SQLite UNIQUE constraint for cross-session deduplication
+- Historical Fetch:
+  - `fetch_historical(days)` method for batch data retrieval
+  - Configurable via `message.historical.days` in YAML
+
+**Files**:
+- `src/data/sources/baostock_announcement.py` - Baostock announcements
+- `src/data/sources/cls_news.py` - CLS telegraph
+- `src/data/sources/eastmoney_news.py` - East Money news
+- `src/data/sources/sina_news.py` - Sina news
+- `tests/unit/data/sources/test_*.py` - Tests for each source
+
+**Testing**:
+Each source includes 4 types of tests:
+1. Connectivity test - API accessibility
+2. Data format test - Response structure validation
+3. Deduplication test - Duplicate filtering
+4. Error handling test - Network error recovery
+
+Run tests:
+```bash
+# All source tests
+uv run pytest tests/unit/data/sources/ -v
+
+# Skip live API tests in CI
+uv run pytest tests/unit/data/sources/ -v -m "not live"
+
+# Run only live tests (for debugging)
+uv run pytest tests/unit/data/sources/ -v -m live
+```
+
+**Acceptance Criteria**:
+- [x] Baostock announcement source implemented
+- [x] CLS news source implemented
+- [x] East Money news source implemented
+- [x] Sina news source implemented
+- [x] Content-based deduplication
+- [x] Historical batch fetch support
+- [x] Unit tests for all sources
+- [x] Live connectivity tests (marked with @pytest.mark.live)
 
 ---
 
