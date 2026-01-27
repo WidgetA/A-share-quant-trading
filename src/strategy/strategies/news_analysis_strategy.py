@@ -329,7 +329,7 @@ class NewsAnalysisStrategy(BaseStrategy):
 
             # Classify stocks: limit-up vs available
             limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
-            available_stocks: list[tuple[str, str, float]] = []  # (code, name, price)
+            available_stocks: list[tuple[str, str, float, float | None]] = []  # (code, name, price, change_pct)
 
             for stock_code in news_signal.target_stocks:
                 price = self._get_stock_price(stock_code, context)
@@ -338,11 +338,12 @@ class NewsAnalysisStrategy(BaseStrategy):
                     continue
 
                 stock_name = self._sector_mapper.get_stock_name(stock_code) or stock_code
+                change_pct = self._get_change_pct(stock_code, price, context)
 
                 if self._is_at_limit_up(stock_code, price, context):
                     limit_up_stocks.append((stock_code, stock_name))
                 else:
-                    available_stocks.append((stock_code, stock_name, price))
+                    available_stocks.append((stock_code, stock_name, price, change_pct))
 
             # If some stocks are at limit-up, ask user for confirmation
             if limit_up_stocks:
@@ -369,7 +370,7 @@ class NewsAnalysisStrategy(BaseStrategy):
                 continue
 
             # Buy the selected stock(s)
-            for stock_code, stock_name, price in stocks_to_buy:
+            for stock_code, stock_name, price, _change_pct in stocks_to_buy:
                 try:
                     quantity = self._position_manager.allocate_slot(
                         slot=slot,
@@ -436,7 +437,7 @@ class NewsAnalysisStrategy(BaseStrategy):
 
             # Classify stocks: limit-up vs available
             limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
-            available_stocks: list[tuple[str, str, float]] = []  # (code, name, price)
+            available_stocks: list[tuple[str, str, float, float | None]] = []  # (code, name, price, change_pct)
 
             for stock_code in news_signal.target_stocks:
                 price = self._get_stock_price(stock_code, context)
@@ -444,11 +445,12 @@ class NewsAnalysisStrategy(BaseStrategy):
                     continue
 
                 stock_name = self._sector_mapper.get_stock_name(stock_code) or stock_code
+                change_pct = self._get_change_pct(stock_code, price, context)
 
                 if self._is_at_limit_up(stock_code, price, context):
                     limit_up_stocks.append((stock_code, stock_name))
                 else:
-                    available_stocks.append((stock_code, stock_name, price))
+                    available_stocks.append((stock_code, stock_name, price, change_pct))
 
             # If some stocks are at limit-up, ask user for confirmation
             if limit_up_stocks:
@@ -477,7 +479,7 @@ class NewsAnalysisStrategy(BaseStrategy):
                 stocks_to_buy = available_stocks
 
             # Buy the selected stock(s)
-            for stock_code, stock_name, price in stocks_to_buy:
+            for stock_code, stock_name, price, _change_pct in stocks_to_buy:
                 try:
                     quantity = self._position_manager.allocate_slot(
                         slot=slot,
@@ -625,6 +627,39 @@ class NewsAnalysisStrategy(BaseStrategy):
         # Fallback: use a placeholder price for testing
         # In production, this should fetch real-time price
         return 10.0  # Placeholder
+
+    def _get_change_pct(
+        self,
+        stock_code: str,
+        current_price: float,
+        context: StrategyContext,
+    ) -> float | None:
+        """
+        Get the percentage change from previous close.
+
+        Args:
+            stock_code: Stock code with exchange suffix
+            current_price: Current trading price
+            context: Strategy context with market data
+
+        Returns:
+            Percentage change (e.g., 5.5 for +5.5%), or None if unavailable
+        """
+        market_data = context.market_data.get(stock_code, {})
+
+        # Method 1: Direct change ratio
+        change_ratio = market_data.get("change_ratio") or market_data.get("pct_change")
+        if change_ratio is not None:
+            return float(change_ratio)
+
+        # Method 2: Calculate from previous close
+        prev_close = market_data.get("prev_close") or market_data.get("pre_close")
+        if prev_close:
+            prev_close = float(prev_close)
+            if prev_close > 0:
+                return (current_price / prev_close - 1) * 100
+
+        return None
 
     def _get_limit_up_ratio(self, stock_code: str) -> float:
         """

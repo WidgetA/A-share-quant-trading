@@ -333,6 +333,15 @@ class UserInteraction:
             print()  # New line after timeout
             return None
 
+    def _format_change_pct(self, change_pct: float | None) -> str:
+        """Format change percentage for display."""
+        if change_pct is None:
+            return ""
+        if change_pct >= 0:
+            return f"📈 +{change_pct:.2f}%"
+        else:
+            return f"📉 {change_pct:.2f}%"
+
     def _parse_selection(self, selection: str, max_index: int) -> list[int]:
         """
         Parse user selection string into indices.
@@ -395,8 +404,8 @@ class UserInteraction:
         sector_name: str,
         total_stocks: int,
         limit_up_stocks: list[tuple[str, str]],  # [(code, name), ...]
-        available_stocks: list[tuple[str, str, float]],  # [(code, name, price), ...]
-    ) -> list[tuple[str, str, float]] | None:
+        available_stocks: list[tuple[str, str, float, float | None]],  # [(code, name, price, change_pct), ...]
+    ) -> list[tuple[str, str, float, float | None]] | None:
         """
         Ask user to confirm buying when many stocks in sector are at limit-up.
 
@@ -404,10 +413,11 @@ class UserInteraction:
             sector_name: Name of the sector/board.
             total_stocks: Total number of stocks in sector.
             limit_up_stocks: List of (code, name) tuples for stocks at limit-up.
-            available_stocks: List of (code, name, price) tuples for buyable stocks.
+            available_stocks: List of (code, name, price, change_pct) tuples for buyable stocks.
+                change_pct is the percentage change from previous close (can be None).
 
         Returns:
-            List of (code, name, price) tuples user selected to buy,
+            List of (code, name, price, change_pct) tuples user selected to buy,
             or None if user chooses to skip entirely.
         """
         print(f"\n{'=' * 60}")
@@ -433,8 +443,9 @@ class UserInteraction:
             return None
 
         print(f"\n✅ 可买入 ({available_count} 只):")
-        for i, (code, name, price) in enumerate(available_stocks, 1):
-            print(f"    [{i}] {code} {name} ¥{price:.2f}")
+        for i, (code, name, price, change_pct) in enumerate(available_stocks, 1):
+            change_str = self._format_change_pct(change_pct)
+            print(f"    [{i}] {code} {name} ¥{price:.2f} {change_str}")
 
         print(f"\n{'=' * 60}")
 
