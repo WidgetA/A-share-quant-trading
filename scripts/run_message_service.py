@@ -20,7 +20,7 @@ sys.path.insert(0, str(project_root))
 
 from src.common.config import Config
 from src.data.services.message_service import MessageService
-from src.data.sources.baostock_announcement import BaostockAnnouncementSource
+from src.data.sources.akshare_announcement import AkshareAnnouncementSource
 from src.data.sources.cls_news import CLSNewsSource
 from src.data.sources.eastmoney_news import EastmoneyNewsSource
 from src.data.sources.sina_news import SinaNewsSource
@@ -58,12 +58,13 @@ async def main(config_path: str) -> None:
     # Add sources based on configuration
     sources_config = config.get_dict("message.sources", {})
 
-    # Baostock announcements
-    baostock_config = sources_config.get("baostock", {})
-    if baostock_config.get("enabled", True):
-        interval = baostock_config.get("interval", 300)
-        await service.add_source(BaostockAnnouncementSource(interval=float(interval)))
-        logger.info(f"Added Baostock source (interval={interval}s)")
+    # Akshare announcements (East Money data source)
+    akshare_config = sources_config.get("akshare", sources_config.get("baostock", {}))
+    if akshare_config.get("enabled", True):
+        interval = akshare_config.get("interval", 300)
+        category = akshare_config.get("category", "all")
+        await service.add_source(AkshareAnnouncementSource(interval=float(interval), category=category))
+        logger.info(f"Added Akshare announcement source (interval={interval}s, category={category})")
 
     # CLS news
     cls_config = sources_config.get("cls", {})

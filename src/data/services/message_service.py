@@ -212,6 +212,18 @@ class MessageService:
 
     async def _start_source(self, source: BaseMessageSource) -> None:
         """Start fetching from a single source."""
+        # Load existing message IDs into source's deduplication cache
+        if self._database:
+            existing_ids = await self._database.get_existing_ids(
+                source_name=source.source_name,
+                limit=source.MAX_SEEN_IDS,
+            )
+            for msg_id in existing_ids:
+                source.mark_seen(msg_id)
+            logger.info(
+                f"Loaded {len(existing_ids)} existing IDs for {source.source_name}"
+            )
+
         await source.start()
         task = asyncio.create_task(
             self._fetch_loop(source),
@@ -246,20 +258,27 @@ class MessageService:
 
         logger.info(f"Stopped fetch loop for {source.source_name}")
 
-    async def _process_message(self, message: Message) -> None:
+    async def _process_message(self, message: Message) -> bool:
         """
-        Process a single message: invoke callbacks and save to database.
-        """
-        # Invoke callbacks
-        for callback in self._callbacks:
-            try:
-                callback(message)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
+        Process a single message: save to database and invoke callbacks.
 
-        # Save to database
+        Returns:
+            True if message was new and saved, False if it already existed
+        """
+        # Save to database first (check if new)
+        is_new = False
         if self._database:
-            await self._database.save(message)
+            is_new = await self._database.save(message)
+
+        # Only invoke callbacks for new messages
+        if is_new:
+            for callback in self._callbacks:
+                try:
+                    callback(message)
+                except Exception as e:
+                    logger.error(f"Callback error: {e}")
+
+        return is_new
 
     def _on_source_change(self, source: BaseMessageSource, event: str) -> None:
         """Handle source registry changes."""

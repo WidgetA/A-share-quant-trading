@@ -11,7 +11,8 @@
 | 0.1.1 | 2026-01-27 | - | Add THS SDK installation scripts |
 | 0.1.2 | 2026-01-27 | - | TRD-002: Add SQLite as trading data storage |
 | 0.1.3 | 2026-01-27 | - | DAT-003: Message collection module implemented |
-| 0.1.4 | 2026-01-27 | - | DAT-004: Real data sources (baostock, CLS, eastmoney, sina) |
+| 0.1.4 | 2026-01-27 | - | DAT-004: Real data sources (akshare announcements, CLS, eastmoney, sina) |
+| 0.1.5 | 2026-01-27 | - | DAT-005: Limit-up stocks data collection via iFinD |
 
 ---
 
@@ -224,7 +225,7 @@ uv run python scripts/run_message_service.py --config config/message-config.yaml
 **Description**: Production-ready data sources for fetching real financial news and announcements.
 
 **Requirements**:
-- Baostock announcements: Performance reports and forecasts
+- Akshare announcements: All A-share stock announcements from East Money (全部/重大事项/财务报告/融资公告/风险提示/资产重组/信息变更/持股变动)
 - CLS (财联社): Real-time financial telegraph
 - East Money (东方财富): Global financial news
 - Sina Finance (新浪财经): Financial news
@@ -234,8 +235,7 @@ uv run python scripts/run_message_service.py --config config/message-config.yaml
 
 **Technical Design**:
 - Libraries:
-  - `akshare` for CLS, East Money, Sina news
-  - `baostock` for announcements
+  - `akshare` for all data sources (announcements, CLS, East Money, Sina news)
 - Deduplication:
   - Content-based ID using SHA256(source_name + title + publish_time)
   - LRU cache (10,000 entries) for session deduplication
@@ -245,7 +245,7 @@ uv run python scripts/run_message_service.py --config config/message-config.yaml
   - Configurable via `message.historical.days` in YAML
 
 **Files**:
-- `src/data/sources/baostock_announcement.py` - Baostock announcements
+- `src/data/sources/akshare_announcement.py` - A-share stock announcements (via akshare/East Money)
 - `src/data/sources/cls_news.py` - CLS telegraph
 - `src/data/sources/eastmoney_news.py` - East Money news
 - `src/data/sources/sina_news.py` - Sina news
@@ -271,7 +271,7 @@ uv run pytest tests/unit/data/sources/ -v -m live
 ```
 
 **Acceptance Criteria**:
-- [x] Baostock announcement source implemented
+- [x] Akshare announcement source implemented (全部公告类型)
 - [x] CLS news source implemented
 - [x] East Money news source implemented
 - [x] Sina news source implemented
@@ -279,6 +279,76 @@ uv run pytest tests/unit/data/sources/ -v -m live
 - [x] Historical batch fetch support
 - [x] Unit tests for all sources
 - [x] Live connectivity tests (marked with @pytest.mark.live)
+
+---
+
+### [DAT-005] Limit-Up Stocks Data Collection
+
+**Status**: Completed
+
+**Description**: Collect daily limit-up (涨停) stock information after market close using iFinD API, storing the data in SQLite for analysis and strategy development.
+
+**Requirements**:
+- Fetch all limit-up stocks for a given trading day after market close (15:00)
+- Capture comprehensive limit-up information: stock code, name, price, time, reason, etc.
+- Store data in SQLite database with proper indexing
+- Support historical data backfill
+- Idempotent: re-running for the same date updates existing records
+
+**Technical Design**:
+- Data Source: iFinD `THS_DataPool` API for limit-up board data
+- Database: SQLite (separate from messages, in `data/limit_up.db`)
+- Table Schema:
+  - `limit_up_stocks`:
+    - `id` (TEXT PRIMARY KEY) - Composite: date + stock_code
+    - `trade_date` (TEXT) - Trading date (YYYY-MM-DD)
+    - `stock_code` (TEXT) - Stock code (e.g., "000001.SZ")
+    - `stock_name` (TEXT) - Stock name
+    - `limit_up_price` (REAL) - Limit-up price
+    - `limit_up_time` (TEXT) - First limit-up time (HH:MM:SS)
+    - `open_count` (INTEGER) - Number of times limit opened
+    - `last_limit_up_time` (TEXT) - Last limit-up time if reopened
+    - `turnover_rate` (REAL) - Turnover rate percentage
+    - `amount` (REAL) - Trading amount (yuan)
+    - `circulation_mv` (REAL) - Circulating market value
+    - `reason` (TEXT) - Limit-up reason/concept
+    - `industry` (TEXT) - Industry classification
+    - `created_at` (TEXT) - Record creation timestamp
+    - `updated_at` (TEXT) - Record update timestamp
+  - Indexes: trade_date, stock_code, limit_up_time
+
+**Files**:
+- `src/data/models/limit_up.py` - LimitUpStock data model
+- `src/data/database/limit_up_db.py` - SQLite database layer
+- `src/data/sources/ifind_limit_up.py` - iFinD data source
+- `tests/unit/data/sources/test_ifind_limit_up.py` - Test file
+- `config/market-data-config.yaml` - Configuration
+- `scripts/fetch_limit_up.py` - CLI script for fetching data
+
+**Usage**:
+```python
+from src.data.sources.ifind_limit_up import IFinDLimitUpSource
+
+# Fetch today's limit-up stocks
+source = IFinDLimitUpSource()
+await source.start()
+stocks = await source.fetch_limit_up_stocks()  # Uses today's date
+await source.stop()
+
+# Fetch historical data
+stocks = await source.fetch_limit_up_stocks(date="2026-01-24")
+
+# Backfill multiple days
+await source.backfill(days=30)
+```
+
+**Acceptance Criteria**:
+- [x] LimitUpStock data model defined
+- [x] SQLite database layer with async operations
+- [x] iFinD data source implementation
+- [x] Comprehensive test coverage
+- [x] Configuration via YAML
+- [x] Historical backfill support
 
 ---
 

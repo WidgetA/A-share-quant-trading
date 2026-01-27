@@ -102,16 +102,29 @@ class MessageDatabase:
 
         await self._connection.commit()
 
-    async def save(self, message: Message) -> None:
-        """Save a single message to database."""
+    async def save(self, message: Message) -> bool:
+        """
+        Save a single message to database if not exists.
+
+        Args:
+            message: The message to save
+
+        Returns:
+            True if message was saved, False if it already existed
+        """
         if not self._connection:
             raise RuntimeError("Database not connected")
 
         async with self._lock:
+            # Check if already exists
+            if await self._exists_unlocked(message.id):
+                logger.debug(f"Message already exists, skipping: {message.id}")
+                return False
+
             data = message.to_dict()
             await self._connection.execute(
                 """
-                INSERT OR REPLACE INTO messages
+                INSERT INTO messages
                 (id, source_type, source_name, title, content, url,
                  stock_codes, publish_time, fetch_time, raw_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -131,9 +144,25 @@ class MessageDatabase:
             )
             await self._connection.commit()
             logger.debug(f"Saved message: {message.id} - {message.title[:50]}")
+            return True
+
+    async def _exists_unlocked(self, message_id: str) -> bool:
+        """Check if message exists (must be called with lock held)."""
+        async with self._connection.execute(
+            "SELECT 1 FROM messages WHERE id = ?", (message_id,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
 
     async def save_batch(self, messages: list[Message]) -> int:
-        """Save multiple messages in a single transaction."""
+        """
+        Save multiple messages, skipping those that already exist.
+
+        Args:
+            messages: List of messages to save
+
+        Returns:
+            Number of new messages actually saved
+        """
         if not self._connection:
             raise RuntimeError("Database not connected")
 
@@ -141,10 +170,27 @@ class MessageDatabase:
             return 0
 
         async with self._lock:
-            data_list = [m.to_dict() for m in messages]
+            # Get existing IDs in one query
+            message_ids = [m.id for m in messages]
+            placeholders = ",".join("?" * len(message_ids))
+            async with self._connection.execute(
+                f"SELECT id FROM messages WHERE id IN ({placeholders})",
+                message_ids,
+            ) as cursor:
+                existing_ids = {row[0] async for row in cursor}
+
+            # Filter out existing messages
+            new_messages = [m for m in messages if m.id not in existing_ids]
+
+            if not new_messages:
+                logger.info(f"All {len(messages)} messages already exist, skipping")
+                return 0
+
+            # Insert only new messages
+            data_list = [m.to_dict() for m in new_messages]
             await self._connection.executemany(
                 """
-                INSERT OR REPLACE INTO messages
+                INSERT INTO messages
                 (id, source_type, source_name, title, content, url,
                  stock_codes, publish_time, fetch_time, raw_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -166,8 +212,9 @@ class MessageDatabase:
                 ],
             )
             await self._connection.commit()
-            logger.info(f"Saved {len(messages)} messages in batch")
-            return len(messages)
+            skipped = len(messages) - len(new_messages)
+            logger.info(f"Saved {len(new_messages)} new messages, skipped {skipped} existing")
+            return len(new_messages)
 
     async def query(
         self,
@@ -288,3 +335,31 @@ class MessageDatabase:
             "SELECT 1 FROM messages WHERE id = ?", (message_id,)
         ) as cursor:
             return await cursor.fetchone() is not None
+
+    async def get_existing_ids(
+        self,
+        source_name: str | None = None,
+        limit: int = 10000,
+    ) -> set[str]:
+        """
+        Get existing message IDs for cache initialization.
+
+        Args:
+            source_name: Filter by source name (optional)
+            limit: Maximum number of IDs to return (for memory safety)
+
+        Returns:
+            Set of existing message IDs
+        """
+        if not self._connection:
+            raise RuntimeError("Database not connected")
+
+        if source_name:
+            query = "SELECT id FROM messages WHERE source_name = ? ORDER BY publish_time DESC LIMIT ?"
+            params = (source_name, limit)
+        else:
+            query = "SELECT id FROM messages ORDER BY publish_time DESC LIMIT ?"
+            params = (limit,)
+
+        async with self._connection.execute(query, params) as cursor:
+            return {row[0] async for row in cursor}

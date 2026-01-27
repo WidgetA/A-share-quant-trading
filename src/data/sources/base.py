@@ -84,7 +84,7 @@ class BaseMessageSource(ABC):
         """
         Unique identifier for this specific source.
 
-        Examples: "eastmoney", "sina_finance", "xueqiu", "cls", "baostock"
+        Examples: "eastmoney", "sina_finance", "xueqiu", "cls", "akshare_eastmoney"
         """
         ...
 

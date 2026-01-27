@@ -16,11 +16,14 @@ message:
 
   # Source configurations
   sources:
-    # Baostock announcements (业绩公告)
-    baostock:
+    # Akshare announcements (A股公告 via 东方财富)
+    # Categories: all, major, financial, financing, risk, restructuring, info_change, shareholding
+    akshare:
       enabled: true
       # Polling interval in seconds (5 minutes)
       interval: 300
+      # Announcement category (default: all)
+      category: "all"
 
     # CLS Telegraph (财联社电报)
     cls:
