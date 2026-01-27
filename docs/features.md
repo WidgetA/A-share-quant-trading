@@ -15,6 +15,9 @@
 | 0.1.5 | 2026-01-27 | - | DAT-005: Limit-up stocks data collection via iFinD |
 | 0.2.0 | 2026-01-28 | - | SYS-001/002/003: Main program, state management, scheduler |
 | 0.2.1 | 2026-01-28 | - | STR-001/002: Strategy base interface and hot-reload |
+| 0.3.0 | 2026-01-28 | - | STR-003: News analysis strategy with LLM (Silicon Flow Qwen) |
+| 0.3.1 | 2026-01-28 | - | STR-003: Add sector buying support (multiple stocks per slot) |
+| 0.3.2 | 2026-01-28 | - | STR-003: Add limit-up price check to avoid buying at ceiling |
 
 ---
 
@@ -265,6 +268,120 @@ await engine.stop()
 - [x] Graceful strategy swap without interruption
 - [x] Strategy validation before activation
 - [x] Rollback on reload failure
+
+---
+
+### [STR-003] News Analysis Strategy
+
+**Status**: Completed
+
+**Description**: News-driven trading strategy using LLM (Silicon Flow Qwen) to analyze financial news and announcements for trading signals.
+
+**Requirements**:
+- Analyze overnight news/announcements at 8:30 AM (premarket)
+- Real-time monitoring during trading hours
+- LLM-based sentiment analysis identifying: dividends, earnings, restructuring
+- Stock filtering: exclude BSE (北交所) and ChiNext (创业板)
+- Sector-level signal resolution to individual stocks
+- Slot-based position management (5 slots: 3 premarket + 2 intraday)
+- **Sector buying support**: Each slot can hold either one stock OR multiple stocks from the same sector
+  - Single stock: 20% capital on one stock
+  - Sector buying: 20% capital split equally among sector stocks (e.g., 光通信板块: 烽火通信 + 亨通光电 = 10% each)
+- Overnight holding tracking with morning sell confirmation
+- Command-line user interaction for buy/sell decisions
+- **Limit-up price check**: Skip buying stocks already at limit-up (涨停价) to avoid:
+  - Buying at the highest possible price with zero upside
+  - Next-day drop risk when limit-up cannot continue
+  - Detection methods: direct limit_up_price, calculated from prev_close, or change_ratio
+
+**Technical Design**:
+- LLM Service: Silicon Flow Qwen model via OpenAI-compatible API
+- News Analyzer: Batch analysis with caching and confidence thresholds
+- Stock Filter: Pattern-based exchange detection and filtering
+- Sector Mapper: akshare-based industry board mapping
+- Position Manager: Slot-based capital allocation (20% per slot)
+  - `PositionSlot.holdings: list[StockHolding]` - Supports multiple stocks per slot
+  - `StockHolding`: stock_code, stock_name, quantity, entry_price
+  - Sector buying: capital divided equally among holdings
+  - State persistence: `save_to_file()` / `load_from_file()` for crash recovery
+- Holding Tracker: Overnight position tracking for next-day confirmation
+- User Interaction: Async command-line interface with timeout handling
+- Limit-Up Check: Before buying, verify stock is not at limit-up price
+  - `_get_limit_up_ratio()`: Returns 10% for main board, 20% for ChiNext/STAR
+  - `_is_at_limit_up()`: Checks current_price vs limit_up_price with 0.5% tolerance
+  - If at limit-up, skip to next stock in sector's target_stocks list
+
+**Files**:
+- `src/common/llm_service.py` - Silicon Flow LLM integration
+- `src/common/user_interaction.py` - Command-line user interaction
+- `src/strategy/filters/stock_filter.py` - Exchange-based stock filtering
+- `src/strategy/analyzers/news_analyzer.py` - LLM-based news analysis
+- `src/data/sources/sector_mapper.py` - Stock-to-sector mapping
+- `src/trading/position_manager.py` - Slot-based position management
+- `src/trading/holding_tracker.py` - Overnight holding tracking
+- `src/strategy/strategies/news_analysis_strategy.py` - Main strategy implementation
+- `config/news-strategy-config.yaml` - Strategy configuration
+- `config/secrets.yaml` - Silicon Flow API key (add `siliconflow.api_key`)
+
+**Usage**:
+```python
+# Strategy is auto-loaded by StrategyEngine
+# Configure in config/news-strategy-config.yaml
+
+# Manual testing:
+from src.strategy.strategies.news_analysis_strategy import NewsAnalysisStrategy
+from src.strategy.base import StrategyConfig, StrategyContext
+
+config = StrategyConfig(
+    name="news_analysis",
+    enabled=True,
+    parameters={
+        "total_capital": 10_000_000,
+        "min_confidence": 0.7,
+    }
+)
+strategy = NewsAnalysisStrategy(config)
+await strategy.on_load()
+
+# Generate signals
+async for signal in strategy.generate_signals(context):
+    print(f"Signal: {signal}")
+```
+
+**Configuration** (`config/news-strategy-config.yaml`):
+```yaml
+strategy:
+  news_analysis:
+    enabled: true
+    llm:
+      model: "Qwen/Qwen2.5-72B-Instruct"
+    analysis:
+      min_confidence: 0.7
+      signal_types: [dividend, earnings, restructure]
+    position:
+      total_capital: 10000000
+      premarket_slots: 3
+      intraday_slots: 2
+    filter:
+      exclude_bse: true
+      exclude_chinext: true
+      exclude_star: false
+    schedule:
+      premarket_analysis_time: "08:30"
+      morning_confirmation_time: "09:00"
+```
+
+**Acceptance Criteria**:
+- [x] LLM service with Silicon Flow integration
+- [x] Stock filter excluding BSE/ChiNext
+- [x] Sector mapper using akshare
+- [x] News analyzer with LLM analysis
+- [x] Position manager with slot allocation
+- [x] Holding tracker for overnight positions
+- [x] User interaction via command line
+- [x] Main strategy implementation
+- [x] Configuration file
+- [x] Limit-up price check before buying
 
 ---
 
