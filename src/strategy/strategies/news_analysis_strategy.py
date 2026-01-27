@@ -327,25 +327,56 @@ class NewsAnalysisStrategy(BaseStrategy):
                 logger.warning("No more premarket slots available")
                 break
 
-            # Get first target stock that is NOT at limit-up
+            # Classify stocks: limit-up vs available
+            limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
+            available_stocks: list[tuple[str, str, float]] = []  # (code, name, price)
+
             for stock_code in news_signal.target_stocks:
-                # Get price from context or use a placeholder
                 price = self._get_stock_price(stock_code, context)
                 if not price or price <= 0:
                     logger.warning(f"Cannot get price for {stock_code}")
                     continue
 
-                # Skip stocks already at limit-up - no upside left
-                if self._is_at_limit_up(stock_code, price, context):
-                    continue
+                stock_name = self._sector_mapper.get_stock_name(stock_code) or stock_code
 
+                if self._is_at_limit_up(stock_code, price, context):
+                    limit_up_stocks.append((stock_code, stock_name))
+                else:
+                    available_stocks.append((stock_code, stock_name, price))
+
+            # If some stocks are at limit-up, ask user for confirmation
+            if limit_up_stocks:
+                sector_name = (
+                    news_signal.target_sectors[0]
+                    if news_signal.target_sectors
+                    else "相关板块"
+                )
+                stocks_to_buy = await self._user_interaction.confirm_limit_up_situation(
+                    sector_name=sector_name,
+                    total_stocks=len(news_signal.target_stocks),
+                    limit_up_stocks=limit_up_stocks,
+                    available_stocks=available_stocks,
+                )
+
+                if not stocks_to_buy:
+                    continue  # User chose to skip
+            else:
+                # No limit-up stocks, proceed with available stocks
+                stocks_to_buy = available_stocks
+
+            if not stocks_to_buy:
+                logger.warning(f"No buyable stocks for signal: {news_signal.message.title[:30]}")
+                continue
+
+            # Buy the selected stock(s)
+            for stock_code, stock_name, price in stocks_to_buy:
                 try:
                     quantity = self._position_manager.allocate_slot(
                         slot=slot,
                         stock_code=stock_code,
                         price=price,
                         reason=news_signal.analysis.reason,
-                        stock_name=self._sector_mapper.get_stock_name(stock_code),
+                        stock_name=stock_name,
                     )
 
                     # Mark as filled immediately (paper trading)
@@ -403,29 +434,57 @@ class NewsAnalysisStrategy(BaseStrategy):
                 logger.debug("No intraday slots available")
                 continue
 
-            # Ask user for confirmation
-            confirmed = await self._user_interaction.intraday_confirm(news_signal)
+            # Classify stocks: limit-up vs available
+            limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
+            available_stocks: list[tuple[str, str, float]] = []  # (code, name, price)
 
-            if not confirmed:
-                continue
-
-            # Get first target stock that is NOT at limit-up
             for stock_code in news_signal.target_stocks:
                 price = self._get_stock_price(stock_code, context)
                 if not price or price <= 0:
                     continue
 
-                # Skip stocks already at limit-up - no upside left
-                if self._is_at_limit_up(stock_code, price, context):
-                    continue
+                stock_name = self._sector_mapper.get_stock_name(stock_code) or stock_code
 
+                if self._is_at_limit_up(stock_code, price, context):
+                    limit_up_stocks.append((stock_code, stock_name))
+                else:
+                    available_stocks.append((stock_code, stock_name, price))
+
+            # If some stocks are at limit-up, ask user for confirmation
+            if limit_up_stocks:
+                sector_name = (
+                    news_signal.target_sectors[0]
+                    if news_signal.target_sectors
+                    else "相关板块"
+                )
+                selected = await self._user_interaction.confirm_limit_up_situation(
+                    sector_name=sector_name,
+                    total_stocks=len(news_signal.target_stocks),
+                    limit_up_stocks=limit_up_stocks,
+                    available_stocks=available_stocks,
+                )
+
+                if not selected:
+                    continue  # User chose to skip
+
+                # Use user's selection
+                stocks_to_buy = selected
+            else:
+                # No limit-up stocks, ask for normal confirmation
+                confirmed = await self._user_interaction.intraday_confirm(news_signal)
+                if not confirmed:
+                    continue
+                stocks_to_buy = available_stocks
+
+            # Buy the selected stock(s)
+            for stock_code, stock_name, price in stocks_to_buy:
                 try:
                     quantity = self._position_manager.allocate_slot(
                         slot=slot,
                         stock_code=stock_code,
                         price=price,
                         reason=news_signal.analysis.reason,
-                        stock_name=self._sector_mapper.get_stock_name(stock_code),
+                        stock_name=stock_name,
                     )
 
                     # Mark as filled

@@ -18,6 +18,7 @@
 | 0.3.0 | 2026-01-28 | - | STR-003: News analysis strategy with LLM (Silicon Flow Qwen) |
 | 0.3.1 | 2026-01-28 | - | STR-003: Add sector buying support (multiple stocks per slot) |
 | 0.3.2 | 2026-01-28 | - | STR-003: Add limit-up price check to avoid buying at ceiling |
+| 0.3.3 | 2026-01-28 | - | STR-003: Add user confirmation when sector has limit-up stocks |
 
 ---
 
@@ -293,6 +294,10 @@ await engine.stop()
   - Buying at the highest possible price with zero upside
   - Next-day drop risk when limit-up cannot continue
   - Detection methods: direct limit_up_price, calculated from prev_close, or change_ratio
+- **Limit-up user confirmation**: When sector has some stocks at limit-up:
+  - Show summary of limit-up vs available stocks
+  - Let user choose which available stocks to buy, or skip the sector entirely
+  - Prevents blindly buying the "leftover" stocks without user awareness
 
 **Technical Design**:
 - LLM Service: Silicon Flow Qwen model via OpenAI-compatible API
@@ -309,7 +314,9 @@ await engine.stop()
 - Limit-Up Check: Before buying, verify stock is not at limit-up price
   - `_get_limit_up_ratio()`: Returns 10% for main board, 20% for ChiNext/STAR
   - `_is_at_limit_up()`: Checks current_price vs limit_up_price with 0.5% tolerance
-  - If at limit-up, skip to next stock in sector's target_stocks list
+  - Classifies stocks into limit-up vs available lists
+  - `confirm_limit_up_situation()`: Shows user which stocks are at limit-up,
+    lets user select from available stocks or skip the sector
 
 **Files**:
 - `src/common/llm_service.py` - Silicon Flow LLM integration
@@ -382,6 +389,7 @@ strategy:
 - [x] Main strategy implementation
 - [x] Configuration file
 - [x] Limit-up price check before buying
+- [x] User confirmation when sector has limit-up stocks
 
 ---
 
