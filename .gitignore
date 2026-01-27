@@ -66,7 +66,7 @@ Thumbs.db
 # vendor/*.tar.gz  # Uncomment to ignore large SDK files
 
 # === Data (local data not tracked) ===
-data/
+/data/
 *.csv
 *.parquet
 *.db
