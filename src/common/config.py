@@ -6,6 +6,7 @@
 # - YAML-based: Human-readable configuration format
 # - Environment-aware: Support for dev/staging/prod configs
 # - Type-safe: Provides typed accessors for settings
+# - Secrets separation: Sensitive credentials stored in secrets.yaml
 
 import logging
 from pathlib import Path
@@ -14,6 +15,10 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Project root directory
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.yaml"
 
 
 class Config:
@@ -141,3 +146,68 @@ class Config:
 
     def __repr__(self) -> str:
         return f"Config({list(self._data.keys())})"
+
+
+# === SECRETS MANAGEMENT ===
+
+_secrets_cache: Config | None = None
+
+
+def load_secrets() -> Config:
+    """
+    Load secrets from config/secrets.yaml.
+
+    Returns:
+        Config instance with secrets data
+
+    Raises:
+        FileNotFoundError: If secrets.yaml doesn't exist
+
+    Usage:
+        from src.common.config import load_secrets
+
+        secrets = load_secrets()
+        ifind_user = secrets.get_str("ifind.username")
+        ifind_pass = secrets.get_str("ifind.password")
+    """
+    global _secrets_cache
+    if _secrets_cache is not None:
+        return _secrets_cache
+
+    if not SECRETS_PATH.exists():
+        raise FileNotFoundError(
+            f"Secrets file not found: {SECRETS_PATH}\n"
+            "Please copy config/secrets.yaml.example to config/secrets.yaml "
+            "and fill in your credentials."
+        )
+
+    _secrets_cache = Config.load(SECRETS_PATH)
+    logger.info("Loaded secrets configuration")
+    return _secrets_cache
+
+
+def get_ifind_credentials() -> tuple[str, str]:
+    """
+    Get iFinD API credentials.
+
+    Returns:
+        Tuple of (username, password)
+
+    Raises:
+        FileNotFoundError: If secrets.yaml doesn't exist
+        ValueError: If credentials are missing
+
+    Usage:
+        from src.common.config import get_ifind_credentials
+
+        username, password = get_ifind_credentials()
+        iFinDPy.THS_iFinDLogin(username, password)
+    """
+    secrets = load_secrets()
+    username = secrets.get_str("ifind.username")
+    password = secrets.get_str("ifind.password")
+
+    if not username or not password:
+        raise ValueError("iFinD credentials not configured in secrets.yaml")
+
+    return username, password
