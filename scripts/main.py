@@ -250,7 +250,9 @@ class SystemManager:
                     "premarket_slots": pos.get("premarket_slots", 3),
                     "intraday_slots": pos.get("intraday_slots", 2),
                     "min_confidence": ana.get("min_confidence", 0.7),
-                    "signal_types": ana.get("signal_types", ["dividend", "earnings", "restructure"]),
+                    "signal_types": ana.get(
+                        "signal_types", ["dividend", "earnings", "restructure"]
+                    ),
                     "max_stocks_per_sector": ana.get("max_stocks_per_sector", 5),
                     "exclude_bse": flt.get("exclude_bse", True),
                     "exclude_chinext": flt.get("exclude_chinext", True),

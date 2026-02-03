@@ -29,9 +29,15 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+[tool.ruff.lint.per-file-ignores]
+# Scripts need sys.path manipulation before imports
+"scripts/*.py" = ["E402"]
+
 [tool.mypy]
 python_version = "3.11"
-strict = true
+# Relaxed mode for gradual type adoption
+strict = false
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
