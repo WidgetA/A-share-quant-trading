@@ -292,8 +292,13 @@ class LimitUpDatabase:
         """
         # Validate order_by to prevent SQL injection
         valid_columns = {
-            "limit_up_time", "stock_code", "stock_name", "amount",
-            "turnover_rate", "open_count", "created_at"
+            "limit_up_time",
+            "stock_code",
+            "stock_name",
+            "amount",
+            "turnover_rate",
+            "open_count",
+            "created_at",
         }
         if order_by not in valid_columns:
             order_by = "limit_up_time"
@@ -480,23 +485,25 @@ class LimitUpDatabase:
         trade_date_str = (
             trade_date_val.isoformat() if isinstance(trade_date_val, date) else trade_date_val
         )
-        return LimitUpStock.from_dict({
-            "id": row["id"],
-            "trade_date": trade_date_str,
-            "stock_code": row["stock_code"],
-            "stock_name": row["stock_name"],
-            "limit_up_price": float(row["limit_up_price"]) if row["limit_up_price"] else 0,
-            "limit_up_time": row["limit_up_time"],
-            "open_count": row["open_count"],
-            "last_limit_up_time": row["last_limit_up_time"],
-            "turnover_rate": float(row["turnover_rate"]) if row["turnover_rate"] else None,
-            "amount": float(row["amount"]) if row["amount"] else None,
-            "circulation_mv": float(row["circulation_mv"]) if row["circulation_mv"] else None,
-            "reason": row["reason"],
-            "industry": row["industry"],
-            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-        })
+        return LimitUpStock.from_dict(
+            {
+                "id": row["id"],
+                "trade_date": trade_date_str,
+                "stock_code": row["stock_code"],
+                "stock_name": row["stock_name"],
+                "limit_up_price": float(row["limit_up_price"]) if row["limit_up_price"] else 0,
+                "limit_up_time": row["limit_up_time"],
+                "open_count": row["open_count"],
+                "last_limit_up_time": row["last_limit_up_time"],
+                "turnover_rate": float(row["turnover_rate"]) if row["turnover_rate"] else None,
+                "amount": float(row["amount"]) if row["amount"] else None,
+                "circulation_mv": float(row["circulation_mv"]) if row["circulation_mv"] else None,
+                "reason": row["reason"],
+                "industry": row["industry"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            }
+        )
 
 
 def create_limit_up_db_from_config() -> LimitUpDatabase:

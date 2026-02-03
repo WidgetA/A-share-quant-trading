@@ -83,7 +83,7 @@ class Config:
             Configuration value or default
         """
         keys = key.split(".")
-        value = self._data
+        value: Any = self._data
 
         for k in keys:
             if isinstance(value, dict):
