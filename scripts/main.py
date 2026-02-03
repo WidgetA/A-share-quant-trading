@@ -142,9 +142,7 @@ class SystemManager:
         state_db_path = project_root / self.config.get_str(
             "system.state_database", "data/system_state.db"
         )
-        checkpoint_max_age = self.config.get_int(
-            "system.recovery.max_age_hours", 24
-        )
+        checkpoint_max_age = self.config.get_int("system.recovery.max_age_hours", 24)
         self.state_manager = StateManager(
             state_db_path,
             checkpoint_max_age_hours=checkpoint_max_age,
@@ -177,9 +175,7 @@ class SystemManager:
         import os
 
         # Load database config
-        db_config_path = self.config.get_str(
-            "database.config_path", "config/database-config.yaml"
-        )
+        db_config_path = self.config.get_str("database.config_path", "config/database-config.yaml")
         try:
             db_config = Config.load(project_root / db_config_path)
             msg_db_config = db_config.get_dict("database.messages", {})
@@ -238,6 +234,7 @@ class SystemManager:
         strategy_config_path = config.get("config_path", "config/news-strategy-config.yaml")
         try:
             from src.strategy.base import StrategyConfig
+
             strategy_file = Config.load(project_root / strategy_config_path)
             news_cfg = strategy_file.get_dict("strategy.news_analysis", {})
             if news_cfg:
@@ -623,10 +620,7 @@ class SystemManager:
 
         if self.strategy_engine:
             engine_stats = self.strategy_engine.get_stats()
-            logger.info(
-                f"Strategy stats - "
-                f"Loaded: {engine_stats['strategy_count']}"
-            )
+            logger.info(f"Strategy stats - Loaded: {engine_stats['strategy_count']}")
 
     async def get_stats(self) -> dict[str, Any]:
         """Get comprehensive system statistics."""
@@ -638,9 +632,7 @@ class SystemManager:
             "start_time": self._start_time.isoformat() if self._start_time else None,
             "uptime": uptime,
             "last_checkpoint": (
-                self._last_checkpoint.isoformat()
-                if self._last_checkpoint
-                else None
+                self._last_checkpoint.isoformat() if self._last_checkpoint else None
             ),
             "session": {},
             "modules": {},
@@ -711,9 +703,7 @@ async def main(config_path: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="A-Share Quantitative Trading System"
-    )
+    parser = argparse.ArgumentParser(description="A-Share Quantitative Trading System")
     parser.add_argument(
         "--config",
         "-c",

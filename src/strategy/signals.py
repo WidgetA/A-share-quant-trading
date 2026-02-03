@@ -168,9 +168,7 @@ class TradingSignal:
             stop_loss=data.get("stop_loss"),
             take_profit=data.get("take_profit"),
             valid_until=(
-                datetime.fromisoformat(data["valid_until"])
-                if data.get("valid_until")
-                else None
+                datetime.fromisoformat(data["valid_until"]) if data.get("valid_until") else None
             ),
             created_at=(
                 datetime.fromisoformat(data["created_at"])

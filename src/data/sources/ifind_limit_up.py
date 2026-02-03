@@ -95,9 +95,7 @@ class IFinDLimitUpSource:
             return True
 
         loop = asyncio.get_event_loop()
-        self._logged_in = await loop.run_in_executor(
-            self._executor, self._ifind_login
-        )
+        self._logged_in = await loop.run_in_executor(self._executor, self._ifind_login)
         return self._logged_in
 
     def _ifind_login(self) -> bool:

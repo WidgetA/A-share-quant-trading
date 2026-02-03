@@ -381,9 +381,7 @@ class StateManager:
 
         # Check if checkpoint is too old
         if datetime.now() - created_at > self.checkpoint_max_age:
-            logger.warning(
-                f"Checkpoint for {module_name} is too old ({created_at}), ignoring"
-            )
+            logger.warning(f"Checkpoint for {module_name} is too old ({created_at}), ignoring")
             return None
 
         return CheckpointData(
@@ -472,10 +470,7 @@ class StateManager:
 
         # If last state was RUNNING, system crashed
         if last_state.state == SystemState.RUNNING:
-            logger.warning(
-                f"System was RUNNING at {last_state.updated_at}, "
-                "may need recovery"
-            )
+            logger.warning(f"System was RUNNING at {last_state.updated_at}, may need recovery")
             return True
 
         return False

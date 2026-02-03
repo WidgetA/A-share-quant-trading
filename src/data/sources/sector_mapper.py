@@ -107,9 +107,7 @@ class SectorMapper:
             if not force and self._data.last_updated:
                 age = datetime.now() - self._data.last_updated
                 if age < self._refresh_interval:
-                    logger.debug(
-                        f"Sector data is fresh (age: {age}), skipping reload"
-                    )
+                    logger.debug(f"Sector data is fresh (age: {age}), skipping reload")
                     return
 
             if self._loading:
@@ -169,9 +167,7 @@ class SectorMapper:
             logger.error(f"Failed to fetch industry boards: {e}")
             return []
 
-    async def _fetch_all_board_stocks(
-        self, boards: list[dict[str, Any]]
-    ) -> None:
+    async def _fetch_all_board_stocks(self, boards: list[dict[str, Any]]) -> None:
         """Fetch stocks for all boards in parallel."""
         # Reset data
         self._data.stock_to_sector = {}
@@ -317,10 +313,7 @@ class SectorMapper:
             List of (code, name) tuples.
         """
         stocks = self.get_sector_stocks(sector_name, limit)
-        return [
-            (code, self._data.stock_names.get(code, ""))
-            for code in stocks
-        ]
+        return [(code, self._data.stock_names.get(code, "")) for code in stocks]
 
     def get_related_sectors(self, keywords: list[str]) -> list[str]:
         """
@@ -360,9 +353,7 @@ class SectorMapper:
             "total_stocks": len(self._data.stock_to_sector),
             "total_sectors": len(self._data.sector_to_stocks),
             "last_updated": (
-                self._data.last_updated.isoformat()
-                if self._data.last_updated
-                else None
+                self._data.last_updated.isoformat() if self._data.last_updated else None
             ),
         }
 

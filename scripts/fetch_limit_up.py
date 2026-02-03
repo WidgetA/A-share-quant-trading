@@ -99,9 +99,7 @@ async def show_statistics(
 
 async def main() -> None:
     """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Fetch limit-up stocks data using iFinD API"
-    )
+    parser = argparse.ArgumentParser(description="Fetch limit-up stocks data using iFinD API")
     parser.add_argument(
         "--date",
         type=str,
@@ -155,10 +153,7 @@ async def main() -> None:
     config_path = project_root / args.config
     if config_path.exists():
         config = Config.load(config_path)
-        db_path = config.get_str(
-            "market_data.limit_up.database.path",
-            default="data/limit_up.db"
-        )
+        db_path = config.get_str("market_data.limit_up.database.path", default="data/limit_up.db")
     else:
         db_path = "data/limit_up.db"
 

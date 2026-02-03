@@ -175,9 +175,7 @@ class ModuleCoordinator:
             max_queue_size: Maximum events in queue before blocking.
         """
         self._handlers: dict[EventType, list[EventHandler]] = {}
-        self._event_queue: asyncio.Queue[Event] = asyncio.Queue(
-            maxsize=max_queue_size
-        )
+        self._event_queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=max_queue_size)
         self._running = False
         self._processor_task: asyncio.Task | None = None
         self._history: list[Event] = []
@@ -215,9 +213,7 @@ class ModuleCoordinator:
 
         if handler not in self._handlers[event_type]:
             self._handlers[event_type].append(handler)
-            logger.debug(
-                f"Subscribed handler to {event_type.value}: {handler.__name__}"
-            )
+            logger.debug(f"Subscribed handler to {event_type.value}: {handler.__name__}")
 
     def unsubscribe(
         self,
@@ -234,9 +230,7 @@ class ModuleCoordinator:
         if event_type in self._handlers:
             if handler in self._handlers[event_type]:
                 self._handlers[event_type].remove(handler)
-                logger.debug(
-                    f"Unsubscribed handler from {event_type.value}"
-                )
+                logger.debug(f"Unsubscribed handler from {event_type.value}")
 
     async def publish(self, event: Event) -> None:
         """
@@ -251,9 +245,7 @@ class ModuleCoordinator:
         await self._event_queue.put(event)
         self._stats["published"] += 1
 
-        logger.debug(
-            f"Published {event.event_type.value} from {event.source_module}"
-        )
+        logger.debug(f"Published {event.event_type.value} from {event.source_module}")
 
     def publish_sync(self, event: Event) -> None:
         """
@@ -269,9 +261,7 @@ class ModuleCoordinator:
             self._event_queue.put_nowait(event)
             self._stats["published"] += 1
         except asyncio.QueueFull:
-            logger.warning(
-                f"Event queue full, dropping {event.event_type.value}"
-            )
+            logger.warning(f"Event queue full, dropping {event.event_type.value}")
 
     async def start(self) -> None:
         """
@@ -353,9 +343,7 @@ class ModuleCoordinator:
                 else:
                     handler(event)
             except Exception as e:
-                logger.error(
-                    f"Handler error for {event.event_type.value}: {e}"
-                )
+                logger.error(f"Handler error for {event.event_type.value}: {e}")
                 self._stats["errors"] += 1
 
         self._stats["processed"] += 1
@@ -363,7 +351,7 @@ class ModuleCoordinator:
         # Add to history
         self._history.append(event)
         if len(self._history) > self.MAX_HISTORY_SIZE:
-            self._history = self._history[-self.MAX_HISTORY_SIZE:]
+            self._history = self._history[-self.MAX_HISTORY_SIZE :]
 
     def get_history(
         self,
@@ -390,13 +378,8 @@ class ModuleCoordinator:
         return {
             "running": self._running,
             "queue_size": self._event_queue.qsize(),
-            "handler_count": sum(
-                len(handlers) for handlers in self._handlers.values()
-            ),
-            "subscriptions": {
-                et.value: len(handlers)
-                for et, handlers in self._handlers.items()
-            },
+            "handler_count": sum(len(handlers) for handlers in self._handlers.values()),
+            "subscriptions": {et.value: len(handlers) for et, handlers in self._handlers.items()},
             **self._stats,
         }
 

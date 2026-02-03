@@ -188,9 +188,7 @@ class StrategyEngine:
                 name="strategy_file_watcher",
             )
 
-        logger.info(
-            f"StrategyEngine started with {len(self._strategies)} strategies"
-        )
+        logger.info(f"StrategyEngine started with {len(self._strategies)} strategies")
 
     async def stop(self) -> None:
         """
@@ -245,9 +243,7 @@ class StrategyEngine:
             # Validate
             errors = strategy.validate()
             if errors:
-                logger.error(
-                    f"Strategy {strategy_name} validation failed: {errors}"
-                )
+                logger.error(f"Strategy {strategy_name} validation failed: {errors}")
                 return None
 
             # Calculate file hash
@@ -295,9 +291,7 @@ class StrategyEngine:
             # Validate
             errors = strategy.validate()
             if errors:
-                logger.error(
-                    f"Strategy {strategy_name} validation failed: {errors}"
-                )
+                logger.error(f"Strategy {strategy_name} validation failed: {errors}")
                 return None
 
             async with self._lock:
@@ -440,17 +434,14 @@ class StrategyEngine:
             "strategy_count": len(self._strategies),
             "hot_reload_enabled": self.hot_reload,
             "strategy_dir": str(self.strategy_dir) if self.strategy_dir else None,
-            "strategies": [
-                info.to_dict() for info in self._strategies.values()
-            ],
+            "strategies": [info.to_dict() for info in self._strategies.values()],
         }
 
     def get_state(self) -> dict[str, Any]:
         """Get state for checkpointing."""
         return {
             "strategies": {
-                name: info.strategy.get_state()
-                for name, info in self._strategies.items()
+                name: info.strategy.get_state() for name, info in self._strategies.items()
             },
         }
 
@@ -536,10 +527,7 @@ class StrategyEngine:
                 info.reload_count += 1
 
             self._notify_callbacks(strategy_name, "reloaded")
-            logger.info(
-                f"Reloaded strategy {strategy_name} "
-                f"(reload #{info.reload_count})"
-            )
+            logger.info(f"Reloaded strategy {strategy_name} (reload #{info.reload_count})")
             return True
 
         except Exception as e:
@@ -553,9 +541,7 @@ class StrategyEngine:
             # Generate unique module name
             module_name = f"strategy_{file_path.stem}_{id(file_path)}"
 
-            spec = importlib.util.spec_from_file_location(
-                module_name, file_path
-            )
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
             if spec is None or spec.loader is None:
                 return None
 

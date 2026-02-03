@@ -119,9 +119,7 @@ class AnnouncementContentFetcher:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._config.timeout),
             follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         self._is_running = True
         logger.info("AnnouncementContentFetcher started")
@@ -255,9 +253,7 @@ class AnnouncementContentFetcher:
                 "content": [
                     {
                         "type": "file",
-                        "file": {
-                            "file_data": f"data:application/pdf;base64,{pdf_base64}"
-                        },
+                        "file": {"file_data": f"data:application/pdf;base64,{pdf_base64}"},
                     },
                     {
                         "type": "text",
@@ -381,9 +377,7 @@ def create_content_fetcher_from_config() -> AnnouncementContentFetcher:
 
     config = AliyunConfig(
         api_key=api_key,
-        base_url=aliyun_config.get(
-            "base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ),
+        base_url=aliyun_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         model=aliyun_config.get("model", "qwen-vl-max-latest"),
     )
 

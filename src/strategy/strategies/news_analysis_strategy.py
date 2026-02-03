@@ -278,9 +278,7 @@ class NewsAnalysisStrategy(BaseStrategy):
 
         # Get user confirmation
         holdings_to_review = await self._holding_tracker.get_morning_review()
-        slots_to_sell = await self._user_interaction.morning_confirmation(
-            holdings_to_review
-        )
+        slots_to_sell = await self._user_interaction.morning_confirmation(holdings_to_review)
 
         # Generate sell signals
         if slots_to_sell:
@@ -352,9 +350,7 @@ class NewsAnalysisStrategy(BaseStrategy):
         logger.info(f"Analyzing {len(messages)} messages for premarket")
 
         # Analyze messages
-        signals = await self._news_analyzer.analyze_messages(
-            messages, slot_type="premarket"
-        )
+        signals = await self._news_analyzer.analyze_messages(messages, slot_type="premarket")
 
         if not signals:
             logger.info("No positive signals found in premarket analysis")
@@ -385,9 +381,7 @@ class NewsAnalysisStrategy(BaseStrategy):
 
             # Determine sector name
             sector_name = (
-                news_signal.target_sectors[0]
-                if news_signal.target_sectors
-                else "相关板块"
+                news_signal.target_sectors[0] if news_signal.target_sectors else "相关板块"
             )
 
             # Create pending order
@@ -456,9 +450,7 @@ class NewsAnalysisStrategy(BaseStrategy):
             for stock_code in pending_order.stock_codes:
                 price = self._get_stock_price(stock_code, context)
                 if not price or price <= 0:
-                    logger.warning(
-                        f"Cannot get price for {stock_code}, skipping"
-                    )
+                    logger.warning(f"Cannot get price for {stock_code}, skipping")
                     continue
 
                 stock_name = pending_order.stock_names.get(stock_code, stock_code)
@@ -467,8 +459,7 @@ class NewsAnalysisStrategy(BaseStrategy):
                 if self._is_at_limit_up(stock_code, price, context):
                     limit_up_stocks.append((stock_code, stock_name))
                     logger.info(
-                        f"Skip {stock_code} ({stock_name}): opened at limit-up "
-                        f"(price={price:.2f})"
+                        f"Skip {stock_code} ({stock_name}): opened at limit-up (price={price:.2f})"
                     )
                 else:
                     available_stocks.append((stock_code, stock_name, price, change_pct))
@@ -565,9 +556,7 @@ class NewsAnalysisStrategy(BaseStrategy):
         logger.debug(f"Checking {len(new_messages)} new messages for intraday signals")
 
         # Analyze new messages
-        signals = await self._news_analyzer.analyze_messages(
-            new_messages, slot_type="intraday"
-        )
+        signals = await self._news_analyzer.analyze_messages(new_messages, slot_type="intraday")
 
         # For each positive signal, ask user for confirmation
         for news_signal in signals:
@@ -601,9 +590,7 @@ class NewsAnalysisStrategy(BaseStrategy):
             # If some stocks are at limit-up, ask user for confirmation
             if limit_up_stocks:
                 sector_name = (
-                    news_signal.target_sectors[0]
-                    if news_signal.target_sectors
-                    else "相关板块"
+                    news_signal.target_sectors[0] if news_signal.target_sectors else "相关板块"
                 )
                 selected = await self._user_interaction.confirm_limit_up_situation(
                     sector_name=sector_name,
@@ -681,9 +668,7 @@ class NewsAnalysisStrategy(BaseStrategy):
         if current_time.hour < close_hour:
             # Use yesterday's close
             yesterday = current_time - timedelta(days=1)
-            return yesterday.replace(
-                hour=close_hour, minute=close_minute, second=0, microsecond=0
-            )
+            return yesterday.replace(hour=close_hour, minute=close_minute, second=0, microsecond=0)
         else:
             # Use today's close
             return current_time.replace(
@@ -721,9 +706,7 @@ class NewsAnalysisStrategy(BaseStrategy):
 
         # Limit cache size
         if len(self._processed_message_ids) > 10000:
-            self._processed_message_ids = set(
-                list(self._processed_message_ids)[-5000:]
-            )
+            self._processed_message_ids = set(list(self._processed_message_ids)[-5000:])
 
         return new_messages
 
@@ -850,9 +833,7 @@ class NewsAnalysisStrategy(BaseStrategy):
             limit_ratio = self._get_limit_up_ratio(stock_code) * 100  # Convert to percentage
             # If change ratio >= 9.9% (main board) or 19.8% (ChiNext/STAR), likely at limit
             if change_ratio >= limit_ratio * 0.99:
-                logger.info(
-                    f"Skip {stock_code}: at limit-up (change_ratio={change_ratio:.2f}%)"
-                )
+                logger.info(f"Skip {stock_code}: at limit-up (change_ratio={change_ratio:.2f}%)")
                 return True
             return False
 
