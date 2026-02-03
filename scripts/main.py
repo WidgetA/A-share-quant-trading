@@ -9,9 +9,13 @@
 
 # === KEY CONCEPTS ===
 # - SystemManager: Central coordinator for all modules
+# - MessageReader: Platform layer for reading messages from PostgreSQL
 # - 24/7 operation with state persistence
-# - Automatic recovery from interruptions
 # - Trading session-aware scheduling
+
+# === ARCHITECTURE NOTE ===
+# Message collection is handled by an external project that streams data into PostgreSQL.
+# This system only READS messages from PostgreSQL via MessageReader.
 
 import argparse
 import asyncio
@@ -30,11 +34,7 @@ from src.common.config import Config
 from src.common.coordinator import Event, EventType, ModuleCoordinator
 from src.common.scheduler import MarketSession, TradingScheduler
 from src.common.state_manager import StateManager, SystemState
-from src.data.models.message import Message
-from src.data.services.message_service import MessageService
-from src.data.sources.cls_news import CLSNewsSource
-from src.data.sources.eastmoney_news import EastmoneyNewsSource
-from src.data.sources.sina_news import SinaNewsSource
+from src.data.readers.message_reader import MessageReader, MessageReaderConfig
 from src.strategy.base import StrategyContext
 from src.strategy.engine import StrategyEngine
 
@@ -81,13 +81,19 @@ class SystemManager:
         4. Persist state for crash recovery
         5. Route events between modules
 
+    Architecture:
+        - Message collection is handled by an EXTERNAL project
+        - This system reads messages from PostgreSQL via MessageReader
+        - MessageReader is passed to StrategyContext for strategy access
+
     Lifecycle:
         1. Load configuration
         2. Initialize StateManager, check for recovery
         3. Initialize Scheduler, Coordinator
-        4. Start modules: MessageService -> StrategyEngine
-        5. Main loop: schedule tasks based on session
-        6. Handle shutdown gracefully
+        4. Initialize MessageReader (connects to PostgreSQL)
+        5. Start modules: StrategyEngine
+        6. Main loop: schedule tasks based on session
+        7. Handle shutdown gracefully
 
     Recovery Flow:
         1. On startup, StateManager checks last state
@@ -115,8 +121,10 @@ class SystemManager:
         self.scheduler: TradingScheduler | None = None
         self.coordinator: ModuleCoordinator | None = None
 
+        # Platform layer components
+        self.message_reader: MessageReader | None = None
+
         # Modules
-        self.message_service: MessageService | None = None
         self.strategy_engine: StrategyEngine | None = None
 
         # Tasks
@@ -143,11 +151,10 @@ class SystemManager:
         )
         await self.state_manager.connect()
 
-        # 2. Check for recovery
+        # 2. Check if recovery is needed
         needs_recovery = await self.state_manager.needs_recovery()
         if needs_recovery:
             logger.warning("System needs recovery from previous crash")
-            await self._perform_recovery()
 
         # 3. Initialize scheduler
         self.scheduler = TradingScheduler()
@@ -157,91 +164,114 @@ class SystemManager:
         self.coordinator = ModuleCoordinator()
         await self.coordinator.start()
 
-        # 5. Initialize modules
+        # 5. Initialize MessageReader (platform layer)
+        await self._initialize_message_reader()
+
+        # 6. Initialize modules
         await self._initialize_modules()
 
         logger.info("System initialization complete")
 
+    async def _initialize_message_reader(self) -> None:
+        """Initialize the MessageReader for reading from external PostgreSQL."""
+        import os
+
+        # Load database config
+        db_config_path = self.config.get_str(
+            "database.config_path", "config/database-config.yaml"
+        )
+        try:
+            db_config = Config.load(project_root / db_config_path)
+            msg_db_config = db_config.get_dict("database.messages", {})
+        except FileNotFoundError:
+            logger.warning(f"Database config not found: {db_config_path}, using defaults")
+            msg_db_config = {}
+
+        # Build MessageReaderConfig
+        password = msg_db_config.get("password", "")
+        if password.startswith("${") and password.endswith("}"):
+            env_var = password[2:-1]
+            password = os.environ.get(env_var, "")
+
+        reader_config = MessageReaderConfig(
+            host=msg_db_config.get("host", "localhost"),
+            port=msg_db_config.get("port", 5432),
+            database=msg_db_config.get("database", "messages"),
+            user=msg_db_config.get("user", "reader"),
+            password=password,
+            pool_min_size=msg_db_config.get("pool_min_size", 2),
+            pool_max_size=msg_db_config.get("pool_max_size", 10),
+            table_name=msg_db_config.get("table_name", "messages"),
+        )
+
+        self.message_reader = MessageReader(reader_config)
+
+        try:
+            await self.message_reader.connect()
+            logger.info(
+                f"MessageReader connected to PostgreSQL: "
+                f"{reader_config.host}:{reader_config.port}/{reader_config.database}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to connect MessageReader to PostgreSQL: {e}. "
+                f"Strategies will not have access to messages."
+            )
+            self.message_reader = None
+
     async def _initialize_modules(self) -> None:
         """Initialize all system modules."""
         modules_config = self.config.get_dict("modules", {})
-
-        # Data module (MessageService for news)
-        data_config = modules_config.get("data", {})
-        if data_config.get("enabled", True):
-            await self._initialize_data_module(data_config)
 
         # Strategy module
         strategy_config = modules_config.get("strategy", {})
         if strategy_config.get("enabled", True):
             await self._initialize_strategy_module(strategy_config)
 
-    async def _initialize_data_module(self, config: dict) -> None:
-        """Initialize the data/message collection module."""
-        # Load message service config
-        msg_config_path = config.get("config_path", "config/message-config.yaml")
-        msg_config = Config.load(project_root / msg_config_path)
-
-        # Get database path
-        db_path = project_root / msg_config.get_str(
-            "message.database.path", "data/messages.db"
-        )
-
-        self.message_service = MessageService(db_path)
-
-        # Add news sources (not announcements - only news as per user request)
-        sources_config = msg_config.get_dict("message.sources", {})
-
-        # CLS news
-        cls_config = sources_config.get("cls", {})
-        if cls_config.get("enabled", True):
-            interval = cls_config.get("interval", 30)
-            symbol = cls_config.get("symbol", "全部")
-            await self.message_service.add_source(
-                CLSNewsSource(interval=float(interval), symbol=symbol)
-            )
-            logger.info(f"Added CLS news source (interval={interval}s)")
-
-        # East Money news
-        em_config = sources_config.get("eastmoney", {})
-        if em_config.get("enabled", True):
-            interval = em_config.get("interval", 60)
-            await self.message_service.add_source(
-                EastmoneyNewsSource(interval=float(interval))
-            )
-            logger.info(f"Added East Money news source (interval={interval}s)")
-
-        # Sina news
-        sina_config = sources_config.get("sina", {})
-        if sina_config.get("enabled", True):
-            interval = sina_config.get("interval", 60)
-            await self.message_service.add_source(
-                SinaNewsSource(interval=float(interval))
-            )
-            logger.info(f"Added Sina news source (interval={interval}s)")
-
-        # Add callback to publish events
-        def on_message(message: Message) -> None:
-            if self.coordinator:
-                self.coordinator.publish_sync(
-                    Event(
-                        event_type=EventType.NEWS_RECEIVED,
-                        source_module="data",
-                        payload={"message": message.to_dict()},
-                    )
-                )
-
-        self.message_service.add_callback(on_message)
-        logger.info("Data module initialized")
-
     async def _initialize_strategy_module(self, config: dict) -> None:
         """Initialize the strategy execution module."""
         strategy_dir = config.get("strategy_dir", "src/strategy/strategies")
         hot_reload = config.get("hot_reload", True)
 
+        # Load strategy configurations
+        strategy_configs = {}
+        strategy_config_path = config.get("config_path", "config/news-strategy-config.yaml")
+        try:
+            from src.strategy.base import StrategyConfig
+            strategy_file = Config.load(project_root / strategy_config_path)
+            news_cfg = strategy_file.get_dict("strategy.news_analysis", {})
+            if news_cfg:
+                pos = news_cfg.get("position", {})
+                ana = news_cfg.get("analysis", {})
+                flt = news_cfg.get("filter", {})
+                itx = news_cfg.get("interaction", {})
+                params = {
+                    "total_capital": pos.get("total_capital", 10_000_000),
+                    "premarket_slots": pos.get("premarket_slots", 3),
+                    "intraday_slots": pos.get("intraday_slots", 2),
+                    "min_confidence": ana.get("min_confidence", 0.7),
+                    "signal_types": ana.get("signal_types", ["dividend", "earnings", "restructure"]),
+                    "max_stocks_per_sector": ana.get("max_stocks_per_sector", 5),
+                    "exclude_bse": flt.get("exclude_bse", True),
+                    "exclude_chinext": flt.get("exclude_chinext", True),
+                    "exclude_star": flt.get("exclude_star", False),
+                    "premarket_timeout": itx.get("premarket_timeout", 300),
+                    "intraday_timeout": itx.get("intraday_timeout", 60),
+                    "morning_timeout": itx.get("morning_timeout", 300),
+                }
+                strategy_configs["news_analysis"] = StrategyConfig(
+                    name="news_analysis",
+                    enabled=news_cfg.get("enabled", True),
+                    parameters=params,
+                )
+                logger.info(f"Loaded news_analysis config: total_capital={params['total_capital']}")
+        except Exception as e:
+            logger.warning(f"Failed to load strategy config: {e}")
+
         self.strategy_engine = StrategyEngine(
             strategy_dir=project_root / strategy_dir,
             hot_reload=hot_reload,
+            config=strategy_configs,
         )
 
         # Add callback to publish events
@@ -265,25 +295,24 @@ class SystemManager:
         logger.info("Strategy module initialized")
 
     async def _perform_recovery(self) -> None:
-        """Perform system recovery from last state."""
+        """
+        Perform system recovery from last state.
+
+        Logs recovery info from checkpoints.
+        """
         if not self.state_manager:
             return
 
         recovery_info = await self.state_manager.get_recovery_info()
         logger.info(f"Recovery info: {recovery_info}")
 
-        # Get checkpoints for each module
+        # Log available checkpoints for reference
         checkpoints = await self.state_manager.get_all_checkpoints()
         for checkpoint in checkpoints:
             logger.info(
-                f"Restoring checkpoint for {checkpoint.module_name}: "
-                f"{checkpoint.checkpoint_id}"
+                f"Found checkpoint for {checkpoint.module_name}: "
+                f"{checkpoint.checkpoint_id} at {checkpoint.created_at}"
             )
-            # Module-specific recovery logic would go here
-
-        # Clear checkpoints after successful recovery
-        await self.state_manager.clear_all_checkpoints()
-        logger.info("Recovery complete, checkpoints cleared")
 
     async def run(self) -> None:
         """
@@ -313,15 +342,6 @@ class SystemManager:
 
         logger.info("System is running")
 
-        # Start message service
-        if self.message_service:
-            self._tasks.append(
-                asyncio.create_task(
-                    self.message_service.start(),
-                    name="message_service",
-                )
-            )
-
         # Start strategy engine
         if self.strategy_engine:
             await self.strategy_engine.start()
@@ -343,6 +363,12 @@ class SystemManager:
             asyncio.create_task(
                 self._stats_loop(),
                 name="stats_loop",
+            )
+        )
+        self._tasks.append(
+            asyncio.create_task(
+                self._strategy_loop(),
+                name="strategy_loop",
             )
         )
 
@@ -385,8 +411,9 @@ class SystemManager:
         if self.strategy_engine:
             await self.strategy_engine.stop()
 
-        if self.message_service:
-            await self.message_service.stop()
+        # Close MessageReader
+        if self.message_reader:
+            await self.message_reader.close()
 
         # Stop coordinator
         if self.coordinator:
@@ -422,17 +449,6 @@ class SystemManager:
         if not self.state_manager:
             return
 
-        # Save message service state
-        if self.message_service:
-            stats = await self.message_service.get_stats()
-            await self.state_manager.save_checkpoint(
-                "message_service",
-                {
-                    "total_messages": stats.get("total_messages", 0),
-                    "sources": stats.get("sources", []),
-                },
-            )
-
         # Save strategy engine state
         if self.strategy_engine:
             state = self.strategy_engine.get_state()
@@ -467,6 +483,87 @@ class SystemManager:
                 break
             except Exception as e:
                 logger.error(f"Session monitor error: {e}")
+
+    async def _strategy_loop(self) -> None:
+        """
+        Periodically run strategy signal generation.
+
+        Creates StrategyContext with MessageReader access and passes
+        it to the strategy engine for signal generation.
+        """
+        interval = self.config.get_int("strategy.loop_interval", 60)
+
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+
+                if not self._running:
+                    break
+
+                if not self.strategy_engine:
+                    continue
+
+                # Build strategy context with MessageReader
+                context = self._build_strategy_context()
+
+                # Generate signals from all strategies
+                async for signal in self.strategy_engine.generate_all_signals(context):
+                    logger.info(
+                        f"Signal generated: {signal.signal_type.value} "
+                        f"{signal.stock_code} qty={signal.quantity} "
+                        f"reason={signal.reason[:50]}..."
+                    )
+
+                    # Publish signal event
+                    if self.coordinator:
+                        await self.coordinator.publish(
+                            Event(
+                                event_type=EventType.SIGNAL_GENERATED,
+                                source_module="strategy",
+                                payload={
+                                    "signal_type": signal.signal_type.value,
+                                    "stock_code": signal.stock_code,
+                                    "quantity": signal.quantity,
+                                    "price": signal.price,
+                                    "strategy_name": signal.strategy_name,
+                                    "reason": signal.reason,
+                                },
+                            )
+                        )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Strategy loop error: {e}", exc_info=True)
+
+    def _build_strategy_context(self) -> StrategyContext:
+        """
+        Build StrategyContext with all required data.
+
+        Returns:
+            StrategyContext with MessageReader, market data, and session info.
+        """
+        now = datetime.now()
+
+        # Get current session
+        session = MarketSession.CLOSED
+        if self.scheduler:
+            session = self.scheduler.get_current_session()
+
+        # Build context with MessageReader
+        context = StrategyContext(
+            timestamp=now,
+            market_data={},  # TODO: Add market data from iFinD
+            positions={},  # TODO: Add from position manager
+            account={},  # TODO: Add account info
+            metadata={
+                "session": session,
+                "is_trading_hours": self.scheduler.is_trading_hours() if self.scheduler else False,
+            },
+            _message_reader=self.message_reader,
+        )
+
+        return context
 
     def _on_session_change(
         self,
@@ -515,13 +612,12 @@ class SystemManager:
             f"Trading: {stats['session']['is_trading_hours']}"
         )
 
-        if self.message_service:
-            msg_stats = await self.message_service.get_stats()
-            logger.info(
-                f"Message stats - "
-                f"Sources: {len(msg_stats['sources'])}, "
-                f"Total messages: {msg_stats['total_messages']}"
-            )
+        if self.message_reader and self.message_reader.is_connected:
+            try:
+                msg_count = await self.message_reader.get_message_count()
+                logger.info(f"Message reader connected, total messages: {msg_count}")
+            except Exception as e:
+                logger.warning(f"Failed to get message count: {e}")
 
         if self.strategy_engine:
             engine_stats = self.strategy_engine.get_stats()
@@ -551,8 +647,10 @@ class SystemManager:
         if self.scheduler:
             stats["session"] = self.scheduler.get_session_info()
 
-        if self.message_service:
-            stats["modules"]["message_service"] = await self.message_service.get_stats()
+        if self.message_reader:
+            stats["modules"]["message_reader"] = {
+                "connected": self.message_reader.is_connected,
+            }
 
         if self.strategy_engine:
             stats["modules"]["strategy_engine"] = self.strategy_engine.get_stats()

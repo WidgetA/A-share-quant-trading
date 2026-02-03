@@ -4,8 +4,8 @@
 # Supports full PDF content reading via Aliyun multimodal model.
 
 # === WORKFLOW ===
-# 1. PRE_MARKET (8:30): Analyze overnight news, present to user
-# 2. MORNING_AUCTION (9:15-9:30): Execute confirmed premarket buys
+# 1. PRE_MARKET (8:30): Analyze overnight news, present to user, save pending orders
+# 2. MORNING_AUCTION (9:25-9:30): Check real-time prices, skip limit-up stocks, execute buys
 # 3. MORNING/AFTERNOON: Monitor new news, confirm intraday buys
 # 4. AFTER_HOURS (15:00): Record holdings for next day
 # 5. NEXT PRE_MARKET (9:00): Confirm sell/hold decisions
@@ -21,6 +21,7 @@
 # - user_interaction: Gets user confirmations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
 
@@ -41,6 +42,26 @@ from src.trading.holding_tracker import HoldingTracker
 from src.trading.position_manager import PositionConfig, PositionManager, SlotType
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingPremarketOrder:
+    """
+    Represents a pending order from premarket analysis.
+
+    These orders are created during premarket analysis (8:30) and
+    executed during morning auction (9:25-9:30) after checking
+    real-time prices for limit-up conditions.
+    """
+
+    slot_id: int
+    stock_codes: list[str]  # Candidate stocks for this order
+    stock_names: dict[str, str]  # code -> name mapping
+    reason: str
+    news_id: str
+    signal_type: str
+    confidence: float
+    sector_name: str = ""
 
 
 class NewsAnalysisStrategy(BaseStrategy):
@@ -162,7 +183,11 @@ class NewsAnalysisStrategy(BaseStrategy):
         # State tracking
         self._last_premarket_analysis: datetime | None = None
         self._last_morning_confirmation: datetime | None = None
+        self._last_morning_auction: datetime | None = None
         self._processed_message_ids: set[str] = set()
+
+        # Pending orders from premarket analysis (to be executed at morning auction)
+        self._pending_premarket_orders: list[PendingPremarketOrder] = []
 
         logger.info(f"NewsAnalysisStrategy loaded with config: {position_config}")
 
@@ -200,11 +225,21 @@ class NewsAnalysisStrategy(BaseStrategy):
             async for signal in self._handle_morning_confirmation(context):
                 yield signal
 
-            # Premarket analysis
-            async for signal in self._handle_premarket(context):
+            # Premarket analysis (only saves pending orders, does not execute)
+            await self._handle_premarket(context)
+
+        elif session == MarketSession.MORNING_AUCTION:
+            # Execute pending premarket orders after checking real-time prices
+            async for signal in self._handle_morning_auction(context):
                 yield signal
 
         elif session in (MarketSession.MORNING, MarketSession.AFTERNOON):
+            # Also check for pending orders at start of morning session
+            # (in case morning auction was missed)
+            if self._pending_premarket_orders:
+                async for signal in self._handle_morning_auction(context):
+                    yield signal
+
             # Intraday monitoring
             async for signal in self._handle_trading_hours(context):
                 yield signal
@@ -268,11 +303,16 @@ class NewsAnalysisStrategy(BaseStrategy):
     async def _handle_premarket(
         self,
         context: StrategyContext,
-    ) -> AsyncIterator[TradingSignal]:
-        """Handle premarket analysis at configured time (default 8:30 AM)."""
+    ) -> None:
+        """
+        Handle premarket analysis at configured time (default 8:30 AM).
+
+        This function only analyzes news and saves pending orders.
+        Actual execution happens in _handle_morning_auction after
+        checking real-time prices for limit-up conditions.
+        """
         # Check if it's analysis time
         analysis_time = self.get_parameter("premarket_analysis_time", "08:30")
-        current_time = context.timestamp.strftime("%H:%M")
 
         # Only run once per day
         if self._last_premarket_analysis:
@@ -289,6 +329,12 @@ class NewsAnalysisStrategy(BaseStrategy):
 
         logger.info("Starting premarket news analysis")
 
+        # Check if MessageReader is available
+        if not context.has_message_reader:
+            logger.warning("MessageReader not available, skipping premarket analysis")
+            self._last_premarket_analysis = context.timestamp
+            return
+
         # Ensure sector data is loaded
         if not self._sector_mapper.is_loaded:
             try:
@@ -298,7 +344,7 @@ class NewsAnalysisStrategy(BaseStrategy):
 
         # Get messages since last close (yesterday 15:00)
         last_close = self._get_last_close_time(context.timestamp)
-        messages = self._get_messages_since(last_close, context)
+        messages = await context.get_messages_since(last_close)
 
         if not messages:
             logger.info("No new messages for premarket analysis")
@@ -320,67 +366,151 @@ class NewsAnalysisStrategy(BaseStrategy):
         # Present to user for selection
         selected = await self._user_interaction.premarket_review(signals)
 
-        # Generate buy signals for selected stocks
+        # Save pending orders (do NOT execute yet)
+        self._pending_premarket_orders.clear()
+
         for news_signal in selected:
             slot = self._position_manager.get_available_slot(SlotType.PREMARKET)
             if not slot:
                 logger.warning("No more premarket slots available")
                 break
 
-            # Classify stocks: limit-up vs available
-            limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
-            available_stocks: list[tuple[str, str, float, float | None]] = []  # (code, name, price, change_pct)
+            # Reserve the slot
+            self._position_manager.reserve_slot(slot.slot_id)
 
+            # Build stock name mapping
+            stock_names = {}
             for stock_code in news_signal.target_stocks:
+                stock_names[stock_code] = (
+                    self._sector_mapper.get_stock_name(stock_code) or stock_code
+                )
+
+            # Determine sector name
+            sector_name = (
+                news_signal.target_sectors[0]
+                if news_signal.target_sectors
+                else "相关板块"
+            )
+
+            # Create pending order
+            pending_order = PendingPremarketOrder(
+                slot_id=slot.slot_id,
+                stock_codes=news_signal.target_stocks,
+                stock_names=stock_names,
+                reason=news_signal.analysis.reason,
+                news_id=news_signal.message.id,
+                signal_type=news_signal.analysis.signal_type,
+                confidence=news_signal.analysis.confidence,
+                sector_name=sector_name,
+            )
+            self._pending_premarket_orders.append(pending_order)
+
+            logger.info(
+                f"Pending order created for slot {slot.slot_id}: "
+                f"{len(news_signal.target_stocks)} candidate stocks, "
+                f"reason: {news_signal.analysis.reason[:50]}..."
+            )
+
+        if self._pending_premarket_orders:
+            logger.info(
+                f"Premarket analysis complete: {len(self._pending_premarket_orders)} "
+                f"pending orders waiting for morning auction execution"
+            )
+        else:
+            logger.info("No pending orders created from premarket analysis")
+
+        self._last_premarket_analysis = context.timestamp
+
+    async def _handle_morning_auction(
+        self,
+        context: StrategyContext,
+    ) -> AsyncIterator[TradingSignal]:
+        """
+        Execute pending premarket orders during morning auction (9:25-9:30).
+
+        This is where we check real-time prices and skip stocks that
+        opened at limit-up. Users are notified when stocks are skipped.
+
+        Trading Safety: This function ensures we don't buy stocks that
+        opened at limit-up, as they have no upside potential and high
+        risk of next-day drop.
+        """
+        # Only run once per day
+        if self._last_morning_auction:
+            if self._last_morning_auction.date() == context.timestamp.date():
+                return
+
+        if not self._pending_premarket_orders:
+            self._last_morning_auction = context.timestamp
+            return
+
+        logger.info(
+            f"Morning auction: executing {len(self._pending_premarket_orders)} "
+            f"pending premarket orders"
+        )
+
+        # Process each pending order
+        for pending_order in self._pending_premarket_orders:
+            # Classify stocks based on current real-time prices
+            limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
+            available_stocks: list[tuple[str, str, float, float | None]] = []
+
+            for stock_code in pending_order.stock_codes:
                 price = self._get_stock_price(stock_code, context)
                 if not price or price <= 0:
-                    logger.warning(f"Cannot get price for {stock_code}")
+                    logger.warning(
+                        f"Cannot get price for {stock_code}, skipping"
+                    )
                     continue
 
-                stock_name = self._sector_mapper.get_stock_name(stock_code) or stock_code
+                stock_name = pending_order.stock_names.get(stock_code, stock_code)
                 change_pct = self._get_change_pct(stock_code, price, context)
 
                 if self._is_at_limit_up(stock_code, price, context):
                     limit_up_stocks.append((stock_code, stock_name))
+                    logger.info(
+                        f"Skip {stock_code} ({stock_name}): opened at limit-up "
+                        f"(price={price:.2f})"
+                    )
                 else:
                     available_stocks.append((stock_code, stock_name, price, change_pct))
 
-            # If some stocks are at limit-up, ask user for confirmation
+            # Notify user about limit-up stocks
             if limit_up_stocks:
-                sector_name = (
-                    news_signal.target_sectors[0]
-                    if news_signal.target_sectors
-                    else "相关板块"
-                )
-                stocks_to_buy = await self._user_interaction.confirm_limit_up_situation(
-                    sector_name=sector_name,
-                    total_stocks=len(news_signal.target_stocks),
+                await self._user_interaction.notify_limit_up_skip(
+                    sector_name=pending_order.sector_name,
                     limit_up_stocks=limit_up_stocks,
                     available_stocks=available_stocks,
+                    reason=pending_order.reason,
                 )
 
-                if not stocks_to_buy:
-                    continue  # User chose to skip
-            else:
-                # No limit-up stocks, proceed with available stocks
-                stocks_to_buy = available_stocks
-
-            if not stocks_to_buy:
-                logger.warning(f"No buyable stocks for signal: {news_signal.message.title[:30]}")
+            # If all stocks are at limit-up, release the slot and skip
+            if not available_stocks:
+                logger.warning(
+                    f"All candidate stocks for slot {pending_order.slot_id} "
+                    f"are at limit-up, releasing slot"
+                )
+                self._position_manager.release_slot(pending_order.slot_id)
                 continue
 
-            # Buy the selected stock(s)
-            for stock_code, stock_name, price, _change_pct in stocks_to_buy:
+            # Execute buy for available stocks
+            slot = self._position_manager.get_slot(pending_order.slot_id)
+            if not slot:
+                logger.error(f"Slot {pending_order.slot_id} not found")
+                continue
+
+            # Buy the first available stock
+            for stock_code, stock_name, price, _change_pct in available_stocks:
                 try:
                     quantity = self._position_manager.allocate_slot(
                         slot=slot,
                         stock_code=stock_code,
                         price=price,
-                        reason=news_signal.analysis.reason,
+                        reason=pending_order.reason,
                         stock_name=stock_name,
                     )
 
-                    # Mark as filled immediately (paper trading)
+                    # Mark as filled
                     self._position_manager.fill_slot(slot.slot_id, price)
 
                     yield TradingSignal(
@@ -389,30 +519,47 @@ class NewsAnalysisStrategy(BaseStrategy):
                         quantity=quantity,
                         strategy_name=self.strategy_name,
                         price=price,
-                        confidence=news_signal.analysis.confidence,
-                        reason=news_signal.analysis.reason,
+                        confidence=pending_order.confidence,
+                        reason=pending_order.reason,
                         metadata={
                             "slot_id": slot.slot_id,
                             "slot_type": "premarket",
-                            "news_id": news_signal.message.id,
-                            "signal_type": news_signal.analysis.signal_type,
+                            "news_id": pending_order.news_id,
+                            "signal_type": pending_order.signal_type,
+                            "skipped_limit_up": [s[0] for s in limit_up_stocks],
                         },
+                    )
+
+                    logger.info(
+                        f"Executed premarket buy: {stock_code} ({stock_name}) "
+                        f"@ {price:.2f}, qty={quantity}"
                     )
                     # Successfully bought one stock, stop looking for more
                     break
 
                 except Exception as e:
-                    logger.error(f"Failed to allocate slot for {stock_code}: {e}")
+                    logger.error(f"Failed to execute order for {stock_code}: {e}")
 
-        self._last_premarket_analysis = context.timestamp
+        # Clear pending orders after processing
+        self._pending_premarket_orders.clear()
+        self._last_morning_auction = context.timestamp
+
+        # Save position state
+        state_file = self.get_parameter("position_state_file", "data/position_state.json")
+        self._position_manager.save_to_file(state_file)
+        logger.info("Morning auction execution complete, position state saved")
 
     async def _handle_trading_hours(
         self,
         context: StrategyContext,
     ) -> AsyncIterator[TradingSignal]:
         """Handle intraday monitoring and buying."""
-        # Get new messages from context
-        new_messages = self._get_new_messages(context)
+        # Check if MessageReader is available
+        if not context.has_message_reader:
+            return
+
+        # Get new messages since last check
+        new_messages = await self._get_new_messages(context)
 
         if not new_messages:
             return
@@ -544,37 +691,34 @@ class NewsAnalysisStrategy(BaseStrategy):
                 hour=close_hour, minute=close_minute, second=0, microsecond=0
             )
 
-    def _get_messages_since(
+    async def _get_new_messages(
         self,
-        since: datetime,
         context: StrategyContext,
     ) -> list[Any]:
-        """Get messages from context since the given time."""
-        messages = []
+        """
+        Get messages not yet processed from context.
 
-        for news in context.news:
-            # Convert to Message if dict
-            publish_time = news.get("publish_time")
-            if isinstance(publish_time, str):
-                try:
-                    publish_time = datetime.fromisoformat(publish_time)
-                except ValueError:
-                    continue
+        Uses incremental query via MessageReader to only fetch new messages
+        since the last check. Deduplication is handled by tracking processed IDs.
+        """
+        # Determine since time: use last fetch time or 5 minutes ago
+        if hasattr(self, "_last_message_check"):
+            since = self._last_message_check
+        else:
+            since = context.timestamp - timedelta(minutes=5)
 
-            if publish_time and publish_time >= since:
-                messages.append(self._dict_to_message(news))
+        # Fetch new messages from database
+        all_messages = await context.get_messages_since(since, limit=500)
 
-        return messages
+        # Filter out already processed messages
+        new_messages = []
+        for msg in all_messages:
+            if msg.id not in self._processed_message_ids:
+                self._processed_message_ids.add(msg.id)
+                new_messages.append(msg)
 
-    def _get_new_messages(self, context: StrategyContext) -> list[Any]:
-        """Get messages not yet processed."""
-        messages = []
-
-        for news in context.news:
-            msg_id = news.get("id")
-            if msg_id and msg_id not in self._processed_message_ids:
-                self._processed_message_ids.add(msg_id)
-                messages.append(self._dict_to_message(news))
+        # Update last check time
+        self._last_message_check = context.timestamp
 
         # Limit cache size
         if len(self._processed_message_ids) > 10000:
@@ -582,34 +726,7 @@ class NewsAnalysisStrategy(BaseStrategy):
                 list(self._processed_message_ids)[-5000:]
             )
 
-        return messages
-
-    def _dict_to_message(self, data: dict[str, Any]) -> Any:
-        """Convert dict to Message object."""
-        from src.data.models.message import Message
-
-        return Message(
-            id=data.get("id", ""),
-            source_type=data.get("source_type", "news"),
-            source_name=data.get("source_name", "unknown"),
-            title=data.get("title", ""),
-            content=data.get("content", ""),
-            url=data.get("url"),
-            stock_codes=data.get("stock_codes", []),
-            publish_time=self._parse_datetime(data.get("publish_time")),
-            fetch_time=self._parse_datetime(data.get("fetch_time")),
-        )
-
-    def _parse_datetime(self, value: Any) -> datetime:
-        """Parse datetime from various formats."""
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                pass
-        return datetime.now()
+        return new_messages
 
     def _get_stock_price(
         self,
@@ -740,13 +857,15 @@ class NewsAnalysisStrategy(BaseStrategy):
                 return True
             return False
 
-        # If we can't determine, log warning but allow the trade
-        # (better to miss than to crash, but log for investigation)
+        # Trading Safety: If we can't determine, assume it's at limit-up
+        # (better to miss a trade than to buy at ceiling price)
+        # This follows the principle: Trading Safety > Program Robustness
         logger.warning(
             f"Cannot determine limit-up status for {stock_code}: "
-            f"no limit_up_price, prev_close, or change_ratio in market_data"
+            f"no limit_up_price, prev_close, or change_ratio in market_data. "
+            f"Assuming limit-up for safety."
         )
-        return False
+        return True
 
     def get_state(self) -> dict[str, Any]:
         """Get strategy state for checkpointing."""
@@ -765,6 +884,12 @@ class NewsAnalysisStrategy(BaseStrategy):
                 "last_morning_confirmation": self._last_morning_confirmation.isoformat()
                 if self._last_morning_confirmation
                 else None,
+                "last_morning_auction": self._last_morning_auction.isoformat()
+                if self._last_morning_auction
+                else None,
+                "pending_premarket_orders": len(self._pending_premarket_orders)
+                if hasattr(self, "_pending_premarket_orders")
+                else 0,
             }
         )
         return state

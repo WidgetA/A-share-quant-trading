@@ -6,6 +6,21 @@ A quantitative trading system for China A-share market, designed with modular ar
 
 ## Development Guidelines
 
+### 0. Development Workflow Rules
+
+#### Rule 1: Documentation First
+**CRITICAL: Always update documentation BEFORE implementing code changes.**
+- Update `README.md` for user-facing changes
+- Update `docs/features.md` for feature changes
+- Update `CLAUDE.md` for development process changes
+
+#### Rule 2: CI Status Tracking
+**CRITICAL: After every `git push`, track CI status until success.**
+- Check GitHub Actions workflow status after push
+- If CI fails, fix the issue immediately
+- Do NOT consider the task complete until CI passes
+- Command to check: `gh run list --limit 1` or check GitHub Actions page
+
 ### 1. File Naming Convention
 
 - All file names must be in **English**
@@ -65,11 +80,21 @@ Comment principles:
 
 ### 4. System Architecture
 
-The system is divided into three **decoupled** modules:
+The system is a **strategy platform** with decoupled modules. Message collection is handled by an **external project** that streams data into PostgreSQL.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    A-Share Quant Trading System                 │
+│           External Message Collector (Separate Project)         │
+│         CLS / East Money / Sina / Akshare → PostgreSQL          │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓ (streaming)
+                    ┌─────────────────────┐
+                    │     PostgreSQL      │
+                    │   (messages table)  │
+                    └─────────────────────┘
+                              ↓ (read-only)
+┌─────────────────────────────────────────────────────────────────┐
+│              A-Share Quant Trading System (This Project)        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
@@ -81,6 +106,8 @@ The system is divided into three **decoupled** modules:
 │         │            │             │           │               │
 │         ▼            ▼             ▼           ▼               │
 │    [Strategies]  [Live Trade] [Paper Trade] [Market Data]      │
+│    - NewsAnalysis                            [MessageReader]    │
+│    - (Future...)                             (from PostgreSQL)  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -93,7 +120,7 @@ Communication: Message Queue (Redis/ZeroMQ) for real-time decoupling
 |--------|---------------|------------|
 | **Strategy** | Signal generation, risk rules, position sizing | Yes - strategies can be updated during trading hours |
 | **Trading** | Order execution, position management, P&L tracking | Partial - receives strategy updates in real-time |
-| **Data/Info** | Market data, fundamentals, news, historical data | No - runs continuously |
+| **Data/Info** | Market data (iFinD), message reading (PostgreSQL) | No - runs continuously |
 
 #### Decoupling Requirements
 
@@ -127,33 +154,45 @@ CI Requirements:
 
 ```
 A-share-quant-trading/
-├── claude.md                 # This file - AI development guide
+├── CLAUDE.md                 # This file - AI development guide
 ├── docs/
 │   └── features.md          # Feature specifications (check before dev)
 ├── src/
 │   ├── strategy/            # Strategy module
 │   │   ├── base.py          # Base strategy interface
+│   │   ├── engine.py        # Strategy engine with hot-reload
 │   │   ├── signals.py       # Signal generation
-│   │   └── strategies/      # Concrete strategy implementations
+│   │   ├── strategies/      # Concrete strategy implementations
+│   │   ├── analyzers/       # LLM-based analyzers
+│   │   └── filters/         # Stock filters
 │   ├── trading/             # Trading module
 │   │   ├── executor.py      # Order execution
+│   │   ├── position_manager.py  # Slot-based position management
+│   │   ├── holding_tracker.py   # Overnight holding tracking
 │   │   ├── live/            # Live trading implementation
 │   │   └── paper/           # Paper trading simulation
 │   ├── data/                # Data module
-│   │   ├── market.py        # Real-time market data
-│   │   ├── historical.py    # Historical data
-│   │   └── sources/         # Data source adapters
+│   │   ├── models/          # Data models (message.py, etc.)
+│   │   ├── readers/         # Data readers (PostgreSQL message reader)
+│   │   │   └── message_reader.py  # Read messages from external PostgreSQL
+│   │   └── sources/         # iFinD data sources (market data only)
+│   │       └── ifind_limit_up.py  # Limit-up stocks via iFinD
 │   └── common/              # Shared utilities
-│       ├── messaging.py     # Message queue abstraction
-│       ├── config.py        # Configuration management
-│       └── models.py        # Shared data models
+│       ├── coordinator.py   # Event-driven module coordination
+│       ├── scheduler.py     # Trading session scheduler
+│       ├── state_manager.py # State persistence and recovery
+│       ├── llm_service.py   # LLM integration (Silicon Flow)
+│       ├── user_interaction.py  # Command-line user interaction
+│       └── config.py        # Configuration management
 ├── tests/
 │   ├── unit/
 │   └── integration/
 ├── config/
-│   └── trading-config.yaml
+│   ├── main-config.yaml     # System configuration
+│   ├── database-config.yaml # PostgreSQL connection config
+│   └── news-strategy-config.yaml  # Strategy parameters
 ├── scripts/
-│   └── start_system.py
+│   └── main.py              # Main entry point
 └── .github/
     └── workflows/
         └── ci.yml
@@ -180,10 +219,12 @@ Before starting any development task:
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
 | Message Queue | Redis Pub/Sub or ZeroMQ | Low latency, simple setup |
 | Trading Data | SQLite | Zero-config, positions/orders/transactions |
+| Message Data | PostgreSQL (external, read-only) | Messages streamed by external collector project |
 | Historical Data | PostgreSQL + TimescaleDB (optional) | Time-series optimized, for large datasets |
 | Task Queue | Celery (optional) | Async task processing |
 | Config Format | YAML | Human-readable, supports hot-reload |
 | Market Data SDK | THS iFinD | A-share real-time and historical data |
+| PostgreSQL Client | asyncpg | Async PostgreSQL access for message reading |
 
 ### 9. Environment Management (uv)
 
@@ -249,41 +290,37 @@ uv run pytest
 - **Live Trading**: Real trading with actual broker connection
 - **Hot-Reload**: Ability to update code/config without system restart
 
-### 11. Data Source Testing Requirements
+### 11. Message Reader Testing Requirements
 
-**MANDATORY: Every new data source MUST have accompanying tests. Do not merge/commit a data source without its test file.**
+**Note**: Message collection has been moved to an external project. This project only reads messages from PostgreSQL.
 
-Every data source must include the following tests to detect when external APIs become unavailable:
+Every message reader component must include the following tests:
 
 | Test Type | Purpose | Example |
 |-----------|---------|---------|
-| **Connectivity** | Verify API is accessible | `test_connectivity()` |
-| **Data Format** | Verify response structure matches expectations | `test_message_format()` |
-| **Deduplication** | Verify duplicate messages are filtered | `test_deduplication()` |
-| **Error Handling** | Verify graceful handling of network errors | `test_network_error()` |
+| **Connection** | Verify PostgreSQL connection works | `test_connection()` |
+| **Query** | Verify message queries return expected format | `test_query_messages()` |
+| **Incremental** | Verify incremental queries work correctly | `test_incremental_fetch()` |
+| **Error Handling** | Verify graceful handling of connection errors | `test_connection_error()` |
 
-Run data source tests:
+Run message reader tests:
 
 ```bash
-# Run all data source tests
-uv run pytest tests/unit/data/sources/ -v
+# Run all reader tests
+uv run pytest tests/unit/data/readers/ -v
 
-# Run specific source test
-uv run pytest tests/unit/data/sources/test_cls_news.py -v
+# Run with mocked database (default in CI)
+uv run pytest tests/unit/data/readers/ -v -m "not live"
+
+# Run live tests against real PostgreSQL (local debugging)
+uv run pytest tests/unit/data/readers/ -v -m live
 ```
 
 Test implementation guidelines:
-- **New data source = New test file** (e.g., `xxx_news.py` → `test_xxx_news.py`)
 - Use `pytest.mark.asyncio` for async tests
-- Use `pytest-mock` to mock external API calls for unit tests
-- Include at least one "live" test (marked with `@pytest.mark.live`) that actually hits the API
-- Live tests should be skipped in CI but run locally for debugging
-
-Test file naming convention:
-```
-src/data/sources/xxx_news.py      → tests/unit/data/sources/test_xxx_news.py
-src/data/sources/yyy_source.py    → tests/unit/data/sources/test_yyy_source.py
-```
+- Use `pytest-mock` to mock database connections for unit tests
+- Include at least one "live" test (marked with `@pytest.mark.live`) that connects to real PostgreSQL
+- Live tests require `DATABASE_URL` environment variable
 
 ### 12. Trading Safety Priority Principle
 
@@ -372,3 +409,119 @@ def place_order(order):
         logger.error(f"Order submission failed: {e}")
         raise OrderSubmissionError("Manual intervention required")
 ```
+
+### 13. Date and Time Handling (Beijing Time)
+
+**Core Principle: All date/time operations MUST use Beijing Time (UTC+8), and MUST be calculated via code execution.**
+
+AI models have unreliable internal date awareness. To ensure accuracy, **always run Python code** to determine current date/time and calculate relative dates.
+
+#### Mandatory Rules
+
+1. **Never trust AI's internal date** - Always execute code to get current time
+2. **Always use Beijing timezone** - A-share market operates on Beijing time
+3. **Calculate relative dates via code** - "yesterday", "this Tuesday", "last week" must be computed
+
+#### How to Get Current Beijing Time
+
+```python
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+# Get current Beijing time
+beijing_tz = ZoneInfo("Asia/Shanghai")
+now = datetime.now(beijing_tz)
+print(f"Current Beijing time: {now}")
+```
+
+#### Examples of Relative Date Calculation
+
+```python
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+beijing_tz = ZoneInfo("Asia/Shanghai")
+today = datetime.now(beijing_tz).date()
+
+# Yesterday
+yesterday = today - timedelta(days=1)
+
+# This Tuesday (current week)
+days_since_monday = today.weekday()
+this_tuesday = today - timedelta(days=days_since_monday) + timedelta(days=1)
+
+# Last Friday
+days_since_last_friday = (today.weekday() - 4) % 7
+if days_since_last_friday == 0:
+    days_since_last_friday = 7
+last_friday = today - timedelta(days=days_since_last_friday)
+
+# Start of this month
+start_of_month = today.replace(day=1)
+```
+
+#### Required Workflow
+
+When user mentions any date/time reference:
+
+1. **Run code first** to determine the actual date
+2. **Confirm with user** if the calculated date matches their intent
+3. **Use the calculated date** for all subsequent operations
+
+| User Says | Action Required |
+|-----------|-----------------|
+| "今天" / "today" | Run `datetime.now(beijing_tz).date()` |
+| "昨天" / "yesterday" | Run `today - timedelta(days=1)` |
+| "本周二" / "this Tuesday" | Calculate from current weekday |
+| "上周" / "last week" | Calculate week boundaries |
+| "这个月" / "this month" | Get month start/end dates |
+| Any specific date | Verify it's a valid trading day |
+
+### 14. Market Data Source Policy
+
+**Core Principle: All trading-related price data MUST use THS iFinD.**
+
+#### Data Source Selection Rules
+
+| Data Type | Required Source | Rationale |
+|-----------|----------------|-----------|
+| **Real-time quotes** | iFinD | Trading execution requires accurate, low-latency data |
+| **Historical OHLCV** | iFinD | Backtesting and position tracking need consistent data |
+| **Opening/Closing prices** | iFinD | Order price calculation must be accurate |
+| **Limit up/down prices** | iFinD | Risk control requires precise limit prices |
+| **News/Announcements** | akshare/other | Non-trading data, accuracy less critical |
+| **Sector/Industry mapping** | akshare/other | Reference data, not directly used for trading |
+
+#### Why iFinD for Trading Prices?
+
+1. **Data accuracy** - iFinD is an official data vendor with verified data quality
+2. **Consistency** - Using single source avoids price discrepancies
+3. **Liability** - Official data source provides audit trail
+4. **Real-time capability** - iFinD supports real-time streaming
+
+#### Prohibited Patterns
+
+```python
+# FORBIDDEN: Using akshare for trading price data - NO EXCEPTIONS
+import akshare as ak
+price = ak.stock_zh_a_hist(symbol='600489')  # NEVER USE for any price data!
+
+# CORRECT: Use iFinD for ALL price data
+from iFinDPy import THS_HQ, THS_HistoryQuotes
+price = THS_HQ('600489.SH', 'open')  # Use iFinD API
+```
+
+#### NO EXCEPTIONS - Including Tests
+
+**There are NO exceptions to this rule.** akshare MUST NOT be used for price data in ANY scenario:
+
+- Production environment
+- Development environment
+- Unit tests
+- Integration tests
+- Analysis scripts
+- Backtesting
+
+**Rationale:** Using different data sources in test vs production creates hidden risks. A strategy that passes tests with akshare data may behave differently with iFinD data in production. This violates the Trading Safety Priority Principle (Section 12).
+
+If iFinD is unavailable, the correct action is to **halt** and fix the data source issue, NOT to fall back to akshare.

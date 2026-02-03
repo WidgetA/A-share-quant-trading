@@ -1,0 +1,19 @@
+# Database Configuration
+# This file configures database connections for the strategy platform.
+
+database:
+  # External PostgreSQL for messages (read-only)
+  # Messages are written by external collector project
+  messages:
+    host: "localhost"
+    port: 5432
+    database: "messages"
+    user: "reader"
+    password: "${MESSAGES_DB_PASSWORD}"  # Set via environment variable
+    pool_min_size: 2
+    pool_max_size: 10
+    table_name: "messages"
+    read_only: true
+
+  # Note: Trading data (positions, orders) uses SQLite
+  # See config/main-config.yaml for SQLite paths

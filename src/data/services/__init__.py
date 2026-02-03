@@ -1,6 +1,5 @@
 # === MODULE PURPOSE ===
 # Services that orchestrate data operations.
+# Note: MessageService has been removed - message collection moved to external project.
 
-from .message_service import MessageService
-
-__all__ = ["MessageService"]
+__all__: list[str] = []

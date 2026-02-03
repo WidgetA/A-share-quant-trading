@@ -4,19 +4,25 @@
 
 # === DEPENDENCIES ===
 # - signals: TradingSignal data model
-# - Strategies receive market data and news, produce signals
+# - MessageReader: Platform layer for reading messages from PostgreSQL
+# - Strategies receive market data and messages, produce signals
 
 # === KEY CONCEPTS ===
 # - BaseStrategy: Abstract base class for strategies
+# - StrategyContext: Provides unified access to market data and messages
 # - Hot-reload: Strategies can be updated at runtime
 # - generate_signals(): Main entry point for signal generation
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from src.strategy.signals import TradingSignal
+
+if TYPE_CHECKING:
+    from src.data.models.message import Message
+    from src.data.readers.message_reader import MessageReader
 
 
 @dataclass
@@ -25,22 +31,107 @@ class StrategyContext:
     Context data provided to strategies for signal generation.
 
     Contains all information a strategy might need to make decisions.
+    Messages are accessed via methods that query the platform-layer MessageReader.
+
+    Architecture:
+        MessageReader (platform) -> StrategyContext -> Strategy
+        Strategies should NOT directly access MessageReader.
 
     Fields:
         timestamp: Current evaluation time
         market_data: Real-time quotes keyed by stock code
-        news: Recent news/announcements
         positions: Current portfolio positions
         account: Account information (cash, equity, etc.)
         metadata: Additional context from coordinator
+        _message_reader: Internal reference to platform MessageReader (do not use directly)
+
+    Usage:
+        # In strategy's generate_signals():
+        messages = await context.get_messages_since(last_check_time)
+        news = await context.get_messages(source_type="news", limit=100)
     """
 
     timestamp: datetime
     market_data: dict[str, dict[str, Any]] = field(default_factory=dict)
-    news: list[dict[str, Any]] = field(default_factory=list)
     positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     account: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    _message_reader: "MessageReader | None" = field(default=None, repr=False)
+
+    async def get_messages_since(
+        self,
+        since: datetime,
+        source_type: str | None = None,
+        limit: int = 1000,
+    ) -> list["Message"]:
+        """
+        Get messages fetched since a given time.
+
+        Args:
+            since: Fetch messages with fetch_time > since.
+            source_type: Optional filter by source type (announcement/news/social).
+            limit: Maximum number of messages to return.
+
+        Returns:
+            List of Message objects, ordered by fetch_time ascending.
+
+        Raises:
+            RuntimeError: If MessageReader is not available.
+        """
+        if not self._message_reader:
+            raise RuntimeError("MessageReader not available in context")
+        return await self._message_reader.get_messages_since(since, source_type, limit)
+
+    async def get_messages_in_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        source_type: str | None = None,
+        limit: int = 1000,
+    ) -> list["Message"]:
+        """
+        Get messages published within a time range.
+
+        Args:
+            start_time: Start of publish_time range (inclusive).
+            end_time: End of publish_time range (exclusive).
+            source_type: Optional filter by source type.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            List of Message objects, ordered by publish_time ascending.
+        """
+        if not self._message_reader:
+            raise RuntimeError("MessageReader not available in context")
+        return await self._message_reader.get_messages_in_range(
+            start_time, end_time, source_type, limit
+        )
+
+    async def get_messages_by_stock(
+        self,
+        stock_code: str,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list["Message"]:
+        """
+        Get messages related to a specific stock.
+
+        Args:
+            stock_code: Stock code to search for.
+            since: Optional filter by fetch_time.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            List of Message objects containing the stock code.
+        """
+        if not self._message_reader:
+            raise RuntimeError("MessageReader not available in context")
+        return await self._message_reader.get_messages_by_stock(stock_code, since, limit)
+
+    @property
+    def has_message_reader(self) -> bool:
+        """Check if MessageReader is available."""
+        return self._message_reader is not None and self._message_reader.is_connected
 
 
 @dataclass

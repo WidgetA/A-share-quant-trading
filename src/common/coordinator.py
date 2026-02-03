@@ -52,6 +52,7 @@ class EventType(Enum):
     SYSTEM_RUNNING = "system_running"  # System fully operational
     SYSTEM_STOPPING = "system_stopping"  # System shutting down
     CHECKPOINT_SAVED = "checkpoint_saved"  # State checkpoint saved
+    BACKFILL_COMPLETED = "backfill_completed"  # Recovery backfill finished
     ERROR_OCCURRED = "error_occurred"  # Module error
 
 

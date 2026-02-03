@@ -1,6 +1,7 @@
 # === MODULE PURPOSE ===
 # Database layer for data persistence.
+# Note: MessageDatabase has been removed - messages now read from external PostgreSQL.
 
-from .message_db import MessageDatabase
+from .limit_up_db import LimitUpDatabase
 
-__all__ = ["MessageDatabase"]
+__all__ = ["LimitUpDatabase"]

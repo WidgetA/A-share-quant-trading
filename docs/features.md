@@ -19,6 +19,7 @@
 | 0.3.1 | 2026-01-28 | - | STR-003: Add sector buying support (multiple stocks per slot) |
 | 0.3.2 | 2026-01-28 | - | STR-003: Add limit-up price check to avoid buying at ceiling |
 | 0.3.3 | 2026-01-28 | - | STR-003: Add user confirmation when sector has limit-up stocks |
+| 0.4.0 | 2026-02-03 | - | Architecture refactor: Message collection moved to external project, this project reads from PostgreSQL |
 
 ---
 
@@ -175,7 +176,9 @@ scheduler.add_session_callback(on_change)
 - `BaseStrategy` abstract class defines the interface
 - `TradingSignal` dataclass with: signal_type, stock_code, quantity, price, confidence, reason
 - `SignalType` enum: BUY, SELL, HOLD
-- `StrategyContext` provides market data, news, positions to strategies
+- `StrategyContext` provides market data, messages, positions to strategies
+  - Messages are provided by platform-layer `MessageReader` (reads from PostgreSQL)
+  - Strategies should NOT directly access database; use `context.get_messages_since()` instead
 
 **Files**:
 - `src/strategy/__init__.py` - Module exports
@@ -501,123 +504,138 @@ strategy:
 
 ---
 
-### [DAT-003] Message Collection
+### [DAT-003] Message Reader (Platform Layer)
 
-**Status**: Completed
+**Status**: Planned
 
-**Description**: Continuous collection of news, announcements, and social media content for sentiment analysis and event-driven trading.
+**Description**: Platform-level component that reads messages from external PostgreSQL database. Message collection is handled by a separate project that streams data into PostgreSQL.
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│              External Message Collector Project             │
+│  (CLS, East Money, Sina, Akshare → PostgreSQL streaming)   │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+                    PostgreSQL (messages table)
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                 This Project (Strategy Platform)            │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              MessageReader (Platform Layer)          │   │
+│  │    - Connects to PostgreSQL                         │   │
+│  │    - Polls for new messages                         │   │
+│  │    - Provides unified query interface               │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                              ↓                              │
+│                    StrategyContext.messages                 │
+│                              ↓                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │  Strategy A  │  │  Strategy B  │  │  Strategy C  │      │
+│  │ (NewsAnalysis)│  │   (Future)   │  │   (Future)   │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+```
 
 **Requirements**:
-- Support multiple message source types: stock announcements, financial news, social media
-- Plugin architecture for dynamic source addition/removal at runtime
-- Stream-based message fetching with real-time database storage
-- Continuous background operation with configurable polling intervals
-- SQLite storage for collected messages
+- Connect to external PostgreSQL database (read-only)
+- Polling-based message retrieval with incremental queries
+- Provide unified interface for all strategies via StrategyContext
+- Support time-range queries (e.g., messages since last close)
+- Support source-type filtering (announcement, news, social)
+- Connection pooling for efficiency
 
 **Technical Design**:
-- Architecture: Plugin-based with BaseMessageSource interface
-- Components:
-  - `MessageService`: Main service orchestrating all sources
-  - `SourceRegistry`: Dynamic source registration/removal
-  - `MessageDatabase`: Async SQLite storage layer
-  - `BaseMessageSource`: Abstract base for all sources
-- Database: SQLite with messages table
-  - Fields: id, source_type, source_name, title, content, url, stock_codes, publish_time, fetch_time, raw_data
-  - Indexes: source_type, publish_time, source_name
+- Library: `asyncpg` for async PostgreSQL access
+- Query Strategy: Polling with `fetch_time > last_check_time`
+- PostgreSQL Table Schema (read from external DB):
+  - `id` (TEXT PRIMARY KEY)
+  - `source_type` (TEXT) - announcement/news/social
+  - `source_name` (TEXT) - cls/eastmoney/sina/akshare
+  - `title` (TEXT)
+  - `content` (TEXT)
+  - `url` (TEXT)
+  - `stock_codes` (TEXT) - JSON array
+  - `publish_time` (TIMESTAMP)
+  - `fetch_time` (TIMESTAMP)
+  - `raw_data` (JSONB)
+- Indexes (managed by external project): source_type, publish_time, fetch_time
 
 **Files**:
-- `src/data/models/message.py` - Message data model
-- `src/data/database/message_db.py` - SQLite database layer
-- `src/data/sources/base.py` - Base source interface
-- `src/data/sources/registry.py` - Source registry
-- `src/data/sources/announcement.py` - Announcement source
-- `src/data/sources/news.py` - News source
-- `src/data/sources/social.py` - Social media source
-- `src/data/services/message_service.py` - Main service
-- `src/common/config.py` - Configuration loader
-- `config/message-config.yaml` - Module configuration
-- `scripts/run_message_service.py` - Startup script
+- `src/data/models/message.py` - Message data model (unchanged)
+- `src/data/readers/message_reader.py` - PostgreSQL message reader
+- `src/data/readers/__init__.py` - Reader exports
+- `config/database-config.yaml` - PostgreSQL connection config
 
 **Usage**:
-```bash
-# Start the message service
-uv run python scripts/run_message_service.py
+```python
+# Platform layer initializes MessageReader
+from src.data.readers import MessageReader
 
-# With custom config
-uv run python scripts/run_message_service.py --config config/message-config.yaml
+reader = MessageReader(config)
+await reader.connect()
+
+# Strategies access messages via StrategyContext
+class MyStrategy(BaseStrategy):
+    async def generate_signals(self, context: StrategyContext):
+        # Get messages since last market close
+        messages = await context.get_messages_since(last_close_time)
+
+        # Get messages by source type
+        news = await context.get_messages(source_type="news", limit=100)
+
+        # Process messages...
+```
+
+**Configuration** (`config/database-config.yaml`):
+```yaml
+database:
+  messages:
+    host: "localhost"
+    port: 5432
+    database: "messages"
+    user: "reader"
+    password: "${MESSAGES_DB_PASSWORD}"  # From environment
+    pool_size: 5
+    read_only: true
 ```
 
 **Acceptance Criteria**:
-- [x] Plugin architecture for message sources
-- [x] Dynamic source add/remove at runtime
-- [x] Async stream-based message fetching
-- [x] SQLite database storage
-- [x] YAML configuration support
-- [x] Sample implementations for all three source types
+- [ ] MessageReader class with async PostgreSQL connection
+- [ ] Connection pooling configured
+- [ ] Incremental query support (by fetch_time)
+- [ ] Source type filtering
+- [ ] StrategyContext integration
+- [ ] Configuration via YAML
+- [ ] Unit tests with mocked database
 
 ---
 
 ### [DAT-004] Real Data Sources
 
-**Status**: Completed
+**Status**: Removed (Migrated to External Project)
 
-**Description**: Production-ready data sources for fetching real financial news and announcements.
+**Description**: ~~Production-ready data sources for fetching real financial news and announcements.~~
 
-**Requirements**:
-- Akshare announcements: All A-share stock announcements from East Money (全部/重大事项/财务报告/融资公告/风险提示/资产重组/信息变更/持股变动)
-- CLS (财联社): Real-time financial telegraph
-- East Money (东方财富): Global financial news
-- Sina Finance (新浪财经): Financial news
-- Historical batch fetch support for initial data population
-- Content-based deduplication to prevent duplicate messages
-- Comprehensive tests to detect API failures
+**Migration Note**:
+Message collection has been moved to a separate project. This project now only reads messages from PostgreSQL. The external project handles:
+- Akshare announcements
+- CLS (财联社) telegraph
+- East Money (东方财富) news
+- Sina Finance (新浪财经) news
+- Deduplication and streaming to PostgreSQL
 
-**Technical Design**:
-- Libraries:
-  - `akshare` for all data sources (announcements, CLS, East Money, Sina news)
-- Deduplication:
-  - Content-based ID using SHA256(source_name + title + publish_time)
-  - LRU cache (10,000 entries) for session deduplication
-  - SQLite UNIQUE constraint for cross-session deduplication
-- Historical Fetch:
-  - `fetch_historical(days)` method for batch data retrieval
-  - Configurable via `message.historical.days` in YAML
-
-**Files**:
-- `src/data/sources/akshare_announcement.py` - A-share stock announcements (via akshare/East Money)
-- `src/data/sources/cls_news.py` - CLS telegraph
-- `src/data/sources/eastmoney_news.py` - East Money news
-- `src/data/sources/sina_news.py` - Sina news
-- `tests/unit/data/sources/test_*.py` - Tests for each source
-
-**Testing**:
-Each source includes 4 types of tests:
-1. Connectivity test - API accessibility
-2. Data format test - Response structure validation
-3. Deduplication test - Duplicate filtering
-4. Error handling test - Network error recovery
-
-Run tests:
-```bash
-# All source tests
-uv run pytest tests/unit/data/sources/ -v
-
-# Skip live API tests in CI
-uv run pytest tests/unit/data/sources/ -v -m "not live"
-
-# Run only live tests (for debugging)
-uv run pytest tests/unit/data/sources/ -v -m live
-```
-
-**Acceptance Criteria**:
-- [x] Akshare announcement source implemented (全部公告类型)
-- [x] CLS news source implemented
-- [x] East Money news source implemented
-- [x] Sina news source implemented
-- [x] Content-based deduplication
-- [x] Historical batch fetch support
-- [x] Unit tests for all sources
-- [x] Live connectivity tests (marked with @pytest.mark.live)
+**Removed Files**:
+- `src/data/sources/akshare_announcement.py`
+- `src/data/sources/cls_news.py`
+- `src/data/sources/eastmoney_news.py`
+- `src/data/sources/sina_news.py`
+- `src/data/sources/base.py`
+- `src/data/sources/registry.py`
+- `src/data/services/message_service.py`
+- `src/data/database/message_db.py`
+- `config/message-config.yaml`
+- Related tests in `tests/unit/data/sources/`
 
 ---
 
