@@ -12,7 +12,6 @@
 # - Strategies access messages via StrategyContext, not directly through this reader
 # - Polling-based: Uses incremental queries with fetch_time for efficiency
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass

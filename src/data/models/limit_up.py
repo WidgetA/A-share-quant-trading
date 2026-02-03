@@ -96,6 +96,14 @@ class LimitUpStock:
             circulation_mv=float(data["circulation_mv"]) if data.get("circulation_mv") else None,
             reason=data.get("reason"),
             industry=data.get("industry"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(),
-            updated_at=datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else datetime.now(),
+            created_at=(
+                datetime.fromisoformat(data["created_at"])
+                if data.get("created_at")
+                else datetime.now()
+            ),
+            updated_at=(
+                datetime.fromisoformat(data["updated_at"])
+                if data.get("updated_at")
+                else datetime.now()
+            ),
         )
