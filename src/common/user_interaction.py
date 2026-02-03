@@ -452,7 +452,7 @@ class UserInteraction:
 
         try:
             selection = await self._get_input_with_timeout(
-                f"选择要买入的股票 (逗号分隔; 输入 'skip' 放弃本板块): ",
+                "选择要买入的股票 (逗号分隔; 输入 'skip' 放弃本板块): ",
                 timeout=self._config.intraday_timeout,
             )
 

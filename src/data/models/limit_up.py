@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Defines the LimitUpStock data model for storing daily limit-up stock information.
-# Used for tracking which stocks hit the daily price limit (+10% for main board, +20% for ChiNext/STAR).
+# Tracks stocks hitting daily price limit (+10% main board, +20% ChiNext/STAR).
 
 # === KEY CONCEPTS ===
 # - Limit-up (涨停): Stock reaches maximum daily price increase limit
