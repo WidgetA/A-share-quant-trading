@@ -190,12 +190,15 @@ def get_ifind_credentials() -> tuple[str, str]:
     """
     Get iFinD API credentials.
 
+    Credentials are read in the following order:
+    1. Environment variables: IFIND_USERNAME, IFIND_PASSWORD
+    2. secrets.yaml file: ifind.username, ifind.password
+
     Returns:
         Tuple of (username, password)
 
     Raises:
-        FileNotFoundError: If secrets.yaml doesn't exist
-        ValueError: If credentials are missing
+        ValueError: If credentials are missing from both env and secrets.yaml
 
     Usage:
         from src.common.config import get_ifind_credentials
@@ -203,14 +206,33 @@ def get_ifind_credentials() -> tuple[str, str]:
         username, password = get_ifind_credentials()
         iFinDPy.THS_iFinDLogin(username, password)
     """
-    secrets = load_secrets()
-    username = secrets.get_str("ifind.username")
-    password = secrets.get_str("ifind.password")
+    import os
 
-    if not username or not password:
-        raise ValueError("iFinD credentials not configured in secrets.yaml")
+    # Priority 1: Environment variables (for Docker deployment)
+    username = os.environ.get("IFIND_USERNAME", "")
+    password = os.environ.get("IFIND_PASSWORD", "")
 
-    return username, password
+    if username and password:
+        logger.debug("Using iFinD credentials from environment variables")
+        return username, password
+
+    # Priority 2: secrets.yaml (for local development)
+    try:
+        secrets = load_secrets()
+        username = secrets.get_str("ifind.username")
+        password = secrets.get_str("ifind.password")
+
+        if username and password:
+            logger.debug("Using iFinD credentials from secrets.yaml")
+            return username, password
+    except FileNotFoundError:
+        pass  # secrets.yaml not found, will raise ValueError below
+
+    raise ValueError(
+        "iFinD credentials not configured. "
+        "Set IFIND_USERNAME and IFIND_PASSWORD environment variables, "
+        "or configure in config/secrets.yaml"
+    )
 
 
 def load_config(config_path: str | Path) -> Config:

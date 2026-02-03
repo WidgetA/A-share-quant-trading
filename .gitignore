@@ -58,6 +58,10 @@ credentials.json
 secrets.yaml
 config/secrets.yaml
 
+# === Docker ===
+docker-compose*.yml
+!docker-compose.example.yml
+
 # === OS ===
 .DS_Store
 Thumbs.db

@@ -7,6 +7,12 @@
 # - Morning confirmation: User decides to sell or hold
 # - Generate sell signals for confirmed sales
 
+# === PERSISTENCE ===
+# - PostgreSQL (trading.overnight_holdings table) via TradingRepository
+# - Supports system restart between market close and morning review
+
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +22,7 @@ from src.strategy.signals import SignalType, TradingSignal
 
 if TYPE_CHECKING:
     from src.trading.position_manager import PositionManager, PositionSlot
+    from src.trading.repository import TradingRepository
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,9 @@ class HoldingRecord:
     current_price: float | None = None
     pnl_amount: float | None = None
     pnl_percent: float | None = None
+
+    # Database ID (set when loaded from DB)
+    db_id: int | None = None
 
     def calculate_pnl(self, current_price: float) -> None:
         """Calculate P&L based on current price."""
@@ -107,8 +117,13 @@ class HoldingTracker:
         3. User confirms: sell or continue holding
         4. Generate sell signals for confirmed sales
 
+    Persistence:
+        - PostgreSQL (trading.overnight_holdings) via set_repository()
+        - Survives system restart between close and morning review
+
     Usage:
         tracker = HoldingTracker()
+        tracker.set_repository(repo)  # Optional: for DB persistence
 
         # At market close
         holdings = await tracker.record_holdings(position_manager)
@@ -127,6 +142,12 @@ class HoldingTracker:
         """Initialize holding tracker."""
         self._holdings: list[HoldingRecord] = []
         self._record_time: datetime | None = None
+        self._repository: TradingRepository | None = None
+
+    def set_repository(self, repository: TradingRepository) -> None:
+        """Set the database repository for persistence."""
+        self._repository = repository
+        logger.info("HoldingTracker: Using PostgreSQL for persistence")
 
     async def record_holdings(
         self,
@@ -150,6 +171,11 @@ class HoldingTracker:
             self._holdings.append(record)
 
         self._record_time = datetime.now()
+
+        # Save to database if repository is set
+        if self._repository:
+            holdings_data = [h.to_dict() for h in self._holdings]
+            await self._repository.save_overnight_holdings(self._record_time, holdings_data)
 
         logger.info(f"Recorded {len(self._holdings)} holdings for overnight tracking")
         return self._holdings
@@ -276,3 +302,80 @@ class HoldingTracker:
     def holdings_count(self) -> int:
         """Get number of tracked holdings."""
         return len(self._holdings)
+
+    # ==================== Database Persistence ====================
+
+    async def load_from_db(self, record_date: datetime | None = None) -> bool:
+        """
+        Load overnight holdings from database.
+
+        Args:
+            record_date: Date to load. If None, loads latest.
+
+        Returns:
+            True if holdings were loaded, False if no data.
+        """
+        if not self._repository:
+            logger.warning("Repository not set, cannot load from database")
+            return False
+
+        rows = await self._repository.get_overnight_holdings(record_date)
+
+        if not rows:
+            logger.info("No overnight holdings found in database")
+            return False
+
+        self._holdings = []
+        for row in rows:
+            record = HoldingRecord(
+                slot_id=row["slot_id"],
+                stock_code=row["stock_code"],
+                stock_name=row.get("stock_name") or "",
+                quantity=row["quantity"],
+                entry_price=float(row["entry_price"]) if row.get("entry_price") else 0.0,
+                entry_time=row.get("entry_time") or datetime.now(),
+                entry_reason=row.get("entry_reason") or "",
+                slot_type=row.get("slot_type") or "premarket",
+            )
+            record.current_price = float(row["current_price"]) if row.get("current_price") else None
+            record.pnl_amount = float(row["pnl_amount"]) if row.get("pnl_amount") else None
+            record.pnl_percent = float(row["pnl_percent"]) if row.get("pnl_percent") else None
+            # Store database ID for later updates
+            record.db_id = row["id"]
+            self._holdings.append(record)
+
+        # Get record time from first row
+        if rows and rows[0].get("record_date"):
+            self._record_time = datetime.combine(rows[0]["record_date"], datetime.min.time())
+
+        logger.info(f"Loaded {len(self._holdings)} overnight holdings from database")
+        return True
+
+    async def save_price_updates_to_db(self) -> None:
+        """Save current price and P&L updates to database."""
+        if not self._repository:
+            return
+
+        for holding in self._holdings:
+            if holding.db_id is not None and holding.current_price is not None:
+                await self._repository.update_overnight_holding_price(
+                    holding.db_id,
+                    holding.current_price,
+                    holding.pnl_amount or 0,
+                    holding.pnl_percent or 0,
+                )
+
+    async def mark_reviewed_in_db(self, slot_id: int, action: str) -> None:
+        """Mark a holding as reviewed in database."""
+        if not self._repository:
+            return
+
+        for holding in self._holdings:
+            if holding.slot_id == slot_id and holding.db_id is not None:
+                await self._repository.mark_overnight_holding_reviewed(holding.db_id, action)
+                break
+
+    @property
+    def has_repository(self) -> bool:
+        """Check if repository is set."""
+        return self._repository is not None

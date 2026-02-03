@@ -8,17 +8,26 @@
 # - Each slot can hold one position at a time
 # - State machine: EMPTY -> PENDING_BUY -> FILLED -> PENDING_SELL -> EMPTY
 
+# === PERSISTENCE ===
+# - Primary: PostgreSQL (trading schema) for production
+# - Fallback: JSON file for local development without DB
+
+from __future__ import annotations
+
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.trading.repository import TradingRepository
 
 logger = logging.getLogger(__name__)
 
-# Default state file path
+# Default state file path (fallback when no DB)
 DEFAULT_STATE_FILE = Path("data/position_state.json")
 
 
@@ -238,8 +247,18 @@ class PositionManager:
         - 2 slots reserved for intraday signals
         - Hold overnight only
 
+    Persistence:
+        - PostgreSQL (trading schema): set repository via set_repository()
+        - JSON file fallback: use save_to_file() / load_from_file()
+
     Usage:
         manager = PositionManager(PositionConfig(total_capital=10_000_000))
+
+        # With PostgreSQL (recommended)
+        repo = TradingRepository(config)
+        await repo.connect()
+        manager.set_repository(repo)
+        await manager.load_from_db()
 
         # Allocate a premarket slot
         slot = manager.get_available_slot(SlotType.PREMARKET)
@@ -268,7 +287,18 @@ class PositionManager:
         """
         self._config = config or PositionConfig()
         self._slots: list[PositionSlot] = []
+        self._repository: TradingRepository | None = None
         self._initialize_slots()
+
+    def set_repository(self, repository: TradingRepository) -> None:
+        """
+        Set the database repository for persistence.
+
+        Args:
+            repository: Connected TradingRepository instance.
+        """
+        self._repository = repository
+        logger.info("PositionManager: Using PostgreSQL for persistence")
 
     def _initialize_slots(self) -> None:
         """Initialize position slots based on configuration."""
@@ -804,13 +834,168 @@ class PositionManager:
 
         return True
 
+    # ==================== PostgreSQL Persistence ====================
+
+    async def save_to_db(self) -> None:
+        """
+        Save all slots to PostgreSQL database.
+
+        Raises:
+            RuntimeError: If repository not set.
+        """
+        if not self._repository:
+            raise RuntimeError("Repository not set. Call set_repository() first.")
+
+        for slot in self._slots:
+            # Save slot
+            slot_data = {
+                "slot_id": slot.slot_id,
+                "slot_type": slot.slot_type.value,
+                "state": slot.state.value,
+                "entry_time": slot.entry_time,
+                "entry_reason": slot.entry_reason,
+                "sector_name": slot.sector_name,
+                "pending_order_id": slot.pending_order_id,
+                "exit_price": slot.exit_price,
+                "exit_time": slot.exit_time,
+            }
+            await self._repository.save_slot(slot_data)
+
+            # Save holdings if any
+            if slot.holdings:
+                holdings_data = [h.to_dict() for h in slot.holdings]
+                await self._repository.save_holdings(slot.slot_id, holdings_data)
+
+        logger.info(f"Saved {len(self._slots)} slots to database")
+
+    async def save_slot_to_db(self, slot_id: int) -> None:
+        """
+        Save a single slot to database.
+
+        Args:
+            slot_id: The slot ID to save.
+        """
+        if not self._repository:
+            raise RuntimeError("Repository not set. Call set_repository() first.")
+
+        slot = self.get_slot(slot_id)
+        if not slot:
+            raise ValueError(f"Slot {slot_id} not found")
+
+        slot_data = {
+            "slot_id": slot.slot_id,
+            "slot_type": slot.slot_type.value,
+            "state": slot.state.value,
+            "entry_time": slot.entry_time,
+            "entry_reason": slot.entry_reason,
+            "sector_name": slot.sector_name,
+            "pending_order_id": slot.pending_order_id,
+            "exit_price": slot.exit_price,
+            "exit_time": slot.exit_time,
+        }
+        await self._repository.save_slot(slot_data)
+
+        if slot.holdings:
+            holdings_data = [h.to_dict() for h in slot.holdings]
+            await self._repository.save_holdings(slot.slot_id, holdings_data)
+
+        logger.debug(f"Saved slot {slot_id} to database")
+
+    async def load_from_db(self) -> bool:
+        """
+        Load slots from PostgreSQL database.
+
+        Returns:
+            True if state was loaded, False if no data exists.
+
+        Raises:
+            RuntimeError: If repository not set.
+        """
+        if not self._repository:
+            raise RuntimeError("Repository not set. Call set_repository() first.")
+
+        slots_data = await self._repository.get_all_slots()
+
+        if not slots_data:
+            # No data in DB, initialize fresh and save
+            logger.info("No position data in database, initializing fresh slots")
+            await self.save_to_db()
+            return False
+
+        # Load holdings for all slots
+        all_holdings = await self._repository.get_all_holdings()
+
+        # Reconstruct slots
+        self._slots = []
+        for data in slots_data:
+            slot = PositionSlot(
+                slot_id=data["slot_id"],
+                slot_type=SlotType(data["slot_type"]),
+                state=SlotState(data.get("state", "empty")),
+            )
+
+            # Load holdings
+            slot_holdings = all_holdings.get(data["slot_id"], [])
+            slot.holdings = [StockHolding.from_dict(h) for h in slot_holdings]
+
+            slot.entry_time = data.get("entry_time")
+            slot.entry_reason = data.get("entry_reason") or ""
+            slot.sector_name = data.get("sector_name")
+            slot.pending_order_id = data.get("pending_order_id")
+            slot.exit_price = float(data["exit_price"]) if data.get("exit_price") else None
+            slot.exit_time = data.get("exit_time")
+
+            self._slots.append(slot)
+
+        # Ensure we have all slots (in case DB is incomplete)
+        existing_ids = {s.slot_id for s in self._slots}
+        for i in range(self._config.premarket_slots):
+            if i not in existing_ids:
+                self._slots.append(PositionSlot(slot_id=i, slot_type=SlotType.PREMARKET))
+        for i in range(self._config.intraday_slots):
+            slot_id = self._config.premarket_slots + i
+            if slot_id not in existing_ids:
+                self._slots.append(PositionSlot(slot_id=slot_id, slot_type=SlotType.INTRADAY))
+
+        # Sort by slot_id
+        self._slots.sort(key=lambda s: s.slot_id)
+
+        logger.info(f"Loaded {len(self._slots)} slots from database")
+
+        # Log filled positions
+        filled_slots = self.get_holdings()
+        if filled_slots:
+            for slot in filled_slots:
+                if slot.is_sector_position():
+                    logger.info(
+                        f"  Slot {slot.slot_id} ({slot.sector_name}): {len(slot.holdings)} stocks"
+                    )
+                    for h in slot.holdings:
+                        logger.info(
+                            f"    {h.stock_code} {h.stock_name}: {h.quantity} @ {h.entry_price}"
+                        )
+                else:
+                    logger.info(
+                        f"  Slot {slot.slot_id}: {slot.stock_code} {slot.stock_name} "
+                        f"x{slot.quantity} @ {slot.entry_price}"
+                    )
+
+        return True
+
+    @property
+    def has_repository(self) -> bool:
+        """Check if repository is set."""
+        return self._repository is not None
+
 
 def create_position_manager_with_state(
     config: PositionConfig | None = None,
     state_file: Path | str | None = None,
 ) -> PositionManager:
     """
-    Create a PositionManager and load existing state if available.
+    Create a PositionManager and load existing state from JSON file.
+
+    Note: For PostgreSQL persistence, use create_position_manager_with_db() instead.
 
     Args:
         config: Position configuration (used if no state file exists).
@@ -821,4 +1006,41 @@ def create_position_manager_with_state(
     """
     manager = PositionManager(config)
     manager.load_from_file(state_file)
+    return manager
+
+
+async def create_position_manager_with_db(
+    config: PositionConfig | None = None,
+    repository: TradingRepository | None = None,
+) -> PositionManager:
+    """
+    Create a PositionManager with PostgreSQL persistence.
+
+    Args:
+        config: Position configuration.
+        repository: Connected TradingRepository. If None, creates one from config.
+
+    Returns:
+        PositionManager with database persistence enabled.
+
+    Example:
+        # Option 1: Auto-create repository
+        manager = await create_position_manager_with_db(config)
+
+        # Option 2: Use existing repository
+        repo = TradingRepository(repo_config)
+        await repo.connect()
+        manager = await create_position_manager_with_db(config, repo)
+    """
+    from src.trading.repository import create_trading_repository_from_config
+
+    manager = PositionManager(config)
+
+    if repository is None:
+        repository = create_trading_repository_from_config()
+        await repository.connect()
+
+    manager.set_repository(repository)
+    await manager.load_from_db()
+
     return manager

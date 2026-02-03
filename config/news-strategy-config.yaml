@@ -1,0 +1,58 @@
+# News Analysis Strategy Configuration
+# 新闻分析策略配置文件
+
+strategy:
+  news_analysis:
+    enabled: true
+
+    # LLM Configuration (硅基流动 Qwen)
+    llm:
+      model: "Qwen/Qwen2.5-72B-Instruct"
+      max_tokens: 2000
+      temperature: 0.1  # 低温度确保分析一致性
+      timeout: 60
+
+    # Analysis Configuration (分析配置)
+    analysis:
+      min_confidence: 0.7  # 最低置信度阈值
+      signal_types:        # 识别的信号类型
+        - dividend         # 分红
+        - earnings         # 业绩
+        - restructure      # 重组并购
+      max_stocks_per_sector: 5  # 板块买入时最多买几只
+
+    # Position Management (仓位管理)
+    position:
+      total_capital: 10000000  # 总资金: 1000万
+      num_slots: 5             # 总仓位数: 5个
+      premarket_slots: 3       # 盘前仓位: 3个
+      intraday_slots: 2        # 盘中仓位: 2个
+      min_order_amount: 10000  # 最小下单金额
+      lot_size: 100            # 最小交易单位
+
+    # Stock Filter (股票筛选)
+    filter:
+      exclude_bse: true       # 排除北交所
+      exclude_chinext: true   # 排除创业板
+      exclude_star: false     # 保留科创板
+
+    # Schedule (时间安排)
+    schedule:
+      premarket_analysis_time: "08:30"     # 盘前分析时间
+      morning_confirmation_time: "09:00"   # 早盘卖出确认时间
+
+    # User Interaction Timeouts (用户交互超时)
+    interaction:
+      premarket_timeout: 300   # 盘前选择超时: 5分钟
+      intraday_timeout: 60     # 盘中确认超时: 1分钟
+      morning_timeout: 300     # 早盘确认超时: 5分钟
+
+# Sector Mapping Configuration (板块映射配置)
+sector:
+  refresh_interval_hours: 24   # 板块数据刷新间隔
+  max_workers: 4               # 并发获取线程数
+
+# Logging Configuration (日志配置)
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
