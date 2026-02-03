@@ -65,7 +65,7 @@ class StrategyContext:
         limit: int = 1000,
     ) -> list["Message"]:
         """
-        Get messages fetched since a given time.
+        Get messages fetched since a given time with analysis results.
 
         Args:
             since: Fetch messages with fetch_time > since.
@@ -73,14 +73,41 @@ class StrategyContext:
             limit: Maximum number of messages to return.
 
         Returns:
-            List of Message objects, ordered by fetch_time ascending.
+            List of Message objects with analysis, ordered by fetch_time ascending.
 
         Raises:
             RuntimeError: If MessageReader is not available.
         """
         if not self._message_reader:
             raise RuntimeError("MessageReader not available in context")
-        return await self._message_reader.get_messages_since(since, source_type, limit)
+        return await self._message_reader.get_messages_since(since, source_type, limit=limit)
+
+    async def get_positive_messages_since(
+        self,
+        since: datetime,
+        source_type: str | None = None,
+        limit: int = 500,
+    ) -> list["Message"]:
+        """
+        Get messages with positive sentiment (bullish/strong_bullish) since a given time.
+
+        This is a convenience method for strategies that only care about positive signals.
+        Analysis results come from external message_analysis table.
+
+        Args:
+            since: Fetch messages with fetch_time > since.
+            source_type: Optional filter by source type.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            List of Message objects with positive sentiment.
+
+        Raises:
+            RuntimeError: If MessageReader is not available.
+        """
+        if not self._message_reader:
+            raise RuntimeError("MessageReader not available in context")
+        return await self._message_reader.get_positive_messages_since(since, source_type, limit)
 
     async def get_messages_in_range(
         self,
@@ -90,7 +117,7 @@ class StrategyContext:
         limit: int = 1000,
     ) -> list["Message"]:
         """
-        Get messages published within a time range.
+        Get messages published within a time range with analysis results.
 
         Args:
             start_time: Start of publish_time range (inclusive).
@@ -99,12 +126,12 @@ class StrategyContext:
             limit: Maximum number of messages to return.
 
         Returns:
-            List of Message objects, ordered by publish_time ascending.
+            List of Message objects with analysis, ordered by publish_time ascending.
         """
         if not self._message_reader:
             raise RuntimeError("MessageReader not available in context")
         return await self._message_reader.get_messages_in_range(
-            start_time, end_time, source_type, limit
+            start_time, end_time, source_type, limit=limit
         )
 
     async def get_messages_by_stock(

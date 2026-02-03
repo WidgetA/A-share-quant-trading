@@ -23,6 +23,7 @@
 | 0.4.1 | 2026-02-03 | - | INF-002: Add GitHub Actions CI pipeline |
 | 0.5.0 | 2026-02-03 | - | TRD-000: Trading data persistence with PostgreSQL (trading schema) |
 | 0.5.1 | 2026-02-03 | - | SYS-002/DAT-005: Migrate StateManager and LimitUpDatabase from SQLite to PostgreSQL |
+| 0.6.0 | 2026-02-03 | - | STR-003: Use pre-analyzed messages from external project (no LLM calls needed) |
 
 ---
 
@@ -285,12 +286,16 @@ await engine.stop()
 
 **Status**: Completed
 
-**Description**: News-driven trading strategy using LLM (Silicon Flow Qwen) to analyze financial news and announcements for trading signals.
+**Description**: News-driven trading strategy that uses pre-analyzed messages from external message collection project. Analysis results (sentiment, confidence, reasoning) are stored in `message_analysis` table and read via MessageReader JOIN.
+
+**Architecture Change (v0.6.0)**:
+- **Before**: Strategy called LLM (Silicon Flow Qwen) to analyze each message
+- **After**: External project analyzes messages; this project only filters and acts on results
+- **Benefit**: Faster execution (no API calls), analysis quality controlled by external project
 
 **Requirements**:
-- Analyze overnight news/announcements at 8:30 AM (premarket)
-- Real-time monitoring during trading hours
-- LLM-based sentiment analysis identifying: dividends, earnings, restructuring
+- Filter positive messages (bullish/strong_bullish) at 8:30 AM (premarket)
+- Real-time monitoring for new positive messages during trading hours
 - Stock filtering: exclude BSE (北交所) and ChiNext (创业板)
 - Sector-level signal resolution to individual stocks
 - Slot-based position management (5 slots: 3 premarket + 2 intraday)
@@ -309,8 +314,9 @@ await engine.stop()
   - Prevents blindly buying the "leftover" stocks without user awareness
 
 **Technical Design**:
-- LLM Service: Silicon Flow Qwen model via OpenAI-compatible API
-- News Analyzer: Batch analysis with caching and confidence thresholds
+- Message Model: `Message` with `MessageAnalysis` containing sentiment, confidence, reasoning
+- MessageReader: JOINs `messages` with `message_analysis` table to get pre-analyzed results
+- News Analyzer: Filters messages by sentiment (bullish/strong_bullish) and confidence threshold
 - Stock Filter: Pattern-based exchange detection and filtering
 - Sector Mapper: akshare-based industry board mapping
 - Position Manager: Slot-based capital allocation (20% per slot)
@@ -321,23 +327,27 @@ await engine.stop()
 - Holding Tracker: Overnight position tracking for next-day confirmation
 - User Interaction: Async command-line interface with timeout handling
 - Limit-Up Check: Before buying, verify stock is not at limit-up price
-  - `_get_limit_up_ratio()`: Returns 10% for main board, 20% for ChiNext/STAR
-  - `_is_at_limit_up()`: Checks current_price vs limit_up_price with 0.5% tolerance
-  - Classifies stocks into limit-up vs available lists
-  - `confirm_limit_up_situation()`: Shows user which stocks are at limit-up,
-    lets user select from available stocks or skip the sector
+
+**Sentiment Values** (from external `message_analysis` table):
+| Value | Meaning | Action |
+|-------|---------|--------|
+| `strong_bullish` | 强利好 | Buy signal |
+| `bullish` | 利好 | Buy signal |
+| `neutral` | 中性 | Ignore |
+| `bearish` | 利空 | Ignore |
+| `strong_bearish` | 强利空 | Ignore |
 
 **Files**:
-- `src/common/llm_service.py` - Silicon Flow LLM integration
+- `src/data/models/message.py` - Message and MessageAnalysis models
+- `src/data/readers/message_reader.py` - PostgreSQL reader with analysis JOIN
 - `src/common/user_interaction.py` - Command-line user interaction
 - `src/strategy/filters/stock_filter.py` - Exchange-based stock filtering
-- `src/strategy/analyzers/news_analyzer.py` - LLM-based news analysis
+- `src/strategy/analyzers/news_analyzer.py` - Filters pre-analyzed messages
 - `src/data/sources/sector_mapper.py` - Stock-to-sector mapping
 - `src/trading/position_manager.py` - Slot-based position management
 - `src/trading/holding_tracker.py` - Overnight holding tracking
 - `src/strategy/strategies/news_analysis_strategy.py` - Main strategy implementation
 - `config/news-strategy-config.yaml` - Strategy configuration
-- `config/secrets.yaml` - Silicon Flow API key (add `siliconflow.api_key`)
 
 **Usage**:
 ```python
@@ -359,7 +369,7 @@ config = StrategyConfig(
 strategy = NewsAnalysisStrategy(config)
 await strategy.on_load()
 
-# Generate signals
+# Generate signals (uses pre-analyzed messages from DB)
 async for signal in strategy.generate_signals(context):
     print(f"Signal: {signal}")
 ```
@@ -369,11 +379,9 @@ async for signal in strategy.generate_signals(context):
 strategy:
   news_analysis:
     enabled: true
-    llm:
-      model: "Qwen/Qwen2.5-72B-Instruct"
     analysis:
       min_confidence: 0.7
-      signal_types: [dividend, earnings, restructure]
+      actionable_sentiments: ["strong_bullish", "bullish"]
     position:
       total_capital: 10000000
       premarket_slots: 3
@@ -388,10 +396,11 @@ strategy:
 ```
 
 **Acceptance Criteria**:
-- [x] LLM service with Silicon Flow integration
+- [x] Message model with analysis fields (sentiment, confidence, reasoning)
+- [x] MessageReader JOINs message_analysis table
 - [x] Stock filter excluding BSE/ChiNext
 - [x] Sector mapper using akshare
-- [x] News analyzer with LLM analysis
+- [x] News analyzer filters pre-analyzed messages
 - [x] Position manager with slot allocation
 - [x] Holding tracker for overnight positions
 - [x] User interaction via command line

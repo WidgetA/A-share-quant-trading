@@ -11,6 +11,7 @@
 # - MessageReader: Platform layer component, initialized once by SystemManager
 # - Strategies access messages via StrategyContext, not directly through this reader
 # - Polling-based: Uses incremental queries with fetch_time for efficiency
+# - JOIN message_analysis: Analysis results are joined from message_analysis table
 
 import json
 import logging
@@ -20,7 +21,7 @@ from typing import Any
 
 import asyncpg
 
-from src.data.models.message import Message
+from src.data.models.message import Message, MessageAnalysis, Sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -125,40 +126,99 @@ class MessageReader:
         self,
         since: datetime,
         source_type: str | None = None,
+        sentiment: str | None = None,
+        only_analyzed: bool = False,
         limit: int = 1000,
     ) -> list[Message]:
         """
-        Get messages fetched since a given time.
+        Get messages fetched since a given time with analysis results.
 
         Args:
             since: Fetch messages with fetch_time > since.
             source_type: Optional filter by source type (announcement/news/social).
+            sentiment: Optional filter by sentiment ('strong_bullish', 'bullish', etc.).
+            only_analyzed: If True, only return messages that have been analyzed.
             limit: Maximum number of messages to return.
 
         Returns:
-            List of Message objects, ordered by fetch_time ascending.
+            List of Message objects with analysis, ordered by fetch_time ascending.
 
         Raises:
             RuntimeError: If not connected.
         """
         self._ensure_connected()
 
+        # JOIN with message_analysis to get analysis results
+        join_type = "INNER JOIN" if only_analyzed else "LEFT JOIN"
         query = f"""
-            SELECT id, source_type, source_name, title, content, url,
-                   stock_codes, publish_time, fetch_time, raw_data
-            FROM {self._config.table_name}
-            WHERE fetch_time > $1
+            SELECT m.id, m.source_type, m.source_name, m.title, m.content, m.url,
+                   m.stock_codes, m.publish_time, m.fetch_time, m.raw_data,
+                   a.sentiment, a.confidence, a.reasoning, a.extracted_entities,
+                   a.matched_sector_ids, a.affected_stocks, a.analyzed_at, a.analysis_source
+            FROM {self._config.table_name} m
+            {join_type} message_analysis a ON m.id = a.message_id
+            WHERE m.fetch_time > $1
         """
         params: list[Any] = [since]
 
         if source_type:
-            query += " AND source_type = $2"
+            query += f" AND m.source_type = ${len(params) + 1}"
             params.append(source_type)
 
-        query += " ORDER BY fetch_time ASC LIMIT $" + str(len(params) + 1)
+        if sentiment:
+            query += f" AND a.sentiment = ${len(params) + 1}"
+            params.append(sentiment)
+
+        query += f" ORDER BY m.fetch_time ASC LIMIT ${len(params) + 1}"
         params.append(limit)
 
-        async with self._pool.acquire() as conn:
+        pool = self._ensure_connected()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        return [self._row_to_message(row) for row in rows]
+
+    async def get_positive_messages_since(
+        self,
+        since: datetime,
+        source_type: str | None = None,
+        limit: int = 500,
+    ) -> list[Message]:
+        """
+        Get messages with positive sentiment (bullish or strong_bullish) since a given time.
+
+        This is a convenience method for strategies that only care about positive signals.
+
+        Args:
+            since: Fetch messages with fetch_time > since.
+            source_type: Optional filter by source type.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            List of Message objects with positive sentiment.
+        """
+        pool = self._ensure_connected()
+
+        query = f"""
+            SELECT m.id, m.source_type, m.source_name, m.title, m.content, m.url,
+                   m.stock_codes, m.publish_time, m.fetch_time, m.raw_data,
+                   a.sentiment, a.confidence, a.reasoning, a.extracted_entities,
+                   a.matched_sector_ids, a.affected_stocks, a.analyzed_at, a.analysis_source
+            FROM {self._config.table_name} m
+            INNER JOIN message_analysis a ON m.id = a.message_id
+            WHERE m.fetch_time > $1
+              AND a.sentiment IN ('strong_bullish', 'bullish')
+        """
+        params: list[Any] = [since]
+
+        if source_type:
+            query += f" AND m.source_type = ${len(params) + 1}"
+            params.append(source_type)
+
+        query += f" ORDER BY m.fetch_time ASC LIMIT ${len(params) + 1}"
+        params.append(limit)
+
+        async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_message(row) for row in rows]
@@ -168,38 +228,47 @@ class MessageReader:
         start_time: datetime,
         end_time: datetime,
         source_type: str | None = None,
+        only_positive: bool = False,
         limit: int = 1000,
     ) -> list[Message]:
         """
-        Get messages published within a time range.
+        Get messages published within a time range with analysis results.
 
         Args:
             start_time: Start of publish_time range (inclusive).
             end_time: End of publish_time range (exclusive).
             source_type: Optional filter by source type.
+            only_positive: If True, only return messages with positive sentiment.
             limit: Maximum number of messages to return.
 
         Returns:
-            List of Message objects, ordered by publish_time ascending.
+            List of Message objects with analysis, ordered by publish_time ascending.
         """
-        self._ensure_connected()
+        pool = self._ensure_connected()
 
+        join_type = "INNER JOIN" if only_positive else "LEFT JOIN"
         query = f"""
-            SELECT id, source_type, source_name, title, content, url,
-                   stock_codes, publish_time, fetch_time, raw_data
-            FROM {self._config.table_name}
-            WHERE publish_time >= $1 AND publish_time < $2
+            SELECT m.id, m.source_type, m.source_name, m.title, m.content, m.url,
+                   m.stock_codes, m.publish_time, m.fetch_time, m.raw_data,
+                   a.sentiment, a.confidence, a.reasoning, a.extracted_entities,
+                   a.matched_sector_ids, a.affected_stocks, a.analyzed_at, a.analysis_source
+            FROM {self._config.table_name} m
+            {join_type} message_analysis a ON m.id = a.message_id
+            WHERE m.publish_time >= $1 AND m.publish_time < $2
         """
         params: list[Any] = [start_time, end_time]
 
         if source_type:
-            query += " AND source_type = $3"
+            query += f" AND m.source_type = ${len(params) + 1}"
             params.append(source_type)
 
-        query += " ORDER BY publish_time ASC LIMIT $" + str(len(params) + 1)
+        if only_positive:
+            query += " AND a.sentiment IN ('strong_bullish', 'bullish')"
+
+        query += f" ORDER BY m.publish_time ASC LIMIT ${len(params) + 1}"
         params.append(limit)
 
-        async with self._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_message(row) for row in rows]
@@ -211,7 +280,7 @@ class MessageReader:
         limit: int = 100,
     ) -> list[Message]:
         """
-        Get messages related to a specific stock.
+        Get messages related to a specific stock with analysis results.
 
         Args:
             stock_code: Stock code to search for.
@@ -219,29 +288,32 @@ class MessageReader:
             limit: Maximum number of messages to return.
 
         Returns:
-            List of Message objects containing the stock code.
+            List of Message objects with analysis containing the stock code.
         """
-        self._ensure_connected()
+        pool = self._ensure_connected()
 
         # Normalize stock code (remove suffix)
         code = stock_code.split(".")[0] if "." in stock_code else stock_code
 
         query = f"""
-            SELECT id, source_type, source_name, title, content, url,
-                   stock_codes, publish_time, fetch_time, raw_data
-            FROM {self._config.table_name}
-            WHERE stock_codes LIKE $1
+            SELECT m.id, m.source_type, m.source_name, m.title, m.content, m.url,
+                   m.stock_codes, m.publish_time, m.fetch_time, m.raw_data,
+                   a.sentiment, a.confidence, a.reasoning, a.extracted_entities,
+                   a.matched_sector_ids, a.affected_stocks, a.analyzed_at, a.analysis_source
+            FROM {self._config.table_name} m
+            LEFT JOIN message_analysis a ON m.id = a.message_id
+            WHERE $1 = ANY(m.stock_codes)
         """
-        params: list[Any] = [f"%{code}%"]
+        params: list[Any] = [code]
 
         if since:
-            query += " AND fetch_time > $2"
+            query += f" AND m.fetch_time > ${len(params) + 1}"
             params.append(since)
 
-        query += " ORDER BY fetch_time DESC LIMIT $" + str(len(params) + 1)
+        query += f" ORDER BY m.fetch_time DESC LIMIT ${len(params) + 1}"
         params.append(limit)
 
-        async with self._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_message(row) for row in rows]
@@ -253,11 +325,11 @@ class MessageReader:
         Returns:
             Latest fetch_time or None if table is empty.
         """
-        self._ensure_connected()
+        pool = self._ensure_connected()
 
         query = f"SELECT MAX(fetch_time) FROM {self._config.table_name}"
 
-        async with self._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             result = await conn.fetchval(query)
 
         return result
@@ -277,7 +349,7 @@ class MessageReader:
         Returns:
             Number of matching messages.
         """
-        self._ensure_connected()
+        pool = self._ensure_connected()
 
         query = f"SELECT COUNT(*) FROM {self._config.table_name} WHERE 1=1"
         params: list[Any] = []
@@ -290,13 +362,13 @@ class MessageReader:
             query += f" AND source_type = ${len(params) + 1}"
             params.append(source_type)
 
-        async with self._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             count = await conn.fetchval(query, *params)
 
         return count or 0
 
     def _row_to_message(self, row: asyncpg.Record) -> Message:
-        """Convert database row to Message object."""
+        """Convert database row to Message object with analysis."""
         # Parse stock_codes (could be JSON array or comma-separated string)
         stock_codes_raw = row["stock_codes"]
         if stock_codes_raw:
@@ -318,6 +390,40 @@ class MessageReader:
             except (json.JSONDecodeError, TypeError):
                 raw_data = None
 
+        # Parse analysis result if present
+        analysis = None
+        sentiment_value = row.get("sentiment")
+        if sentiment_value:
+            try:
+                sentiment = Sentiment(sentiment_value)
+
+                # Parse array fields
+                extracted_entities = row.get("extracted_entities") or []
+                if isinstance(extracted_entities, str):
+                    extracted_entities = json.loads(extracted_entities)
+
+                matched_sector_ids = row.get("matched_sector_ids") or []
+                if isinstance(matched_sector_ids, str):
+                    matched_sector_ids = json.loads(matched_sector_ids)
+
+                affected_stocks = row.get("affected_stocks") or []
+                if isinstance(affected_stocks, str):
+                    affected_stocks = json.loads(affected_stocks)
+
+                analysis = MessageAnalysis(
+                    sentiment=sentiment,
+                    confidence=float(row.get("confidence") or 0.0),
+                    reasoning=row.get("reasoning") or "",
+                    extracted_entities=list(extracted_entities),
+                    matched_sector_ids=list(matched_sector_ids),
+                    affected_stocks=list(affected_stocks),
+                    analyzed_at=row.get("analyzed_at"),
+                    analysis_source=row.get("analysis_source") or "text",
+                )
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Failed to parse analysis for message {row['id']}: {e}")
+                analysis = None
+
         return Message(
             id=str(row["id"]),
             source_type=row["source_type"],
@@ -329,12 +435,14 @@ class MessageReader:
             publish_time=row["publish_time"],
             fetch_time=row["fetch_time"],
             raw_data=raw_data,
+            analysis=analysis,
         )
 
-    def _ensure_connected(self) -> None:
-        """Ensure reader is connected."""
+    def _ensure_connected(self) -> asyncpg.Pool:
+        """Ensure reader is connected and return pool."""
         if not self._is_connected or not self._pool:
             raise RuntimeError("MessageReader is not connected. Call connect() first.")
+        return self._pool
 
     @property
     def is_connected(self) -> bool:

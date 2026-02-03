@@ -1,37 +1,34 @@
 # === MODULE PURPOSE ===
-# News-driven trading strategy with LLM analysis.
-# Implements premarket batch analysis and intraday monitoring.
-# Supports full PDF content reading via Aliyun multimodal model.
+# News-driven trading strategy using pre-analyzed messages from database.
+# Analysis is done by external message collection project - this strategy
+# only filters and acts on the results.
 
 # === WORKFLOW ===
-# 1. PRE_MARKET (8:30): Analyze overnight news, present to user, save pending orders
+# 1. PRE_MARKET (8:30): Filter positive messages, present to user, save pending orders
 # 2. MORNING_AUCTION (9:25-9:30): Check real-time prices, skip limit-up stocks, execute buys
-# 3. MORNING/AFTERNOON: Monitor new news, confirm intraday buys
+# 3. MORNING/AFTERNOON: Monitor new positive messages, confirm intraday buys
 # 4. AFTER_HOURS (15:00): Record holdings for next day
 # 5. NEXT PRE_MARKET (9:00): Confirm sell/hold decisions
 
 # === DEPENDENCIES ===
-# - llm_service: For news analysis
 # - stock_filter: For exchange filtering
 # - sector_mapper: For sector resolution
-# - news_analyzer: Coordinates analysis (with optional PDF reading)
-# - content_fetcher: For reading full PDF content (Aliyun Qwen-VL)
+# - news_analyzer: Filters pre-analyzed messages
 # - position_manager: Manages capital slots
 # - holding_tracker: Tracks overnight positions
 # - user_interaction: Gets user confirmations
+
+# === KEY CHANGE ===
+# No LLM calls needed - analysis results come from message_analysis table
+# via MessageReader JOIN
 
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
 
-from src.common.llm_service import LLMConfig, LLMService, create_llm_service_from_config
 from src.common.scheduler import MarketSession
 from src.common.user_interaction import InteractionConfig, UserInteraction
-from src.data.sources.announcement_content import (
-    AnnouncementContentFetcher,
-    create_content_fetcher_from_config,
-)
 from src.data.sources.sector_mapper import SectorMapper
 from src.strategy.analyzers.news_analyzer import NewsAnalyzer, NewsAnalyzerConfig
 from src.strategy.base import BaseStrategy, StrategyContext
@@ -65,21 +62,25 @@ class PendingPremarketOrder:
 
 class NewsAnalysisStrategy(BaseStrategy):
     """
-    News-driven trading strategy with LLM analysis.
+    News-driven trading strategy using pre-analyzed messages.
 
-    This strategy analyzes news and announcements using LLM to identify
-    trading signals. It supports:
-    - Premarket batch analysis (8:30 AM)
+    This strategy uses analysis results from external message collection
+    project (stored in message_analysis table). It supports:
+    - Premarket filtering of positive messages (8:30 AM)
     - Intraday real-time monitoring
     - Overnight position tracking
     - Morning sell confirmations
+
+    Key difference from previous version:
+    - No LLM calls - analysis is already done by external project
+    - Messages come with sentiment, confidence, reasoning pre-populated
+    - Much faster execution (no API calls needed)
 
     Configuration (YAML):
         strategies:
           news_analysis:
             enabled: true
             parameters:
-              llm_model: "Qwen/Qwen2.5-72B-Instruct"
               min_confidence: 0.7
               total_capital: 10000000
               premarket_slots: 3
@@ -99,29 +100,6 @@ class NewsAnalysisStrategy(BaseStrategy):
         """Initialize all components."""
         await super().on_load()
 
-        # Initialize LLM service
-        try:
-            self._llm_service = create_llm_service_from_config()
-        except (ValueError, FileNotFoundError) as e:
-            logger.error(f"Failed to create LLM service: {e}")
-            # Create with placeholder config - will fail on actual use
-            self._llm_service = LLMService(LLMConfig(api_key="NOT_CONFIGURED"))
-
-        await self._llm_service.start()
-
-        # Initialize content fetcher for PDF reading (optional)
-        self._content_fetcher: AnnouncementContentFetcher | None = None
-        fetch_full_content = self.get_parameter("fetch_full_content", True)
-
-        if fetch_full_content:
-            try:
-                self._content_fetcher = create_content_fetcher_from_config()
-                await self._content_fetcher.start()
-                logger.info("Content fetcher initialized for PDF reading")
-            except (ValueError, FileNotFoundError) as e:
-                logger.warning(f"Content fetcher not available (PDF reading disabled): {e}")
-                self._content_fetcher = None
-
         # Initialize stock filter
         filter_config = StockFilterConfig(
             exclude_bse=self.get_parameter("exclude_bse", True),
@@ -134,22 +112,17 @@ class NewsAnalysisStrategy(BaseStrategy):
         self._sector_mapper = SectorMapper()
         # Note: Sector data will be loaded lazily on first use
 
-        # Initialize news analyzer with content fetcher
+        # Initialize news analyzer (no LLM needed - uses pre-analyzed data)
         analyzer_config = NewsAnalyzerConfig(
             min_confidence=self.get_parameter("min_confidence", 0.7),
             max_stocks_per_sector=self.get_parameter("max_stocks_per_sector", 5),
-            signal_types=self.get_parameter(
-                "signal_types", ["dividend", "earnings", "restructure"]
+            actionable_sentiments=self.get_parameter(
+                "actionable_sentiments", ["strong_bullish", "bullish"]
             ),
-            fetch_full_content=fetch_full_content,
-            content_fetch_timeout=self.get_parameter("content_fetch_timeout", 30.0),
-            content_fetch_concurrency=self.get_parameter("content_fetch_concurrency", 5),
         )
         self._news_analyzer = NewsAnalyzer(
-            llm_service=self._llm_service,
             stock_filter=self._stock_filter,
             sector_mapper=self._sector_mapper,
-            content_fetcher=self._content_fetcher,
             config=analyzer_config,
         )
 
@@ -183,6 +156,7 @@ class NewsAnalysisStrategy(BaseStrategy):
         self._last_premarket_analysis: datetime | None = None
         self._last_morning_confirmation: datetime | None = None
         self._last_morning_auction: datetime | None = None
+        self._last_message_check: datetime | None = None
         self._processed_message_ids: set[str] = set()
 
         # Pending orders from premarket analysis (to be executed at morning auction)
@@ -192,12 +166,6 @@ class NewsAnalysisStrategy(BaseStrategy):
 
     async def on_unload(self) -> None:
         """Clean up resources."""
-        if hasattr(self, "_content_fetcher") and self._content_fetcher:
-            await self._content_fetcher.stop()
-
-        if hasattr(self, "_llm_service") and self._llm_service:
-            await self._llm_service.stop()
-
         if hasattr(self, "_sector_mapper") and self._sector_mapper:
             await self._sector_mapper.close()
 
@@ -338,19 +306,20 @@ class NewsAnalysisStrategy(BaseStrategy):
             except Exception as e:
                 logger.warning(f"Failed to load sector data: {e}")
 
-        # Get messages since last close (yesterday 15:00)
+        # Get POSITIVE messages since last close (already analyzed by external project)
+        # Using get_positive_messages_since to only fetch bullish/strong_bullish
         last_close = self._get_last_close_time(context.timestamp)
-        messages = await context.get_messages_since(last_close)
+        messages = await context.get_positive_messages_since(last_close)
 
         if not messages:
-            logger.info("No new messages for premarket analysis")
+            logger.info("No positive messages for premarket analysis")
             self._last_premarket_analysis = context.timestamp
             return
 
-        logger.info(f"Analyzing {len(messages)} messages for premarket")
+        logger.info(f"Found {len(messages)} positive messages for premarket")
 
-        # Analyze messages
-        signals = await self._news_analyzer.analyze_messages(messages, slot_type="premarket")
+        # Filter and convert to signals (no LLM needed - already analyzed)
+        signals = self._news_analyzer.filter_positive_messages(messages, slot_type="premarket")
 
         if not signals:
             logger.info("No positive signals found in premarket analysis")
@@ -547,16 +516,16 @@ class NewsAnalysisStrategy(BaseStrategy):
         if not context.has_message_reader:
             return
 
-        # Get new messages since last check
-        new_messages = await self._get_new_messages(context)
+        # Get new POSITIVE messages since last check (already analyzed)
+        new_messages = await self._get_new_positive_messages(context)
 
         if not new_messages:
             return
 
-        logger.debug(f"Checking {len(new_messages)} new messages for intraday signals")
+        logger.debug(f"Found {len(new_messages)} new positive messages for intraday")
 
-        # Analyze new messages
-        signals = await self._news_analyzer.analyze_messages(new_messages, slot_type="intraday")
+        # Filter and convert to signals (no LLM needed)
+        signals = self._news_analyzer.filter_positive_messages(new_messages, slot_type="intraday")
 
         # For each positive signal, ask user for confirmation
         for news_signal in signals:
@@ -675,24 +644,24 @@ class NewsAnalysisStrategy(BaseStrategy):
                 hour=close_hour, minute=close_minute, second=0, microsecond=0
             )
 
-    async def _get_new_messages(
+    async def _get_new_positive_messages(
         self,
         context: StrategyContext,
     ) -> list[Any]:
         """
-        Get messages not yet processed from context.
+        Get new positive messages not yet processed.
 
-        Uses incremental query via MessageReader to only fetch new messages
-        since the last check. Deduplication is handled by tracking processed IDs.
+        Uses incremental query via MessageReader to only fetch new positive
+        messages (bullish/strong_bullish) since the last check.
         """
         # Determine since time: use last fetch time or 5 minutes ago
-        if hasattr(self, "_last_message_check"):
+        if self._last_message_check is not None:
             since = self._last_message_check
         else:
             since = context.timestamp - timedelta(minutes=5)
 
-        # Fetch new messages from database
-        all_messages = await context.get_messages_since(since, limit=500)
+        # Fetch new POSITIVE messages from database (already filtered by sentiment)
+        all_messages = await context.get_positive_messages_since(since, limit=100)
 
         # Filter out already processed messages
         new_messages = []

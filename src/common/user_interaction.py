@@ -246,16 +246,22 @@ class UserInteraction:
     def _display_signal(self, index: int, signal: "NewsSignal") -> None:
         """Display a single signal with formatting."""
         analysis = signal.analysis
+        if not analysis:
+            print(f"\n[{index}] 无分析结果")
+            print(f"    标题: {signal.message.title[:50]}...")
+            return
+
         confidence_pct = int(analysis.confidence * 100)
 
-        # Signal type display
-        type_map = {
-            "dividend": "💰 分红",
-            "earnings": "📈 业绩",
-            "restructure": "🔄 重组",
-            "other": "📰 其他",
+        # Sentiment display
+        sentiment_map = {
+            "strong_bullish": "🚀 强利好",
+            "bullish": "📈 利好",
+            "neutral": "➖ 中性",
+            "bearish": "📉 利空",
+            "strong_bearish": "💥 强利空",
         }
-        signal_type = type_map.get(analysis.signal_type, "📰 其他")
+        sentiment_display = sentiment_map.get(analysis.sentiment.value, "📰 未知")
 
         # Action display
         action_map = {
@@ -274,10 +280,10 @@ class UserInteraction:
         else:
             targets = "无"
 
-        print(f"\n[{index}] {signal_type} | 置信度: {confidence_pct}% | {action}")
+        print(f"\n[{index}] {sentiment_display} | 置信度: {confidence_pct}% | {action}")
         print(f"    目标: {targets}")
         print(f"    标题: {signal.message.title[:50]}...")
-        print(f"    理由: {analysis.reason}")
+        print(f"    理由: {analysis.reasoning[:80]}..." if analysis.reasoning else "    理由: 无")
 
     def _display_holding(self, index: int, holding: "HoldingRecord") -> None:
         """Display a single holding with formatting."""
