@@ -41,3 +41,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "live: marks tests that require live API access (skipped in CI)",
+]
+# Skip live tests by default (run with pytest -m live to include them)
+addopts = "-m 'not live'"

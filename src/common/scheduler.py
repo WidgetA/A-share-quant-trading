@@ -10,11 +10,11 @@
 # - TradingScheduler: Main class for session detection
 # - Trading Hours: 9:30-11:30 (morning), 13:00-15:00 (afternoon)
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from enum import Enum
 from typing import Callable
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +192,6 @@ class TradingScheduler:
             now = datetime.now()
 
         current_session = self.get_current_session(now)
-        current_time = now.time()
         today = now.date()
 
         # Determine next session based on current session
