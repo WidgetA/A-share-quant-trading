@@ -185,19 +185,22 @@ class IFinDLimitUpSource:
             # Build query string with date and required fields
             # Format date for query: YYYY-MM-DD -> YYYYMMDD or use relative date
             today = datetime.now().strftime("%Y-%m-%d")
+            query_fields = "首次涨停时间 涨停原因类型 涨停开板次数 成交额 换手率 所属行业"
             if trade_date == today:
-                query = "今日涨停 首次涨停时间 涨停原因类型 涨停开板次数 成交额 换手率 所属行业"
+                query = f"今日涨停 {query_fields}"
             else:
                 # For historical dates, specify the date in query
                 date_str = trade_date.replace("-", "")
-                query = f"{date_str}涨停 首次涨停时间 涨停原因类型 涨停开板次数 成交额 换手率 所属行业"
+                query = f"{date_str}涨停 {query_fields}"
 
             result = THS_iwencai(query, "stock")
 
             # THS_iwencai returns OrderedDict with errorcode
             if isinstance(result, dict):
                 if result.get("errorcode", 0) != 0:
-                    logger.error(f"THS_iwencai error: {result.get('errmsg')} (code: {result.get('errorcode')})")
+                    err_msg = result.get("errmsg")
+                    err_code = result.get("errorcode")
+                    logger.error(f"THS_iwencai error: {err_msg} (code: {err_code})")
                     return None
                 logger.debug(f"THS_iwencai returned {len(result.get('tables', []))} tables")
                 return result

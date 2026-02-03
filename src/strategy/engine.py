@@ -17,7 +17,7 @@ import hashlib
 import importlib.util
 import logging
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable

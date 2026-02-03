@@ -12,10 +12,8 @@
 # - HTML announcements: Parse with regex/basic extraction
 # - Caching: Avoid re-downloading same announcements
 
-import asyncio
 import base64
 import hashlib
-import json
 import logging
 import re
 from dataclasses import dataclass
