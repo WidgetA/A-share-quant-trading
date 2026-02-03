@@ -32,6 +32,7 @@ sys.path.insert(0, str(project_root))
 
 from src.common.config import Config
 from src.common.coordinator import Event, EventType, ModuleCoordinator
+from src.common.feishu_bot import FeishuBot
 from src.common.scheduler import MarketSession, TradingScheduler
 from src.common.state_manager import StateManager, SystemState, create_state_manager_from_config
 from src.data.readers.message_reader import MessageReader, MessageReaderConfig
@@ -126,6 +127,9 @@ class SystemManager:
 
         # Modules
         self.strategy_engine: StrategyEngine | None = None
+
+        # Feishu alert bot
+        self.feishu_bot: FeishuBot = FeishuBot()
 
         # Tasks
         self._tasks: list[asyncio.Task] = []
@@ -334,6 +338,10 @@ class SystemManager:
 
         logger.info("System is running")
 
+        # Send Feishu startup notification
+        if self.feishu_bot.is_configured():
+            asyncio.create_task(self.feishu_bot.send_startup_notification())
+
         # Start strategy engine
         if self.strategy_engine:
             await self.strategy_engine.start()
@@ -415,6 +423,10 @@ class SystemManager:
         if self.state_manager:
             await self.state_manager.save_state(SystemState.STOPPED)
             await self.state_manager.close()
+
+        # Send Feishu shutdown notification
+        if self.feishu_bot.is_configured():
+            await self.feishu_bot.send_shutdown_notification()
 
         logger.info("Shutdown complete")
 
@@ -687,6 +699,12 @@ async def main(config_path: str) -> None:
 
     except Exception as e:
         logger.error(f"System error: {e}", exc_info=True)
+        # Send Feishu error alert
+        if manager.feishu_bot.is_configured():
+            await manager.feishu_bot.send_alert(
+                "系统错误",
+                f"A股交易系统发生严重错误:\n\n{type(e).__name__}: {e}",
+            )
         raise
     finally:
         # Shutdown

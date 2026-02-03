@@ -24,6 +24,7 @@
 | 0.5.0 | 2026-02-03 | - | TRD-000: Trading data persistence with PostgreSQL (trading schema) |
 | 0.5.1 | 2026-02-03 | - | SYS-002/DAT-005: Migrate StateManager and LimitUpDatabase from SQLite to PostgreSQL |
 | 0.6.0 | 2026-02-03 | - | STR-003: Use pre-analyzed messages from external project (no LLM calls needed) |
+| 0.6.1 | 2026-02-03 | - | SYS-004: Feishu alert notifications for errors and critical events |
 
 ---
 
@@ -162,6 +163,80 @@ scheduler.add_session_callback(on_change)
 - [x] Trading day check (weekday)
 - [x] Time until next session calculation
 - [x] Session change callbacks
+
+---
+
+### [SYS-004] Feishu Alert Notifications
+
+**Status**: Completed
+
+**Description**: Send Feishu (飞书) notifications when errors or critical events occur, enabling real-time monitoring of the trading system.
+
+**Requirements**:
+- Send alerts for exceptions and critical errors
+- Send startup/shutdown notifications
+- Configurable via environment variables
+- Graceful degradation when Feishu is not configured
+- Retry mechanism with exponential backoff
+
+**Technical Design**:
+- `FeishuBot` class for sending messages via external bot service
+- Uses external Feishu bot relay service (LeapCell or self-hosted)
+- Async HTTP requests with retry support
+- Message types: text alerts, error alerts, startup/shutdown notifications
+
+**Configuration** (Environment Variables):
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `FEISHU_APP_ID` | No | - | Feishu app ID |
+| `FEISHU_APP_SECRET` | No | - | Feishu app secret |
+| `FEISHU_CHAT_ID` | No | - | Target chat ID for alerts |
+| `FEISHU_BOT_URL` | No | `https://feishugroupbot-widgetinp950-g352rogo.leapcell.dev` | Bot relay service URL |
+
+**Alert Types**:
+| Type | Trigger | Format |
+|------|---------|--------|
+| Startup | System starts successfully | `✅ A股交易系统已启动\n⏰ 启动时间: {time}` |
+| Shutdown | System stops | `⚠️ A股交易系统已停止\n⏰ 停止时间: {time}` |
+| Error | Exception or critical error | `🚨 {title}\n\n{content}` |
+
+**Files**:
+- `src/common/feishu_bot.py` - FeishuBot class
+- `src/common/config.py` - get_feishu_config() function
+
+**Usage**:
+```python
+from src.common.feishu_bot import FeishuBot
+
+# Create bot instance
+bot = FeishuBot()
+
+# Check if configured
+if bot.is_configured():
+    # Send alert
+    await bot.send_alert("Database Error", "Connection timeout after 30s")
+
+    # Send startup notification
+    await bot.send_startup_notification()
+
+    # Send shutdown notification
+    await bot.send_shutdown_notification()
+```
+
+**Integration Points**:
+- `scripts/main.py` - Startup/shutdown notifications
+- `src/common/state_manager.py` - State persistence errors
+- `src/trading/repository.py` - Database connection errors
+- `src/strategy/engine.py` - Strategy execution errors
+
+**Acceptance Criteria**:
+- [x] FeishuBot class with async HTTP support
+- [x] Configuration via environment variables
+- [x] Retry mechanism with exponential backoff
+- [x] Graceful skip when not configured
+- [x] Error alert method
+- [x] Startup/shutdown notifications
+- [x] Unit tests
 
 ---
 

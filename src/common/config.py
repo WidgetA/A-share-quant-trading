@@ -186,6 +186,44 @@ def load_secrets() -> Config:
     return _secrets_cache
 
 
+def get_feishu_config() -> dict[str, str]:
+    """
+    Get Feishu bot configuration from environment variables.
+
+    Environment variables:
+        FEISHU_BOT_URL: Bot relay service URL (optional)
+        FEISHU_APP_ID: Feishu app ID (required for sending)
+        FEISHU_APP_SECRET: Feishu app secret (required for sending)
+        FEISHU_CHAT_ID: Target chat ID (required for sending)
+
+    Returns:
+        Dictionary with bot configuration:
+            - bot_url: Bot relay service URL
+            - app_id: Feishu app ID
+            - app_secret: Feishu app secret
+            - chat_id: Target chat ID
+
+    Usage:
+        from src.common.config import get_feishu_config
+
+        config = get_feishu_config()
+        if config["app_id"] and config["app_secret"] and config["chat_id"]:
+            # Feishu is configured, can send messages
+            pass
+    """
+    import os
+
+    return {
+        "bot_url": os.getenv(
+            "FEISHU_BOT_URL",
+            "https://feishugroupbot-widgetinp950-g352rogo.leapcell.dev",
+        ),
+        "app_id": os.getenv("FEISHU_APP_ID", ""),
+        "app_secret": os.getenv("FEISHU_APP_SECRET", ""),
+        "chat_id": os.getenv("FEISHU_CHAT_ID", ""),
+    }
+
+
 def get_ifind_credentials() -> tuple[str, str]:
     """
     Get iFinD API credentials.
