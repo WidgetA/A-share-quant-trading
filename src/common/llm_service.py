@@ -17,7 +17,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 import httpx
@@ -109,7 +108,8 @@ class AnalysisResult:
 
 
 # System prompt for news analysis
-ANALYSIS_SYSTEM_PROMPT = """你是一个专业的A股财经新闻分析师。请分析以下新闻/公告，判断对相关股票价格的影响。
+ANALYSIS_SYSTEM_PROMPT = """你是一个专业的A股财经新闻分析师。
+请分析以下新闻/公告，判断对相关股票价格的影响。
 
 重点识别以下利好信号：
 1. 分红信息（dividend）- 现金分红、高送转、股份回购
@@ -276,19 +276,16 @@ class LLMService:
 
             except httpx.HTTPStatusError as e:
                 last_error = f"HTTP error {e.response.status_code}: {e.response.text}"
-                logger.warning(
-                    f"LLM API error (attempt {attempt + 1}/{self._config.max_retries}): {last_error}"
-                )
+                retries = self._config.max_retries
+                logger.warning(f"LLM API error (attempt {attempt + 1}/{retries}): {last_error}")
             except httpx.RequestError as e:
                 last_error = f"Request error: {str(e)}"
-                logger.warning(
-                    f"LLM request error (attempt {attempt + 1}/{self._config.max_retries}): {last_error}"
-                )
+                retries = self._config.max_retries
+                logger.warning(f"LLM request error ({attempt + 1}/{retries}): {last_error}")
             except (KeyError, json.JSONDecodeError) as e:
                 last_error = f"Response parse error: {str(e)}"
-                logger.warning(
-                    f"LLM parse error (attempt {attempt + 1}/{self._config.max_retries}): {last_error}"
-                )
+                retries = self._config.max_retries
+                logger.warning(f"LLM parse error ({attempt + 1}/{retries}): {last_error}")
 
             # Wait before retry
             if attempt < self._config.max_retries - 1:

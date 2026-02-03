@@ -621,13 +621,6 @@ class PositionManager:
         slot.exit_time = datetime.now()
         slot.reset()
 
-    def get_slot(self, slot_id: int) -> PositionSlot | None:
-        """Get slot by ID."""
-        for slot in self._slots:
-            if slot.slot_id == slot_id:
-                return slot
-        return None
-
     def get_holdings(self) -> list[PositionSlot]:
         """Get all filled positions."""
         return [slot for slot in self._slots if slot.is_filled()]

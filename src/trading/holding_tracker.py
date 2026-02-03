@@ -8,7 +8,7 @@
 # - Generate sell signals for confirmed sales
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -141,7 +141,6 @@ class HoldingTracker:
         Returns:
             List of HoldingRecords for overnight tracking.
         """
-        from src.trading.position_manager import PositionSlot
 
         self._holdings = []
         holdings = position_manager.get_holdings()

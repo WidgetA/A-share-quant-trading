@@ -3,7 +3,6 @@
 
 import json
 import sys
-from pathlib import Path
 
 # 设置输出编码
 sys.stdout.reconfigure(encoding="utf-8")

@@ -2,7 +2,7 @@
 # Tests Silicon Flow Qwen API integration
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -284,9 +284,14 @@ class TestLLMService:
 
     def test_parse_analysis_response_with_extra_text(self, service):
         """Test parsing response with extra text around JSON."""
-        response = """
+        json_content = (
+            '{"sentiment": "positive", "signal_type": "dividend", '
+            '"confidence": 0.8, "stock_codes": ["000001"], '
+            '"sectors": ["银行"], "reason": "高分红"}'
+        )
+        response = f"""
         根据分析，这是一条利好新闻：
-        {"sentiment": "positive", "signal_type": "dividend", "confidence": 0.8, "stock_codes": ["000001"], "sectors": ["银行"], "reason": "高分红"}
+        {json_content}
         以上是我的分析结果。
         """
 

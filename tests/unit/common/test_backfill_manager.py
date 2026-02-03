@@ -1,24 +1,21 @@
 # === MODULE PURPOSE ===
 # Unit tests for BackfillManager recovery mechanism.
 
-import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from src.common.backfill_manager import (
     BackfillManager,
     BackfillReport,
     BackfillStrategy,
     BackfillTask,
 )
-from src.common.state_manager import StateManager, SystemState
-from src.data.models.message import Message
 from src.data.sources.base import BaseMessageSource
 
+from src.common.state_manager import StateManager, SystemState
+from src.data.models.message import Message
 
 # === TEST FIXTURES ===
 

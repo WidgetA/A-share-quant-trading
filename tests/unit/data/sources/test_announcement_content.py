@@ -1,7 +1,6 @@
 # === TEST MODULE ===
 # Tests for announcement content fetcher with PDF support.
 
-import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -276,7 +275,7 @@ class TestNewsAnalyzerWithContentFetcher:
         )
 
         # Analyze
-        signals = await analyzer.analyze_messages([message], slot_type="premarket")
+        _signals = await analyzer.analyze_messages([message], slot_type="premarket")
 
         # Verify content was fetched
         mock_fetcher.fetch_content.assert_called_once()
