@@ -33,7 +33,7 @@ sys.path.insert(0, str(project_root))
 from src.common.config import Config
 from src.common.coordinator import Event, EventType, ModuleCoordinator
 from src.common.scheduler import MarketSession, TradingScheduler
-from src.common.state_manager import StateManager, SystemState
+from src.common.state_manager import StateManager, SystemState, create_state_manager_from_config
 from src.data.readers.message_reader import MessageReader, MessageReaderConfig
 from src.strategy.base import StrategyContext
 from src.strategy.engine import StrategyEngine
@@ -138,15 +138,8 @@ class SystemManager:
         """Initialize all components and check for recovery."""
         logger.info("Initializing system...")
 
-        # 1. Initialize state manager
-        state_db_path = project_root / self.config.get_str(
-            "system.state_database", "data/system_state.db"
-        )
-        checkpoint_max_age = self.config.get_int("system.recovery.max_age_hours", 24)
-        self.state_manager = StateManager(
-            state_db_path,
-            checkpoint_max_age_hours=checkpoint_max_age,
-        )
+        # 1. Initialize state manager (uses PostgreSQL via database-config.yaml)
+        self.state_manager = create_state_manager_from_config()
         await self.state_manager.connect()
 
         # 2. Check if recovery is needed

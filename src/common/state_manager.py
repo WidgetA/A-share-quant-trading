@@ -1,9 +1,9 @@
 # === MODULE PURPOSE ===
 # System state persistence and recovery manager.
-# Enables the system to recover from interruptions by persisting state to SQLite.
+# Enables the system to recover from interruptions by persisting state to PostgreSQL.
 
 # === DEPENDENCIES ===
-# - aiosqlite: Async SQLite operations
+# - asyncpg: Async PostgreSQL operations
 # - System modules save checkpoints via this manager
 
 # === KEY CONCEPTS ===
@@ -14,13 +14,13 @@
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +103,54 @@ class SystemStateRecord:
         )
 
 
+@dataclass
+class StateManagerConfig:
+    """Configuration for PostgreSQL state manager."""
+
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "messages"
+    user: str = "reader"
+    password: str = ""
+    pool_min_size: int = 2
+    pool_max_size: int = 5
+    schema: str = "trading"
+    checkpoint_max_age_hours: int = 24
+
+
+# SQL for schema and table creation
+SCHEMA_SQL = """
+CREATE SCHEMA IF NOT EXISTS {schema};
+"""
+
+TABLES_SQL = """
+-- System state table
+CREATE TABLE IF NOT EXISTS {schema}.system_state (
+    id SERIAL PRIMARY KEY,
+    state VARCHAR(20) NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    metadata JSONB DEFAULT '{{}}'
+);
+
+-- Module checkpoints table
+CREATE TABLE IF NOT EXISTS {schema}.module_checkpoints (
+    id SERIAL PRIMARY KEY,
+    module_name VARCHAR(100) UNIQUE NOT NULL,
+    checkpoint_id VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    state_data JSONB NOT NULL
+);
+
+-- Create index for checkpoint lookup
+CREATE INDEX IF NOT EXISTS idx_checkpoints_module
+ON {schema}.module_checkpoints(module_name);
+"""
+
+
 class StateManager:
     """
-    Manages system state persistence and recovery.
+    Manages system state persistence and recovery using PostgreSQL.
 
     Provides:
         - System state tracking (starting, running, stopped, etc.)
@@ -117,7 +162,8 @@ class StateManager:
         - module_checkpoints: Per-module recovery points
 
     Usage:
-        state_manager = StateManager("data/system_state.db")
+        config = StateManagerConfig(host="localhost", ...)
+        state_manager = StateManager(config)
         await state_manager.connect()
 
         # Check for recovery on startup
@@ -144,81 +190,85 @@ class StateManager:
         5. Clear old checkpoints after successful recovery
     """
 
-    # Schema version for migrations
-    SCHEMA_VERSION = 1
-
-    def __init__(
-        self,
-        db_path: str | Path,
-        checkpoint_max_age_hours: int = 24,
-    ):
+    def __init__(self, config: StateManagerConfig):
         """
         Initialize state manager.
 
         Args:
-            db_path: Path to SQLite database file.
-            checkpoint_max_age_hours: Maximum age of checkpoints to consider
-                                     for recovery. Older checkpoints are ignored.
+            config: PostgreSQL connection configuration.
         """
-        self.db_path = Path(db_path)
-        self.checkpoint_max_age = timedelta(hours=checkpoint_max_age_hours)
-        self._db: aiosqlite.Connection | None = None
+        self._config = config
+        self._pool: asyncpg.Pool | None = None
+        self._is_connected = False
+        self._schema = config.schema
+        self.checkpoint_max_age = timedelta(hours=config.checkpoint_max_age_hours)
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Connect to database and initialize schema."""
-        # Ensure parent directory exists
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._is_connected:
+            return
 
-        self._db = await aiosqlite.connect(self.db_path)
-        self._db.row_factory = aiosqlite.Row
+        try:
+            logger.info(
+                f"Connecting StateManager to PostgreSQL: {self._config.host}:{self._config.port}"
+                f"/{self._config.database} (schema: {self._schema})"
+            )
 
-        await self._init_schema()
-        logger.info(f"StateManager connected to {self.db_path}")
+            self._pool = await asyncpg.create_pool(
+                host=self._config.host,
+                port=self._config.port,
+                database=self._config.database,
+                user=self._config.user,
+                password=self._config.password,
+                min_size=self._config.pool_min_size,
+                max_size=self._config.pool_max_size,
+            )
+
+            # Initialize schema and tables
+            await self._init_schema()
+
+            self._is_connected = True
+            logger.info("StateManager connected to PostgreSQL")
+
+        except Exception as e:
+            logger.error(f"Failed to connect StateManager to PostgreSQL: {e}")
+            raise ConnectionError(f"Cannot connect to state database: {e}") from e
 
     async def close(self) -> None:
         """Close database connection."""
-        if self._db:
-            await self._db.close()
-            self._db = None
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
+            self._is_connected = False
             logger.info("StateManager connection closed")
 
     async def _init_schema(self) -> None:
         """Initialize database schema."""
-        if not self._db:
-            return
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            # Create schema
+            await conn.execute(SCHEMA_SQL.format(schema=self._schema))
+            # Create tables
+            await conn.execute(TABLES_SQL.format(schema=self._schema))
+            logger.info(f"Initialized state management schema: {self._schema}")
 
-        await self._db.executescript(
-            """
-            -- System state table
-            CREATE TABLE IF NOT EXISTS system_state (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                state TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                metadata TEXT
-            );
+    def _ensure_connected(self) -> None:
+        """Ensure manager is connected."""
+        if not self._is_connected or not self._pool:
+            raise RuntimeError("StateManager is not connected. Call connect() first.")
 
-            -- Module checkpoints table
-            CREATE TABLE IF NOT EXISTS module_checkpoints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                module_name TEXT UNIQUE NOT NULL,
-                checkpoint_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                state_data TEXT NOT NULL
-            );
+    @property
+    def _db_pool(self) -> asyncpg.Pool:
+        """Get the database pool, raising if not connected."""
+        self._ensure_connected()
+        assert self._pool is not None
+        return self._pool
 
-            -- Create index for checkpoint lookup
-            CREATE INDEX IF NOT EXISTS idx_checkpoints_module
-            ON module_checkpoints(module_name);
-
-            -- Schema version tracking
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY
-            );
-            """
-        )
-        await self._db.commit()
+    @property
+    def is_connected(self) -> bool:
+        """Check if connected."""
+        return self._is_connected
 
     async def save_state(
         self,
@@ -232,49 +282,43 @@ class StateManager:
             state: Current system state.
             metadata: Optional metadata to store with state.
         """
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
         async with self._lock:
             now = datetime.now()
 
-            # Check if we have an existing state
-            async with self._db.execute(
-                "SELECT id, started_at FROM system_state ORDER BY id DESC LIMIT 1"
-            ) as cursor:
-                row = await cursor.fetchone()
+            async with self._db_pool.acquire() as conn:
+                # Check if we have an existing state
+                row = await conn.fetchrow(
+                    f"SELECT id, started_at FROM {self._schema}.system_state "
+                    "ORDER BY id DESC LIMIT 1"
+                )
 
-            if row:
-                # Update existing state
-                await self._db.execute(
-                    """
-                    UPDATE system_state
-                    SET state = ?, updated_at = ?, metadata = ?
-                    WHERE id = ?
-                    """,
-                    (
+                if row:
+                    # Update existing state
+                    await conn.execute(
+                        f"""
+                        UPDATE {self._schema}.system_state
+                        SET state = $1, updated_at = $2, metadata = $3
+                        WHERE id = $4
+                        """,
                         state.value,
-                        now.isoformat(),
+                        now,
                         json.dumps(metadata or {}),
                         row["id"],
-                    ),
-                )
-            else:
-                # Insert new state record
-                await self._db.execute(
-                    """
-                    INSERT INTO system_state (state, started_at, updated_at, metadata)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (
+                    )
+                else:
+                    # Insert new state record
+                    await conn.execute(
+                        f"""
+                        INSERT INTO {self._schema}.system_state
+                            (state, started_at, updated_at, metadata)
+                        VALUES ($1, $2, $3, $4)
+                        """,
                         state.value,
-                        now.isoformat(),
-                        now.isoformat(),
+                        now,
+                        now,
                         json.dumps(metadata or {}),
-                    ),
-                )
+                    )
 
-            await self._db.commit()
             logger.debug(f"Saved system state: {state.value}")
 
     async def get_last_state(self) -> SystemStateRecord | None:
@@ -284,26 +328,27 @@ class StateManager:
         Returns:
             SystemStateRecord if found, None if no state exists.
         """
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
-        async with self._db.execute(
-            """
-            SELECT state, started_at, updated_at, metadata
-            FROM system_state
-            ORDER BY id DESC LIMIT 1
-            """
-        ) as cursor:
-            row = await cursor.fetchone()
+        async with self._db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT state, started_at, updated_at, metadata
+                FROM {self._schema}.system_state
+                ORDER BY id DESC LIMIT 1
+                """
+            )
 
         if not row:
             return None
 
+        metadata = row["metadata"]
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+
         return SystemStateRecord(
             state=SystemState(row["state"]),
-            started_at=datetime.fromisoformat(row["started_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-            metadata=json.loads(row["metadata"] or "{}"),
+            started_at=row["started_at"],
+            updated_at=row["updated_at"],
+            metadata=metadata or {},
         )
 
     async def save_checkpoint(
@@ -323,30 +368,26 @@ class StateManager:
         Returns:
             Checkpoint ID.
         """
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
         async with self._lock:
             now = datetime.now()
             checkpoint_id = f"{module_name}_{now.strftime('%Y%m%d_%H%M%S')}"
 
-            await self._db.execute(
-                """
-                INSERT INTO module_checkpoints (module_name, checkpoint_id, created_at, state_data)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(module_name) DO UPDATE SET
-                    checkpoint_id = excluded.checkpoint_id,
-                    created_at = excluded.created_at,
-                    state_data = excluded.state_data
-                """,
-                (
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(
+                    f"""
+                    INSERT INTO {self._schema}.module_checkpoints
+                        (module_name, checkpoint_id, created_at, state_data)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (module_name) DO UPDATE SET
+                        checkpoint_id = EXCLUDED.checkpoint_id,
+                        created_at = EXCLUDED.created_at,
+                        state_data = EXCLUDED.state_data
+                    """,
                     module_name,
                     checkpoint_id,
-                    now.isoformat(),
+                    now,
                     json.dumps(state_data),
-                ),
-            )
-            await self._db.commit()
+                )
 
             logger.debug(f"Saved checkpoint for {module_name}: {checkpoint_id}")
             return checkpoint_id
@@ -361,34 +402,35 @@ class StateManager:
         Returns:
             CheckpointData if found and not expired, None otherwise.
         """
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
-        async with self._db.execute(
-            """
-            SELECT checkpoint_id, module_name, created_at, state_data
-            FROM module_checkpoints
-            WHERE module_name = ?
-            """,
-            (module_name,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        async with self._db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT checkpoint_id, module_name, created_at, state_data
+                FROM {self._schema}.module_checkpoints
+                WHERE module_name = $1
+                """,
+                module_name,
+            )
 
         if not row:
             return None
 
-        created_at = datetime.fromisoformat(row["created_at"])
+        created_at = row["created_at"]
 
         # Check if checkpoint is too old
         if datetime.now() - created_at > self.checkpoint_max_age:
             logger.warning(f"Checkpoint for {module_name} is too old ({created_at}), ignoring")
             return None
 
+        state_data = row["state_data"]
+        if isinstance(state_data, str):
+            state_data = json.loads(state_data)
+
         return CheckpointData(
             checkpoint_id=row["checkpoint_id"],
             module_name=row["module_name"],
             created_at=created_at,
-            state_data=json.loads(row["state_data"]),
+            state_data=state_data,
         )
 
     async def get_all_checkpoints(self) -> list[CheckpointData]:
@@ -398,30 +440,34 @@ class StateManager:
         Returns:
             List of CheckpointData for all modules with valid checkpoints.
         """
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
         cutoff = datetime.now() - self.checkpoint_max_age
 
-        async with self._db.execute(
-            """
-            SELECT checkpoint_id, module_name, created_at, state_data
-            FROM module_checkpoints
-            WHERE created_at > ?
-            """,
-            (cutoff.isoformat(),),
-        ) as cursor:
-            rows = await cursor.fetchall()
-
-        return [
-            CheckpointData(
-                checkpoint_id=row["checkpoint_id"],
-                module_name=row["module_name"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                state_data=json.loads(row["state_data"]),
+        async with self._db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT checkpoint_id, module_name, created_at, state_data
+                FROM {self._schema}.module_checkpoints
+                WHERE created_at > $1
+                """,
+                cutoff,
             )
-            for row in rows
-        ]
+
+        result = []
+        for row in rows:
+            state_data = row["state_data"]
+            if isinstance(state_data, str):
+                state_data = json.loads(state_data)
+
+            result.append(
+                CheckpointData(
+                    checkpoint_id=row["checkpoint_id"],
+                    module_name=row["module_name"],
+                    created_at=row["created_at"],
+                    state_data=state_data,
+                )
+            )
+
+        return result
 
     async def clear_checkpoint(self, module_name: str) -> None:
         """
@@ -432,25 +478,19 @@ class StateManager:
         Args:
             module_name: Name of the module.
         """
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
         async with self._lock:
-            await self._db.execute(
-                "DELETE FROM module_checkpoints WHERE module_name = ?",
-                (module_name,),
-            )
-            await self._db.commit()
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(
+                    f"DELETE FROM {self._schema}.module_checkpoints WHERE module_name = $1",
+                    module_name,
+                )
             logger.debug(f"Cleared checkpoint for {module_name}")
 
     async def clear_all_checkpoints(self) -> None:
         """Clear all module checkpoints."""
-        if not self._db:
-            raise RuntimeError("StateManager not connected")
-
         async with self._lock:
-            await self._db.execute("DELETE FROM module_checkpoints")
-            await self._db.commit()
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(f"DELETE FROM {self._schema}.module_checkpoints")
             logger.info("Cleared all checkpoints")
 
     async def needs_recovery(self) -> bool:
@@ -500,3 +540,45 @@ class StateManager:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """Async context manager exit."""
         await self.close()
+
+
+def create_state_manager_from_config() -> StateManager:
+    """
+    Create StateManager from configuration file.
+
+    Returns:
+        Configured StateManager instance.
+    """
+    from src.common.config import load_config
+
+    config = load_config("config/database-config.yaml")
+    db_config = config.get_dict("database.trading", {})
+
+    if not db_config:
+        raise ValueError("Trading database configuration not found")
+
+    # Support environment variable substitution
+    def resolve_env(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("${"):
+            # Parse ${VAR:default} or ${VAR}
+            inner = value[2:-1]
+            if ":" in inner:
+                var_name, default = inner.split(":", 1)
+            else:
+                var_name, default = inner, ""
+            return os.environ.get(var_name, default)
+        return value
+
+    state_config = StateManagerConfig(
+        host=resolve_env(db_config.get("host", "localhost")),
+        port=int(resolve_env(db_config.get("port", 5432))),
+        database=resolve_env(db_config.get("database", "messages")),
+        user=resolve_env(db_config.get("user", "reader")),
+        password=resolve_env(db_config.get("password", "")),
+        pool_min_size=db_config.get("pool_min_size", 2),
+        pool_max_size=db_config.get("pool_max_size", 5),
+        schema=db_config.get("schema", "trading"),
+        checkpoint_max_age_hours=db_config.get("checkpoint_max_age_hours", 24),
+    )
+
+    return StateManager(state_config)

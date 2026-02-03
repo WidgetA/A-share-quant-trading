@@ -5,7 +5,6 @@ description = "A quantitative trading system for China A-share market"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "aiosqlite>=0.19.0",
     "pyyaml>=6.0",
     "akshare>=1.18.0",
     "baostock>=0.8.8",

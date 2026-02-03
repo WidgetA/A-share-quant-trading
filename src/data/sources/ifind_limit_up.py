@@ -5,7 +5,7 @@
 # === DEPENDENCIES ===
 # - iFinDPy: THS iFinD SDK for A-share market data
 # - LimitUpStock model: Data structure for limit-up stocks
-# - LimitUpDatabase: SQLite storage layer
+# - LimitUpDatabase: PostgreSQL storage layer
 
 # === KEY CONCEPTS ===
 # - Limit-up (涨停): Stock reaches maximum daily price increase limit
@@ -18,11 +18,14 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from src.common.config import Config, get_ifind_credentials
-from src.data.database.limit_up_db import LimitUpDatabase
+from src.data.database.limit_up_db import (
+    LimitUpDatabase,
+    LimitUpDatabaseConfig,
+    create_limit_up_db_from_config,
+)
 from src.data.models.limit_up import LimitUpStock
 
 logger = logging.getLogger(__name__)
@@ -53,17 +56,17 @@ class IFinDLimitUpSource:
 
     def __init__(
         self,
-        db_path: str | Path = "data/limit_up.db",
+        db_config: LimitUpDatabaseConfig | None = None,
         config: Config | None = None,
     ):
         """
         Initialize the iFinD limit-up data source.
 
         Args:
-            db_path: Path to SQLite database
+            db_config: PostgreSQL database configuration (if None, uses config file)
             config: Optional configuration (for future extensibility)
         """
-        self.db_path = Path(db_path)
+        self._db_config = db_config
         self.config = config
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ifind")
         self._database: LimitUpDatabase | None = None
@@ -71,7 +74,10 @@ class IFinDLimitUpSource:
 
     async def start(self) -> None:
         """Initialize resources and connect to database."""
-        self._database = LimitUpDatabase(self.db_path)
+        if self._db_config is not None:
+            self._database = LimitUpDatabase(self._db_config)
+        else:
+            self._database = create_limit_up_db_from_config()
         await self._database.connect()
         logger.info("IFinD limit-up source started")
 

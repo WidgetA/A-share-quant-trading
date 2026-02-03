@@ -27,7 +27,6 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.common.config import Config
 from src.data.sources.ifind_limit_up import IFinDLimitUpSource
 
 
@@ -132,12 +131,6 @@ async def main() -> None:
         help="End date for statistics (YYYY-MM-DD)",
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default="config/market-data-config.yaml",
-        help="Path to configuration file",
-    )
-    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -149,16 +142,8 @@ async def main() -> None:
 
     setup_logging(args.log_level)
 
-    # Load configuration
-    config_path = project_root / args.config
-    if config_path.exists():
-        config = Config.load(config_path)
-        db_path = config.get_str("market_data.limit_up.database.path", default="data/limit_up.db")
-    else:
-        db_path = "data/limit_up.db"
-
-    # Initialize source
-    source = IFinDLimitUpSource(db_path=project_root / db_path)
+    # Initialize source (uses database-config.yaml via create_limit_up_db_from_config)
+    source = IFinDLimitUpSource()
 
     try:
         await source.start()

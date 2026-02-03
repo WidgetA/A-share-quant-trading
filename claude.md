@@ -218,7 +218,7 @@ Before starting any development task:
 | Language | Python 3.11+ | Ecosystem, quant libraries |
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
 | Message Queue | Redis Pub/Sub or ZeroMQ | Low latency, simple setup |
-| Trading Data | SQLite | Zero-config, positions/orders/transactions |
+| Trading Data | PostgreSQL (trading schema) | Unified with messages DB, positions/orders/transactions/state |
 | Message Data | PostgreSQL (external, read-only) | Messages streamed by external collector project |
 | Historical Data | PostgreSQL + TimescaleDB (optional) | Time-series optimized, for large datasets |
 | Task Queue | Celery (optional) | Async task processing |

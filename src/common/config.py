@@ -211,3 +211,18 @@ def get_ifind_credentials() -> tuple[str, str]:
         raise ValueError("iFinD credentials not configured in secrets.yaml")
 
     return username, password
+
+
+def load_config(config_path: str | Path) -> Config:
+    """
+    Load configuration from a YAML file.
+
+    This is a convenience function that wraps Config.load().
+
+    Args:
+        config_path: Path to the YAML configuration file
+
+    Returns:
+        Config instance
+    """
+    return Config.load(config_path)

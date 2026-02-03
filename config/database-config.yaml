@@ -5,15 +5,26 @@ database:
   # External PostgreSQL for messages (read-only)
   # Messages are written by external collector project
   messages:
-    host: "localhost"
-    port: 5432
-    database: "messages"
-    user: "reader"
-    password: "${MESSAGES_DB_PASSWORD}"  # Set via environment variable
+    host: "${DB_HOST:localhost}"
+    port: ${DB_PORT:5432}
+    database: "${DB_NAME:messages}"
+    user: "${DB_USER:reader}"
+    password: "${DB_PASSWORD}"
     pool_min_size: 2
     pool_max_size: 10
+    schema: "public"
     table_name: "messages"
     read_only: true
 
-  # Note: Trading data (positions, orders) uses SQLite
-  # See config/main-config.yaml for SQLite paths
+  # Trading data (positions, orders, transactions)
+  # Uses separate schema for isolation from messages
+  trading:
+    host: "${DB_HOST:localhost}"
+    port: ${DB_PORT:5432}
+    database: "${DB_NAME:messages}"
+    user: "${DB_USER:reader}"
+    password: "${DB_PASSWORD}"
+    pool_min_size: 2
+    pool_max_size: 5
+    schema: "trading"
+    auto_create_schema: true  # Create schema if not exists

@@ -21,6 +21,8 @@
 | 0.3.3 | 2026-01-28 | - | STR-003: Add user confirmation when sector has limit-up stocks |
 | 0.4.0 | 2026-02-03 | - | Architecture refactor: Message collection moved to external project, this project reads from PostgreSQL |
 | 0.4.1 | 2026-02-03 | - | INF-002: Add GitHub Actions CI pipeline |
+| 0.5.0 | 2026-02-03 | - | TRD-000: Trading data persistence with PostgreSQL (trading schema) |
+| 0.5.1 | 2026-02-03 | - | SYS-002/DAT-005: Migrate StateManager and LimitUpDatabase from SQLite to PostgreSQL |
 
 ---
 
@@ -71,7 +73,7 @@ uv run python scripts/main.py --config config/main-config.yaml
 
 **Status**: Completed
 
-**Description**: Enable system recovery from crashes by persisting state to SQLite.
+**Description**: Enable system recovery from crashes by persisting state to PostgreSQL.
 
 **Requirements**:
 - Persist system state (STARTING, RUNNING, STOPPED, etc.)
@@ -81,16 +83,18 @@ uv run python scripts/main.py --config config/main-config.yaml
 - Configurable checkpoint age limit
 
 **Technical Design**:
-- `StateManager` class manages SQLite persistence
-- Database: `data/system_state.db`
+- `StateManager` class manages PostgreSQL persistence
+- Database: PostgreSQL (same instance as trading, `trading` schema)
 - Tables:
-  - `system_state` - Overall system state
-  - `module_checkpoints` - Per-module recovery data
+  - `trading.system_state` - Overall system state
+  - `trading.module_checkpoints` - Per-module recovery data
+- Connection pooling via asyncpg
 - Checkpoint interval: configurable (default 60s)
 - Recovery: load checkpoints, resume modules, clear old checkpoints
 
 **Files**:
 - `src/common/state_manager.py` - State persistence manager
+- `config/database-config.yaml` - Database configuration
 
 **Acceptance Criteria**:
 - [x] SystemState enum (STARTING, RUNNING, STOPPED, etc.)
@@ -98,6 +102,7 @@ uv run python scripts/main.py --config config/main-config.yaml
 - [x] Crash detection on startup
 - [x] Recovery flow implemented
 - [x] Configurable checkpoint age limit
+- [x] PostgreSQL with asyncpg connection pool
 
 ---
 
@@ -399,6 +404,83 @@ strategy:
 
 ## Module: Trading
 
+### [TRD-000] Trading Data Persistence
+
+**Status**: Completed
+
+**Description**: PostgreSQL-based persistence for all trading data including positions, orders, and transactions. Uses separate schema for isolation from messages.
+
+**Requirements**:
+- Store position slots and their state
+- Track stock holdings within slots (supports sector buying)
+- Record orders and their lifecycle
+- Record transactions (fills)
+- Track overnight holdings for morning review
+- Schema isolation from message data
+
+**Technical Design**:
+- Database: PostgreSQL (same instance as messages, separate schema)
+- Schema: `trading` (isolated from `public` schema)
+- Tables:
+  - `position_slots` - Slot state (id, type, state, entry_time, reason, sector)
+  - `stock_holdings` - Holdings per slot (stock_code, quantity, price)
+  - `orders` - Order records (id, type, stock, qty, price, status)
+  - `transactions` - Fill records (order_id, price, qty, amount, commission)
+  - `overnight_holdings` - Overnight tracking for morning review
+
+**Files**:
+- `src/trading/repository.py` - TradingRepository class
+- `src/trading/position_manager.py` - Updated with DB support
+- `src/trading/holding_tracker.py` - Updated with DB support
+- `config/database-config.yaml` - Database configuration
+
+**Usage**:
+```python
+from src.trading import (
+    TradingRepository,
+    create_position_manager_with_db,
+    create_trading_repository_from_config,
+)
+
+# Create repository and connect
+repo = create_trading_repository_from_config()
+await repo.connect()
+
+# Create position manager with DB persistence
+manager = await create_position_manager_with_db(config, repo)
+
+# All operations auto-persist to PostgreSQL
+slot = manager.get_available_slot("premarket")
+manager.allocate_slot(slot, "000001", 15.50, "利好消息")
+await manager.save_slot_to_db(slot.slot_id)
+```
+
+**Configuration** (`config/database-config.yaml`):
+```yaml
+database:
+  trading:
+    host: "${DB_HOST:localhost}"
+    port: ${DB_PORT:5432}
+    database: "${DB_NAME:messages}"
+    user: "${DB_USER:reader}"
+    password: "${DB_PASSWORD}"
+    schema: "trading"
+    auto_create_schema: true
+```
+
+**Acceptance Criteria**:
+- [x] TradingRepository class with asyncpg
+- [x] Schema and table auto-creation
+- [x] Position slot CRUD operations
+- [x] Stock holdings persistence
+- [x] Order management methods
+- [x] Transaction recording
+- [x] Overnight holdings tracking
+- [x] PositionManager DB integration
+- [x] HoldingTracker DB integration
+
+---
+
 ### [TRD-001] Order Executor
 
 **Status**: Planned
@@ -431,16 +513,12 @@ strategy:
 - Export trading records for analysis
 
 **Technical Design**:
-- Database: SQLite (zero-config, single file)
-- Tables:
-  - `account` - Cash balance, total value
-  - `positions` - Current holdings (stock_code, qty, avg_cost)
-  - `orders` - Order records (id, stock, direction, price, status)
-  - `transactions` - Fill records (order_id, fill_price, fill_qty, timestamp)
+- Database: PostgreSQL (trading schema, reuse TRD-000 infrastructure)
+- Additional tables if needed:
+  - `paper_account` - Virtual cash balance, total value
 
 **Acceptance Criteria**:
 - [ ] Paper trading executor implemented
-- [ ] SQLite database schema implemented
 - [ ] Slippage model configurable
 - [ ] Trade log export functionality
 
@@ -644,65 +722,66 @@ Message collection has been moved to a separate project. This project now only r
 
 **Status**: Completed
 
-**Description**: Collect daily limit-up (涨停) stock information after market close using iFinD API, storing the data in SQLite for analysis and strategy development.
+**Description**: Collect daily limit-up (涨停) stock information after market close using iFinD API, storing the data in PostgreSQL for analysis and strategy development.
 
 **Requirements**:
 - Fetch all limit-up stocks for a given trading day after market close (15:00)
 - Capture comprehensive limit-up information: stock code, name, price, time, reason, etc.
-- Store data in SQLite database with proper indexing
+- Store data in PostgreSQL database with proper indexing
 - Support historical data backfill
 - Idempotent: re-running for the same date updates existing records
 
 **Technical Design**:
 - Data Source: iFinD `THS_DataPool` API for limit-up board data
-- Database: SQLite (separate from messages, in `data/limit_up.db`)
+- Database: PostgreSQL (same instance as trading, `trading` schema)
 - Table Schema:
-  - `limit_up_stocks`:
-    - `id` (TEXT PRIMARY KEY) - Composite: date + stock_code
-    - `trade_date` (TEXT) - Trading date (YYYY-MM-DD)
-    - `stock_code` (TEXT) - Stock code (e.g., "000001.SZ")
-    - `stock_name` (TEXT) - Stock name
-    - `limit_up_price` (REAL) - Limit-up price
-    - `limit_up_time` (TEXT) - First limit-up time (HH:MM:SS)
+  - `trading.limit_up_stocks`:
+    - `id` (VARCHAR PRIMARY KEY) - Composite: date + stock_code
+    - `trade_date` (DATE) - Trading date
+    - `stock_code` (VARCHAR) - Stock code (e.g., "000001.SZ")
+    - `stock_name` (VARCHAR) - Stock name
+    - `limit_up_price` (DECIMAL) - Limit-up price
+    - `limit_up_time` (VARCHAR) - First limit-up time (HH:MM:SS)
     - `open_count` (INTEGER) - Number of times limit opened
-    - `last_limit_up_time` (TEXT) - Last limit-up time if reopened
-    - `turnover_rate` (REAL) - Turnover rate percentage
-    - `amount` (REAL) - Trading amount (yuan)
-    - `circulation_mv` (REAL) - Circulating market value
+    - `last_limit_up_time` (VARCHAR) - Last limit-up time if reopened
+    - `turnover_rate` (DECIMAL) - Turnover rate percentage
+    - `amount` (DECIMAL) - Trading amount (yuan)
+    - `circulation_mv` (DECIMAL) - Circulating market value
     - `reason` (TEXT) - Limit-up reason/concept
-    - `industry` (TEXT) - Industry classification
-    - `created_at` (TEXT) - Record creation timestamp
-    - `updated_at` (TEXT) - Record update timestamp
+    - `industry` (VARCHAR) - Industry classification
+    - `created_at` (TIMESTAMP) - Record creation timestamp
+    - `updated_at` (TIMESTAMP) - Record update timestamp
   - Indexes: trade_date, stock_code, limit_up_time
 
 **Files**:
 - `src/data/models/limit_up.py` - LimitUpStock data model
-- `src/data/database/limit_up_db.py` - SQLite database layer
+- `src/data/database/limit_up_db.py` - PostgreSQL database layer
 - `src/data/sources/ifind_limit_up.py` - iFinD data source
 - `tests/unit/data/sources/test_ifind_limit_up.py` - Test file
-- `config/market-data-config.yaml` - Configuration
+- `config/database-config.yaml` - Database configuration
 - `scripts/fetch_limit_up.py` - CLI script for fetching data
 
 **Usage**:
 ```python
-from src.data.sources.ifind_limit_up import IFinDLimitUpSource
+from src.data.database.limit_up_db import create_limit_up_db_from_config
 
-# Fetch today's limit-up stocks
-source = IFinDLimitUpSource()
-await source.start()
-stocks = await source.fetch_limit_up_stocks()  # Uses today's date
-await source.stop()
+# Create database from config and connect
+db = create_limit_up_db_from_config()
+await db.connect()
 
-# Fetch historical data
-stocks = await source.fetch_limit_up_stocks(date="2026-01-24")
+# Save limit-up stocks
+await db.save(stock)
+await db.save_batch(stocks)
 
-# Backfill multiple days
-await source.backfill(days=30)
+# Query by date
+stocks = await db.query_by_date("2026-01-24")
+
+await db.close()
 ```
 
 **Acceptance Criteria**:
 - [x] LimitUpStock data model defined
-- [x] SQLite database layer with async operations
+- [x] PostgreSQL database layer with asyncpg
 - [x] iFinD data source implementation
 - [x] Comprehensive test coverage
 - [x] Configuration via YAML
