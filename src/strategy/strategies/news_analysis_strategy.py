@@ -21,11 +21,10 @@
 # - user_interaction: Gets user confirmations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
 
-from src.common.config import Config
 from src.common.llm_service import LLMConfig, LLMService, create_llm_service_from_config
 from src.common.scheduler import MarketSession
 from src.common.user_interaction import InteractionConfig, UserInteraction
@@ -35,7 +34,7 @@ from src.data.sources.announcement_content import (
 )
 from src.data.sources.sector_mapper import SectorMapper
 from src.strategy.analyzers.news_analyzer import NewsAnalyzer, NewsAnalyzerConfig
-from src.strategy.base import BaseStrategy, StrategyConfig, StrategyContext
+from src.strategy.base import BaseStrategy, StrategyContext
 from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 from src.strategy.signals import SignalType, TradingSignal
 from src.trading.holding_tracker import HoldingTracker
@@ -255,7 +254,6 @@ class NewsAnalysisStrategy(BaseStrategy):
         """Handle morning sell confirmation for overnight holdings."""
         # Check if it's confirmation time (around 9:00)
         confirmation_time = self.get_parameter("morning_confirmation_time", "09:00")
-        current_time = context.timestamp.strftime("%H:%M")
 
         # Only run once per day
         if self._last_morning_confirmation:
