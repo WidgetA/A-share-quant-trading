@@ -582,7 +582,8 @@ class NewsAnalysisStrategy(BaseStrategy):
 
             # Classify stocks: limit-up vs available
             limit_up_stocks: list[tuple[str, str]] = []  # (code, name)
-            available_stocks: list[tuple[str, str, float, float | None]] = []  # (code, name, price, change_pct)
+            # (code, name, price, change_pct)
+            available_stocks: list[tuple[str, str, float, float | None]] = []
 
             for stock_code in news_signal.target_stocks:
                 price = self._get_stock_price(stock_code, context)
