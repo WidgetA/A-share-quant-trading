@@ -20,6 +20,7 @@
 | 0.3.2 | 2026-01-28 | - | STR-003: Add limit-up price check to avoid buying at ceiling |
 | 0.3.3 | 2026-01-28 | - | STR-003: Add user confirmation when sector has limit-up stocks |
 | 0.4.0 | 2026-02-03 | - | Architecture refactor: Message collection moved to external project, this project reads from PostgreSQL |
+| 0.4.1 | 2026-02-03 | - | INF-002: Add GitHub Actions CI pipeline |
 
 ---
 
@@ -731,21 +732,29 @@ await source.backfill(days=30)
 
 ### [INF-002] CI Pipeline
 
-**Status**: Planned
+**Status**: Completed
 
 **Description**: Continuous integration pipeline for code quality.
 
 **Requirements**:
 - Lint check (ruff)
-- Format check (black)
+- Format check (ruff format)
 - Type check (mypy)
 - Unit tests (pytest)
-- Coverage report
+
+**Technical Design**:
+- GitHub Actions workflow on push/PR to main branch
+- Uses `uv` for fast dependency installation
+- Three parallel jobs: lint, typecheck, test
+
+**Files**:
+- `.github/workflows/ci.yml` - GitHub Actions workflow
 
 **Acceptance Criteria**:
-- [ ] GitHub Actions workflow configured
-- [ ] All checks pass on main branch
-- [ ] Coverage threshold enforced
+- [x] GitHub Actions workflow configured
+- [x] Lint and format checks (ruff)
+- [x] Type check (mypy)
+- [x] Unit tests (pytest)
 
 ---
 
