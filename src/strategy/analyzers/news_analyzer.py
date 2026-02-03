@@ -31,9 +31,7 @@ class NewsAnalyzerConfig:
     min_confidence: float = 0.7  # Minimum confidence to consider signal
     max_stocks_per_sector: int = 5  # Max stocks when buying sector
     # Which sentiments to treat as actionable
-    actionable_sentiments: list[str] = field(
-        default_factory=lambda: ["strong_bullish", "bullish"]
-    )
+    actionable_sentiments: list[str] = field(default_factory=lambda: ["strong_bullish", "bullish"])
 
 
 @dataclass
@@ -178,9 +176,7 @@ class NewsAnalyzer:
             if signal.is_actionable():
                 signals.append(signal)
 
-        logger.info(
-            f"Filtered {len(messages)} messages -> {len(signals)} actionable signals"
-        )
+        logger.info(f"Filtered {len(messages)} messages -> {len(signals)} actionable signals")
         return signals
 
     def _create_signal(
