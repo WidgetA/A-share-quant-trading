@@ -214,10 +214,10 @@ class UserInteraction:
             if selection is None:
                 # Timeout - use default action
                 if self._config.morning_default == "sell_all":
-                    print(f"⏱️ 超时，执行默认操作: 全部卖出")
+                    print("⏱️ 超时，执行默认操作: 全部卖出")
                     return [h.slot_id for h in holdings]
                 else:
-                    print(f"⏱️ 超时，执行默认操作: 继续持有")
+                    print("⏱️ 超时，执行默认操作: 继续持有")
                     return []
 
             if selection.lower() == "all":
@@ -404,7 +404,8 @@ class UserInteraction:
         sector_name: str,
         total_stocks: int,
         limit_up_stocks: list[tuple[str, str]],  # [(code, name), ...]
-        available_stocks: list[tuple[str, str, float, float | None]],  # [(code, name, price, change_pct), ...]
+        # [(code, name, price, change_pct), ...]
+        available_stocks: list[tuple[str, str, float, float | None]],
     ) -> list[tuple[str, str, float, float | None]] | None:
         """
         Ask user to confirm buying when many stocks in sector are at limit-up.
@@ -437,8 +438,8 @@ class UserInteraction:
         # Show available stocks
         available_count = len(available_stocks)
         if available_count == 0:
-            print(f"\n❌ 板块内所有股票均已涨停，无法买入")
-            print(f"{'=' * 60}")
+            print("\n❌ 板块内所有股票均已涨停，无法买入")
+            print("=" * 60)
             await self._get_input_with_timeout("按回车继续...", timeout=10.0)
             return None
 
@@ -474,8 +475,55 @@ class UserInteraction:
             return selected
 
         except asyncio.TimeoutError:
-            print(f"\n⏱️ 超时，跳过本板块")
+            print("\n⏱️ 超时，跳过本板块")
             return None
+
+    async def notify_limit_up_skip(
+        self,
+        sector_name: str,
+        limit_up_stocks: list[tuple[str, str]],  # [(code, name), ...]
+        # [(code, name, price, change_pct), ...]
+        available_stocks: list[tuple[str, str, float, float | None]],
+        reason: str,
+    ) -> None:
+        """
+        Notify user that some stocks were skipped because they opened at limit-up.
+
+        This is an informational notification during morning auction execution.
+        It lets users know which stocks from their premarket selections were
+        not bought due to opening at limit-up prices.
+
+        Args:
+            sector_name: Name of the sector/board.
+            limit_up_stocks: List of (code, name) tuples for stocks at limit-up.
+            available_stocks: List of (code, name, price, change_pct) tuples still buyable.
+            reason: Original reason for the trade signal.
+        """
+        print(f"\n{'=' * 60}")
+        print(f"⚠️  开盘涨停提醒: {sector_name}")
+        print(f"{'=' * 60}")
+
+        # Show why we were trying to buy
+        print(f"\n📰 原因: {reason[:60]}...")
+
+        # Show limit-up stocks that were skipped
+        print("\n🔒 以下股票开盘涨停，已跳过买入:")
+        for code, name in limit_up_stocks:
+            print(f"    ❌ {code} {name} [开盘涨停]")
+
+        # Show what we're buying instead (if any)
+        if available_stocks:
+            print("\n✅ 改为买入:")
+            for code, name, price, change_pct in available_stocks[:3]:
+                change_str = self._format_change_pct(change_pct)
+                print(f"    ✓ {code} {name} ¥{price:.2f} {change_str}")
+        else:
+            print("\n❌ 该板块所有候选股票均涨停，放弃买入")
+
+        print(f"{'=' * 60}\n")
+
+        # Brief pause to let user see the notification
+        await asyncio.sleep(0.5)
 
     @property
     def config(self) -> InteractionConfig:
