@@ -234,7 +234,7 @@ class IFinDLimitUpSource:
         Returns:
             List of LimitUpStock objects
         """
-        stocks = []
+        stocks: list[LimitUpStock] = []
 
         # THS_iwencai returns data as:
         # {'tables': [{'table': {'股票代码': [...], '股票简称': [...], ...}}]}

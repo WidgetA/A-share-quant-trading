@@ -2,9 +2,6 @@
 # Tests for IFinDLimitUpSource.
 # Verifies connectivity, data format, database operations, and error handling.
 
-from datetime import datetime
-from unittest.mock import MagicMock
-
 import pytest
 
 from src.data.database.limit_up_db import LimitUpDatabase, LimitUpDatabaseConfig
