@@ -446,7 +446,17 @@ def create_simulation_router() -> APIRouter:
                 detail="No simulation is running. Start one first.",
             )
 
-        new_phase = await manager.advance_to_next_phase()
+        try:
+            new_phase = await manager.advance_to_next_phase()
+        except Exception as e:
+            import traceback
+
+            logger.error(f"Error advancing simulation: {e}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(
+                status_code=500,
+                detail=f"推进模拟时出错: {str(e)}",
+            )
 
         return {
             "success": True,
