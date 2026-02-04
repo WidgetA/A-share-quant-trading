@@ -460,6 +460,9 @@ def create_message_reader_from_config() -> MessageReader:
     Raises:
         ValueError: If configuration is missing.
     """
+    import os
+    from typing import Any
+
     from src.common.config import load_config
 
     config = load_config("config/database-config.yaml")
@@ -468,20 +471,23 @@ def create_message_reader_from_config() -> MessageReader:
     if not db_config:
         raise ValueError("Database configuration not found in config/database-config.yaml")
 
-    # Support environment variable substitution for password
-    import os
-
-    password = db_config.get("password", "")
-    if password.startswith("${") and password.endswith("}"):
-        env_var = password[2:-1]
-        password = os.environ.get(env_var, "")
+    # Support environment variable substitution: ${VAR:default} or ${VAR}
+    def resolve_env(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("${"):
+            inner = value[2:-1]
+            if ":" in inner:
+                var_name, default = inner.split(":", 1)
+            else:
+                var_name, default = inner, ""
+            return os.environ.get(var_name, default)
+        return value
 
     reader_config = MessageReaderConfig(
-        host=db_config.get("host", "localhost"),
-        port=db_config.get("port", 5432),
-        database=db_config.get("database", "messages"),
-        user=db_config.get("user", "reader"),
-        password=password,
+        host=resolve_env(db_config.get("host", "localhost")),
+        port=int(resolve_env(db_config.get("port", 5432))),
+        database=resolve_env(db_config.get("database", "messages")),
+        user=resolve_env(db_config.get("user", "reader")),
+        password=resolve_env(db_config.get("password", "")),
         pool_min_size=db_config.get("pool_min_size", 2),
         pool_max_size=db_config.get("pool_max_size", 10),
         table_name=db_config.get("table_name", "messages"),
