@@ -24,16 +24,16 @@
                         <option value="5">5 days</option>
                     </select>
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="capital-group">
                     <label for="initial_capital">Initial Capital</label>
                     <input type="number" id="initial_capital" name="initial_capital" value="10000000" step="100000">
                 </div>
                 <div class="form-group checkbox-group">
                     <label class="checkbox-label">
-                        <input type="checkbox" id="load_holdings" name="load_holdings">
+                        <input type="checkbox" id="load_holdings" name="load_holdings" onchange="toggleCapitalInput()">
                         <span>Load existing positions from database</span>
                     </label>
-                    <p class="form-hint">Start simulation with current holdings instead of empty portfolio</p>
+                    <p class="form-hint">Initial capital will be set to the loaded positions value</p>
                 </div>
                 <button type="submit" class="btn btn-primary btn-lg">Start Simulation</button>
             </form>
@@ -453,6 +453,15 @@ async function resetSimulation() {
     await cancelSimulation();
 }
 
+// Toggle capital input visibility based on load holdings checkbox
+function toggleCapitalInput() {
+    const loadHoldings = document.getElementById('load_holdings').checked;
+    const capitalGroup = document.getElementById('capital-group');
+    if (capitalGroup) {
+        capitalGroup.style.display = loadHoldings ? 'none' : 'block';
+    }
+}
+
 // Set default date to yesterday
 document.addEventListener('DOMContentLoaded', () => {
     const dateInput = document.getElementById('start_date');
@@ -461,6 +470,8 @@ document.addEventListener('DOMContentLoaded', () => {
         yesterday.setDate(yesterday.getDate() - 3);  // Default to 3 days ago
         dateInput.value = yesterday.toISOString().split('T')[0];
     }
+    // Initialize capital input visibility
+    toggleCapitalInput();
 });
 </script>
 {% endblock %}

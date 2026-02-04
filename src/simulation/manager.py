@@ -374,10 +374,14 @@ class SimulationManager:
                 return
 
             # Load into simulation position manager
-            filled_count = self._position_manager.load_holdings(slots_data, holdings_data)
+            filled_count, holdings_value = self._position_manager.load_holdings(
+                slots_data, holdings_data
+            )
 
             if filled_count > 0:
-                self._add_message(f"Loaded {filled_count} existing position(s) from database")
+                self._add_message(
+                    f"Loaded {filled_count} position(s), total value: {holdings_value:,.0f}"
+                )
 
                 # Log details of loaded positions
                 for slot in self._position_manager._slots:

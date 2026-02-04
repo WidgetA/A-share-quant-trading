@@ -484,12 +484,13 @@ class SimulationPositionManager:
         self,
         slots_data: list[dict],
         holdings_data: dict[int, list[dict]],
-    ) -> int:
+    ) -> tuple[int, float]:
         """
         Load existing holdings into simulation slots.
 
         This is used to initialize simulation with historical positions
-        loaded from the database.
+        loaded from the database. When loading holdings, the initial capital
+        is automatically calculated based on the loaded positions.
 
         Args:
             slots_data: List of slot dicts from database with keys:
@@ -498,9 +499,10 @@ class SimulationPositionManager:
                 - stock_code, stock_name, quantity, entry_price
 
         Returns:
-            Number of filled slots loaded.
+            Tuple of (filled_count, total_holdings_value)
         """
         filled_count = 0
+        total_holdings_value = 0.0
 
         for slot_dict in slots_data:
             slot_id = slot_dict["slot_id"]
@@ -524,7 +526,7 @@ class SimulationPositionManager:
 
             # Load holdings into slot
             holdings = []
-            total_value = 0.0
+            slot_value = 0.0
             entry_time = slot_dict.get("entry_time") or datetime.now()
             for h in slot_holdings:
                 entry_price = float(h["entry_price"]) if h.get("entry_price") else 0.0
@@ -539,7 +541,7 @@ class SimulationPositionManager:
                     entry_reason=slot_dict.get("entry_reason", ""),
                 )
                 holdings.append(holding)
-                total_value += entry_price * quantity
+                slot_value += entry_price * quantity
 
             # Update slot state
             slot.state = SlotState.FILLED
@@ -547,15 +549,23 @@ class SimulationPositionManager:
             slot.entry_reason = slot_dict.get("entry_reason", "")
             slot.sector_name = slot_dict.get("sector_name")
 
-            # Deduct from available cash
-            self._available_cash -= total_value
-
+            total_holdings_value += slot_value
             filled_count += 1
-            logger.info(
-                f"Loaded slot {slot_id}: {len(holdings)} holdings, value={total_value:,.0f}"
-            )
+            logger.info(f"Loaded slot {slot_id}: {len(holdings)} holdings, value={slot_value:,.0f}")
 
-        return filled_count
+        # When loading holdings, set initial capital = holdings value
+        # This means available_cash = 0 (all capital is in positions)
+        if filled_count > 0:
+            self._config = SimulationConfig(
+                total_capital=total_holdings_value,
+                num_slots=self._config.num_slots,
+                premarket_slots=self._config.premarket_slots,
+                intraday_slots=self._config.intraday_slots,
+            )
+            self._available_cash = 0.0
+            logger.info(f"Set initial capital to holdings value: {total_holdings_value:,.0f}")
+
+        return filled_count, total_holdings_value
 
     # No-op methods for compatibility with real PositionManager
     async def save_to_db(self) -> None:
