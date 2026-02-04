@@ -1,0 +1,452 @@
+{% extends "base.html" %}
+
+{% block title %}Historical Simulation{% endblock %}
+
+{% block content %}
+<div class="simulation-page">
+    <h2>Historical Simulation</h2>
+
+    <!-- Start Form (shown when not running) -->
+    <section id="start-section" class="sim-section {% if state.phase != 'not_started' %}hidden{% endif %}">
+        <div class="sim-card">
+            <h3>Start New Simulation</h3>
+            <form id="start-form" class="sim-form">
+                <div class="form-group">
+                    <label for="start_date">Start Date</label>
+                    <input type="date" id="start_date" name="start_date" required>
+                </div>
+                <div class="form-group">
+                    <label for="num_days">Number of Days</label>
+                    <select id="num_days" name="num_days">
+                        <option value="1">1 day</option>
+                        <option value="2" selected>2 days</option>
+                        <option value="3">3 days</option>
+                        <option value="5">5 days</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="initial_capital">Initial Capital</label>
+                    <input type="number" id="initial_capital" name="initial_capital" value="10000000" step="100000">
+                </div>
+                <button type="submit" class="btn btn-primary btn-lg">Start Simulation</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- Simulation State (shown when running) -->
+    <section id="state-section" class="sim-section {% if state.phase == 'not_started' %}hidden{% endif %}">
+        <!-- Phase Header -->
+        <div class="phase-header">
+            <div class="phase-info">
+                <span class="phase-badge {{ state.phase }}">{{ state.phase | replace('_', ' ') | title }}</span>
+                <span class="sim-time">{{ state.sim_time[:16] if state.sim_time else '' }}</span>
+                <span class="day-counter">Day {{ state.day_number }}/{{ state.total_days }}</span>
+            </div>
+            <button class="btn btn-danger btn-sm" onclick="cancelSimulation()">Cancel</button>
+        </div>
+
+        <!-- Messages Log -->
+        <div class="messages-log">
+            {% for msg in state.messages %}
+            <div class="log-msg">{{ msg }}</div>
+            {% endfor %}
+        </div>
+
+        <!-- Premarket: Signal Selection -->
+        {% if state.phase == 'premarket_analysis' and state.pending_signals %}
+        <div class="sim-card">
+            <h3>Select Signals to Buy</h3>
+            <form id="select-form" class="signals-form">
+                {% for signal in state.pending_signals %}
+                <div class="signal-item">
+                    <label class="signal-checkbox">
+                        <input type="checkbox" name="signals" value="{{ signal.index }}">
+                        <div class="signal-content">
+                            <div class="signal-header">
+                                <span class="signal-index">#{{ signal.index }}</span>
+                                <span class="signal-sentiment {{ signal.sentiment }}">{{ signal.sentiment }}</span>
+                                <span class="signal-confidence">{{ "%.0f"|format(signal.confidence * 100) }}%</span>
+                            </div>
+                            <div class="signal-title">{{ signal.title }}</div>
+                            <div class="signal-stocks">
+                                {% for stock in signal.target_stocks[:5] %}
+                                <span class="stock-tag">{{ stock }}</span>
+                                {% endfor %}
+                                {% if signal.target_stocks|length > 5 %}
+                                <span class="stock-tag more">+{{ signal.target_stocks|length - 5 }}</span>
+                                {% endif %}
+                            </div>
+                            <div class="signal-reasoning">{{ signal.reasoning[:150] }}{% if signal.reasoning|length > 150 %}...{% endif %}</div>
+                        </div>
+                    </label>
+                </div>
+                {% endfor %}
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Confirm Selection</button>
+                    <button type="button" class="btn btn-secondary" onclick="skipSelection()">Skip All</button>
+                </div>
+            </form>
+        </div>
+        {% elif state.phase == 'premarket_analysis' %}
+        <div class="sim-card">
+            <p>Generating signals...</p>
+            <button class="btn btn-primary" onclick="advancePhase()">Generate Signals</button>
+        </div>
+        {% endif %}
+
+        <!-- Morning Confirmation: Sell Decision -->
+        {% if state.phase == 'morning_confirmation' and state.pending_holdings %}
+        <div class="sim-card">
+            <h3>Morning Confirmation - Sell or Hold?</h3>
+            <form id="sell-form" class="holdings-form">
+                {% for holding in state.pending_holdings %}
+                <div class="holding-item">
+                    <label class="holding-checkbox">
+                        <input type="checkbox" name="slots" value="{{ holding.slot_id }}">
+                        <div class="holding-content">
+                            <div class="holding-header">
+                                <span class="stock-code">{{ holding.stock_code }}</span>
+                                <span class="stock-name">{{ holding.stock_name }}</span>
+                            </div>
+                            <div class="holding-details">
+                                <span>Qty: {{ holding.quantity }}</span>
+                                <span>Entry: {{ "%.2f"|format(holding.entry_price) }}</span>
+                                {% if holding.current_price %}
+                                <span>Current: {{ "%.2f"|format(holding.current_price) }}</span>
+                                {% endif %}
+                                {% if holding.pnl_percent is not none %}
+                                <span class="pnl {{ 'positive' if holding.pnl_percent > 0 else 'negative' }}">
+                                    {{ "%+.2f"|format(holding.pnl_percent) }}%
+                                </span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </label>
+                </div>
+                {% endfor %}
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-danger">Sell Selected</button>
+                    <button type="button" class="btn btn-success" onclick="holdAll()">Hold All</button>
+                </div>
+            </form>
+        </div>
+        {% endif %}
+
+        <!-- Other phases: Advance button -->
+        {% if state.phase in ['morning_auction', 'trading_hours', 'market_close'] %}
+        <div class="sim-card">
+            <h3>
+                {% if state.phase == 'morning_auction' %}
+                Morning Auction - Executing Buy Orders
+                {% elif state.phase == 'trading_hours' %}
+                Trading Hours
+                {% elif state.phase == 'market_close' %}
+                Market Closed
+                {% endif %}
+            </h3>
+            <button class="btn btn-primary btn-lg" onclick="advancePhase()">
+                {% if state.phase == 'morning_auction' %}
+                Execute & Continue
+                {% elif state.phase == 'trading_hours' %}
+                Fast Forward to Close
+                {% elif state.phase == 'market_close' %}
+                {% if state.day_number < state.total_days %}
+                Next Trading Day
+                {% else %}
+                View Results
+                {% endif %}
+                {% endif %}
+            </button>
+        </div>
+        {% endif %}
+
+        <!-- Current Holdings -->
+        {% if state.holdings %}
+        <div class="sim-card">
+            <h3>Current Holdings</h3>
+            <div class="holdings-table">
+                {% for h in state.holdings %}
+                <div class="holding-row">
+                    <span class="stock-code">{{ h.stock_code }}</span>
+                    <span class="quantity">{{ h.quantity }} shares</span>
+                    <span class="entry-price">@ {{ "%.2f"|format(h.entry_price) }}</span>
+                    {% if h.current_price %}
+                    <span class="current-price">{{ "%.2f"|format(h.current_price) }}</span>
+                    {% endif %}
+                    {% if h.pnl_percent is not none %}
+                    <span class="pnl {{ 'positive' if h.pnl_percent > 0 else 'negative' }}">
+                        {{ "%+.2f"|format(h.pnl_percent) }}%
+                    </span>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Completed: Show Results -->
+        {% if state.phase == 'completed' %}
+        <div class="sim-card results-card">
+            <h3>Simulation Complete!</h3>
+            <button class="btn btn-primary btn-lg" onclick="showResults()">View Final Results</button>
+        </div>
+        {% endif %}
+
+        <!-- Capital Info -->
+        <div class="capital-info">
+            <span>Initial: {{ "{:,.0f}".format(state.initial_capital) }}</span>
+            <span>Available: {{ "{:,.0f}".format(state.available_cash) }}</span>
+        </div>
+    </section>
+
+    <!-- Results Modal -->
+    <div id="results-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Simulation Results</h3>
+                <button class="modal-close" onclick="closeResults()">&times;</button>
+            </div>
+            <div class="modal-body" id="results-content">
+                Loading...
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="resetSimulation()">Start New Simulation</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const startForm = document.getElementById('start-form');
+const selectForm = document.getElementById('select-form');
+const sellForm = document.getElementById('sell-form');
+
+// Start simulation
+if (startForm) {
+    startForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(startForm);
+        const data = {
+            start_date: formData.get('start_date'),
+            num_days: parseInt(formData.get('num_days')),
+            initial_capital: parseFloat(formData.get('initial_capital'))
+        };
+
+        try {
+            const response = await fetch('/api/simulation/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            const result = await response.json();
+            if (response.ok && result.success) {
+                window.location.reload();
+            } else {
+                alert('Error: ' + (result.detail || result.message || 'Unknown error'));
+            }
+        } catch (error) {
+            alert('Network error: ' + error.message);
+        }
+    });
+}
+
+// Select signals
+if (selectForm) {
+    selectForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const checkboxes = selectForm.querySelectorAll('input[name="signals"]:checked');
+        const selected = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+        if (selected.length === 0) {
+            if (!confirm('No signals selected. Skip to next phase?')) {
+                return;
+            }
+        }
+
+        try {
+            const response = await fetch('/api/simulation/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ selected_indices: selected })
+            });
+            const result = await response.json();
+            if (response.ok) {
+                window.location.reload();
+            } else {
+                alert('Error: ' + (result.detail || 'Unknown error'));
+            }
+        } catch (error) {
+            alert('Network error: ' + error.message);
+        }
+    });
+}
+
+// Skip selection
+async function skipSelection() {
+    try {
+        const response = await fetch('/api/simulation/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selected_indices: [] })
+        });
+        if (response.ok) {
+            window.location.reload();
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
+// Sell decision
+if (sellForm) {
+    sellForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const checkboxes = sellForm.querySelectorAll('input[name="slots"]:checked');
+        const slots = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+        try {
+            const response = await fetch('/api/simulation/sell', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ slots_to_sell: slots })
+            });
+            if (response.ok) {
+                await advancePhase();
+            } else {
+                const result = await response.json();
+                alert('Error: ' + (result.detail || 'Unknown error'));
+            }
+        } catch (error) {
+            alert('Network error: ' + error.message);
+        }
+    });
+}
+
+// Hold all
+async function holdAll() {
+    try {
+        const response = await fetch('/api/simulation/sell', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slots_to_sell: [] })
+        });
+        if (response.ok) {
+            await advancePhase();
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
+// Advance phase
+async function advancePhase() {
+    try {
+        const response = await fetch('/api/simulation/advance', {
+            method: 'POST'
+        });
+        if (response.ok) {
+            window.location.reload();
+        } else {
+            const result = await response.json();
+            alert('Error: ' + (result.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Network error: ' + error.message);
+    }
+}
+
+// Cancel simulation
+async function cancelSimulation() {
+    if (!confirm('Are you sure you want to cancel the simulation?')) {
+        return;
+    }
+    try {
+        const response = await fetch('/api/simulation', {
+            method: 'DELETE'
+        });
+        if (response.ok) {
+            window.location.reload();
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
+// Show results
+async function showResults() {
+    const modal = document.getElementById('results-modal');
+    const content = document.getElementById('results-content');
+    modal.classList.remove('hidden');
+
+    try {
+        const response = await fetch('/api/simulation/result');
+        const result = await response.json();
+
+        if (response.ok) {
+            const pnlClass = result.total_pnl >= 0 ? 'positive' : 'negative';
+            content.innerHTML = `
+                <div class="results-summary">
+                    <div class="result-item">
+                        <span class="label">Period</span>
+                        <span class="value">${result.start_date} ~ ${result.end_date}</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Initial Capital</span>
+                        <span class="value">${result.initial_capital.toLocaleString()}</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Final Capital</span>
+                        <span class="value">${result.final_capital.toLocaleString()}</span>
+                    </div>
+                    <div class="result-item highlight">
+                        <span class="label">Total P&L</span>
+                        <span class="value ${pnlClass}">
+                            ${result.total_pnl >= 0 ? '+' : ''}${result.total_pnl.toLocaleString()}
+                            (${result.pnl_percent >= 0 ? '+' : ''}${result.pnl_percent.toFixed(2)}%)
+                        </span>
+                    </div>
+                </div>
+                <div class="results-transactions">
+                    <h4>Transactions (${result.transactions.length})</h4>
+                    ${result.transactions.map(t => `
+                        <div class="transaction-row ${t.action.toLowerCase()}">
+                            <span class="action">${t.action}</span>
+                            <span class="stock">${t.stock_code}</span>
+                            <span class="qty">${t.quantity}</span>
+                            <span class="price">@ ${t.price.toFixed(2)}</span>
+                            <span class="time">${t.timestamp.substring(0, 16)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        } else {
+            content.innerHTML = `<p class="error">${result.detail || 'Failed to load results'}</p>`;
+        }
+    } catch (error) {
+        content.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+    }
+}
+
+// Close results
+function closeResults() {
+    document.getElementById('results-modal').classList.add('hidden');
+}
+
+// Reset simulation
+async function resetSimulation() {
+    await cancelSimulation();
+}
+
+// Set default date to yesterday
+document.addEventListener('DOMContentLoaded', () => {
+    const dateInput = document.getElementById('start_date');
+    if (dateInput && !dateInput.value) {
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 3);  // Default to 3 days ago
+        dateInput.value = yesterday.toISOString().split('T')[0];
+    }
+});
+</script>
+{% endblock %}

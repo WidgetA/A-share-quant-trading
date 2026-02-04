@@ -16,6 +16,9 @@ header {
     background: #1a1a2e;
     color: white;
     padding: 1rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 header h1 {
@@ -25,6 +28,21 @@ header h1 {
 header a {
     color: white;
     text-decoration: none;
+}
+
+header nav {
+    display: flex;
+    gap: 1.5rem;
+}
+
+header nav .nav-link {
+    color: rgba(255,255,255,0.8);
+    font-size: 0.95rem;
+    transition: color 0.2s;
+}
+
+header nav .nav-link:hover {
+    color: white;
 }
 
 main {
@@ -619,4 +637,452 @@ footer {
         width: 100%;
         text-align: center;
     }
+}
+
+/* ==================== Simulation Page ==================== */
+
+.simulation-page h2 {
+    margin-bottom: 1.5rem;
+}
+
+.sim-section.hidden {
+    display: none;
+}
+
+.sim-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.sim-card h3 {
+    margin-bottom: 1rem;
+    font-size: 1.1rem;
+}
+
+/* Start Form */
+.sim-form {
+    max-width: 400px;
+}
+
+.sim-form .form-group {
+    margin-bottom: 1rem;
+}
+
+.sim-form label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
+.sim-form input,
+.sim-form select {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 1rem;
+}
+
+.btn-lg {
+    padding: 1rem 2rem;
+    font-size: 1.1rem;
+}
+
+.btn-sm {
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+}
+
+/* Phase Header */
+.phase-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: white;
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 1rem;
+}
+
+.phase-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.phase-badge {
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    background: #e3f2fd;
+    color: #1565c0;
+}
+
+.phase-badge.premarket_analysis { background: #fff3e0; color: #e65100; }
+.phase-badge.morning_auction { background: #e8f5e9; color: #2e7d32; }
+.phase-badge.trading_hours { background: #e3f2fd; color: #1565c0; }
+.phase-badge.market_close { background: #fce4ec; color: #c2185b; }
+.phase-badge.morning_confirmation { background: #f3e5f5; color: #7b1fa2; }
+.phase-badge.completed { background: #e0f2f1; color: #00695c; }
+
+.sim-time {
+    font-family: monospace;
+    color: #666;
+}
+
+.day-counter {
+    font-size: 0.875rem;
+    color: #888;
+}
+
+/* Messages Log */
+.messages-log {
+    background: #f5f5f5;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    max-height: 150px;
+    overflow-y: auto;
+    font-size: 0.875rem;
+}
+
+.log-msg {
+    padding: 0.25rem 0;
+    font-family: monospace;
+    color: #666;
+}
+
+/* Signal Selection */
+.signals-form .signal-item {
+    border: 2px solid #eee;
+    border-radius: 8px;
+    margin-bottom: 0.75rem;
+    transition: border-color 0.2s;
+}
+
+.signals-form .signal-item:has(input:checked) {
+    border-color: #4CAF50;
+    background: #f0fff0;
+}
+
+.signal-checkbox {
+    display: flex;
+    padding: 1rem;
+    cursor: pointer;
+}
+
+.signal-checkbox input {
+    margin-right: 1rem;
+    width: 20px;
+    height: 20px;
+}
+
+.signal-content {
+    flex: 1;
+}
+
+.signal-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.signal-index {
+    font-weight: 600;
+    color: #666;
+}
+
+.signal-sentiment {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.signal-sentiment.strong_bullish { background: #c8e6c9; color: #1b5e20; }
+.signal-sentiment.bullish { background: #dcedc8; color: #33691e; }
+
+.signal-confidence {
+    font-size: 0.875rem;
+    color: #888;
+}
+
+.signal-title {
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+}
+
+.signal-stocks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.stock-tag {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    background: #e3f2fd;
+    color: #1565c0;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.stock-tag.more {
+    background: #f5f5f5;
+    color: #666;
+}
+
+.signal-reasoning {
+    font-size: 0.8rem;
+    color: #888;
+    font-style: italic;
+}
+
+/* Holdings Form */
+.holdings-form .holding-item {
+    border: 2px solid #eee;
+    border-radius: 8px;
+    margin-bottom: 0.75rem;
+}
+
+.holdings-form .holding-item:has(input:checked) {
+    border-color: #f44336;
+    background: #ffebee;
+}
+
+.holding-checkbox {
+    display: flex;
+    padding: 1rem;
+    cursor: pointer;
+}
+
+.holding-checkbox input {
+    margin-right: 1rem;
+    width: 20px;
+    height: 20px;
+}
+
+.holding-content {
+    flex: 1;
+}
+
+.holding-content .holding-header {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.holding-content .stock-code {
+    font-family: monospace;
+    font-weight: 600;
+}
+
+.holding-content .stock-name {
+    color: #666;
+}
+
+.holding-content .holding-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    font-size: 0.875rem;
+    color: #666;
+}
+
+/* Form Actions */
+.form-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #eee;
+}
+
+/* Holdings Table */
+.holdings-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.holdings-table .holding-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+}
+
+.holdings-table .stock-code {
+    font-family: monospace;
+    font-weight: 600;
+    min-width: 90px;
+}
+
+.holdings-table .quantity {
+    color: #666;
+    font-size: 0.875rem;
+}
+
+.holdings-table .entry-price,
+.holdings-table .current-price {
+    font-family: monospace;
+    font-size: 0.875rem;
+}
+
+.holdings-table .pnl {
+    font-weight: 600;
+    margin-left: auto;
+}
+
+.holdings-table .pnl.positive { color: #4CAF50; }
+.holdings-table .pnl.negative { color: #f44336; }
+
+/* Capital Info */
+.capital-info {
+    display: flex;
+    gap: 2rem;
+    padding: 0.75rem 1rem;
+    background: #f5f5f5;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    color: #666;
+}
+
+/* Results Modal */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal.hidden {
+    display: none;
+}
+
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #eee;
+}
+
+.modal-header h3 {
+    margin: 0;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #666;
+}
+
+.modal-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+}
+
+.modal-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid #eee;
+    text-align: right;
+}
+
+/* Results Summary */
+.results-summary {
+    margin-bottom: 1.5rem;
+}
+
+.result-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.result-item .label {
+    color: #666;
+}
+
+.result-item .value {
+    font-weight: 500;
+}
+
+.result-item.highlight {
+    font-size: 1.1rem;
+}
+
+.result-item .value.positive { color: #4CAF50; }
+.result-item .value.negative { color: #f44336; }
+
+/* Results Transactions */
+.results-transactions h4 {
+    margin-bottom: 0.75rem;
+    font-size: 0.95rem;
+    color: #666;
+}
+
+.transaction-row {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.5rem;
+    font-size: 0.875rem;
+    border-bottom: 1px solid #f5f5f5;
+}
+
+.transaction-row .action {
+    font-weight: 600;
+    width: 40px;
+}
+
+.transaction-row.buy .action { color: #f44336; }
+.transaction-row.sell .action { color: #4CAF50; }
+
+.transaction-row .stock {
+    font-family: monospace;
+    min-width: 90px;
+}
+
+.transaction-row .qty {
+    color: #666;
+}
+
+.transaction-row .price {
+    font-family: monospace;
+}
+
+.transaction-row .time {
+    margin-left: auto;
+    color: #888;
+    font-size: 0.8rem;
 }

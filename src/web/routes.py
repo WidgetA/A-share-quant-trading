@@ -132,6 +132,23 @@ def create_router() -> APIRouter:
             },
         )
 
+    @router.get("/simulation", response_class=HTMLResponse)
+    async def simulation_page(request: Request):
+        """Historical simulation page."""
+        from src.simulation import get_simulation_manager
+
+        templates = request.app.state.templates
+        manager = get_simulation_manager()
+        state = manager.get_state()
+
+        return templates.TemplateResponse(
+            "simulation.html",
+            {
+                "request": request,
+                "state": state.to_dict(),
+            },
+        )
+
     # ==================== API Endpoints ====================
 
     @router.get("/api/status")
