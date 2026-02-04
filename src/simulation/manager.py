@@ -544,6 +544,15 @@ class SimulationManager:
 
             processed += 1
 
+        # After buying from messages, clear pending signals and advance phase
+        if processed > 0:
+            self._pending_signals = []
+            if self._phase == SimulationPhase.PREMARKET_ANALYSIS:
+                # Skip to trading hours since buys are already executed
+                self._phase = SimulationPhase.TRADING_HOURS
+                self._clock.advance_to_time(time(9, 30))
+                self._add_message("已完成买入，进入交易时段")
+
         return {"processed": processed}
 
     def get_result(self) -> SimulationResult | None:
