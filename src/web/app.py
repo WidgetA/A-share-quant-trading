@@ -4,10 +4,15 @@
 
 # === DEPENDENCIES ===
 # - pending_store: For accessing pending confirmations
+# - strategy_controller: For strategy start/stop control
+# - position_manager: For displaying current positions
 # - jinja2: For HTML template rendering
+
+from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +20,10 @@ from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.web.routes import create_router
+
+if TYPE_CHECKING:
+    from src.common.strategy_controller import StrategyController
+    from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +36,8 @@ STATIC_DIR = WEB_DIR / "static"
 def create_app(
     store: PendingConfirmationStore | None = None,
     web_base_url: str = "http://localhost:8000",
+    strategy_controller: StrategyController | None = None,
+    position_manager: PositionManager | None = None,
 ) -> FastAPI:
     """
     Create FastAPI application.
@@ -34,6 +45,8 @@ def create_app(
     Args:
         store: Pending confirmation store. Uses global singleton if not provided.
         web_base_url: Base URL for generating links in notifications.
+        strategy_controller: Controller for strategy start/stop.
+        position_manager: Manager for position data.
 
     Returns:
         Configured FastAPI app.
@@ -51,6 +64,8 @@ def create_app(
     # Store reference for routes
     app.state.pending_store = store
     app.state.web_base_url = web_base_url
+    app.state.strategy_controller = strategy_controller
+    app.state.position_manager = position_manager
 
     # Set up templates
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))

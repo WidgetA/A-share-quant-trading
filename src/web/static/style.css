@@ -82,6 +82,187 @@ footer {
 
 /* Dashboard */
 .dashboard h2 {
+    margin-bottom: 1rem;
+}
+
+.dashboard section {
+    margin-bottom: 2rem;
+}
+
+/* Strategy Control */
+.strategy-section {
+    margin-bottom: 1.5rem;
+}
+
+.strategy-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 1rem 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.strategy-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.status-indicator {
+    font-size: 1rem;
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+}
+
+.status-indicator.running {
+    background: #c8e6c9;
+    color: #2e7d32;
+}
+
+.status-indicator.stopped {
+    background: #ffcdd2;
+    color: #c62828;
+}
+
+.status-time {
+    font-size: 0.875rem;
+    color: #666;
+}
+
+/* Positions Section */
+.positions-section {
+    margin-bottom: 1.5rem;
+}
+
+.positions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.position-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+.position-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: #f8f9fa;
+    border-bottom: 1px solid #eee;
+}
+
+.slot-badge {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    background: #1a1a2e;
+    color: white;
+}
+
+.slot-badge.premarket {
+    background: #2196F3;
+}
+
+.slot-badge.intraday {
+    background: #FF9800;
+}
+
+.entry-time {
+    font-size: 0.75rem;
+    color: #888;
+}
+
+.position-body {
+    padding: 0.75rem 1rem;
+}
+
+.holding-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.holding-row:last-child {
+    border-bottom: none;
+}
+
+.holding-main {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.holding-main .stock-code {
+    font-family: monospace;
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+.holding-main .stock-name {
+    color: #666;
+    font-size: 0.875rem;
+}
+
+.holding-details {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    font-size: 0.875rem;
+    color: #666;
+}
+
+.holding-details .quantity {
+    color: #333;
+}
+
+.holding-details .entry-price {
+    font-family: monospace;
+}
+
+.position-footer {
+    padding: 0.5rem 1rem;
+    background: #fafafa;
+    border-top: 1px solid #eee;
+}
+
+.entry-reason {
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.positions-summary {
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    display: flex;
+    gap: 2rem;
+    font-size: 0.875rem;
+    color: #666;
+}
+
+/* Small empty state */
+.empty-state.small {
+    padding: 1.5rem;
+}
+
+.empty-state.small p {
+    margin: 0;
+}
+
+/* Confirmations Section */
+.confirmations-section {
     margin-bottom: 1.5rem;
 }
 

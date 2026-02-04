@@ -36,9 +36,11 @@ from src.common.feishu_bot import FeishuBot
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.common.scheduler import MarketSession, TradingScheduler
 from src.common.state_manager import StateManager, SystemState, create_state_manager_from_config
+from src.common.strategy_controller import StrategyController, StrategyState
 from src.data.readers.message_reader import MessageReader, MessageReaderConfig
 from src.strategy.base import StrategyContext
 from src.strategy.engine import StrategyEngine
+from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +130,10 @@ class SystemManager:
 
         # Modules
         self.strategy_engine: StrategyEngine | None = None
+        self.position_manager: PositionManager | None = None
+
+        # Strategy controller (for Web UI start/stop)
+        self.strategy_controller = StrategyController(initial_state=StrategyState.STOPPED)
 
         # Feishu alert bot
         self.feishu_bot: FeishuBot = FeishuBot()
@@ -243,7 +249,12 @@ class SystemManager:
         port = self._web_config.get("port", 8000)
         base_url = self._web_config.get("base_url", f"http://localhost:{port}")
 
-        app = create_app(store=self.pending_store, web_base_url=base_url)
+        app = create_app(
+            store=self.pending_store,
+            web_base_url=base_url,
+            strategy_controller=self.strategy_controller,
+            position_manager=self.position_manager,
+        )
 
         config = uvicorn.Config(
             app=app,
@@ -320,6 +331,23 @@ class SystemManager:
             hot_reload=hot_reload,
             config=strategy_configs,
         )
+
+        # Initialize PositionManager with same config parameters
+        from src.trading.position_manager import PositionConfig
+
+        news_cfg = strategy_configs.get("news_analysis")
+        if news_cfg:
+            params = news_cfg.parameters
+            position_config = PositionConfig(
+                total_capital=params.get("total_capital", 10_000_000),
+                premarket_slots=params.get("premarket_slots", 3),
+                intraday_slots=params.get("intraday_slots", 2),
+            )
+            self.position_manager = PositionManager(position_config)
+            logger.info(
+                f"PositionManager initialized: total_capital={position_config.total_capital}, "
+                f"slots={position_config.num_slots}"
+            )
 
         # Add callback to publish events
         def on_strategy_change(name: str, event: str) -> None:
@@ -556,6 +584,8 @@ class SystemManager:
 
         Creates StrategyContext with MessageReader access and passes
         it to the strategy engine for signal generation.
+
+        Note: Only runs when strategy_controller.is_running is True.
         """
         interval = self.config.get_int("strategy.loop_interval", 60)
 
@@ -565,6 +595,10 @@ class SystemManager:
 
                 if not self._running:
                     break
+
+                # Check if strategy is enabled via controller
+                if not self.strategy_controller.is_running:
+                    continue
 
                 if not self.strategy_engine:
                     continue

@@ -8,15 +8,25 @@
 # GET  /api/pending/{id}     - Get confirmation details (JSON)
 # POST /api/pending/{id}/submit - Submit user decision (JSON)
 # GET  /api/status           - Health check (JSON)
+# GET  /api/strategy/state   - Get strategy state (JSON)
+# POST /api/strategy/start   - Start strategy (JSON)
+# POST /api/strategy/stop    - Stop strategy (JSON)
+# GET  /api/positions        - Get current positions (JSON)
+
+from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from src.common.pending_store import PendingConfirmationStore
+
+if TYPE_CHECKING:
+    from src.common.strategy_controller import StrategyController
+    from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +52,36 @@ def create_router() -> APIRouter:
         """Get pending store from app state."""
         return request.app.state.pending_store
 
+    def get_strategy_controller(request: Request) -> StrategyController | None:
+        """Get strategy controller from app state."""
+        return getattr(request.app.state, "strategy_controller", None)
+
+    def get_position_manager(request: Request) -> PositionManager | None:
+        """Get position manager from app state."""
+        return getattr(request.app.state, "position_manager", None)
+
     # ==================== HTML Pages ====================
 
     @router.get("/", response_class=HTMLResponse)
     async def index_page(request: Request):
-        """Main dashboard showing all pending confirmations."""
+        """Main dashboard showing strategy status, positions, and pending confirmations."""
         store = get_store(request)
         pending = store.get_pending_list()
         templates = request.app.state.templates
+
+        # Get strategy state
+        controller = get_strategy_controller(request)
+        strategy_state = controller.to_dict() if controller else {"state": "unknown", "is_running": False}
+
+        # Get positions
+        manager = get_position_manager(request)
+        if manager:
+            positions = {
+                "slots": manager.get_state().get("slots", []),
+                "summary": manager.get_summary(),
+            }
+        else:
+            positions = {"slots": [], "summary": {}}
 
         return templates.TemplateResponse(
             "index.html",
@@ -57,6 +89,8 @@ def create_router() -> APIRouter:
                 "request": request,
                 "pending": pending,
                 "count": len(pending),
+                "strategy_state": strategy_state,
+                "positions": positions,
             },
         )
 
@@ -150,6 +184,58 @@ def create_router() -> APIRouter:
                 status_code=400,
                 detail="Failed to submit selection",
             )
+
+    # ==================== Strategy Control API ====================
+
+    @router.get("/api/strategy/state")
+    async def api_strategy_state(request: Request) -> dict:
+        """Get current strategy state."""
+        controller = get_strategy_controller(request)
+        if not controller:
+            return {"state": "unavailable", "is_running": False, "message": "Strategy controller not initialized"}
+        return controller.to_dict()
+
+    @router.post("/api/strategy/start")
+    async def api_strategy_start(request: Request) -> dict:
+        """Start strategy execution."""
+        controller = get_strategy_controller(request)
+        if not controller:
+            raise HTTPException(status_code=503, detail="Strategy controller not available")
+
+        success = await controller.start()
+        return {
+            "success": success,
+            "state": controller.state.value,
+            "message": "Strategy started" if success else "Strategy already running",
+        }
+
+    @router.post("/api/strategy/stop")
+    async def api_strategy_stop(request: Request) -> dict:
+        """Stop strategy execution."""
+        controller = get_strategy_controller(request)
+        if not controller:
+            raise HTTPException(status_code=503, detail="Strategy controller not available")
+
+        success = await controller.stop()
+        return {
+            "success": success,
+            "state": controller.state.value,
+            "message": "Strategy stopped" if success else "Strategy already stopped",
+        }
+
+    # ==================== Position API ====================
+
+    @router.get("/api/positions")
+    async def api_positions(request: Request) -> dict:
+        """Get all current positions."""
+        manager = get_position_manager(request)
+        if not manager:
+            return {"positions": [], "summary": {}, "message": "Position manager not initialized"}
+
+        return {
+            "positions": manager.get_state().get("slots", []),
+            "summary": manager.get_summary(),
+        }
 
     return router
 

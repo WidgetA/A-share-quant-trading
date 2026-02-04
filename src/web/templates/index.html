@@ -1,57 +1,176 @@
 {% extends "base.html" %}
 
-{% block title %}Trading Confirmations{% endblock %}
+{% block title %}Trading Dashboard{% endblock %}
 
 {% block head %}
-<meta http-equiv="refresh" content="5">
+<meta http-equiv="refresh" content="10">
 {% endblock %}
 
 {% block content %}
 <div class="dashboard">
-    <h2>Pending Confirmations ({{ count }})</h2>
-
-    {% if pending %}
-    <div class="pending-list">
-        {% for item in pending %}
-        <div class="pending-card {{ item.type }}">
-            <div class="card-header">
-                <span class="type-badge">
-                    {% if item.type == 'premarket' %}
-                    Premarket
-                    {% elif item.type == 'intraday' %}
-                    Intraday
-                    {% elif item.type == 'morning' %}
-                    Morning
-                    {% elif item.type == 'limit_up' %}
-                    Limit-Up
-                    {% else %}
-                    {{ item.type }}
-                    {% endif %}
+    <!-- Strategy Control Section -->
+    <section class="strategy-section">
+        <h2>Strategy Status</h2>
+        <div class="strategy-card">
+            <div class="strategy-info">
+                <span class="status-indicator {{ 'running' if strategy_state.is_running else 'stopped' }}">
+                    {{ 'Running' if strategy_state.is_running else 'Stopped' }}
                 </span>
-                <span class="timer" data-expires="{{ item.expires_at }}">
-                    {{ item.remaining_seconds }}s
-                </span>
+                {% if strategy_state.state_changed_at %}
+                <span class="status-time">since {{ strategy_state.state_changed_at[:19] }}</span>
+                {% endif %}
             </div>
-            <div class="card-body">
-                <h3>{{ item.title }}</h3>
-            </div>
-            <div class="card-footer">
-                <a href="/confirm/{{ item.id }}" class="btn btn-primary">Confirm</a>
+            <div class="strategy-controls">
+                {% if strategy_state.is_running %}
+                <button class="btn btn-danger" onclick="stopStrategy()">Stop Strategy</button>
+                {% else %}
+                <button class="btn btn-success" onclick="startStrategy()">Start Strategy</button>
+                {% endif %}
             </div>
         </div>
+    </section>
+
+    <!-- Positions Section -->
+    <section class="positions-section">
+        <h2>Current Positions
+            {% if positions.summary %}
+            ({{ positions.summary.filled_slots_count|default(0) }}/{{ positions.summary.total_slots|default(5) }})
+            {% endif %}
+        </h2>
+
+        {% set filled_slots = [] %}
+        {% for slot in positions.slots %}
+            {% if slot.state == 'filled' %}
+                {% set _ = filled_slots.append(slot) %}
+            {% endif %}
         {% endfor %}
-    </div>
-    {% else %}
-    <div class="empty-state">
-        <p>No pending confirmations</p>
-        <p class="hint">This page auto-refreshes every 5 seconds</p>
-    </div>
-    {% endif %}
+
+        {% if filled_slots %}
+        <div class="positions-list">
+            {% for slot in positions.slots %}
+            {% if slot.state == 'filled' %}
+            <div class="position-card">
+                <div class="position-header">
+                    <span class="slot-badge {{ slot.slot_type }}">
+                        {{ 'Premarket' if slot.slot_type == 'premarket' else 'Intraday' }} #{{ slot.slot_id }}
+                    </span>
+                    <span class="entry-time">{{ slot.entry_time[:16] if slot.entry_time else '' }}</span>
+                </div>
+                <div class="position-body">
+                    {% for holding in slot.holdings %}
+                    <div class="holding-row">
+                        <div class="holding-main">
+                            <span class="stock-code">{{ holding.stock_code }}</span>
+                            <span class="stock-name">{{ holding.stock_name or '' }}</span>
+                        </div>
+                        <div class="holding-details">
+                            <span class="quantity">{{ holding.quantity }} shares</span>
+                            <span class="entry-price">@ {{ "%.2f"|format(holding.entry_price or 0) }}</span>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% if slot.entry_reason %}
+                <div class="position-footer">
+                    <span class="entry-reason">{{ slot.entry_reason }}</span>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+
+        {% if positions.summary %}
+        <div class="positions-summary">
+            <span>Total Capital: {{ "%.0f"|format(positions.summary.total_capital|default(0)) }}</span>
+            <span>Slot Capital: {{ "%.0f"|format(positions.summary.slot_capital|default(0)) }}</span>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="empty-state small">
+            <p>No current positions</p>
+        </div>
+        {% endif %}
+    </section>
+
+    <!-- Pending Confirmations Section -->
+    <section class="confirmations-section">
+        <h2>Pending Confirmations ({{ count }})</h2>
+
+        {% if pending %}
+        <div class="pending-list">
+            {% for item in pending %}
+            <div class="pending-card {{ item.type }}">
+                <div class="card-header">
+                    <span class="type-badge">
+                        {% if item.type == 'premarket' %}
+                        Premarket
+                        {% elif item.type == 'intraday' %}
+                        Intraday
+                        {% elif item.type == 'morning' %}
+                        Morning
+                        {% elif item.type == 'limit_up' %}
+                        Limit-Up
+                        {% else %}
+                        {{ item.type }}
+                        {% endif %}
+                    </span>
+                    <span class="timer" data-expires="{{ item.expires_at }}">
+                        {{ item.remaining_seconds }}s
+                    </span>
+                </div>
+                <div class="card-body">
+                    <h3>{{ item.title }}</h3>
+                </div>
+                <div class="card-footer">
+                    <a href="/confirm/{{ item.id }}" class="btn btn-primary">Confirm</a>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state small">
+            <p>No pending confirmations</p>
+        </div>
+        {% endif %}
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Strategy control functions
+async function startStrategy() {
+    try {
+        const response = await fetch('/api/strategy/start', { method: 'POST' });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            window.location.reload();
+        } else {
+            alert('Failed to start: ' + (data.message || data.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Network error: ' + error.message);
+    }
+}
+
+async function stopStrategy() {
+    if (!confirm('Are you sure you want to stop the strategy?')) {
+        return;
+    }
+    try {
+        const response = await fetch('/api/strategy/stop', { method: 'POST' });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            window.location.reload();
+        } else {
+            alert('Failed to stop: ' + (data.message || data.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Network error: ' + error.message);
+    }
+}
+
 // Update countdown timers
 function updateTimers() {
     document.querySelectorAll('.timer').forEach(el => {
