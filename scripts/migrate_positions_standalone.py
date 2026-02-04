@@ -142,7 +142,9 @@ def migrate(json_file: str) -> None:
             if holdings:
                 print(f"  Slot {slot['slot_id']} ({slot['slot_type']}): {len(holdings)} holdings")
                 for h in holdings:
-                    print(f"    - {h['stock_code']} {h.get('stock_name')}: {h.get('quantity')} @ {h.get('entry_price')}")
+                    code, name = h["stock_code"], h.get("stock_name")
+                    qty, price = h.get("quantity"), h.get("entry_price")
+                    print(f"    - {code} {name}: {qty} @ {price}")
 
         conn.commit()
         print(f"\nMigrated {len(slots)} slots successfully!")
