@@ -1,0 +1,441 @@
+/* Base styles */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: #f5f5f5;
+    color: #333;
+    line-height: 1.6;
+}
+
+header {
+    background: #1a1a2e;
+    color: white;
+    padding: 1rem 2rem;
+}
+
+header h1 {
+    font-size: 1.25rem;
+}
+
+header a {
+    color: white;
+    text-decoration: none;
+}
+
+main {
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+}
+
+footer {
+    text-align: center;
+    padding: 2rem;
+    color: #666;
+    font-size: 0.875rem;
+}
+
+/* Buttons */
+.btn {
+    display: inline-block;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.2s;
+}
+
+.btn-primary {
+    background: #4CAF50;
+    color: white;
+}
+
+.btn-primary:hover {
+    background: #45a049;
+}
+
+.btn-secondary {
+    background: #666;
+    color: white;
+}
+
+.btn-secondary:hover {
+    background: #555;
+}
+
+.btn-success {
+    background: #4CAF50;
+    color: white;
+}
+
+.btn-danger {
+    background: #f44336;
+    color: white;
+}
+
+/* Dashboard */
+.dashboard h2 {
+    margin-bottom: 1.5rem;
+}
+
+.pending-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.pending-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: #f0f0f0;
+}
+
+.type-badge {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    background: #1a1a2e;
+    color: white;
+}
+
+.premarket .type-badge { background: #2196F3; }
+.intraday .type-badge { background: #FF9800; }
+.morning .type-badge { background: #9C27B0; }
+.limit_up .type-badge { background: #f44336; }
+
+.timer {
+    font-family: monospace;
+    font-size: 0.875rem;
+    color: #666;
+}
+
+.timer.urgent {
+    color: #f44336;
+    font-weight: bold;
+}
+
+.timer.expired {
+    color: #999;
+}
+
+.card-body {
+    padding: 1rem;
+}
+
+.card-body h3 {
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.card-footer {
+    padding: 0.75rem 1rem;
+    border-top: 1px solid #eee;
+    text-align: right;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: #666;
+}
+
+.empty-state .hint {
+    font-size: 0.875rem;
+    margin-top: 0.5rem;
+}
+
+/* Confirm page */
+.confirm-page {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 1.5rem;
+}
+
+.confirm-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid #eee;
+}
+
+.confirm-header h2 {
+    font-size: 1.25rem;
+}
+
+.timer-large {
+    font-size: 1.5rem;
+    font-family: monospace;
+    color: #666;
+}
+
+.timer-large.urgent {
+    color: #f44336;
+}
+
+.timer-large.expired {
+    color: #999;
+}
+
+/* Signal cards */
+.signal-list,
+.holding-list,
+.stock-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.signal-card,
+.holding-card,
+.stock-card {
+    border: 2px solid #eee;
+    border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+}
+
+.signal-card:has(input:checked),
+.holding-card:has(input:checked),
+.stock-card:has(input:checked) {
+    border-color: #4CAF50;
+    background: #f0fff0;
+}
+
+.signal-card label,
+.holding-card label,
+.stock-card label {
+    display: flex;
+    align-items: flex-start;
+    padding: 1rem;
+    cursor: pointer;
+}
+
+.signal-card input,
+.holding-card input,
+.stock-card input {
+    margin-right: 1rem;
+    margin-top: 0.25rem;
+    width: 20px;
+    height: 20px;
+}
+
+.signal-content,
+.holding-content,
+.stock-content {
+    flex: 1;
+}
+
+.signal-header,
+.holding-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.index {
+    font-weight: 600;
+    color: #666;
+}
+
+.sentiment {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+}
+
+.sentiment.strong_bullish {
+    background: #c8e6c9;
+    color: #2e7d32;
+}
+
+.sentiment.bullish {
+    background: #dcedc8;
+    color: #558b2f;
+}
+
+.confidence {
+    font-size: 0.875rem;
+    color: #666;
+}
+
+.targets {
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+}
+
+.title {
+    font-size: 0.875rem;
+    color: #666;
+}
+
+.reasoning {
+    font-size: 0.875rem;
+    color: #888;
+    font-style: italic;
+    margin-top: 0.5rem;
+}
+
+/* Holdings */
+.code {
+    font-family: monospace;
+    font-weight: 600;
+}
+
+.name {
+    color: #666;
+}
+
+.pnl {
+    font-weight: 600;
+}
+
+.pnl.positive,
+.change.positive {
+    color: #4CAF50;
+}
+
+.pnl.negative,
+.change.negative {
+    color: #f44336;
+}
+
+.holding-details {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.875rem;
+    color: #666;
+    margin-bottom: 0.25rem;
+}
+
+.reason {
+    font-size: 0.875rem;
+    color: #888;
+}
+
+/* Limit-up */
+.limit-up-info {
+    background: #fff3e0;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+
+.limit-up-info h3 {
+    font-size: 0.875rem;
+    color: #e65100;
+    margin-bottom: 0.5rem;
+}
+
+.limit-up-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.stock-chip {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    background: #ffccbc;
+    color: #bf360c;
+}
+
+.stock-content {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.price {
+    font-family: monospace;
+}
+
+/* Actions */
+.actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid #eee;
+}
+
+/* Error page */
+.error-page {
+    text-align: center;
+    padding: 3rem;
+}
+
+.error-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+}
+
+.error-page h2 {
+    margin-bottom: 1.5rem;
+    color: #666;
+}
+
+/* Large signal card */
+.signal-single .signal-card.large {
+    border: none;
+    padding: 1.5rem;
+}
+
+.signal-single .signal-header {
+    font-size: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+.signal-single .targets {
+    font-size: 1.25rem;
+}
+
+.signal-single .title {
+    font-size: 1rem;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    main {
+        margin: 1rem auto;
+    }
+
+    .confirm-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
+
+    .actions {
+        flex-direction: column;
+    }
+
+    .actions .btn {
+        width: 100%;
+        text-align: center;
+    }
+}

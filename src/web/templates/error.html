@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Error{% endblock %}
+
+{% block content %}
+<div class="error-page">
+    <div class="error-icon">
+        {% if error == 'not_found' %}
+        &#x1F50D;
+        {% else %}
+        &#x26A0;
+        {% endif %}
+    </div>
+    <h2>{{ message }}</h2>
+    <a href="/" class="btn btn-primary">Back to Dashboard</a>
+</div>
+{% endblock %}

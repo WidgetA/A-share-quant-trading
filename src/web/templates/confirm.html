@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title %}{{ confirm.title }}{% endblock %}
+
+{% block content %}
+<div class="confirm-page">
+    <div class="confirm-header">
+        <h2>{{ confirm.title }}</h2>
+        <div class="timer-large" data-expires="{{ confirm.expires_at }}">
+            <span class="remaining">{{ confirm.remaining_seconds }}</span>s remaining
+        </div>
+    </div>
+
+    <form id="confirm-form" method="post">
+        {% if confirm.type == 'premarket' %}
+        <!-- Premarket: Select signals to buy -->
+        <div class="signal-list">
+            {% for signal in confirm.data.signals %}
+            <div class="signal-card">
+                <label>
+                    <input type="checkbox" name="selection" value="{{ loop.index }}">
+                    <div class="signal-content">
+                        <div class="signal-header">
+                            <span class="index">[{{ loop.index }}]</span>
+                            <span class="sentiment {{ signal.sentiment }}">
+                                {% if signal.sentiment == 'strong_bullish' %}Strong Bullish
+                                {% elif signal.sentiment == 'bullish' %}Bullish
+                                {% else %}{{ signal.sentiment }}{% endif %}
+                            </span>
+                            <span class="confidence">{{ signal.confidence }}%</span>
+                        </div>
+                        <div class="targets">{{ signal.targets }}</div>
+                        <div class="title">{{ signal.title }}</div>
+                        {% if signal.reasoning %}
+                        <div class="reasoning">{{ signal.reasoning }}</div>
+                        {% endif %}
+                    </div>
+                </label>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-secondary" onclick="selectAll()">Select All</button>
+            <button type="button" class="btn btn-secondary" onclick="selectNone()">Skip All</button>
+            <button type="submit" class="btn btn-primary">Confirm Selection</button>
+        </div>
+
+        {% elif confirm.type == 'intraday' %}
+        <!-- Intraday: Confirm single signal -->
+        <div class="signal-single">
+            {% set signal = confirm.data.signal %}
+            <div class="signal-card large">
+                <div class="signal-header">
+                    <span class="sentiment {{ signal.sentiment }}">
+                        {% if signal.sentiment == 'strong_bullish' %}Strong Bullish
+                        {% elif signal.sentiment == 'bullish' %}Bullish
+                        {% else %}{{ signal.sentiment }}{% endif %}
+                    </span>
+                    <span class="confidence">{{ signal.confidence }}%</span>
+                </div>
+                <div class="targets">{{ signal.targets }}</div>
+                <div class="title">{{ signal.title }}</div>
+                {% if signal.reasoning %}
+                <div class="reasoning">{{ signal.reasoning }}</div>
+                {% endif %}
+            </div>
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-danger" onclick="submitIntraday(false)">Skip</button>
+            <button type="button" class="btn btn-success" onclick="submitIntraday(true)">Buy</button>
+        </div>
+
+        {% elif confirm.type == 'morning' %}
+        <!-- Morning: Select holdings to sell -->
+        <div class="holding-list">
+            {% for holding in confirm.data.holdings %}
+            <div class="holding-card">
+                <label>
+                    <input type="checkbox" name="selection" value="{{ holding.slot_id }}">
+                    <div class="holding-content">
+                        <div class="holding-header">
+                            <span class="code">{{ holding.stock_code }}</span>
+                            <span class="name">{{ holding.stock_name }}</span>
+                            <span class="pnl {% if holding.pnl_percent >= 0 %}positive{% else %}negative{% endif %}">
+                                {% if holding.pnl_percent >= 0 %}+{% endif %}{{ "%.2f"|format(holding.pnl_percent) }}%
+                            </span>
+                        </div>
+                        <div class="holding-details">
+                            <span>Qty: {{ holding.quantity }}</span>
+                            <span>Cost: {{ "%.2f"|format(holding.entry_price) }}</span>
+                            {% if holding.current_price %}
+                            <span>Current: {{ "%.2f"|format(holding.current_price) }}</span>
+                            {% endif %}
+                        </div>
+                        <div class="reason">{{ holding.entry_reason }}</div>
+                    </div>
+                </label>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-secondary" onclick="selectAll()">Sell All</button>
+            <button type="button" class="btn btn-secondary" onclick="selectNone()">Hold All</button>
+            <button type="submit" class="btn btn-primary">Confirm Selection</button>
+        </div>
+
+        {% elif confirm.type == 'limit_up' %}
+        <!-- Limit-up: Show limit-up stocks and select from available -->
+        <div class="limit-up-info">
+            <h3>Limit-Up Stocks (Cannot Buy)</h3>
+            <div class="limit-up-list">
+                {% for stock in confirm.data.limit_up_stocks %}
+                <span class="stock-chip limit">{{ stock[0] }} {{ stock[1] }}</span>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% if confirm.data.available_stocks %}
+        <h3>Available Stocks</h3>
+        <div class="stock-list">
+            {% for stock in confirm.data.available_stocks %}
+            <div class="stock-card">
+                <label>
+                    <input type="checkbox" name="selection" value="{{ loop.index }}">
+                    <div class="stock-content">
+                        <span class="code">{{ stock[0] }}</span>
+                        <span class="name">{{ stock[1] }}</span>
+                        <span class="price">{{ "%.2f"|format(stock[2]) }}</span>
+                        {% if stock[3] %}
+                        <span class="change {% if stock[3] >= 0 %}positive{% else %}negative{% endif %}">
+                            {% if stock[3] >= 0 %}+{% endif %}{{ "%.2f"|format(stock[3]) }}%
+                        </span>
+                        {% endif %}
+                    </div>
+                </label>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-secondary" onclick="selectAll()">Select All</button>
+            <button type="button" class="btn btn-secondary" onclick="submitSkip()">Skip Sector</button>
+            <button type="submit" class="btn btn-primary">Confirm Selection</button>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <p>No available stocks in this sector</p>
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-primary" onclick="submitSkip()">OK</button>
+        </div>
+        {% endif %}
+
+        {% else %}
+        <p>Unknown confirmation type: {{ confirm.type }}</p>
+        {% endif %}
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const confirmId = "{{ confirm.id }}";
+const confirmType = "{{ confirm.type }}";
+
+// Update countdown timer
+function updateTimer() {
+    const timerEl = document.querySelector('.timer-large');
+    const expires = new Date(timerEl.dataset.expires);
+    const now = new Date();
+    const remaining = Math.max(0, Math.floor((expires - now) / 1000));
+    timerEl.querySelector('.remaining').textContent = remaining;
+    if (remaining <= 0) {
+        timerEl.classList.add('expired');
+        window.location.href = '/';
+    } else if (remaining <= 30) {
+        timerEl.classList.add('urgent');
+    }
+}
+setInterval(updateTimer, 1000);
+updateTimer();
+
+// Selection helpers
+function selectAll() {
+    document.querySelectorAll('input[name="selection"]').forEach(cb => cb.checked = true);
+}
+
+function selectNone() {
+    document.querySelectorAll('input[name="selection"]').forEach(cb => cb.checked = false);
+}
+
+// Submit form
+document.getElementById('confirm-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    let selection;
+    if (confirmType === 'morning') {
+        // For morning, selection is list of slot_ids
+        selection = Array.from(document.querySelectorAll('input[name="selection"]:checked'))
+            .map(cb => parseInt(cb.value));
+    } else {
+        // For others, selection is list of indices
+        selection = Array.from(document.querySelectorAll('input[name="selection"]:checked'))
+            .map(cb => parseInt(cb.value));
+    }
+
+    await submitSelection(selection);
+});
+
+// Intraday buy/skip
+async function submitIntraday(buy) {
+    await submitSelection(buy);
+}
+
+// Skip sector (limit-up)
+async function submitSkip() {
+    await submitSelection("skip");
+}
+
+// Submit to API
+async function submitSelection(selection) {
+    try {
+        const response = await fetch(`/api/pending/${confirmId}/submit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selection })
+        });
+
+        if (response.ok) {
+            window.location.href = '/?submitted=1';
+        } else {
+            const data = await response.json();
+            alert('Error: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Network error: ' + error.message);
+    }
+}
+</script>
+{% endblock %}

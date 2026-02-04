@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Trading Confirmations{% endblock %}
+
+{% block head %}
+<meta http-equiv="refresh" content="5">
+{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h2>Pending Confirmations ({{ count }})</h2>
+
+    {% if pending %}
+    <div class="pending-list">
+        {% for item in pending %}
+        <div class="pending-card {{ item.type }}">
+            <div class="card-header">
+                <span class="type-badge">
+                    {% if item.type == 'premarket' %}
+                    Premarket
+                    {% elif item.type == 'intraday' %}
+                    Intraday
+                    {% elif item.type == 'morning' %}
+                    Morning
+                    {% elif item.type == 'limit_up' %}
+                    Limit-Up
+                    {% else %}
+                    {{ item.type }}
+                    {% endif %}
+                </span>
+                <span class="timer" data-expires="{{ item.expires_at }}">
+                    {{ item.remaining_seconds }}s
+                </span>
+            </div>
+            <div class="card-body">
+                <h3>{{ item.title }}</h3>
+            </div>
+            <div class="card-footer">
+                <a href="/confirm/{{ item.id }}" class="btn btn-primary">Confirm</a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>No pending confirmations</p>
+        <p class="hint">This page auto-refreshes every 5 seconds</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Update countdown timers
+function updateTimers() {
+    document.querySelectorAll('.timer').forEach(el => {
+        const expires = new Date(el.dataset.expires);
+        const now = new Date();
+        const remaining = Math.max(0, Math.floor((expires - now) / 1000));
+        el.textContent = remaining + 's';
+        if (remaining <= 0) {
+            el.classList.add('expired');
+        } else if (remaining <= 30) {
+            el.classList.add('urgent');
+        }
+    });
+}
+setInterval(updateTimers, 1000);
+updateTimers();
+</script>
+{% endblock %}
