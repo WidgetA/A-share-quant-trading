@@ -119,8 +119,16 @@ class SectorMapper:
         try:
             logger.info("Loading sector mapping data from akshare...")
 
-            # Fetch industry board list
             loop = asyncio.get_event_loop()
+
+            # First, load all stock names (comprehensive source)
+            await loop.run_in_executor(
+                self._executor,
+                self._fetch_all_stock_names,
+            )
+            logger.info(f"Loaded {len(self._data.stock_names)} stock names")
+
+            # Then fetch industry board list
             boards = await loop.run_in_executor(
                 self._executor,
                 self._fetch_industry_boards,
@@ -128,6 +136,9 @@ class SectorMapper:
 
             if not boards:
                 logger.warning("No industry boards fetched")
+                # Still mark as loaded if we have stock names
+                if self._data.stock_names:
+                    self._data.last_updated = datetime.now()
                 return
 
             # Fetch stocks for each board (parallel)
@@ -145,6 +156,23 @@ class SectorMapper:
 
         finally:
             self._loading = False
+
+    def _fetch_all_stock_names(self) -> None:
+        """Fetch all A-share stock names (sync, runs in thread pool)."""
+        try:
+            df = ak.stock_info_a_code_name()
+            if df is None or df.empty:
+                logger.warning("No stock names fetched from stock_info_a_code_name")
+                return
+
+            for _, row in df.iterrows():
+                code = str(row.get("code", ""))
+                name = str(row.get("name", ""))
+                if code and len(code) == 6 and name:
+                    self._data.stock_names[code] = name
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch all stock names: {e}")
 
     def _fetch_industry_boards(self) -> list[dict[str, Any]]:
         """Fetch list of industry boards (sync, runs in thread pool)."""
@@ -169,9 +197,8 @@ class SectorMapper:
 
     async def _fetch_all_board_stocks(self, boards: list[dict[str, Any]]) -> None:
         """Fetch stocks for all boards in parallel."""
-        # Reset data
+        # Reset sector data (but preserve stock_names which was pre-loaded)
         self._data.stock_to_sector = {}
-        self._data.stock_names = {}
         self._data.sector_to_stocks = {}
 
         # Create tasks for parallel fetching
@@ -203,7 +230,9 @@ class SectorMapper:
 
                     # Store mappings
                     self._data.stock_to_sector[code] = board_name
-                    self._data.stock_names[code] = name
+                    # Only set name if not already present (preserve pre-loaded names)
+                    if code not in self._data.stock_names and name:
+                        self._data.stock_names[code] = name
                     self._data.sector_to_stocks[board_name].append(code)
 
         except Exception as e:
