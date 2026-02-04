@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
-from src.web.routes import create_router
+from src.web.routes import create_router, create_simulation_router
 
 if TYPE_CHECKING:
     from src.common.strategy_controller import StrategyController
@@ -71,9 +71,13 @@ def create_app(
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     app.state.templates = templates
 
-    # Create and include router
+    # Create and include routers
     router = create_router()
     app.include_router(router)
+
+    # Add simulation router
+    simulation_router = create_simulation_router()
+    app.include_router(simulation_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():

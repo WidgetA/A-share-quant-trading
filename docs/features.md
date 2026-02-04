@@ -27,6 +27,7 @@
 | 0.6.1 | 2026-02-03 | - | SYS-004: Feishu alert notifications for errors and critical events |
 | 0.7.0 | 2026-02-03 | - | SYS-005: Web UI for trading confirmations (containerized deployment) |
 | 0.7.1 | 2026-02-04 | - | SYS-004: Enhanced startup notification with git commit info for CD tracking |
+| 0.8.0 | 2026-02-04 | - | SIM-001: Historical simulation trading feature |
 
 ---
 
@@ -1106,12 +1107,145 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 
 ---
 
+## Module: Simulation
+
+### [SIM-001] Historical Simulation Trading
+
+**Status**: Completed
+
+**Description**: Replay historical trading days using stored messages and price data. Allows users to practice trading decisions in a fast-forward mode and calculate P&L.
+
+**Requirements**:
+- Select a historical date to start simulation
+- Optionally load historical position snapshot
+- Replay messages based on simulated time
+- Fast-forward through trading day phases (no real-time waiting)
+- User interaction for stock selection and sell decisions via Web UI
+- Calculate and display P&L at simulation end
+
+**Technical Design**:
+- **SimulationClock**: Virtual time controller that can jump to key time points
+- **HistoricalPriceService**: Fetches historical OHLCV from iFinD
+- **HistoricalMessageReader**: Wraps MessageReader to filter by simulated time
+- **SimulationContext**: Extended StrategyContext for simulation mode
+- **SimulationPositionManager**: Isolated position manager (no DB persistence)
+- **SimulationManager**: Main orchestrator for simulation lifecycle
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Historical Simulation System                  │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────┐    ┌────────────────────────┐            │
+│  │ SimulationClock  │◄──►│ HistoricalPriceService │            │
+│  │ (虚拟时间控制)   │    │ (iFinD历史价格)        │            │
+│  └────────┬─────────┘    └────────────────────────┘            │
+│           │                                                     │
+│           ▼                                                     │
+│  ┌──────────────────┐    ┌────────────────────────┐            │
+│  │ SimulationContext│◄──►│HistoricalMessageReader │            │
+│  │ (模拟上下文)     │    │(按模拟时间过滤消息)    │            │
+│  └────────┬─────────┘    └────────────────────────┘            │
+│           │                                                     │
+│           ▼                                                     │
+│  ┌──────────────────┐    ┌────────────────────────┐            │
+│  │SimulationManager │◄──►│ Web UI (/api/simulation)│            │
+│  │ (主协调器)       │    └────────────────────────┘            │
+│  └────────┬─────────┘                                          │
+│           │                                                     │
+│           ▼                                                     │
+│  ┌──────────────────┐                                          │
+│  │SimPositionManager│                                          │
+│  │ (隔离的仓位管理) │                                          │
+│  └──────────────────┘                                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Simulation Phases**:
+| Phase | Time | Description |
+|-------|------|-------------|
+| PREMARKET_ANALYSIS | 08:30 | Review overnight messages, select signals |
+| MORNING_AUCTION | 09:25 | Execute pending buys, check limit-up |
+| TRADING_HOURS | 09:30-15:00 | Monitor positions |
+| MARKET_CLOSE | 15:00 | Day summary, P&L calculation |
+| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions |
+| COMPLETED | - | Simulation finished, show results |
+
+**API Endpoints**:
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/simulation/start` | POST | Start new simulation |
+| `/api/simulation/state` | GET | Get current state |
+| `/api/simulation/advance` | POST | Advance to next phase |
+| `/api/simulation/select` | POST | Submit signal selection |
+| `/api/simulation/sell` | POST | Submit sell decision |
+| `/api/simulation/result` | GET | Get final result |
+| `/api/simulation` | DELETE | Cancel simulation |
+
+**Files**:
+- `src/simulation/__init__.py` - Module exports
+- `src/simulation/models.py` - Data models (phases, state, result)
+- `src/simulation/clock.py` - Virtual time controller
+- `src/simulation/historical_price_service.py` - iFinD historical prices
+- `src/simulation/historical_message_reader.py` - Time-filtered messages
+- `src/simulation/context.py` - Simulation context
+- `src/simulation/position_manager.py` - Isolated position manager
+- `src/simulation/manager.py` - Main orchestrator
+- `src/web/routes.py` - API routes (extended)
+- `config/simulation-config.yaml` - Simulation configuration
+
+**Usage**:
+```bash
+# Start simulation via API
+curl -X POST http://localhost:8000/api/simulation/start \
+  -H "Content-Type: application/json" \
+  -d '{"start_date": "2026-01-29", "num_days": 2}'
+
+# Get current state
+curl http://localhost:8000/api/simulation/state
+
+# Select signals (1-based indices)
+curl -X POST http://localhost:8000/api/simulation/select \
+  -d '{"selected_indices": [1, 2]}'
+
+# Advance to next phase
+curl -X POST http://localhost:8000/api/simulation/advance
+
+# Get final result
+curl http://localhost:8000/api/simulation/result
+```
+
+**Configuration** (`config/simulation-config.yaml`):
+```yaml
+simulation:
+  default_capital: 10000000
+  num_slots: 5
+  premarket_slots: 3
+  intraday_slots: 2
+  min_order_amount: 10000
+  lot_size: 100
+  price_source: "ifind"
+```
+
+**Acceptance Criteria**:
+- [x] SimulationClock with virtual time control
+- [x] HistoricalPriceService with iFinD integration
+- [x] HistoricalMessageReader with time filtering
+- [x] SimulationContext compatible with StrategyContext
+- [x] SimulationPositionManager with transaction tracking
+- [x] SimulationManager orchestrating all components
+- [x] Web API endpoints for simulation control
+- [x] Configuration file
+- [x] P&L calculation and result display
+
+---
+
 ## Backlog
 
 Features under consideration (not yet planned):
 
 - [x] Web dashboard for monitoring → See SYS-005
 - [ ] Telegram/WeChat notifications
-- [ ] Backtesting framework
+- [x] Backtesting framework → See SIM-001 (Historical Simulation)
 - [ ] Multi-account support
 - [ ] Performance analytics

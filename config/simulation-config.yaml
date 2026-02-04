@@ -1,0 +1,50 @@
+# Historical Simulation Configuration
+# This file configures the simulation feature for backtesting strategies.
+
+simulation:
+  # Default capital for simulation
+  default_capital: 10000000  # 10 million CNY
+
+  # Position slots
+  num_slots: 5
+  premarket_slots: 3
+  intraday_slots: 2
+
+  # Order constraints
+  min_order_amount: 10000  # Minimum order value in CNY
+  lot_size: 100  # A-share minimum trading unit
+
+  # Key time points for trading day simulation (Beijing time)
+  # These are the moments where the simulation pauses for user interaction
+  key_time_points:
+    - "08:30"  # Premarket analysis - review overnight messages
+    - "09:15"  # Morning auction starts
+    - "09:25"  # Morning auction critical moment
+    - "09:30"  # Market opens
+    - "10:00"  # Intraday check point 1
+    - "11:00"  # Intraday check point 2
+    - "11:30"  # Lunch break starts
+    - "13:00"  # Afternoon trading starts
+    - "14:00"  # Intraday check point 3
+    - "14:30"  # Near market close
+    - "15:00"  # Market closes
+    - "15:30"  # After hours (for overnight recording)
+
+  # Default simulation duration
+  default_num_days: 1
+  max_num_days: 5
+
+  # Price data source
+  # Per CLAUDE.md: All trading-related price data MUST use iFinD
+  price_source: "ifind"
+
+  # Message filtering
+  message_settings:
+    # Only consider messages with these sentiments
+    positive_sentiments:
+      - "strong_bullish"
+      - "bullish"
+
+    # Maximum messages to display per phase
+    max_premarket_signals: 10
+    max_intraday_signals: 5

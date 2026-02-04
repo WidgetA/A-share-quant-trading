@@ -75,7 +75,8 @@ async def migrate_positions(json_file: str = "data/position_state.json") -> None
     # Show current holdings
     holdings = manager.get_holdings()
     for slot in holdings:
-        logger.info(f"  Slot {slot.slot_id} ({slot.slot_type.value}): {slot.sector_name or 'single'}")
+        slot_name = slot.sector_name or "single"
+        logger.info(f"  Slot {slot.slot_id} ({slot.slot_type.value}): {slot_name}")
         for h in slot.holdings:
             logger.info(f"    - {h.stock_code} {h.stock_name}: {h.quantity} @ {h.entry_price}")
 

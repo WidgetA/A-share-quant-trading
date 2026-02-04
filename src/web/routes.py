@@ -12,6 +12,15 @@
 # POST /api/strategy/start   - Start strategy (JSON)
 # POST /api/strategy/stop    - Stop strategy (JSON)
 # GET  /api/positions        - Get current positions (JSON)
+#
+# === SIMULATION ENDPOINTS ===
+# POST /api/simulation/start   - Start new simulation
+# GET  /api/simulation/state   - Get simulation state
+# POST /api/simulation/advance - Advance to next phase
+# POST /api/simulation/select  - Submit signal selection
+# POST /api/simulation/sell    - Submit sell decision
+# GET  /api/simulation/result  - Get final result
+# DELETE /api/simulation       - Cancel simulation
 
 from __future__ import annotations
 
@@ -302,3 +311,173 @@ def _parse_selection(confirm_type: str, selection: Any, data: dict) -> Any:
 
     else:
         return selection
+
+
+# ==================== Simulation API Models ====================
+
+
+class SimulationStartRequest(BaseModel):
+    """Request body for starting a simulation."""
+
+    start_date: str  # YYYY-MM-DD format
+    num_days: int = 1
+    initial_capital: float = 10_000_000.0
+    load_holdings_from: str | None = None  # Optional date to load holdings from
+
+
+class SimulationSelectRequest(BaseModel):
+    """Request body for signal selection."""
+
+    selected_indices: list[int]  # 1-based indices
+
+
+class SimulationSellRequest(BaseModel):
+    """Request body for sell decision."""
+
+    slots_to_sell: list[int]  # Slot IDs to sell
+
+
+def create_simulation_router() -> APIRouter:
+    """Create router for simulation endpoints."""
+    from datetime import datetime
+
+    from src.simulation import (
+        SimulationSettings,
+        get_simulation_manager,
+        reset_simulation_manager,
+    )
+
+    router = APIRouter(prefix="/api/simulation", tags=["simulation"])
+
+    @router.post("/start")
+    async def start_simulation(body: SimulationStartRequest) -> dict:
+        """Start a new simulation."""
+        manager = get_simulation_manager()
+
+        # Cancel any existing simulation
+        if manager.is_running:
+            await manager.cleanup()
+
+        # Parse start date
+        try:
+            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid date format: {body.start_date}. Use YYYY-MM-DD.",
+            )
+
+        # Create settings
+        settings = SimulationSettings(
+            start_date=start_date,
+            num_days=body.num_days,
+            initial_capital=body.initial_capital,
+        )
+
+        # Initialize simulation
+        try:
+            await manager.initialize(settings)
+        except Exception as e:
+            logger.error(f"Failed to start simulation: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return {
+            "success": True,
+            "message": f"Simulation started for {start_date}",
+            "state": manager.get_state().to_dict(),
+        }
+
+    @router.get("/state")
+    async def get_simulation_state() -> dict:
+        """Get current simulation state."""
+        manager = get_simulation_manager()
+        state = manager.get_state()
+        return state.to_dict()
+
+    @router.post("/advance")
+    async def advance_simulation() -> dict:
+        """Advance simulation to next phase."""
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(
+                status_code=400,
+                detail="No simulation is running. Start one first.",
+            )
+
+        new_phase = await manager.advance_to_next_phase()
+
+        return {
+            "success": True,
+            "phase": new_phase.value,
+            "state": manager.get_state().to_dict(),
+        }
+
+    @router.post("/select")
+    async def submit_selection(body: SimulationSelectRequest) -> dict:
+        """Submit signal selection."""
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(
+                status_code=400,
+                detail="No simulation is running.",
+            )
+
+        await manager.process_selection(body.selected_indices)
+
+        return {
+            "success": True,
+            "selected": body.selected_indices,
+            "state": manager.get_state().to_dict(),
+        }
+
+    @router.post("/sell")
+    async def submit_sell_decision(body: SimulationSellRequest) -> dict:
+        """Submit sell decision for morning confirmation."""
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(
+                status_code=400,
+                detail="No simulation is running.",
+            )
+
+        await manager.process_sell_decision(body.slots_to_sell)
+
+        return {
+            "success": True,
+            "sold_slots": body.slots_to_sell,
+            "state": manager.get_state().to_dict(),
+        }
+
+    @router.get("/result")
+    async def get_simulation_result() -> dict:
+        """Get final simulation result."""
+        manager = get_simulation_manager()
+
+        result = manager.get_result()
+        if not result:
+            raise HTTPException(
+                status_code=400,
+                detail="No simulation result available.",
+            )
+
+        return result.to_dict()
+
+    @router.delete("")
+    async def cancel_simulation() -> dict:
+        """Cancel current simulation."""
+        manager = get_simulation_manager()
+
+        if manager.is_running:
+            await manager.cleanup()
+
+        await reset_simulation_manager()
+
+        return {
+            "success": True,
+            "message": "Simulation cancelled",
+        }
+
+    return router
