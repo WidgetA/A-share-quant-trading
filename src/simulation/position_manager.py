@@ -552,8 +552,7 @@ class SimulationPositionManager:
 
             filled_count += 1
             logger.info(
-                f"Loaded slot {slot_id}: {len(holdings)} holdings, "
-                f"value={total_value:,.0f}"
+                f"Loaded slot {slot_id}: {len(holdings)} holdings, value={total_value:,.0f}"
             )
 
         return filled_count
