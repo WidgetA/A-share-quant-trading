@@ -492,6 +492,65 @@ def create_simulation_router() -> APIRouter:
             "state": manager.get_state().to_dict(),
         }
 
+    @router.post("/intraday/select")
+    async def submit_intraday_selection(body: SimulationSelectRequest) -> dict:
+        """Submit intraday signal selection."""
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(status_code=400, detail="No simulation is running.")
+
+        await manager.process_intraday_selection(body.selected_indices)
+
+        return {
+            "success": True,
+            "selected": body.selected_indices,
+            "state": manager.get_state().to_dict(),
+        }
+
+    @router.post("/intraday/skip")
+    async def skip_intraday() -> dict:
+        """Skip intraday messages and continue."""
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(status_code=400, detail="No simulation is running.")
+
+        await manager.skip_intraday()
+
+        return {
+            "success": True,
+            "state": manager.get_state().to_dict(),
+        }
+
+    @router.post("/sync")
+    async def sync_to_database(confirm: bool = False) -> dict:
+        """
+        Sync simulation results to trading database.
+
+        Requires explicit confirmation to prevent accidental syncs.
+        """
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="请确认同步操作 (设置 confirm=true)",
+            )
+
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(status_code=400, detail="No simulation is running.")
+
+        try:
+            result = await manager.sync_to_database()
+            return {
+                "success": True,
+                "message": "模拟结果已同步到数据库",
+                **result,
+            }
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.get("/result")
     async def get_simulation_result() -> dict:
         """Get final simulation result."""

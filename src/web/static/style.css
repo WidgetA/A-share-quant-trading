@@ -729,6 +729,20 @@ footer {
 .phase-badge.morning_confirmation { background: #f3e5f5; color: #7b1fa2; }
 .phase-badge.completed { background: #e0f2f1; color: #00695c; }
 
+.phase-hint-text {
+    font-size: 0.85rem;
+    color: #666;
+    font-style: italic;
+}
+
+.phase-description {
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 1rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #eee;
+}
+
 .sim-time {
     font-family: monospace;
     color: #666;
@@ -808,10 +822,79 @@ footer {
 
 .signal-sentiment.strong_bullish { background: #c8e6c9; color: #1b5e20; }
 .signal-sentiment.bullish { background: #dcedc8; color: #33691e; }
+.signal-sentiment.neutral { background: #e0e0e0; color: #616161; }
+.signal-sentiment.bearish { background: #ffcdd2; color: #c62828; }
+.signal-sentiment.strong_bearish { background: #ef9a9a; color: #b71c1c; }
+.signal-sentiment.unknown { background: #f5f5f5; color: #9e9e9e; }
+
+/* Signal item sentiment-based styling */
+.signal-item.strong_bullish,
+.signal-item.bullish { border-left: 4px solid #4CAF50; }
+.signal-item.neutral { border-left: 4px solid #9e9e9e; }
+.signal-item.bearish,
+.signal-item.strong_bearish { border-left: 4px solid #f44336; }
+.signal-item.unknown { border-left: 4px solid #bdbdbd; }
+
+/* AI Recommended tag */
+.ai-recommended {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.2rem 0.5rem;
+    background: #4CAF50;
+    color: white;
+    border-radius: 4px;
+}
+
+/* Recommended signal highlight */
+.signal-item.recommended {
+    background: #f1f8e9;
+}
 
 .signal-confidence {
     font-size: 0.875rem;
     color: #888;
+}
+
+/* Results actions */
+.results-actions {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* Sync status */
+.sync-status {
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.sync-status.success {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+/* Warning button */
+.btn-warning {
+    background: #ff9800;
+    color: white;
+    border: none;
+}
+
+.btn-warning:hover {
+    background: #f57c00;
+}
+
+/* Outline button */
+.btn-outline {
+    background: transparent;
+    border: 2px solid #1976d2;
+    color: #1976d2;
+}
+
+.btn-outline:hover {
+    background: #e3f2fd;
 }
 
 .signal-title {

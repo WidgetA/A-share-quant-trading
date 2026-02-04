@@ -1,41 +1,41 @@
 {% extends "base.html" %}
 
-{% block title %}Historical Simulation{% endblock %}
+{% block title %}历史模拟{% endblock %}
 
 {% block content %}
 <div class="simulation-page">
-    <h2>Historical Simulation</h2>
+    <h2>历史模拟</h2>
 
     <!-- Start Form (shown when not running) -->
     <section id="start-section" class="sim-section {% if state.phase != 'not_started' %}hidden{% endif %}">
         <div class="sim-card">
-            <h3>Start New Simulation</h3>
+            <h3>开始新模拟</h3>
             <form id="start-form" class="sim-form">
                 <div class="form-group">
-                    <label for="start_date">Start Date</label>
+                    <label for="start_date">模拟开始日期</label>
                     <input type="date" id="start_date" name="start_date" required>
                 </div>
                 <div class="form-group">
-                    <label for="num_days">Number of Days</label>
+                    <label for="num_days">模拟天数</label>
                     <select id="num_days" name="num_days">
-                        <option value="1">1 day</option>
-                        <option value="2" selected>2 days</option>
-                        <option value="3">3 days</option>
-                        <option value="5">5 days</option>
+                        <option value="1">1 天</option>
+                        <option value="2" selected>2 天</option>
+                        <option value="3">3 天</option>
+                        <option value="5">5 天</option>
                     </select>
                 </div>
                 <div class="form-group" id="capital-group">
-                    <label for="initial_capital">Initial Capital</label>
+                    <label for="initial_capital">初始资金</label>
                     <input type="number" id="initial_capital" name="initial_capital" value="10000000" step="100000">
                 </div>
                 <div class="form-group checkbox-group">
                     <label class="checkbox-label">
                         <input type="checkbox" id="load_holdings" name="load_holdings" onchange="toggleCapitalInput()">
-                        <span>Load existing positions from database</span>
+                        <span>从数据库加载现有持仓</span>
                     </label>
-                    <p class="form-hint">Initial capital will be set to the loaded positions value</p>
+                    <p class="form-hint">初始资金将设置为持仓市值</p>
                 </div>
-                <button type="submit" class="btn btn-primary btn-lg">Start Simulation</button>
+                <button type="submit" class="btn btn-primary btn-lg">开始模拟</button>
             </form>
         </div>
     </section>
@@ -43,13 +43,30 @@
     <!-- Simulation State (shown when running) -->
     <section id="state-section" class="sim-section {% if state.phase == 'not_started' %}hidden{% endif %}">
         <!-- Phase Header -->
+        {% set phase_names = {
+            'premarket_analysis': '盘前分析',
+            'morning_auction': '早盘竞价',
+            'trading_hours': '交易时段',
+            'market_close': '收盘',
+            'morning_confirmation': '次日早盘确认',
+            'completed': '模拟完成'
+        } %}
+        {% set phase_hints = {
+            'premarket_analysis': '分析昨夜今晨的消息，选择看好的信号',
+            'morning_auction': '执行买入委托',
+            'trading_hours': '观察盘中走势',
+            'market_close': '当日交易结束，查看收益',
+            'morning_confirmation': '决定隔夜持仓是否卖出',
+            'completed': '查看最终模拟结果'
+        } %}
         <div class="phase-header">
             <div class="phase-info">
-                <span class="phase-badge {{ state.phase }}">{{ state.phase | replace('_', ' ') | title }}</span>
+                <span class="phase-badge {{ state.phase }}">{{ phase_names.get(state.phase, state.phase) }}</span>
+                <span class="phase-hint-text">{{ phase_hints.get(state.phase, '') }}</span>
                 <span class="sim-time">{{ state.sim_time[:16] if state.sim_time else '' }}</span>
-                <span class="day-counter">Day {{ state.day_number }}/{{ state.total_days }}</span>
+                <span class="day-counter">第 {{ state.day_number }}/{{ state.total_days }} 天</span>
             </div>
-            <button class="btn btn-danger btn-sm" onclick="cancelSimulation()">Cancel</button>
+            <button class="btn btn-danger btn-sm" onclick="cancelSimulation()">取消</button>
         </div>
 
         <!-- Messages Log -->
@@ -61,45 +78,62 @@
 
         <!-- Premarket: Signal Selection -->
         {% if state.phase == 'premarket_analysis' and state.pending_signals %}
+        {% set sentiment_names = {
+            'strong_bullish': '强看多',
+            'bullish': '看多',
+            'neutral': '中性',
+            'bearish': '看空',
+            'strong_bearish': '强看空',
+            'unknown': '未分析'
+        } %}
         <div class="sim-card">
-            <h3>Select Signals to Buy</h3>
+            <h3>选择要买入的消息</h3>
+            <p class="phase-description">以下是当日所有消息，绿色为AI推荐的正面消息，您可以选择任何消息进行买入</p>
             <form id="select-form" class="signals-form">
                 {% for signal in state.pending_signals %}
-                <div class="signal-item">
+                {% set is_positive = signal.sentiment in ['strong_bullish', 'bullish'] %}
+                <div class="signal-item {{ signal.sentiment }} {% if is_positive %}recommended{% endif %}">
                     <label class="signal-checkbox">
-                        <input type="checkbox" name="signals" value="{{ signal.index }}">
+                        <input type="checkbox" name="signals" value="{{ signal.index }}" {% if is_positive %}checked{% endif %}>
                         <div class="signal-content">
                             <div class="signal-header">
                                 <span class="signal-index">#{{ signal.index }}</span>
-                                <span class="signal-sentiment {{ signal.sentiment }}">{{ signal.sentiment }}</span>
-                                <span class="signal-confidence">{{ "%.0f"|format(signal.confidence * 100) }}%</span>
+                                <span class="signal-sentiment {{ signal.sentiment }}">{{ sentiment_names.get(signal.sentiment, signal.sentiment) }}</span>
+                                {% if signal.confidence > 0 %}
+                                <span class="signal-confidence">置信度 {{ "%.0f"|format(signal.confidence * 100) }}%</span>
+                                {% endif %}
+                                {% if is_positive %}
+                                <span class="ai-recommended">AI推荐</span>
+                                {% endif %}
                             </div>
                             <div class="signal-title">{{ signal.title }}</div>
                             <div class="signal-stocks">
                                 {% for stock in signal.target_stocks[:5] %}
-                                <span class="stock-tag">{{ stock }}</span>
+                                <span class="stock-tag">{{ stock }}{% if signal.target_stock_names and signal.target_stock_names.get(stock.split('.')[0] if '.' in stock else stock) %} {{ signal.target_stock_names.get(stock.split('.')[0] if '.' in stock else stock) }}{% endif %}</span>
                                 {% endfor %}
                                 {% if signal.target_stocks|length > 5 %}
                                 <span class="stock-tag more">+{{ signal.target_stocks|length - 5 }}</span>
                                 {% endif %}
                             </div>
+                            {% if signal.reasoning %}
                             <div class="signal-reasoning">{{ signal.reasoning[:150] }}{% if signal.reasoning|length > 150 %}...{% endif %}</div>
+                            {% endif %}
                         </div>
                     </label>
                 </div>
                 {% endfor %}
                 <div class="form-actions">
-                    <button type="submit" class="btn btn-primary">Confirm Selection</button>
-                    <button type="button" class="btn btn-secondary" onclick="skipSelection()">Skip All</button>
+                    <button type="submit" class="btn btn-primary">确认选择</button>
+                    <button type="button" class="btn btn-secondary" onclick="skipSelection()">跳过（不买入）</button>
                 </div>
             </form>
         </div>
         {% elif state.phase == 'premarket_analysis' %}
         <div class="sim-card">
-            <p>No new signals available for this trading day.</p>
+            <p>当日无新消息</p>
             <div class="form-actions">
-                <button class="btn btn-primary" onclick="advancePhase()">Generate Signals</button>
-                <button class="btn btn-secondary" onclick="skipSelection()">Skip to Next Phase</button>
+                <button class="btn btn-primary" onclick="advancePhase()">生成信号</button>
+                <button class="btn btn-secondary" onclick="skipSelection()">跳过到下一阶段</button>
             </div>
         </div>
         {% endif %}
@@ -107,7 +141,8 @@
         <!-- Morning Confirmation: Sell Decision -->
         {% if state.phase == 'morning_confirmation' and state.pending_holdings %}
         <div class="sim-card">
-            <h3>Morning Confirmation - Sell or Hold?</h3>
+            <h3>早盘确认 - 卖出还是持有？</h3>
+            <p class="phase-description">以下是您的隔夜持仓，勾选要卖出的持仓（将以次日开盘价卖出）</p>
             <form id="sell-form" class="holdings-form">
                 {% for holding in state.pending_holdings %}
                 <div class="holding-item">
@@ -119,10 +154,10 @@
                                 <span class="stock-name">{{ holding.stock_name }}</span>
                             </div>
                             <div class="holding-details">
-                                <span>Qty: {{ holding.quantity }}</span>
-                                <span>Entry: {{ "%.2f"|format(holding.entry_price) }}</span>
+                                <span>数量: {{ holding.quantity }} 股</span>
+                                <span>成本: {{ "%.2f"|format(holding.entry_price) }}</span>
                                 {% if holding.current_price %}
-                                <span>Current: {{ "%.2f"|format(holding.current_price) }}</span>
+                                <span>现价: {{ "%.2f"|format(holding.current_price) }}</span>
                                 {% endif %}
                                 {% if holding.pnl_percent is not none %}
                                 <span class="pnl {{ 'positive' if holding.pnl_percent > 0 else 'negative' }}">
@@ -135,36 +170,80 @@
                 </div>
                 {% endfor %}
                 <div class="form-actions">
-                    <button type="submit" class="btn btn-danger">Sell Selected</button>
-                    <button type="button" class="btn btn-success" onclick="holdAll()">Hold All</button>
+                    <button type="submit" class="btn btn-danger">卖出选中（次日开盘价）</button>
+                    <button type="button" class="btn btn-success" onclick="holdAll()">全部持有</button>
                 </div>
             </form>
         </div>
         {% endif %}
 
-        <!-- Other phases: Advance button -->
-        {% if state.phase in ['morning_auction', 'trading_hours', 'market_close'] %}
+        <!-- Morning Auction phase -->
+        {% if state.phase == 'morning_auction' %}
         <div class="sim-card">
-            <h3>
-                {% if state.phase == 'morning_auction' %}
-                Morning Auction - Executing Buy Orders
-                {% elif state.phase == 'trading_hours' %}
-                Trading Hours
-                {% elif state.phase == 'market_close' %}
-                Market Closed
-                {% endif %}
-            </h3>
+            <h3>早盘竞价 - 执行买入委托</h3>
+            <p class="phase-description">点击下方按钮以开盘价执行买入委托</p>
+            <button class="btn btn-primary btn-lg" onclick="advancePhase()">执行买入</button>
+        </div>
+        {% endif %}
+
+        <!-- Trading Hours phase with intraday messages -->
+        {% if state.phase == 'trading_hours' %}
+        <div class="sim-card">
+            <h3>交易时段</h3>
+            {% if state.intraday_signals %}
+            <p class="phase-description">发现盘中消息，您可以选择买入或跳过</p>
+            <form id="intraday-form" class="signals-form">
+                {% for signal in state.intraday_signals %}
+                {% set is_positive = signal.sentiment in ['strong_bullish', 'bullish'] %}
+                <div class="signal-item {{ signal.sentiment }} {% if is_positive %}recommended{% endif %}">
+                    <label class="signal-checkbox">
+                        <input type="checkbox" name="signals" value="{{ signal.index }}" {% if is_positive %}checked{% endif %}>
+                        <div class="signal-content">
+                            <div class="signal-header">
+                                <span class="signal-index">#{{ signal.index }}</span>
+                                <span class="signal-sentiment {{ signal.sentiment }}">{{ sentiment_names.get(signal.sentiment, signal.sentiment) }}</span>
+                                {% if signal.confidence > 0 %}
+                                <span class="signal-confidence">置信度 {{ "%.0f"|format(signal.confidence * 100) }}%</span>
+                                {% endif %}
+                                {% if is_positive %}
+                                <span class="ai-recommended">AI推荐</span>
+                                {% endif %}
+                            </div>
+                            <div class="signal-title">{{ signal.title }}</div>
+                            <div class="signal-stocks">
+                                {% for stock in signal.target_stocks[:5] %}
+                                <span class="stock-tag">{{ stock }}{% if signal.target_stock_names and signal.target_stock_names.get(stock.split('.')[0] if '.' in stock else stock) %} {{ signal.target_stock_names.get(stock.split('.')[0] if '.' in stock else stock) }}{% endif %}</span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </label>
+                </div>
+                {% endfor %}
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">买入选中</button>
+                    <button type="button" class="btn btn-secondary" onclick="skipIntraday()">跳过盘中消息</button>
+                    <button type="button" class="btn btn-outline" onclick="advancePhase()">快进到收盘</button>
+                </div>
+            </form>
+            {% else %}
+            <p class="phase-description">点击下方按钮检查盘中消息或快进到收盘</p>
+            <div class="form-actions">
+                <button class="btn btn-primary btn-lg" onclick="advancePhase()">检查盘中消息 / 快进到收盘</button>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <!-- Market Close phase -->
+        {% if state.phase == 'market_close' %}
+        <div class="sim-card">
+            <h3>收盘</h3>
+            <p class="phase-description">当日交易结束</p>
             <button class="btn btn-primary btn-lg" onclick="advancePhase()">
-                {% if state.phase == 'morning_auction' %}
-                Execute & Continue
-                {% elif state.phase == 'trading_hours' %}
-                Fast Forward to Close
-                {% elif state.phase == 'market_close' %}
                 {% if state.day_number < state.total_days %}
-                Next Trading Day
+                进入下一交易日
                 {% else %}
-                View Results
-                {% endif %}
+                查看结果
                 {% endif %}
             </button>
         </div>
@@ -173,15 +252,16 @@
         <!-- Current Holdings -->
         {% if state.holdings %}
         <div class="sim-card">
-            <h3>Current Holdings</h3>
+            <h3>当前持仓</h3>
             <div class="holdings-table">
                 {% for h in state.holdings %}
                 <div class="holding-row">
                     <span class="stock-code">{{ h.stock_code }}</span>
-                    <span class="quantity">{{ h.quantity }} shares</span>
-                    <span class="entry-price">@ {{ "%.2f"|format(h.entry_price) }}</span>
+                    <span class="stock-name">{{ h.stock_name or '' }}</span>
+                    <span class="quantity">{{ h.quantity }} 股</span>
+                    <span class="entry-price">成本 {{ "%.2f"|format(h.entry_price) }}</span>
                     {% if h.current_price %}
-                    <span class="current-price">{{ "%.2f"|format(h.current_price) }}</span>
+                    <span class="current-price">现价 {{ "%.2f"|format(h.current_price) }}</span>
                     {% endif %}
                     {% if h.pnl_percent is not none %}
                     <span class="pnl {{ 'positive' if h.pnl_percent > 0 else 'negative' }}">
@@ -197,16 +277,23 @@
         <!-- Completed: Show Results -->
         {% if state.phase == 'completed' %}
         <div class="sim-card results-card">
-            <h3>Simulation Complete!</h3>
-            <button class="btn btn-primary btn-lg" onclick="showResults()">View Final Results</button>
+            <h3>模拟完成！</h3>
+            <div class="results-actions">
+                <button class="btn btn-primary btn-lg" onclick="showResults()">查看最终结果</button>
+                {% if state.can_sync_to_db and not state.is_synced %}
+                <button class="btn btn-warning btn-lg" onclick="confirmSyncToDb()">更新到数据库</button>
+                {% elif state.is_synced %}
+                <span class="sync-status success">✓ 已同步到数据库</span>
+                {% endif %}
+            </div>
         </div>
         {% endif %}
 
         <!-- Capital Info -->
         <div class="capital-info">
-            <span>Initial: {{ "{:,.0f}".format(state.initial_capital) }}</span>
-            <span>Available: {{ "{:,.0f}".format(state.available_cash) }}</span>
-            <button class="btn btn-sm btn-secondary" onclick="showMessages()">View Messages</button>
+            <span>初始资金: {{ "{:,.0f}".format(state.initial_capital) }}</span>
+            <span>可用现金: {{ "{:,.0f}".format(state.available_cash) }}</span>
+            <button class="btn btn-sm btn-secondary" onclick="showMessages()">查看消息</button>
         </div>
     </section>
 
@@ -214,14 +301,14 @@
     <div id="results-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Simulation Results</h3>
+                <h3>模拟结果</h3>
                 <button class="modal-close" onclick="closeResults()">&times;</button>
             </div>
             <div class="modal-body" id="results-content">
-                Loading...
+                加载中...
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="resetSimulation()">Start New Simulation</button>
+                <button class="btn btn-primary" onclick="resetSimulation()">开始新模拟</button>
             </div>
         </div>
     </div>
@@ -230,17 +317,17 @@
     <div id="messages-modal" class="modal hidden">
         <div class="modal-content modal-large">
             <div class="modal-header">
-                <h3>Historical Messages</h3>
+                <h3>历史消息</h3>
                 <button class="modal-close" onclick="closeMessages()">&times;</button>
             </div>
             <div class="modal-body" id="messages-content">
                 <div class="messages-filter">
                     <label>
                         <input type="checkbox" id="only-positive" onchange="loadMessages()">
-                        Only show positive messages
+                        仅显示正面消息
                     </label>
                 </div>
-                <div id="messages-list">Loading...</div>
+                <div id="messages-list">加载中...</div>
             </div>
         </div>
     </div>
@@ -252,6 +339,7 @@
 const startForm = document.getElementById('start-form');
 const selectForm = document.getElementById('select-form');
 const sellForm = document.getElementById('sell-form');
+const intradayForm = document.getElementById('intraday-form');
 
 // Start simulation
 if (startForm) {
@@ -281,10 +369,10 @@ if (startForm) {
             if (response.ok && result.success) {
                 window.location.reload();
             } else {
-                alert('Error: ' + (result.detail || result.message || 'Unknown error'));
+                alert('错误: ' + (result.detail || result.message || '未知错误'));
             }
         } catch (error) {
-            alert('Network error: ' + error.message);
+            alert('网络错误: ' + error.message);
         }
     });
 }
@@ -297,7 +385,7 @@ if (selectForm) {
         const selected = Array.from(checkboxes).map(cb => parseInt(cb.value));
 
         if (selected.length === 0) {
-            if (!confirm('No signals selected. Skip to next phase?')) {
+            if (!confirm('未选择任何信号，确定跳过吗？')) {
                 return;
             }
         }
@@ -312,10 +400,10 @@ if (selectForm) {
             if (response.ok) {
                 window.location.reload();
             } else {
-                alert('Error: ' + (result.detail || 'Unknown error'));
+                alert('错误: ' + (result.detail || '未知错误'));
             }
         } catch (error) {
-            alert('Network error: ' + error.message);
+            alert('网络错误: ' + error.message);
         }
     });
 }
@@ -332,7 +420,7 @@ async function skipSelection() {
             window.location.reload();
         }
     } catch (error) {
-        alert('Error: ' + error.message);
+        alert('错误: ' + error.message);
     }
 }
 
@@ -353,10 +441,10 @@ if (sellForm) {
                 await advancePhase();
             } else {
                 const result = await response.json();
-                alert('Error: ' + (result.detail || 'Unknown error'));
+                alert('错误: ' + (result.detail || '未知错误'));
             }
         } catch (error) {
-            alert('Network error: ' + error.message);
+            alert('网络错误: ' + error.message);
         }
     });
 }
@@ -373,7 +461,97 @@ async function holdAll() {
             await advancePhase();
         }
     } catch (error) {
-        alert('Error: ' + error.message);
+        alert('错误: ' + error.message);
+    }
+}
+
+// Intraday form submission
+if (intradayForm) {
+    intradayForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const checkboxes = intradayForm.querySelectorAll('input[name="signals"]:checked');
+        const selected = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+        if (selected.length === 0) {
+            if (!confirm('未选择任何盘中信号，确定跳过吗？')) {
+                return;
+            }
+            await skipIntraday();
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/simulation/intraday/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ selected_indices: selected })
+            });
+            if (response.ok) {
+                window.location.reload();
+            } else {
+                const result = await response.json();
+                alert('错误: ' + (result.detail || '未知错误'));
+            }
+        } catch (error) {
+            alert('网络错误: ' + error.message);
+        }
+    });
+}
+
+// Skip intraday messages
+async function skipIntraday() {
+    try {
+        const response = await fetch('/api/simulation/intraday/skip', {
+            method: 'POST'
+        });
+        if (response.ok) {
+            window.location.reload();
+        } else {
+            const result = await response.json();
+            alert('错误: ' + (result.detail || '未知错误'));
+        }
+    } catch (error) {
+        alert('网络错误: ' + error.message);
+    }
+}
+
+// Sync to database with confirmation
+async function confirmSyncToDb() {
+    const confirmed = confirm(
+        '确定要将模拟结果同步到数据库吗？\n\n' +
+        '这将覆盖当前数据库中的持仓数据！\n\n' +
+        '此操作不可撤销。'
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    // Double confirmation
+    const doubleConfirm = confirm(
+        '再次确认：这将更新真实的持仓数据！\n\n' +
+        '点击"确定"继续同步。'
+    );
+
+    if (!doubleConfirm) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/simulation/sync?confirm=true', {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (response.ok && result.success) {
+            alert(`同步成功！\n\n已同步 ${result.synced_slots} 个仓位，${result.synced_holdings} 只股票。`);
+            window.location.reload();
+        } else {
+            alert('同步失败：' + (result.detail || '未知错误'));
+        }
+    } catch (error) {
+        alert('网络错误：' + error.message);
     }
 }
 
@@ -396,7 +574,7 @@ async function advancePhase() {
 
 // Cancel simulation
 async function cancelSimulation() {
-    if (!confirm('Are you sure you want to cancel the simulation?')) {
+    if (!confirm('确定要取消模拟吗？')) {
         return;
     }
     try {
@@ -407,7 +585,7 @@ async function cancelSimulation() {
             window.location.reload();
         }
     } catch (error) {
-        alert('Error: ' + error.message);
+        alert('错误: ' + error.message);
     }
 }
 
@@ -426,19 +604,19 @@ async function showResults() {
             content.innerHTML = `
                 <div class="results-summary">
                     <div class="result-item">
-                        <span class="label">Period</span>
+                        <span class="label">模拟期间</span>
                         <span class="value">${result.start_date} ~ ${result.end_date}</span>
                     </div>
                     <div class="result-item">
-                        <span class="label">Initial Capital</span>
+                        <span class="label">初始资金</span>
                         <span class="value">${result.initial_capital.toLocaleString()}</span>
                     </div>
                     <div class="result-item">
-                        <span class="label">Final Capital</span>
+                        <span class="label">最终资金</span>
                         <span class="value">${result.final_capital.toLocaleString()}</span>
                     </div>
                     <div class="result-item highlight">
-                        <span class="label">Total P&L</span>
+                        <span class="label">总盈亏</span>
                         <span class="value ${pnlClass}">
                             ${result.total_pnl >= 0 ? '+' : ''}${result.total_pnl.toLocaleString()}
                             (${result.pnl_percent >= 0 ? '+' : ''}${result.pnl_percent.toFixed(2)}%)
@@ -446,12 +624,12 @@ async function showResults() {
                     </div>
                 </div>
                 <div class="results-transactions">
-                    <h4>Transactions (${result.transactions.length})</h4>
+                    <h4>交易记录 (${result.transactions.length} 笔)</h4>
                     ${result.transactions.map(t => `
                         <div class="transaction-row ${t.action.toLowerCase()}">
-                            <span class="action">${t.action}</span>
-                            <span class="stock">${t.stock_code}</span>
-                            <span class="qty">${t.quantity}</span>
+                            <span class="action">${t.action === 'BUY' ? '买入' : '卖出'}</span>
+                            <span class="stock">${t.stock_code} ${t.stock_name || ''}</span>
+                            <span class="qty">${t.quantity} 股</span>
                             <span class="price">@ ${t.price.toFixed(2)}</span>
                             <span class="time">${t.timestamp.substring(0, 16)}</span>
                         </div>
@@ -459,7 +637,7 @@ async function showResults() {
                 </div>
             `;
         } else {
-            content.innerHTML = `<p class="error">${result.detail || 'Failed to load results'}</p>`;
+            content.innerHTML = `<p class="error">${result.detail || '加载结果失败'}</p>`;
         }
     } catch (error) {
         content.innerHTML = `<p class="error">Error: ${error.message}</p>`;
@@ -491,7 +669,7 @@ function closeMessages() {
 async function loadMessages() {
     const onlyPositive = document.getElementById('only-positive').checked;
     const listEl = document.getElementById('messages-list');
-    listEl.innerHTML = '<p>Loading...</p>';
+    listEl.innerHTML = '<p>加载中...</p>';
 
     try {
         const url = `/api/simulation/messages?only_positive=${onlyPositive}&limit=100`;
@@ -499,22 +677,32 @@ async function loadMessages() {
         const data = await response.json();
 
         if (!response.ok) {
-            listEl.innerHTML = `<p class="error">${data.detail || 'Failed to load messages'}</p>`;
+            listEl.innerHTML = `<p class="error">${data.detail || '加载消息失败'}</p>`;
             return;
         }
 
         if (data.messages.length === 0) {
-            listEl.innerHTML = '<p>No messages found for this date.</p>';
+            listEl.innerHTML = '<p>当日无消息</p>';
             return;
         }
 
-        let html = `<p class="messages-summary">Found ${data.count} messages for ${data.sim_date}</p>`;
+        const sentimentNames = {
+            'strong_bullish': '强看多',
+            'bullish': '看多',
+            'neutral': '中性',
+            'bearish': '看空',
+            'strong_bearish': '强看空',
+            'unknown': '未分析'
+        };
+
+        let html = `<p class="messages-summary">找到 ${data.count} 条消息 (${data.sim_date})</p>`;
         html += '<div class="messages-table">';
 
         for (const msg of data.messages) {
             const sentiment = msg.analysis?.sentiment || 'unknown';
+            const sentimentLabel = sentimentNames[sentiment] || sentiment;
             const confidence = msg.analysis ? (msg.analysis.confidence * 100).toFixed(0) + '%' : '-';
-            const reasoning = msg.analysis?.reasoning || 'No analysis';
+            const reasoning = msg.analysis?.reasoning || '无分析';
             const stocks = msg.analysis?.affected_stocks?.join(', ') || msg.stock_codes?.join(', ') || '-';
 
             html += `
@@ -522,15 +710,15 @@ async function loadMessages() {
                     <div class="message-header">
                         <span class="message-time">${msg.publish_time?.substring(0, 16) || '-'}</span>
                         <span class="message-source">${msg.source_name}</span>
-                        <span class="sentiment-badge ${sentiment}">${sentiment}</span>
+                        <span class="sentiment-badge ${sentiment}">${sentimentLabel}</span>
                         <span class="confidence">${confidence}</span>
                     </div>
-                    <div class="message-title">${msg.title || '(No title)'}</div>
-                    <div class="message-stocks">Stocks: ${stocks}</div>
+                    <div class="message-title">${msg.title || '(无标题)'}</div>
+                    <div class="message-stocks">相关股票: ${stocks}</div>
                     <div class="message-reasoning">${reasoning}</div>
                     <details class="message-content-details">
-                        <summary>View content</summary>
-                        <div class="message-content">${msg.content || '(No content)'}</div>
+                        <summary>查看内容</summary>
+                        <div class="message-content">${msg.content || '(无内容)'}</div>
                     </details>
                 </div>
             `;
@@ -540,7 +728,7 @@ async function loadMessages() {
         listEl.innerHTML = html;
 
     } catch (error) {
-        listEl.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        listEl.innerHTML = `<p class="error">错误: ${error.message}</p>`;
     }
 }
 

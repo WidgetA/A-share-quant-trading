@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 from src.data.readers.message_reader import MessageReader, create_message_reader_from_config
+from src.data.sources.sector_mapper import SectorMapper
 from src.simulation.clock import SimulationClock
 from src.simulation.context import SimulationContext
 from src.simulation.historical_message_reader import HistoricalMessageReader
@@ -80,16 +81,20 @@ class SimulationManager:
         self._position_manager: SimulationPositionManager | None = None
         self._context: SimulationContext | None = None
         self._trading_repo: TradingRepository | None = None
+        self._sector_mapper: SectorMapper | None = None
 
         # Simulation state
         self._phase = SimulationPhase.NOT_STARTED
         self._current_day = 0
         self._pending_signals: list[PendingSignal] = []
         self._selected_signals: list[PendingSignal] = []
+        self._intraday_signals: list[PendingSignal] = []
         self._messages: list[str] = []  # Log messages for UI
+        self._is_synced: bool = False
 
         # Track what we've processed
         self._last_message_time: datetime | None = None
+        self._last_intraday_check: datetime | None = None
 
     @property
     def is_initialized(self) -> bool:
@@ -137,6 +142,15 @@ class SimulationManager:
             price_service=self._price_service,
         )
 
+        # Initialize sector mapper for stock names
+        self._sector_mapper = SectorMapper()
+        try:
+            await self._sector_mapper.load_sector_data()
+            logger.info("Sector mapper loaded successfully")
+        except Exception as e:
+            logger.warning(f"Failed to load sector mapper: {e}")
+            # Continue without stock names
+
         # Load initial holdings if specified
         if settings.load_holdings_from_date:
             await self._load_initial_holdings()
@@ -163,6 +177,9 @@ class SimulationManager:
         if self._trading_repo:
             await self._trading_repo.close()
             self._trading_repo = None
+        if self._sector_mapper:
+            await self._sector_mapper.close()
+            self._sector_mapper = None
 
         self._phase = SimulationPhase.NOT_STARTED
         logger.info("Simulation cleaned up")
@@ -201,11 +218,14 @@ class SimulationManager:
             total_days=self._settings.num_days if self._settings else 0,
             pending_signals=self._pending_signals,
             pending_holdings=pending_holdings,
+            intraday_signals=self._intraday_signals,
             holdings=holdings,
             transactions=self._position_manager.transactions,
             initial_capital=self._position_manager.total_capital,
             available_cash=self._position_manager.available_cash,
             messages=self._messages[-10:],  # Last 10 messages
+            can_sync_to_db=(self._phase == SimulationPhase.COMPLETED),
+            is_synced=self._is_synced,
         )
 
     async def advance_to_next_phase(self) -> SimulationPhase:
@@ -233,7 +253,15 @@ class SimulationManager:
             self._clock.advance_to_time(time(9, 30))
 
         elif current_phase == SimulationPhase.TRADING_HOURS:
-            # Advance to market close
+            # Check for intraday messages first
+            if not self._intraday_signals:
+                await self._check_intraday_messages()
+                if self._intraday_signals:
+                    self._add_message(f"发现 {len(self._intraday_signals)} 条盘中消息")
+                    return self._phase  # Stay in trading hours, let user review
+
+            # No intraday messages or user skipped, advance to market close
+            self._intraday_signals = []
             self._clock.advance_to_time(time(15, 0))
             await self._update_closing_prices()
             self._phase = SimulationPhase.MARKET_CLOSE
@@ -324,7 +352,84 @@ class SimulationManager:
                         prices[h.stock_code] = price
 
                 pnl = self._position_manager.release_slot(slot_id, prices, self._clock.current_time)
-                self._add_message(f"Sold slot {slot_id}, P&L: {pnl:+,.0f}")
+                self._add_message(f"卖出仓位 {slot_id}, 盈亏: {pnl:+,.0f}")
+
+    async def process_intraday_selection(self, selected_indices: list[int]) -> None:
+        """
+        Process user's intraday signal selection.
+
+        Args:
+            selected_indices: 1-based indices of selected intraday signals.
+        """
+        if self._phase != SimulationPhase.TRADING_HOURS:
+            return
+
+        if not self._position_manager or not self._price_service or not self._clock:
+            return
+
+        # Filter selected signals
+        selected = [s for s in self._intraday_signals if s.index in selected_indices]
+
+        if not selected:
+            self._add_message("未选择盘中信号")
+            self._intraday_signals = []
+            return
+
+        self._add_message(f"选择了 {len(selected)} 个盘中信号")
+
+        # Allocate intraday slots for selected signals
+        for signal in selected:
+            slot = self._position_manager.get_available_slot(SlotType.INTRADAY)
+            if not slot:
+                self._add_message("无可用盘中仓位")
+                break
+
+            # Get stocks and prices
+            stocks_to_buy = []
+            for code in signal.target_stocks[:3]:
+                clean_code = code.split(".")[0] if "." in code else code
+                if "." not in code:
+                    code = f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
+
+                price = await self._price_service.get_price_at_time(code, self._clock.current_time)
+
+                if price:
+                    name = signal.target_stock_names.get(clean_code, "") or self._get_stock_name(code)
+                    stocks_to_buy.append((code, name, price))
+
+            if not stocks_to_buy:
+                continue
+
+            # Allocate slot
+            if len(stocks_to_buy) == 1:
+                code, name, price = stocks_to_buy[0]
+                self._position_manager.allocate_slot(
+                    slot, code, price, signal.reasoning,
+                    stock_name=name, timestamp=self._clock.current_time,
+                )
+                # Fill immediately for intraday
+                self._position_manager.fill_slot(slot.slot_id, {code: price}, self._clock.current_time)
+                self._add_message(f"盘中买入 {code} {name} @ {price:.2f}")
+            else:
+                self._position_manager.allocate_slot_sector(
+                    slot, stocks_to_buy,
+                    sector_name=signal.title[:30],
+                    reason=signal.reasoning,
+                    timestamp=self._clock.current_time,
+                )
+                fill_prices = {s[0]: s[2] for s in stocks_to_buy}
+                self._position_manager.fill_slot(slot.slot_id, fill_prices, self._clock.current_time)
+                self._add_message(f"盘中买入 {signal.title[:20]}")
+
+        self._intraday_signals = []
+
+    async def skip_intraday(self) -> None:
+        """Skip intraday messages and continue to market close."""
+        if self._phase != SimulationPhase.TRADING_HOURS:
+            return
+
+        self._add_message("跳过盘中消息")
+        self._intraday_signals = []
 
     def get_result(self) -> SimulationResult | None:
         """
@@ -347,6 +452,75 @@ class SimulationManager:
             end_date=self._clock.current_date if self._clock else self._settings.start_date,
             current_prices=prices,
         )
+
+    async def sync_to_database(self) -> dict[str, int]:
+        """
+        Sync simulation results to trading database.
+
+        Returns:
+            Dict with synced_slots and synced_holdings counts.
+
+        Raises:
+            RuntimeError: If simulation not completed or sync fails.
+        """
+        if self._phase != SimulationPhase.COMPLETED:
+            raise RuntimeError("只能在模拟完成后同步到数据库")
+
+        if not self._position_manager:
+            raise RuntimeError("Position manager not available")
+
+        # Connect to trading repository if not already connected
+        if not self._trading_repo:
+            self._trading_repo = create_trading_repository_from_config()
+            await self._trading_repo.connect()
+
+        try:
+            synced_slots = 0
+            synced_holdings = 0
+
+            # Sync each slot
+            for slot in self._position_manager._slots:
+                # Save slot data
+                slot_data = {
+                    "slot_id": slot.slot_id,
+                    "slot_type": slot.slot_type,
+                    "state": slot.state,
+                    "entry_time": slot.holdings[0].entry_time if slot.holdings else None,
+                    "entry_reason": slot.entry_reason,
+                    "sector_name": slot.sector_name,
+                }
+                await self._trading_repo.save_slot(slot_data)
+
+                # Save holdings if slot is filled
+                if slot.state == "filled" and slot.holdings:
+                    holdings_data = []
+                    for h in slot.holdings:
+                        holdings_data.append({
+                            "stock_code": h.stock_code,
+                            "stock_name": h.stock_name,
+                            "quantity": h.quantity,
+                            "entry_price": h.entry_price,
+                        })
+                    await self._trading_repo.save_holdings(slot.slot_id, holdings_data)
+                    synced_holdings += len(holdings_data)
+                    synced_slots += 1
+                else:
+                    # Clear holdings for empty slots
+                    await self._trading_repo.save_holdings(slot.slot_id, [])
+
+            self._is_synced = True
+            self._add_message(f"已同步到数据库：{synced_slots} 个仓位，{synced_holdings} 只股票")
+
+            logger.info(f"Synced to database: {synced_slots} slots, {synced_holdings} holdings")
+
+            return {
+                "synced_slots": synced_slots,
+                "synced_holdings": synced_holdings,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to sync to database: {e}")
+            raise RuntimeError(f"同步失败: {e}")
 
     # === Private methods ===
 
@@ -406,47 +580,141 @@ class SimulationManager:
             logger.error(f"Failed to load initial holdings: {e}")
             self._add_message(f"Warning: Failed to load holdings - {e}")
 
+    def _get_stock_name(self, code: str) -> str:
+        """Get stock name for a code, or return empty string if not found."""
+        if not self._sector_mapper:
+            return ""
+        # Remove suffix if present
+        clean_code = code.split(".")[0] if "." in code else code
+        name = self._sector_mapper.get_stock_name(clean_code)
+        return name or ""
+
+    def _get_stock_names_dict(self, codes: list[str]) -> dict[str, str]:
+        """Get stock names for a list of codes."""
+        result = {}
+        for code in codes:
+            clean_code = code.split(".")[0] if "." in code else code
+            result[clean_code] = self._get_stock_name(code)
+        return result
+
     async def _generate_premarket_signals(self) -> None:
-        """Generate signals from premarket messages."""
+        """Generate signals from premarket messages (all messages, not just positive)."""
         if not self._hist_message_reader or not self._clock:
             return
 
         self._pending_signals = []
 
-        # Get positive messages for premarket
+        # Get ALL messages for premarket (not just positive), let user decide
         messages = await self._hist_message_reader.get_premarket_messages(
             trade_date=self._clock.current_time,
-            only_positive=True,
-            limit=50,
+            only_positive=False,  # Get all messages for human review
+            limit=100,
         )
 
         if not messages:
-            self._add_message("No positive messages found for premarket")
+            self._add_message("当日无消息")
             return
 
         # Convert messages to pending signals
+        positive_count = 0
         for i, msg in enumerate(messages, 1):
-            if not msg.analysis:
-                continue
+            # Include messages with or without analysis
+            sentiment = "unknown"
+            confidence = 0.0
+            reasoning = ""
+            target_stocks = msg.stock_codes or []
+
+            if msg.analysis:
+                sentiment = msg.analysis.sentiment.value
+                confidence = msg.analysis.confidence
+                reasoning = msg.analysis.reasoning[:200] if msg.analysis.reasoning else ""
+                target_stocks = msg.analysis.affected_stocks or msg.stock_codes
+
+            # Track positive count
+            if sentiment in ("strong_bullish", "bullish"):
+                positive_count += 1
+
+            stock_names = self._get_stock_names_dict(target_stocks)
 
             signal = PendingSignal(
                 index=i,
-                signal_type="buy_sector" if msg.analysis.affected_stocks else "buy_stock",
-                sentiment=msg.analysis.sentiment.value,
-                confidence=msg.analysis.confidence,
-                target_stocks=msg.analysis.affected_stocks or msg.stock_codes,
-                target_sectors=[],  # Could extract from analysis
+                signal_type="buy_sector" if len(target_stocks) > 1 else "buy_stock",
+                sentiment=sentiment,
+                confidence=confidence,
+                target_stocks=target_stocks,
+                target_stock_names=stock_names,
+                target_sectors=[],
                 title=msg.title[:100] if msg.title else "",
-                reasoning=msg.analysis.reasoning[:200] if msg.analysis.reasoning else "",
+                reasoning=reasoning,
                 message_id=msg.id,
             )
             self._pending_signals.append(signal)
 
             # Limit to reasonable number
-            if len(self._pending_signals) >= 10:
+            if len(self._pending_signals) >= 20:
                 break
 
-        self._add_message(f"Found {len(self._pending_signals)} premarket signals")
+        self._add_message(f"找到 {len(self._pending_signals)} 条消息 (其中 {positive_count} 条正面)")
+
+    async def _check_intraday_messages(self) -> None:
+        """Check for intraday messages during trading hours."""
+        if not self._hist_message_reader or not self._clock:
+            return
+
+        self._intraday_signals = []
+
+        # Set the time range for intraday messages
+        since = self._last_intraday_check or datetime.combine(
+            self._clock.current_date, time(9, 30)
+        )
+
+        # Get intraday messages
+        messages = await self._hist_message_reader.get_intraday_messages(
+            since=since,
+            only_positive=False,
+            limit=50,
+        )
+
+        self._last_intraday_check = self._clock.current_time
+
+        if not messages:
+            return
+
+        # Convert messages to pending signals
+        positive_count = 0
+        for i, msg in enumerate(messages, 1):
+            sentiment = "unknown"
+            confidence = 0.0
+            reasoning = ""
+            target_stocks = msg.stock_codes or []
+
+            if msg.analysis:
+                sentiment = msg.analysis.sentiment.value
+                confidence = msg.analysis.confidence
+                reasoning = msg.analysis.reasoning[:200] if msg.analysis.reasoning else ""
+                target_stocks = msg.analysis.affected_stocks or msg.stock_codes
+
+            if sentiment in ("strong_bullish", "bullish"):
+                positive_count += 1
+
+            stock_names = self._get_stock_names_dict(target_stocks)
+
+            signal = PendingSignal(
+                index=i,
+                signal_type="buy_sector" if len(target_stocks) > 1 else "buy_stock",
+                sentiment=sentiment,
+                confidence=confidence,
+                target_stocks=target_stocks,
+                target_stock_names=stock_names,
+                target_sectors=[],
+                title=msg.title[:100] if msg.title else "",
+                reasoning=reasoning,
+                message_id=msg.id,
+            )
+            self._intraday_signals.append(signal)
+
+            if len(self._intraday_signals) >= 10:
+                break
 
     async def _allocate_selected_signals(self) -> None:
         """Allocate slots for selected signals."""
@@ -456,20 +724,23 @@ class SimulationManager:
         for signal in self._selected_signals:
             slot = self._position_manager.get_available_slot(SlotType.PREMARKET)
             if not slot:
-                self._add_message("No more slots available")
+                self._add_message("无可用仓位")
                 break
 
             # Get stocks and prices
             stocks_to_buy = []
             for code in signal.target_stocks[:3]:  # Max 3 stocks per signal
                 # Normalize code if needed
+                clean_code = code.split(".")[0] if "." in code else code
                 if "." not in code:
                     code = f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
 
                 price = await self._price_service.get_price_at_time(code, self._clock.current_time)
 
                 if price:
-                    stocks_to_buy.append((code, "", price))
+                    # Get stock name from signal or lookup
+                    name = signal.target_stock_names.get(clean_code, "") or self._get_stock_name(code)
+                    stocks_to_buy.append((code, name, price))
 
             if not stocks_to_buy:
                 continue
@@ -482,6 +753,7 @@ class SimulationManager:
                     code,
                     price,
                     signal.reasoning,
+                    stock_name=name,
                     timestamp=self._clock.current_time,
                 )
             else:

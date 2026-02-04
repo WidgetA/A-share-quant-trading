@@ -130,6 +130,7 @@ class PendingSignal:
     title: str
     reasoning: str
     message_id: str
+    target_stock_names: dict[str, str] = field(default_factory=dict)  # code -> name
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -139,6 +140,7 @@ class PendingSignal:
             "sentiment": self.sentiment,
             "confidence": self.confidence,
             "target_stocks": self.target_stocks,
+            "target_stock_names": self.target_stock_names,
             "target_sectors": self.target_sectors,
             "title": self.title,
             "reasoning": self.reasoning,
@@ -159,6 +161,9 @@ class SimulationState:
     pending_signals: list[PendingSignal] = field(default_factory=list)
     pending_holdings: list[SimulationHolding] = field(default_factory=list)
 
+    # Intraday messages for trading hours
+    intraday_signals: list[PendingSignal] = field(default_factory=list)
+
     # Current positions
     holdings: list[SimulationHolding] = field(default_factory=list)
 
@@ -176,6 +181,10 @@ class SimulationState:
     # Messages for display
     messages: list[str] = field(default_factory=list)
 
+    # Sync status
+    can_sync_to_db: bool = False
+    is_synced: bool = False
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
         return {
@@ -186,6 +195,7 @@ class SimulationState:
             "total_days": self.total_days,
             "pending_signals": [s.to_dict() for s in self.pending_signals],
             "pending_holdings": [h.to_dict() for h in self.pending_holdings],
+            "intraday_signals": [s.to_dict() for s in self.intraday_signals],
             "holdings": [h.to_dict() for h in self.holdings],
             "transactions": [t.to_dict() for t in self.transactions],
             "initial_capital": self.initial_capital,
@@ -193,6 +203,8 @@ class SimulationState:
             "day_pnl_amount": self.day_pnl_amount,
             "day_pnl_percent": self.day_pnl_percent,
             "messages": self.messages,
+            "can_sync_to_db": self.can_sync_to_db,
+            "is_synced": self.is_synced,
         }
 
 
