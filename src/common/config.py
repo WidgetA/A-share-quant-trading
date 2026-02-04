@@ -286,3 +286,44 @@ def load_config(config_path: str | Path) -> Config:
         Config instance
     """
     return Config.load(config_path)
+
+
+def get_web_config() -> dict[str, Any]:
+    """
+    Get Web UI configuration from environment variables.
+
+    Environment variables:
+        WEB_ENABLED: Whether to enable web UI (default: false)
+        WEB_HOST: Host to bind to (default: 0.0.0.0)
+        WEB_PORT: Port to listen on (default: 8000)
+        WEB_BASE_URL: Base URL for the web UI (optional)
+        INTERACTION_MODE: Interaction mode - 'cli' or 'web' (default: cli)
+
+    Returns:
+        Dictionary with web configuration:
+            - enabled: Whether web UI is enabled
+            - host: Host to bind to
+            - port: Port to listen on
+            - base_url: Base URL for the web UI
+            - interaction_mode: Interaction mode
+
+    Usage:
+        from src.common.config import get_web_config
+
+        config = get_web_config()
+        if config["enabled"]:
+            # Start web server
+            pass
+    """
+    import os
+
+    enabled_str = os.getenv("WEB_ENABLED", "false").lower()
+    enabled = enabled_str in ("true", "yes", "1", "on")
+
+    return {
+        "enabled": enabled,
+        "host": os.getenv("WEB_HOST", "0.0.0.0"),
+        "port": int(os.getenv("WEB_PORT", "8000")),
+        "base_url": os.getenv("WEB_BASE_URL", ""),
+        "interaction_mode": os.getenv("INTERACTION_MODE", "cli"),
+    }
