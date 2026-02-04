@@ -85,9 +85,14 @@ def create_router() -> APIRouter:
         else:
             strategy_state = {"state": "unknown", "is_running": False}
 
-        # Get positions
+        # Get positions (always reload from database)
         manager = get_position_manager(request)
         if manager:
+            if manager.has_repository:
+                try:
+                    await manager.load_from_db()
+                except Exception as e:
+                    logger.warning(f"Failed to reload positions from DB: {e}")
             positions = {
                 "slots": manager.get_state().get("slots", []),
                 "summary": manager.get_summary(),
@@ -260,10 +265,17 @@ def create_router() -> APIRouter:
 
     @router.get("/api/positions")
     async def api_positions(request: Request) -> dict:
-        """Get all current positions."""
+        """Get all current positions (always reads from database)."""
         manager = get_position_manager(request)
         if not manager:
             return {"positions": [], "summary": {}, "message": "Position manager not initialized"}
+
+        # Always reload from database for fresh data
+        if manager.has_repository:
+            try:
+                await manager.load_from_db()
+            except Exception as e:
+                logger.warning(f"Failed to reload positions from DB: {e}")
 
         return {
             "positions": manager.get_state().get("slots", []),
