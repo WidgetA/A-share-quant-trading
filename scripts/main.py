@@ -349,6 +349,21 @@ class SystemManager:
                 f"slots={position_config.num_slots}"
             )
 
+            # Connect to trading database for position persistence
+            try:
+                from src.trading.repository import create_trading_repository_from_config
+
+                trading_repo = create_trading_repository_from_config()
+                await trading_repo.connect()
+                self.position_manager.set_repository(trading_repo)
+                await self.position_manager.load_from_db()
+                logger.info("PositionManager connected to trading database")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to connect PositionManager to database: {e}. "
+                    f"Positions will not be persisted."
+                )
+
         # Add callback to publish events
         def on_strategy_change(name: str, event: str) -> None:
             if self.coordinator:

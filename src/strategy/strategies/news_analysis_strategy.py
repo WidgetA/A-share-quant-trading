@@ -134,7 +134,8 @@ class NewsAnalysisStrategy(BaseStrategy):
         )
         self._position_manager = PositionManager(position_config)
 
-        # Load existing position state from file
+        # Note: Database connection will be set up in on_load() (async)
+        # For now, try to load from file as fallback
         state_file = self.get_parameter("position_state_file", "data/position_state.json")
         if self._position_manager.load_from_file(state_file):
             holdings = self._position_manager.get_holdings()
@@ -162,6 +163,21 @@ class NewsAnalysisStrategy(BaseStrategy):
         # Pending orders from premarket analysis (to be executed at morning auction)
         self._pending_premarket_orders: list[PendingPremarketOrder] = []
 
+        # Try to connect to trading database for position persistence
+        try:
+            from src.trading.repository import create_trading_repository_from_config
+
+            trading_repo = create_trading_repository_from_config()
+            await trading_repo.connect()
+            self._position_manager.set_repository(trading_repo)
+            await self._position_manager.load_from_db()
+            logger.info("PositionManager connected to trading database")
+        except Exception as e:
+            logger.warning(
+                f"Failed to connect to trading database: {e}. "
+                f"Using file-based persistence."
+            )
+
         logger.info(f"NewsAnalysisStrategy loaded with config: {position_config}")
 
     async def on_unload(self) -> None:
@@ -171,6 +187,28 @@ class NewsAnalysisStrategy(BaseStrategy):
 
         await super().on_unload()
         logger.info("NewsAnalysisStrategy unloaded")
+
+    async def _save_position_state(self) -> None:
+        """
+        Save position state to database or file.
+
+        Uses database if repository is connected, otherwise falls back to file.
+        """
+        if self._position_manager.has_repository:
+            try:
+                await self._position_manager.save_to_db()
+                logger.debug("Position state saved to database")
+            except Exception as e:
+                logger.error(f"Failed to save to database: {e}, falling back to file")
+                state_file = self.get_parameter(
+                    "position_state_file", "data/position_state.json"
+                )
+                self._position_manager.save_to_file(state_file)
+        else:
+            state_file = self.get_parameter(
+                "position_state_file", "data/position_state.json"
+            )
+            self._position_manager.save_to_file(state_file)
 
     async def generate_signals(
         self,
@@ -503,8 +541,7 @@ class NewsAnalysisStrategy(BaseStrategy):
         self._last_morning_auction = context.timestamp
 
         # Save position state
-        state_file = self.get_parameter("position_state_file", "data/position_state.json")
-        self._position_manager.save_to_file(state_file)
+        await self._save_position_state()
         logger.info("Morning auction execution complete, position state saved")
 
     async def _handle_trading_hours(
@@ -623,10 +660,9 @@ class NewsAnalysisStrategy(BaseStrategy):
             await self._holding_tracker.record_holdings(self._position_manager)
             logger.info(f"Recorded {len(holdings)} holdings for overnight tracking")
 
-        # Save position state to file
-        state_file = self.get_parameter("position_state_file", "data/position_state.json")
-        self._position_manager.save_to_file(state_file)
-        logger.info("Saved position state to file")
+        # Save position state
+        await self._save_position_state()
+        logger.info("Saved position state")
 
     def _get_last_close_time(self, current_time: datetime) -> datetime:
         """Get the time of last market close."""
