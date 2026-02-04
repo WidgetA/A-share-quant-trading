@@ -71,7 +71,10 @@ def create_router() -> APIRouter:
 
         # Get strategy state
         controller = get_strategy_controller(request)
-        strategy_state = controller.to_dict() if controller else {"state": "unknown", "is_running": False}
+        if controller:
+            strategy_state = controller.to_dict()
+        else:
+            strategy_state = {"state": "unknown", "is_running": False}
 
         # Get positions
         manager = get_position_manager(request)
@@ -192,7 +195,11 @@ def create_router() -> APIRouter:
         """Get current strategy state."""
         controller = get_strategy_controller(request)
         if not controller:
-            return {"state": "unavailable", "is_running": False, "message": "Strategy controller not initialized"}
+            return {
+                "state": "unavailable",
+                "is_running": False,
+                "message": "Strategy controller not initialized",
+            }
         return controller.to_dict()
 
     @router.post("/api/strategy/start")
