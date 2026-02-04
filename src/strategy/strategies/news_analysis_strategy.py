@@ -174,8 +174,7 @@ class NewsAnalysisStrategy(BaseStrategy):
             logger.info("PositionManager connected to trading database")
         except Exception as e:
             logger.warning(
-                f"Failed to connect to trading database: {e}. "
-                f"Using file-based persistence."
+                f"Failed to connect to trading database: {e}. Using file-based persistence."
             )
 
         logger.info(f"NewsAnalysisStrategy loaded with config: {position_config}")
@@ -200,14 +199,10 @@ class NewsAnalysisStrategy(BaseStrategy):
                 logger.debug("Position state saved to database")
             except Exception as e:
                 logger.error(f"Failed to save to database: {e}, falling back to file")
-                state_file = self.get_parameter(
-                    "position_state_file", "data/position_state.json"
-                )
+                state_file = self.get_parameter("position_state_file", "data/position_state.json")
                 self._position_manager.save_to_file(state_file)
         else:
-            state_file = self.get_parameter(
-                "position_state_file", "data/position_state.json"
-            )
+            state_file = self.get_parameter("position_state_file", "data/position_state.json")
             self._position_manager.save_to_file(state_file)
 
     async def generate_signals(
