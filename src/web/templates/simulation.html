@@ -98,6 +98,9 @@
                         <div class="signal-content">
                             <div class="signal-header">
                                 <span class="signal-index">#{{ signal.index }}</span>
+                                {% if signal.publish_time %}
+                                <span class="signal-time">{{ signal.publish_time[11:16] }}</span>
+                                {% endif %}
                                 <span class="signal-sentiment {{ signal.sentiment }}">{{ sentiment_names.get(signal.sentiment, signal.sentiment) }}</span>
                                 {% if signal.confidence > 0 %}
                                 <span class="signal-confidence">置信度 {{ "%.0f"|format(signal.confidence * 100) }}%</span>
@@ -248,6 +251,9 @@
                         <div class="signal-content">
                             <div class="signal-header">
                                 <span class="signal-index">#{{ signal.index }}</span>
+                                {% if signal.publish_time %}
+                                <span class="signal-time">{{ signal.publish_time[11:16] }}</span>
+                                {% endif %}
                                 <span class="signal-sentiment {{ signal.sentiment }}">{{ sentiment_names.get(signal.sentiment, signal.sentiment) }}</span>
                                 {% if signal.confidence > 0 %}
                                 <span class="signal-confidence">置信度 {{ "%.0f"|format(signal.confidence * 100) }}%</span>

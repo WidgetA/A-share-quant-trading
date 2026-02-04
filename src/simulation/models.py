@@ -131,6 +131,7 @@ class PendingSignal:
     reasoning: str
     message_id: str
     target_stock_names: dict[str, str] = field(default_factory=dict)  # code -> name
+    publish_time: datetime | None = None  # When the message was published
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -144,6 +145,7 @@ class PendingSignal:
             "target_sectors": self.target_sectors,
             "title": self.title,
             "reasoning": self.reasoning,
+            "publish_time": self.publish_time.isoformat() if self.publish_time else None,
         }
 
 

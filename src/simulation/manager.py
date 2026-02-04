@@ -514,9 +514,18 @@ class SimulationManager:
             title = msg_data.get("title", "")[:100]
             sentiment = msg_data.get("sentiment", "unknown")
             msg_id = msg_data.get("id", "")
+            publish_time_str = msg_data.get("publish_time")
 
             if not stock_codes:
                 continue
+
+            # Parse publish_time if provided
+            publish_time = None
+            if publish_time_str:
+                try:
+                    publish_time = datetime.fromisoformat(publish_time_str)
+                except (ValueError, TypeError):
+                    pass
 
             # Get stock names
             stock_names = self._get_stock_names_dict(stock_codes)
@@ -532,6 +541,7 @@ class SimulationManager:
                 title=title,
                 reasoning="用户从消息中选择",
                 message_id=msg_id,
+                publish_time=publish_time,
             )
             self._pending_signals.append(signal)
 
@@ -758,6 +768,7 @@ class SimulationManager:
                 title=msg.title[:100] if msg.title else "",
                 reasoning=reasoning,
                 message_id=msg.id,
+                publish_time=msg.publish_time,
             )
             self._pending_signals.append(signal)
 
@@ -820,6 +831,7 @@ class SimulationManager:
                 title=msg.title[:100] if msg.title else "",
                 reasoning=reasoning,
                 message_id=msg.id,
+                publish_time=msg.publish_time,
             )
             self._intraday_signals.append(signal)
 

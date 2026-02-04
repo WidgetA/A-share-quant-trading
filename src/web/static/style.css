@@ -811,6 +811,12 @@ footer {
     color: #666;
 }
 
+.signal-time {
+    font-size: 0.75rem;
+    color: #888;
+    font-family: monospace;
+}
+
 .signal-sentiment {
     font-size: 0.75rem;
     font-weight: 600;
