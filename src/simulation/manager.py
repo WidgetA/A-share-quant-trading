@@ -153,11 +153,18 @@ class SimulationManager:
             # Continue without stock names
 
         # Load initial holdings if specified
+        has_holdings = False
         if settings.load_holdings_from_date:
-            await self._load_initial_holdings()
+            has_holdings = await self._load_initial_holdings()
 
-        # Set phase to premarket
-        self._phase = SimulationPhase.PREMARKET_ANALYSIS
+        # Set initial phase based on whether we have overnight holdings
+        # If there are holdings, start with MORNING_CONFIRMATION so user can decide to sell first
+        # After selling (releasing slots), then we can select new stocks in PREMARKET_ANALYSIS
+        if has_holdings:
+            self._phase = SimulationPhase.MORNING_CONFIRMATION
+            self._clock.advance_to_time(time(9, 0))
+        else:
+            self._phase = SimulationPhase.PREMARKET_ANALYSIS
         self._last_message_time = datetime.combine(
             settings.start_date - timedelta(days=1),
             time(15, 0),
@@ -354,16 +361,14 @@ class SimulationManager:
         Process user's sell decision.
 
         Can be called during:
-        - TRADING_HOURS: Sell at current intraday price
-        - MARKET_CLOSE: Sell at closing price
-        - MORNING_CONFIRMATION: Sell at next day open price
+        - MARKET_CLOSE: Sell at closing price (optional, for 持仓不过夜)
+        - MORNING_CONFIRMATION: Sell at next day opening price
 
         Args:
             slots_to_sell: List of slot IDs to sell.
         """
-        # Allow sell at TRADING_HOURS, MARKET_CLOSE and MORNING_CONFIRMATION
+        # Only allow sell at MARKET_CLOSE and MORNING_CONFIRMATION (not during trading hours)
         if self._phase not in (
-            SimulationPhase.TRADING_HOURS,
             SimulationPhase.MARKET_CLOSE,
             SimulationPhase.MORNING_CONFIRMATION,
         ):
@@ -645,15 +650,18 @@ class SimulationManager:
 
     # === Private methods ===
 
-    async def _load_initial_holdings(self) -> None:
+    async def _load_initial_holdings(self) -> bool:
         """
         Load initial holdings from the trading database.
 
         Loads the current positions from trading.position_slots and
         trading.stock_holdings tables into the simulation position manager.
+
+        Returns:
+            True if there are filled positions, False otherwise.
         """
         if not self._position_manager:
-            return
+            return False
 
         try:
             # Connect to trading database
@@ -666,7 +674,7 @@ class SimulationManager:
 
             if not slots_data:
                 self._add_message("No position data found in database")
-                return
+                return False
 
             # Load account state for cash balance
             account_state = await self._trading_repo.get_account_state()
@@ -701,10 +709,12 @@ class SimulationManager:
                 self._add_message("No filled positions to load")
 
             logger.info(f"Loaded {filled_count} holdings from database")
+            return filled_count > 0
 
         except Exception as e:
             logger.error(f"Failed to load initial holdings: {e}")
             self._add_message(f"Warning: Failed to load holdings - {e}")
+            return False
 
     def _get_stock_name(self, code: str) -> str:
         """Get stock name for a code, or return empty string if not found."""
