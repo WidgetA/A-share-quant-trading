@@ -24,6 +24,7 @@ from src.simulation.models import (
     SimulationState,
 )
 from src.simulation.position_manager import SimulationPositionManager, SlotType
+from src.trading.repository import TradingRepository, create_trading_repository_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class SimulationManager:
         self._price_service: HistoricalPriceService | None = None
         self._position_manager: SimulationPositionManager | None = None
         self._context: SimulationContext | None = None
+        self._trading_repo: TradingRepository | None = None
 
         # Simulation state
         self._phase = SimulationPhase.NOT_STARTED
@@ -135,9 +137,9 @@ class SimulationManager:
             price_service=self._price_service,
         )
 
-        # TODO: Load initial holdings if specified
-        # if settings.load_holdings_from_date:
-        #     await self._load_initial_holdings(settings.load_holdings_from_date)
+        # Load initial holdings if specified
+        if settings.load_holdings_from_date:
+            await self._load_initial_holdings()
 
         # Set phase to premarket
         self._phase = SimulationPhase.PREMARKET_ANALYSIS
@@ -158,6 +160,9 @@ class SimulationManager:
             await self._price_service.stop()
         if self._message_reader:
             await self._message_reader.close()
+        if self._trading_repo:
+            await self._trading_repo.close()
+            self._trading_repo = None
 
         self._phase = SimulationPhase.NOT_STARTED
         logger.info("Simulation cleaned up")
@@ -344,6 +349,58 @@ class SimulationManager:
         )
 
     # === Private methods ===
+
+    async def _load_initial_holdings(self) -> None:
+        """
+        Load initial holdings from the trading database.
+
+        Loads the current positions from trading.position_slots and
+        trading.stock_holdings tables into the simulation position manager.
+        """
+        if not self._position_manager:
+            return
+
+        try:
+            # Connect to trading database
+            self._trading_repo = create_trading_repository_from_config()
+            await self._trading_repo.connect()
+
+            # Load slots and holdings
+            slots_data = await self._trading_repo.get_all_slots()
+            holdings_data = await self._trading_repo.get_all_holdings()
+
+            if not slots_data:
+                self._add_message("No position data found in database")
+                return
+
+            # Load into simulation position manager
+            filled_count = self._position_manager.load_holdings(slots_data, holdings_data)
+
+            if filled_count > 0:
+                self._add_message(f"Loaded {filled_count} existing position(s) from database")
+
+                # Log details of loaded positions
+                for slot in self._position_manager._slots:
+                    if slot.state == "filled" and slot.holdings:
+                        if slot.sector_name:
+                            self._add_message(
+                                f"  Slot {slot.slot_id} ({slot.sector_name}): "
+                                f"{len(slot.holdings)} stocks"
+                            )
+                        else:
+                            h = slot.holdings[0]
+                            self._add_message(
+                                f"  Slot {slot.slot_id}: {h.stock_code} {h.stock_name} "
+                                f"x{h.quantity} @ {h.entry_price:.2f}"
+                            )
+            else:
+                self._add_message("No filled positions to load")
+
+            logger.info(f"Loaded {filled_count} holdings from database")
+
+        except Exception as e:
+            logger.error(f"Failed to load initial holdings: {e}")
+            self._add_message(f"Warning: Failed to load holdings - {e}")
 
     async def _generate_premarket_signals(self) -> None:
         """Generate signals from premarket messages."""

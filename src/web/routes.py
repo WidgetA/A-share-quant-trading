@@ -396,11 +396,23 @@ def create_simulation_router() -> APIRouter:
                 detail=f"Invalid date format: {body.start_date}. Use YYYY-MM-DD.",
             )
 
+        # Parse load holdings date if specified
+        load_holdings_date = None
+        if body.load_holdings_from:
+            try:
+                load_holdings_date = datetime.strptime(body.load_holdings_from, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid load_holdings_from date: {body.load_holdings_from}",
+                )
+
         # Create settings
         settings = SimulationSettings(
             start_date=start_date,
             num_days=body.num_days,
             initial_capital=body.initial_capital,
+            load_holdings_from_date=load_holdings_date,
         )
 
         # Initialize simulation

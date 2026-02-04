@@ -480,6 +480,84 @@ class SimulationPositionManager:
         self._transactions = []
         self._available_cash = self._config.total_capital
 
+    def load_holdings(
+        self,
+        slots_data: list[dict],
+        holdings_data: dict[int, list[dict]],
+    ) -> int:
+        """
+        Load existing holdings into simulation slots.
+
+        This is used to initialize simulation with historical positions
+        loaded from the database.
+
+        Args:
+            slots_data: List of slot dicts from database with keys:
+                - slot_id, slot_type, state, entry_time, entry_reason, sector_name
+            holdings_data: Dict mapping slot_id to list of holding dicts:
+                - stock_code, stock_name, quantity, entry_price
+
+        Returns:
+            Number of filled slots loaded.
+        """
+        filled_count = 0
+
+        for slot_dict in slots_data:
+            slot_id = slot_dict["slot_id"]
+            state = slot_dict.get("state", "empty")
+
+            # Only load filled slots
+            if state != "filled":
+                continue
+
+            # Find matching simulation slot
+            slot = self.get_slot(slot_id)
+            if not slot:
+                logger.warning(f"Slot {slot_id} not found in simulation slots")
+                continue
+
+            # Get holdings for this slot
+            slot_holdings = holdings_data.get(slot_id, [])
+            if not slot_holdings:
+                logger.warning(f"Slot {slot_id} marked as filled but has no holdings")
+                continue
+
+            # Load holdings into slot
+            holdings = []
+            total_value = 0.0
+            entry_time = slot_dict.get("entry_time") or datetime.now()
+            for h in slot_holdings:
+                entry_price = float(h["entry_price"]) if h.get("entry_price") else 0.0
+                quantity = h.get("quantity", 0)
+                holding = SimulationHolding(
+                    slot_id=slot_id,
+                    stock_code=h["stock_code"],
+                    stock_name=h.get("stock_name", ""),
+                    quantity=quantity,
+                    entry_price=entry_price,
+                    entry_time=entry_time,
+                    entry_reason=slot_dict.get("entry_reason", ""),
+                )
+                holdings.append(holding)
+                total_value += entry_price * quantity
+
+            # Update slot state
+            slot.state = SlotState.FILLED
+            slot.holdings = holdings
+            slot.entry_reason = slot_dict.get("entry_reason", "")
+            slot.sector_name = slot_dict.get("sector_name")
+
+            # Deduct from available cash
+            self._available_cash -= total_value
+
+            filled_count += 1
+            logger.info(
+                f"Loaded slot {slot_id}: {len(holdings)} holdings, "
+                f"value={total_value:,.0f}"
+            )
+
+        return filled_count
+
     # No-op methods for compatibility with real PositionManager
     async def save_to_db(self) -> None:
         """No-op: simulation doesn't persist to database."""
