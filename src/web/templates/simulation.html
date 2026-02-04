@@ -59,6 +59,14 @@
             'morning_confirmation': '决定隔夜持仓是否卖出',
             'completed': '查看最终模拟结果'
         } %}
+        {% set sentiment_names = {
+            'strong_bullish': '强看多',
+            'bullish': '看多',
+            'neutral': '中性',
+            'bearish': '看空',
+            'strong_bearish': '强看空',
+            'unknown': '未分析'
+        } %}
         <div class="phase-header">
             <div class="phase-info">
                 <span class="phase-badge {{ state.phase }}">{{ phase_names.get(state.phase, state.phase) }}</span>
@@ -78,14 +86,6 @@
 
         <!-- Premarket: Signal Selection -->
         {% if state.phase == 'premarket_analysis' and state.pending_signals %}
-        {% set sentiment_names = {
-            'strong_bullish': '强看多',
-            'bullish': '看多',
-            'neutral': '中性',
-            'bearish': '看空',
-            'strong_bearish': '强看空',
-            'unknown': '未分析'
-        } %}
         <div class="sim-card">
             <h3>选择要买入的消息</h3>
             <p class="phase-description">以下是当日所有消息，绿色为AI推荐的正面消息，您可以选择任何消息进行买入</p>
