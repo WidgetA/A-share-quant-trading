@@ -12,7 +12,7 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Callable
 
@@ -322,7 +322,7 @@ class TradingScheduler:
         """Check if datetime is a weekday (Monday=0 to Friday=4)."""
         return dt.weekday() < 5
 
-    def _next_trading_day(self, from_date: datetime) -> datetime:
+    def _next_trading_day(self, from_date: datetime) -> date:
         """
         Get the next trading day after the given date.
 

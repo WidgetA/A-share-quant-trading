@@ -329,7 +329,7 @@ class LLMService:
         # Convert exceptions to failed results
         processed_results = []
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 processed_results.append(
                     AnalysisResult(
                         success=False,

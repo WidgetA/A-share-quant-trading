@@ -45,3 +45,8 @@ markers = [
 ]
 # Skip live tests by default (run with pytest -m live to include them)
 addopts = "-m 'not live'"
+
+[dependency-groups]
+dev = [
+    "types-pyyaml>=6.0.12.20250915",
+]

@@ -220,6 +220,7 @@ class AnnouncementContentFetcher:
 
         # Download PDF
         logger.info(f"Downloading PDF: {url}")
+        assert self._client is not None
         response = await self._client.get(url)
         response.raise_for_status()
         pdf_data = response.content
@@ -278,6 +279,7 @@ class AnnouncementContentFetcher:
 
         # Make API call
         api_url = f"{self._config.base_url}/chat/completions"
+        assert self._client is not None
         response = await self._client.post(
             api_url,
             json=payload,
@@ -305,6 +307,7 @@ class AnnouncementContentFetcher:
         Returns:
             Extracted text content.
         """
+        assert self._client is not None
         response = await self._client.get(url)
         response.raise_for_status()
 
