@@ -1,6 +1,11 @@
 # Multi-stage build for smaller image
 FROM python:3.11-slim AS builder
 
+# Build arguments for version tracking
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_TIME=unknown
+
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -15,6 +20,16 @@ RUN uv sync --frozen --no-dev || uv sync --no-dev
 
 # Runtime stage
 FROM python:3.11-slim AS runtime
+
+# Inherit build arguments for version tracking
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_TIME=unknown
+
+# Set version info as environment variables
+ENV GIT_COMMIT=${GIT_COMMIT}
+ENV GIT_BRANCH=${GIT_BRANCH}
+ENV BUILD_TIME=${BUILD_TIME}
 
 # Add Debian oldstable for legacy libidn11 required by iFinD SDK
 RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/bullseye.list
@@ -66,6 +81,15 @@ ENV LD_LIBRARY_PATH="/opt/ths_sdk/bin64:$LD_LIBRARY_PATH"
 # These are placeholders - MUST be set at runtime
 ENV IFIND_USERNAME=""
 ENV IFIND_PASSWORD=""
+
+# Web UI configuration
+ENV WEB_ENABLED=true
+ENV WEB_HOST=0.0.0.0
+ENV WEB_PORT=8000
+ENV INTERACTION_MODE=web
+
+# Expose Web UI port
+EXPOSE 8000
 
 # Run the service
 CMD ["python", "scripts/main.py"]

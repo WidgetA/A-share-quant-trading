@@ -168,15 +168,39 @@ class FeishuBot:
         message = f"🚨 {title}\n\n{content}"
         return await self.send_message(message)
 
-    async def send_startup_notification(self) -> bool:
+    async def send_startup_notification(
+        self,
+        git_commit: str | None = None,
+        git_branch: str | None = None,
+        build_time: str | None = None,
+    ) -> bool:
         """
-        Send system startup notification.
+        Send system startup notification with optional version info.
+
+        Args:
+            git_commit: Git commit hash (short or full)
+            git_branch: Git branch name
+            build_time: Build timestamp
 
         Returns:
             True if sent successfully, False otherwise
         """
         now = datetime.now(BEIJING_TZ)
-        message = f"✅ A股交易系统已启动\n\n⏰ 启动时间: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+        lines = [
+            "✅ A股交易系统已启动",
+            "",
+            f"⏰ 启动时间: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+
+        # Add version info if available
+        if git_commit and git_commit != "unknown":
+            lines.append(f"📦 版本: {git_commit[:8]}")
+        if git_branch and git_branch != "unknown":
+            lines.append(f"🌿 分支: {git_branch}")
+        if build_time and build_time != "unknown":
+            lines.append(f"🔨 构建: {build_time}")
+
+        message = "\n".join(lines)
         return await self.send_message(message)
 
     async def send_shutdown_notification(self) -> bool:
@@ -188,4 +212,48 @@ class FeishuBot:
         """
         now = datetime.now(BEIJING_TZ)
         message = f"⚠️ A股交易系统已停止\n\n⏰ 停止时间: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+        return await self.send_message(message)
+
+    async def send_limit_up_skip_notification(
+        self,
+        sector_name: str,
+        limit_up_stocks: list[tuple[str, str]],
+        available_stocks: list[tuple[str, str, float, float | None]],
+        reason: str,
+    ) -> bool:
+        """
+        Send notification about stocks skipped due to limit-up.
+
+        Args:
+            sector_name: Name of the sector/board.
+            limit_up_stocks: List of (code, name) tuples for stocks at limit-up.
+            available_stocks: List of (code, name, price, change_pct) tuples still buyable.
+            reason: Original reason for the trade signal.
+
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        # Format limit-up stocks
+        limit_up_str = "\n".join([f"  {code} {name}" for code, name in limit_up_stocks[:5]])
+        if len(limit_up_stocks) > 5:
+            limit_up_str += f"\n  ... +{len(limit_up_stocks) - 5}"
+
+        # Format available stocks
+        if available_stocks:
+            available_str = "\n".join(
+                [f"  {code} {name} ¥{price:.2f}" for code, name, price, _ in available_stocks[:3]]
+            )
+            buying_section = f"Buying instead:\n{available_str}"
+        else:
+            buying_section = "No available stocks, skipping sector."
+
+        message = f"""Limit-Up Skip: {sector_name}
+
+Reason: {reason[:60]}...
+
+Limit-up (skipped):
+{limit_up_str}
+
+{buying_section}"""
+
         return await self.send_message(message)

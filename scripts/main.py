@@ -30,9 +30,10 @@ from typing import Any
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.common.config import Config
+from src.common.config import Config, get_web_config
 from src.common.coordinator import Event, EventType, ModuleCoordinator
 from src.common.feishu_bot import FeishuBot
+from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.common.scheduler import MarketSession, TradingScheduler
 from src.common.state_manager import StateManager, SystemState, create_state_manager_from_config
 from src.data.readers.message_reader import MessageReader, MessageReaderConfig
@@ -131,6 +132,11 @@ class SystemManager:
         # Feishu alert bot
         self.feishu_bot: FeishuBot = FeishuBot()
 
+        # Web UI components
+        self.pending_store: PendingConfirmationStore | None = None
+        self._web_server: asyncio.Server | None = None
+        self._web_config: dict = get_web_config()
+
         # Tasks
         self._tasks: list[asyncio.Task] = []
 
@@ -164,6 +170,10 @@ class SystemManager:
 
         # 6. Initialize modules
         await self._initialize_modules()
+
+        # 7. Initialize Web UI (if enabled)
+        if self._web_config.get("enabled", True):
+            await self._initialize_web_ui()
 
         logger.info("System initialization complete")
 
@@ -211,6 +221,47 @@ class SystemManager:
                 f"Strategies will not have access to messages."
             )
             self.message_reader = None
+
+    async def _initialize_web_ui(self) -> None:
+        """Initialize Web UI for trading confirmations."""
+        self.pending_store = get_pending_store()
+        logger.info(
+            f"Web UI initialized: mode={self._web_config.get('mode')}, "
+            f"base_url={self._web_config.get('base_url')}"
+        )
+
+    async def _start_web_server(self) -> None:
+        """Start the FastAPI web server in background."""
+        if not self._web_config.get("enabled", True):
+            return
+
+        import uvicorn
+
+        from src.web.app import create_app
+
+        host = self._web_config.get("host", "0.0.0.0")
+        port = self._web_config.get("port", 8000)
+        base_url = self._web_config.get("base_url", f"http://localhost:{port}")
+
+        app = create_app(store=self.pending_store, web_base_url=base_url)
+
+        config = uvicorn.Config(
+            app=app,
+            host=host,
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+
+        # Run server in background
+        self._tasks.append(
+            asyncio.create_task(
+                server.serve(),
+                name="web_server",
+            )
+        )
+        logger.info(f"Web UI server started at http://{host}:{port}")
 
     async def _initialize_modules(self) -> None:
         """Initialize all system modules."""
@@ -338,9 +389,20 @@ class SystemManager:
 
         logger.info("System is running")
 
-        # Send Feishu startup notification
+        # Send Feishu startup notification with version info
         if self.feishu_bot.is_configured():
-            asyncio.create_task(self.feishu_bot.send_startup_notification())
+            import os
+
+            asyncio.create_task(
+                self.feishu_bot.send_startup_notification(
+                    git_commit=os.environ.get("GIT_COMMIT"),
+                    git_branch=os.environ.get("GIT_BRANCH"),
+                    build_time=os.environ.get("BUILD_TIME"),
+                )
+            )
+
+        # Start Web UI server
+        await self._start_web_server()
 
         # Start strategy engine
         if self.strategy_engine:

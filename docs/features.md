@@ -25,6 +25,8 @@
 | 0.5.1 | 2026-02-03 | - | SYS-002/DAT-005: Migrate StateManager and LimitUpDatabase from SQLite to PostgreSQL |
 | 0.6.0 | 2026-02-03 | - | STR-003: Use pre-analyzed messages from external project (no LLM calls needed) |
 | 0.6.1 | 2026-02-03 | - | SYS-004: Feishu alert notifications for errors and critical events |
+| 0.7.0 | 2026-02-03 | - | SYS-005: Web UI for trading confirmations (containerized deployment) |
+| 0.7.1 | 2026-02-04 | - | SYS-004: Enhanced startup notification with git commit info for CD tracking |
 
 ---
 
@@ -196,9 +198,15 @@ scheduler.add_session_callback(on_change)
 **Alert Types**:
 | Type | Trigger | Format |
 |------|---------|--------|
-| Startup | System starts successfully | `✅ A股交易系统已启动\n⏰ 启动时间: {time}` |
+| Startup | System starts successfully | `✅ A股交易系统已启动\n⏰ 启动时间: {time}\n📦 版本: {commit_hash}` |
 | Shutdown | System stops | `⚠️ A股交易系统已停止\n⏰ 停止时间: {time}` |
 | Error | Exception or critical error | `🚨 {title}\n\n{content}` |
+
+**CD Deployment Tracking** (v0.7.1):
+- Git commit hash is embedded during Docker image build
+- Startup notification includes commit info for deployment verification
+- Enables tracking of which version is deployed after watchtower auto-update
+- Version file: `VERSION` at image build time, read on startup
 
 **Files**:
 - `src/common/feishu_bot.py` - FeishuBot class
@@ -237,6 +245,126 @@ if bot.is_configured():
 - [x] Error alert method
 - [x] Startup/shutdown notifications
 - [x] Unit tests
+
+---
+
+### [SYS-005] Web UI for Trading Confirmations
+
+**Status**: Completed
+
+**Description**: Web-based user interaction for trading confirmations, replacing command-line stdin input to support containerized deployment.
+
+**Requirements**:
+- Web UI for premarket signal selection and morning sell confirmation
+- Feishu notifications with Web links for intraday signals
+- Timeout handling with configurable default behaviors
+- Support both CLI mode (local development) and Web mode (container)
+
+**Technical Design**:
+- `WebUserInteraction` class extends `UserInteraction` for Web-based input
+- `PendingConfirmationStore` manages pending confirmation requests
+- FastAPI + Jinja2 for Web UI and API
+- Strategy engine creates confirmation → waits for user response via Web
+- Feishu notifications include clickable confirmation links
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Trading System (Container)                 │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │   FastAPI    │◄──►│  Pending     │◄──►│  Strategy    │  │
+│  │   :8000      │    │  Store       │    │  Engine      │  │
+│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│         │                   │                    │          │
+│         ▼                   ▼                    ▼          │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │  HTML Pages  │    │  Feishu Bot  │    │  Web User    │  │
+│  │              │    │  (通知+链接) │    │  Interaction │  │
+│  └──────────────┘    └──────────────┘    └──────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Interaction Points**:
+| Interaction | Time | Notification | Confirmation |
+|-------------|------|--------------|--------------|
+| Premarket signal selection | 08:30 | - | Web UI |
+| Morning sell confirmation | 09:00 | - | Web UI |
+| Intraday buy confirmation | Trading hours | Feishu | Web UI |
+| Limit-up stock selection | Trading hours | Feishu | Web UI |
+
+**API Endpoints**:
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `GET /` | GET | Main dashboard (pending list) |
+| `GET /confirm/{id}` | GET | Confirmation page |
+| `GET /api/pending` | GET | List pending confirmations |
+| `GET /api/pending/{id}` | GET | Get confirmation details |
+| `POST /api/pending/{id}/submit` | POST | Submit user decision |
+| `GET /api/status` | GET | Health check |
+
+**Configuration** (Environment Variables):
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEB_ENABLED` | `true` | Enable/disable Web UI |
+| `WEB_HOST` | `0.0.0.0` | Bind host |
+| `WEB_PORT` | `8000` | Bind port |
+| `WEB_BASE_URL` | auto | Base URL for notification links |
+| `INTERACTION_MODE` | `web` | `web` or `cli` |
+
+**Timeout Defaults** (unchanged from CLI):
+| Type | Timeout | Default Action |
+|------|---------|----------------|
+| premarket | 5 min | Skip all signals |
+| intraday | 1 min | Don't buy |
+| morning | 5 min | Sell all holdings |
+| limit_up | 1 min | Skip sector |
+
+**Files**:
+- `src/common/pending_store.py` - Pending confirmation store
+- `src/common/user_interaction.py` - Extended with `WebUserInteraction`
+- `src/web/__init__.py` - Web module
+- `src/web/app.py` - FastAPI application
+- `src/web/routes.py` - API routes
+- `src/web/templates/` - Jinja2 HTML templates
+- `src/web/static/` - CSS styles
+
+**Usage**:
+```python
+# Web mode (container deployment)
+from src.common.user_interaction import WebUserInteraction, WebInteractionConfig
+from src.common.pending_store import get_pending_store
+
+config = WebInteractionConfig(web_base_url="http://your-server:8000")
+ui = WebUserInteraction(config, get_pending_store(), feishu_bot)
+
+# Same interface as UserInteraction
+selected = await ui.premarket_review(signals)
+confirmed = await ui.intraday_confirm(signal)
+```
+
+**Docker Deployment**:
+```yaml
+# docker-compose.prod.yml
+services:
+  trading-service:
+    ports:
+      - "8000:8000"  # Web UI port
+    environment:
+      - WEB_ENABLED=true
+      - WEB_BASE_URL=http://your-server:8000
+      - INTERACTION_MODE=web
+```
+
+**Acceptance Criteria**:
+- [x] PendingConfirmationStore for confirmation state management
+- [x] FastAPI Web application with API endpoints
+- [x] HTML templates for confirmation pages
+- [x] WebUserInteraction class extending UserInteraction
+- [x] Feishu notifications with Web confirmation links
+- [x] Docker configuration with port exposure
+- [x] Environment variable configuration
+- [x] Timeout handling with default behaviors
 
 ---
 
@@ -982,7 +1110,7 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 
 Features under consideration (not yet planned):
 
-- [ ] Web dashboard for monitoring
+- [x] Web dashboard for monitoring → See SYS-005
 - [ ] Telegram/WeChat notifications
 - [ ] Backtesting framework
 - [ ] Multi-account support
