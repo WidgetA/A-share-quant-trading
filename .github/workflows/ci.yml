@@ -107,3 +107,38 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Send Feishu deployment notification
+        if: success()
+        env:
+          FEISHU_BOT_URL: ${{ secrets.FEISHU_BOT_URL }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if [ -n "$FEISHU_APP_ID" ] && [ -n "$FEISHU_APP_SECRET" ] && [ -n "$FEISHU_CHAT_ID" ]; then
+            BOT_URL="${FEISHU_BOT_URL:-https://feishugroupbot-widgetinp950-g352rogo.leapcell.dev}"
+            DEPLOY_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+            COMMIT_SHORT="${GITHUB_SHA:0:8}"
+            # Escape special characters for JSON
+            COMMIT_MSG_ESCAPED=$(echo "$COMMIT_MSG" | head -1 | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+            MESSAGE=$(cat <<EOF
+          🚀 新版本已部署
+
+          📦 版本 ${COMMIT_SHORT}
+          🌿 分支 ${BRANCH_NAME}
+          📝 提交 ${COMMIT_MSG_ESCAPED}
+          👤 作者 ${COMMIT_AUTHOR}
+          ⏰ 时间 ${DEPLOY_TIME}
+          EOF
+            )
+            curl -s -X POST "${BOT_URL}/api/send" \
+              -H "Content-Type: application/json" \
+              --data-raw "$(jq -n --arg app_id "$FEISHU_APP_ID" --arg app_secret "$FEISHU_APP_SECRET" --arg chat_id "$FEISHU_CHAT_ID" --arg message "$MESSAGE" '{app_id: $app_id, app_secret: $app_secret, chat_id: $chat_id, message: $message}')"
+          else
+            echo "Feishu notification skipped - credentials not configured"
+          fi
