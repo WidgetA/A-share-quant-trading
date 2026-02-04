@@ -257,18 +257,35 @@ class SimulationManager:
             self._clock.advance_to_time(time(9, 30))
 
         elif current_phase == SimulationPhase.TRADING_HOURS:
-            # Check for intraday messages first
+            # Advance time forward before checking intraday messages
+            # Simulate checking at different times: 10:30, 11:30, 14:00, 15:00
+            current_time = self._clock.current_time.time()
+            if current_time < time(10, 30):
+                self._clock.advance_to_time(time(10, 30))
+            elif current_time < time(11, 30):
+                self._clock.advance_to_time(time(11, 30))
+            elif current_time < time(14, 0):
+                self._clock.advance_to_time(time(14, 0))
+            else:
+                # Already past 14:00, go to close
+                self._intraday_signals = []
+                self._clock.advance_to_time(time(15, 0))
+                await self._update_closing_prices()
+                self._phase = SimulationPhase.MARKET_CLOSE
+                return self._phase
+
+            # Check for intraday messages at this time point
             if not self._intraday_signals:
                 await self._check_intraday_messages()
                 if self._intraday_signals:
-                    self._add_message(f"发现 {len(self._intraday_signals)} 条盘中消息")
+                    self._add_message(
+                        f"[{self._clock.get_time_string()[11:16]}] "
+                        f"发现 {len(self._intraday_signals)} 条盘中消息"
+                    )
                     return self._phase  # Stay in trading hours, let user review
 
-            # No intraday messages or user skipped, advance to market close
-            self._intraday_signals = []
-            self._clock.advance_to_time(time(15, 0))
-            await self._update_closing_prices()
-            self._phase = SimulationPhase.MARKET_CLOSE
+            # No intraday messages at this checkpoint, user can check again or skip to close
+            self._add_message(f"[{self._clock.get_time_string()[11:16]}] 无新盘中消息")
 
         elif current_phase == SimulationPhase.MARKET_CLOSE:
             # At market close, check if there are holdings to sell
@@ -374,6 +391,13 @@ class SimulationManager:
                     )
                     if price:
                         prices[h.stock_code] = price
+                    elif h.current_price:
+                        # Fallback to current_price from holding
+                        prices[h.stock_code] = h.current_price
+                    elif h.entry_price:
+                        # Last resort: use entry price (0 profit)
+                        prices[h.stock_code] = h.entry_price
+                        self._add_message(f"警告: {h.stock_code} 无法获取价格，使用成本价")
 
                 pnl = self._position_manager.release_slot(slot_id, prices, self._clock.current_time)
                 self._add_message(f"卖出仓位 {slot_id}, 盈亏: {pnl:+,.0f}")
