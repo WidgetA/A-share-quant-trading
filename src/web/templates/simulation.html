@@ -206,6 +206,7 @@
         <div class="capital-info">
             <span>Initial: {{ "{:,.0f}".format(state.initial_capital) }}</span>
             <span>Available: {{ "{:,.0f}".format(state.available_cash) }}</span>
+            <button class="btn btn-sm btn-secondary" onclick="showMessages()">View Messages</button>
         </div>
     </section>
 
@@ -221,6 +222,25 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-primary" onclick="resetSimulation()">Start New Simulation</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Messages Modal -->
+    <div id="messages-modal" class="modal hidden">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>Historical Messages</h3>
+                <button class="modal-close" onclick="closeMessages()">&times;</button>
+            </div>
+            <div class="modal-body" id="messages-content">
+                <div class="messages-filter">
+                    <label>
+                        <input type="checkbox" id="only-positive" onchange="loadMessages()">
+                        Only show positive messages
+                    </label>
+                </div>
+                <div id="messages-list">Loading...</div>
             </div>
         </div>
     </div>
@@ -454,6 +474,74 @@ function closeResults() {
 // Reset simulation
 async function resetSimulation() {
     await cancelSimulation();
+}
+
+// Show messages modal
+function showMessages() {
+    document.getElementById('messages-modal').classList.remove('hidden');
+    loadMessages();
+}
+
+// Close messages modal
+function closeMessages() {
+    document.getElementById('messages-modal').classList.add('hidden');
+}
+
+// Load messages from API
+async function loadMessages() {
+    const onlyPositive = document.getElementById('only-positive').checked;
+    const listEl = document.getElementById('messages-list');
+    listEl.innerHTML = '<p>Loading...</p>';
+
+    try {
+        const url = `/api/simulation/messages?only_positive=${onlyPositive}&limit=100`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!response.ok) {
+            listEl.innerHTML = `<p class="error">${data.detail || 'Failed to load messages'}</p>`;
+            return;
+        }
+
+        if (data.messages.length === 0) {
+            listEl.innerHTML = '<p>No messages found for this date.</p>';
+            return;
+        }
+
+        let html = `<p class="messages-summary">Found ${data.count} messages for ${data.sim_date}</p>`;
+        html += '<div class="messages-table">';
+
+        for (const msg of data.messages) {
+            const sentiment = msg.analysis?.sentiment || 'unknown';
+            const confidence = msg.analysis ? (msg.analysis.confidence * 100).toFixed(0) + '%' : '-';
+            const reasoning = msg.analysis?.reasoning || 'No analysis';
+            const stocks = msg.analysis?.affected_stocks?.join(', ') || msg.stock_codes?.join(', ') || '-';
+
+            html += `
+                <div class="message-row ${sentiment}">
+                    <div class="message-header">
+                        <span class="message-time">${msg.publish_time?.substring(0, 16) || '-'}</span>
+                        <span class="message-source">${msg.source_name}</span>
+                        <span class="sentiment-badge ${sentiment}">${sentiment}</span>
+                        <span class="confidence">${confidence}</span>
+                    </div>
+                    <div class="message-title">${msg.title || '(No title)'}</div>
+                    <div class="message-stocks">Stocks: ${stocks}</div>
+                    <div class="message-reasoning">${reasoning}</div>
+                    <details class="message-content-details">
+                        <summary>View content</summary>
+                        <div class="message-content">${msg.content || '(No content)'}</div>
+                    </details>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        listEl.innerHTML = html;
+
+    } catch (error) {
+        listEl.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+    }
 }
 
 // Toggle capital input visibility based on load holdings checkbox

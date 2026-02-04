@@ -506,6 +506,75 @@ def create_simulation_router() -> APIRouter:
 
         return result.to_dict()
 
+    @router.get("/messages")
+    async def get_simulation_messages(
+        only_positive: bool = False,
+        limit: int = 100,
+    ) -> dict:
+        """
+        Get messages for the current simulation date.
+
+        Returns all messages (or only positive ones) with their analysis results.
+        """
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(
+                status_code=400,
+                detail="Simulation not initialized.",
+            )
+
+        # Access internal components
+        hist_reader = manager._hist_message_reader
+        clock = manager._clock
+
+        if not hist_reader or not clock:
+            raise HTTPException(
+                status_code=500,
+                detail="Simulation components not available.",
+            )
+
+        # Get premarket messages (all or only positive)
+        messages = await hist_reader.get_premarket_messages(
+            trade_date=clock.current_time,
+            only_positive=only_positive,
+            limit=limit,
+        )
+
+        # Convert to dict format
+        result = []
+        for msg in messages:
+            msg_dict = {
+                "id": msg.id,
+                "source_type": msg.source_type,
+                "source_name": msg.source_name,
+                "title": msg.title,
+                "content": msg.content[:500] if msg.content else "",  # Truncate
+                "publish_time": msg.publish_time.isoformat() if msg.publish_time else None,
+                "stock_codes": msg.stock_codes,
+                "url": msg.url,
+            }
+
+            # Add analysis if available
+            if msg.analysis:
+                msg_dict["analysis"] = {
+                    "sentiment": msg.analysis.sentiment.value,
+                    "confidence": msg.analysis.confidence,
+                    "reasoning": msg.analysis.reasoning,
+                    "affected_stocks": msg.analysis.affected_stocks,
+                }
+            else:
+                msg_dict["analysis"] = None
+
+            result.append(msg_dict)
+
+        return {
+            "success": True,
+            "sim_date": clock.current_date.isoformat(),
+            "count": len(result),
+            "messages": result,
+        }
+
     @router.delete("")
     async def cancel_simulation() -> dict:
         """Cancel current simulation."""
