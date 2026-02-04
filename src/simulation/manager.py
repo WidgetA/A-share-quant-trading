@@ -459,101 +459,56 @@ class SimulationManager:
         self._add_message("跳过盘中消息")
         self._intraday_signals = []
 
-    async def buy_from_messages(self, messages: list[dict]) -> dict[str, int]:
+    def set_signals_from_messages(self, messages: list[dict]) -> dict[str, int]:
         """
-        Buy stocks from selected messages (from messages viewer modal).
+        Set pending signals from selected messages (modal selection).
+
+        This replaces the current pending_signals with new signals created
+        from the user's message selection in the modal. The actual buying
+        happens when user confirms on the main page.
 
         Args:
             messages: List of message dicts with id, stocks, title, sentiment.
 
         Returns:
-            Dict with processed count.
+            Dict with count of signals set.
         """
-        if not self._position_manager or not self._price_service or not self._clock:
-            raise RuntimeError("Simulation not properly initialized")
+        if self._phase != SimulationPhase.PREMARKET_ANALYSIS:
+            raise RuntimeError("只能在盘前分析阶段选择消息")
 
-        # Only allow buying in premarket or trading hours
-        if self._phase not in (
-            SimulationPhase.PREMARKET_ANALYSIS,
-            SimulationPhase.TRADING_HOURS,
-        ):
-            raise RuntimeError("只能在盘前分析或交易时段买入")
+        # Clear current pending signals and create new ones from selection
+        self._pending_signals = []
 
-        processed = 0
-        slot_type = (
-            SlotType.PREMARKET
-            if self._phase == SimulationPhase.PREMARKET_ANALYSIS
-            else SlotType.INTRADAY
-        )
-
-        for msg_data in messages:
+        for i, msg_data in enumerate(messages, 1):
             stock_codes = msg_data.get("stocks", [])
-            title = msg_data.get("title", "")[:50]
+            title = msg_data.get("title", "")[:100]
+            sentiment = msg_data.get("sentiment", "unknown")
+            msg_id = msg_data.get("id", "")
 
             if not stock_codes:
                 continue
 
-            # Get available slot
-            slot = self._position_manager.get_available_slot(slot_type)
-            if not slot:
-                self._add_message("无可用仓位，无法继续买入")
-                break
+            # Get stock names
+            stock_names = self._get_stock_names_dict(stock_codes)
 
-            # Get prices for stocks
-            stocks_to_buy = []
-            for code in stock_codes[:3]:  # Max 3 stocks per message
-                if "." not in code:
-                    code = f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
+            signal = PendingSignal(
+                index=i,
+                signal_type="buy_sector" if len(stock_codes) > 1 else "buy_stock",
+                sentiment=sentiment,
+                confidence=0.8 if sentiment in ("strong_bullish", "bullish") else 0.5,
+                target_stocks=stock_codes,
+                target_stock_names=stock_names,
+                target_sectors=[],
+                title=title,
+                reasoning="用户从消息中选择",
+                message_id=msg_id,
+            )
+            self._pending_signals.append(signal)
 
-                price = await self._price_service.get_price_at_time(code, self._clock.current_time)
-                if price:
-                    name = self._get_stock_name(code)
-                    stocks_to_buy.append((code, name, price))
+        count = len(self._pending_signals)
+        self._add_message(f"已选择 {count} 条消息，请确认买入")
 
-            if not stocks_to_buy:
-                continue
-
-            # Allocate and fill slot
-            if len(stocks_to_buy) == 1:
-                code, name, price = stocks_to_buy[0]
-                self._position_manager.allocate_slot(
-                    slot,
-                    code,
-                    price,
-                    f"消息: {title}",
-                    stock_name=name,
-                    timestamp=self._clock.current_time,
-                )
-                self._position_manager.fill_slot(
-                    slot.slot_id, {code: price}, self._clock.current_time
-                )
-                self._add_message(f"买入 {code} {name} @ {price:.2f}")
-            else:
-                self._position_manager.allocate_slot_sector(
-                    slot,
-                    stocks_to_buy,
-                    sector_name=title,
-                    reason=f"消息选择: {title}",
-                    timestamp=self._clock.current_time,
-                )
-                fill_prices = {s[0]: s[2] for s in stocks_to_buy}
-                self._position_manager.fill_slot(
-                    slot.slot_id, fill_prices, self._clock.current_time
-                )
-                self._add_message(f"买入 {title}")
-
-            processed += 1
-
-        # After buying from messages, clear pending signals and advance phase
-        if processed > 0:
-            self._pending_signals = []
-            if self._phase == SimulationPhase.PREMARKET_ANALYSIS:
-                # Skip to trading hours since buys are already executed
-                self._phase = SimulationPhase.TRADING_HOURS
-                self._clock.advance_to_time(time(9, 30))
-                self._add_message("已完成买入，进入交易时段")
-
-        return {"processed": processed}
+        return {"count": count}
 
     def get_result(self) -> SimulationResult | None:
         """

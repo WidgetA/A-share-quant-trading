@@ -634,13 +634,13 @@ def create_simulation_router() -> APIRouter:
             "messages": result,
         }
 
-    @router.post("/messages/buy")
-    async def buy_from_messages(request: Request) -> dict:
+    @router.post("/messages/select")
+    async def select_messages(request: Request) -> dict:
         """
-        Buy stocks from selected messages.
+        Set pending signals from selected messages.
 
-        This endpoint allows users to select messages from the messages viewer
-        and buy the associated stocks.
+        This endpoint allows users to select messages from the messages viewer.
+        The selected messages become pending signals for confirmation on the main page.
         """
         manager = get_simulation_manager()
 
@@ -654,11 +654,11 @@ def create_simulation_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="No messages selected.")
 
         try:
-            result = await manager.buy_from_messages(messages)
+            result = manager.set_signals_from_messages(messages)
             return {
                 "success": True,
-                "processed": result.get("processed", 0),
-                "message": f"已处理 {result.get('processed', 0)} 条消息",
+                "count": result.get("count", 0),
+                "message": f"已选择 {result.get('count', 0)} 条消息",
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))

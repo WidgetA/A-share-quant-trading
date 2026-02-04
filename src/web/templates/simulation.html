@@ -344,7 +344,7 @@
                 <div id="messages-list">加载中...</div>
             </div>
             <div class="modal-footer messages-actions" id="messages-actions" style="display: none;">
-                <button class="btn btn-primary" onclick="buySelectedMessages()">买入选中的消息</button>
+                <button class="btn btn-primary" onclick="confirmMessageSelection()">确认选择</button>
                 <span class="selection-count">已选 <span id="msg-selected-count">0</span> 条</span>
             </div>
         </div>
@@ -804,11 +804,11 @@ function updateMsgSelectionCount() {
     document.getElementById('msg-selected-count').textContent = checkboxes.length;
 }
 
-// Buy selected messages
-async function buySelectedMessages() {
+// Confirm message selection (updates pending signals, then main page shows for confirmation)
+async function confirmMessageSelection() {
     const checkboxes = document.querySelectorAll('.msg-checkbox:checked');
     if (checkboxes.length === 0) {
-        alert('请先选择要买入的消息');
+        alert('请先选择消息');
         return;
     }
 
@@ -824,7 +824,7 @@ async function buySelectedMessages() {
     });
 
     try {
-        const response = await fetch('/api/simulation/messages/buy', {
+        const response = await fetch('/api/simulation/messages/select', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ messages: selectedMessages })
@@ -833,11 +833,11 @@ async function buySelectedMessages() {
         const result = await response.json();
 
         if (response.ok && result.success) {
-            alert(`买入成功！已处理 ${result.processed} 条消息`);
+            // Close modal and reload - main page will show selected signals for confirmation
             closeMessages();
             window.location.reload();
         } else {
-            alert('买入失败: ' + (result.detail || '未知错误'));
+            alert('选择失败: ' + (result.detail || '未知错误'));
         }
     } catch (error) {
         alert('网络错误: ' + error.message);
