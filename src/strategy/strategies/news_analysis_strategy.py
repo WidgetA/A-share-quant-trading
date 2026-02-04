@@ -307,21 +307,40 @@ class NewsAnalysisStrategy(BaseStrategy):
         This function only analyzes news and saves pending orders.
         Actual execution happens in _handle_morning_auction after
         checking real-time prices for limit-up conditions.
-        """
-        # Check if it's analysis time
-        analysis_time = self.get_parameter("premarket_analysis_time", "08:30")
 
+        IMPORTANT: Must wait for morning_confirmation to complete first
+        if there are overnight holdings. This ensures we know how many
+        slots are available before selecting new stocks.
+        """
         # Only run once per day
         if self._last_premarket_analysis:
             if self._last_premarket_analysis.date() == context.timestamp.date():
                 return
 
-        # Check time window (analysis_time to analysis_time + 30min)
+        # CRITICAL: If there are overnight holdings, wait for morning_confirmation first
+        # This ensures we know how many slots will be freed before selecting new stocks
+        holdings = self._holding_tracker.get_holdings()
+        if holdings:
+            # Check if morning confirmation has been done today
+            if not self._last_morning_confirmation:
+                logger.debug(
+                    f"Waiting for morning confirmation: {len(holdings)} overnight holdings"
+                )
+                return
+            if self._last_morning_confirmation.date() != context.timestamp.date():
+                logger.debug(
+                    f"Waiting for morning confirmation: {len(holdings)} overnight holdings"
+                )
+                return
+
+        # Check if it's analysis time (extended window to 09:15 to run after confirmation)
+        analysis_time = self.get_parameter("premarket_analysis_time", "08:30")
         analysis_hour, analysis_minute = map(int, analysis_time.split(":"))
         current_minutes = context.timestamp.hour * 60 + context.timestamp.minute
         analysis_minutes = analysis_hour * 60 + analysis_minute
 
-        if not (analysis_minutes <= current_minutes <= analysis_minutes + 30):
+        # Allow premarket analysis from 08:30 to 09:15 (after morning confirmation at 09:00)
+        if not (analysis_minutes <= current_minutes <= analysis_minutes + 45):
             return
 
         logger.info("Starting premarket news analysis")
