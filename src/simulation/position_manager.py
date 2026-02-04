@@ -484,19 +484,21 @@ class SimulationPositionManager:
         self,
         slots_data: list[dict],
         holdings_data: dict[int, list[dict]],
+        cash_balance: float = 0.0,
     ) -> tuple[int, float]:
         """
         Load existing holdings into simulation slots.
 
         This is used to initialize simulation with historical positions
         loaded from the database. When loading holdings, the initial capital
-        is automatically calculated based on the loaded positions.
+        is automatically calculated based on the loaded positions plus cash.
 
         Args:
             slots_data: List of slot dicts from database with keys:
                 - slot_id, slot_type, state, entry_time, entry_reason, sector_name
             holdings_data: Dict mapping slot_id to list of holding dicts:
                 - stock_code, stock_name, quantity, entry_price
+            cash_balance: Available cash from account_state (default 0)
 
         Returns:
             Tuple of (filled_count, total_holdings_value)
@@ -553,17 +555,20 @@ class SimulationPositionManager:
             filled_count += 1
             logger.info(f"Loaded slot {slot_id}: {len(holdings)} holdings, value={slot_value:,.0f}")
 
-        # When loading holdings, set initial capital = holdings value
-        # This means available_cash = 0 (all capital is in positions)
+        # When loading holdings, set initial capital = holdings value + cash
         if filled_count > 0:
+            total_capital = total_holdings_value + cash_balance
             self._config = SimulationConfig(
-                total_capital=total_holdings_value,
+                total_capital=total_capital,
                 num_slots=self._config.num_slots,
                 premarket_slots=self._config.premarket_slots,
                 intraday_slots=self._config.intraday_slots,
             )
-            self._available_cash = 0.0
-            logger.info(f"Set initial capital to holdings value: {total_holdings_value:,.0f}")
+            self._available_cash = cash_balance
+            logger.info(
+                f"Loaded holdings: value={total_holdings_value:,.0f}, "
+                f"cash={cash_balance:,.0f}, total={total_capital:,.0f}"
+            )
 
         return filled_count, total_holdings_value
 

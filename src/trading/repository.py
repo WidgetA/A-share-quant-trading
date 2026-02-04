@@ -409,6 +409,33 @@ class TradingRepository:
 
         return result
 
+    async def get_account_state(self) -> dict[str, Any] | None:
+        """
+        Get account state including cash balance.
+
+        Returns:
+            Dict with total_capital, total_assets, cash_balance, realized_pnl
+            or None if no account state exists.
+        """
+        async with self._db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT total_capital, total_assets, cash_balance, realized_pnl
+                FROM {self._schema}.account_state
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            )
+
+        if row:
+            return {
+                "total_capital": float(row["total_capital"]) if row["total_capital"] else 0.0,
+                "total_assets": float(row["total_assets"]) if row["total_assets"] else 0.0,
+                "cash_balance": float(row["cash_balance"]) if row["cash_balance"] else 0.0,
+                "realized_pnl": float(row["realized_pnl"]) if row["realized_pnl"] else 0.0,
+            }
+        return None
+
     # ==================== Orders ====================
 
     async def create_order(

@@ -668,14 +668,19 @@ class SimulationManager:
                 self._add_message("No position data found in database")
                 return
 
+            # Load account state for cash balance
+            account_state = await self._trading_repo.get_account_state()
+            cash_balance = account_state.get("cash_balance", 0.0) if account_state else 0.0
+
             # Load into simulation position manager
             filled_count, holdings_value = self._position_manager.load_holdings(
-                slots_data, holdings_data
+                slots_data, holdings_data, cash_balance=cash_balance
             )
 
             if filled_count > 0:
                 self._add_message(
-                    f"Loaded {filled_count} position(s), total value: {holdings_value:,.0f}"
+                    f"Loaded {filled_count} position(s), value: {holdings_value:,.0f}, "
+                    f"cash: {cash_balance:,.0f}"
                 )
 
                 # Log details of loaded positions
