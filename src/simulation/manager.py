@@ -91,6 +91,7 @@ class SimulationManager:
         self._intraday_signals: list[PendingSignal] = []
         self._messages: list[str] = []  # Log messages for UI
         self._is_synced: bool = False
+        self._pending_close_sell_done: bool = False  # Track if sell decision made at close
 
         # Track what we've processed
         self._last_message_time: datetime | None = None
@@ -205,9 +206,12 @@ class SimulationManager:
         for h in self._position_manager.get_all_holdings():
             holdings.append(h)
 
-        # Get pending holdings for morning confirmation
+        # Get pending holdings for sell decision (at close or morning confirmation)
         pending_holdings = []
-        if self._phase == SimulationPhase.MORNING_CONFIRMATION:
+        if self._phase in (
+            SimulationPhase.MARKET_CLOSE,
+            SimulationPhase.MORNING_CONFIRMATION,
+        ):
             pending_holdings = holdings.copy()
 
         return SimulationState(
@@ -267,18 +271,24 @@ class SimulationManager:
             self._phase = SimulationPhase.MARKET_CLOSE
 
         elif current_phase == SimulationPhase.MARKET_CLOSE:
-            # Check if more days to simulate
+            # At market close, check if there are holdings to sell
+            # Strategy: 持仓不过夜 (don't hold overnight)
+            filled_slots = self._position_manager.get_filled_slots()
+            if filled_slots and not self._pending_close_sell_done:
+                # Stay at market close, let user decide on selling
+                # pending_holdings will be populated in get_state()
+                self._add_message("收盘，请决定是否卖出当前持仓")
+                return self._phase
+
+            # After sell decision or no holdings, proceed
+            self._pending_close_sell_done = False  # Reset for next day
+
             if self._current_day < self._settings.num_days:
                 # Move to next day
                 self._clock.advance_to_next_day()
                 self._current_day += 1
-
-                # Check if there are holdings to confirm
-                if self._position_manager.get_filled_slots():
-                    self._phase = SimulationPhase.MORNING_CONFIRMATION
-                    self._clock.advance_to_time(time(9, 0))
-                else:
-                    self._phase = SimulationPhase.PREMARKET_ANALYSIS
+                self._phase = SimulationPhase.PREMARKET_ANALYSIS
+                self._clock.advance_to_time(time(8, 30))
             else:
                 # Simulation complete
                 self._phase = SimulationPhase.COMPLETED
@@ -324,19 +334,27 @@ class SimulationManager:
 
     async def process_sell_decision(self, slots_to_sell: list[int]) -> None:
         """
-        Process user's sell decision for morning confirmation.
+        Process user's sell decision at market close or morning confirmation.
 
         Args:
             slots_to_sell: List of slot IDs to sell.
         """
-        if self._phase != SimulationPhase.MORNING_CONFIRMATION:
+        # Allow sell at both MARKET_CLOSE and MORNING_CONFIRMATION
+        if self._phase not in (
+            SimulationPhase.MARKET_CLOSE,
+            SimulationPhase.MORNING_CONFIRMATION,
+        ):
             return
 
         if not self._position_manager or not self._price_service or not self._clock:
             return
 
+        # Mark that sell decision is done at close
+        if self._phase == SimulationPhase.MARKET_CLOSE:
+            self._pending_close_sell_done = True
+
         if not slots_to_sell:
-            self._add_message("Holding all positions")
+            self._add_message("保留所有持仓")
             return
 
         # Get current prices and sell

@@ -138,11 +138,17 @@
         </div>
         {% endif %}
 
-        <!-- Morning Confirmation: Sell Decision -->
-        {% if state.phase == 'morning_confirmation' and state.pending_holdings %}
+        <!-- Sell Decision: At Market Close or Morning Confirmation -->
+        {% if state.phase in ['market_close', 'morning_confirmation'] and state.pending_holdings %}
         <div class="sim-card">
-            <h3>早盘确认 - 卖出还是持有？</h3>
-            <p class="phase-description">以下是您的隔夜持仓，勾选要卖出的持仓（将以次日开盘价卖出）</p>
+            <h3>{% if state.phase == 'market_close' %}收盘 - 卖出还是持有？{% else %}早盘确认 - 卖出还是持有？{% endif %}</h3>
+            <p class="phase-description">
+                {% if state.phase == 'market_close' %}
+                策略建议：持仓不过夜。勾选要卖出的持仓（将以收盘价卖出）
+                {% else %}
+                以下是您的隔夜持仓，勾选要卖出的持仓（将以次日开盘价卖出）
+                {% endif %}
+            </p>
             <form id="sell-form" class="holdings-form">
                 {% for holding in state.pending_holdings %}
                 <div class="holding-item">
@@ -170,7 +176,9 @@
                 </div>
                 {% endfor %}
                 <div class="form-actions">
-                    <button type="submit" class="btn btn-danger">卖出选中（次日开盘价）</button>
+                    <button type="submit" class="btn btn-danger">
+                        {% if state.phase == 'market_close' %}卖出选中（收盘价）{% else %}卖出选中（次日开盘价）{% endif %}
+                    </button>
                     <button type="button" class="btn btn-success" onclick="holdAll()">全部持有</button>
                 </div>
             </form>
@@ -240,8 +248,8 @@
         </div>
         {% endif %}
 
-        <!-- Market Close phase -->
-        {% if state.phase == 'market_close' %}
+        <!-- Market Close phase (only show if no pending sell decision) -->
+        {% if state.phase == 'market_close' and not state.pending_holdings %}
         <div class="sim-card">
             <h3>收盘</h3>
             <p class="phase-description">当日交易结束</p>
