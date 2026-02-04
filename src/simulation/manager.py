@@ -405,8 +405,12 @@ class SimulationManager:
             if len(stocks_to_buy) == 1:
                 code, name, price = stocks_to_buy[0]
                 self._position_manager.allocate_slot(
-                    slot, code, price, signal.reasoning,
-                    stock_name=name, timestamp=self._clock.current_time,
+                    slot,
+                    code,
+                    price,
+                    signal.reasoning,
+                    stock_name=name,
+                    timestamp=self._clock.current_time,
                 )
                 # Fill immediately for intraday
                 self._position_manager.fill_slot(
@@ -415,7 +419,8 @@ class SimulationManager:
                 self._add_message(f"盘中买入 {code} {name} @ {price:.2f}")
             else:
                 self._position_manager.allocate_slot_sector(
-                    slot, stocks_to_buy,
+                    slot,
+                    stocks_to_buy,
                     sector_name=signal.title[:30],
                     reason=signal.reasoning,
                     timestamp=self._clock.current_time,
@@ -500,12 +505,14 @@ class SimulationManager:
                 if slot.state == "filled" and slot.holdings:
                     holdings_data = []
                     for h in slot.holdings:
-                        holdings_data.append({
-                            "stock_code": h.stock_code,
-                            "stock_name": h.stock_name,
-                            "quantity": h.quantity,
-                            "entry_price": h.entry_price,
-                        })
+                        holdings_data.append(
+                            {
+                                "stock_code": h.stock_code,
+                                "stock_name": h.stock_name,
+                                "quantity": h.quantity,
+                                "entry_price": h.entry_price,
+                            }
+                        )
                     await self._trading_repo.save_holdings(slot.slot_id, holdings_data)
                     synced_holdings += len(holdings_data)
                     synced_slots += 1
@@ -670,9 +677,7 @@ class SimulationManager:
         self._intraday_signals = []
 
         # Set the time range for intraday messages
-        since = self._last_intraday_check or datetime.combine(
-            self._clock.current_date, time(9, 30)
-        )
+        since = self._last_intraday_check or datetime.combine(self._clock.current_date, time(9, 30))
 
         # Get intraday messages
         messages = await self._hist_message_reader.get_intraday_messages(
