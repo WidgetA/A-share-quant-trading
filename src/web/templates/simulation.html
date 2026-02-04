@@ -194,9 +194,48 @@
         </div>
         {% endif %}
 
+        <!-- Trading Hours: Intraday Sell Form (hidden by default) -->
+        {% if state.phase == 'trading_hours' and state.holdings %}
+        <div id="intraday-sell-section" class="sim-card hidden">
+            <h3>盘中卖出 - 选择要卖出的持仓</h3>
+            <p class="phase-description">勾选要卖出的持仓（将以当前价格卖出）</p>
+            <form id="intraday-sell-form" class="holdings-form">
+                {% for holding in state.holdings %}
+                <div class="holding-item">
+                    <label class="holding-checkbox">
+                        <input type="checkbox" name="slots" value="{{ holding.slot_id }}">
+                        <div class="holding-content">
+                            <div class="holding-header">
+                                <span class="stock-code">{{ holding.stock_code }}</span>
+                                <span class="stock-name">{{ holding.stock_name }}</span>
+                            </div>
+                            <div class="holding-details">
+                                <span>数量: {{ holding.quantity }} 股</span>
+                                <span>成本: {{ "%.2f"|format(holding.entry_price) }}</span>
+                                {% if holding.current_price %}
+                                <span>现价: {{ "%.2f"|format(holding.current_price) }}</span>
+                                {% endif %}
+                                {% if holding.pnl_percent is not none %}
+                                <span class="pnl {{ 'positive' if holding.pnl_percent > 0 else 'negative' }}">
+                                    {{ "%+.2f"|format(holding.pnl_percent) }}%
+                                </span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </label>
+                </div>
+                {% endfor %}
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-danger">卖出选中（盘中价）</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideIntradaySellForm()">取消</button>
+                </div>
+            </form>
+        </div>
+        {% endif %}
+
         <!-- Trading Hours phase with intraday messages -->
         {% if state.phase == 'trading_hours' %}
-        <div class="sim-card">
+        <div class="sim-card" id="trading-hours-main">
             <h3>交易时段 ({{ state.sim_time[11:16] if state.sim_time else '09:30' }})</h3>
             {% if state.intraday_signals %}
             <p class="phase-description">发现 {{ state.intraday_signals|length }} 条盘中消息，您可以选择买入或跳过</p>
@@ -237,11 +276,15 @@
             <ul class="phase-options">
                 <li>点击"查看消息"浏览所有消息并选择买入</li>
                 <li>点击"检查盘中消息"查看是否有新的盘中消息</li>
+                <li>点击"卖出持仓"以当前价格卖出</li>
                 <li>点击"快进到收盘"直接跳到15:00收盘</li>
             </ul>
             <div class="form-actions trading-actions">
                 <button class="btn btn-secondary" onclick="showMessages()">查看消息</button>
                 <button class="btn btn-primary" onclick="advancePhase()">检查盘中消息</button>
+                {% if state.holdings %}
+                <button class="btn btn-warning" onclick="showIntradaySellForm()">卖出持仓</button>
+                {% endif %}
                 <button class="btn btn-outline" onclick="fastForwardToClose()">快进到收盘</button>
             </div>
             {% endif %}
@@ -358,6 +401,7 @@ const startForm = document.getElementById('start-form');
 const selectForm = document.getElementById('select-form');
 const sellForm = document.getElementById('sell-form');
 const intradayForm = document.getElementById('intraday-form');
+const intradaySellForm = document.getElementById('intraday-sell-form');
 
 // Start simulation
 if (startForm) {
@@ -503,6 +547,52 @@ if (intradayForm) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ selected_indices: selected })
+            });
+            if (response.ok) {
+                window.location.reload();
+            } else {
+                const result = await response.json();
+                alert('错误: ' + (result.detail || '未知错误'));
+            }
+        } catch (error) {
+            alert('网络错误: ' + error.message);
+        }
+    });
+}
+
+// Show intraday sell form
+function showIntradaySellForm() {
+    const sellSection = document.getElementById('intraday-sell-section');
+    const mainSection = document.getElementById('trading-hours-main');
+    if (sellSection) sellSection.classList.remove('hidden');
+    if (mainSection) mainSection.classList.add('hidden');
+}
+
+// Hide intraday sell form
+function hideIntradaySellForm() {
+    const sellSection = document.getElementById('intraday-sell-section');
+    const mainSection = document.getElementById('trading-hours-main');
+    if (sellSection) sellSection.classList.add('hidden');
+    if (mainSection) mainSection.classList.remove('hidden');
+}
+
+// Intraday sell form submission
+if (intradaySellForm) {
+    intradaySellForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const checkboxes = intradaySellForm.querySelectorAll('input[name="slots"]:checked');
+        const slots = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+        if (slots.length === 0) {
+            alert('请选择要卖出的持仓');
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/simulation/sell', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ slots_to_sell: slots })
             });
             if (response.ok) {
                 window.location.reload();

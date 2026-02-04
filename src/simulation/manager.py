@@ -334,13 +334,19 @@ class SimulationManager:
 
     async def process_sell_decision(self, slots_to_sell: list[int]) -> None:
         """
-        Process user's sell decision at market close or morning confirmation.
+        Process user's sell decision.
+
+        Can be called during:
+        - TRADING_HOURS: Sell at current intraday price
+        - MARKET_CLOSE: Sell at closing price
+        - MORNING_CONFIRMATION: Sell at next day open price
 
         Args:
             slots_to_sell: List of slot IDs to sell.
         """
-        # Allow sell at both MARKET_CLOSE and MORNING_CONFIRMATION
+        # Allow sell at TRADING_HOURS, MARKET_CLOSE and MORNING_CONFIRMATION
         if self._phase not in (
+            SimulationPhase.TRADING_HOURS,
             SimulationPhase.MARKET_CLOSE,
             SimulationPhase.MORNING_CONFIRMATION,
         ):

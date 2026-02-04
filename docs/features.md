@@ -28,6 +28,7 @@
 | 0.7.0 | 2026-02-03 | - | SYS-005: Web UI for trading confirmations (containerized deployment) |
 | 0.7.1 | 2026-02-04 | - | SYS-004: Enhanced startup notification with git commit info for CD tracking |
 | 0.8.0 | 2026-02-04 | - | SIM-001: Historical simulation trading feature |
+| 0.8.1 | 2026-02-04 | - | SIM-001: Add intraday sell capability during trading hours |
 
 ---
 
@@ -1166,10 +1167,17 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 |-------|------|-------------|
 | PREMARKET_ANALYSIS | 08:30 | Review overnight messages, select signals |
 | MORNING_AUCTION | 09:25 | Execute pending buys, check limit-up |
-| TRADING_HOURS | 09:30-15:00 | Monitor positions |
-| MARKET_CLOSE | 15:00 | Day summary, P&L calculation |
+| TRADING_HOURS | 09:30-15:00 | Monitor positions, check intraday messages, sell holdings at current price |
+| MARKET_CLOSE | 15:00 | Day summary, P&L calculation, sell decision for overnight holdings |
 | MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions |
 | COMPLETED | - | Simulation finished, show results |
+
+**Trading Hours Actions** (v0.8.1):
+During trading hours, users can:
+- View and select from historical messages for buying
+- Check intraday messages for new buying opportunities
+- Sell existing holdings at current intraday prices (new in v0.8.1)
+- Fast forward to market close
 
 **API Endpoints**:
 | Endpoint | Method | Purpose |
@@ -1177,9 +1185,14 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 | `/api/simulation/start` | POST | Start new simulation |
 | `/api/simulation/state` | GET | Get current state |
 | `/api/simulation/advance` | POST | Advance to next phase |
-| `/api/simulation/select` | POST | Submit signal selection |
-| `/api/simulation/sell` | POST | Submit sell decision |
+| `/api/simulation/select` | POST | Submit signal selection (premarket) |
+| `/api/simulation/sell` | POST | Submit sell decision (trading hours, market close, or morning confirmation) |
+| `/api/simulation/intraday/select` | POST | Select intraday signals for buying |
+| `/api/simulation/intraday/skip` | POST | Skip intraday messages |
+| `/api/simulation/messages` | GET | Get historical messages |
+| `/api/simulation/messages/select` | POST | Select messages for buying |
 | `/api/simulation/result` | GET | Get final result |
+| `/api/simulation/sync` | POST | Sync results to database |
 | `/api/simulation` | DELETE | Cancel simulation |
 
 **Files**:
