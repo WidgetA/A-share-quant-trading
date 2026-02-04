@@ -634,6 +634,35 @@ def create_simulation_router() -> APIRouter:
             "messages": result,
         }
 
+    @router.post("/messages/buy")
+    async def buy_from_messages(request: Request) -> dict:
+        """
+        Buy stocks from selected messages.
+
+        This endpoint allows users to select messages from the messages viewer
+        and buy the associated stocks.
+        """
+        manager = get_simulation_manager()
+
+        if not manager.is_initialized:
+            raise HTTPException(status_code=400, detail="No simulation is running.")
+
+        data = await request.json()
+        messages = data.get("messages", [])
+
+        if not messages:
+            raise HTTPException(status_code=400, detail="No messages selected.")
+
+        try:
+            result = await manager.buy_from_messages(messages)
+            return {
+                "success": True,
+                "processed": result.get("processed", 0),
+                "message": f"已处理 {result.get('processed', 0)} 条消息",
+            }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.delete("")
     async def cancel_simulation() -> dict:
         """Cancel current simulation."""

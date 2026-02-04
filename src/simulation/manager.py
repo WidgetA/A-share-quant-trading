@@ -441,6 +441,93 @@ class SimulationManager:
         self._add_message("跳过盘中消息")
         self._intraday_signals = []
 
+    async def buy_from_messages(self, messages: list[dict]) -> dict[str, int]:
+        """
+        Buy stocks from selected messages (from messages viewer modal).
+
+        Args:
+            messages: List of message dicts with id, stocks, title, sentiment.
+
+        Returns:
+            Dict with processed count.
+        """
+        if not self._position_manager or not self._price_service or not self._clock:
+            raise RuntimeError("Simulation not properly initialized")
+
+        # Only allow buying in premarket or trading hours
+        if self._phase not in (
+            SimulationPhase.PREMARKET_ANALYSIS,
+            SimulationPhase.TRADING_HOURS,
+        ):
+            raise RuntimeError("只能在盘前分析或交易时段买入")
+
+        processed = 0
+        slot_type = (
+            SlotType.PREMARKET
+            if self._phase == SimulationPhase.PREMARKET_ANALYSIS
+            else SlotType.INTRADAY
+        )
+
+        for msg_data in messages:
+            stock_codes = msg_data.get("stocks", [])
+            title = msg_data.get("title", "")[:50]
+
+            if not stock_codes:
+                continue
+
+            # Get available slot
+            slot = self._position_manager.get_available_slot(slot_type)
+            if not slot:
+                self._add_message("无可用仓位，无法继续买入")
+                break
+
+            # Get prices for stocks
+            stocks_to_buy = []
+            for code in stock_codes[:3]:  # Max 3 stocks per message
+                if "." not in code:
+                    code = f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
+
+                price = await self._price_service.get_price_at_time(code, self._clock.current_time)
+                if price:
+                    name = self._get_stock_name(code)
+                    stocks_to_buy.append((code, name, price))
+
+            if not stocks_to_buy:
+                continue
+
+            # Allocate and fill slot
+            if len(stocks_to_buy) == 1:
+                code, name, price = stocks_to_buy[0]
+                self._position_manager.allocate_slot(
+                    slot,
+                    code,
+                    price,
+                    f"消息: {title}",
+                    stock_name=name,
+                    timestamp=self._clock.current_time,
+                )
+                self._position_manager.fill_slot(
+                    slot.slot_id, {code: price}, self._clock.current_time
+                )
+                self._add_message(f"买入 {code} {name} @ {price:.2f}")
+            else:
+                self._position_manager.allocate_slot_sector(
+                    slot,
+                    stocks_to_buy,
+                    sector_name=title,
+                    reason=f"消息选择: {title}",
+                    timestamp=self._clock.current_time,
+                )
+                fill_prices = {s[0]: s[2] for s in stocks_to_buy}
+                self._position_manager.fill_slot(
+                    slot.slot_id, fill_prices, self._clock.current_time
+                )
+                self._add_message(f"买入 {title}")
+
+            processed += 1
+
+        return {"processed": processed}
+
     def get_result(self) -> SimulationResult | None:
         """
         Get final simulation result.

@@ -189,9 +189,9 @@
         <!-- Trading Hours phase with intraday messages -->
         {% if state.phase == 'trading_hours' %}
         <div class="sim-card">
-            <h3>交易时段</h3>
+            <h3>交易时段 ({{ state.sim_time[11:16] if state.sim_time else '09:30' }})</h3>
             {% if state.intraday_signals %}
-            <p class="phase-description">发现盘中消息，您可以选择买入或跳过</p>
+            <p class="phase-description">发现 {{ state.intraday_signals|length }} 条盘中消息，您可以选择买入或跳过</p>
             <form id="intraday-form" class="signals-form">
                 {% for signal in state.intraday_signals %}
                 {% set is_positive = signal.sentiment in ['strong_bullish', 'bullish'] %}
@@ -221,14 +221,20 @@
                 {% endfor %}
                 <div class="form-actions">
                     <button type="submit" class="btn btn-primary">买入选中</button>
-                    <button type="button" class="btn btn-secondary" onclick="skipIntraday()">跳过盘中消息</button>
-                    <button type="button" class="btn btn-outline" onclick="advancePhase()">快进到收盘</button>
+                    <button type="button" class="btn btn-secondary" onclick="skipIntraday()">跳过，不买入</button>
                 </div>
             </form>
             {% else %}
-            <p class="phase-description">点击下方按钮检查盘中消息或快进到收盘</p>
-            <div class="form-actions">
-                <button class="btn btn-primary btn-lg" onclick="advancePhase()">检查盘中消息 / 快进到收盘</button>
+            <p class="phase-description">当前处于交易时段。您可以：</p>
+            <ul class="phase-options">
+                <li>点击"查看消息"浏览所有消息并选择买入</li>
+                <li>点击"检查盘中消息"查看是否有新的盘中消息</li>
+                <li>点击"快进到收盘"直接跳到15:00收盘</li>
+            </ul>
+            <div class="form-actions trading-actions">
+                <button class="btn btn-secondary" onclick="showMessages()">查看消息</button>
+                <button class="btn btn-primary" onclick="advancePhase()">检查盘中消息</button>
+                <button class="btn btn-outline" onclick="fastForwardToClose()">快进到收盘</button>
             </div>
             {% endif %}
         </div>
@@ -328,6 +334,10 @@
                     </label>
                 </div>
                 <div id="messages-list">加载中...</div>
+            </div>
+            <div class="modal-footer messages-actions" id="messages-actions" style="display: none;">
+                <button class="btn btn-primary" onclick="buySelectedMessages()">买入选中的消息</button>
+                <span class="selection-count">已选 <span id="msg-selected-count">0</span> 条</span>
             </div>
         </div>
     </div>
@@ -515,6 +525,24 @@ async function skipIntraday() {
     }
 }
 
+// Fast forward to market close (skip checking intraday messages)
+async function fastForwardToClose() {
+    try {
+        // First skip any pending intraday messages
+        await fetch('/api/simulation/intraday/skip', { method: 'POST' });
+        // Then advance to close
+        const response = await fetch('/api/simulation/advance', { method: 'POST' });
+        if (response.ok) {
+            window.location.reload();
+        } else {
+            const result = await response.json();
+            alert('错误: ' + (result.detail || '未知错误'));
+        }
+    } catch (error) {
+        alert('网络错误: ' + error.message);
+    }
+}
+
 // Sync to database with confirmation
 async function confirmSyncToDb() {
     const confirmed = confirm(
@@ -665,10 +693,14 @@ function closeMessages() {
     document.getElementById('messages-modal').classList.add('hidden');
 }
 
+// Store loaded messages for selection
+let loadedMessages = [];
+
 // Load messages from API
 async function loadMessages() {
     const onlyPositive = document.getElementById('only-positive').checked;
     const listEl = document.getElementById('messages-list');
+    const actionsEl = document.getElementById('messages-actions');
     listEl.innerHTML = '<p>加载中...</p>';
 
     try {
@@ -678,13 +710,18 @@ async function loadMessages() {
 
         if (!response.ok) {
             listEl.innerHTML = `<p class="error">${data.detail || '加载消息失败'}</p>`;
+            actionsEl.style.display = 'none';
             return;
         }
 
         if (data.messages.length === 0) {
             listEl.innerHTML = '<p>当日无消息</p>';
+            actionsEl.style.display = 'none';
             return;
         }
+
+        // Store messages for later use
+        loadedMessages = data.messages;
 
         const sentimentNames = {
             'strong_bullish': '强看多',
@@ -695,27 +732,44 @@ async function loadMessages() {
             'unknown': '未分析'
         };
 
-        let html = `<p class="messages-summary">找到 ${data.count} 条消息 (${data.sim_date})</p>`;
+        let html = `<p class="messages-summary">找到 ${data.count} 条消息 (${data.sim_date}) - 勾选要买入的消息</p>`;
         html += '<div class="messages-table">';
 
-        for (const msg of data.messages) {
+        for (let i = 0; i < data.messages.length; i++) {
+            const msg = data.messages[i];
             const sentiment = msg.analysis?.sentiment || 'unknown';
             const sentimentLabel = sentimentNames[sentiment] || sentiment;
             const confidence = msg.analysis ? (msg.analysis.confidence * 100).toFixed(0) + '%' : '-';
             const reasoning = msg.analysis?.reasoning || '无分析';
-            const stocks = msg.analysis?.affected_stocks?.join(', ') || msg.stock_codes?.join(', ') || '-';
+            const stockCodes = msg.analysis?.affected_stocks || msg.stock_codes || [];
+            const stocks = stockCodes.join(', ') || '-';
+            const isPositive = sentiment === 'strong_bullish' || sentiment === 'bullish';
+            const hasStocks = stockCodes.length > 0;
 
             html += `
                 <div class="message-row ${sentiment}">
-                    <div class="message-header">
-                        <span class="message-time">${msg.publish_time?.substring(0, 16) || '-'}</span>
-                        <span class="message-source">${msg.source_name}</span>
-                        <span class="sentiment-badge ${sentiment}">${sentimentLabel}</span>
-                        <span class="confidence">${confidence}</span>
-                    </div>
-                    <div class="message-title">${msg.title || '(无标题)'}</div>
-                    <div class="message-stocks">相关股票: ${stocks}</div>
-                    <div class="message-reasoning">${reasoning}</div>
+                    <label class="message-select-label">
+                        <input type="checkbox" class="msg-checkbox" value="${i}"
+                               data-id="${msg.id}"
+                               data-stocks='${JSON.stringify(stockCodes)}'
+                               data-title="${(msg.title || '').replace(/"/g, '&quot;')}"
+                               data-sentiment="${sentiment}"
+                               ${isPositive && hasStocks ? 'checked' : ''}
+                               ${!hasStocks ? 'disabled title="无相关股票"' : ''}
+                               onchange="updateMsgSelectionCount()">
+                        <div class="message-content-wrapper">
+                            <div class="message-header">
+                                <span class="message-time">${msg.publish_time?.substring(0, 16) || '-'}</span>
+                                <span class="message-source">${msg.source_name}</span>
+                                <span class="sentiment-badge ${sentiment}">${sentimentLabel}</span>
+                                <span class="confidence">${confidence}</span>
+                                ${isPositive ? '<span class="ai-recommended">AI推荐</span>' : ''}
+                            </div>
+                            <div class="message-title">${msg.title || '(无标题)'}</div>
+                            <div class="message-stocks">相关股票: ${stocks}</div>
+                            <div class="message-reasoning">${reasoning}</div>
+                        </div>
+                    </label>
                     <details class="message-content-details">
                         <summary>查看内容</summary>
                         <div class="message-content">${msg.content || '(无内容)'}</div>
@@ -727,8 +781,58 @@ async function loadMessages() {
         html += '</div>';
         listEl.innerHTML = html;
 
+        // Show buy button and update count
+        actionsEl.style.display = 'flex';
+        updateMsgSelectionCount();
+
     } catch (error) {
         listEl.innerHTML = `<p class="error">错误: ${error.message}</p>`;
+    }
+}
+
+// Update selection count
+function updateMsgSelectionCount() {
+    const checkboxes = document.querySelectorAll('.msg-checkbox:checked');
+    document.getElementById('msg-selected-count').textContent = checkboxes.length;
+}
+
+// Buy selected messages
+async function buySelectedMessages() {
+    const checkboxes = document.querySelectorAll('.msg-checkbox:checked');
+    if (checkboxes.length === 0) {
+        alert('请先选择要买入的消息');
+        return;
+    }
+
+    // Collect selected message data
+    const selectedMessages = [];
+    checkboxes.forEach(cb => {
+        selectedMessages.push({
+            id: cb.dataset.id,
+            stocks: JSON.parse(cb.dataset.stocks),
+            title: cb.dataset.title,
+            sentiment: cb.dataset.sentiment
+        });
+    });
+
+    try {
+        const response = await fetch('/api/simulation/messages/buy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: selectedMessages })
+        });
+
+        const result = await response.json();
+
+        if (response.ok && result.success) {
+            alert(`买入成功！已处理 ${result.processed} 条消息`);
+            closeMessages();
+            window.location.reload();
+        } else {
+            alert('买入失败: ' + (result.detail || '未知错误'));
+        }
+    } catch (error) {
+        alert('网络错误: ' + error.message);
     }
 }
 
