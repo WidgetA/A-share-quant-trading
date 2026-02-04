@@ -96,8 +96,11 @@
         </div>
         {% elif state.phase == 'premarket_analysis' %}
         <div class="sim-card">
-            <p>Generating signals...</p>
-            <button class="btn btn-primary" onclick="advancePhase()">Generate Signals</button>
+            <p>No new signals available for this trading day.</p>
+            <div class="form-actions">
+                <button class="btn btn-primary" onclick="advancePhase()">Generate Signals</button>
+                <button class="btn btn-secondary" onclick="skipSelection()">Skip to Next Phase</button>
+            </div>
         </div>
         {% endif %}
 
