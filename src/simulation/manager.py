@@ -158,11 +158,11 @@ class SimulationManager:
             has_holdings = await self._load_initial_holdings()
 
         # Set initial phase based on whether we have overnight holdings
-        # If there are holdings, start with MORNING_CONFIRMATION so user can decide to sell first
-        # After selling (releasing slots), then we can select new stocks in PREMARKET_ANALYSIS
+        # If there are holdings, start with MORNING_CONFIRMATION so user can mark slots to sell
+        # This is just marking, not actual execution - selling happens at MORNING_AUCTION (09:25)
         if has_holdings:
             self._phase = SimulationPhase.MORNING_CONFIRMATION
-            self._clock.advance_to_time(time(9, 0))
+            # Stay at 08:30 - confirmation is marking which slots to sell, not execution
         else:
             self._phase = SimulationPhase.PREMARKET_ANALYSIS
         self._last_message_time = datetime.combine(
@@ -318,10 +318,10 @@ class SimulationManager:
                 self._phase = SimulationPhase.COMPLETED
 
         elif current_phase == SimulationPhase.MORNING_CONFIRMATION:
-            # After confirmation, go to premarket for new signals
-            self._phase = SimulationPhase.PREMARKET_ANALYSIS
-            self._clock.advance_to_time(time(8, 30))
-            await self._generate_premarket_signals()
+            # Stay in MORNING_CONFIRMATION until user calls process_sell_decision
+            # This is similar to MARKET_CLOSE behavior - wait for user decision
+            # After process_sell_decision is called, it will advance to PREMARKET_ANALYSIS
+            pass
 
         self._add_message(f"Phase: {self._phase.value}")
         return self._phase
@@ -383,6 +383,10 @@ class SimulationManager:
 
         if not slots_to_sell:
             self._add_message("保留所有持仓")
+            # Still need to advance to next phase after MORNING_CONFIRMATION
+            if self._phase == SimulationPhase.MORNING_CONFIRMATION:
+                self._phase = SimulationPhase.PREMARKET_ANALYSIS
+                await self._generate_premarket_signals()
             return
 
         # Get current prices and sell
@@ -406,6 +410,11 @@ class SimulationManager:
 
                 pnl = self._position_manager.release_slot(slot_id, prices, self._clock.current_time)
                 self._add_message(f"卖出仓位 {slot_id}, 盈亏: {pnl:+,.0f}")
+
+        # After MORNING_CONFIRMATION sell decision, advance to PREMARKET_ANALYSIS
+        if self._phase == SimulationPhase.MORNING_CONFIRMATION:
+            self._phase = SimulationPhase.PREMARKET_ANALYSIS
+            await self._generate_premarket_signals()
 
     async def process_intraday_selection(self, selected_indices: list[int]) -> None:
         """
