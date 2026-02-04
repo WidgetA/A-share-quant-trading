@@ -394,7 +394,8 @@ class SimulationManager:
                 price = await self._price_service.get_price_at_time(code, self._clock.current_time)
 
                 if price:
-                    name = signal.target_stock_names.get(clean_code, "") or self._get_stock_name(code)
+                    name = signal.target_stock_names.get(clean_code, "")
+                    name = name or self._get_stock_name(code)
                     stocks_to_buy.append((code, name, price))
 
             if not stocks_to_buy:
@@ -408,7 +409,9 @@ class SimulationManager:
                     stock_name=name, timestamp=self._clock.current_time,
                 )
                 # Fill immediately for intraday
-                self._position_manager.fill_slot(slot.slot_id, {code: price}, self._clock.current_time)
+                self._position_manager.fill_slot(
+                    slot.slot_id, {code: price}, self._clock.current_time
+                )
                 self._add_message(f"盘中买入 {code} {name} @ {price:.2f}")
             else:
                 self._position_manager.allocate_slot_sector(
@@ -418,7 +421,9 @@ class SimulationManager:
                     timestamp=self._clock.current_time,
                 )
                 fill_prices = {s[0]: s[2] for s in stocks_to_buy}
-                self._position_manager.fill_slot(slot.slot_id, fill_prices, self._clock.current_time)
+                self._position_manager.fill_slot(
+                    slot.slot_id, fill_prices, self._clock.current_time
+                )
                 self._add_message(f"盘中买入 {signal.title[:20]}")
 
         self._intraday_signals = []
@@ -654,7 +659,8 @@ class SimulationManager:
             if len(self._pending_signals) >= 20:
                 break
 
-        self._add_message(f"找到 {len(self._pending_signals)} 条消息 (其中 {positive_count} 条正面)")
+        msg_count = len(self._pending_signals)
+        self._add_message(f"找到 {msg_count} 条消息 (其中 {positive_count} 条正面)")
 
     async def _check_intraday_messages(self) -> None:
         """Check for intraday messages during trading hours."""
@@ -739,7 +745,8 @@ class SimulationManager:
 
                 if price:
                     # Get stock name from signal or lookup
-                    name = signal.target_stock_names.get(clean_code, "") or self._get_stock_name(code)
+                    name = signal.target_stock_names.get(clean_code, "")
+                    name = name or self._get_stock_name(code)
                     stocks_to_buy.append((code, name, price))
 
             if not stocks_to_buy:

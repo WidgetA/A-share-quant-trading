@@ -603,7 +603,7 @@ def create_simulation_router() -> APIRouter:
         # Convert to dict format
         result = []
         for msg in messages:
-            msg_dict = {
+            msg_dict: dict[str, Any] = {
                 "id": msg.id,
                 "source_type": msg.source_type,
                 "source_name": msg.source_name,
