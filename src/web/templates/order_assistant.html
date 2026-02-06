@@ -135,7 +135,7 @@ function renderMessages(containerId, messages, stockNames, hasMore, totalCount, 
             <div class="message-row ${sentiment} ${isNew ? 'new-message' : ''}">
                 <div class="message-content-wrapper">
                     <div class="message-header">
-                        <span class="message-time">${msg.publish_time?.substring(0, 16) || '-'}</span>
+                        <span class="message-time">${msg.publish_time ? msg.publish_time.substring(0, 16).replace('T', ' ') : '-'}</span>
                         <span class="message-source">${msg.source_name || ''}</span>
                         <span class="sentiment-badge ${sentiment}">${sentimentLabel}</span>
                         <span class="confidence">${confidence}</span>
@@ -184,12 +184,15 @@ async function loadPremarketMessages(append = false) {
     try {
         const url = `/api/order-assistant/messages?mode=premarket&only_positive=${onlyPositive}&limit=${premarketPageSize}&offset=${premarketOffset}`;
         const response = await fetch(url);
-        const data = await response.json();
 
         if (!response.ok) {
-            el.innerHTML = `<p class="error">${data.detail || '加载消息失败'}</p>`;
+            let detail = '加载消息失败';
+            try { const err = await response.json(); detail = err.detail || detail; } catch {}
+            el.innerHTML = `<p class="error">${detail}</p>`;
             return;
         }
+
+        const data = await response.json();
 
         premarketTotalCount = data.total_count;
         premarketHasMore = data.has_more;
@@ -240,15 +243,18 @@ async function loadIntradayMessages(append = false) {
     try {
         const url = `/api/order-assistant/messages?mode=intraday&only_positive=${onlyPositive}&limit=${intradayPageSize}&offset=${intradayOffset}`;
         const response = await fetch(url);
-        const data = await response.json();
 
         if (!response.ok) {
+            let detail = '加载消息失败';
+            try { const err = await response.json(); detail = err.detail || detail; } catch {}
             // Don't overwrite on refresh error
             if (intradayMessages.length === 0) {
-                el.innerHTML = `<p class="error">${data.detail || '加载消息失败'}</p>`;
+                el.innerHTML = `<p class="error">${detail}</p>`;
             }
             return;
         }
+
+        const data = await response.json();
 
         intradayTotalCount = data.total_count;
         intradayHasMore = data.has_more;

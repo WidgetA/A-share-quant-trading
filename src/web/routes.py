@@ -850,39 +850,55 @@ def create_order_assistant_router() -> APIRouter:
         if mode not in ("premarket", "intraday"):
             raise HTTPException(status_code=400, detail="mode must be 'premarket' or 'intraday'")
 
-        reader = await _get_oa_reader()
         now = datetime.now(beijing_tz)
         today = now.date()
 
-        # Use naive datetimes (DB stores timestamp without timezone)
-        now_naive = now.replace(tzinfo=None)
+        try:
+            reader = await _get_oa_reader()
+        except Exception as e:
+            logger.error(f"Failed to connect to message database: {e}")
+            raise HTTPException(status_code=503, detail=f"数据库连接失败: {e}")
+
+        # DB stores naive UTC timestamps; compute boundaries in Beijing
+        # time then convert to UTC for queries.
+        _BJ_UTC = timedelta(hours=8)
+        now_bj = now.replace(tzinfo=None)
 
         if mode == "premarket":
-            start_time = _get_prev_trading_day_close(today)
-            end_time = datetime.combine(today, time(9, 30))
-            # Cap end_time at now if before 9:30
-            if now_naive < end_time:
-                end_time = now_naive
+            start_bj = _get_prev_trading_day_close(today)
+            end_bj = datetime.combine(today, time(9, 30))
+            # Cap end at current Beijing time if before 9:30
+            if now_bj < end_bj:
+                end_bj = now_bj
         else:
             # Intraday: from 9:30 today to now (or 15:00 if after hours)
-            start_time = datetime.combine(today, time(9, 30))
-            end_time = min(now_naive, datetime.combine(today, time(15, 0)))
+            start_bj = datetime.combine(today, time(9, 30))
+            end_bj = min(now_bj, datetime.combine(today, time(15, 0)))
 
-        # Get total count
-        total_count = await reader.count_messages_in_range(
-            start_time=start_time,
-            end_time=end_time,
-            only_positive=only_positive,
-        )
+        # Convert Beijing time boundaries to UTC for DB queries
+        start_time = start_bj - _BJ_UTC
+        end_time = end_bj - _BJ_UTC
 
-        # Get paginated messages
-        messages = await reader.get_messages_in_range(
-            start_time=start_time,
-            end_time=end_time,
-            only_positive=only_positive,
-            limit=limit,
-            offset=offset,
-        )
+        try:
+            # Get total count
+            total_count = await reader.count_messages_in_range(
+                start_time=start_time,
+                end_time=end_time,
+                only_positive=only_positive,
+            )
+
+            # Get paginated messages
+            messages = await reader.get_messages_in_range(
+                start_time=start_time,
+                end_time=end_time,
+                only_positive=only_positive,
+                limit=limit,
+                offset=offset,
+                order_desc=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to query messages ({mode}): {e}")
+            raise HTTPException(status_code=500, detail=f"查询消息失败: {e}")
 
         # Collect stock codes for name lookup
         all_stock_codes: set[str] = set()
@@ -909,7 +925,11 @@ def create_order_assistant_router() -> APIRouter:
                 "source_name": msg.source_name,
                 "title": msg.title,
                 "content": msg.content[:500] if msg.content else "",
-                "publish_time": (msg.publish_time.isoformat() if msg.publish_time else None),
+                "publish_time": (
+                    (msg.publish_time + _BJ_UTC).isoformat()
+                    if msg.publish_time
+                    else None
+                ),
                 "stock_codes": msg.stock_codes,
                 "url": msg.url,
             }

@@ -231,6 +231,7 @@ class MessageReader:
         only_positive: bool = False,
         limit: int = 1000,
         offset: int = 0,
+        order_desc: bool = False,
     ) -> list[Message]:
         """
         Get messages published within a time range with analysis results.
@@ -242,9 +243,10 @@ class MessageReader:
             only_positive: If True, only return messages with positive sentiment.
             limit: Maximum number of messages to return.
             offset: Number of messages to skip (for pagination).
+            order_desc: If True, order by publish_time descending (newest first).
 
         Returns:
-            List of Message objects with analysis, ordered by publish_time ascending.
+            List of Message objects with analysis.
         """
         pool = self._ensure_connected()
 
@@ -267,7 +269,8 @@ class MessageReader:
         if only_positive:
             query += " AND a.sentiment IN ('strong_bullish', 'bullish')"
 
-        query += f" ORDER BY m.publish_time ASC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        order = "DESC" if order_desc else "ASC"
+        query += f" ORDER BY m.publish_time {order} LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
         params.append(limit)
         params.append(offset)
 
