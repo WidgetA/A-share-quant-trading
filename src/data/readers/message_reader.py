@@ -270,7 +270,9 @@ class MessageReader:
             query += " AND a.sentiment IN ('strong_bullish', 'bullish')"
 
         order = "DESC" if order_desc else "ASC"
-        query += f" ORDER BY m.publish_time {order} LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        limit_idx = len(params) + 1
+        offset_idx = len(params) + 2
+        query += f" ORDER BY m.publish_time {order} LIMIT ${limit_idx} OFFSET ${offset_idx}"
         params.append(limit)
         params.append(offset)
 
