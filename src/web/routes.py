@@ -926,9 +926,7 @@ def create_order_assistant_router() -> APIRouter:
                 "title": msg.title,
                 "content": msg.content[:500] if msg.content else "",
                 "publish_time": (
-                    (msg.publish_time + _BJ_UTC).isoformat()
-                    if msg.publish_time
-                    else None
+                    (msg.publish_time + _BJ_UTC).isoformat() if msg.publish_time else None
                 ),
                 "stock_codes": msg.stock_codes,
                 "url": msg.url,
