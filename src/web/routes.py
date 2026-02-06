@@ -848,9 +848,7 @@ def create_order_assistant_router() -> APIRouter:
             offset: Pagination offset.
         """
         if mode not in ("premarket", "intraday"):
-            raise HTTPException(
-                status_code=400, detail="mode must be 'premarket' or 'intraday'"
-            )
+            raise HTTPException(status_code=400, detail="mode must be 'premarket' or 'intraday'")
 
         reader = await _get_oa_reader()
         now = datetime.now(beijing_tz)
@@ -865,9 +863,7 @@ def create_order_assistant_router() -> APIRouter:
         else:
             # Intraday: from 9:30 today to now (or 15:00 if after hours)
             start_time = datetime.combine(today, time(9, 30), tzinfo=beijing_tz)
-            end_time = min(
-                now, datetime.combine(today, time(15, 0), tzinfo=beijing_tz)
-            )
+            end_time = min(now, datetime.combine(today, time(15, 0), tzinfo=beijing_tz))
 
         # Get total count
         total_count = await reader.count_messages_in_range(
@@ -910,9 +906,7 @@ def create_order_assistant_router() -> APIRouter:
                 "source_name": msg.source_name,
                 "title": msg.title,
                 "content": msg.content[:500] if msg.content else "",
-                "publish_time": (
-                    msg.publish_time.isoformat() if msg.publish_time else None
-                ),
+                "publish_time": (msg.publish_time.isoformat() if msg.publish_time else None),
                 "stock_codes": msg.stock_codes,
                 "url": msg.url,
             }
@@ -972,9 +966,7 @@ def create_order_assistant_router() -> APIRouter:
             return {"success": True, "sent": 0, "message": "无新消息"}
 
         # Filter out already-sent messages
-        new_messages = [
-            m for m in incoming if m.get("id") and m["id"] not in _oa_feishu_sent_ids
-        ]
+        new_messages = [m for m in incoming if m.get("id") and m["id"] not in _oa_feishu_sent_ids]
 
         if not new_messages:
             return {"success": True, "sent": 0, "message": "消息已发送过"}

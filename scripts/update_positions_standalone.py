@@ -43,12 +43,16 @@ SLOTS = [
         "sector_name": "光通信",
         "holdings": [
             {
-                "stock_code": "600498.SH", "stock_name": "烽火通信",
-                "quantity": 25000, "entry_price": 39.92,
+                "stock_code": "600498.SH",
+                "stock_name": "烽火通信",
+                "quantity": 25000,
+                "entry_price": 39.92,
             },
             {
-                "stock_code": "600487.SH", "stock_name": "亨通光电",
-                "quantity": 32500, "entry_price": 30.70,
+                "stock_code": "600487.SH",
+                "stock_name": "亨通光电",
+                "quantity": 32500,
+                "entry_price": 30.70,
             },
         ],
     },
@@ -61,8 +65,10 @@ SLOTS = [
         "sector_name": "化工",
         "holdings": [
             {
-                "stock_code": "601117.SH", "stock_name": "中国化学",
-                "quantity": 222700, "entry_price": 8.98,
+                "stock_code": "601117.SH",
+                "stock_name": "中国化学",
+                "quantity": 222700,
+                "entry_price": 8.98,
             },
         ],
     },
@@ -75,12 +81,16 @@ SLOTS = [
         "sector_name": "黄金",
         "holdings": [
             {
-                "stock_code": "000506.SZ", "stock_name": "招金矿业",
-                "quantity": 30900, "entry_price": 21.4,
+                "stock_code": "000506.SZ",
+                "stock_name": "招金矿业",
+                "quantity": 30900,
+                "entry_price": 21.4,
             },
             {
-                "stock_code": "002155.SZ", "stock_name": "湖南黄金",
-                "quantity": 35900, "entry_price": 27.8,
+                "stock_code": "002155.SZ",
+                "stock_name": "湖南黄金",
+                "quantity": 35900,
+                "entry_price": 27.8,
             },
         ],
     },
