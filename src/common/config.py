@@ -226,7 +226,9 @@ def get_feishu_config() -> dict[str, str]:
 
 def get_ifind_credentials() -> tuple[str, str]:
     """
-    Get iFinD API credentials.
+    Get iFinD API credentials (legacy SDK method).
+
+    DEPRECATED: Use get_ifind_refresh_token() for HTTP API instead.
 
     Credentials are read in the following order:
     1. Environment variables: IFIND_USERNAME, IFIND_PASSWORD
@@ -270,6 +272,59 @@ def get_ifind_credentials() -> tuple[str, str]:
         "iFinD credentials not configured. "
         "Set IFIND_USERNAME and IFIND_PASSWORD environment variables, "
         "or configure in config/secrets.yaml"
+    )
+
+
+def get_ifind_refresh_token() -> str:
+    """
+    Get iFinD HTTP API refresh_token.
+
+    The refresh_token is used to obtain access_token for HTTP API calls.
+    It can be obtained from the iFinD Windows client:
+    Tools -> refresh_token Query/Update
+
+    Credentials are read in the following order:
+    1. Environment variable: IFIND_REFRESH_TOKEN
+    2. secrets.yaml file: ifind.refresh_token
+
+    Returns:
+        refresh_token string
+
+    Raises:
+        ValueError: If refresh_token is not configured
+
+    Usage:
+        from src.common.config import get_ifind_refresh_token
+
+        refresh_token = get_ifind_refresh_token()
+        # Use with IFinDHttpClient
+    """
+    import os
+
+    # Priority 1: Environment variable (for Docker deployment)
+    refresh_token = os.environ.get("IFIND_REFRESH_TOKEN", "")
+
+    if refresh_token:
+        logger.debug("Using iFinD refresh_token from environment variable")
+        return refresh_token
+
+    # Priority 2: secrets.yaml (for local development)
+    try:
+        secrets = load_secrets()
+        refresh_token = secrets.get_str("ifind.refresh_token")
+
+        if refresh_token:
+            logger.debug("Using iFinD refresh_token from secrets.yaml")
+            return refresh_token
+    except FileNotFoundError:
+        pass  # secrets.yaml not found, will raise ValueError below
+
+    raise ValueError(
+        "iFinD refresh_token not configured. "
+        "Set IFIND_REFRESH_TOKEN environment variable, "
+        "or configure ifind.refresh_token in config/secrets.yaml. "
+        "You can obtain refresh_token from iFinD Windows client: "
+        "Tools -> refresh_token Query/Update"
     )
 
 

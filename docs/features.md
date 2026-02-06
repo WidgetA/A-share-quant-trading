@@ -28,7 +28,7 @@
 | 0.7.0 | 2026-02-03 | - | SYS-005: Web UI for trading confirmations (containerized deployment) |
 | 0.7.1 | 2026-02-04 | - | SYS-004: Enhanced startup notification with git commit info for CD tracking |
 | 0.8.0 | 2026-02-04 | - | SIM-001: Historical simulation trading feature |
-| 0.8.1 | 2026-02-04 | - | SIM-001: Add intraday sell capability during trading hours |
+| 0.9.0 | 2026-02-06 | - | OA-001: Order assistant (real-time news dashboard) |
 
 ---
 
@@ -1167,16 +1167,15 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 |-------|------|-------------|
 | PREMARKET_ANALYSIS | 08:30 | Review overnight messages, select signals |
 | MORNING_AUCTION | 09:25 | Execute pending buys, check limit-up |
-| TRADING_HOURS | 09:30-15:00 | Monitor positions, check intraday messages, sell holdings at current price |
-| MARKET_CLOSE | 15:00 | Day summary, P&L calculation, sell decision for overnight holdings |
-| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions |
+| TRADING_HOURS | 09:30-15:00 | Monitor positions, check intraday messages for buying opportunities |
+| MARKET_CLOSE | 15:00 | Day summary, P&L calculation, optional sell at closing price |
+| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions, sell at opening price |
 | COMPLETED | - | Simulation finished, show results |
 
-**Trading Hours Actions** (v0.8.1):
+**Trading Hours Actions**:
 During trading hours, users can:
 - View and select from historical messages for buying
 - Check intraday messages for new buying opportunities
-- Sell existing holdings at current intraday prices (new in v0.8.1)
 - Fast forward to market close
 
 **API Endpoints**:
@@ -1186,7 +1185,7 @@ During trading hours, users can:
 | `/api/simulation/state` | GET | Get current state |
 | `/api/simulation/advance` | POST | Advance to next phase |
 | `/api/simulation/select` | POST | Submit signal selection (premarket) |
-| `/api/simulation/sell` | POST | Submit sell decision (trading hours, market close, or morning confirmation) |
+| `/api/simulation/sell` | POST | Submit sell decision (market close or morning confirmation) |
 | `/api/simulation/intraday/select` | POST | Select intraday signals for buying |
 | `/api/simulation/intraday/skip` | POST | Skip intraday messages |
 | `/api/simulation/messages` | GET | Get historical messages |
@@ -1253,6 +1252,58 @@ simulation:
 
 ---
 
+### [OA-001] Order Assistant (Real-time News Dashboard)
+
+**Status**: Completed
+
+**Description**: Real-time news analysis dashboard for manual trading decisions. Shows pre-analyzed messages from the database based on current Beijing time. No position management — purely informational.
+
+**Requirements**:
+- Auto-detect market phase based on Beijing time (pre-market / trading / closed)
+- Pre-market mode (before 9:30): show overnight messages (last trading day 15:00 to now)
+- Trading mode (9:30–15:00): show both pre-market (static) and intraday messages (auto-refresh every 30s)
+- After hours (after 15:00): show both sections statically
+- Same message card design as simulation (sentiment badges, stock tags, confidence %, reasoning)
+- Filter: "仅显示正面消息" toggle per section
+- Pagination: "加载更多" button per section
+- No position management, no buying/selling — read-only display
+
+**Technical Design**:
+- `create_order_assistant_router()` factory function (same pattern as simulation)
+- Lazy-init `MessageReader` singleton for real-time DB access
+- Uses `MessageReader.get_messages_in_range()` and `count_messages_in_range()` directly
+- Phase detection based on `datetime.now(ZoneInfo("Asia/Shanghai"))`
+- Frontend `setInterval` polling for intraday auto-refresh
+- Stock name lookup via `SectorMapper`
+
+**Files**:
+- `src/web/routes.py` - Order assistant routes (`create_order_assistant_router()`)
+- `src/web/templates/order_assistant.html` - Page template
+- `src/web/templates/base.html` - Nav link added
+- `src/web/static/style.css` - Additional styles
+- `src/web/app.py` - Router registration
+
+**API Endpoints**:
+```
+GET  /order-assistant                     - Page (HTML)
+GET  /api/order-assistant/state           - Current phase and time info (JSON)
+GET  /api/order-assistant/messages        - Messages with pagination (JSON)
+     ?mode=premarket|intraday
+     &only_positive=false
+     &limit=50
+     &offset=0
+```
+
+**Acceptance Criteria**:
+- [x] Phase auto-detection based on Beijing time
+- [x] Pre-market message display with analysis
+- [x] Intraday message display with auto-refresh
+- [x] Filter and pagination support
+- [x] Same message card design as simulation
+- [x] Navigation link in header
+
+---
+
 ## Backlog
 
 Features under consideration (not yet planned):
@@ -1260,5 +1311,6 @@ Features under consideration (not yet planned):
 - [x] Web dashboard for monitoring → See SYS-005
 - [ ] Telegram/WeChat notifications
 - [x] Backtesting framework → See SIM-001 (Historical Simulation)
+- [x] Order assistant → See OA-001
 - [ ] Multi-account support
 - [ ] Performance analytics

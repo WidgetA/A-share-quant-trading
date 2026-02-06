@@ -197,45 +197,6 @@
         </div>
         {% endif %}
 
-        <!-- Trading Hours: Intraday Sell Form (hidden by default) -->
-        {% if state.phase == 'trading_hours' and state.holdings %}
-        <div id="intraday-sell-section" class="sim-card hidden">
-            <h3>盘中卖出 - 选择要卖出的持仓</h3>
-            <p class="phase-description">勾选要卖出的持仓（将以当前价格卖出）</p>
-            <form id="intraday-sell-form" class="holdings-form">
-                {% for holding in state.holdings %}
-                <div class="holding-item">
-                    <label class="holding-checkbox">
-                        <input type="checkbox" name="slots" value="{{ holding.slot_id }}">
-                        <div class="holding-content">
-                            <div class="holding-header">
-                                <span class="stock-code">{{ holding.stock_code }}</span>
-                                <span class="stock-name">{{ holding.stock_name }}</span>
-                            </div>
-                            <div class="holding-details">
-                                <span>数量: {{ holding.quantity }} 股</span>
-                                <span>成本: {{ "%.2f"|format(holding.entry_price) }}</span>
-                                {% if holding.current_price %}
-                                <span>现价: {{ "%.2f"|format(holding.current_price) }}</span>
-                                {% endif %}
-                                {% if holding.pnl_percent is not none %}
-                                <span class="pnl {{ 'positive' if holding.pnl_percent > 0 else 'negative' }}">
-                                    {{ "%+.2f"|format(holding.pnl_percent) }}%
-                                </span>
-                                {% endif %}
-                            </div>
-                        </div>
-                    </label>
-                </div>
-                {% endfor %}
-                <div class="form-actions">
-                    <button type="submit" class="btn btn-danger">卖出选中（盘中价）</button>
-                    <button type="button" class="btn btn-secondary" onclick="hideIntradaySellForm()">取消</button>
-                </div>
-            </form>
-        </div>
-        {% endif %}
-
         <!-- Trading Hours phase with intraday messages -->
         {% if state.phase == 'trading_hours' %}
         <div class="sim-card" id="trading-hours-main">
@@ -282,15 +243,11 @@
             <ul class="phase-options">
                 <li>点击"查看消息"浏览所有消息并选择买入</li>
                 <li>点击"检查盘中消息"查看是否有新的盘中消息</li>
-                <li>点击"卖出持仓"以当前价格卖出</li>
                 <li>点击"快进到收盘"直接跳到15:00收盘</li>
             </ul>
             <div class="form-actions trading-actions">
                 <button class="btn btn-secondary" onclick="showMessages()">查看消息</button>
                 <button class="btn btn-primary" onclick="advancePhase()">检查盘中消息</button>
-                {% if state.holdings %}
-                <button class="btn btn-warning" onclick="showIntradaySellForm()">卖出持仓</button>
-                {% endif %}
                 <button class="btn btn-outline" onclick="fastForwardToClose()">快进到收盘</button>
             </div>
             {% endif %}
@@ -407,7 +364,6 @@ const startForm = document.getElementById('start-form');
 const selectForm = document.getElementById('select-form');
 const sellForm = document.getElementById('sell-form');
 const intradayForm = document.getElementById('intraday-form');
-const intradaySellForm = document.getElementById('intraday-sell-form');
 
 // Start simulation
 if (startForm) {
@@ -553,52 +509,6 @@ if (intradayForm) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ selected_indices: selected })
-            });
-            if (response.ok) {
-                window.location.reload();
-            } else {
-                const result = await response.json();
-                alert('错误: ' + (result.detail || '未知错误'));
-            }
-        } catch (error) {
-            alert('网络错误: ' + error.message);
-        }
-    });
-}
-
-// Show intraday sell form
-function showIntradaySellForm() {
-    const sellSection = document.getElementById('intraday-sell-section');
-    const mainSection = document.getElementById('trading-hours-main');
-    if (sellSection) sellSection.classList.remove('hidden');
-    if (mainSection) mainSection.classList.add('hidden');
-}
-
-// Hide intraday sell form
-function hideIntradaySellForm() {
-    const sellSection = document.getElementById('intraday-sell-section');
-    const mainSection = document.getElementById('trading-hours-main');
-    if (sellSection) sellSection.classList.add('hidden');
-    if (mainSection) mainSection.classList.remove('hidden');
-}
-
-// Intraday sell form submission
-if (intradaySellForm) {
-    intradaySellForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const checkboxes = intradaySellForm.querySelectorAll('input[name="slots"]:checked');
-        const slots = Array.from(checkboxes).map(cb => parseInt(cb.value));
-
-        if (slots.length === 0) {
-            alert('请选择要卖出的持仓');
-            return;
-        }
-
-        try {
-            const response = await fetch('/api/simulation/sell', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ slots_to_sell: slots })
             });
             if (response.ok) {
                 window.location.reload();
@@ -799,16 +709,54 @@ function closeMessages() {
 
 // Store loaded messages for selection
 let loadedMessages = [];
+// Pagination state
+let currentOffset = 0;
+let pageSize = 50;
+let totalCount = 0;
+let hasMore = false;
+// Track checked message IDs for preservation during re-render
+let checkedMessageIds = new Set();
+// Store stock names map globally for re-render
+let globalStockNamesMap = {};
 
-// Load messages from API
-async function loadMessages() {
+// Get checked message IDs before re-render
+function saveCheckedState() {
+    checkedMessageIds.clear();
+    document.querySelectorAll('.msg-checkbox:checked').forEach(cb => {
+        checkedMessageIds.add(cb.dataset.id);
+    });
+}
+
+// Restore checked state after re-render
+function restoreCheckedState() {
+    checkedMessageIds.forEach(id => {
+        const checkbox = document.querySelector(`.msg-checkbox[data-id="${id}"]`);
+        if (checkbox && !checkbox.disabled) {
+            checkbox.checked = true;
+        }
+    });
+}
+
+// Load messages from API (append mode for pagination)
+async function loadMessages(append = false) {
     const onlyPositive = document.getElementById('only-positive').checked;
     const listEl = document.getElementById('messages-list');
     const actionsEl = document.getElementById('messages-actions');
-    listEl.innerHTML = '<p>加载中...</p>';
+
+    // Reset pagination when filter changes or initial load
+    if (!append) {
+        currentOffset = 0;
+        loadedMessages = [];
+        checkedMessageIds.clear();
+        globalStockNamesMap = {};
+        listEl.innerHTML = '<p>加载中...</p>';
+    } else {
+        // Save checked state before re-render
+        saveCheckedState();
+    }
 
     try {
-        const url = `/api/simulation/messages?only_positive=${onlyPositive}&limit=100`;
+        const url = `/api/simulation/messages?only_positive=${onlyPositive}&limit=${pageSize}&offset=${currentOffset}`;
         const response = await fetch(url);
         const data = await response.json();
 
@@ -818,14 +766,21 @@ async function loadMessages() {
             return;
         }
 
-        if (data.messages.length === 0) {
+        // Update pagination state
+        totalCount = data.total_count;
+        hasMore = data.has_more;
+
+        // Append new messages to existing list
+        loadedMessages = loadedMessages.concat(data.messages);
+
+        // Merge stock names
+        Object.assign(globalStockNamesMap, data.stock_names || {});
+
+        if (loadedMessages.length === 0) {
             listEl.innerHTML = '<p>当日无消息</p>';
             actionsEl.style.display = 'none';
             return;
         }
-
-        // Store messages for later use
-        loadedMessages = data.messages;
 
         const sentimentNames = {
             'strong_bullish': '强看多',
@@ -836,19 +791,29 @@ async function loadMessages() {
             'unknown': '未分析'
         };
 
-        let html = `<p class="messages-summary">找到 ${data.count} 条消息 (${data.sim_date}) - 勾选要买入的消息</p>`;
+        // Helper function to format stock code with name
+        function formatStock(code) {
+            // Remove exchange suffix for lookup
+            const cleanCode = code.includes('.') ? code.split('.')[0] : code;
+            const name = globalStockNamesMap[cleanCode];
+            return name ? `${code}(${name})` : code;
+        }
+
+        let html = `<p class="messages-summary">已加载 ${loadedMessages.length} / ${totalCount} 条消息 (${data.sim_date}) - 勾选要买入的消息</p>`;
         html += '<div class="messages-table">';
 
-        for (let i = 0; i < data.messages.length; i++) {
-            const msg = data.messages[i];
+        for (let i = 0; i < loadedMessages.length; i++) {
+            const msg = loadedMessages[i];
             const sentiment = msg.analysis?.sentiment || 'unknown';
             const sentimentLabel = sentimentNames[sentiment] || sentiment;
             const confidence = msg.analysis ? (msg.analysis.confidence * 100).toFixed(0) + '%' : '-';
             const reasoning = msg.analysis?.reasoning || '无分析';
             const stockCodes = msg.analysis?.affected_stocks || msg.stock_codes || [];
-            const stocks = stockCodes.join(', ') || '-';
+            const stocks = stockCodes.map(formatStock).join(', ') || '-';
             const isPositive = sentiment === 'strong_bullish' || sentiment === 'bullish';
             const hasStocks = stockCodes.length > 0;
+            // For initial load, auto-check positive messages; for append, preserve state
+            const shouldCheck = append ? checkedMessageIds.has(msg.id) : (isPositive && hasStocks);
 
             html += `
                 <div class="message-row ${sentiment}">
@@ -858,7 +823,7 @@ async function loadMessages() {
                                data-stocks='${JSON.stringify(stockCodes)}'
                                data-title="${(msg.title || '').replace(/"/g, '&quot;')}"
                                data-sentiment="${sentiment}"
-                               ${isPositive && hasStocks ? 'checked' : ''}
+                               ${shouldCheck ? 'checked' : ''}
                                ${!hasStocks ? 'disabled title="无相关股票"' : ''}
                                onchange="updateMsgSelectionCount()">
                         <div class="message-content-wrapper">
@@ -882,8 +847,25 @@ async function loadMessages() {
             `;
         }
 
+        // Add "Load More" button if more messages available
+        if (hasMore) {
+            const remaining = totalCount - loadedMessages.length;
+            html += `
+                <div class="load-more-container">
+                    <button class="btn btn-secondary" onclick="loadMoreMessages()" id="load-more-btn">
+                        加载更多 (还有 ${remaining} 条)
+                    </button>
+                </div>
+            `;
+        }
+
         html += '</div>';
         listEl.innerHTML = html;
+
+        // Restore checked state for appended messages
+        if (append) {
+            restoreCheckedState();
+        }
 
         // Show buy button and update count
         actionsEl.style.display = 'flex';
@@ -892,6 +874,18 @@ async function loadMessages() {
     } catch (error) {
         listEl.innerHTML = `<p class="error">错误: ${error.message}</p>`;
     }
+}
+
+// Load more messages (pagination)
+async function loadMoreMessages() {
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+        loadMoreBtn.disabled = true;
+        loadMoreBtn.textContent = '加载中...';
+    }
+
+    currentOffset += pageSize;
+    await loadMessages(true);  // append mode
 }
 
 // Update selection count

@@ -3,7 +3,7 @@
 # Retrieves all stocks that hit the daily price limit after market close.
 
 # === DEPENDENCIES ===
-# - iFinDPy: THS iFinD SDK for A-share market data
+# - IFinDHttpClient: HTTP client for iFinD API
 # - LimitUpStock model: Data structure for limit-up stocks
 # - LimitUpDatabase: PostgreSQL storage layer
 
@@ -12,15 +12,15 @@
 #   - Main board: +10% (or +5% for ST stocks)
 #   - ChiNext/STAR: +20%
 # - Best called after market close (15:00 Beijing time)
-# - Uses THS_iwencai API (问财) for natural language query
+# - Uses smart_stock_picking API (问财) for natural language query
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
-from src.common.config import Config, get_ifind_credentials
+from src.common.config import Config
+from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.limit_up_db import (
     LimitUpDatabase,
     LimitUpDatabaseConfig,
@@ -33,10 +33,10 @@ logger = logging.getLogger(__name__)
 
 class IFinDLimitUpSource:
     """
-    Data source for fetching limit-up stocks via iFinD API.
+    Data source for fetching limit-up stocks via iFinD HTTP API.
 
     Data Flow:
-        iFinD THS_DataPool API -> DataFrame -> LimitUpStock -> LimitUpDatabase
+        iFinD HTTP API -> dict -> LimitUpStock -> LimitUpDatabase
 
     Usage:
         source = IFinDLimitUpSource()
@@ -58,6 +58,7 @@ class IFinDLimitUpSource:
         self,
         db_config: LimitUpDatabaseConfig | None = None,
         config: Config | None = None,
+        http_client: IFinDHttpClient | None = None,
     ):
         """
         Initialize the iFinD limit-up data source.
@@ -65,12 +66,13 @@ class IFinDLimitUpSource:
         Args:
             db_config: PostgreSQL database configuration (if None, uses config file)
             config: Optional configuration (for future extensibility)
+            http_client: Optional HTTP client (if None, creates new one)
         """
         self._db_config = db_config
         self.config = config
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ifind")
         self._database: LimitUpDatabase | None = None
-        self._logged_in = False
+        self._http_client = http_client
+        self._owns_http_client = http_client is None
 
     async def start(self) -> None:
         """Initialize resources and connect to database."""
@@ -79,6 +81,12 @@ class IFinDLimitUpSource:
         else:
             self._database = create_limit_up_db_from_config()
         await self._database.connect()
+
+        # Initialize HTTP client if we own it
+        if self._owns_http_client:
+            self._http_client = IFinDHttpClient()
+            await self._http_client.start()
+
         logger.info("IFinD limit-up source started")
 
     async def stop(self) -> None:
@@ -87,58 +95,12 @@ class IFinDLimitUpSource:
             await self._database.close()
             self._database = None
 
-        # Logout before shutting down executor (logout uses executor)
-        if self._logged_in:
-            await self._ifind_logout()
-
-        self._executor.shutdown(wait=False)
+        # Stop HTTP client if we own it
+        if self._owns_http_client and self._http_client:
+            await self._http_client.stop()
+            self._http_client = None
 
         logger.info("IFinD limit-up source stopped")
-
-    async def _ensure_login(self) -> bool:
-        """Ensure iFinD is logged in."""
-        if self._logged_in:
-            return True
-
-        loop = asyncio.get_event_loop()
-        self._logged_in = await loop.run_in_executor(self._executor, self._ifind_login)
-        return self._logged_in
-
-    def _ifind_login(self) -> bool:
-        """Login to iFinD API (runs in thread pool)."""
-        try:
-            from iFinDPy import THS_iFinDLogin
-
-            username, password = get_ifind_credentials()
-            result = THS_iFinDLogin(username, password)
-
-            if result == 0:
-                logger.info("iFinD login successful")
-                return True
-            else:
-                logger.error(f"iFinD login failed with code: {result}")
-                return False
-        except ImportError as e:
-            logger.error(f"iFinDPy module not available: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"iFinD login error: {e}")
-            return False
-
-    async def _ifind_logout(self) -> None:
-        """Logout from iFinD API."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self._executor, self._do_logout)
-
-    def _do_logout(self) -> None:
-        """Perform logout (runs in thread pool)."""
-        try:
-            from iFinDPy import THS_iFinDLogout
-
-            THS_iFinDLogout()
-            logger.info("iFinD logout successful")
-        except Exception as e:
-            logger.warning(f"iFinD logout error: {e}")
 
     async def fetch_limit_up_stocks(
         self,
@@ -154,20 +116,16 @@ class IFinDLimitUpSource:
             List of LimitUpStock objects
 
         Raises:
-            RuntimeError: If iFinD login fails
+            RuntimeError: If HTTP client is not initialized
+            IFinDHttpError: If API call fails
         """
-        if not await self._ensure_login():
-            raise RuntimeError("Failed to login to iFinD")
+        if self._http_client is None:
+            raise RuntimeError("HTTP client not initialized. Call start() first.")
 
         if trade_date is None:
             trade_date = datetime.now().strftime("%Y-%m-%d")
 
-        loop = asyncio.get_event_loop()
-        raw_data = await loop.run_in_executor(
-            self._executor,
-            self._fetch_limit_up_data,
-            trade_date,
-        )
+        raw_data = await self._fetch_limit_up_data(trade_date)
 
         if raw_data is None:
             logger.warning(f"No limit-up data returned for {trade_date}")
@@ -177,15 +135,16 @@ class IFinDLimitUpSource:
         logger.info(f"Fetched {len(stocks)} limit-up stocks for {trade_date}")
         return stocks
 
-    def _fetch_limit_up_data(self, trade_date: str) -> dict[str, Any] | None:
+    async def _fetch_limit_up_data(self, trade_date: str) -> dict[str, Any] | None:
         """
-        Fetch limit-up data from iFinD API (runs in thread pool).
+        Fetch limit-up data from iFinD HTTP API.
 
-        Uses THS_iwencai (问财) for natural language query.
+        Uses smart_stock_picking (问财) for natural language query.
         """
+        # Caller guarantees _http_client is set
+        assert self._http_client is not None
+
         try:
-            from iFinDPy import THS_iwencai
-
             # Build query string with date and required fields
             # Format date for query: YYYY-MM-DD -> YYYYMMDD or use relative date
             today = datetime.now().strftime("%Y-%m-%d")
@@ -197,23 +156,14 @@ class IFinDLimitUpSource:
                 date_str = trade_date.replace("-", "")
                 query = f"{date_str}涨停 {query_fields}"
 
-            result = THS_iwencai(query, "stock")
+            result = await self._http_client.smart_stock_picking(query, "stock")
 
-            # THS_iwencai returns OrderedDict with errorcode
-            if isinstance(result, dict):
-                if result.get("errorcode", 0) != 0:
-                    err_msg = result.get("errmsg")
-                    err_code = result.get("errorcode")
-                    logger.error(f"THS_iwencai error: {err_msg} (code: {err_code})")
-                    return None
-                logger.debug(f"THS_iwencai returned {len(result.get('tables', []))} tables")
-                return result
-            else:
-                logger.warning(f"Unexpected THS_iwencai return type: {type(result)}")
-                return None
+            # Check for errors (IFinDHttpClient raises on non-zero errorcode)
+            logger.debug(f"smart_stock_picking returned {len(result.get('tables', []))} tables")
+            return result
 
-        except ImportError as e:
-            logger.error(f"iFinDPy module not available: {e}")
+        except IFinDHttpError as e:
+            logger.error(f"iFinD HTTP API error: {e}")
             return None
         except Exception as e:
             logger.error(f"Error fetching limit-up data: {e}")

@@ -1,0 +1,433 @@
+{% extends "base.html" %}
+
+{% block title %}下单辅助{% endblock %}
+
+{% block content %}
+<div class="oa-page">
+    <h2>下单辅助</h2>
+
+    <!-- Phase Header -->
+    {% set phase_names = {
+        'premarket': '盘前分析',
+        'trading': '交易时段',
+        'closed': '已收盘'
+    } %}
+    <div class="phase-header">
+        <div class="phase-info">
+            <span class="phase-badge {{ phase }}">{{ phase_names.get(phase, phase) }}</span>
+            <span class="sim-time" id="beijing-time">{{ beijing_time }}</span>
+            <span class="auto-refresh-badge" id="auto-refresh-badge" style="display: none;">自动刷新中</span>
+        </div>
+    </div>
+
+    <!-- Premarket Section -->
+    <section class="oa-section" id="premarket-section">
+        <div class="sim-card">
+            <div class="oa-section-header">
+                <h3>盘前消息</h3>
+                <span class="oa-section-hint">昨日收盘后至今晨的新闻与分析</span>
+            </div>
+            <div class="messages-filter">
+                <label>
+                    <input type="checkbox" id="premarket-positive-only" onchange="loadPremarketMessages()">
+                    仅显示正面消息
+                </label>
+            </div>
+            <div id="premarket-messages">加载中...</div>
+        </div>
+    </section>
+
+    <!-- Intraday Section (hidden before 9:30) -->
+    <section class="oa-section" id="intraday-section" style="{% if phase == 'premarket' %}display: none;{% endif %}">
+        <div class="sim-card">
+            <div class="oa-section-header">
+                <h3>盘中消息</h3>
+                <span class="oa-section-hint" id="intraday-hint">
+                    {% if phase == 'trading' %}
+                    开盘至今的新闻与公告（每30秒自动刷新）
+                    {% else %}
+                    今日盘中新闻与公告
+                    {% endif %}
+                </span>
+                <span class="oa-update-time" id="intraday-update-time"></span>
+            </div>
+            <div class="messages-filter">
+                <label>
+                    <input type="checkbox" id="intraday-positive-only" onchange="loadIntradayMessages()">
+                    仅显示正面消息
+                </label>
+            </div>
+            <div id="intraday-messages">加载中...</div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const currentPhase = '{{ phase }}';
+
+// Sentiment label mapping
+const sentimentNames = {
+    'strong_bullish': '强看多',
+    'bullish': '看多',
+    'neutral': '中性',
+    'bearish': '看空',
+    'strong_bearish': '强看空',
+    'unknown': '未分析'
+};
+
+// === Premarket State ===
+let premarketOffset = 0;
+let premarketPageSize = 50;
+let premarketTotalCount = 0;
+let premarketHasMore = false;
+let premarketMessages = [];
+let premarketStockNames = {};
+
+// === Intraday State ===
+let intradayOffset = 0;
+let intradayPageSize = 50;
+let intradayTotalCount = 0;
+let intradayHasMore = false;
+let intradayMessages = [];
+let intradayStockNames = {};
+let intradayPrevCount = 0;
+
+// === Feishu Notification State ===
+let feishuSentIds = new Set();
+
+// === Auto-refresh ===
+let autoRefreshInterval = null;
+let timeUpdateInterval = null;
+
+// Helper: format stock code with name
+function formatStock(code, stockNames) {
+    const cleanCode = code.includes('.') ? code.split('.')[0] : code;
+    const name = stockNames[cleanCode];
+    return name ? `${code}(${name})` : code;
+}
+
+// Render messages into a container
+function renderMessages(containerId, messages, stockNames, hasMore, totalCount, loadedCount, loadMoreFn, newMessageIds) {
+    const el = document.getElementById(containerId);
+
+    if (messages.length === 0) {
+        el.innerHTML = '<p class="no-messages">暂无消息</p>';
+        return;
+    }
+
+    let html = `<p class="messages-summary">已加载 ${loadedCount} / ${totalCount} 条消息</p>`;
+    html += '<div class="messages-table">';
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const sentiment = msg.analysis?.sentiment || 'unknown';
+        const sentimentLabel = sentimentNames[sentiment] || sentiment;
+        const confidence = msg.analysis ? (msg.analysis.confidence * 100).toFixed(0) + '%' : '-';
+        const reasoning = msg.analysis?.reasoning || '无分析';
+        const stockCodes = msg.analysis?.affected_stocks || msg.stock_codes || [];
+        const stocks = stockCodes.map(c => formatStock(c, stockNames)).join(', ') || '-';
+        const isPositive = sentiment === 'strong_bullish' || sentiment === 'bullish';
+        const isNew = newMessageIds && newMessageIds.has(msg.id);
+
+        html += `
+            <div class="message-row ${sentiment} ${isNew ? 'new-message' : ''}">
+                <div class="message-content-wrapper">
+                    <div class="message-header">
+                        <span class="message-time">${msg.publish_time?.substring(0, 16) || '-'}</span>
+                        <span class="message-source">${msg.source_name || ''}</span>
+                        <span class="sentiment-badge ${sentiment}">${sentimentLabel}</span>
+                        <span class="confidence">${confidence}</span>
+                        ${isPositive ? '<span class="ai-recommended">AI推荐</span>' : ''}
+                        ${isNew ? '<span class="new-badge">NEW</span>' : ''}
+                    </div>
+                    <div class="message-title">${msg.title || '(无标题)'}</div>
+                    <div class="message-stocks">相关股票: ${stocks}</div>
+                    <div class="message-reasoning">${reasoning}</div>
+                </div>
+                <details class="message-content-details">
+                    <summary>查看内容</summary>
+                    <div class="message-content">${msg.content || '(无内容)'}</div>
+                </details>
+            </div>
+        `;
+    }
+
+    if (hasMore) {
+        const remaining = totalCount - loadedCount;
+        html += `
+            <div class="load-more-container">
+                <button class="btn btn-secondary" onclick="${loadMoreFn}()" id="${containerId}-load-more">
+                    加载更多 (还有 ${remaining} 条)
+                </button>
+            </div>
+        `;
+    }
+
+    html += '</div>';
+    el.innerHTML = html;
+}
+
+// === Premarket Messages ===
+async function loadPremarketMessages(append = false) {
+    const onlyPositive = document.getElementById('premarket-positive-only').checked;
+    const el = document.getElementById('premarket-messages');
+
+    if (!append) {
+        premarketOffset = 0;
+        premarketMessages = [];
+        premarketStockNames = {};
+        el.innerHTML = '<p>加载中...</p>';
+    }
+
+    try {
+        const url = `/api/order-assistant/messages?mode=premarket&only_positive=${onlyPositive}&limit=${premarketPageSize}&offset=${premarketOffset}`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!response.ok) {
+            el.innerHTML = `<p class="error">${data.detail || '加载消息失败'}</p>`;
+            return;
+        }
+
+        premarketTotalCount = data.total_count;
+        premarketHasMore = data.has_more;
+        premarketMessages = premarketMessages.concat(data.messages);
+        Object.assign(premarketStockNames, data.stock_names || {});
+
+        renderMessages(
+            'premarket-messages',
+            premarketMessages,
+            premarketStockNames,
+            premarketHasMore,
+            premarketTotalCount,
+            premarketMessages.length,
+            'loadMorePremarket',
+            null
+        );
+    } catch (error) {
+        el.innerHTML = `<p class="error">错误: ${error.message}</p>`;
+    }
+}
+
+function loadMorePremarket() {
+    const btn = document.getElementById('premarket-messages-load-more');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '加载中...';
+    }
+    premarketOffset += premarketPageSize;
+    loadPremarketMessages(true);
+}
+
+// === Intraday Messages ===
+async function loadIntradayMessages(append = false) {
+    const onlyPositive = document.getElementById('intraday-positive-only').checked;
+    const el = document.getElementById('intraday-messages');
+
+    if (!append) {
+        intradayOffset = 0;
+        const oldMessages = intradayMessages;
+        intradayMessages = [];
+        intradayStockNames = {};
+        // Only show loading on first load
+        if (oldMessages.length === 0) {
+            el.innerHTML = '<p>加载中...</p>';
+        }
+    }
+
+    try {
+        const url = `/api/order-assistant/messages?mode=intraday&only_positive=${onlyPositive}&limit=${intradayPageSize}&offset=${intradayOffset}`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!response.ok) {
+            // Don't overwrite on refresh error
+            if (intradayMessages.length === 0) {
+                el.innerHTML = `<p class="error">${data.detail || '加载消息失败'}</p>`;
+            }
+            return;
+        }
+
+        intradayTotalCount = data.total_count;
+        intradayHasMore = data.has_more;
+        intradayMessages = intradayMessages.concat(data.messages);
+        Object.assign(intradayStockNames, data.stock_names || {});
+
+        // Detect new messages for highlighting
+        let newIds = null;
+        if (intradayPrevCount > 0 && intradayMessages.length > intradayPrevCount) {
+            newIds = new Set();
+            for (let i = intradayPrevCount; i < intradayMessages.length; i++) {
+                newIds.add(intradayMessages[i].id);
+            }
+        }
+
+        renderMessages(
+            'intraday-messages',
+            intradayMessages,
+            intradayStockNames,
+            intradayHasMore,
+            intradayTotalCount,
+            intradayMessages.length,
+            'loadMoreIntraday',
+            newIds
+        );
+
+        // Update timestamp
+        const timeEl = document.getElementById('intraday-update-time');
+        if (timeEl && data.beijing_time) {
+            timeEl.textContent = '最后更新: ' + data.beijing_time.substring(11, 19);
+        }
+
+        intradayPrevCount = intradayMessages.length;
+    } catch (error) {
+        if (intradayMessages.length === 0) {
+            el.innerHTML = `<p class="error">错误: ${error.message}</p>`;
+        }
+    }
+}
+
+function loadMoreIntraday() {
+    const btn = document.getElementById('intraday-messages-load-more');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '加载中...';
+    }
+    intradayOffset += intradayPageSize;
+    loadIntradayMessages(true);
+}
+
+// Send new bullish/bearish messages to Feishu
+async function notifyFeishuNewMessages(messages) {
+    // Filter: only bullish/bearish, not already sent
+    const actionable = ['strong_bullish', 'bullish', 'bearish', 'strong_bearish'];
+    const toSend = messages.filter(m => {
+        const sentiment = m.analysis?.sentiment || 'unknown';
+        return actionable.includes(sentiment) && m.id && !feishuSentIds.has(m.id);
+    });
+
+    if (toSend.length === 0) return;
+
+    // Format for the backend endpoint
+    const payload = toSend.map(m => {
+        const sentiment = m.analysis?.sentiment || 'unknown';
+        const confidence = m.analysis ? (m.analysis.confidence * 100).toFixed(0) + '%' : '';
+        const stockCodes = m.analysis?.affected_stocks || m.stock_codes || [];
+        const stocks = stockCodes.map(c => formatStock(c, intradayStockNames)).join(', ');
+        return {
+            id: m.id,
+            title: m.title || '(无标题)',
+            sentiment: sentiment,
+            confidence: confidence,
+            stocks: stocks,
+            reasoning: m.analysis?.reasoning || '',
+            publish_time: m.publish_time || ''
+        };
+    });
+
+    try {
+        const response = await fetch('/api/order-assistant/feishu-notify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: payload })
+        });
+        const result = await response.json();
+        if (result.success && result.sent > 0) {
+            // Mark as sent locally too
+            toSend.forEach(m => feishuSentIds.add(m.id));
+        }
+    } catch (e) {
+        // Silent fail — don't interrupt the main flow
+        console.warn('Feishu notify failed:', e);
+    }
+}
+
+// Auto-refresh for intraday during trading hours
+async function autoRefreshIntraday() {
+    // Full reload (not append) to get all new messages
+    intradayPrevCount = intradayMessages.length;
+    intradayOffset = 0;
+    intradayMessages = [];
+    intradayStockNames = {};
+    await loadIntradayMessages(false);
+
+    // Push new messages to Feishu
+    if (intradayMessages.length > 0) {
+        await notifyFeishuNewMessages(intradayMessages);
+    }
+}
+
+// Update Beijing time display
+function updateTimeDisplay() {
+    const el = document.getElementById('beijing-time');
+    if (el) {
+        const now = new Date();
+        // Convert to Beijing time (UTC+8)
+        const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+        const beijing = new Date(utc + 8 * 3600000);
+        const y = beijing.getFullYear();
+        const m = String(beijing.getMonth() + 1).padStart(2, '0');
+        const d = String(beijing.getDate()).padStart(2, '0');
+        const h = String(beijing.getHours()).padStart(2, '0');
+        const min = String(beijing.getMinutes()).padStart(2, '0');
+        const s = String(beijing.getSeconds()).padStart(2, '0');
+        el.textContent = `${y}-${m}-${d} ${h}:${min}:${s}`;
+    }
+}
+
+// Phase transition check (show intraday section when trading starts)
+async function checkPhaseTransition() {
+    try {
+        const response = await fetch('/api/order-assistant/state');
+        const data = await response.json();
+
+        if (data.phase === 'trading' && currentPhase === 'premarket') {
+            // Trading just started — show intraday section and start auto-refresh
+            document.getElementById('intraday-section').style.display = '';
+            document.getElementById('auto-refresh-badge').style.display = '';
+            loadIntradayMessages();
+            startAutoRefresh();
+        }
+    } catch (e) {
+        // Ignore — will retry next interval
+    }
+}
+
+function startAutoRefresh() {
+    if (autoRefreshInterval) return;
+    autoRefreshInterval = setInterval(autoRefreshIntraday, 30000);
+    document.getElementById('auto-refresh-badge').style.display = '';
+}
+
+// === Initialization ===
+document.addEventListener('DOMContentLoaded', () => {
+    // Always load premarket messages
+    loadPremarketMessages();
+
+    // Load intraday if in trading or closed phase
+    if (currentPhase === 'trading' || currentPhase === 'closed') {
+        loadIntradayMessages().then(() => {
+            // Send initial batch to Feishu on first open during trading
+            if (currentPhase === 'trading' && intradayMessages.length > 0) {
+                notifyFeishuNewMessages(intradayMessages);
+            }
+        });
+    }
+
+    // Start auto-refresh during trading hours
+    if (currentPhase === 'trading') {
+        startAutoRefresh();
+    }
+
+    // If premarket, poll for phase transition every 60s
+    if (currentPhase === 'premarket') {
+        setInterval(checkPhaseTransition, 60000);
+    }
+
+    // Update time display every second
+    timeUpdateInterval = setInterval(updateTimeDisplay, 1000);
+});
+</script>
+{% endblock %}

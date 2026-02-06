@@ -3,7 +3,7 @@
 """
 查询同花顺板块列表
 
-使用iFinD问财接口查询A股市场的各类板块：
+使用iFinD HTTP API问财接口查询A股市场的各类板块：
 - 行业板块（同花顺行业分类）
 - 概念板块
 - 地域板块
@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import io
 import logging
 import sys
@@ -30,7 +31,7 @@ if sys.platform == "win32":
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.common.config import get_ifind_credentials
+from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,46 +40,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def login_ifind() -> bool:
-    """登录iFinD接口"""
-    try:
-        from iFinDPy import THS_iFinDLogin
-
-        username, password = get_ifind_credentials()
-        result = THS_iFinDLogin(username, password)
-
-        if result == 0:
-            logger.info("iFinD 登录成功")
-            return True
-        else:
-            logger.error(f"iFinD 登录失败，错误码: {result}")
-            return False
-    except ImportError as e:
-        logger.error(f"iFinDPy 模块不可用: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"登录错误: {e}")
-        return False
-
-
-def logout_ifind() -> None:
-    """登出iFinD接口"""
-    try:
-        from iFinDPy import THS_iFinDLogout
-
-        THS_iFinDLogout()
-        logger.info("iFinD 已登出")
-    except Exception as e:
-        logger.warning(f"登出错误: {e}")
-
-
-def fetch_sectors_by_iwencai(
-    query: str, sector_type: str, search_type: str = "stock"
+async def fetch_sectors_by_iwencai(
+    client: IFinDHttpClient, query: str, sector_type: str, search_type: str = "stock"
 ) -> list[dict]:
     """
     使用问财查询板块
 
     Args:
+        client: iFinD HTTP 客户端
         query: 问财查询语句
         sector_type: 板块类型名称
         search_type: 搜索类型 (stock/zhishu/fund等)
@@ -87,61 +56,51 @@ def fetch_sectors_by_iwencai(
         板块列表
     """
     try:
-        from iFinDPy import THS_iwencai
+        result = await client.smart_stock_picking(query, search_type)
 
-        result = THS_iwencai(query, search_type)
-
-        if isinstance(result, dict):
-            if result.get("errorcode", 0) != 0:
-                logger.error(
-                    f"问财查询{sector_type}失败: {result.get('errmsg')} "
-                    f"(code: {result.get('errorcode')})"
-                )
-                return []
-
-            tables = result.get("tables", [])
-            if not tables:
-                logger.warning(f"{sector_type}返回空数据")
-                return []
-
-            sectors = []
-            for table_wrapper in tables:
-                if not isinstance(table_wrapper, dict):
-                    continue
-
-                table = table_wrapper.get("table", table_wrapper)
-                if not isinstance(table, dict):
-                    continue
-
-                # 找到代码和名称列
-                codes = None
-                names = None
-                changes = None
-                for col_name, col_data in table.items():
-                    col_lower = col_name.lower()
-                    if "代码" in col_name or "thscode" in col_lower:
-                        codes = col_data
-                    if "简称" in col_name or "名称" in col_name:
-                        names = col_data
-                    if "涨跌幅" in col_name:
-                        changes = col_data
-
-                if codes:
-                    for i in range(len(codes)):
-                        sector = {
-                            "code": codes[i] if i < len(codes) else "",
-                            "name": names[i] if names and i < len(names) else "",
-                        }
-                        if changes and i < len(changes):
-                            sector["change"] = changes[i]
-                        sectors.append(sector)
-
-            logger.info(f"获取到 {len(sectors)} 个{sector_type}")
-            return sectors
-        else:
-            logger.warning(f"THS_iwencai 返回类型异常: {type(result)}")
+        tables = result.get("tables", [])
+        if not tables:
+            logger.warning(f"{sector_type}返回空数据")
             return []
 
+        sectors = []
+        for table_wrapper in tables:
+            if not isinstance(table_wrapper, dict):
+                continue
+
+            table = table_wrapper.get("table", table_wrapper)
+            if not isinstance(table, dict):
+                continue
+
+            # 找到代码和名称列
+            codes = None
+            names = None
+            changes = None
+            for col_name, col_data in table.items():
+                col_lower = col_name.lower()
+                if "代码" in col_name or "thscode" in col_lower:
+                    codes = col_data
+                if "简称" in col_name or "名称" in col_name:
+                    names = col_data
+                if "涨跌幅" in col_name:
+                    changes = col_data
+
+            if codes:
+                for i in range(len(codes)):
+                    sector = {
+                        "code": codes[i] if i < len(codes) else "",
+                        "name": names[i] if names and i < len(names) else "",
+                    }
+                    if changes and i < len(changes):
+                        sector["change"] = changes[i]
+                    sectors.append(sector)
+
+        logger.info(f"获取到 {len(sectors)} 个{sector_type}")
+        return sectors
+
+    except IFinDHttpError as e:
+        logger.error(f"问财查询{sector_type}失败: {e.error_msg} (code: {e.error_code})")
+        return []
     except Exception as e:
         logger.error(f"问财查询{sector_type}错误: {e}")
         import traceback
@@ -150,22 +109,19 @@ def fetch_sectors_by_iwencai(
         return []
 
 
-def fetch_industry_sectors() -> list[dict]:
+async def fetch_industry_sectors(client: IFinDHttpClient) -> list[dict]:
     """获取行业板块（同花顺行业分类）"""
-    # 使用问财查询所有同花顺行业板块
-    return fetch_sectors_by_iwencai("同花顺行业板块", "行业板块", "zhishu")
+    return await fetch_sectors_by_iwencai(client, "同花顺行业板块", "行业板块", "zhishu")
 
 
-def fetch_concept_sectors() -> list[dict]:
+async def fetch_concept_sectors(client: IFinDHttpClient) -> list[dict]:
     """获取概念板块"""
-    # 使用问财查询所有概念板块
-    return fetch_sectors_by_iwencai("概念板块", "概念板块", "zhishu")
+    return await fetch_sectors_by_iwencai(client, "概念板块", "概念板块", "zhishu")
 
 
-def fetch_region_sectors() -> list[dict]:
+async def fetch_region_sectors(client: IFinDHttpClient) -> list[dict]:
     """获取地域板块"""
-    # 使用问财查询所有地域板块
-    return fetch_sectors_by_iwencai("地域板块", "地域板块", "zhishu")
+    return await fetch_sectors_by_iwencai(client, "地域板块", "地域板块", "zhishu")
 
 
 def print_sectors(sectors: list[dict], title: str) -> None:
@@ -197,42 +153,19 @@ def export_to_json(data: dict, output_path: Path) -> None:
     print(f"\n数据已导出到: {output_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="查询同花顺板块列表")
-    parser.add_argument(
-        "--type",
-        "-t",
-        choices=["industry", "concept", "region", "all"],
-        default="all",
-        help="板块类型: industry=行业, concept=概念, region=地域, all=全部",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        help="导出JSON文件路径 (例如: data/sectors.json)",
-    )
-    parser.add_argument(
-        "--debug",
-        "-d",
-        action="store_true",
-        help="显示调试信息",
-    )
-
-    args = parser.parse_args()
-
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    # 登录
-    if not login_ifind():
-        sys.exit(1)
+async def async_main(args: argparse.Namespace) -> None:
+    """异步主函数"""
+    # 初始化 HTTP 客户端
+    client = IFinDHttpClient()
 
     try:
+        await client.start()
+        logger.info("iFinD HTTP 客户端启动成功")
+
         # 查询所有类型的板块
-        industry = fetch_industry_sectors()
-        concept = fetch_concept_sectors()
-        region = fetch_region_sectors()
+        industry = await fetch_industry_sectors(client)
+        concept = await fetch_concept_sectors(client)
+        region = await fetch_region_sectors(client)
 
         # 根据类型过滤显示
         if args.type == "all":
@@ -265,8 +198,42 @@ def main():
             }
             export_to_json(data, output_path)
 
+    except IFinDHttpError as e:
+        logger.error(f"iFinD HTTP 错误: {e}")
+        sys.exit(1)
     finally:
-        logout_ifind()
+        await client.stop()
+        logger.info("iFinD HTTP 客户端已停止")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="查询同花顺板块列表")
+    parser.add_argument(
+        "--type",
+        "-t",
+        choices=["industry", "concept", "region", "all"],
+        default="all",
+        help="板块类型: industry=行业, concept=概念, region=地域, all=全部",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        help="导出JSON文件路径 (例如: data/sectors.json)",
+    )
+    parser.add_argument(
+        "--debug",
+        "-d",
+        action="store_true",
+        help="显示调试信息",
+    )
+
+    args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":

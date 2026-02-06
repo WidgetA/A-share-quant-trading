@@ -230,6 +230,7 @@ class MessageReader:
         source_type: str | None = None,
         only_positive: bool = False,
         limit: int = 1000,
+        offset: int = 0,
     ) -> list[Message]:
         """
         Get messages published within a time range with analysis results.
@@ -240,6 +241,7 @@ class MessageReader:
             source_type: Optional filter by source type.
             only_positive: If True, only return messages with positive sentiment.
             limit: Maximum number of messages to return.
+            offset: Number of messages to skip (for pagination).
 
         Returns:
             List of Message objects with analysis, ordered by publish_time ascending.
@@ -265,13 +267,56 @@ class MessageReader:
         if only_positive:
             query += " AND a.sentiment IN ('strong_bullish', 'bullish')"
 
-        query += f" ORDER BY m.publish_time ASC LIMIT ${len(params) + 1}"
+        query += f" ORDER BY m.publish_time ASC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
         params.append(limit)
+        params.append(offset)
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_message(row) for row in rows]
+
+    async def count_messages_in_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        source_type: str | None = None,
+        only_positive: bool = False,
+    ) -> int:
+        """
+        Count messages published within a time range.
+
+        Args:
+            start_time: Start of publish_time range (inclusive).
+            end_time: End of publish_time range (exclusive).
+            source_type: Optional filter by source type.
+            only_positive: If True, only count messages with positive sentiment.
+
+        Returns:
+            Number of matching messages.
+        """
+        pool = self._ensure_connected()
+
+        join_type = "INNER JOIN" if only_positive else "LEFT JOIN"
+        query = f"""
+            SELECT COUNT(*)
+            FROM {self._config.table_name} m
+            {join_type} message_analysis a ON m.id = a.message_id
+            WHERE m.publish_time >= $1 AND m.publish_time < $2
+        """
+        params: list[Any] = [start_time, end_time]
+
+        if source_type:
+            query += f" AND m.source_type = ${len(params) + 1}"
+            params.append(source_type)
+
+        if only_positive:
+            query += " AND a.sentiment IN ('strong_bullish', 'bullish')"
+
+        async with pool.acquire() as conn:
+            count = await conn.fetchval(query, *params)
+
+        return count or 0
 
     async def get_messages_by_stock(
         self,

@@ -152,6 +152,7 @@ class HistoricalMessageReader:
         source_type: str | None = None,
         only_positive: bool = False,
         limit: int = 1000,
+        offset: int = 0,
     ) -> list[Message]:
         """
         Get messages in a time range, capped by simulation time.
@@ -164,6 +165,7 @@ class HistoricalMessageReader:
             source_type: Optional filter by source type.
             only_positive: If True, only return positive sentiment.
             limit: Maximum number of messages.
+            offset: Number of messages to skip (for pagination).
 
         Returns:
             List of messages in the effective range.
@@ -182,6 +184,39 @@ class HistoricalMessageReader:
             source_type=source_type,
             only_positive=only_positive,
             limit=limit,
+            offset=offset,
+        )
+
+    async def count_messages_in_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        source_type: str | None = None,
+        only_positive: bool = False,
+    ) -> int:
+        """
+        Count messages in a time range, capped by simulation time.
+
+        Args:
+            start_time: Start of publish_time range.
+            end_time: End of publish_time range (capped at sim time).
+            source_type: Optional filter by source type.
+            only_positive: If True, only count positive sentiment.
+
+        Returns:
+            Number of matching messages.
+        """
+        sim_time = self._clock.current_time
+        effective_end = min(end_time, sim_time)
+
+        if start_time >= effective_end:
+            return 0
+
+        return await self._reader.count_messages_in_range(
+            start_time=start_time,
+            end_time=effective_end,
+            source_type=source_type,
+            only_positive=only_positive,
         )
 
     async def get_messages_by_stock(
@@ -218,6 +253,7 @@ class HistoricalMessageReader:
         trade_date: datetime,
         only_positive: bool = True,
         limit: int = 500,
+        offset: int = 0,
     ) -> list[Message]:
         """
         Get messages for premarket analysis.
@@ -230,6 +266,7 @@ class HistoricalMessageReader:
             trade_date: The trading date to get premarket messages for.
             only_positive: If True, only return positive sentiment messages.
             limit: Maximum number of messages.
+            offset: Number of messages to skip (for pagination).
 
         Returns:
             List of overnight messages for premarket analysis.
@@ -250,6 +287,43 @@ class HistoricalMessageReader:
             end_time=end_time,
             only_positive=only_positive,
             limit=limit,
+            offset=offset,
+        )
+
+    async def count_premarket_messages(
+        self,
+        trade_date: datetime,
+        only_positive: bool = True,
+    ) -> int:
+        """
+        Count messages for premarket analysis.
+
+        Returns count of messages published between:
+        - Previous day's market close (15:00)
+        - Current day's premarket time (08:30)
+
+        Args:
+            trade_date: The trading date to count premarket messages for.
+            only_positive: If True, only count positive sentiment messages.
+
+        Returns:
+            Number of overnight messages for premarket analysis.
+        """
+        from datetime import time, timedelta
+
+        # Previous trading day close
+        prev_date = trade_date.date() - timedelta(days=1)
+        # Skip weekends
+        while prev_date.weekday() >= 5:
+            prev_date -= timedelta(days=1)
+
+        start_time = datetime.combine(prev_date, time(15, 0))
+        end_time = datetime.combine(trade_date.date(), time(8, 30))
+
+        return await self.count_messages_in_range(
+            start_time=start_time,
+            end_time=end_time,
+            only_positive=only_positive,
         )
 
     async def get_intraday_messages(

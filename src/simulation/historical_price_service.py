@@ -1,24 +1,23 @@
 # === MODULE PURPOSE ===
-# Historical price data service using iFinD API.
+# Historical price data service using iFinD HTTP API.
 # Provides historical OHLCV data for simulation P&L calculation.
 
 # === DEPENDENCIES ===
-# - iFinDPy: THS iFinD SDK for A-share market data
+# - IFinDHttpClient: HTTP client for iFinD API
 # - SimulationClock: Virtual time reference
 
 # === KEY CONCEPTS ===
-# - Historical quotes: Past OHLCV data via THS_HistoryQuotes
+# - Historical quotes: Past OHLCV data via HTTP API
 # - Price interpolation: Estimate price at specific time within trading day
 # - Caching: Reduce API calls by caching daily data
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
 
-from src.common.config import get_ifind_credentials
+from src.data.clients.ifind_http_client import IFinDHttpClient
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +79,16 @@ class DailyPriceData:
 
 class HistoricalPriceService:
     """
-    Historical price data service using iFinD API.
+    Historical price data service using iFinD HTTP API.
 
     Fetches and caches historical OHLCV data for simulation.
     All trading-related price data uses iFinD per CLAUDE.md Section 14.
 
     Usage:
-        service = HistoricalPriceService()
+        http_client = IFinDHttpClient()
+        await http_client.start()
+
+        service = HistoricalPriceService(http_client)
         await service.start()
 
         # Get daily data
@@ -96,72 +98,37 @@ class HistoricalPriceService:
         price = await service.get_price_at_time("600519.SH", datetime(2026, 1, 29, 10, 30))
 
         await service.stop()
+        await http_client.stop()
     """
 
-    def __init__(self) -> None:
-        """Initialize the price service."""
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ifind_hist")
-        self._logged_in = False
+    def __init__(self, http_client: IFinDHttpClient | None = None) -> None:
+        """
+        Initialize the price service.
+
+        Args:
+            http_client: iFinD HTTP client instance.
+                        If None, creates a new client (and owns it).
+        """
+        self._http_client = http_client
+        self._owns_http_client = http_client is None
 
         # Cache: (stock_code, date) -> DailyPriceData
         self._cache: dict[tuple[str, date], DailyPriceData] = {}
 
     async def start(self) -> None:
-        """Start the service and login to iFinD."""
-        if not await self._ensure_login():
-            logger.warning("iFinD login failed - price service may not work")
+        """Start the service and initialize HTTP client if needed."""
+        if self._owns_http_client:
+            self._http_client = IFinDHttpClient()
+            await self._http_client.start()
+        logger.info("Historical price service started")
 
     async def stop(self) -> None:
         """Stop the service and cleanup."""
-        if self._logged_in:
-            await self._logout()
-        self._executor.shutdown(wait=False)
+        if self._owns_http_client and self._http_client:
+            await self._http_client.stop()
+            self._http_client = None
         self._cache.clear()
-
-    async def _ensure_login(self) -> bool:
-        """Ensure iFinD is logged in."""
-        if self._logged_in:
-            return True
-
-        loop = asyncio.get_event_loop()
-        self._logged_in = await loop.run_in_executor(self._executor, self._do_login)
-        return self._logged_in
-
-    def _do_login(self) -> bool:
-        """Login to iFinD (runs in thread pool)."""
-        try:
-            from iFinDPy import THS_iFinDLogin
-
-            username, password = get_ifind_credentials()
-            result = THS_iFinDLogin(username, password)
-
-            if result == 0:
-                logger.info("iFinD login successful (price service)")
-                return True
-            else:
-                logger.error(f"iFinD login failed with code: {result}")
-                return False
-        except ImportError as e:
-            logger.error(f"iFinDPy module not available: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"iFinD login error: {e}")
-            return False
-
-    async def _logout(self) -> None:
-        """Logout from iFinD."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self._executor, self._do_logout)
-
-    def _do_logout(self) -> None:
-        """Perform logout (runs in thread pool)."""
-        try:
-            from iFinDPy import THS_iFinDLogout
-
-            THS_iFinDLogout()
-            logger.info("iFinD logout (price service)")
-        except Exception as e:
-            logger.warning(f"iFinD logout error: {e}")
+        logger.info("Historical price service stopped")
 
     async def get_daily_data(
         self,
@@ -183,91 +150,73 @@ class HistoricalPriceService:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        # Ensure logged in
-        if not await self._ensure_login():
-            logger.error("Cannot fetch price data - not logged in")
+        # Ensure HTTP client is available
+        if not self._http_client:
+            logger.error("Cannot fetch price data - HTTP client not initialized")
             return None
 
-        # Fetch from iFinD
-        loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(
-            self._executor,
-            self._fetch_daily_data,
-            stock_code,
-            trade_date,
-        )
+        # Fetch from iFinD HTTP API
+        data = await self._fetch_daily_data(stock_code, trade_date)
 
         if data:
             self._cache[cache_key] = data
 
         return data
 
-    def _fetch_daily_data(
+    async def _fetch_daily_data(
         self,
         stock_code: str,
         trade_date: date,
     ) -> DailyPriceData | None:
-        """Fetch daily data from iFinD (runs in thread pool)."""
-        try:
-            from iFinDPy import THS_HistoryQuotes
+        """Fetch daily data from iFinD HTTP API."""
+        # Caller guarantees _http_client is set
+        assert self._http_client is not None
 
+        try:
             date_str = trade_date.strftime("%Y-%m-%d")
 
-            # Fetch OHLCV data
-            result = THS_HistoryQuotes(
-                stock_code,
-                "open;high;low;close;preClose;vol;amount",
-                "",  # No params
-                date_str,
-                date_str,
+            # Fetch OHLCV data via HTTP API
+            result = await self._http_client.history_quotes(
+                codes=stock_code,
+                indicators="open,high,low,close,preClose,vol,amount",
+                start_date=date_str,
+                end_date=date_str,
             )
 
             # Parse result
-            if isinstance(result, dict):
-                if result.get("errorcode", 0) != 0:
-                    err_msg = result.get("errmsg", "Unknown error")
-                    logger.error(f"THS_HistoryQuotes error: {err_msg}")
-                    return None
+            tables = result.get("tables", [])
+            if not tables:
+                logger.warning(f"No data for {stock_code} on {date_str}")
+                return None
 
-                tables = result.get("tables", [])
-                if not tables:
-                    logger.warning(f"No data for {stock_code} on {date_str}")
-                    return None
+            # Parse first table
+            table = tables[0].get("table", {})
 
-                # Parse first table
-                table = tables[0].get("table", {})
+            # Extract values (arrays with single element for single day)
+            open_vals = table.get("open", [])
+            high_vals = table.get("high", [])
+            low_vals = table.get("low", [])
+            close_vals = table.get("close", [])
+            prev_vals = table.get("preClose", [])
+            vol_vals = table.get("vol", [])
+            amt_vals = table.get("amount", [])
 
-                # Extract values (arrays with single element for single day)
-                open_vals = table.get("open", [])
-                high_vals = table.get("high", [])
-                low_vals = table.get("low", [])
-                close_vals = table.get("close", [])
-                prev_vals = table.get("preClose", [])
-                vol_vals = table.get("vol", [])
-                amt_vals = table.get("amount", [])
+            if not all([open_vals, high_vals, low_vals, close_vals, prev_vals]):
+                logger.warning(f"Incomplete data for {stock_code} on {date_str}")
+                return None
 
-                if not all([open_vals, high_vals, low_vals, close_vals, prev_vals]):
-                    logger.warning(f"Incomplete data for {stock_code} on {date_str}")
-                    return None
+            return DailyPriceData(
+                stock_code=stock_code,
+                trade_date=trade_date,
+                open=float(open_vals[0]) if open_vals else 0.0,
+                high=float(high_vals[0]) if high_vals else 0.0,
+                low=float(low_vals[0]) if low_vals else 0.0,
+                close=float(close_vals[0]) if close_vals else 0.0,
+                prev_close=float(prev_vals[0]) if prev_vals else 0.0,
+                volume=float(vol_vals[0]) if vol_vals else None,
+                amount=float(amt_vals[0]) if amt_vals else None,
+            )
 
-                return DailyPriceData(
-                    stock_code=stock_code,
-                    trade_date=trade_date,
-                    open=float(open_vals[0]) if open_vals else 0.0,
-                    high=float(high_vals[0]) if high_vals else 0.0,
-                    low=float(low_vals[0]) if low_vals else 0.0,
-                    close=float(close_vals[0]) if close_vals else 0.0,
-                    prev_close=float(prev_vals[0]) if prev_vals else 0.0,
-                    volume=float(vol_vals[0]) if vol_vals else None,
-                    amount=float(amt_vals[0]) if amt_vals else None,
-                )
-
-            logger.warning(f"Unexpected result type: {type(result)}")
-            return None
-
-        except ImportError as e:
-            logger.error(f"iFinDPy not available: {e}")
-            return None
         except Exception as e:
             logger.error(f"Error fetching daily data: {e}")
             return None

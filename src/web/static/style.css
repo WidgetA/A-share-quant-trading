@@ -1391,3 +1391,96 @@ footer {
 .message-row.bullish .message-select-label:hover {
     background: rgba(76, 175, 80, 0.1);
 }
+
+/* Load More Button */
+.load-more-container {
+    display: flex;
+    justify-content: center;
+    padding: 1.5rem 0;
+    margin-top: 1rem;
+}
+
+.load-more-container .btn {
+    min-width: 200px;
+}
+
+.load-more-container .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* ==================== Order Assistant ==================== */
+
+.oa-page {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.oa-section {
+    margin-bottom: 2rem;
+}
+
+.oa-section-header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.oa-section-header h3 {
+    margin: 0;
+}
+
+.oa-section-hint {
+    color: #6b7280;
+    font-size: 0.85rem;
+}
+
+.oa-update-time {
+    color: #6b7280;
+    font-size: 0.8rem;
+    margin-left: auto;
+}
+
+.auto-refresh-badge {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 9999px;
+    animation: pulse-badge 2s infinite;
+}
+
+@keyframes pulse-badge {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.no-messages {
+    color: #6b7280;
+    text-align: center;
+    padding: 2rem 0;
+}
+
+/* New message highlight */
+.message-row.new-message {
+    animation: highlight-new 2s ease-out;
+}
+
+@keyframes highlight-new {
+    0% { background-color: #fef3c7; }
+    100% { background-color: transparent; }
+}
+
+.new-badge {
+    display: inline-block;
+    background: #f59e0b;
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    margin-left: 0.3rem;
+}
