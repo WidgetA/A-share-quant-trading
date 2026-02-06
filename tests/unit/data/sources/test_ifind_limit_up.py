@@ -164,7 +164,7 @@ class TestIFinDLimitUpSource:
         """Test source initialization."""
         source = IFinDLimitUpSource(db_config=mock_db_config)
         assert source._database is None
-        assert source._logged_in is False
+        assert source._http_client is None
 
     def test_format_time_hhmmss(self, mock_db_config):
         """Test time formatting from HHMMSS."""
