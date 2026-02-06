@@ -26,14 +26,17 @@
             <div class="oa-section-header">
                 <h3>盘前消息</h3>
                 <span class="oa-section-hint">昨日收盘后至今晨的新闻与分析</span>
+                <button class="section-toggle-btn" id="premarket-toggle" onclick="togglePremarketSection()">收起 ▲</button>
             </div>
-            <div class="messages-filter">
-                <label>
-                    <input type="checkbox" id="premarket-positive-only" onchange="loadPremarketMessages()">
-                    仅显示正面消息
-                </label>
+            <div id="premarket-body">
+                <div class="messages-filter">
+                    <label>
+                        <input type="checkbox" id="premarket-positive-only" onchange="loadPremarketMessages()">
+                        仅显示正面消息
+                    </label>
+                </div>
+                <div id="premarket-messages">加载中...</div>
             </div>
-            <div id="premarket-messages">加载中...</div>
         </div>
     </section>
 
@@ -66,6 +69,19 @@
 {% block scripts %}
 <script>
 const currentPhase = '{{ phase }}';
+
+// Toggle premarket section collapse/expand
+function togglePremarketSection() {
+    const body = document.getElementById('premarket-body');
+    const btn = document.getElementById('premarket-toggle');
+    if (body.style.display === 'none') {
+        body.style.display = '';
+        btn.textContent = '收起 ▲';
+    } else {
+        body.style.display = 'none';
+        btn.textContent = '展开 ▼';
+    }
+}
 
 // Sentiment label mapping
 const sentimentNames = {
