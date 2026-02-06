@@ -800,7 +800,7 @@ def create_order_assistant_router() -> APIRouter:
         prev = today - timedelta(days=1)
         while prev.weekday() >= 5:
             prev -= timedelta(days=1)
-        return datetime.combine(prev, time(15, 0), tzinfo=beijing_tz)
+        return datetime.combine(prev, time(15, 0))
 
     @router.get("/order-assistant", response_class=HTMLResponse)
     async def order_assistant_page(request: Request):
@@ -854,16 +854,19 @@ def create_order_assistant_router() -> APIRouter:
         now = datetime.now(beijing_tz)
         today = now.date()
 
+        # Use naive datetimes (DB stores timestamp without timezone)
+        now_naive = now.replace(tzinfo=None)
+
         if mode == "premarket":
             start_time = _get_prev_trading_day_close(today)
-            end_time = datetime.combine(today, time(9, 30), tzinfo=beijing_tz)
+            end_time = datetime.combine(today, time(9, 30))
             # Cap end_time at now if before 9:30
-            if now < end_time:
-                end_time = now
+            if now_naive < end_time:
+                end_time = now_naive
         else:
             # Intraday: from 9:30 today to now (or 15:00 if after hours)
-            start_time = datetime.combine(today, time(9, 30), tzinfo=beijing_tz)
-            end_time = min(now, datetime.combine(today, time(15, 0), tzinfo=beijing_tz))
+            start_time = datetime.combine(today, time(9, 30))
+            end_time = min(now_naive, datetime.combine(today, time(15, 0)))
 
         # Get total count
         total_count = await reader.count_messages_in_range(
