@@ -864,8 +864,10 @@ def create_order_assistant_router() -> APIRouter:
             logger.error(f"Failed to connect to message database: {e}")
             raise HTTPException(status_code=503, detail=f"数据库连接失败: {e}")
 
-        # DB stores UTC timestamps; compute boundaries in Beijing time
-        # then convert to UTC for queries.
+        # DB stores UTC timestamps (timestamptz). asyncpg interprets naive
+        # datetimes using the system TZ (Asia/Shanghai in container).
+        # Use timezone-aware Beijing datetimes so asyncpg converts to UTC
+        # correctly regardless of the system TZ setting.
         _BJ_UTC = timedelta(hours=8)
         now_bj = now.replace(tzinfo=None)
 
@@ -880,9 +882,9 @@ def create_order_assistant_router() -> APIRouter:
             start_bj = datetime.combine(today, time(9, 30))
             end_bj = min(now_bj, datetime.combine(today, time(15, 0)))
 
-        # Convert Beijing time boundaries to UTC for DB queries
-        start_time = start_bj - _BJ_UTC
-        end_time = end_bj - _BJ_UTC
+        # Tag with Beijing timezone — asyncpg converts to UTC automatically
+        start_time = start_bj.replace(tzinfo=beijing_tz)
+        end_time = end_bj.replace(tzinfo=beijing_tz)
 
         try:
             # Get total count
@@ -967,11 +969,9 @@ def create_order_assistant_router() -> APIRouter:
             "stock_names": stock_names,
             "debug": {
                 "git_commit": os.environ.get("GIT_COMMIT", "unknown"),
-                "query_start_utc": start_time.isoformat(),
-                "query_end_utc": end_time.isoformat(),
-                "query_start_bj": start_bj.isoformat(),
-                "query_end_bj": end_bj.isoformat(),
-                "timezone_offset_hours": 8,
+                "query_start": start_time.isoformat(),
+                "query_end": end_time.isoformat(),
+                "note": "query times are Beijing (asyncpg converts to UTC)",
             },
         }
 
