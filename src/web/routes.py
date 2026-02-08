@@ -165,10 +165,15 @@ def create_router() -> APIRouter:
     @router.get("/api/status")
     async def api_status(request: Request) -> dict:
         """Health check endpoint."""
+        import os
+
         store = get_store(request)
         return {
             "status": "ok",
             "pending_count": len(store),
+            "git_commit": os.environ.get("GIT_COMMIT", "unknown"),
+            "git_branch": os.environ.get("GIT_BRANCH", "unknown"),
+            "build_time": os.environ.get("BUILD_TIME", "unknown"),
         }
 
     @router.get("/api/pending")
@@ -944,6 +949,8 @@ def create_order_assistant_router() -> APIRouter:
 
             result.append(msg_dict)
 
+        import os
+
         return {
             "success": True,
             "mode": mode,
@@ -956,6 +963,14 @@ def create_order_assistant_router() -> APIRouter:
             "has_more": offset + len(result) < total_count,
             "messages": result,
             "stock_names": stock_names,
+            "debug": {
+                "git_commit": os.environ.get("GIT_COMMIT", "unknown"),
+                "query_start_utc": start_time.isoformat(),
+                "query_end_utc": end_time.isoformat(),
+                "query_start_bj": start_bj.isoformat(),
+                "query_end_bj": end_bj.isoformat(),
+                "timezone_offset_hours": 8,
+            },
         }
 
     @router.post("/api/order-assistant/feishu-notify")
