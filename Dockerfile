@@ -15,7 +15,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
 
-# Install dependencies (cache bust: 2026-02-04-v2)
+# Install dependencies (cache bust: 2026-02-08-v1)
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
 # Runtime stage
