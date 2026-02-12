@@ -26,7 +26,6 @@ from datetime import datetime
 from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
 from src.data.sources.concept_mapper import ConceptMapper
-from src.strategy.filters.board_filter import filter_boards
 from src.strategy.filters.stock_filter import StockFilter, create_main_board_only_filter
 
 logger = logging.getLogger(__name__)
@@ -124,9 +123,7 @@ class MomentumSectorScanner:
         self._concept_mapper = concept_mapper or ConceptMapper(ifind_client)
         self._stock_filter = stock_filter or create_main_board_only_filter()
 
-    async def scan(
-        self, price_snapshots: dict[str, PriceSnapshot]
-    ) -> ScanResult:
+    async def scan(self, price_snapshots: dict[str, PriceSnapshot]) -> ScanResult:
         """
         Run the full 5-step scan pipeline.
 
@@ -151,9 +148,7 @@ class MomentumSectorScanner:
 
         # Step 2: Reverse lookup concept boards for each gainer
         stock_boards = await self._step2_reverse_lookup(list(gainers.keys()))
-        logger.info(
-            f"Step 2: Found concept boards for {len(stock_boards)} stocks"
-        )
+        logger.info(f"Step 2: Found concept boards for {len(stock_boards)} stocks")
 
         # Step 3: Find hot boards (≥2 gainers in same board)
         hot_boards = self._step3_find_hot_boards(stock_boards)
@@ -170,9 +165,7 @@ class MomentumSectorScanner:
         logger.info(f"Step 4: {total_constituents} total constituent stocks across hot boards")
 
         # Step 5: PE filter — open gain > 0 AND PE within board avg ±10%
-        selected = await self._step5_pe_filter(
-            board_constituents, price_snapshots
-        )
+        selected = await self._step5_pe_filter(board_constituents, price_snapshots)
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
 
@@ -207,16 +200,12 @@ class MomentumSectorScanner:
             return {}
 
         # Filter out ST stocks via fundamentals DB
-        non_st_codes = await self._fundamentals_db.batch_filter_st(
-            list(candidates.keys())
-        )
+        non_st_codes = await self._fundamentals_db.batch_filter_st(list(candidates.keys()))
         candidates = {code: candidates[code] for code in non_st_codes}
 
         return candidates
 
-    async def _step2_reverse_lookup(
-        self, stock_codes: list[str]
-    ) -> dict[str, list[str]]:
+    async def _step2_reverse_lookup(self, stock_codes: list[str]) -> dict[str, list[str]]:
         """
         Step 2: For each gainer, find its concept boards.
 
@@ -225,9 +214,7 @@ class MomentumSectorScanner:
         """
         return await self._concept_mapper.batch_get_stock_concepts(stock_codes)
 
-    def _step3_find_hot_boards(
-        self, stock_boards: dict[str, list[str]]
-    ) -> dict[str, list[str]]:
+    def _step3_find_hot_boards(self, stock_boards: dict[str, list[str]]) -> dict[str, list[str]]:
         """
         Step 3: Find boards that contain ≥ MIN_STOCKS_PER_BOARD gainers.
 
@@ -281,9 +268,7 @@ class MomentumSectorScanner:
         pe_data = await self._fundamentals_db.batch_get_pe(list(all_constituent_codes))
 
         # Get price data for constituents not already in price_snapshots
-        missing_codes = [
-            code for code in all_constituent_codes if code not in price_snapshots
-        ]
+        missing_codes = [code for code in all_constituent_codes if code not in price_snapshots]
         if missing_codes:
             extra_prices = await self._fetch_constituent_prices(missing_codes)
             price_snapshots = {**price_snapshots, **extra_prices}
@@ -353,9 +338,7 @@ class MomentumSectorScanner:
 
         return sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True)
 
-    async def _fetch_constituent_prices(
-        self, stock_codes: list[str]
-    ) -> dict[str, PriceSnapshot]:
+    async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:
         """
         Fetch today's open and prev_close for stocks not yet in price_snapshots.
 
@@ -367,9 +350,7 @@ class MomentumSectorScanner:
         batch_size = 50
         for i in range(0, len(stock_codes), batch_size):
             batch = stock_codes[i : i + batch_size]
-            codes_str = ",".join(
-                f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-            )
+            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
             try:
                 data = await self._ifind.real_time_quotation(

@@ -34,7 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.common.feishu_bot import FeishuBot
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
-from src.data.database.fundamentals_db import FundamentalsDB, create_fundamentals_db_from_config
+from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 from src.data.sources.concept_mapper import ConceptMapper
 from src.strategy.strategies.momentum_sector_scanner import (
     MomentumSectorScanner,
@@ -94,15 +94,12 @@ async def fetch_main_board_prices_for_date(
         # Parse columns from iwencai response
         codes = None
         names = None
-        open_gains = None
 
         for col_name, col_data in table.items():
             if "代码" in col_name:
                 codes = col_data
             elif "简称" in col_name or "名称" in col_name:
                 names = col_data
-            elif "开盘涨幅" in col_name or "涨幅" in col_name:
-                open_gains = col_data
 
         if not codes:
             continue
@@ -241,9 +238,7 @@ async def run_backtest(trade_date: date, notify: bool = False) -> ScanResult:
         )
 
         # Fetch price data for the date
-        price_snapshots = await fetch_main_board_prices_for_date(
-            ifind_client, trade_date
-        )
+        price_snapshots = await fetch_main_board_prices_for_date(ifind_client, trade_date)
 
         if not price_snapshots:
             logger.warning(f"No price data for {trade_date}")

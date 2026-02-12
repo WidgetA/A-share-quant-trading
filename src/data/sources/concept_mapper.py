@@ -100,18 +100,14 @@ class ConceptMapper:
             return self._stock_concepts_cache[bare_code]
 
         try:
-            result = await self._client.smart_stock_picking(
-                f"{bare_code}所属同花顺概念", "stock"
-            )
+            result = await self._client.smart_stock_picking(f"{bare_code}所属同花顺概念", "stock")
 
             concepts = self._parse_concept_names(result)
             # Filter out junk boards
             filtered = filter_boards(concepts)
 
             self._stock_concepts_cache[bare_code] = filtered
-            logger.debug(
-                f"{bare_code}: {len(concepts)} concepts -> {len(filtered)} after filter"
-            )
+            logger.debug(f"{bare_code}: {len(concepts)} concepts -> {len(filtered)} after filter")
             return filtered
 
         except IFinDHttpError as e:
@@ -121,9 +117,7 @@ class ConceptMapper:
             logger.error(f"Unexpected error getting concepts for {bare_code}: {e}")
             return []
 
-    async def batch_get_stock_concepts(
-        self, stock_codes: list[str]
-    ) -> dict[str, list[str]]:
+    async def batch_get_stock_concepts(self, stock_codes: list[str]) -> dict[str, list[str]]:
         """
         Batch reverse lookup with concurrency control.
 
@@ -146,9 +140,7 @@ class ConceptMapper:
 
         return results
 
-    async def get_board_stocks(
-        self, board_name: str
-    ) -> list[tuple[str, str]]:
+    async def get_board_stocks(self, board_name: str) -> list[tuple[str, str]]:
         """
         Get all constituent stocks of a concept board.
 
@@ -167,9 +159,7 @@ class ConceptMapper:
             return self._board_stocks_cache[board_name]
 
         try:
-            result = await self._client.smart_stock_picking(
-                f"{board_name}概念板块成分股", "stock"
-            )
+            result = await self._client.smart_stock_picking(f"{board_name}概念板块成分股", "stock")
 
             stocks = self._parse_stock_list(result)
             self._board_stocks_cache[board_name] = stocks
@@ -180,9 +170,7 @@ class ConceptMapper:
             logger.error(f"Failed to get stocks for board '{board_name}': {e}")
             return []
         except Exception as e:
-            logger.error(
-                f"Unexpected error getting stocks for board '{board_name}': {e}"
-            )
+            logger.error(f"Unexpected error getting stocks for board '{board_name}': {e}")
             return []
 
     async def batch_get_board_stocks(
@@ -247,9 +235,7 @@ class ConceptMapper:
 
         return concepts
 
-    def _parse_stock_list(
-        self, result: dict[str, Any]
-    ) -> list[tuple[str, str]]:
+    def _parse_stock_list(self, result: dict[str, Any]) -> list[tuple[str, str]]:
         """
         Parse stock code and name from iwencai response.
 

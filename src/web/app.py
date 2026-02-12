@@ -118,9 +118,7 @@ def create_app(
             "today_results": [],
             "task": None,
         }
-        task = asyncio.create_task(
-            _run_intraday_monitor(app.state.momentum_monitor_state)
-        )
+        task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
         app.state.momentum_monitor_state["task"] = task
         logger.info("Intraday momentum monitor auto-started")
 

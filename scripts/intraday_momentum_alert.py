@@ -17,7 +17,7 @@ import asyncio
 import io
 import logging
 import sys
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 # Fix Windows console encoding for Chinese characters
@@ -67,9 +67,7 @@ async def poll_realtime_gainers(
         Dict of stock_code → PriceSnapshot.
     """
     try:
-        result = await client.smart_stock_picking(
-            "涨幅大于5%的沪深主板非ST股票", "stock"
-        )
+        result = await client.smart_stock_picking("涨幅大于5%的沪深主板非ST股票", "stock")
     except IFinDHttpError as e:
         logger.error(f"iwencai realtime query failed: {e}")
         return {}
@@ -177,9 +175,7 @@ async def wait_until(target: time) -> None:
 
         # Calculate seconds to wait
         now_dt = datetime.now(BEIJING_TZ)
-        target_dt = now_dt.replace(
-            hour=target.hour, minute=target.minute, second=target.second
-        )
+        target_dt = now_dt.replace(hour=target.hour, minute=target.minute, second=target.second)
         delta = (target_dt - now_dt).total_seconds()
 
         if delta <= 0:
@@ -249,9 +245,7 @@ async def monitor(
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
         # Run full strategy scan on accumulated data
-        logger.info(
-            f"Running strategy scan on {len(accumulated)} accumulated stocks..."
-        )
+        logger.info(f"Running strategy scan on {len(accumulated)} accumulated stocks...")
 
         concept_mapper = ConceptMapper(ifind_client)
         scanner = MomentumSectorScanner(

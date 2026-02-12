@@ -1086,22 +1086,23 @@ class MomentumBacktestRequest(BaseModel):
 def create_momentum_router() -> APIRouter:
     """Create router for momentum backtest and intraday monitor endpoints."""
     import asyncio
-    from datetime import date, datetime, time, timedelta
-    from zoneinfo import ZoneInfo
-
-    beijing_tz = ZoneInfo("Asia/Shanghai")
+    from datetime import datetime
 
     router = APIRouter(tags=["momentum"])
 
     def _get_monitor_state(request: Request) -> dict[str, Any]:
         """Get monitor state from app.state (created at startup)."""
-        return getattr(request.app.state, "momentum_monitor_state", {
-            "running": False,
-            "last_scan_time": None,
-            "last_result": None,
-            "today_results": [],
-            "task": None,
-        })
+        return getattr(
+            request.app.state,
+            "momentum_monitor_state",
+            {
+                "running": False,
+                "last_scan_time": None,
+                "last_result": None,
+                "today_results": [],
+                "task": None,
+            },
+        )
 
     @router.get("/momentum", response_class=HTMLResponse)
     async def momentum_page(request: Request):
@@ -1125,7 +1126,6 @@ def create_momentum_router() -> APIRouter:
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
-            PriceSnapshot,
         )
 
         # Parse date
@@ -1185,9 +1185,7 @@ def create_momentum_router() -> APIRouter:
                 "success": True,
                 "trade_date": body.trade_date,
                 "initial_gainers": len(result.initial_gainers),
-                "hot_boards": {
-                    name: codes for name, codes in result.hot_boards.items()
-                },
+                "hot_boards": {name: codes for name, codes in result.hot_boards.items()},
                 "selected_stocks": [
                     {
                         "stock_code": s.stock_code,
@@ -1259,9 +1257,7 @@ def create_momentum_router() -> APIRouter:
     return router
 
 
-async def _parse_iwencai_and_fetch_prices(
-    ifind_client, iwencai_result: dict, trade_date
-) -> dict:
+async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, trade_date) -> dict:
     """Parse iwencai response and fetch historical prices via history_quotes."""
     from src.data.clients.ifind_http_client import IFinDHttpError
     from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
@@ -1371,7 +1367,7 @@ async def _run_intraday_monitor(state: dict) -> None:
     from zoneinfo import ZoneInfo
 
     from src.common.feishu_bot import FeishuBot
-    from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+    from src.data.clients.ifind_http_client import IFinDHttpClient
     from src.data.database.fundamentals_db import create_fundamentals_db_from_config
     from src.data.sources.concept_mapper import ConceptMapper
     from src.strategy.strategies.momentum_sector_scanner import (
@@ -1455,9 +1451,7 @@ async def _run_intraday_monitor(state: dict) -> None:
 
                 # Run full strategy scan
                 if accumulated:
-                    logger.info(
-                        f"Running strategy scan on {len(accumulated)} accumulated stocks"
-                    )
+                    logger.info(f"Running strategy scan on {len(accumulated)} accumulated stocks")
                     concept_mapper = ConceptMapper(ifind_client)
                     scanner = MomentumSectorScanner(
                         ifind_client=ifind_client,

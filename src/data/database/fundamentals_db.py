@@ -11,7 +11,6 @@
 # - ST detection: company_name containing "ST" indicates ST stock
 # - PE filtering: Used by momentum sector strategy for board-level PE comparison
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -164,9 +163,7 @@ class FundamentalsDB:
 
         return self._row_to_model(row)
 
-    async def batch_get_fundamentals(
-        self, stock_codes: list[str]
-    ) -> dict[str, StockFundamentals]:
+    async def batch_get_fundamentals(self, stock_codes: list[str]) -> dict[str, StockFundamentals]:
         """
         Get fundamental data for multiple stocks.
 
