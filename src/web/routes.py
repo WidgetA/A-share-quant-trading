@@ -66,6 +66,12 @@ class SubmitResponse(BaseModel):
     message: str
 
 
+class TokenUpdateRequest(BaseModel):
+    """Request body for updating iFinD token."""
+
+    token: str
+
+
 def create_router() -> APIRouter:
     """Create API router with all endpoints."""
     router = APIRouter()
@@ -2107,9 +2113,6 @@ def create_settings_router() -> APIRouter:
                 "masked_token": "",
                 "token_length": 0,
             }
-
-    class TokenUpdateRequest(BaseModel):
-        token: str
 
     @router.post("/api/settings/ifind-token")
     async def update_ifind_token(body: TokenUpdateRequest):
