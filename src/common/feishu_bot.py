@@ -264,6 +264,7 @@ Limit-up (skipped):
         hot_boards: dict[str, list[str]],
         initial_gainer_count: int,
         scan_time: datetime | None = None,
+        recommended_stock: object | None = None,
     ) -> bool:
         """
         Send momentum sector strategy scan result.
@@ -273,6 +274,7 @@ Limit-up (skipped):
             hot_boards: Dict of board_name → list of initial gainer codes.
             initial_gainer_count: Number of stocks that passed initial >5% filter.
             scan_time: When the scan was performed.
+            recommended_stock: RecommendedStock (the top pick), or None.
 
         Returns:
             True if sent successfully, False otherwise.
@@ -312,5 +314,15 @@ Limit-up (skipped):
             lines.append("")
 
         lines.append(f"共选出 {len(selected_stocks)} 只标的")
+
+        # Recommendation section
+        if recommended_stock:
+            rec = recommended_stock
+            growth_sign = "+" if rec.growth_rate >= 0 else ""
+            lines.append("")
+            lines.append(f"⭐ 推荐: {rec.stock_code} {rec.stock_name}")
+            lines.append(f"  板块: {rec.board_name} (选出{rec.board_stock_count}只，为最多板块)")
+            lines.append(f"  业绩增长率: {growth_sign}{rec.growth_rate:.1f}%")
+            lines.append(f"  开盘涨幅: {rec.open_gain_pct:+.1f}%  PE: {rec.pe_ttm:.1f}")
 
         return await self.send_message("\n".join(lines))

@@ -16,7 +16,8 @@
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
 # Step 5: constituents with open_gain>0 AND PE within board avg ±10%
-# Step 6: → ScanResult → Feishu notification
+# Step 6: recommend — from board with most picks, find highest earnings growth
+# Step 7: → ScanResult → Feishu notification
 
 import logging
 from collections import defaultdict
@@ -72,6 +73,20 @@ class SelectedStock:
 
 
 @dataclass
+class RecommendedStock:
+    """The top pick from the board with most selected stocks, ranked by earnings growth."""
+
+    stock_code: str
+    stock_name: str
+    board_name: str  # Which board it was recommended from
+    board_stock_count: int  # How many selected stocks in that board
+    growth_rate: float  # 归母净利润同比增长率 (%)
+    open_gain_pct: float
+    pe_ttm: float
+    board_avg_pe: float
+
+
+@dataclass
 class ScanResult:
     """Complete result of a momentum sector scan."""
 
@@ -81,6 +96,8 @@ class ScanResult:
     # Initial gainers that passed Step 1
     initial_gainers: list[str] = field(default_factory=list)
     scan_time: datetime = field(default_factory=datetime.now)
+    # Step 6: recommended stock (best earnings growth from the most-populated board)
+    recommended_stock: RecommendedStock | None = None
 
     @property
     def has_results(self) -> bool:
@@ -175,6 +192,19 @@ class MomentumSectorScanner:
         selected = await self._step5_pe_filter(board_constituents, price_snapshots)
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
+
+        # Step 6: Recommend — best earnings growth from the board with most selected stocks
+        if selected:
+            result.recommended_stock = await self._step6_recommend(selected)
+            if result.recommended_stock:
+                logger.info(
+                    f"Step 6: Recommended {result.recommended_stock.stock_code} "
+                    f"{result.recommended_stock.stock_name} from board "
+                    f"'{result.recommended_stock.board_name}' "
+                    f"(growth={result.recommended_stock.growth_rate:+.1f}%)"
+                )
+            else:
+                logger.info("Step 6: No recommendation (growth data unavailable)")
 
         return result
 
@@ -344,6 +374,101 @@ class MomentumSectorScanner:
                 seen[stock.stock_code] = stock
 
         return sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True)
+
+    async def _step6_recommend(
+        self, selected_stocks: list[SelectedStock]
+    ) -> RecommendedStock | None:
+        """
+        Step 6: Pick the best stock from the board with the most selected stocks.
+
+        Logic:
+            1. Group selected stocks by board_name
+            2. Find the board with the most stocks (ties broken by highest avg open_gain_pct)
+            3. Query iwencai for 归母净利润同比增长率 of stocks in that board
+            4. Return the stock with the highest growth rate
+        """
+        if not selected_stocks:
+            return None
+
+        # Group by board
+        board_groups: dict[str, list[SelectedStock]] = defaultdict(list)
+        for stock in selected_stocks:
+            board_groups[stock.board_name].append(stock)
+
+        # Find the board with most stocks; tie-break by avg open_gain_pct
+        top_board = max(
+            board_groups.keys(),
+            key=lambda b: (
+                len(board_groups[b]),
+                sum(s.open_gain_pct for s in board_groups[b]) / len(board_groups[b]),
+            ),
+        )
+        top_board_stocks = board_groups[top_board]
+        logger.info(f"Step 6: Top board '{top_board}' has {len(top_board_stocks)} selected stocks")
+
+        # Query iwencai for earnings growth rate
+        codes_str = ";".join(s.stock_code for s in top_board_stocks)
+        query = f"{codes_str} 归母净利润同比增长率"
+
+        growth_data: dict[str, float] = {}
+        try:
+            result = await self._ifind.smart_stock_picking(query, "stock")
+            tables = result.get("tables", [])
+            if tables:
+                table = tables[0].get("table", {})
+                # iwencai returns columns with dynamic names; find the growth column
+                code_col = table.get("股票代码", [])
+                # Find the growth rate column (name may vary)
+                growth_col_name = None
+                growth_col_values = []
+                for col_name, col_values in table.items():
+                    if "净利润" in col_name and "增长率" in col_name:
+                        growth_col_name = col_name
+                        growth_col_values = col_values
+                        break
+                    if "净利润" in col_name and "同比" in col_name:
+                        growth_col_name = col_name
+                        growth_col_values = col_values
+                        break
+
+                if growth_col_name and code_col:
+                    logger.debug(f"Step 6: Found growth column '{growth_col_name}'")
+                    for i, code in enumerate(code_col):
+                        bare_code = code.split(".")[0] if isinstance(code, str) else str(code)
+                        if i < len(growth_col_values):
+                            val = growth_col_values[i]
+                            if val is not None and val != "--":
+                                try:
+                                    growth_data[bare_code] = float(val)
+                                except (ValueError, TypeError):
+                                    pass
+                else:
+                    logger.warning("Step 6: Growth column not found in iwencai result")
+
+        except Exception as e:
+            logger.error(f"Step 6: Failed to query growth rates: {e}")
+
+        if not growth_data:
+            logger.warning("Step 6: No growth data available for any stock")
+            return None
+
+        # Find the stock with the highest growth rate
+        best_code = max(growth_data, key=lambda c: growth_data[c])
+        best_stock = next((s for s in top_board_stocks if s.stock_code == best_code), None)
+
+        if not best_stock:
+            return None
+
+        return RecommendedStock(
+            stock_code=best_stock.stock_code,
+            stock_name=best_stock.stock_name,
+            board_name=top_board,
+            board_stock_count=len(top_board_stocks),
+            growth_rate=growth_data[best_code],
+            open_gain_pct=best_stock.open_gain_pct,
+            pe_ttm=best_stock.pe_ttm,
+            board_avg_pe=best_stock.board_avg_pe,
+        )
 
     async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:
         """

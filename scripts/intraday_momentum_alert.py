@@ -287,6 +287,7 @@ async def monitor(
                 hot_boards=result.hot_boards,
                 initial_gainer_count=len(result.initial_gainers),
                 scan_time=scan_time,
+                recommended_stock=result.recommended_stock,
             )
             logger.info("Feishu notification sent")
         else:

@@ -45,7 +45,7 @@
         <div class="sim-card loading-card">
             <div class="loading-spinner"></div>
             <p>回测运行中，正在查询 iFinD 数据...</p>
-            <p class="loading-hint">Step 1: iwencai 查询初筛 → Step 2: 反查概念板块 → Step 3: 热门板块 → Step 4: 成分股 → Step 5: PE过滤</p>
+            <p class="loading-hint">Step 1: iwencai 查询初筛 → Step 2: 反查概念板块 → Step 3: 热门板块 → Step 4: 成分股 → Step 5: PE过滤 → Step 6: 推股</p>
         </div>
     </section>
 
@@ -58,6 +58,25 @@
                     <span class="result-badge">初筛: <strong id="result-gainers">0</strong> 只</span>
                     <span class="result-badge">热门板块: <strong id="result-boards">0</strong> 个</span>
                     <span class="result-badge highlight">选股: <strong id="result-selected">0</strong> 只</span>
+                    <span class="result-badge recommend" id="result-recommend-badge" style="display:none">
+                        推股: <strong id="result-recommend-name"></strong>
+                    </span>
+                </div>
+            </div>
+
+            <!-- Recommendation card -->
+            <div id="recommend-card" class="recommend-card hidden">
+                <div class="recommend-label">推荐</div>
+                <div class="recommend-body">
+                    <div class="recommend-stock">
+                        <span class="recommend-code" id="rec-code"></span>
+                        <span class="recommend-stock-name" id="rec-name"></span>
+                    </div>
+                    <div class="recommend-details">
+                        <span class="recommend-detail" id="rec-growth"></span>
+                        <span class="recommend-detail" id="rec-gain"></span>
+                        <span class="recommend-detail" id="rec-board"></span>
+                    </div>
                 </div>
             </div>
 
@@ -131,6 +150,24 @@ function renderResults(data) {
 
     const container = document.getElementById('result-boards-container');
     const emptyEl = document.getElementById('result-empty');
+    const recBadge = document.getElementById('result-recommend-badge');
+    const recCard = document.getElementById('recommend-card');
+
+    // Recommendation
+    const rec = data.recommended_stock;
+    if (rec) {
+        recBadge.style.display = '';
+        document.getElementById('result-recommend-name').textContent = `${rec.stock_name}`;
+        recCard.classList.remove('hidden');
+        document.getElementById('rec-code').textContent = rec.stock_code;
+        document.getElementById('rec-name').textContent = rec.stock_name;
+        document.getElementById('rec-growth').textContent = `业绩增长: ${rec.growth_rate >= 0 ? '+' : ''}${rec.growth_rate.toFixed(1)}%`;
+        document.getElementById('rec-gain').textContent = `开盘涨幅: +${rec.open_gain_pct.toFixed(2)}%`;
+        document.getElementById('rec-board').textContent = `板块: ${rec.board_name} (选出${rec.board_stock_count}只最多)`;
+    } else {
+        recBadge.style.display = 'none';
+        recCard.classList.add('hidden');
+    }
 
     if (!data.selected_stocks || data.selected_stocks.length === 0) {
         container.innerHTML = '';
@@ -170,10 +207,11 @@ function renderResults(data) {
         `;
         stocks.forEach(s => {
             const gainClass = s.open_gain_pct > 3 ? 'gain-high' : (s.open_gain_pct > 1 ? 'gain-mid' : 'gain-low');
+            const isRec = rec && s.stock_code === rec.stock_code;
             html += `
-                        <tr>
+                        <tr class="${isRec ? 'recommended-row' : ''}">
                             <td class="stock-code">${s.stock_code}</td>
-                            <td>${s.stock_name}</td>
+                            <td>${s.stock_name}${isRec ? ' <span class="rec-tag">推荐</span>' : ''}</td>
                             <td class="${gainClass}">+${s.open_gain_pct.toFixed(2)}%</td>
                             <td>${s.pe_ttm.toFixed(1)}</td>
                             <td>${s.board_avg_pe.toFixed(1)}</td>

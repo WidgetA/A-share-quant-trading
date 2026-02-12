@@ -259,6 +259,7 @@ async def run_backtest(trade_date: date, notify: bool = False) -> ScanResult:
                     hot_boards=result.hot_boards,
                     initial_gainer_count=len(result.initial_gainers),
                     scan_time=result.scan_time,
+                    recommended_stock=result.recommended_stock,
                 )
                 logger.info("Feishu notification sent")
             else:

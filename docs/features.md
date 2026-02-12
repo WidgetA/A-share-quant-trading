@@ -629,7 +629,8 @@ strategy:
 3. **Hot Board Detection**: Find boards containing ≥2 gainers from step 1
 4. **Board Constituents**: Get ALL stocks in each hot board
 5. **PE Filter**: Select stocks with opening gain >0 AND PE(TTM) within board average PE ±10%
-6. **Notification**: Send selection via Feishu
+6. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (归母净利润同比增长率 via iwencai). Highlighted in UI + Feishu notification
+7. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
 - Price (backtest): iFinD `history_quotes`
@@ -648,8 +649,8 @@ strategy:
 - [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
 - [x] ConceptMapper: iwencai-based stock-to-board and board-to-stock lookups
-- [x] MomentumSectorScanner: 5-step pipeline
-- [x] Feishu notification: `send_momentum_scan_result()`
+- [x] MomentumSectorScanner: 5-step pipeline + step 6 recommendation
+- [x] Feishu notification: `send_momentum_scan_result()` with recommendation
 - [x] Backtest script with `--notify` option
 - [x] Intraday monitoring script (polls 9:30-9:40)
 - [ ] Unit tests

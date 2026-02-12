@@ -1181,6 +1181,7 @@ def create_momentum_router() -> APIRouter:
             result = await scanner.scan(price_snapshots, trade_date=trade_date)
 
             # Format response
+            rec = result.recommended_stock
             response_data = {
                 "success": True,
                 "trade_date": body.trade_date,
@@ -1197,6 +1198,18 @@ def create_momentum_router() -> APIRouter:
                     }
                     for s in result.selected_stocks
                 ],
+                "recommended_stock": {
+                    "stock_code": rec.stock_code,
+                    "stock_name": rec.stock_name,
+                    "board_name": rec.board_name,
+                    "board_stock_count": rec.board_stock_count,
+                    "growth_rate": round(rec.growth_rate, 2),
+                    "open_gain_pct": round(rec.open_gain_pct, 2),
+                    "pe_ttm": round(rec.pe_ttm, 2),
+                    "board_avg_pe": round(rec.board_avg_pe, 2),
+                }
+                if rec
+                else None,
             }
 
             # Send Feishu if requested
@@ -1208,6 +1221,7 @@ def create_momentum_router() -> APIRouter:
                         hot_boards=result.hot_boards,
                         initial_gainer_count=len(result.initial_gainers),
                         scan_time=result.scan_time,
+                        recommended_stock=result.recommended_stock,
                     )
                     response_data["feishu_sent"] = True
 
@@ -1463,6 +1477,7 @@ async def _run_intraday_monitor(state: dict) -> None:
                     scan_time = datetime.now(beijing_tz)
 
                     # Store result
+                    rec = scan_result.recommended_stock
                     result_entry = {
                         "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
                         "initial_gainers": len(scan_result.initial_gainers),
@@ -1479,6 +1494,16 @@ async def _run_intraday_monitor(state: dict) -> None:
                             }
                             for s in scan_result.selected_stocks
                         ],
+                        "recommended_stock": {
+                            "stock_code": rec.stock_code,
+                            "stock_name": rec.stock_name,
+                            "board_name": rec.board_name,
+                            "board_stock_count": rec.board_stock_count,
+                            "growth_rate": round(rec.growth_rate, 2),
+                            "open_gain_pct": round(rec.open_gain_pct, 2),
+                        }
+                        if rec
+                        else None,
                     }
                     state["last_result"] = result_entry
                     state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
@@ -1492,6 +1517,7 @@ async def _run_intraday_monitor(state: dict) -> None:
                             hot_boards=scan_result.hot_boards,
                             initial_gainer_count=len(scan_result.initial_gainers),
                             scan_time=scan_time,
+                            recommended_stock=scan_result.recommended_stock,
                         )
                         logger.info("Monitor: Feishu notification sent")
 
