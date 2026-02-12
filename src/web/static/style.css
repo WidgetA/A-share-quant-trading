@@ -1850,3 +1850,143 @@ footer {
     vertical-align: middle;
     margin-left: 0.3rem;
 }
+
+/* === Backtest Tabs === */
+.backtest-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid #e8e8e8;
+    margin-bottom: 1.25rem;
+}
+
+.backtest-tab {
+    padding: 0.6rem 1.25rem;
+    border: none;
+    background: none;
+    font-size: 0.95rem;
+    color: #888;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s, border-color 0.2s;
+}
+
+.backtest-tab:hover {
+    color: #333;
+}
+
+.backtest-tab.active {
+    color: #1a73e8;
+    border-bottom-color: #1a73e8;
+    font-weight: 600;
+}
+
+.tab-content.hidden {
+    display: none;
+}
+
+/* Form row for range backtest */
+.form-row {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.form-row .form-group {
+    flex: 1;
+    min-width: 140px;
+}
+
+.form-hint {
+    font-size: 0.8rem;
+    color: #888;
+    margin: 0.5rem 0 1rem;
+}
+
+/* === Range Backtest Progress Bar === */
+.range-progress-bar {
+    width: 100%;
+    height: 6px;
+    background: #e8e8e8;
+    border-radius: 3px;
+    margin: 1rem 0 0.5rem;
+    overflow: hidden;
+}
+
+.range-progress-fill {
+    height: 100%;
+    background: #4CAF50;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+/* === Range Backtest Summary === */
+.range-summary {
+    margin-bottom: 1.25rem;
+}
+
+.range-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.75rem;
+}
+
+.range-stat {
+    background: #f8f9fa;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.range-stat-label {
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.range-stat-value {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #333;
+}
+
+/* === Range Backtest Table === */
+.range-table-wrap {
+    overflow-x: auto;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.range-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.range-skip-row {
+    background: #fafafa;
+}
+
+.range-skip-reason {
+    color: #999;
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.range-capital {
+    font-family: monospace;
+    font-weight: 500;
+    text-align: right;
+}
+
+.range-profit-pos {
+    color: #c62828;
+    font-weight: 600;
+}
+
+.range-profit-neg {
+    color: #2e7d32;
+    font-weight: 600;
+}

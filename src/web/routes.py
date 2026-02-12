@@ -30,7 +30,8 @@
 #
 # === MOMENTUM BACKTEST ENDPOINTS ===
 # GET  /momentum              - Momentum backtest page (HTML)
-# POST /api/momentum/backtest - Run backtest for a date (JSON)
+# POST /api/momentum/backtest - Run single-day backtest (JSON)
+# POST /api/momentum/range-backtest - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status - Get intraday monitor status (JSON)
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 from src.common.pending_store import PendingConfirmationStore
 
@@ -1083,6 +1085,14 @@ class MomentumBacktestRequest(BaseModel):
     notify: bool = False  # Send Feishu notification
 
 
+class MomentumRangeBacktestRequest(BaseModel):
+    """Request body for momentum range backtest."""
+
+    start_date: str  # YYYY-MM-DD format
+    end_date: str  # YYYY-MM-DD format
+    initial_capital: float  # Starting capital in yuan
+
+
 def create_momentum_router() -> APIRouter:
     """Create router for momentum backtest and intraday monitor endpoints."""
     import asyncio
@@ -1207,6 +1217,8 @@ def create_momentum_router() -> APIRouter:
                     "open_gain_pct": round(rec.open_gain_pct, 2),
                     "pe_ttm": round(rec.pe_ttm, 2),
                     "board_avg_pe": round(rec.board_avg_pe, 2),
+                    "open_price": round(rec.open_price, 2),
+                    "prev_close": round(rec.prev_close, 2),
                 }
                 if rec
                 else None,
@@ -1267,6 +1279,322 @@ def create_momentum_router() -> APIRouter:
         monitor_state["running"] = False
         monitor_state["task"] = None
         return {"success": True, "message": "监控已停止"}
+
+    @router.post("/api/momentum/range-backtest")
+    async def run_range_backtest(body: MomentumRangeBacktestRequest):
+        """Run momentum range backtest with SSE streaming progress."""
+        import asyncio
+        import json
+        import math
+        from datetime import datetime
+
+        from src.data.clients.ifind_http_client import IFinDHttpClient
+        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.data.sources.concept_mapper import ConceptMapper
+        from src.strategy.strategies.momentum_sector_scanner import (
+            MomentumSectorScanner,
+        )
+
+        # Validate dates
+        try:
+            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
+
+        if end_date <= start_date:
+            raise HTTPException(status_code=400, detail="结束日期必须晚于起始日期")
+
+        if body.initial_capital < 1000:
+            raise HTTPException(status_code=400, detail="起始资金不能低于 1000 元")
+
+        async def event_stream():
+            """SSE event generator for range backtest."""
+
+            def sse(data: dict) -> str:
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+            ifind_client = IFinDHttpClient()
+            fundamentals_db = create_fundamentals_db_from_config()
+
+            try:
+                await ifind_client.start()
+                await fundamentals_db.connect()
+
+                concept_mapper = ConceptMapper(ifind_client)
+                scanner = MomentumSectorScanner(
+                    ifind_client=ifind_client,
+                    fundamentals_db=fundamentals_db,
+                    concept_mapper=concept_mapper,
+                )
+
+                # Get trading calendar using a liquid stock
+                trading_days = await _get_trading_calendar(ifind_client, start_date, end_date)
+
+                if not trading_days:
+                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
+                    return
+
+                if len(trading_days) > 90:
+                    trading_days = trading_days[:90]
+                    first, last = trading_days[0], trading_days[-1]
+                    yield sse(
+                        {
+                            "type": "warning",
+                            "message": f"已截断至前 90 个交易日 ({first} ~ {last})",
+                        }
+                    )
+
+                yield sse(
+                    {
+                        "type": "init",
+                        "total_days": len(trading_days),
+                        "start_date": str(trading_days[0]),
+                        "end_date": str(trading_days[-1]),
+                        "initial_capital": body.initial_capital,
+                    }
+                )
+
+                capital = body.initial_capital
+                day_results: list[dict] = []
+
+                for i, day in enumerate(trading_days):
+                    yield sse(
+                        {
+                            "type": "progress",
+                            "day": i + 1,
+                            "total": len(trading_days),
+                            "trade_date": str(day),
+                        }
+                    )
+
+                    # Run single-day scan
+                    try:
+                        scan_result = await _run_momentum_scan_for_date(ifind_client, scanner, day)
+                    except Exception as e:
+                        logger.error(f"Range backtest scan error on {day}: {e}")
+                        day_results.append(
+                            {
+                                "trade_date": str(day),
+                                "has_trade": False,
+                                "skip_reason": f"策略出错: {str(e)[:50]}",
+                                "capital": round(capital, 2),
+                            }
+                        )
+                        yield sse(
+                            {
+                                "type": "day_result",
+                                **day_results[-1],
+                            }
+                        )
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    rec = (
+                        scan_result.recommended_stock
+                        if scan_result and scan_result.recommended_stock
+                        else None
+                    )
+
+                    if not rec:
+                        day_results.append(
+                            {
+                                "trade_date": str(day),
+                                "has_trade": False,
+                                "skip_reason": "无推荐",
+                                "capital": round(capital, 2),
+                            }
+                        )
+                        yield sse({"type": "day_result", **day_results[-1]})
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    # Fetch buy price (today) and sell price (next trading day)
+                    buy_price = rec.open_price
+                    if buy_price <= 0:
+                        # Fallback: fetch from history_quotes
+                        prices = await _fetch_stock_open_prices(
+                            ifind_client, rec.stock_code, day, days=10
+                        )
+                        if prices:
+                            buy_price = prices[0][1]
+
+                    if buy_price <= 0:
+                        day_results.append(
+                            {
+                                "trade_date": str(day),
+                                "has_trade": False,
+                                "skip_reason": "无法获取买入价",
+                                "stock_code": rec.stock_code,
+                                "stock_name": rec.stock_name,
+                                "capital": round(capital, 2),
+                            }
+                        )
+                        yield sse({"type": "day_result", **day_results[-1]})
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    # Fetch next day open price for selling
+                    sell_prices = await _fetch_stock_open_prices(
+                        ifind_client, rec.stock_code, day, days=10
+                    )
+                    # sell_prices is list of (date, open_price), skip first (today)
+                    sell_price = 0.0
+                    sell_date_str = ""
+                    for sp_date, sp_price in sell_prices:
+                        if sp_date > day and sp_price > 0:
+                            sell_price = sp_price
+                            sell_date_str = str(sp_date)
+                            break
+
+                    if sell_price <= 0:
+                        day_results.append(
+                            {
+                                "trade_date": str(day),
+                                "has_trade": False,
+                                "skip_reason": "无法获取次日卖出价",
+                                "stock_code": rec.stock_code,
+                                "stock_name": rec.stock_name,
+                                "capital": round(capital, 2),
+                            }
+                        )
+                        yield sse({"type": "day_result", **day_results[-1]})
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    # Calculate lots
+                    lots = math.floor(capital / (buy_price * 100))
+                    if lots <= 0:
+                        day_results.append(
+                            {
+                                "trade_date": str(day),
+                                "has_trade": False,
+                                "skip_reason": f"资金不足 (需 {buy_price * 100:.0f} 元/手)",
+                                "stock_code": rec.stock_code,
+                                "stock_name": rec.stock_name,
+                                "capital": round(capital, 2),
+                            }
+                        )
+                        yield sse({"type": "day_result", **day_results[-1]})
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    # Check total buy cost fits within capital
+                    buy_amount = lots * 100 * buy_price
+                    buy_commission = max(buy_amount * 0.003, 5.0)
+                    buy_transfer = buy_amount * 0.00001
+                    total_buy_cost = buy_amount + buy_commission + buy_transfer
+
+                    while total_buy_cost > capital and lots > 0:
+                        lots -= 1
+                        buy_amount = lots * 100 * buy_price
+                        buy_commission = max(buy_amount * 0.003, 5.0)
+                        buy_transfer = buy_amount * 0.00001
+                        total_buy_cost = buy_amount + buy_commission + buy_transfer
+
+                    if lots <= 0:
+                        day_results.append(
+                            {
+                                "trade_date": str(day),
+                                "has_trade": False,
+                                "skip_reason": "资金不足（含手续费）",
+                                "stock_code": rec.stock_code,
+                                "stock_name": rec.stock_name,
+                                "capital": round(capital, 2),
+                            }
+                        )
+                        yield sse({"type": "day_result", **day_results[-1]})
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    # Calculate sell proceeds
+                    sell_amount = lots * 100 * sell_price
+                    sell_commission = max(sell_amount * 0.003, 5.0)
+                    sell_transfer = sell_amount * 0.00001
+                    sell_stamp = sell_amount * 0.0005
+                    net_sell = sell_amount - sell_commission - sell_transfer - sell_stamp
+
+                    # Update capital
+                    capital_before = capital
+                    capital = capital - total_buy_cost + net_sell
+                    trade_profit = net_sell - total_buy_cost
+                    trade_return_pct = (
+                        trade_profit / total_buy_cost * 100 if total_buy_cost > 0 else 0
+                    )
+
+                    day_result = {
+                        "trade_date": str(day),
+                        "has_trade": True,
+                        "stock_code": rec.stock_code,
+                        "stock_name": rec.stock_name,
+                        "board_name": rec.board_name,
+                        "buy_price": round(buy_price, 2),
+                        "sell_price": round(sell_price, 2),
+                        "sell_date": sell_date_str,
+                        "lots": lots,
+                        "buy_amount": round(buy_amount, 2),
+                        "buy_commission": round(buy_commission, 2),
+                        "buy_transfer": round(buy_transfer, 2),
+                        "sell_amount": round(sell_amount, 2),
+                        "sell_commission": round(sell_commission, 2),
+                        "sell_transfer": round(sell_transfer, 2),
+                        "sell_stamp": round(sell_stamp, 2),
+                        "profit": round(trade_profit, 2),
+                        "return_pct": round(trade_return_pct, 2),
+                        "capital_before": round(capital_before, 2),
+                        "capital": round(capital, 2),
+                    }
+                    day_results.append(day_result)
+                    yield sse({"type": "day_result", **day_result})
+                    await asyncio.sleep(0.05)
+
+                # Summary
+                trade_results = [d for d in day_results if d.get("has_trade")]
+                wins = [d for d in trade_results if d["profit"] > 0]
+                losses = [d for d in trade_results if d["profit"] < 0]
+                total_return_pct = (capital - body.initial_capital) / body.initial_capital * 100
+
+                summary = {
+                    "initial_capital": body.initial_capital,
+                    "final_capital": round(capital, 2),
+                    "total_return_pct": round(total_return_pct, 2),
+                    "total_days": len(trading_days),
+                    "trade_days": len(trade_results),
+                    "skip_days": len(trading_days) - len(trade_results),
+                    "win_days": len(wins),
+                    "lose_days": len(losses),
+                    "even_days": len(trade_results) - len(wins) - len(losses),
+                    "win_rate": round(
+                        len(wins) / len(trade_results) * 100 if trade_results else 0, 1
+                    ),
+                    "max_win": round(max((d["profit"] for d in trade_results), default=0), 2),
+                    "max_loss": round(min((d["profit"] for d in trade_results), default=0), 2),
+                    "total_commission": round(
+                        sum(
+                            d.get("buy_commission", 0) + d.get("sell_commission", 0)
+                            for d in trade_results
+                        ),
+                        2,
+                    ),
+                    "total_stamp_tax": round(sum(d.get("sell_stamp", 0) for d in trade_results), 2),
+                }
+                yield sse({"type": "complete", "summary": summary})
+
+            except Exception as e:
+                logger.error(f"Range backtest error: {e}", exc_info=True)
+                yield sse({"type": "error", "message": f"回测出错: {str(e)}"})
+            finally:
+                await fundamentals_db.close()
+                await ifind_client.stop()
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return router
 
@@ -1367,6 +1695,83 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
             logger.error(f"history_quotes batch failed: {e}")
 
     return snapshots
+
+
+async def _get_trading_calendar(ifind_client, start_date, end_date) -> list:
+    """Get list of trading days by checking a liquid stock's price history."""
+    from datetime import datetime
+
+    try:
+        data = await ifind_client.history_quotes(
+            codes="000001.SZ",
+            indicators="open",
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+        )
+        for table_entry in data.get("tables", []):
+            tbl = table_entry.get("table", {})
+            times = tbl.get("time", [])
+            return [datetime.strptime(t, "%Y-%m-%d").date() for t in times]
+    except Exception as e:
+        logger.error(f"Failed to get trading calendar: {e}")
+    return []
+
+
+async def _fetch_stock_open_prices(
+    ifind_client, stock_code: str, from_date, days: int = 10
+) -> list:
+    """Fetch open prices for a stock starting from a date.
+
+    Returns list of (date, open_price) tuples sorted chronologically.
+    """
+    from datetime import datetime, timedelta
+
+    suffix = ".SH" if stock_code.startswith("6") else ".SZ"
+    code = f"{stock_code}{suffix}"
+    end = from_date + timedelta(days=days)
+
+    try:
+        data = await ifind_client.history_quotes(
+            codes=code,
+            indicators="open",
+            start_date=from_date.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+        )
+        for table_entry in data.get("tables", []):
+            tbl = table_entry.get("table", {})
+            times = tbl.get("time", [])
+            opens = tbl.get("open", [])
+            result = []
+            for j in range(min(len(times), len(opens))):
+                d = datetime.strptime(times[j], "%Y-%m-%d").date()
+                result.append((d, float(opens[j])))
+            return result
+    except Exception as e:
+        logger.error(f"Failed to fetch open prices for {stock_code}: {e}")
+    return []
+
+
+async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
+    """Run full momentum scan for a specific date. Returns ScanResult or None."""
+    from src.data.clients.ifind_http_client import IFinDHttpError
+
+    date_str = trade_date.strftime("%Y%m%d")
+    query = f"{date_str}开盘涨幅大于5%的沪深主板非ST股票"
+
+    try:
+        iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
+    except IFinDHttpError as e:
+        logger.error(f"iwencai query failed for {trade_date}: {e}")
+        return None
+
+    price_snapshots = await _parse_iwencai_and_fetch_prices(
+        ifind_client, iwencai_result, trade_date
+    )
+
+    if not price_snapshots:
+        return None
+
+    return await scanner.scan(price_snapshots, trade_date=trade_date)
 
 
 async def _run_intraday_monitor(state: dict) -> None:

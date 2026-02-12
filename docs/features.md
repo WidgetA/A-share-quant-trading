@@ -645,6 +645,26 @@ strategy:
 - `scripts/backtest_momentum.py` — Backtest script
 - `scripts/intraday_momentum_alert.py` — Live monitoring + Feishu alert
 
+**Backtest Modes**:
+
+| Mode | Description |
+|------|-------------|
+| **Single-day** | Run strategy for one date, show selected stocks + recommendation |
+| **Range** | Run strategy for a date range (max 90 trading days), simulate daily buy/sell with real costs |
+
+**Range Backtest Details**:
+- Input: start date, end date, initial capital (yuan)
+- Each trading day: run strategy → buy recommended stock at open (~9:45), sell at next day's open
+- Trading costs:
+  - **Commission**: 0.3% of trade amount, minimum 5 yuan (both buy and sell)
+  - **Transfer fee**: 0.001% (1/100,000) of trade amount (both buy and sell)
+  - **Stamp tax**: 0.05% (0.5/1,000) of trade amount (sell only)
+- Minimum trading unit: 1 lot (100 shares)
+- Buy with max affordable lots each day
+- If no recommendation or capital insufficient for 1 lot: skip day
+- SSE streaming for real-time progress display
+- Results: per-day trade details + summary (total return, win rate, etc.)
+
 **Checklist**:
 - [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
@@ -653,6 +673,8 @@ strategy:
 - [x] Feishu notification: `send_momentum_scan_result()` with recommendation
 - [x] Backtest script with `--notify` option
 - [x] Intraday monitoring script (polls 9:30-9:40)
+- [x] Range backtest with trading cost simulation (SSE streaming)
+- [x] Tab-based UI for single-day vs range backtest
 - [ ] Unit tests
 
 ---

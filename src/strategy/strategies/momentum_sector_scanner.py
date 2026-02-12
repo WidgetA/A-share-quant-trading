@@ -84,6 +84,8 @@ class RecommendedStock:
     open_gain_pct: float
     pe_ttm: float
     board_avg_pe: float
+    open_price: float = 0.0  # Raw open price (for range backtest)
+    prev_close: float = 0.0  # Previous close price (for range backtest)
 
 
 @dataclass
@@ -189,13 +191,13 @@ class MomentumSectorScanner:
         logger.info(f"Step 4: {total_constituents} total constituent stocks across hot boards")
 
         # Step 5: PE filter — open gain > 0 AND PE within board avg ±10%
-        selected = await self._step5_pe_filter(board_constituents, price_snapshots)
+        selected, all_snapshots = await self._step5_pe_filter(board_constituents, price_snapshots)
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
 
         # Step 6: Recommend — best earnings growth from the board with most selected stocks
         if selected:
-            result.recommended_stock = await self._step6_recommend(selected)
+            result.recommended_stock = await self._step6_recommend(selected, all_snapshots)
             if result.recommended_stock:
                 logger.info(
                     f"Step 6: Recommended {result.recommended_stock.stock_code} "
@@ -286,7 +288,7 @@ class MomentumSectorScanner:
         self,
         board_constituents: dict[str, list[tuple[str, str]]],
         price_snapshots: dict[str, PriceSnapshot],
-    ) -> list[SelectedStock]:
+    ) -> tuple[list[SelectedStock], dict[str, PriceSnapshot]]:
         """
         Step 5: From all constituent stocks, select those with:
         - Opening gain > 0
@@ -373,10 +375,12 @@ class MomentumSectorScanner:
             if existing is None or stock.open_gain_pct > existing.open_gain_pct:
                 seen[stock.stock_code] = stock
 
-        return sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True)
+        return sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True), price_snapshots
 
     async def _step6_recommend(
-        self, selected_stocks: list[SelectedStock]
+        self,
+        selected_stocks: list[SelectedStock],
+        price_snapshots: dict[str, PriceSnapshot] | None = None,
     ) -> RecommendedStock | None:
         """
         Step 6: Pick the best stock from the board with the most selected stocks.
@@ -459,6 +463,9 @@ class MomentumSectorScanner:
         if not best_stock:
             return None
 
+        # Look up raw price from snapshots if available
+        snap = price_snapshots.get(best_code) if price_snapshots else None
+
         return RecommendedStock(
             stock_code=best_stock.stock_code,
             stock_name=best_stock.stock_name,
@@ -468,6 +475,8 @@ class MomentumSectorScanner:
             open_gain_pct=best_stock.open_gain_pct,
             pe_ttm=best_stock.pe_ttm,
             board_avg_pe=best_stock.board_avg_pe,
+            open_price=snap.open_price if snap else 0.0,
+            prev_close=snap.prev_close if snap else 0.0,
         )
 
     async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:

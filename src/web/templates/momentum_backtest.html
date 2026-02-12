@@ -20,27 +20,57 @@
         </div>
     </section>
 
-    <!-- Backtest Form -->
+    <!-- Backtest Tabs -->
     <section class="momentum-section">
         <div class="sim-card">
-            <h3>历史回测</h3>
-            <form id="backtest-form" class="sim-form">
-                <div class="form-group">
-                    <label for="trade_date">回测日期</label>
-                    <input type="date" id="trade_date" name="trade_date" required>
-                </div>
-                <div class="form-group checkbox-group">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="notify" name="notify">
-                        <span>同时发送飞书通知</span>
-                    </label>
-                </div>
-                <button type="submit" class="btn btn-primary" id="backtest-btn">开始回测</button>
-            </form>
+            <div class="backtest-tabs">
+                <button class="backtest-tab active" data-tab="single">单日回测</button>
+                <button class="backtest-tab" data-tab="range">区间回测</button>
+            </div>
+
+            <!-- Single Day Backtest -->
+            <div id="tab-single" class="tab-content">
+                <form id="backtest-form" class="sim-form">
+                    <div class="form-group">
+                        <label for="trade_date">回测日期</label>
+                        <input type="date" id="trade_date" name="trade_date" required>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="notify" name="notify">
+                            <span>同时发送飞书通知</span>
+                        </label>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="backtest-btn">开始回测</button>
+                </form>
+            </div>
+
+            <!-- Range Backtest -->
+            <div id="tab-range" class="tab-content hidden">
+                <form id="range-form" class="sim-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="range_start">起始日期</label>
+                            <input type="date" id="range_start" name="range_start" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="range_end">结束日期</label>
+                            <input type="date" id="range_end" name="range_end" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="initial_capital">起始资金 (元)</label>
+                            <input type="number" id="initial_capital" name="initial_capital"
+                                   value="100000" min="1000" step="1000" required>
+                        </div>
+                    </div>
+                    <p class="form-hint">每天买入推荐股（开盘价），次日开盘卖出。最多 90 个交易日。含手续费、过户费、印花税。</p>
+                    <button type="submit" class="btn btn-primary" id="range-btn">开始区间回测</button>
+                </form>
+            </div>
         </div>
     </section>
 
-    <!-- Loading -->
+    <!-- Single Day Loading -->
     <section id="loading-section" class="momentum-section hidden">
         <div class="sim-card loading-card">
             <div class="loading-spinner"></div>
@@ -49,7 +79,7 @@
         </div>
     </section>
 
-    <!-- Results -->
+    <!-- Single Day Results -->
     <section id="results-section" class="momentum-section hidden">
         <div class="sim-card">
             <div class="result-header">
@@ -88,6 +118,48 @@
         </div>
     </section>
 
+    <!-- Range Backtest Loading -->
+    <section id="range-loading" class="momentum-section hidden">
+        <div class="sim-card loading-card">
+            <div class="loading-spinner"></div>
+            <p id="range-progress-text">正在处理...</p>
+            <div class="range-progress-bar">
+                <div id="range-progress-fill" class="range-progress-fill"></div>
+            </div>
+            <p class="loading-hint" id="range-progress-hint"></p>
+        </div>
+    </section>
+
+    <!-- Range Backtest Results -->
+    <section id="range-results" class="momentum-section hidden">
+        <div class="sim-card">
+            <h3>区间回测结果</h3>
+
+            <!-- Summary -->
+            <div id="range-summary" class="range-summary"></div>
+
+            <!-- Trade table -->
+            <div class="range-table-wrap">
+                <table class="stock-table range-table">
+                    <thead>
+                        <tr>
+                            <th>买入日</th>
+                            <th>推荐股</th>
+                            <th>买入价</th>
+                            <th>卖出日</th>
+                            <th>卖出价</th>
+                            <th>手数</th>
+                            <th>盈亏</th>
+                            <th>收益率</th>
+                            <th>当前资金</th>
+                        </tr>
+                    </thead>
+                    <tbody id="range-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
     <!-- History (today's monitor results) -->
     <section id="history-section" class="momentum-section">
         <div class="sim-card">
@@ -102,7 +174,27 @@
 
 {% block scripts %}
 <script>
-// Backtest form
+// === Tab Switching ===
+document.querySelectorAll('.backtest-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.backtest-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        const target = tab.dataset.tab;
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+        document.getElementById('tab-' + target).classList.remove('hidden');
+
+        // Hide results from the other mode
+        if (target === 'single') {
+            document.getElementById('range-loading').classList.add('hidden');
+            document.getElementById('range-results').classList.add('hidden');
+        } else {
+            document.getElementById('loading-section').classList.add('hidden');
+            document.getElementById('results-section').classList.add('hidden');
+        }
+    });
+});
+
+// === Single Day Backtest ===
 document.getElementById('backtest-form').addEventListener('submit', async (e) => {
     e.preventDefault();
 
@@ -111,7 +203,6 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
 
     if (!tradeDate) return;
 
-    // Show loading, hide results
     document.getElementById('loading-section').classList.remove('hidden');
     document.getElementById('results-section').classList.add('hidden');
     document.getElementById('backtest-btn').disabled = true;
@@ -153,7 +244,6 @@ function renderResults(data) {
     const recBadge = document.getElementById('result-recommend-badge');
     const recCard = document.getElementById('recommend-card');
 
-    // Recommendation
     const rec = data.recommended_stock;
     if (rec) {
         recBadge.style.display = '';
@@ -177,7 +267,6 @@ function renderResults(data) {
 
     emptyEl.classList.add('hidden');
 
-    // Group by board
     const boardMap = {};
     data.selected_stocks.forEach(s => {
         if (!boardMap[s.board_name]) boardMap[s.board_name] = [];
@@ -224,7 +313,202 @@ function renderResults(data) {
     container.innerHTML = html;
 }
 
-// Poll monitor status
+// === Range Backtest ===
+document.getElementById('range-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const startDate = document.getElementById('range_start').value;
+    const endDate = document.getElementById('range_end').value;
+    const initialCapital = parseFloat(document.getElementById('initial_capital').value);
+
+    if (!startDate || !endDate) return;
+    if (endDate <= startDate) { alert('结束日期必须晚于起始日期'); return; }
+    if (initialCapital < 1000) { alert('起始资金不能低于 1000 元'); return; }
+
+    // Reset UI
+    document.getElementById('range-loading').classList.remove('hidden');
+    document.getElementById('range-results').classList.add('hidden');
+    document.getElementById('range-table-body').innerHTML = '';
+    document.getElementById('range-summary').innerHTML = '';
+    document.getElementById('range-btn').disabled = true;
+    document.getElementById('range-btn').textContent = '运行中...';
+
+    try {
+        const resp = await fetch('/api/momentum/range-backtest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                start_date: startDate,
+                end_date: endDate,
+                initial_capital: initialCapital,
+            }),
+        });
+
+        if (!resp.ok) {
+            const errData = await resp.json();
+            alert(errData.detail || '回测失败');
+            return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const messages = buffer.split('\n\n');
+            buffer = messages.pop();
+
+            for (const msg of messages) {
+                const trimmed = msg.trim();
+                if (!trimmed.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(trimmed.substring(6));
+                    handleRangeEvent(data);
+                } catch (parseErr) {
+                    // skip malformed SSE
+                }
+            }
+        }
+
+        // Process any remaining buffer
+        if (buffer.trim().startsWith('data: ')) {
+            try {
+                const data = JSON.parse(buffer.trim().substring(6));
+                handleRangeEvent(data);
+            } catch (e) {}
+        }
+
+    } catch (err) {
+        alert('请求失败: ' + err.message);
+    } finally {
+        document.getElementById('range-loading').classList.add('hidden');
+        document.getElementById('range-btn').disabled = false;
+        document.getElementById('range-btn').textContent = '开始区间回测';
+    }
+});
+
+function handleRangeEvent(data) {
+    switch (data.type) {
+        case 'init':
+            document.getElementById('range-progress-hint').textContent =
+                `${data.start_date} ~ ${data.end_date}，共 ${data.total_days} 个交易日`;
+            break;
+
+        case 'warning':
+            document.getElementById('range-progress-hint').textContent = data.message;
+            break;
+
+        case 'progress':
+            document.getElementById('range-progress-text').textContent =
+                `正在处理第 ${data.day} / ${data.total} 天 (${data.trade_date})...`;
+            const pct = (data.day / data.total * 100).toFixed(0);
+            document.getElementById('range-progress-fill').style.width = pct + '%';
+            break;
+
+        case 'day_result':
+            // Show results section
+            document.getElementById('range-results').classList.remove('hidden');
+            appendRangeDayRow(data);
+            break;
+
+        case 'complete':
+            document.getElementById('range-loading').classList.add('hidden');
+            renderRangeSummary(data.summary);
+            break;
+
+        case 'error':
+            document.getElementById('range-loading').classList.add('hidden');
+            alert(data.message);
+            break;
+    }
+}
+
+function appendRangeDayRow(d) {
+    const tbody = document.getElementById('range-table-body');
+    const tr = document.createElement('tr');
+
+    if (!d.has_trade) {
+        tr.className = 'range-skip-row';
+        tr.innerHTML = `
+            <td>${d.trade_date}</td>
+            <td colspan="7" class="range-skip-reason">${d.skip_reason}${d.stock_code ? ' (' + d.stock_code + ')' : ''}</td>
+            <td class="range-capital">${formatMoney(d.capital)}</td>
+        `;
+    } else {
+        const profitClass = d.profit > 0 ? 'range-profit-pos' : (d.profit < 0 ? 'range-profit-neg' : '');
+        tr.className = profitClass ? 'range-trade-row' : 'range-trade-row';
+        tr.innerHTML = `
+            <td>${d.trade_date}</td>
+            <td><span class="stock-code">${d.stock_code}</span> ${d.stock_name}</td>
+            <td>${d.buy_price.toFixed(2)}</td>
+            <td>${d.sell_date || '-'}</td>
+            <td>${d.sell_price.toFixed(2)}</td>
+            <td>${d.lots}</td>
+            <td class="${profitClass}">${d.profit >= 0 ? '+' : ''}${d.profit.toFixed(2)}</td>
+            <td class="${profitClass}">${d.return_pct >= 0 ? '+' : ''}${d.return_pct.toFixed(2)}%</td>
+            <td class="range-capital">${formatMoney(d.capital)}</td>
+        `;
+    }
+
+    tbody.appendChild(tr);
+    // Auto-scroll to bottom
+    tr.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function renderRangeSummary(s) {
+    const returnClass = s.total_return_pct >= 0 ? 'range-profit-pos' : 'range-profit-neg';
+    const html = `
+        <div class="range-summary-grid">
+            <div class="range-stat">
+                <span class="range-stat-label">起始资金</span>
+                <span class="range-stat-value">${formatMoney(s.initial_capital)}</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">最终资金</span>
+                <span class="range-stat-value ${returnClass}">${formatMoney(s.final_capital)}</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">总收益率</span>
+                <span class="range-stat-value ${returnClass}">${s.total_return_pct >= 0 ? '+' : ''}${s.total_return_pct.toFixed(2)}%</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">交易天数</span>
+                <span class="range-stat-value">${s.trade_days} / ${s.total_days}</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">胜率</span>
+                <span class="range-stat-value">${s.win_rate.toFixed(1)}% (${s.win_days}胜 ${s.lose_days}负)</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">最大单笔盈利</span>
+                <span class="range-stat-value range-profit-pos">${s.max_win >= 0 ? '+' : ''}${s.max_win.toFixed(2)}</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">最大单笔亏损</span>
+                <span class="range-stat-value range-profit-neg">${s.max_loss.toFixed(2)}</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">总手续费</span>
+                <span class="range-stat-value">${s.total_commission.toFixed(2)}</span>
+            </div>
+            <div class="range-stat">
+                <span class="range-stat-label">总印花税</span>
+                <span class="range-stat-value">${s.total_stamp_tax.toFixed(2)}</span>
+            </div>
+        </div>
+    `;
+    document.getElementById('range-summary').innerHTML = html;
+}
+
+function formatMoney(val) {
+    return val.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// === Monitor Status Polling ===
 async function refreshMonitorStatus() {
     try {
         const resp = await fetch('/api/momentum/monitor-status');
@@ -234,7 +518,6 @@ async function refreshMonitorStatus() {
         statusEl.textContent = data.running ? '运行中' : '已停止';
         statusEl.className = 'status-indicator ' + (data.running ? 'running' : 'stopped');
 
-        // Show last result
         const lastEl = document.getElementById('monitor-last-result');
         if (data.last_scan_time) {
             const last = data.today_results[data.today_results.length - 1];
@@ -245,7 +528,6 @@ async function refreshMonitorStatus() {
             lastEl.innerHTML = '';
         }
 
-        // Render history
         const historyEl = document.getElementById('history-container');
         if (data.today_results && data.today_results.length > 0) {
             let hhtml = '';
@@ -273,7 +555,6 @@ async function refreshMonitorStatus() {
     }
 }
 
-// Initial load + periodic refresh
 refreshMonitorStatus();
 setInterval(refreshMonitorStatus, 30000);
 </script>
