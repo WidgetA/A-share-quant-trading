@@ -525,3 +525,63 @@ price = THS_HQ('600489.SH', 'open')  # Use iFinD API
 **Rationale:** Using different data sources in test vs production creates hidden risks. A strategy that passes tests with akshare data may behave differently with iFinD data in production. This violates the Trading Safety Priority Principle (Section 12).
 
 If iFinD is unavailable, the correct action is to **halt** and fix the data source issue, NOT to fall back to akshare.
+
+### 15. asyncpg Timezone Handling (Critical)
+
+**Core Principle: ALWAYS use timezone-aware datetimes when passing parameters to asyncpg queries.**
+
+#### Root Cause
+
+asyncpg has **asymmetric timezone behavior** that causes silent data corruption:
+
+| Direction | Behavior |
+|-----------|----------|
+| **Sending** (query parameters) | Naive datetimes are interpreted using the **system timezone** (`TZ` env var) |
+| **Receiving** (query results) | Always returns **UTC-aware** datetimes (`tzinfo=UTC`) for `timestamptz` columns |
+
+When the Docker container has `TZ=Asia/Shanghai`, this asymmetry causes a **16-hour offset** for naive datetimes:
+
+```
+Naive 01:30 → asyncpg treats as 01:30 CST → converts to 17:30 UTC (previous day!)
+Expected: 01:30 UTC
+Actual:   17:30 UTC (WRONG by 16 hours)
+```
+
+#### Prohibited Patterns
+
+```python
+# FORBIDDEN: Subtracting hours from naive datetime for "manual UTC conversion"
+start_bj = datetime(2026, 2, 8, 9, 30)  # 9:30 Beijing
+start_utc = start_bj - timedelta(hours=8)  # 01:30 naive — WRONG!
+# asyncpg will interpret 01:30 as 01:30 CST → 17:30 UTC
+
+# FORBIDDEN: Any naive datetime as asyncpg query parameter
+await conn.fetch("SELECT * FROM t WHERE ts >= $1", naive_datetime)
+```
+
+#### Correct Patterns
+
+```python
+from zoneinfo import ZoneInfo
+
+beijing_tz = ZoneInfo("Asia/Shanghai")
+
+# CORRECT: Use timezone-aware datetime for query parameters
+start_bj = datetime(2026, 2, 8, 9, 30)
+start_aware = start_bj.replace(tzinfo=beijing_tz)  # 09:30+08:00
+# asyncpg correctly converts to 01:30 UTC
+
+await conn.fetch("SELECT * FROM t WHERE ts >= $1", start_aware)
+
+# CORRECT: Display conversion (UTC result → Beijing time for display)
+utc_time = row["publish_time"]  # e.g., 2026-02-07 22:58:00+00:00
+beijing_display = (utc_time + timedelta(hours=8)).replace(tzinfo=None)
+# Result: 2026-02-08 06:58:00 (clean Beijing time string)
+```
+
+#### Summary of Rules
+
+1. **Query parameters**: Always use `datetime.replace(tzinfo=beijing_tz)` — NEVER subtract 8 hours from naive datetimes
+2. **Display results**: Always use `+ timedelta(hours=8)` then `.replace(tzinfo=None)` for clean Beijing time
+3. **Never assume system TZ**: Code must work correctly regardless of `TZ` environment variable
+4. **Test with TZ=Asia/Shanghai**: Always verify datetime handling in an environment matching production

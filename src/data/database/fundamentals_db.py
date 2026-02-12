@@ -307,10 +307,10 @@ def create_fundamentals_db_from_config() -> FundamentalsDB:
     from src.common.config import load_config
 
     config = load_config("config/database-config.yaml")
-    db_config = config.get_dict("database.trading", {})
+    db_config = config.get_dict("database.fundamentals", {})
 
     if not db_config:
-        raise ValueError("Trading database configuration not found")
+        raise ValueError("Fundamentals database configuration not found")
 
     def resolve_env(value: Any) -> Any:
         if isinstance(value, str) and value.startswith("${"):

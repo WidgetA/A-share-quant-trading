@@ -28,3 +28,14 @@ database:
     pool_max_size: 5
     schema: "trading"
     auto_create_schema: true  # Create schema if not exists
+
+  # Stock fundamentals (read-only, populated by external process)
+  fundamentals:
+    host: "${DB_HOST:localhost}"
+    port: ${DB_PORT:5432}
+    database: "${DB_NAME:messages}"
+    user: "${DB_USER:reader}"
+    password: "${DB_PASSWORD}"
+    pool_min_size: 2
+    pool_max_size: 5
+    schema: "public"
