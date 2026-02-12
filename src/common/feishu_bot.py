@@ -12,12 +12,21 @@
 # - Retry Mechanism: Exponential backoff for reliability
 # - Graceful Degradation: Skip if not configured, don't crash
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from datetime import datetime
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import httpx
+
+if TYPE_CHECKING:
+    from src.strategy.strategies.momentum_sector_scanner import (
+        RecommendedStock,
+        SelectedStock,
+    )
 
 from src.common.config import get_feishu_config
 
@@ -260,11 +269,11 @@ Limit-up (skipped):
 
     async def send_momentum_scan_result(
         self,
-        selected_stocks: list,
+        selected_stocks: list[SelectedStock],
         hot_boards: dict[str, list[str]],
         initial_gainer_count: int,
         scan_time: datetime | None = None,
-        recommended_stock: object | None = None,
+        recommended_stock: RecommendedStock | None = None,
     ) -> bool:
         """
         Send momentum sector strategy scan result.
