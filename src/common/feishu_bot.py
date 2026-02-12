@@ -257,3 +257,60 @@ Limit-up (skipped):
 {buying_section}"""
 
         return await self.send_message(message)
+
+    async def send_momentum_scan_result(
+        self,
+        selected_stocks: list,
+        hot_boards: dict[str, list[str]],
+        initial_gainer_count: int,
+        scan_time: datetime | None = None,
+    ) -> bool:
+        """
+        Send momentum sector strategy scan result.
+
+        Args:
+            selected_stocks: List of SelectedStock (from momentum_sector_scanner).
+            hot_boards: Dict of board_name → list of initial gainer codes.
+            initial_gainer_count: Number of stocks that passed initial >5% filter.
+            scan_time: When the scan was performed.
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        now = scan_time or datetime.now(BEIJING_TZ)
+        time_str = now.strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"📊 动量板块策略选股 ({time_str})",
+            f"初筛: {initial_gainer_count}只涨幅>5% | 热门板块: {len(hot_boards)}个",
+            "",
+        ]
+
+        if not selected_stocks:
+            lines.append("未筛选到符合条件的股票")
+            return await self.send_message("\n".join(lines))
+
+        # Group selected stocks by board
+        board_stocks: dict[str, list] = {}
+        for stock in selected_stocks:
+            board = stock.board_name
+            if board not in board_stocks:
+                board_stocks[board] = []
+            board_stocks[board].append(stock)
+
+        for board_name, stocks in board_stocks.items():
+            gainer_count = len(hot_boards.get(board_name, []))
+            lines.append(f"🔥 {board_name} ({gainer_count}只触发)")
+            for s in stocks:
+                pe_diff = s.pe_ttm - s.board_avg_pe
+                pe_sign = "+" if pe_diff >= 0 else ""
+                lines.append(
+                    f"  ✅ {s.stock_code} {s.stock_name}  "
+                    f"涨幅{s.open_gain_pct:+.1f}%  "
+                    f"PE {s.pe_ttm:.1f} (均值{s.board_avg_pe:.1f} {pe_sign}{pe_diff:.1f})"
+                )
+            lines.append("")
+
+        lines.append(f"共选出 {len(selected_stocks)} 只标的")
+
+        return await self.send_message("\n".join(lines))

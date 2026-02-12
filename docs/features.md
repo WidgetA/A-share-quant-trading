@@ -29,6 +29,7 @@
 | 0.7.1 | 2026-02-04 | - | SYS-004: Enhanced startup notification with git commit info for CD tracking |
 | 0.8.0 | 2026-02-04 | - | SIM-001: Historical simulation trading feature |
 | 0.9.0 | 2026-02-06 | - | OA-001: Order assistant (real-time news dashboard) |
+| 0.10.0 | 2026-02-12 | - | STR-004: Momentum sector strategy (backtest + intraday alert) |
 
 ---
 
@@ -613,6 +614,45 @@ strategy:
 - [x] Configuration file
 - [x] Limit-up price check before buying
 - [x] User confirmation when sector has limit-up stocks
+
+---
+
+### [STR-004] Momentum Sector Strategy (动量板块策略)
+
+**Status**: In Progress
+
+**Description**: Identifies "hot" concept boards by finding main board stocks with >5% early-morning gain, then selects PE-reasonable stocks from those boards.
+
+**Strategy Flow**:
+1. **Initial Scan (9:30-9:40)**: Track stocks with intraday gain >5%, main board only (600/601/603/605/000/001), non-ST
+2. **Reverse Concept Lookup**: For each gainer, find its concept boards via iwencai, filter junk boards
+3. **Hot Board Detection**: Find boards containing ≥2 gainers from step 1
+4. **Board Constituents**: Get ALL stocks in each hot board
+5. **PE Filter**: Select stocks with opening gain >0 AND PE(TTM) within board average PE ±10%
+6. **Notification**: Send selection via Feishu
+
+**Data Sources**:
+- Price (backtest): iFinD `history_quotes`
+- Price (live): iFinD `real_time_quotation`
+- Concept boards: iFinD iwencai (`smart_stock_picking`)
+- PE data: `stock_fundamentals` table (external, read-only)
+
+**Key Files**:
+- `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic
+- `src/data/sources/concept_mapper.py` — Stock ↔ concept board mapping
+- `src/data/database/fundamentals_db.py` — stock_fundamentals reader
+- `scripts/backtest_momentum.py` — Backtest script
+- `scripts/intraday_momentum_alert.py` — Live monitoring + Feishu alert
+
+**Checklist**:
+- [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
+- [x] FundamentalsDB: read-only access to stock_fundamentals table
+- [x] ConceptMapper: iwencai-based stock-to-board and board-to-stock lookups
+- [x] MomentumSectorScanner: 5-step pipeline
+- [x] Feishu notification: `send_momentum_scan_result()`
+- [x] Backtest script with `--notify` option
+- [x] Intraday monitoring script (polls 9:30-9:40)
+- [ ] Unit tests
 
 ---
 

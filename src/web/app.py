@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.web.routes import (
+    create_momentum_router,
     create_order_assistant_router,
     create_router,
     create_simulation_router,
@@ -87,19 +88,55 @@ def create_app(
     oa_router = create_order_assistant_router()
     app.include_router(oa_router)
 
+    # Add momentum backtest/monitor router
+    momentum_router = create_momentum_router()
+    app.include_router(momentum_router)
+
     # Mount static files if directory exists
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.on_event("startup")
     async def startup():
+        import asyncio
+
+        from src.web.routes import _run_intraday_monitor
+
         logger.info("Web UI started")
         store.start_cleanup_task()
+
+        # Auto-start intraday momentum monitor as background task
+        # Access the monitor state from the momentum router's closure
+        for route in momentum_router.routes:
+            if hasattr(route, "endpoint") and hasattr(route.endpoint, "__self__"):
+                break
+        # Use the module-level runner with a fresh state dict stored on app
+        app.state.momentum_monitor_state = {
+            "running": False,
+            "last_scan_time": None,
+            "last_result": None,
+            "today_results": [],
+            "task": None,
+        }
+        task = asyncio.create_task(
+            _run_intraday_monitor(app.state.momentum_monitor_state)
+        )
+        app.state.momentum_monitor_state["task"] = task
+        logger.info("Intraday momentum monitor auto-started")
 
     @app.on_event("shutdown")
     async def shutdown():
         logger.info("Web UI stopped")
         store.stop_cleanup_task()
+
+        # Stop momentum monitor
+        monitor_state = getattr(app.state, "momentum_monitor_state", None)
+        if monitor_state:
+            task = monitor_state.get("task")
+            if task and not task.done():
+                task.cancel()
+            monitor_state["running"] = False
+            logger.info("Intraday momentum monitor stopped")
 
     return app
 

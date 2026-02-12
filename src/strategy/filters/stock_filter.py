@@ -38,6 +38,7 @@ class StockFilterConfig:
     exclude_bse: bool = True  # Exclude Beijing Stock Exchange
     exclude_chinext: bool = True  # Exclude ChiNext (创业板)
     exclude_star: bool = False  # Exclude STAR Market (科创板)
+    exclude_sme: bool = False  # Exclude SME Board (中小板 002)
 
 
 class StockFilter:
@@ -161,6 +162,9 @@ class StockFilter:
         if self._config.exclude_star and exchange == Exchange.STAR:
             return False
 
+        if self._config.exclude_sme and exchange == Exchange.SME:
+            return False
+
         return True
 
     def filter_stocks(self, stock_codes: list[str]) -> list[str]:
@@ -200,6 +204,8 @@ class StockFilter:
                 excluded[code] = "创业板股票"
             elif self._config.exclude_star and exchange == Exchange.STAR:
                 excluded[code] = "科创板股票"
+            elif self._config.exclude_sme and exchange == Exchange.SME:
+                excluded[code] = "中小板股票"
             else:
                 allowed.append(code)
 
@@ -266,7 +272,7 @@ def create_default_filter() -> StockFilter:
     """
     Create a stock filter with default settings.
 
-    Excludes BSE and ChiNext, allows STAR market.
+    Excludes BSE and ChiNext, allows STAR market and SME.
 
     Returns:
         Configured StockFilter instance.
@@ -276,5 +282,26 @@ def create_default_filter() -> StockFilter:
             exclude_bse=True,
             exclude_chinext=True,
             exclude_star=False,
+            exclude_sme=False,
+        )
+    )
+
+
+def create_main_board_only_filter() -> StockFilter:
+    """
+    Create a filter that only allows strict main board stocks.
+
+    Allows: 上证主板 (600/601/603/605) + 深证主板 (000/001)
+    Excludes: 中小板(002), 创业板(300), 科创板(688), 北交所(8xx/4xx)
+
+    Returns:
+        Configured StockFilter instance.
+    """
+    return StockFilter(
+        StockFilterConfig(
+            exclude_bse=True,
+            exclude_chinext=True,
+            exclude_star=True,
+            exclude_sme=True,
         )
     )

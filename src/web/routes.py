@@ -27,6 +27,11 @@
 # GET  /api/order-assistant/state            - Current phase and time info (JSON)
 # GET  /api/order-assistant/messages         - Messages with pagination (JSON)
 # POST /api/order-assistant/feishu-notify    - Push new messages to Feishu (JSON)
+#
+# === MOMENTUM BACKTEST ENDPOINTS ===
+# GET  /momentum              - Momentum backtest page (HTML)
+# POST /api/momentum/backtest - Run backtest for a date (JSON)
+# GET  /api/momentum/monitor-status - Get intraday monitor status (JSON)
 
 from __future__ import annotations
 
@@ -1066,3 +1071,552 @@ def create_order_assistant_router() -> APIRouter:
         }
 
     return router
+
+
+# ==================== Momentum Backtest ====================
+
+
+class MomentumBacktestRequest(BaseModel):
+    """Request body for momentum backtest."""
+
+    trade_date: str  # YYYY-MM-DD format
+    notify: bool = False  # Send Feishu notification
+
+
+def create_momentum_router() -> APIRouter:
+    """Create router for momentum backtest and intraday monitor endpoints."""
+    import asyncio
+    from datetime import date, datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    beijing_tz = ZoneInfo("Asia/Shanghai")
+
+    router = APIRouter(tags=["momentum"])
+
+    def _get_monitor_state(request: Request) -> dict[str, Any]:
+        """Get monitor state from app.state (created at startup)."""
+        return getattr(request.app.state, "momentum_monitor_state", {
+            "running": False,
+            "last_scan_time": None,
+            "last_result": None,
+            "today_results": [],
+            "task": None,
+        })
+
+    @router.get("/momentum", response_class=HTMLResponse)
+    async def momentum_page(request: Request):
+        """Momentum backtest and monitor page."""
+        templates = request.app.state.templates
+        monitor_state = _get_monitor_state(request)
+        return templates.TemplateResponse(
+            "momentum_backtest.html",
+            {
+                "request": request,
+                "monitor_running": monitor_state["running"],
+            },
+        )
+
+    @router.post("/api/momentum/backtest")
+    async def run_backtest(body: MomentumBacktestRequest) -> dict:
+        """Run momentum sector strategy backtest for a specific date."""
+        from src.common.feishu_bot import FeishuBot
+        from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.data.sources.concept_mapper import ConceptMapper
+        from src.strategy.strategies.momentum_sector_scanner import (
+            MomentumSectorScanner,
+            PriceSnapshot,
+        )
+
+        # Parse date
+        try:
+            trade_date = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"日期格式错误: {body.trade_date}，请使用 YYYY-MM-DD",
+            )
+
+        # Initialize components
+        ifind_client = IFinDHttpClient()
+        fundamentals_db = create_fundamentals_db_from_config()
+
+        try:
+            await ifind_client.start()
+            await fundamentals_db.connect()
+
+            concept_mapper = ConceptMapper(ifind_client)
+            scanner = MomentumSectorScanner(
+                ifind_client=ifind_client,
+                fundamentals_db=fundamentals_db,
+                concept_mapper=concept_mapper,
+            )
+
+            # Step 1: Use iwencai to get >5% gainers
+            date_str = trade_date.strftime("%Y%m%d")
+            query = f"{date_str}开盘涨幅大于5%的沪深主板非ST股票"
+            logger.info(f"Momentum backtest iwencai query: {query}")
+
+            try:
+                iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
+            except IFinDHttpError as e:
+                raise HTTPException(status_code=502, detail=f"iFinD查询失败: {e}")
+
+            # Parse iwencai response → fetch prices
+            price_snapshots = await _parse_iwencai_and_fetch_prices(
+                ifind_client, iwencai_result, trade_date
+            )
+
+            if not price_snapshots:
+                return {
+                    "success": True,
+                    "trade_date": body.trade_date,
+                    "initial_gainers": 0,
+                    "hot_boards": {},
+                    "selected_stocks": [],
+                    "message": "未找到符合条件的股票",
+                }
+
+            # Run scan
+            result = await scanner.scan(price_snapshots)
+
+            # Format response
+            response_data = {
+                "success": True,
+                "trade_date": body.trade_date,
+                "initial_gainers": len(result.initial_gainers),
+                "hot_boards": {
+                    name: codes for name, codes in result.hot_boards.items()
+                },
+                "selected_stocks": [
+                    {
+                        "stock_code": s.stock_code,
+                        "stock_name": s.stock_name,
+                        "board_name": s.board_name,
+                        "open_gain_pct": round(s.open_gain_pct, 2),
+                        "pe_ttm": round(s.pe_ttm, 2),
+                        "board_avg_pe": round(s.board_avg_pe, 2),
+                    }
+                    for s in result.selected_stocks
+                ],
+            }
+
+            # Send Feishu if requested
+            if body.notify and result.has_results:
+                bot = FeishuBot()
+                if bot.is_configured():
+                    await bot.send_momentum_scan_result(
+                        selected_stocks=result.selected_stocks,
+                        hot_boards=result.hot_boards,
+                        initial_gainer_count=len(result.initial_gainers),
+                        scan_time=result.scan_time,
+                    )
+                    response_data["feishu_sent"] = True
+
+            return response_data
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Momentum backtest error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
+        finally:
+            await fundamentals_db.close()
+            await ifind_client.stop()
+
+    @router.get("/api/momentum/monitor-status")
+    async def get_monitor_status(request: Request) -> dict:
+        """Get intraday monitor status and latest results."""
+        monitor_state = _get_monitor_state(request)
+        return {
+            "running": monitor_state["running"],
+            "last_scan_time": monitor_state["last_scan_time"],
+            "today_results": monitor_state["today_results"],
+        }
+
+    @router.post("/api/momentum/monitor/start")
+    async def start_monitor(request: Request) -> dict:
+        """Manually start the intraday monitor."""
+        monitor_state = _get_monitor_state(request)
+        if monitor_state["running"]:
+            return {"success": True, "message": "监控已在运行中"}
+
+        task = asyncio.create_task(_run_intraday_monitor(monitor_state))
+        monitor_state["task"] = task
+        return {"success": True, "message": "监控已启动"}
+
+    @router.post("/api/momentum/monitor/stop")
+    async def stop_monitor(request: Request) -> dict:
+        """Manually stop the intraday monitor."""
+        monitor_state = _get_monitor_state(request)
+        task = monitor_state.get("task")
+        if task and not task.done():
+            task.cancel()
+        monitor_state["running"] = False
+        monitor_state["task"] = None
+        return {"success": True, "message": "监控已停止"}
+
+    return router
+
+
+async def _parse_iwencai_and_fetch_prices(
+    ifind_client, iwencai_result: dict, trade_date
+) -> dict:
+    """Parse iwencai response and fetch historical prices via history_quotes."""
+    from src.data.clients.ifind_http_client import IFinDHttpError
+    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+
+    tables = iwencai_result.get("tables", [])
+    if not tables:
+        return {}
+
+    raw_codes: list[str] = []
+    names_map: dict[str, str] = {}
+
+    for table_wrapper in tables:
+        if not isinstance(table_wrapper, dict):
+            continue
+        table = table_wrapper.get("table", table_wrapper)
+        if not isinstance(table, dict):
+            continue
+
+        codes = None
+        names = None
+        for col_name, col_data in table.items():
+            if "代码" in col_name:
+                codes = col_data
+            elif "简称" in col_name or "名称" in col_name:
+                names = col_data
+
+        if not codes:
+            continue
+
+        for i in range(len(codes)):
+            raw = str(codes[i]).strip()
+            bare = raw
+            for suffix in (".SZ", ".SH", ".BJ", ".sz", ".sh", ".bj"):
+                if bare.endswith(suffix):
+                    bare = bare[: -len(suffix)]
+                    break
+            if len(bare) == 6 and bare.isdigit():
+                raw_codes.append(raw)
+                name = str(names[i]).strip() if names and i < len(names) else ""
+                names_map[bare] = name
+
+    if not raw_codes:
+        return {}
+
+    # Batch fetch prices
+    snapshots: dict[str, PriceSnapshot] = {}
+    batch_size = 50
+    date_fmt = trade_date.strftime("%Y-%m-%d")
+
+    for i in range(0, len(raw_codes), batch_size):
+        batch = raw_codes[i : i + batch_size]
+        formatted = []
+        for raw in batch:
+            if "." in raw:
+                formatted.append(raw)
+            else:
+                suffix = ".SH" if raw.startswith("6") else ".SZ"
+                formatted.append(f"{raw}{suffix}")
+
+        codes_str = ",".join(formatted)
+
+        try:
+            data = await ifind_client.history_quotes(
+                codes=codes_str,
+                indicators="open,preClose",
+                start_date=date_fmt,
+                end_date=date_fmt,
+            )
+
+            for table_entry in data.get("tables", []):
+                thscode = table_entry.get("thscode", "")
+                bare = thscode.split(".")[0] if thscode else ""
+                if not bare:
+                    continue
+
+                tbl = table_entry.get("table", {})
+                open_vals = tbl.get("open", [])
+                prev_vals = tbl.get("preClose", [])
+
+                if open_vals and prev_vals:
+                    open_price = float(open_vals[0])
+                    prev_close = float(prev_vals[0])
+                    if prev_close > 0:
+                        snapshots[bare] = PriceSnapshot(
+                            stock_code=bare,
+                            stock_name=names_map.get(bare, ""),
+                            open_price=open_price,
+                            prev_close=prev_close,
+                            latest_price=open_price,
+                        )
+
+        except IFinDHttpError as e:
+            logger.error(f"history_quotes batch failed: {e}")
+
+    return snapshots
+
+
+async def _run_intraday_monitor(state: dict) -> None:
+    """
+    Background task: intraday momentum monitor.
+
+    Runs every trading day 9:30-9:40, polls for >5% gainers,
+    then runs the full strategy scan and sends Feishu notification.
+    """
+    import asyncio
+    from datetime import datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    from src.common.feishu_bot import FeishuBot
+    from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+    from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+    from src.data.sources.concept_mapper import ConceptMapper
+    from src.strategy.strategies.momentum_sector_scanner import (
+        MomentumSectorScanner,
+        PriceSnapshot,
+    )
+
+    beijing_tz = ZoneInfo("Asia/Shanghai")
+    POLL_INTERVAL = 30  # seconds
+    MONITOR_START = time(9, 30)
+    MONITOR_END = time(9, 40)
+
+    state["running"] = True
+    logger.info("Intraday momentum monitor started")
+
+    try:
+        while state["running"]:
+            now = datetime.now(beijing_tz)
+            current_time = now.time()
+
+            # Only run on weekdays
+            if now.weekday() >= 5:
+                # Weekend — sleep until Monday
+                await asyncio.sleep(3600)
+                continue
+
+            # Before monitoring window — wait
+            if current_time < MONITOR_START:
+                delta = datetime.combine(now.date(), MONITOR_START) - datetime.combine(
+                    now.date(), current_time
+                )
+                wait_secs = max(delta.total_seconds(), 10)
+                logger.debug(f"Monitor waiting {wait_secs:.0f}s until {MONITOR_START}")
+                await asyncio.sleep(min(wait_secs, 60))
+                continue
+
+            # After monitoring window — wait for tomorrow
+            if current_time > time(9, 50):
+                # Sleep until next day 9:25
+                tomorrow = now + timedelta(days=1)
+                target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
+                wait_secs = (target - now).total_seconds()
+                logger.debug(f"Monitor done for today, sleeping {wait_secs:.0f}s")
+                await asyncio.sleep(min(wait_secs, 3600))
+                continue
+
+            # We're in the monitoring window (9:30-9:40)
+            logger.info("Monitor entering active polling window")
+            accumulated: dict[str, PriceSnapshot] = {}
+            poll_count = 0
+
+            ifind_client = IFinDHttpClient()
+            fundamentals_db = create_fundamentals_db_from_config()
+
+            try:
+                await ifind_client.start()
+                await fundamentals_db.connect()
+
+                while state["running"]:
+                    current_time = datetime.now(beijing_tz).time()
+                    if current_time >= MONITOR_END:
+                        break
+
+                    poll_count += 1
+                    logger.info(f"Monitor poll #{poll_count}")
+
+                    try:
+                        result = await ifind_client.smart_stock_picking(
+                            "涨幅大于5%的沪深主板非ST股票", "stock"
+                        )
+                        snapshots = await _parse_iwencai_realtime(ifind_client, result)
+                        accumulated.update(snapshots)
+                        logger.info(
+                            f"Poll #{poll_count}: {len(snapshots)} >5% stocks "
+                            f"(accumulated: {len(accumulated)})"
+                        )
+                    except Exception as e:
+                        logger.error(f"Monitor poll error: {e}")
+
+                    await asyncio.sleep(POLL_INTERVAL)
+
+                # Run full strategy scan
+                if accumulated:
+                    logger.info(
+                        f"Running strategy scan on {len(accumulated)} accumulated stocks"
+                    )
+                    concept_mapper = ConceptMapper(ifind_client)
+                    scanner = MomentumSectorScanner(
+                        ifind_client=ifind_client,
+                        fundamentals_db=fundamentals_db,
+                        concept_mapper=concept_mapper,
+                    )
+
+                    scan_result = await scanner.scan(accumulated)
+                    scan_time = datetime.now(beijing_tz)
+
+                    # Store result
+                    result_entry = {
+                        "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
+                        "initial_gainers": len(scan_result.initial_gainers),
+                        "hot_boards": len(scan_result.hot_boards),
+                        "selected_count": len(scan_result.selected_stocks),
+                        "selected_stocks": [
+                            {
+                                "stock_code": s.stock_code,
+                                "stock_name": s.stock_name,
+                                "board_name": s.board_name,
+                                "open_gain_pct": round(s.open_gain_pct, 2),
+                                "pe_ttm": round(s.pe_ttm, 2),
+                                "board_avg_pe": round(s.board_avg_pe, 2),
+                            }
+                            for s in scan_result.selected_stocks
+                        ],
+                    }
+                    state["last_result"] = result_entry
+                    state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
+                    state["today_results"].append(result_entry)
+
+                    # Send Feishu notification
+                    bot = FeishuBot()
+                    if bot.is_configured():
+                        await bot.send_momentum_scan_result(
+                            selected_stocks=scan_result.selected_stocks,
+                            hot_boards=scan_result.hot_boards,
+                            initial_gainer_count=len(scan_result.initial_gainers),
+                            scan_time=scan_time,
+                        )
+                        logger.info("Monitor: Feishu notification sent")
+
+                    logger.info(
+                        f"Monitor scan complete: {len(scan_result.selected_stocks)} stocks selected"
+                    )
+                else:
+                    logger.info("Monitor: no >5% gainers found during window")
+
+            finally:
+                await fundamentals_db.close()
+                await ifind_client.stop()
+
+            # After scan, wait until next day
+            tomorrow = now + timedelta(days=1)
+            target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
+            wait_secs = (target - datetime.now(beijing_tz)).total_seconds()
+            state["today_results"] = []  # Reset for next day
+            await asyncio.sleep(min(max(wait_secs, 10), 3600 * 18))
+
+    except asyncio.CancelledError:
+        logger.info("Intraday momentum monitor cancelled")
+    except Exception as e:
+        logger.error(f"Intraday momentum monitor error: {e}", exc_info=True)
+    finally:
+        state["running"] = False
+        state["task"] = None
+        logger.info("Intraday momentum monitor stopped")
+
+
+async def _parse_iwencai_realtime(ifind_client, iwencai_result: dict) -> dict:
+    """Parse iwencai response and fetch real-time prices."""
+    from src.data.clients.ifind_http_client import IFinDHttpError
+    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+
+    tables = iwencai_result.get("tables", [])
+    if not tables:
+        return {}
+
+    raw_codes: list[str] = []
+    names_map: dict[str, str] = {}
+
+    for table_wrapper in tables:
+        if not isinstance(table_wrapper, dict):
+            continue
+        table = table_wrapper.get("table", table_wrapper)
+        if not isinstance(table, dict):
+            continue
+
+        codes = None
+        names = None
+        for col_name, col_data in table.items():
+            if "代码" in col_name:
+                codes = col_data
+            elif "简称" in col_name or "名称" in col_name:
+                names = col_data
+
+        if codes:
+            for i in range(len(codes)):
+                raw = str(codes[i]).strip()
+                bare = raw
+                for suffix in (".SZ", ".SH", ".BJ"):
+                    if bare.upper().endswith(suffix):
+                        bare = bare[: -len(suffix)]
+                        break
+                if len(bare) == 6 and bare.isdigit():
+                    raw_codes.append(raw)
+                    name = str(names[i]).strip() if names and i < len(names) else ""
+                    names_map[bare] = name
+
+    if not raw_codes:
+        return {}
+
+    snapshots: dict[str, PriceSnapshot] = {}
+    batch_size = 50
+
+    for i in range(0, len(raw_codes), batch_size):
+        batch = raw_codes[i : i + batch_size]
+        formatted = []
+        for raw in batch:
+            if "." in raw:
+                formatted.append(raw)
+            else:
+                suffix = ".SH" if raw.startswith("6") else ".SZ"
+                formatted.append(f"{raw}{suffix}")
+
+        codes_str = ",".join(formatted)
+
+        try:
+            data = await ifind_client.real_time_quotation(
+                codes=codes_str,
+                indicators="open,preClose,latest",
+            )
+
+            for table_entry in data.get("tables", []):
+                thscode = table_entry.get("thscode", "")
+                bare = thscode.split(".")[0] if thscode else ""
+                if not bare:
+                    continue
+
+                tbl = table_entry.get("table", {})
+                open_vals = tbl.get("open", [])
+                prev_vals = tbl.get("preClose", [])
+                latest_vals = tbl.get("latest", [])
+
+                if open_vals and prev_vals and latest_vals:
+                    open_price = float(open_vals[0]) if open_vals[0] else 0.0
+                    prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
+                    latest = float(latest_vals[0]) if latest_vals[0] else 0.0
+                    if prev_close > 0:
+                        snapshots[bare] = PriceSnapshot(
+                            stock_code=bare,
+                            stock_name=names_map.get(bare, ""),
+                            open_price=open_price,
+                            prev_close=prev_close,
+                            latest_price=latest,
+                        )
+
+        except IFinDHttpError as e:
+            logger.error(f"real_time_quotation batch failed: {e}")
+
+    return snapshots

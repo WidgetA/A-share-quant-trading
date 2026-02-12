@@ -1501,3 +1501,260 @@ footer {
     border-radius: 4px;
     margin-left: 0.3rem;
 }
+
+/* ==================== Momentum Backtest Page ==================== */
+
+.momentum-page h2 {
+    margin-bottom: 1.5rem;
+}
+
+.momentum-section {
+    margin-bottom: 1.5rem;
+}
+
+.momentum-section.hidden {
+    display: none;
+}
+
+/* Monitor card */
+.monitor-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 1.25rem 1.5rem;
+}
+
+.monitor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.monitor-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.monitor-desc {
+    font-size: 0.875rem;
+    color: #666;
+    margin-bottom: 0.5rem;
+}
+
+.monitor-last {
+    font-size: 0.85rem;
+    color: #444;
+    background: #f0f4f8;
+    padding: 0.4rem 0.75rem;
+    border-radius: 4px;
+    margin-top: 0.5rem;
+}
+
+/* Loading card */
+.loading-card {
+    text-align: center;
+    padding: 2rem 1.5rem;
+}
+
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid #e0e0e0;
+    border-top-color: #4CAF50;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 1rem;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.loading-hint {
+    font-size: 0.8rem;
+    color: #888;
+    margin-top: 0.5rem;
+}
+
+/* Results section */
+.result-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.result-header h3 {
+    margin: 0;
+}
+
+.result-summary {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.result-badge {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.75rem;
+    background: #f0f0f0;
+    border-radius: 4px;
+    color: #555;
+}
+
+.result-badge.highlight {
+    background: #e8f5e9;
+    color: #2e7d32;
+    font-weight: 600;
+}
+
+.result-empty {
+    text-align: center;
+    padding: 2rem;
+    color: #888;
+}
+
+.result-empty.hidden {
+    display: none;
+}
+
+/* Board groups */
+.board-group {
+    margin-bottom: 1.25rem;
+    border: 1px solid #e8e8e8;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.board-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 1rem;
+    background: #fafafa;
+    border-bottom: 1px solid #e8e8e8;
+}
+
+.board-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #d32f2f;
+}
+
+.board-trigger {
+    font-size: 0.8rem;
+    color: #888;
+    font-family: monospace;
+}
+
+/* Stock table inside board groups */
+.stock-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+.stock-table thead {
+    background: #f5f5f5;
+}
+
+.stock-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    font-weight: 500;
+    color: #666;
+    font-size: 0.8rem;
+}
+
+.stock-table td {
+    padding: 0.5rem 0.75rem;
+    border-top: 1px solid #f0f0f0;
+}
+
+.stock-table .stock-code {
+    font-family: monospace;
+    font-weight: 600;
+}
+
+.gain-high {
+    color: #c62828;
+    font-weight: 600;
+}
+
+.gain-mid {
+    color: #e65100;
+    font-weight: 500;
+}
+
+.gain-low {
+    color: #2e7d32;
+}
+
+/* Checkbox group for backtest form */
+.checkbox-group {
+    margin-top: 0.5rem;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-weight: normal;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+}
+
+/* History section */
+.history-item {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 0.875rem;
+    flex-wrap: wrap;
+}
+
+.history-item:last-child {
+    border-bottom: none;
+}
+
+.history-time {
+    font-family: monospace;
+    color: #666;
+    min-width: 120px;
+}
+
+.history-selected {
+    color: #2e7d32;
+}
+
+.history-stocks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.25rem 0 0.75rem;
+}
+
+.history-stock {
+    font-size: 0.8rem;
+    padding: 0.2rem 0.5rem;
+    background: #e8f5e9;
+    color: #2e7d32;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.empty-hint {
+    text-align: center;
+    padding: 1.5rem;
+    color: #999;
+    font-size: 0.875rem;
+}

@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block title %}动量板块策略{% endblock %}
+
+{% block content %}
+<div class="momentum-page">
+    <h2>动量板块策略</h2>
+
+    <!-- Monitor Status -->
+    <section class="momentum-section">
+        <div class="monitor-card">
+            <div class="monitor-header">
+                <h3>盘中监控</h3>
+                <span id="monitor-status" class="status-indicator {{ 'running' if monitor_running else 'stopped' }}">
+                    {{ '运行中' if monitor_running else '已停止' }}
+                </span>
+            </div>
+            <p class="monitor-desc">每个交易日 9:30-9:40 自动追踪涨幅 >5% 主板非ST股票，选股后飞书通知</p>
+            <div id="monitor-last-result"></div>
+        </div>
+    </section>
+
+    <!-- Backtest Form -->
+    <section class="momentum-section">
+        <div class="sim-card">
+            <h3>历史回测</h3>
+            <form id="backtest-form" class="sim-form">
+                <div class="form-group">
+                    <label for="trade_date">回测日期</label>
+                    <input type="date" id="trade_date" name="trade_date" required>
+                </div>
+                <div class="form-group checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="notify" name="notify">
+                        <span>同时发送飞书通知</span>
+                    </label>
+                </div>
+                <button type="submit" class="btn btn-primary" id="backtest-btn">开始回测</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- Loading -->
+    <section id="loading-section" class="momentum-section hidden">
+        <div class="sim-card loading-card">
+            <div class="loading-spinner"></div>
+            <p>回测运行中，正在查询 iFinD 数据...</p>
+            <p class="loading-hint">Step 1: iwencai 查询初筛 → Step 2: 反查概念板块 → Step 3: 热门板块 → Step 4: 成分股 → Step 5: PE过滤</p>
+        </div>
+    </section>
+
+    <!-- Results -->
+    <section id="results-section" class="momentum-section hidden">
+        <div class="sim-card">
+            <div class="result-header">
+                <h3>回测结果 <span id="result-date"></span></h3>
+                <div class="result-summary">
+                    <span class="result-badge">初筛: <strong id="result-gainers">0</strong> 只</span>
+                    <span class="result-badge">热门板块: <strong id="result-boards">0</strong> 个</span>
+                    <span class="result-badge highlight">选股: <strong id="result-selected">0</strong> 只</span>
+                </div>
+            </div>
+
+            <div id="result-empty" class="result-empty hidden">
+                <p>未筛选到符合条件的股票</p>
+            </div>
+
+            <div id="result-boards-container"></div>
+        </div>
+    </section>
+
+    <!-- History (today's monitor results) -->
+    <section id="history-section" class="momentum-section">
+        <div class="sim-card">
+            <h3>今日监控记录</h3>
+            <div id="history-container">
+                <p class="empty-hint">暂无记录</p>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Backtest form
+document.getElementById('backtest-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const tradeDate = document.getElementById('trade_date').value;
+    const notify = document.getElementById('notify').checked;
+
+    if (!tradeDate) return;
+
+    // Show loading, hide results
+    document.getElementById('loading-section').classList.remove('hidden');
+    document.getElementById('results-section').classList.add('hidden');
+    document.getElementById('backtest-btn').disabled = true;
+    document.getElementById('backtest-btn').textContent = '运行中...';
+
+    try {
+        const resp = await fetch('/api/momentum/backtest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trade_date: tradeDate, notify: notify }),
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            alert(data.detail || '回测失败');
+            return;
+        }
+
+        renderResults(data);
+    } catch (err) {
+        alert('请求失败: ' + err.message);
+    } finally {
+        document.getElementById('loading-section').classList.add('hidden');
+        document.getElementById('backtest-btn').disabled = false;
+        document.getElementById('backtest-btn').textContent = '开始回测';
+    }
+});
+
+function renderResults(data) {
+    document.getElementById('results-section').classList.remove('hidden');
+    document.getElementById('result-date').textContent = data.trade_date;
+    document.getElementById('result-gainers').textContent = data.initial_gainers;
+    document.getElementById('result-boards').textContent = Object.keys(data.hot_boards || {}).length;
+    document.getElementById('result-selected').textContent = (data.selected_stocks || []).length;
+
+    const container = document.getElementById('result-boards-container');
+    const emptyEl = document.getElementById('result-empty');
+
+    if (!data.selected_stocks || data.selected_stocks.length === 0) {
+        container.innerHTML = '';
+        emptyEl.classList.remove('hidden');
+        return;
+    }
+
+    emptyEl.classList.add('hidden');
+
+    // Group by board
+    const boardMap = {};
+    data.selected_stocks.forEach(s => {
+        if (!boardMap[s.board_name]) boardMap[s.board_name] = [];
+        boardMap[s.board_name].push(s);
+    });
+
+    let html = '';
+    for (const [boardName, stocks] of Object.entries(boardMap)) {
+        const triggerCodes = (data.hot_boards[boardName] || []).join(', ');
+        html += `
+            <div class="board-group">
+                <div class="board-header">
+                    <span class="board-name">${boardName}</span>
+                    <span class="board-trigger">触发: ${triggerCodes}</span>
+                </div>
+                <table class="stock-table">
+                    <thead>
+                        <tr>
+                            <th>代码</th>
+                            <th>名称</th>
+                            <th>开盘涨幅</th>
+                            <th>PE(TTM)</th>
+                            <th>板块均值PE</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        stocks.forEach(s => {
+            const gainClass = s.open_gain_pct > 3 ? 'gain-high' : (s.open_gain_pct > 1 ? 'gain-mid' : 'gain-low');
+            html += `
+                        <tr>
+                            <td class="stock-code">${s.stock_code}</td>
+                            <td>${s.stock_name}</td>
+                            <td class="${gainClass}">+${s.open_gain_pct.toFixed(2)}%</td>
+                            <td>${s.pe_ttm.toFixed(1)}</td>
+                            <td>${s.board_avg_pe.toFixed(1)}</td>
+                        </tr>
+            `;
+        });
+        html += '</tbody></table></div>';
+    }
+
+    container.innerHTML = html;
+}
+
+// Poll monitor status
+async function refreshMonitorStatus() {
+    try {
+        const resp = await fetch('/api/momentum/monitor-status');
+        const data = await resp.json();
+
+        const statusEl = document.getElementById('monitor-status');
+        statusEl.textContent = data.running ? '运行中' : '已停止';
+        statusEl.className = 'status-indicator ' + (data.running ? 'running' : 'stopped');
+
+        // Show last result
+        const lastEl = document.getElementById('monitor-last-result');
+        if (data.last_scan_time) {
+            const last = data.today_results[data.today_results.length - 1];
+            if (last) {
+                lastEl.innerHTML = `<p class="monitor-last">上次扫描: ${last.scan_time} | 选出 ${last.selected_count} 只</p>`;
+            }
+        } else {
+            lastEl.innerHTML = '';
+        }
+
+        // Render history
+        const historyEl = document.getElementById('history-container');
+        if (data.today_results && data.today_results.length > 0) {
+            let hhtml = '';
+            data.today_results.forEach(r => {
+                hhtml += `
+                    <div class="history-item">
+                        <span class="history-time">${r.scan_time}</span>
+                        <span>初筛 ${r.initial_gainers} 只</span>
+                        <span>热门板块 ${r.hot_boards} 个</span>
+                        <span class="history-selected">选出 <strong>${r.selected_count}</strong> 只</span>
+                    </div>
+                `;
+                if (r.selected_stocks && r.selected_stocks.length > 0) {
+                    hhtml += '<div class="history-stocks">';
+                    r.selected_stocks.forEach(s => {
+                        hhtml += `<span class="history-stock">${s.stock_code} ${s.stock_name} +${s.open_gain_pct}%</span>`;
+                    });
+                    hhtml += '</div>';
+                }
+            });
+            historyEl.innerHTML = hhtml;
+        }
+    } catch (e) {
+        // Ignore poll errors
+    }
+}
+
+// Initial load + periodic refresh
+refreshMonitorStatus();
+setInterval(refreshMonitorStatus, 30000);
+</script>
+{% endblock %}
