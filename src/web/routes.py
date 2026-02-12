@@ -1700,9 +1700,7 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
     return snapshots
 
 
-async def _get_trading_calendar(
-    ifind_client, start_date, end_date
-) -> tuple[list, str]:
+async def _get_trading_calendar(ifind_client, start_date, end_date) -> tuple[list, str]:
     """Get list of trading days by checking a liquid stock's price history.
 
     Returns:
