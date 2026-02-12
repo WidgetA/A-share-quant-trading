@@ -244,8 +244,8 @@ async def run_backtest(trade_date: date, notify: bool = False) -> ScanResult:
             logger.warning(f"No price data for {trade_date}")
             return ScanResult()
 
-        # Run the scan
-        result = await scanner.scan(price_snapshots)
+        # Run the scan (pass trade_date so constituent prices use history_quotes)
+        result = await scanner.scan(price_snapshots, trade_date=trade_date)
 
         # Print results
         print_scan_result(result, trade_date)

@@ -21,7 +21,7 @@
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
@@ -123,7 +123,11 @@ class MomentumSectorScanner:
         self._concept_mapper = concept_mapper or ConceptMapper(ifind_client)
         self._stock_filter = stock_filter or create_main_board_only_filter()
 
-    async def scan(self, price_snapshots: dict[str, PriceSnapshot]) -> ScanResult:
+    async def scan(
+        self,
+        price_snapshots: dict[str, PriceSnapshot],
+        trade_date: date | None = None,
+    ) -> ScanResult:
         """
         Run the full 5-step scan pipeline.
 
@@ -131,10 +135,13 @@ class MomentumSectorScanner:
             price_snapshots: Dict of stock_code → PriceSnapshot.
                 For backtest: built from history_quotes.
                 For live: built from real_time_quotation.
+            trade_date: If provided, use history_quotes for constituent prices
+                (backtest mode). If None, use real_time_quotation (live mode).
 
         Returns:
             ScanResult with selected stocks and metadata.
         """
+        self._trade_date = trade_date
         result = ScanResult(scan_time=datetime.now())
 
         # Step 1: Filter initial gainers (>5%, main board, non-ST)
@@ -340,14 +347,20 @@ class MomentumSectorScanner:
 
     async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:
         """
-        Fetch today's open and prev_close for stocks not yet in price_snapshots.
+        Fetch open and prev_close for stocks not yet in price_snapshots.
 
-        Uses iFinD real_time_quotation in batches.
+        Uses history_quotes (backtest) or real_time_quotation (live)
+        depending on whether trade_date was set in scan().
         """
-        result: dict[str, PriceSnapshot] = {}
+        if self._trade_date is not None:
+            return await self._fetch_prices_historical(stock_codes, self._trade_date)
+        return await self._fetch_prices_realtime(stock_codes)
 
-        # Batch by 50 codes per request (iFinD typical limit)
+    async def _fetch_prices_realtime(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:
+        """Fetch prices via real_time_quotation (live mode)."""
+        result: dict[str, PriceSnapshot] = {}
         batch_size = 50
+
         for i in range(0, len(stock_codes), batch_size):
             batch = stock_codes[i : i + batch_size]
             codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
@@ -358,15 +371,12 @@ class MomentumSectorScanner:
                     indicators="open,preClose,latest,name",
                 )
 
-                tables = data.get("tables", [])
-                for table_wrapper in tables:
+                for table_wrapper in data.get("tables", []):
                     if not isinstance(table_wrapper, dict):
                         continue
-
                     table = table_wrapper.get("table", table_wrapper)
                     thscode = table_wrapper.get("thscode", "")
                     bare_code = thscode.split(".")[0] if thscode else ""
-
                     if not isinstance(table, dict) or not bare_code:
                         continue
 
@@ -391,7 +401,53 @@ class MomentumSectorScanner:
                             )
 
             except Exception as e:
-                logger.error(f"Error fetching prices for batch: {e}")
-                # Per trading safety: skip batch, don't guess
+                logger.error(f"Error fetching realtime prices for batch: {e}")
+
+        return result
+
+    async def _fetch_prices_historical(
+        self, stock_codes: list[str], trade_date: date
+    ) -> dict[str, PriceSnapshot]:
+        """Fetch prices via history_quotes (backtest mode)."""
+        result: dict[str, PriceSnapshot] = {}
+        batch_size = 50
+        date_str = trade_date.strftime("%Y-%m-%d")
+
+        for i in range(0, len(stock_codes), batch_size):
+            batch = stock_codes[i : i + batch_size]
+            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
+
+            try:
+                data = await self._ifind.history_quotes(
+                    codes=codes_str,
+                    indicators="open,preClose",
+                    start_date=date_str,
+                    end_date=date_str,
+                )
+
+                for table_entry in data.get("tables", []):
+                    thscode = table_entry.get("thscode", "")
+                    bare_code = thscode.split(".")[0] if thscode else ""
+                    if not bare_code:
+                        continue
+
+                    tbl = table_entry.get("table", {})
+                    open_vals = tbl.get("open", [])
+                    prev_vals = tbl.get("preClose", [])
+
+                    if open_vals and prev_vals:
+                        open_price = float(open_vals[0])
+                        prev_close = float(prev_vals[0])
+                        if prev_close > 0:
+                            result[bare_code] = PriceSnapshot(
+                                stock_code=bare_code,
+                                stock_name="",
+                                open_price=open_price,
+                                prev_close=prev_close,
+                                latest_price=open_price,
+                            )
+
+            except Exception as e:
+                logger.error(f"Error fetching historical prices for batch: {e}")
 
         return result

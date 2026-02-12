@@ -1177,8 +1177,8 @@ def create_momentum_router() -> APIRouter:
                     "message": "未找到符合条件的股票",
                 }
 
-            # Run scan
-            result = await scanner.scan(price_snapshots)
+            # Run scan (pass trade_date so constituent prices use history_quotes)
+            result = await scanner.scan(price_snapshots, trade_date=trade_date)
 
             # Format response
             response_data = {
