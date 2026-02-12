@@ -1329,7 +1329,9 @@ def create_momentum_router() -> APIRouter:
                 )
 
                 # Get trading calendar using a liquid stock
-                trading_days, cal_error = await _get_trading_calendar(ifind_client, start_date, end_date)
+                trading_days, cal_error = await _get_trading_calendar(
+                    ifind_client, start_date, end_date
+                )
 
                 if not trading_days:
                     msg = cal_error or "所选日期范围内无交易日"
