@@ -1329,10 +1329,11 @@ def create_momentum_router() -> APIRouter:
                 )
 
                 # Get trading calendar using a liquid stock
-                trading_days = await _get_trading_calendar(ifind_client, start_date, end_date)
+                trading_days, cal_error = await _get_trading_calendar(ifind_client, start_date, end_date)
 
                 if not trading_days:
-                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
+                    msg = cal_error or "所选日期范围内无交易日"
+                    yield sse({"type": "error", "message": msg})
                     return
 
                 if len(trading_days) > 90:
@@ -1697,8 +1698,15 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
     return snapshots
 
 
-async def _get_trading_calendar(ifind_client, start_date, end_date) -> list:
-    """Get list of trading days by checking a liquid stock's price history."""
+async def _get_trading_calendar(
+    ifind_client, start_date, end_date
+) -> tuple[list, str]:
+    """Get list of trading days by checking a liquid stock's price history.
+
+    Returns:
+        (trading_days, error_message) - trading_days is empty list on failure,
+        error_message explains why.
+    """
     from datetime import datetime
 
     try:
@@ -1711,10 +1719,13 @@ async def _get_trading_calendar(ifind_client, start_date, end_date) -> list:
         for table_entry in data.get("tables", []):
             tbl = table_entry.get("table", {})
             times = tbl.get("time", [])
-            return [datetime.strptime(t, "%Y-%m-%d").date() for t in times]
+            if not times:
+                return [], "iFinD 返回数据为空（000001.SZ 无报价数据）"
+            return [datetime.strptime(t, "%Y-%m-%d").date() for t in times], ""
+        return [], f"iFinD 返回结构异常: tables 为空 (errorcode={data.get('errorcode')})"
     except Exception as e:
         logger.error(f"Failed to get trading calendar: {e}")
-    return []
+        return [], f"获取交易日历失败: {e}"
 
 
 async def _fetch_stock_open_prices(
@@ -2045,3 +2056,106 @@ async def _parse_iwencai_realtime(ifind_client, iwencai_result: dict) -> dict:
             logger.error(f"real_time_quotation batch failed: {e}")
 
     return snapshots
+
+
+# === SETTINGS ENDPOINTS ===
+
+
+def create_settings_router() -> APIRouter:
+    """Create router for settings page (iFinD token management)."""
+    router = APIRouter(tags=["settings"])
+
+    @router.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request):
+        """Settings page."""
+        templates = request.app.state.templates
+        return templates.TemplateResponse("settings.html", {"request": request})
+
+    @router.get("/api/settings/ifind-token")
+    async def get_ifind_token_status():
+        """Get current iFinD token status (masked)."""
+        from src.common.config import get_ifind_refresh_token, get_ifind_token_source
+
+        source = get_ifind_token_source()
+        source_labels = {
+            "web_ui": "Web UI (当前会话)",
+            "persisted_file": "Web UI (已持久化)",
+            "env_var": "环境变量",
+            "secrets_yaml": "secrets.yaml",
+            "not_configured": "未配置",
+        }
+
+        try:
+            token = get_ifind_refresh_token()
+            # Mask token: show first 8 and last 8 chars
+            if len(token) > 20:
+                masked = token[:8] + "..." + token[-8:]
+            else:
+                masked = "***"
+            return {
+                "configured": True,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_token": masked,
+                "token_length": len(token),
+            }
+        except ValueError:
+            return {
+                "configured": False,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_token": "",
+                "token_length": 0,
+            }
+
+    class TokenUpdateRequest(BaseModel):
+        token: str
+
+    @router.post("/api/settings/ifind-token")
+    async def update_ifind_token(body: TokenUpdateRequest):
+        """Save a new iFinD refresh_token."""
+        from src.common.config import set_ifind_refresh_token
+
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        set_ifind_refresh_token(token)
+        return {"success": True, "message": "Token 已保存，新的 API 调用将使用此 token"}
+
+    @router.post("/api/settings/ifind-token/test")
+    async def test_ifind_token(body: TokenUpdateRequest):
+        """Test an iFinD refresh_token by trying to obtain an access_token."""
+        import httpx
+
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        url = "https://quantapi.51ifind.com/api/v1/get_access_token"
+        headers = {
+            "Content-Type": "application/json",
+            "refresh_token": token,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+
+                error_code = data.get("errorcode", -1)
+                if error_code == 0:
+                    return {"success": True, "message": "Token 验证成功，可以正常获取 access_token"}
+                else:
+                    err_msg = data.get("errmsg", "未知错误")
+                    return {
+                        "success": False,
+                        "message": f"Token 验证失败: {err_msg} (错误码: {error_code})",
+                    }
+        except httpx.TimeoutException:
+            return {"success": False, "message": "请求超时，请检查网络连接"}
+        except httpx.HTTPError as e:
+            return {"success": False, "message": f"HTTP 请求失败: {e}"}
+
+    return router

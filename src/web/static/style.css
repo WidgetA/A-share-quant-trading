@@ -1990,3 +1990,112 @@ footer {
     color: #2e7d32;
     font-weight: 600;
 }
+
+/* ==================== Settings Page ==================== */
+
+.settings-page h2 {
+    margin-bottom: 1.5rem;
+}
+
+.settings-section {
+    margin-bottom: 1.5rem;
+}
+
+.settings-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 1.5rem;
+}
+
+.settings-card h3 {
+    margin-bottom: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.settings-desc {
+    font-size: 0.875rem;
+    color: #666;
+    margin-bottom: 1rem;
+}
+
+.token-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    font-size: 0.875rem;
+}
+
+.token-status-label {
+    color: #666;
+    white-space: nowrap;
+}
+
+.token-status-value {
+    font-family: monospace;
+    word-break: break-all;
+}
+
+.token-status-value.configured {
+    color: #2e7d32;
+}
+
+.token-status-value.not-configured {
+    color: #c62828;
+}
+
+.settings-card .form-group {
+    margin-bottom: 1rem;
+}
+
+.settings-card .form-group label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
+.token-input {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-family: monospace;
+    resize: vertical;
+}
+
+.token-input:focus {
+    outline: none;
+    border-color: #4CAF50;
+    box-shadow: 0 0 0 2px rgba(76,175,80,0.2);
+}
+
+.token-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.token-message {
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+
+.token-message.hidden {
+    display: none;
+}
+
+.token-message.success {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.token-message.error {
+    background: #ffebee;
+    color: #c62828;
+}

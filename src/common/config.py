@@ -152,6 +152,11 @@ class Config:
 
 _secrets_cache: Config | None = None
 
+# Runtime override for iFinD refresh_token (set via web UI)
+_ifind_token_override: str | None = None
+# Persistence file for iFinD refresh_token (survives container restarts)
+IFIND_TOKEN_FILE = PROJECT_ROOT / "data" / "ifind_token.txt"
+
 
 def load_secrets() -> Config:
     """
@@ -284,8 +289,10 @@ def get_ifind_refresh_token() -> str:
     Tools -> refresh_token Query/Update
 
     Credentials are read in the following order:
-    1. Environment variable: IFIND_REFRESH_TOKEN
-    2. secrets.yaml file: ifind.refresh_token
+    1. Runtime override (set via web UI, in-memory)
+    2. Persisted file (data/ifind_token.txt, survives restarts)
+    3. Environment variable: IFIND_REFRESH_TOKEN
+    4. secrets.yaml file: ifind.refresh_token
 
     Returns:
         refresh_token string
@@ -301,14 +308,26 @@ def get_ifind_refresh_token() -> str:
     """
     import os
 
-    # Priority 1: Environment variable (for Docker deployment)
+    # Priority 1: Runtime override (set via web UI)
+    if _ifind_token_override:
+        logger.debug("Using iFinD refresh_token from runtime override")
+        return _ifind_token_override
+
+    # Priority 2: Persisted file (survives container restarts)
+    if IFIND_TOKEN_FILE.exists():
+        token = IFIND_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            logger.debug("Using iFinD refresh_token from persisted file")
+            return token
+
+    # Priority 3: Environment variable (for Docker deployment)
     refresh_token = os.environ.get("IFIND_REFRESH_TOKEN", "")
 
     if refresh_token:
         logger.debug("Using iFinD refresh_token from environment variable")
         return refresh_token
 
-    # Priority 2: secrets.yaml (for local development)
+    # Priority 4: secrets.yaml (for local development)
     try:
         secrets = load_secrets()
         refresh_token = secrets.get_str("ifind.refresh_token")
@@ -326,6 +345,49 @@ def get_ifind_refresh_token() -> str:
         "You can obtain refresh_token from iFinD Windows client: "
         "Tools -> refresh_token Query/Update"
     )
+
+
+def set_ifind_refresh_token(token: str) -> None:
+    """
+    Set iFinD refresh_token at runtime and persist to disk.
+
+    Called from the web UI settings page. The token takes effect
+    immediately for all new IFinDHttpClient instances.
+
+    Args:
+        token: The new refresh_token string
+    """
+    global _ifind_token_override
+    _ifind_token_override = token
+
+    # Persist to file so it survives container restarts
+    IFIND_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    IFIND_TOKEN_FILE.write_text(token, encoding="utf-8")
+    logger.info("iFinD refresh_token updated via web UI and persisted to disk")
+
+
+def get_ifind_token_source() -> str:
+    """
+    Return which source the current iFinD refresh_token comes from.
+
+    Returns:
+        One of: "web_ui", "persisted_file", "env_var", "secrets_yaml", "not_configured"
+    """
+    import os
+
+    if _ifind_token_override:
+        return "web_ui"
+    if IFIND_TOKEN_FILE.exists() and IFIND_TOKEN_FILE.read_text(encoding="utf-8").strip():
+        return "persisted_file"
+    if os.environ.get("IFIND_REFRESH_TOKEN", ""):
+        return "env_var"
+    try:
+        secrets = load_secrets()
+        if secrets.get_str("ifind.refresh_token"):
+            return "secrets_yaml"
+    except FileNotFoundError:
+        pass
+    return "not_configured"
 
 
 def load_config(config_path: str | Path) -> Config:

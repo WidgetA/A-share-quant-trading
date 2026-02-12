@@ -23,6 +23,7 @@ from src.web.routes import (
     create_momentum_router,
     create_order_assistant_router,
     create_router,
+    create_settings_router,
     create_simulation_router,
 )
 
@@ -91,6 +92,10 @@ def create_app(
     # Add momentum backtest/monitor router
     momentum_router = create_momentum_router()
     app.include_router(momentum_router)
+
+    # Add settings router
+    settings_router = create_settings_router()
+    app.include_router(settings_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():
