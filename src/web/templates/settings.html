@@ -60,7 +60,11 @@ async function loadTokenStatus() {
 
 function showMessage(text, success) {
     const el = document.getElementById('tokenMessage');
-    el.textContent = text;
+    // Ensure text is a string (API may return objects on error)
+    if (typeof text === 'object' && text !== null) {
+        text = JSON.stringify(text);
+    }
+    el.textContent = text || '';
     el.className = 'token-message ' + (success ? 'success' : 'error');
 }
 
@@ -83,9 +87,9 @@ async function testToken() {
             body: JSON.stringify({token: token})
         });
         const data = await resp.json();
-        showMessage(data.message, data.success);
+        showMessage(data.message || data.detail || '未知响应', data.success);
     } catch (e) {
-        showMessage('请求失败: ' + e.message, false);
+        showMessage('请求失败: ' + (e.message || e), false);
     } finally {
         btn.disabled = false;
         btn.textContent = '验证 Token';
@@ -115,7 +119,8 @@ async function saveToken() {
             document.getElementById('tokenInput').value = '';
             loadTokenStatus();
         } else {
-            showMessage(data.detail || data.message || '保存失败', false);
+            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
+            showMessage(errMsg, false);
         }
     } catch (e) {
         showMessage('请求失败: ' + e.message, false);
