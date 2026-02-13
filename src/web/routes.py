@@ -1453,11 +1453,16 @@ def create_momentum_router() -> APIRouter:
                             break
 
                     if sell_price <= 0:
+                        logger.warning(
+                            f"Cannot find next-day sell price for "
+                            f"{rec.stock_code} on {day}, "
+                            f"raw sell_prices={sell_prices}"
+                        )
                         day_results.append(
                             {
                                 "trade_date": str(day),
                                 "has_trade": False,
-                                "skip_reason": "无法获取次日卖出价",
+                                "skip_reason": f"无法获取次日卖出价 ({rec.stock_code})",
                                 "stock_code": rec.stock_code,
                                 "stock_name": rec.stock_name,
                                 "capital": round(capital, 2),
@@ -1754,10 +1759,23 @@ async def _fetch_stock_open_prices(
             start_date=from_date.strftime("%Y-%m-%d"),
             end_date=end.strftime("%Y-%m-%d"),
         )
-        for table_entry in data.get("tables", []):
+        tables = data.get("tables", [])
+        if not tables:
+            logger.warning(
+                f"No tables returned for {code} "
+                f"({from_date} ~ {end}), response: {data}"
+            )
+            return []
+        for table_entry in tables:
             tbl = table_entry.get("table", {})
             times = tbl.get("time", [])
             opens = tbl.get("open", [])
+            if not times or not opens:
+                logger.warning(
+                    f"Empty time/open for {code}: "
+                    f"times={times}, opens={opens}"
+                )
+                return []
             result = []
             for j in range(min(len(times), len(opens))):
                 d = datetime.strptime(times[j], "%Y-%m-%d").date()
