@@ -166,7 +166,9 @@ class MomentumSectorScanner:
         # Step 1: Filter initial gainers (>5%, main board, non-ST)
         gainers = await self._step1_filter_gainers(price_snapshots)
         result.initial_gainers = list(gainers.keys())
-        logger.info(f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% opening gain")
+        logger.info(
+            f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% opening gain"
+        )
 
         if not gainers:
             logger.info("No gainers found, scan complete")
