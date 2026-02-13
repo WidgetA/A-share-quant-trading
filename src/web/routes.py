@@ -1781,13 +1781,18 @@ async def _fetch_stock_open_prices(ifind_client, stock_code: str, from_date, day
         raise ValueError(f"iFinD returned empty tables for {code} ({date_str}~{end_str}): {data}")
     for table_entry in tables:
         tbl = table_entry.get("table", {})
-        times = tbl.get("time", [])
         opens = tbl.get("open", [])
-        if not times or not opens:
-            raise ValueError(f"No time/open data for {code}: times={times}, opens={opens}")
+        if not opens:
+            raise ValueError(f"No open data for {code}: table={tbl}")
+        # iFinD may not return "time" for single-day queries — use from_date.
+        times = tbl.get("time", [])
         result = []
-        for j in range(min(len(times), len(opens))):
-            d = datetime.strptime(times[j], "%Y-%m-%d").date()
+        for j in range(len(opens)):
+            d = (
+                datetime.strptime(times[j], "%Y-%m-%d").date()
+                if j < len(times) and times[j]
+                else from_date + timedelta(days=0 if j == 0 else j)
+            )
             result.append((d, float(opens[j])))
         return result
     return []
