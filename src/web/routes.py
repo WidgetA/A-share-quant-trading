@@ -1761,20 +1761,14 @@ async def _fetch_stock_open_prices(
         )
         tables = data.get("tables", [])
         if not tables:
-            logger.warning(
-                f"No tables returned for {code} "
-                f"({from_date} ~ {end}), response: {data}"
-            )
+            logger.warning(f"No tables returned for {code} ({from_date} ~ {end}), response: {data}")
             return []
         for table_entry in tables:
             tbl = table_entry.get("table", {})
             times = tbl.get("time", [])
             opens = tbl.get("open", [])
             if not times or not opens:
-                logger.warning(
-                    f"Empty time/open for {code}: "
-                    f"times={times}, opens={opens}"
-                )
+                logger.warning(f"Empty time/open for {code}: times={times}, opens={opens}")
                 return []
             result = []
             for j in range(min(len(times), len(opens))):
