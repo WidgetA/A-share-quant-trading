@@ -1765,23 +1765,26 @@ async def _fetch_stock_open_prices(ifind_client, stock_code: str, from_date, day
     code = f"{stock_code}{suffix}"
     end = from_date + timedelta(days=days) if days > 0 else from_date
 
+    date_str = from_date.strftime("%Y-%m-%d")
+    end_str = end.strftime("%Y-%m-%d")
+
+    # Must use multiple indicators (e.g. "open,preClose") — iFinD
+    # cmd_history_quotation returns empty tables for single-indicator queries.
     data = await ifind_client.history_quotes(
         codes=code,
-        indicators="open",
-        start_date=from_date.strftime("%Y-%m-%d"),
-        end_date=end.strftime("%Y-%m-%d"),
+        indicators="open,preClose",
+        start_date=date_str,
+        end_date=end_str,
     )
     tables = data.get("tables", [])
     if not tables:
-        logger.warning(f"No tables returned for {code} ({from_date} ~ {end}), response: {data}")
-        return []
+        raise ValueError(f"iFinD returned empty tables for {code} ({date_str}~{end_str}): {data}")
     for table_entry in tables:
         tbl = table_entry.get("table", {})
         times = tbl.get("time", [])
         opens = tbl.get("open", [])
         if not times or not opens:
-            logger.warning(f"Empty time/open for {code}: times={times}, opens={opens}")
-            return []
+            raise ValueError(f"No time/open data for {code}: times={times}, opens={opens}")
         result = []
         for j in range(min(len(times), len(opens))):
             d = datetime.strptime(times[j], "%Y-%m-%d").date()
