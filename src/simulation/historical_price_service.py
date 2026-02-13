@@ -178,7 +178,7 @@ class HistoricalPriceService:
             # Fetch OHLCV data via HTTP API
             result = await self._http_client.history_quotes(
                 codes=stock_code,
-                indicators="open,high,low,close,preClose,vol,amount",
+                indicators="open,high,low,close,preClose,volume,amount",
                 start_date=date_str,
                 end_date=date_str,
             )
@@ -198,7 +198,7 @@ class HistoricalPriceService:
             low_vals = table.get("low", [])
             close_vals = table.get("close", [])
             prev_vals = table.get("preClose", [])
-            vol_vals = table.get("vol", [])
+            vol_vals = table.get("volume", [])
             amt_vals = table.get("amount", [])
 
             if not all([open_vals, high_vals, low_vals, close_vals, prev_vals]):
