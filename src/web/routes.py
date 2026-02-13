@@ -1420,7 +1420,7 @@ def create_momentum_router() -> APIRouter:
                         # Fallback: fetch from history_quotes
                         try:
                             prices = await _fetch_stock_open_prices(
-                                ifind_client, rec.stock_code, day, days=10
+                                ifind_client, rec.stock_code, day, days=0
                             )
                             if prices:
                                 buy_price = prices[0][1]
@@ -1442,37 +1442,32 @@ def create_momentum_router() -> APIRouter:
                         await asyncio.sleep(0.05)
                         continue
 
-                    # Fetch next day open price for selling
-                    sell_prices = []
-                    sell_fetch_error = ""
-                    try:
-                        sell_prices = await _fetch_stock_open_prices(
-                            ifind_client, rec.stock_code, day, days=10
-                        )
-                    except Exception as e:
-                        sell_fetch_error = str(e)
-                        logger.error(f"Sell price fetch error for {rec.stock_code} on {day}: {e}")
-
-                    # sell_prices is list of (date, open_price), skip first (today)
+                    # Fetch next trading day open price for selling
+                    # Use trading calendar to find exact next day (single-day query
+                    # works reliably; range queries return empty from iFinD).
                     sell_price = 0.0
                     sell_date_str = ""
-                    for sp_date, sp_price in sell_prices:
-                        if sp_date > day and sp_price > 0:
-                            sell_price = sp_price
-                            sell_date_str = str(sp_date)
-                            break
+                    sell_fetch_error = ""
+
+                    if i + 1 < len(trading_days):
+                        next_day = trading_days[i + 1]
+                        try:
+                            sell_prices = await _fetch_stock_open_prices(
+                                ifind_client, rec.stock_code, next_day, days=0
+                            )
+                            if sell_prices:
+                                sell_price = sell_prices[0][1]
+                                sell_date_str = str(sell_prices[0][0])
+                        except Exception as e:
+                            sell_fetch_error = str(e)
+                            logger.error(
+                                f"Sell price fetch error for {rec.stock_code} on {next_day}: {e}"
+                            )
+                    else:
+                        sell_fetch_error = "无下一交易日"
 
                     if sell_price <= 0:
-                        if sell_fetch_error:
-                            detail = sell_fetch_error[:80]
-                        elif not sell_prices:
-                            detail = "API返回空数据"
-                        else:
-                            detail = f"仅有{len(sell_prices)}条: {sell_prices}"
-                        logger.warning(
-                            f"Cannot find next-day sell price for "
-                            f"{rec.stock_code} on {day}: {detail}"
-                        )
+                        detail = sell_fetch_error or "次日开盘价为0或无数据"
                         day_results.append(
                             {
                                 "trade_date": str(day),
@@ -1754,10 +1749,13 @@ def _get_trading_calendar_akshare(start_date, end_date) -> list:
     return days
 
 
-async def _fetch_stock_open_prices(
-    ifind_client, stock_code: str, from_date, days: int = 10
-) -> list:
+async def _fetch_stock_open_prices(ifind_client, stock_code: str, from_date, days: int = 0) -> list:
     """Fetch open prices for a stock starting from a date.
+
+    Args:
+        days: Number of extra calendar days beyond from_date.
+              Use 0 for single-day query (recommended — range queries
+              may return empty from iFinD).
 
     Returns list of (date, open_price) tuples sorted chronologically.
     """
@@ -1765,7 +1763,7 @@ async def _fetch_stock_open_prices(
 
     suffix = ".SH" if stock_code.startswith("6") else ".SZ"
     code = f"{stock_code}{suffix}"
-    end = from_date + timedelta(days=days)
+    end = from_date + timedelta(days=days) if days > 0 else from_date
 
     data = await ifind_client.history_quotes(
         codes=code,
