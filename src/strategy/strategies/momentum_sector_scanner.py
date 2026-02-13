@@ -16,7 +16,7 @@
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
 # Step 5: constituents with open_gain>0 AND PE within board median ±30%
-# Step 6: recommend — from board with most picks, find highest earnings growth
+# Step 6: recommend — from board with most picks, find highest YoY quarterly revenue growth
 # Step 7: → ScanResult → Feishu notification
 
 import logging
@@ -80,7 +80,7 @@ class RecommendedStock:
     stock_name: str
     board_name: str  # Which board it was recommended from
     board_stock_count: int  # How many selected stocks in that board
-    growth_rate: float  # 归母净利润同比增长率 (%)
+    growth_rate: float  # 同比季度收入增长率 (%)
     open_gain_pct: float
     pe_ttm: float
     board_avg_pe: float
@@ -424,7 +424,7 @@ class MomentumSectorScanner:
 
         # Query iwencai for earnings growth rate
         codes_str = ";".join(s.stock_code for s in top_board_stocks)
-        query = f"{codes_str} 归母净利润同比增长率"
+        query = f"{codes_str} 同比季度收入增长率"
 
         growth_data: dict[str, float] = {}
         try:
@@ -438,11 +438,11 @@ class MomentumSectorScanner:
                 growth_col_name = None
                 growth_col_values = []
                 for col_name, col_values in table.items():
-                    if "净利润" in col_name and "增长率" in col_name:
+                    if "收入" in col_name and "增长率" in col_name:
                         growth_col_name = col_name
                         growth_col_values = col_values
                         break
-                    if "净利润" in col_name and "同比" in col_name:
+                    if "收入" in col_name and "同比" in col_name:
                         growth_col_name = col_name
                         growth_col_values = col_values
                         break

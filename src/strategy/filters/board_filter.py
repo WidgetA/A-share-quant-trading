@@ -112,6 +112,7 @@ JUNK_BOARDS: set[str] = {
     "反内卷概念",
     "VPN",
     "北交所概念",
+    "国企改革",
 }
 
 # Regex patterns that catch time-variant junk boards (e.g. "2026中报预增")
