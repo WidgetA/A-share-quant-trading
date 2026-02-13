@@ -1420,7 +1420,7 @@ def create_momentum_router() -> APIRouter:
                         # Fallback: fetch from history_quotes
                         try:
                             prices = await _fetch_stock_open_prices(
-                                ifind_client, rec.stock_code, day, days=0
+                                ifind_client, rec.stock_code, day
                             )
                             if prices:
                                 buy_price = prices[0][1]
@@ -1453,7 +1453,7 @@ def create_momentum_router() -> APIRouter:
                         next_day = trading_days[i + 1]
                         try:
                             sell_prices = await _fetch_stock_open_prices(
-                                ifind_client, rec.stock_code, next_day, days=0
+                                ifind_client, rec.stock_code, next_day
                             )
                             if sell_prices:
                                 sell_price = sell_prices[0][1]
@@ -1749,53 +1749,30 @@ def _get_trading_calendar_akshare(start_date, end_date) -> list:
     return days
 
 
-async def _fetch_stock_open_prices(ifind_client, stock_code: str, from_date, days: int = 0) -> list:
-    """Fetch open prices for a stock starting from a date.
+async def _fetch_stock_open_prices(ifind_client, stock_code: str, target_date) -> list:
+    """Fetch open price for a stock on a specific date (single-day query).
 
-    Args:
-        days: Number of extra calendar days beyond from_date.
-              Use 0 for single-day query (recommended — range queries
-              may return empty from iFinD).
-
-    Returns list of (date, open_price) tuples sorted chronologically.
+    Returns list of (date, open_price) tuples (always one element).
     """
-    from datetime import datetime, timedelta
-
     suffix = ".SH" if stock_code.startswith("6") else ".SZ"
     code = f"{stock_code}{suffix}"
-    end = from_date + timedelta(days=days) if days > 0 else from_date
+    date_str = target_date.strftime("%Y-%m-%d")
 
-    date_str = from_date.strftime("%Y-%m-%d")
-    end_str = end.strftime("%Y-%m-%d")
-
-    # Must use multiple indicators (e.g. "open,preClose") — iFinD
-    # cmd_history_quotation returns empty tables for single-indicator queries.
+    # Must use multiple indicators — iFinD returns empty tables for single-indicator queries.
     data = await ifind_client.history_quotes(
         codes=code,
         indicators="open,preClose",
         start_date=date_str,
-        end_date=end_str,
+        end_date=date_str,
     )
     tables = data.get("tables", [])
     if not tables:
-        raise ValueError(f"iFinD returned empty tables for {code} ({date_str}~{end_str}): {data}")
-    for table_entry in tables:
-        tbl = table_entry.get("table", {})
-        opens = tbl.get("open", [])
-        if not opens:
-            raise ValueError(f"No open data for {code}: table={tbl}")
-        # iFinD may not return "time" for single-day queries — use from_date.
-        times = tbl.get("time", [])
-        result = []
-        for j in range(len(opens)):
-            d = (
-                datetime.strptime(times[j], "%Y-%m-%d").date()
-                if j < len(times) and times[j]
-                else from_date + timedelta(days=0 if j == 0 else j)
-            )
-            result.append((d, float(opens[j])))
-        return result
-    return []
+        raise ValueError(f"iFinD returned empty tables for {code} ({date_str}): {data}")
+    tbl = tables[0].get("table", {})
+    opens = tbl.get("open", [])
+    if not opens:
+        raise ValueError(f"No open data for {code} ({date_str}): table={tbl}")
+    return [(target_date, float(opens[0]))]
 
 
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
