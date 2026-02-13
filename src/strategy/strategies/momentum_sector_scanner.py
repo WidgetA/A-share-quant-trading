@@ -291,17 +291,23 @@ class MomentumSectorScanner:
     ) -> tuple[list[SelectedStock], dict[str, PriceSnapshot]]:
         """
         Step 5: From all constituent stocks, select those with:
+        - Main board only (same filter as Step 1)
         - Opening gain > 0
         - PE(TTM) within board average PE ± 10%
 
         For constituent stocks not in price_snapshots, we need to fetch
         their prices. This is done per-board.
         """
-        # Collect all unique constituent stock codes
+        # Filter constituent stocks by main board (exclude ChiNext, STAR, BSE, etc.)
         all_constituent_codes: set[str] = set()
-        for stocks in board_constituents.values():
-            for code, _ in stocks:
+        filtered_board_constituents: dict[str, list[tuple[str, str]]] = {}
+        for board_name, stocks in board_constituents.items():
+            allowed = [(code, name) for code, name in stocks if self._stock_filter.is_allowed(code)]
+            filtered_board_constituents[board_name] = allowed
+            for code, _ in allowed:
                 all_constituent_codes.add(code)
+
+        board_constituents = filtered_board_constituents
 
         # Get PE data for all constituents
         pe_data = await self._fundamentals_db.batch_get_pe(list(all_constituent_codes))
@@ -502,7 +508,7 @@ class MomentumSectorScanner:
             try:
                 data = await self._ifind.real_time_quotation(
                     codes=codes_str,
-                    indicators="open,preClose,latest,name",
+                    indicators="open,preClose,latest",
                 )
 
                 for table_wrapper in data.get("tables", []):
@@ -517,18 +523,16 @@ class MomentumSectorScanner:
                     open_vals = table.get("open", [])
                     prev_vals = table.get("preClose", [])
                     latest_vals = table.get("latest", [])
-                    name_vals = table.get("name", [])
 
                     if open_vals and prev_vals and latest_vals:
                         open_price = float(open_vals[0]) if open_vals[0] else 0.0
                         prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
                         latest = float(latest_vals[0]) if latest_vals[0] else open_price
-                        name = str(name_vals[0]) if name_vals else ""
 
                         if prev_close > 0:
                             result[bare_code] = PriceSnapshot(
                                 stock_code=bare_code,
-                                stock_name=name,
+                                stock_name="",
                                 open_price=open_price,
                                 prev_close=prev_close,
                                 latest_price=latest,
