@@ -3,7 +3,7 @@
 """
 盘中动量板块策略实时监控。
 
-9:30 开始每30秒轮询，追踪涨幅超过5%的沪深主板非ST股票。
+9:30 开始每30秒轮询，追踪开盘涨幅超过5%的沪深主板非ST股票。
 9:40 时运行完整策略流程，选股后飞书通知。
 
 用法：
@@ -58,16 +58,16 @@ async def poll_realtime_gainers(
     client: IFinDHttpClient,
 ) -> dict[str, PriceSnapshot]:
     """
-    Poll real-time quotes to find stocks with >5% gain.
+    Poll real-time quotes to find stocks with >5% opening auction gain.
 
-    Uses iwencai: "涨幅大于5%的沪深主板非ST股票"
+    Uses iwencai: "开盘涨幅大于5%的沪深主板非ST股票"
     Then fetches open + preClose via real_time_quotation for full data.
 
     Returns:
         Dict of stock_code → PriceSnapshot.
     """
     try:
-        result = await client.smart_stock_picking("涨幅大于5%的沪深主板非ST股票", "stock")
+        result = await client.smart_stock_picking("开盘涨幅大于5%的沪深主板非ST股票", "stock")
     except IFinDHttpError as e:
         logger.error(f"iwencai realtime query failed: {e}")
         return {}
@@ -232,7 +232,7 @@ async def monitor(
             logger.info(f"Poll #{poll_count} at {now.strftime('%H:%M:%S')}")
 
             snapshots = await poll_realtime_gainers(ifind_client)
-            logger.info(f"  Found {len(snapshots)} stocks with >5% gain")
+            logger.info(f"  Found {len(snapshots)} stocks with >5% opening gain")
 
             # Accumulate (update with latest prices)
             accumulated.update(snapshots)

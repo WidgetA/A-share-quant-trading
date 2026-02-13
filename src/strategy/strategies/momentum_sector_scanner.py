@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Core momentum sector scanning strategy.
-# Identifies "hot" concept boards by finding stocks with >5% gain,
+# Identifies "hot" concept boards by finding stocks with >5% opening auction gain,
 # then selects PE-reasonable stocks from those boards.
 
 # === DEPENDENCIES ===
@@ -11,7 +11,7 @@
 # - board_filter: Junk board filtering
 
 # === DATA FLOW ===
-# Step 1: iwencai "涨幅>5%主板非ST" → initial gainers
+# Step 1: iwencai "开盘涨幅>5%主板非ST" → initial gainers
 # Step 2: per-stock iwencai "所属同花顺概念" → concept boards (filtered)
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
@@ -113,7 +113,7 @@ class MomentumSectorScanner:
     """
     Momentum sector scanning strategy.
 
-    Identifies concept boards with multiple momentum stocks (>5% gain),
+    Identifies concept boards with multiple momentum stocks (>5% opening auction gain),
     then selects PE-reasonable constituents from those boards.
 
     This class contains the core strategy logic shared by both
@@ -125,7 +125,7 @@ class MomentumSectorScanner:
     """
 
     # Strategy parameters
-    INITIAL_GAIN_THRESHOLD = 5.0  # Step 1: minimum gain % for initial scan
+    INITIAL_GAIN_THRESHOLD = 5.0  # Step 1: minimum opening auction gain % for initial scan
     MIN_STOCKS_PER_BOARD = 2  # Step 3: minimum gainers to qualify a hot board
     OPEN_GAIN_THRESHOLD = 0.0  # Step 5: minimum opening gain %
     PE_TOLERANCE = 0.10  # Step 5: ±10% of board average PE
@@ -166,7 +166,7 @@ class MomentumSectorScanner:
         # Step 1: Filter initial gainers (>5%, main board, non-ST)
         gainers = await self._step1_filter_gainers(price_snapshots)
         result.initial_gainers = list(gainers.keys())
-        logger.info(f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% gain")
+        logger.info(f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% opening gain")
 
         if not gainers:
             logger.info("No gainers found, scan complete")
@@ -216,7 +216,7 @@ class MomentumSectorScanner:
         self, price_snapshots: dict[str, PriceSnapshot]
     ) -> dict[str, PriceSnapshot]:
         """
-        Step 1: Find stocks with gain > threshold, main board, non-ST.
+        Step 1: Find stocks with opening auction gain > threshold, main board, non-ST.
 
         When price_snapshots is provided (from iwencai or pre-built),
         we just apply main board + ST filters on top.
@@ -225,7 +225,7 @@ class MomentumSectorScanner:
         candidates = {
             code: snap
             for code, snap in price_snapshots.items()
-            if snap.current_gain_pct >= self.INITIAL_GAIN_THRESHOLD
+            if snap.open_gain_pct >= self.INITIAL_GAIN_THRESHOLD
         }
 
         if not candidates:
