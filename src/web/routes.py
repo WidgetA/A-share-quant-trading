@@ -1418,11 +1418,14 @@ def create_momentum_router() -> APIRouter:
                     buy_price = rec.open_price
                     if buy_price <= 0:
                         # Fallback: fetch from history_quotes
-                        prices = await _fetch_stock_open_prices(
-                            ifind_client, rec.stock_code, day, days=10
-                        )
-                        if prices:
-                            buy_price = prices[0][1]
+                        try:
+                            prices = await _fetch_stock_open_prices(
+                                ifind_client, rec.stock_code, day, days=10
+                            )
+                            if prices:
+                                buy_price = prices[0][1]
+                        except Exception as e:
+                            logger.warning(f"Buy price fallback failed for {rec.stock_code}: {e}")
 
                     if buy_price <= 0:
                         day_results.append(
@@ -1440,9 +1443,16 @@ def create_momentum_router() -> APIRouter:
                         continue
 
                     # Fetch next day open price for selling
-                    sell_prices = await _fetch_stock_open_prices(
-                        ifind_client, rec.stock_code, day, days=10
-                    )
+                    sell_prices = []
+                    sell_fetch_error = ""
+                    try:
+                        sell_prices = await _fetch_stock_open_prices(
+                            ifind_client, rec.stock_code, day, days=10
+                        )
+                    except Exception as e:
+                        sell_fetch_error = str(e)
+                        logger.error(f"Sell price fetch error for {rec.stock_code} on {day}: {e}")
+
                     # sell_prices is list of (date, open_price), skip first (today)
                     sell_price = 0.0
                     sell_date_str = ""
@@ -1453,16 +1463,21 @@ def create_momentum_router() -> APIRouter:
                             break
 
                     if sell_price <= 0:
+                        if sell_fetch_error:
+                            detail = sell_fetch_error[:80]
+                        elif not sell_prices:
+                            detail = "API返回空数据"
+                        else:
+                            detail = f"仅有{len(sell_prices)}条: {sell_prices}"
                         logger.warning(
                             f"Cannot find next-day sell price for "
-                            f"{rec.stock_code} on {day}, "
-                            f"raw sell_prices={sell_prices}"
+                            f"{rec.stock_code} on {day}: {detail}"
                         )
                         day_results.append(
                             {
                                 "trade_date": str(day),
                                 "has_trade": False,
-                                "skip_reason": f"无法获取次日卖出价 ({rec.stock_code})",
+                                "skip_reason": f"无法获取次日卖出价: {detail}",
                                 "stock_code": rec.stock_code,
                                 "stock_name": rec.stock_name,
                                 "capital": round(capital, 2),
@@ -1752,31 +1767,28 @@ async def _fetch_stock_open_prices(
     code = f"{stock_code}{suffix}"
     end = from_date + timedelta(days=days)
 
-    try:
-        data = await ifind_client.history_quotes(
-            codes=code,
-            indicators="open",
-            start_date=from_date.strftime("%Y-%m-%d"),
-            end_date=end.strftime("%Y-%m-%d"),
-        )
-        tables = data.get("tables", [])
-        if not tables:
-            logger.warning(f"No tables returned for {code} ({from_date} ~ {end}), response: {data}")
+    data = await ifind_client.history_quotes(
+        codes=code,
+        indicators="open",
+        start_date=from_date.strftime("%Y-%m-%d"),
+        end_date=end.strftime("%Y-%m-%d"),
+    )
+    tables = data.get("tables", [])
+    if not tables:
+        logger.warning(f"No tables returned for {code} ({from_date} ~ {end}), response: {data}")
+        return []
+    for table_entry in tables:
+        tbl = table_entry.get("table", {})
+        times = tbl.get("time", [])
+        opens = tbl.get("open", [])
+        if not times or not opens:
+            logger.warning(f"Empty time/open for {code}: times={times}, opens={opens}")
             return []
-        for table_entry in tables:
-            tbl = table_entry.get("table", {})
-            times = tbl.get("time", [])
-            opens = tbl.get("open", [])
-            if not times or not opens:
-                logger.warning(f"Empty time/open for {code}: times={times}, opens={opens}")
-                return []
-            result = []
-            for j in range(min(len(times), len(opens))):
-                d = datetime.strptime(times[j], "%Y-%m-%d").date()
-                result.append((d, float(opens[j])))
-            return result
-    except Exception as e:
-        logger.error(f"Failed to fetch open prices for {stock_code}: {e}")
+        result = []
+        for j in range(min(len(times), len(opens))):
+            d = datetime.strptime(times[j], "%Y-%m-%d").date()
+            result.append((d, float(opens[j])))
+        return result
     return []
 
 
