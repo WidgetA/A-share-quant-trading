@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Core momentum sector scanning strategy.
-# Identifies "hot" concept boards by finding stocks with >5% opening auction gain,
+# Identifies "hot" concept boards by finding stocks with >5% gain,
 # then selects PE-reasonable stocks from those boards.
 
 # === DEPENDENCIES ===
@@ -11,11 +11,11 @@
 # - board_filter: Junk board filtering
 
 # === DATA FLOW ===
-# Step 1: iwencai "开盘涨幅>5%主板非ST" → initial gainers
+# Step 1: iwencai "涨幅>5%主板非ST" → initial gainers
 # Step 2: per-stock iwencai "所属同花顺概念" → concept boards (filtered)
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
-# Step 5: constituents with open_gain>0 AND PE within board avg ±10%
+# Step 5: constituents with open_gain>0 AND PE within board median ±30%
 # Step 6: recommend — from board with most picks, find highest earnings growth
 # Step 7: → ScanResult → Feishu notification
 
@@ -113,7 +113,7 @@ class MomentumSectorScanner:
     """
     Momentum sector scanning strategy.
 
-    Identifies concept boards with multiple momentum stocks (>5% opening auction gain),
+    Identifies concept boards with multiple momentum stocks (>5% gain),
     then selects PE-reasonable constituents from those boards.
 
     This class contains the core strategy logic shared by both
@@ -125,10 +125,10 @@ class MomentumSectorScanner:
     """
 
     # Strategy parameters
-    INITIAL_GAIN_THRESHOLD = 5.0  # Step 1: minimum opening auction gain % for initial scan
+    INITIAL_GAIN_THRESHOLD = 5.0  # Step 1: minimum gain % for initial scan
     MIN_STOCKS_PER_BOARD = 2  # Step 3: minimum gainers to qualify a hot board
     OPEN_GAIN_THRESHOLD = 0.0  # Step 5: minimum opening gain %
-    PE_TOLERANCE = 0.10  # Step 5: ±10% of board average PE
+    PE_TOLERANCE = 0.30  # Step 5: ±30% of board median PE
 
     def __init__(
         self,
@@ -166,9 +166,7 @@ class MomentumSectorScanner:
         # Step 1: Filter initial gainers (>5%, main board, non-ST)
         gainers = await self._step1_filter_gainers(price_snapshots)
         result.initial_gainers = list(gainers.keys())
-        logger.info(
-            f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% opening gain"
-        )
+        logger.info(f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% gain")
 
         if not gainers:
             logger.info("No gainers found, scan complete")
@@ -218,7 +216,7 @@ class MomentumSectorScanner:
         self, price_snapshots: dict[str, PriceSnapshot]
     ) -> dict[str, PriceSnapshot]:
         """
-        Step 1: Find stocks with opening auction gain > threshold, main board, non-ST.
+        Step 1: Find stocks with gain > threshold, main board, non-ST.
 
         When price_snapshots is provided (from iwencai or pre-built),
         we just apply main board + ST filters on top.
@@ -227,7 +225,7 @@ class MomentumSectorScanner:
         candidates = {
             code: snap
             for code, snap in price_snapshots.items()
-            if snap.open_gain_pct >= self.INITIAL_GAIN_THRESHOLD
+            if snap.current_gain_pct >= self.INITIAL_GAIN_THRESHOLD
         }
 
         if not candidates:
@@ -295,7 +293,7 @@ class MomentumSectorScanner:
         Step 5: From all constituent stocks, select those with:
         - Main board only (same filter as Step 1)
         - Opening gain > 0
-        - PE(TTM) within board average PE ± 10%
+        - PE(TTM) within board median PE ± 30%
 
         For constituent stocks not in price_snapshots, we need to fetch
         their prices. This is done per-board.
@@ -324,7 +322,7 @@ class MomentumSectorScanner:
         selected: list[SelectedStock] = []
 
         for board_name, stocks in board_constituents.items():
-            # Collect valid PE values for board average calculation
+            # Collect valid PE values for board median calculation
             board_pe_values: list[float] = []
             for code, _ in stocks:
                 pe = pe_data.get(code)
@@ -335,12 +333,18 @@ class MomentumSectorScanner:
                 logger.debug(f"Board '{board_name}': no valid PE data, skipping")
                 continue
 
-            board_avg_pe = sum(board_pe_values) / len(board_pe_values)
-            pe_lower = board_avg_pe * (1 - self.PE_TOLERANCE)
-            pe_upper = board_avg_pe * (1 + self.PE_TOLERANCE)
+            # Use median instead of average (more robust to outliers)
+            sorted_pe = sorted(board_pe_values)
+            n = len(sorted_pe)
+            if n % 2 == 1:
+                board_median_pe = sorted_pe[n // 2]
+            else:
+                board_median_pe = (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
+            pe_lower = board_median_pe * (1 - self.PE_TOLERANCE)
+            pe_upper = board_median_pe * (1 + self.PE_TOLERANCE)
 
             logger.debug(
-                f"Board '{board_name}': avg PE={board_avg_pe:.2f}, "
+                f"Board '{board_name}': median PE={board_median_pe:.2f}, "
                 f"range=[{pe_lower:.2f}, {pe_upper:.2f}]"
             )
 
@@ -360,7 +364,7 @@ class MomentumSectorScanner:
                 if snap.open_gain_pct <= self.OPEN_GAIN_THRESHOLD:
                     continue
 
-                # Filter: PE within board average ± tolerance
+                # Filter: PE within board median ± tolerance
                 if not (pe_lower <= pe <= pe_upper):
                     continue
 
@@ -371,7 +375,7 @@ class MomentumSectorScanner:
                         board_name=board_name,
                         open_gain_pct=snap.open_gain_pct,
                         pe_ttm=pe,
-                        board_avg_pe=board_avg_pe,
+                        board_avg_pe=board_median_pe,
                     )
                 )
 
