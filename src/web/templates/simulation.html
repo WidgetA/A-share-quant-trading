@@ -149,7 +149,7 @@
                 {% if state.phase == 'market_close' %}
                 策略建议：持仓不过夜。勾选要卖出的持仓（将以收盘价卖出）
                 {% else %}
-                以下是您的隔夜持仓，勾选要卖出的持仓（将以次日开盘价卖出）
+                以下是您的隔夜持仓，勾选要卖出的持仓（将以次日收盘价卖出）
                 {% endif %}
             </p>
             <form id="sell-form" class="holdings-form">
@@ -180,7 +180,7 @@
                 {% endfor %}
                 <div class="form-actions">
                     <button type="submit" class="btn btn-danger">
-                        {% if state.phase == 'market_close' %}卖出选中（收盘价）{% else %}卖出选中（次日开盘价）{% endif %}
+                        {% if state.phase == 'market_close' %}卖出选中（收盘价）{% else %}卖出选中（次日收盘价）{% endif %}
                     </button>
                     <button type="button" class="btn btn-success" onclick="holdAll()">全部持有</button>
                 </div>

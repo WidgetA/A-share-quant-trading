@@ -1232,7 +1232,7 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 | MORNING_AUCTION | 09:25 | Execute pending buys, check limit-up |
 | TRADING_HOURS | 09:30-15:00 | Monitor positions, check intraday messages for buying opportunities |
 | MARKET_CLOSE | 15:00 | Day summary, P&L calculation, optional sell at closing price |
-| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions, sell at opening price |
+| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions, sell at closing price |
 | COMPLETED | - | Simulation finished, show results |
 
 **Trading Hours Actions**:

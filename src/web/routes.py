@@ -1442,7 +1442,7 @@ def create_momentum_router() -> APIRouter:
                         await asyncio.sleep(0.05)
                         continue
 
-                    # Fetch next trading day open price for selling
+                    # Fetch next trading day close price for selling
                     # Use trading calendar to find exact next day (single-day query
                     # works reliably; range queries return empty from iFinD).
                     sell_price = 0.0
@@ -1452,7 +1452,7 @@ def create_momentum_router() -> APIRouter:
                     if i + 1 < len(trading_days):
                         next_day = trading_days[i + 1]
                         try:
-                            sell_prices = await _fetch_stock_open_prices(
+                            sell_prices = await _fetch_stock_close_prices(
                                 ifind_client, rec.stock_code, next_day
                             )
                             if sell_prices:
@@ -1467,7 +1467,7 @@ def create_momentum_router() -> APIRouter:
                         sell_fetch_error = "无下一交易日"
 
                     if sell_price <= 0:
-                        detail = sell_fetch_error or "次日开盘价为0或无数据"
+                        detail = sell_fetch_error or "次日收盘价为0或无数据"
                         day_results.append(
                             {
                                 "trade_date": str(day),
@@ -1773,6 +1773,32 @@ async def _fetch_stock_open_prices(ifind_client, stock_code: str, target_date) -
     if not opens:
         raise ValueError(f"No open data for {code} ({date_str}): table={tbl}")
     return [(target_date, float(opens[0]))]
+
+
+async def _fetch_stock_close_prices(ifind_client, stock_code: str, target_date) -> list:
+    """Fetch close price for a stock on a specific date (single-day query).
+
+    Returns list of (date, close_price) tuples (always one element).
+    """
+    suffix = ".SH" if stock_code.startswith("6") else ".SZ"
+    code = f"{stock_code}{suffix}"
+    date_str = target_date.strftime("%Y-%m-%d")
+
+    # Must use multiple indicators — iFinD returns empty tables for single-indicator queries.
+    data = await ifind_client.history_quotes(
+        codes=code,
+        indicators="close,preClose",
+        start_date=date_str,
+        end_date=date_str,
+    )
+    tables = data.get("tables", [])
+    if not tables:
+        raise ValueError(f"iFinD returned empty tables for {code} ({date_str}): {data}")
+    tbl = tables[0].get("table", {})
+    closes = tbl.get("close", [])
+    if not closes:
+        raise ValueError(f"No close data for {code} ({date_str}): table={tbl}")
+    return [(target_date, float(closes[0]))]
 
 
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):

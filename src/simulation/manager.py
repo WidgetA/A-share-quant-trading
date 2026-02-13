@@ -92,7 +92,7 @@ class SimulationManager:
         self._messages: list[str] = []  # Log messages for UI
         self._is_synced: bool = False
         self._pending_close_sell_done: bool = False  # Track if sell decision made at close
-        self._pending_morning_sells: list[int] = []  # Slots to sell at morning auction
+        self._pending_morning_sells: list[int] = []  # Slots to sell at next day's close
         self._pending_morning_buys: list[PendingSignal] = []  # Signals to buy at morning auction
 
         # Track what we've processed
@@ -356,8 +356,8 @@ class SimulationManager:
             # Store signals for later allocation at morning auction
             self._pending_morning_buys = self._selected_signals.copy()
             self._add_message(
-                f"待卖出 {len(self._pending_morning_sells)} 个仓位，"
-                f"待买入 {len(self._pending_morning_buys)} 个信号，09:25执行"
+                f"待卖出 {len(self._pending_morning_sells)} 个仓位（尾盘），"
+                f"待买入 {len(self._pending_morning_buys)} 个信号（09:25开盘）"
             )
         else:
             # Normal case: allocate slots now
@@ -374,7 +374,7 @@ class SimulationManager:
 
         Can be called during:
         - MARKET_CLOSE: Sell at closing price (optional, for 持仓不过夜)
-        - MORNING_CONFIRMATION: Sell at next day opening price
+        - MORNING_CONFIRMATION: Sell at next day closing price
 
         Args:
             slots_to_sell: List of slot IDs to sell.
@@ -398,7 +398,7 @@ class SimulationManager:
         if self._phase == SimulationPhase.MORNING_CONFIRMATION:
             self._pending_morning_sells = slots_to_sell.copy() if slots_to_sell else []
             if slots_to_sell:
-                self._add_message(f"已选择 {len(slots_to_sell)} 个仓位待卖出（09:25执行）")
+                self._add_message(f"已选择 {len(slots_to_sell)} 个仓位待卖出（尾盘收盘价执行）")
             else:
                 self._add_message("保留所有持仓")
             # Advance to PREMARKET_ANALYSIS for new stock selection
@@ -933,22 +933,22 @@ class SimulationManager:
         if not self._position_manager or not self._price_service or not self._clock:
             return
 
-        # First: Execute pending sells from MORNING_CONFIRMATION at opening price
+        # First: Execute pending sells from MORNING_CONFIRMATION at closing price
         if self._pending_morning_sells:
             for slot_id in self._pending_morning_sells:
                 slot = self._position_manager.get_slot(slot_id)
                 if slot and slot.holdings:
                     prices = {}
                     for h in slot.holdings:
-                        # Get opening price for sell
+                        # Get closing price for sell (次日尾盘卖)
                         daily = await self._price_service.get_daily_data(
                             h.stock_code, self._clock.current_date
                         )
                         if daily:
-                            prices[h.stock_code] = daily.open
+                            prices[h.stock_code] = daily.close
                         elif h.entry_price:
                             prices[h.stock_code] = h.entry_price
-                            self._add_message(f"警告: {h.stock_code} 无法获取开盘价，使用成本价")
+                            self._add_message(f"警告: {h.stock_code} 无法获取收盘价，使用成本价")
 
                     pnl = self._position_manager.release_slot(
                         slot_id, prices, self._clock.current_time
