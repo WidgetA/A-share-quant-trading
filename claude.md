@@ -585,3 +585,53 @@ beijing_display = (utc_time + timedelta(hours=8)).replace(tzinfo=None)
 2. **Display results**: Always use `+ timedelta(hours=8)` then `.replace(tzinfo=None)` for clean Beijing time
 3. **Never assume system TZ**: Code must work correctly regardless of `TZ` environment variable
 4. **Test with TZ=Asia/Shanghai**: Always verify datetime handling in an environment matching production
+
+### 16. iFinD HTTP API Reference (Critical)
+
+**Core Principle: Before writing ANY iFinD API call, ALWAYS consult the API manual first.**
+
+The official API manual is stored in the project:
+- **PDF**: [docs/iFinD-HTTP-API-manual.pdf](docs/iFinD-HTTP-API-manual.pdf)
+- **Text extract**: [docs/iFinD-HTTP-API-manual.txt](docs/iFinD-HTTP-API-manual.txt) (machine-readable, use for quick lookup)
+
+#### Why This Rule Exists
+
+AI models frequently hallucinate API parameter names and indicator names. Past bugs include:
+- Using `vol` instead of `volume` (history_quotes indicator)
+- Using `name` as a `real_time_quotation` indicator (does not exist)
+- Confusing indicators between different endpoints
+
+#### Mandatory Workflow
+
+When writing or modifying any iFinD HTTP API call:
+1. **Read the manual text file** (`docs/iFinD-HTTP-API-manual.txt`) to find the correct endpoint section
+2. **Verify the endpoint URL** matches the operation
+3. **Verify ALL parameter names** (keys in formData) are correct
+4. **Verify ALL indicator names** are valid for that specific endpoint
+5. **Do NOT guess indicator names** — different endpoints have different indicator sets
+
+#### Quick Reference: Endpoints
+
+| Function | Endpoint | Key Parameters |
+|----------|----------|----------------|
+| Basic Data | `/api/v1/basic_data_service` | codes, indipara |
+| Date Sequence | `/api/v1/date_sequence` | codes, indipara, startdate, enddate, functionpara |
+| Historical Quotes | `/api/v1/cmd_history_quotation` | codes, indicators, startdate, enddate, functionpara |
+| High Frequency | `/api/v1/high_frequency` | codes, indicators, starttime, endtime, functionpara |
+| Real-time Quotes | `/api/v1/real_time_quotation` | codes, indicators, functionpara |
+| Snapshot | `/api/v1/snap_shot` | codes, indicators, starttime, endtime |
+| Smart Stock Picking | `/api/v1/smart_stock_picking` | searchstring, searchtype |
+| Trade Dates | `/api/v1/get_trade_dates` | marketcode, functionpara, startdate, enddate |
+| Token | `/api/v1/get_access_token` | (refresh_token in header) |
+| Report Query | `/api/v1/report_query` | codes, functionpara, outputpara |
+
+#### Common Indicator Names (verify against manual before use!)
+
+**cmd_history_quotation**: `preClose`, `open`, `high`, `low`, `close`, `avgPrice`, `change`, `changeRatio`, `volume`, `amount`, `turnoverRatio`, `transactionAmount`, `totalShares`, `totalCapital`, `pe_ttm`, `pe`, `pb`, `ps`, `pcf`
+
+**real_time_quotation**: `tradeDate`, `tradeTime`, `preClose`, `open`, `high`, `low`, `latest`, `latestAmount`, `latestVolume`, `avgPrice`, `change`, `changeRatio`, `upperLimit`, `downLimit`, `amount`, `volume`, `turnoverRatio`, `pe_ttm`, `mv`, `vol_ratio`, `swing`
+
+**Important differences**:
+- History uses `close` for current close; real-time uses `latest` for current price
+- History uses `volume`/`amount`; snapshot uses `vol`/`amt` (single tick) AND `volume`/`amount` (cumulative)
+- `name` is NOT a valid indicator for any quote endpoint — stock names come from `smart_stock_picking` responses
