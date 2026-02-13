@@ -145,6 +145,7 @@
                         <tr>
                             <th>买入日</th>
                             <th>推荐股</th>
+                            <th>板块</th>
                             <th>买入价</th>
                             <th>卖出日</th>
                             <th>卖出价</th>
@@ -435,7 +436,7 @@ function appendRangeDayRow(d) {
         tr.className = 'range-skip-row';
         tr.innerHTML = `
             <td>${d.trade_date}</td>
-            <td colspan="7" class="range-skip-reason">${d.skip_reason}${d.stock_code ? ' (' + d.stock_code + ')' : ''}</td>
+            <td colspan="8" class="range-skip-reason">${d.skip_reason}${d.stock_code ? ' (' + d.stock_code + ')' : ''}</td>
             <td class="range-capital">${formatMoney(d.capital)}</td>
         `;
     } else {
@@ -444,6 +445,7 @@ function appendRangeDayRow(d) {
         tr.innerHTML = `
             <td>${d.trade_date}</td>
             <td><span class="stock-code">${d.stock_code}</span> ${d.stock_name}</td>
+            <td>${d.board_name || '-'}</td>
             <td>${d.buy_price.toFixed(2)}</td>
             <td>${d.sell_date || '-'}</td>
             <td>${d.sell_price.toFixed(2)}</td>
