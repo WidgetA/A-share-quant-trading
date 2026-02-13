@@ -1334,14 +1334,10 @@ def create_momentum_router() -> APIRouter:
                     concept_mapper=concept_mapper,
                 )
 
-                # Get trading calendar using a liquid stock
-                trading_days, cal_error = await _get_trading_calendar(
-                    ifind_client, start_date, end_date
-                )
-
+                # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
+                trading_days = _get_trading_calendar_akshare(start_date, end_date)
                 if not trading_days:
-                    msg = cal_error or "所选日期范围内无交易日"
-                    yield sse({"type": "error", "message": msg})
+                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
 
                 if len(trading_days) > 90:
@@ -1706,32 +1702,36 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
     return snapshots
 
 
-async def _get_trading_calendar(ifind_client, start_date, end_date) -> tuple[list, str]:
-    """Get list of trading days by checking a liquid stock's price history.
+def _get_trading_calendar_akshare(start_date, end_date) -> list:
+    """Get trading days via AKShare (tool_trade_date_hist_sina).
 
-    Returns:
-        (trading_days, error_message) - trading_days is empty list on failure,
-        error_message explains why.
+    Returns list of datetime.date in [start_date, end_date).
+    Falls back to weekday generation on failure.
     """
-    from datetime import datetime
+    from datetime import timedelta
 
     try:
-        data = await ifind_client.history_quotes(
-            codes="000001.SZ",
-            indicators="open",
-            start_date=start_date.strftime("%Y-%m-%d"),
-            end_date=end_date.strftime("%Y-%m-%d"),
-        )
-        for table_entry in data.get("tables", []):
-            tbl = table_entry.get("table", {})
-            times = tbl.get("time", [])
-            if not times:
-                return [], "iFinD 返回数据为空（000001.SZ 无报价数据）"
-            return [datetime.strptime(t, "%Y-%m-%d").date() for t in times], ""
-        return [], f"iFinD 返回结构异常: tables 为空 (errorcode={data.get('errorcode')})"
+        import akshare as ak
+
+        df = ak.tool_trade_date_hist_sina()
+        all_dates = set(df["trade_date"].dt.date)
+        days = sorted(d for d in all_dates if start_date <= d < end_date)
+        if days:
+            logger.info(f"AKShare trading calendar: {len(days)} days in [{start_date}, {end_date})")
+            return days
+        logger.warning("AKShare trading calendar returned no dates in range")
     except Exception as e:
-        logger.error(f"Failed to get trading calendar: {e}")
-        return [], f"获取交易日历失败: {e}"
+        logger.warning(f"AKShare trading calendar failed: {e}")
+
+    # Fallback: weekdays
+    logger.warning("Falling back to weekday generation for trading calendar")
+    days = []
+    current = start_date
+    while current < end_date:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
 
 
 async def _fetch_stock_open_prices(
