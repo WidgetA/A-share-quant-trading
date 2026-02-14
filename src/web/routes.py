@@ -1427,7 +1427,9 @@ def create_momentum_router() -> APIRouter:
                             if prices:
                                 buy_price = prices[0][1]
                         except Exception as e:
-                            logger.warning(f"Buy 9:40 price fallback failed for {rec.stock_code}: {e}")
+                            logger.warning(
+                                f"Buy 9:40 fallback failed for {rec.stock_code}: {e}"
+                            )
                     if buy_price <= 0:
                         # Last resort: use open price
                         try:
@@ -1437,7 +1439,9 @@ def create_momentum_router() -> APIRouter:
                             if prices:
                                 buy_price = prices[0][1]
                         except Exception as e:
-                            logger.warning(f"Buy open price fallback failed for {rec.stock_code}: {e}")
+                            logger.warning(
+                                f"Buy open fallback failed for {rec.stock_code}: {e}"
+                            )
 
                     if buy_price <= 0:
                         day_results.append(
@@ -1818,7 +1822,9 @@ async def _fetch_stock_close_prices(ifind_client, stock_code: str, target_date) 
     return [(target_date, float(closes[0]))]
 
 
-async def _fetch_940_prices_batch(ifind_client, stock_codes: list[str], trade_date) -> dict[str, float]:
+async def _fetch_940_prices_batch(
+    ifind_client, stock_codes: list[str], trade_date
+) -> dict[str, float]:
     """Fetch the 9:40 price for a batch of stocks via high_frequency API (1-min bars)."""
     result: dict[str, float] = {}
     batch_size = 50
