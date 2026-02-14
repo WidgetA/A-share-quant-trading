@@ -33,6 +33,7 @@
 # POST /api/momentum/backtest - Run single-day backtest (JSON)
 # POST /api/momentum/range-backtest - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status - Get intraday monitor status (JSON)
+# POST /api/momentum/loss-analysis  - Analyze losing trades with LLM (SSE streaming)
 
 from __future__ import annotations
 
@@ -1571,6 +1572,12 @@ def create_momentum_router() -> APIRouter:
                         "return_pct": round(trade_return_pct, 2),
                         "capital_before": round(capital_before, 2),
                         "capital": round(capital, 2),
+                        "hot_boards": {
+                            name: codes
+                            for name, codes in (
+                                scan_result.hot_boards if scan_result else {}
+                            ).items()
+                        },
                     }
                     day_results.append(day_result)
                     yield sse({"type": "day_result", **day_result})
@@ -1624,7 +1631,461 @@ def create_momentum_router() -> APIRouter:
             },
         )
 
+    @router.post("/api/momentum/loss-analysis")
+    async def run_loss_analysis(request: Request):
+        """Analyze losing trades from range backtest with board trend data and LLM."""
+        import json
+
+        from src.data.clients.ifind_http_client import IFinDHttpClient
+
+        body = await request.json()
+        losing_trades = body.get("losing_trades", [])
+
+        if not losing_trades:
+            raise HTTPException(status_code=400, detail="没有亏损交易数据")
+
+        async def analysis_stream():
+            def sse(data: dict) -> str:
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+            yield sse({"type": "init", "total": len(losing_trades)})
+
+            ifind_client = IFinDHttpClient()
+            try:
+                await ifind_client.start()
+
+                analyses = []
+                for idx, trade in enumerate(losing_trades):
+                    trade_date_str = trade["trade_date"]
+                    board_name = trade.get("board_name", "")
+                    hot_boards = trade.get("hot_boards", {})
+                    trigger_codes = hot_boards.get(board_name, [])
+
+                    yield sse(
+                        {
+                            "type": "progress",
+                            "index": idx,
+                            "total": len(losing_trades),
+                            "stock_code": trade["stock_code"],
+                            "stock_name": trade.get("stock_name", ""),
+                            "message": (
+                                f"正在分析 {trade['stock_code']} {trade.get('stock_name', '')}..."
+                            ),
+                        }
+                    )
+
+                    # Fetch board trend data
+                    board_data = {}
+                    if board_name:
+                        try:
+                            board_data = await _fetch_board_trend(
+                                ifind_client, board_name, trade_date_str
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Board trend fetch failed for"
+                                f" {board_name} on {trade_date_str}: {e}"
+                            )
+
+                    # Fetch individual stock full-day data for context
+                    stock_day_data = {}
+                    try:
+                        stock_day_data = await _fetch_stock_day_trend(
+                            ifind_client, trade["stock_code"], trade_date_str
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Stock day trend fetch failed for {trade['stock_code']}: {e}"
+                        )
+
+                    # Call LLM for per-stock analysis
+                    llm_analysis = ""
+                    try:
+                        llm_analysis = await _call_llm_stock_analysis(
+                            trade, board_data, stock_day_data, trigger_codes
+                        )
+                    except Exception as e:
+                        logger.error(f"LLM analysis failed for {trade['stock_code']}: {e}")
+                        llm_analysis = f"LLM 分析失败: {str(e)[:100]}"
+
+                    analysis_entry = {
+                        "stock_code": trade["stock_code"],
+                        "stock_name": trade.get("stock_name", ""),
+                        "board_name": board_name,
+                        "trade_date": trade_date_str,
+                        "sell_date": trade.get("sell_date", ""),
+                        "buy_price": trade.get("buy_price", 0),
+                        "sell_price": trade.get("sell_price", 0),
+                        "profit": trade.get("profit", 0),
+                        "return_pct": trade.get("return_pct", 0),
+                        "trigger_codes": trigger_codes,
+                        "board_data": board_data,
+                        "stock_day_data": stock_day_data,
+                        "llm_analysis": llm_analysis,
+                    }
+                    analyses.append(analysis_entry)
+
+                    yield sse({"type": "stock_analysis", "index": idx, **analysis_entry})
+
+                # Strategy-level LLM summary
+                yield sse(
+                    {
+                        "type": "progress",
+                        "index": len(losing_trades),
+                        "total": len(losing_trades),
+                        "message": "正在生成策略总结...",
+                    }
+                )
+
+                strategy_summary = ""
+                try:
+                    strategy_summary = await _call_llm_strategy_summary(analyses)
+                except Exception as e:
+                    logger.error(f"LLM strategy summary failed: {e}")
+                    strategy_summary = f"策略总结生成失败: {str(e)[:100]}"
+
+                yield sse({"type": "strategy_summary", "summary": strategy_summary})
+                yield sse({"type": "complete"})
+
+            except Exception as e:
+                logger.error(f"Loss analysis error: {e}", exc_info=True)
+                yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
+            finally:
+                await ifind_client.stop()
+
+        return StreamingResponse(
+            analysis_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     return router
+
+
+async def _fetch_board_trend(ifind_client, board_name: str, trade_date_str: str) -> dict:
+    """Fetch board/concept index intraday trend data for a given date.
+
+    Tries to find the concept board index via iwencai, then fetches
+    intraday high-frequency data. Falls back to history_quotes for
+    open/close if high_frequency fails.
+
+    Returns dict with: open_gain, gain_940, day_gain, max_gain, min_gain
+    """
+    # Try to find board index code via iwencai
+    board_index_code = ""
+    try:
+        result = await ifind_client.smart_stock_picking(f"{board_name} 板块指数代码", "zhishu")
+        tables = result.get("tables", [])
+        if tables:
+            for tw in tables:
+                table = tw.get("table", tw) if isinstance(tw, dict) else {}
+                for col_name, col_data in table.items():
+                    if "代码" in col_name and col_data:
+                        code = str(col_data[0]).strip()
+                        if code:
+                            board_index_code = code
+                            break
+                if board_index_code:
+                    break
+    except Exception as e:
+        logger.warning(f"iwencai board index lookup failed for {board_name}: {e}")
+
+    if not board_index_code:
+        return {"error": "无法获取板块指数代码", "board_name": board_name}
+
+    # Fetch intraday high-frequency data for the board index
+    start_time = f"{trade_date_str} 09:30:00"
+    end_time = f"{trade_date_str} 15:00:00"
+
+    try:
+        hf_data = await ifind_client.high_frequency(
+            codes=board_index_code,
+            indicators="close",
+            start_time=start_time,
+            end_time=end_time,
+            function_para={"Interval": "1"},
+        )
+
+        tables = hf_data.get("tables", [])
+        if not tables:
+            raise ValueError(f"No high_frequency data for {board_index_code}")
+
+        tbl = tables[0].get("table", {})
+        close_vals = tbl.get("close", [])
+
+        if not close_vals:
+            raise ValueError(f"Empty close data for {board_index_code}")
+
+    except Exception as e:
+        logger.warning(f"Board high_frequency failed for {board_index_code}: {e}")
+        # Fallback: use history_quotes for basic open/close data
+        try:
+            hist_data = await ifind_client.history_quotes(
+                codes=board_index_code,
+                indicators="open,close,preClose,high,low",
+                start_date=trade_date_str,
+                end_date=trade_date_str,
+            )
+            tables = hist_data.get("tables", [])
+            if tables:
+                tbl = tables[0].get("table", {})
+                open_p = float(tbl.get("open", [0])[0] or 0)
+                close_p = float(tbl.get("close", [0])[0] or 0)
+                prev_c = float(tbl.get("preClose", [0])[0] or 0)
+                high_p = float(tbl.get("high", [0])[0] or 0)
+                low_p = float(tbl.get("low", [0])[0] or 0)
+                if prev_c > 0:
+                    return {
+                        "board_index_code": board_index_code,
+                        "open_gain": round((open_p / prev_c - 1) * 100, 2),
+                        "gain_940": None,
+                        "day_gain": round((close_p / prev_c - 1) * 100, 2),
+                        "max_gain": round((high_p / prev_c - 1) * 100, 2),
+                        "min_gain": round((low_p / prev_c - 1) * 100, 2),
+                    }
+        except Exception as e2:
+            logger.warning(f"Board history_quotes also failed: {e2}")
+        return {"error": f"板块数据获取失败: {str(e)[:50]}", "board_name": board_name}
+
+    # Get prev_close for the board index
+    prev_close = 0.0
+    try:
+        hist_data = await ifind_client.history_quotes(
+            codes=board_index_code,
+            indicators="preClose,open",
+            start_date=trade_date_str,
+            end_date=trade_date_str,
+        )
+        tables_h = hist_data.get("tables", [])
+        if tables_h:
+            tbl_h = tables_h[0].get("table", {})
+            prev_vals = tbl_h.get("preClose", [])
+            if prev_vals:
+                prev_close = float(prev_vals[0])
+    except Exception:
+        pass
+
+    if prev_close <= 0:
+        return {"error": "无法获取板块前收盘价", "board_index_code": board_index_code}
+
+    # Calculate gains from intraday data
+    prices = [float(v) for v in close_vals if v is not None]
+    if not prices:
+        return {"error": "板块分钟线数据为空"}
+
+    open_price = prices[0]
+    close_price = prices[-1]
+    max_price = max(prices)
+    min_price = min(prices)
+
+    # Find 9:40 price (approximately the 10th minute bar)
+    price_940 = prices[min(9, len(prices) - 1)]
+
+    return {
+        "board_index_code": board_index_code,
+        "open_gain": round((open_price / prev_close - 1) * 100, 2),
+        "gain_940": round((price_940 / prev_close - 1) * 100, 2),
+        "day_gain": round((close_price / prev_close - 1) * 100, 2),
+        "max_gain": round((max_price / prev_close - 1) * 100, 2),
+        "min_gain": round((min_price / prev_close - 1) * 100, 2),
+    }
+
+
+async def _fetch_stock_day_trend(ifind_client, stock_code: str, trade_date_str: str) -> dict:
+    """Fetch individual stock's full-day data: open, high, low, close, prev_close."""
+    suffix = ".SH" if stock_code.startswith("6") else ".SZ"
+    code = f"{stock_code}{suffix}"
+
+    data = await ifind_client.history_quotes(
+        codes=code,
+        indicators="open,high,low,close,preClose",
+        start_date=trade_date_str,
+        end_date=trade_date_str,
+    )
+    tables = data.get("tables", [])
+    if not tables:
+        return {}
+
+    tbl = tables[0].get("table", {})
+    open_p = float(tbl.get("open", [0])[0] or 0)
+    high_p = float(tbl.get("high", [0])[0] or 0)
+    low_p = float(tbl.get("low", [0])[0] or 0)
+    close_p = float(tbl.get("close", [0])[0] or 0)
+    prev_c = float(tbl.get("preClose", [0])[0] or 0)
+
+    if prev_c <= 0:
+        return {"open": open_p, "high": high_p, "low": low_p, "close": close_p}
+
+    return {
+        "open": open_p,
+        "high": high_p,
+        "low": low_p,
+        "close": close_p,
+        "prev_close": prev_c,
+        "open_gain": round((open_p / prev_c - 1) * 100, 2),
+        "day_gain": round((close_p / prev_c - 1) * 100, 2),
+        "max_gain": round((high_p / prev_c - 1) * 100, 2),
+        "min_gain": round((low_p / prev_c - 1) * 100, 2),
+    }
+
+
+async def _call_llm_stock_analysis(
+    trade: dict, board_data: dict, stock_day_data: dict, trigger_codes: list[str]
+) -> str:
+    """Call Silicon Flow LLM to analyze why a specific trade lost money."""
+    import httpx
+
+    from src.common.config import load_secrets
+
+    secrets = load_secrets()
+    api_key = secrets.get_str("siliconflow.api_key", "")
+    if not api_key:
+        return "LLM API key 未配置"
+
+    system_prompt = (
+        "你是一个A股量化交易分析师。请分析以下亏损交易的原因。\n\n"
+        "策略说明：动量板块策略 - 每天早盘寻找开盘涨幅>5%的主板股票，"
+        "找到有>=2只这样股票的【热门概念板块】，"
+        "从这些板块中选出PE合理且9:40仍在上涨的股票，"
+        "推荐业绩增长最高的那只。买入价为9:40价格，次日开盘卖出。"
+    )
+
+    # Build board trend text
+    board_text = "板块走势数据不可用"
+    if board_data and "error" not in board_data:
+        parts = []
+        if board_data.get("open_gain") is not None:
+            parts.append(f"开盘涨幅: {board_data['open_gain']:+.2f}%")
+        if board_data.get("gain_940") is not None:
+            parts.append(f"9:40涨幅: {board_data['gain_940']:+.2f}%")
+        if board_data.get("day_gain") is not None:
+            parts.append(f"全天涨幅: {board_data['day_gain']:+.2f}%")
+        if board_data.get("max_gain") is not None:
+            parts.append(f"盘中最高: {board_data['max_gain']:+.2f}%")
+        if board_data.get("min_gain") is not None:
+            parts.append(f"盘中最低: {board_data['min_gain']:+.2f}%")
+        if parts:
+            board_text = "\n".join(f"- {p}" for p in parts)
+
+    # Build stock day trend text
+    stock_text = ""
+    if stock_day_data and stock_day_data.get("prev_close"):
+        stock_text = (
+            f"\n\n个股当日走势：\n"
+            f"- 开盘涨幅: {stock_day_data.get('open_gain', 0):+.2f}%\n"
+            f"- 全天涨幅: {stock_day_data.get('day_gain', 0):+.2f}%\n"
+            f"- 盘中最高: {stock_day_data.get('max_gain', 0):+.2f}%\n"
+            f"- 盘中最低: {stock_day_data.get('min_gain', 0):+.2f}%"
+        )
+
+    trigger_text = ", ".join(trigger_codes) if trigger_codes else "未知"
+
+    user_prompt = (
+        f"亏损交易信息：\n"
+        f"- 股票：{trade['stock_code']} {trade.get('stock_name', '')}\n"
+        f"- 所属板块：{trade.get('board_name', '')}\n"
+        f"- 买入日期：{trade['trade_date']}，买入价：{trade.get('buy_price', 0)}\n"
+        f"- 卖出日期：{trade.get('sell_date', '')}，卖出价：{trade.get('sell_price', 0)}\n"
+        f"- 亏损：{trade.get('profit', 0):.2f}元（{trade.get('return_pct', 0):+.2f}%）\n"
+        f"- 该板块触发股票（开盘涨幅>5%）：{trigger_text}\n"
+        f"\n板块当日走势：\n{board_text}"
+        f"{stock_text}\n\n"
+        f"请分析这笔交易亏损的可能原因（2-3句话），重点关注：\n"
+        f"1. 板块是否冲高回落？\n"
+        f"2. 个股是否有特殊情况？\n"
+        f"3. 选股逻辑在这个场景下的缺陷？"
+    )
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            "https://api.siliconflow.cn/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "Qwen/Qwen2.5-72B-Instruct",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": 800,
+                "temperature": 0.3,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def _call_llm_strategy_summary(analyses: list[dict]) -> str:
+    """Call Silicon Flow LLM to summarize strategy weaknesses from all losing trades."""
+    import httpx
+
+    from src.common.config import load_secrets
+
+    secrets = load_secrets()
+    api_key = secrets.get_str("siliconflow.api_key", "")
+    if not api_key:
+        return "LLM API key 未配置"
+
+    # Build summary of all analyses
+    trade_summaries = []
+    for a in analyses:
+        board_info = ""
+        bd = a.get("board_data", {})
+        if bd and "error" not in bd:
+            board_info = f"板块全天{bd.get('day_gain', '?')}%(最高{bd.get('max_gain', '?')}%)"
+
+        trade_summaries.append(
+            f"- {a['stock_code']} {a.get('stock_name', '')} | "
+            f"板块:{a.get('board_name', '')} | "
+            f"亏损{a.get('return_pct', 0):+.2f}% | "
+            f"{board_info}\n"
+            f"  分析: {a.get('llm_analysis', '无')[:200]}"
+        )
+
+    system_prompt = (
+        "你是一个A股量化交易策略分析师。请基于以下亏损交易的逐笔分析，"
+        "总结该策略的问题和改进建议。\n\n"
+        "策略说明：动量板块策略 - 每天早盘寻找开盘涨幅>5%的主板股票，"
+        "找到有>=2只这样股票的【热门概念板块】，"
+        "从这些板块中选出PE合理且9:40仍在上涨的股票，"
+        "推荐业绩增长最高的那只。买入价为9:40价格，次日开盘卖出。"
+    )
+
+    user_prompt = (
+        f"回测期间共 {len(analyses)} 笔亏损交易：\n\n"
+        + "\n\n".join(trade_summaries)
+        + "\n\n请总结：\n"
+        "1. 这些亏损交易的共性问题（2-3点）\n"
+        "2. 策略的主要弱点\n"
+        "3. 可能的改进方向（2-3条具体建议）"
+    )
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            "https://api.siliconflow.cn/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "Qwen/Qwen2.5-72B-Instruct",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": 1500,
+                "temperature": 0.3,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
 
 
 async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, trade_date) -> dict:

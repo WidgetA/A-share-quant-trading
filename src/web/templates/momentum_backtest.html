@@ -158,6 +158,32 @@
                     <tbody id="range-table-body"></tbody>
                 </table>
             </div>
+
+            <!-- Loss Analysis Button -->
+            <div id="loss-analysis-trigger" class="loss-analysis-trigger hidden">
+                <button id="loss-analysis-btn" class="btn btn-loss-analysis" onclick="startLossAnalysis()">
+                    亏损分析 (<span id="loss-count">0</span>笔)
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Loss Analysis Results -->
+    <section id="loss-analysis-section" class="momentum-section hidden">
+        <div class="sim-card">
+            <h3>亏损分析</h3>
+
+            <!-- Progress -->
+            <div id="loss-analysis-progress" class="loss-progress hidden">
+                <div class="loading-spinner-sm"></div>
+                <span id="loss-progress-text">正在分析...</span>
+            </div>
+
+            <!-- Per-stock analysis cards -->
+            <div id="loss-analysis-results"></div>
+
+            <!-- Strategy summary -->
+            <div id="loss-analysis-summary" class="hidden"></div>
         </div>
     </section>
 
@@ -175,6 +201,9 @@
 
 {% block scripts %}
 <script>
+// === Range Results Store (for loss analysis) ===
+let rangeResults = [];
+
 // === Tab Switching ===
 document.querySelectorAll('.backtest-tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -327,10 +356,13 @@ document.getElementById('range-form').addEventListener('submit', async (e) => {
     if (initialCapital < 1000) { alert('起始资金不能低于 1000 元'); return; }
 
     // Reset UI
+    rangeResults = [];
     document.getElementById('range-loading').classList.remove('hidden');
     document.getElementById('range-results').classList.add('hidden');
     document.getElementById('range-table-body').innerHTML = '';
     document.getElementById('range-summary').innerHTML = '';
+    document.getElementById('loss-analysis-trigger').classList.add('hidden');
+    document.getElementById('loss-analysis-section').classList.add('hidden');
     document.getElementById('range-btn').disabled = true;
     document.getElementById('range-btn').textContent = '运行中...';
 
@@ -403,23 +435,32 @@ function handleRangeEvent(data) {
             document.getElementById('range-progress-hint').textContent = data.message;
             break;
 
-        case 'progress':
+        case 'progress': {
             document.getElementById('range-progress-text').textContent =
                 `正在处理第 ${data.day} / ${data.total} 天 (${data.trade_date})...`;
             const pct = (data.day / data.total * 100).toFixed(0);
             document.getElementById('range-progress-fill').style.width = pct + '%';
             break;
+        }
 
         case 'day_result':
-            // Show results section
+            // Store result and show results section
+            rangeResults.push(data);
             document.getElementById('range-results').classList.remove('hidden');
             appendRangeDayRow(data);
             break;
 
-        case 'complete':
+        case 'complete': {
             document.getElementById('range-loading').classList.add('hidden');
             renderRangeSummary(data.summary);
+            // Show loss analysis button if there are losing trades
+            const lossTrades = rangeResults.filter(d => d.has_trade && d.profit < 0);
+            if (lossTrades.length > 0) {
+                document.getElementById('loss-count').textContent = lossTrades.length;
+                document.getElementById('loss-analysis-trigger').classList.remove('hidden');
+            }
             break;
+        }
 
         case 'error':
             document.getElementById('range-loading').classList.add('hidden');
@@ -559,5 +600,211 @@ async function refreshMonitorStatus() {
 
 refreshMonitorStatus();
 setInterval(refreshMonitorStatus, 30000);
+
+// === Loss Analysis ===
+async function startLossAnalysis() {
+    const lossTrades = rangeResults.filter(d => d.has_trade && d.profit < 0);
+    if (lossTrades.length === 0) return;
+
+    // Disable button
+    const btn = document.getElementById('loss-analysis-btn');
+    btn.disabled = true;
+    btn.textContent = '分析中...';
+
+    // Show section and progress
+    const section = document.getElementById('loss-analysis-section');
+    section.classList.remove('hidden');
+    document.getElementById('loss-analysis-progress').classList.remove('hidden');
+    document.getElementById('loss-analysis-results').innerHTML = '';
+    document.getElementById('loss-analysis-summary').classList.add('hidden');
+    document.getElementById('loss-analysis-summary').innerHTML = '';
+
+    // Scroll to section
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // Prepare payload
+    const payload = lossTrades.map(t => ({
+        trade_date: t.trade_date,
+        stock_code: t.stock_code,
+        stock_name: t.stock_name,
+        board_name: t.board_name,
+        buy_price: t.buy_price,
+        sell_price: t.sell_price,
+        sell_date: t.sell_date,
+        profit: t.profit,
+        return_pct: t.return_pct,
+        lots: t.lots,
+        hot_boards: t.hot_boards || {},
+    }));
+
+    try {
+        const resp = await fetch('/api/momentum/loss-analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ losing_trades: payload }),
+        });
+
+        if (!resp.ok) {
+            const errData = await resp.json();
+            alert(errData.detail || '分析失败');
+            return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const messages = buffer.split('\n\n');
+            buffer = messages.pop();
+
+            for (const msg of messages) {
+                const trimmed = msg.trim();
+                if (!trimmed.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(trimmed.substring(6));
+                    handleLossAnalysisEvent(data);
+                } catch (e) {}
+            }
+        }
+
+        // Process remaining buffer
+        if (buffer.trim().startsWith('data: ')) {
+            try {
+                const data = JSON.parse(buffer.trim().substring(6));
+                handleLossAnalysisEvent(data);
+            } catch (e) {}
+        }
+    } catch (err) {
+        alert('分析请求失败: ' + err.message);
+    } finally {
+        document.getElementById('loss-analysis-progress').classList.add('hidden');
+        btn.disabled = false;
+        btn.textContent = `亏损分析 (${lossTrades.length}笔)`;
+    }
+}
+
+function handleLossAnalysisEvent(data) {
+    switch (data.type) {
+        case 'init':
+            document.getElementById('loss-progress-text').textContent =
+                `共 ${data.total} 笔亏损交易，开始分析...`;
+            break;
+
+        case 'progress':
+            document.getElementById('loss-progress-text').textContent = data.message;
+            break;
+
+        case 'stock_analysis':
+            appendStockAnalysisCard(data);
+            break;
+
+        case 'strategy_summary':
+            renderStrategySummary(data.summary);
+            break;
+
+        case 'complete':
+            document.getElementById('loss-analysis-progress').classList.add('hidden');
+            break;
+
+        case 'error':
+            document.getElementById('loss-analysis-progress').classList.add('hidden');
+            alert(data.message);
+            break;
+    }
+}
+
+function appendStockAnalysisCard(a) {
+    const container = document.getElementById('loss-analysis-results');
+
+    // Board data display
+    let boardHtml = '<span class="la-no-data">板块数据不可用</span>';
+    const bd = a.board_data;
+    if (bd && !bd.error) {
+        boardHtml = `
+            <div class="la-board-grid">
+                ${bd.open_gain != null ? `<span class="la-board-item">开盘 <strong>${fmtGain(bd.open_gain)}</strong></span>` : ''}
+                ${bd.gain_940 != null ? `<span class="la-board-item">9:40 <strong>${fmtGain(bd.gain_940)}</strong></span>` : ''}
+                ${bd.day_gain != null ? `<span class="la-board-item">全天 <strong>${fmtGain(bd.day_gain)}</strong></span>` : ''}
+                ${bd.max_gain != null ? `<span class="la-board-item">最高 <strong>${fmtGain(bd.max_gain)}</strong></span>` : ''}
+                ${bd.min_gain != null ? `<span class="la-board-item">最低 <strong>${fmtGain(bd.min_gain)}</strong></span>` : ''}
+            </div>
+        `;
+    } else if (bd && bd.error) {
+        boardHtml = `<span class="la-no-data">${bd.error}</span>`;
+    }
+
+    // Stock day data
+    let stockDayHtml = '';
+    const sd = a.stock_day_data;
+    if (sd && sd.prev_close) {
+        stockDayHtml = `
+            <div class="la-stock-day">
+                <span>个股当日：</span>
+                <span>开盘 <strong>${fmtGain(sd.open_gain)}</strong></span>
+                <span>全天 <strong>${fmtGain(sd.day_gain)}</strong></span>
+                <span>最高 <strong>${fmtGain(sd.max_gain)}</strong></span>
+                <span>最低 <strong>${fmtGain(sd.min_gain)}</strong></span>
+            </div>
+        `;
+    }
+
+    // Trigger codes
+    const triggers = (a.trigger_codes || []).join(', ') || '无';
+
+    const card = document.createElement('div');
+    card.className = 'la-card';
+    card.innerHTML = `
+        <div class="la-card-header">
+            <div class="la-stock-info">
+                <span class="stock-code">${a.stock_code}</span>
+                <span class="la-stock-name">${a.stock_name}</span>
+                <span class="la-board-tag">${a.board_name}</span>
+            </div>
+            <div class="la-loss-info">
+                <span class="la-loss-amount">${a.profit >= 0 ? '+' : ''}${a.profit.toFixed(2)}元</span>
+                <span class="la-loss-pct">${a.return_pct >= 0 ? '+' : ''}${a.return_pct.toFixed(2)}%</span>
+            </div>
+        </div>
+        <div class="la-card-meta">
+            <span>买入 ${a.trade_date} @ ${a.buy_price}</span>
+            <span>卖出 ${a.sell_date} @ ${a.sell_price}</span>
+            <span>触发股: ${triggers}</span>
+        </div>
+        <div class="la-section">
+            <div class="la-section-title">板块走势 (${a.board_name})</div>
+            ${boardHtml}
+        </div>
+        ${stockDayHtml}
+        <div class="la-section">
+            <div class="la-section-title">AI 分析</div>
+            <div class="la-llm-text">${a.llm_analysis || '分析中...'}</div>
+        </div>
+    `;
+    container.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function renderStrategySummary(summary) {
+    const el = document.getElementById('loss-analysis-summary');
+    el.classList.remove('hidden');
+    el.innerHTML = `
+        <div class="la-summary">
+            <div class="la-summary-title">策略总结</div>
+            <div class="la-summary-text">${summary.replace(/\n/g, '<br>')}</div>
+        </div>
+    `;
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function fmtGain(val) {
+    if (val == null) return '-';
+    const cls = val > 0 ? 'range-profit-pos' : (val < 0 ? 'range-profit-neg' : '');
+    return `<span class="${cls}">${val >= 0 ? '+' : ''}${val.toFixed(2)}%</span>`;
+}
 </script>
 {% endblock %}
