@@ -42,6 +42,9 @@ from src.strategy.strategies.momentum_sector_scanner import (
     ScanResult,
 )
 
+# Re-use the scanner's 9:40 price fetcher via a standalone helper
+# (The scanner's _fetch_940_prices is an instance method, but the logic is reusable here.)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -178,7 +181,63 @@ async def fetch_main_board_prices_for_date(
             logger.error(f"history_quotes batch failed: {e}")
 
     logger.info(f"Fetched prices for {len(snapshots)} stocks")
+
+    # Fetch 9:40 price to use as latest_price (for gain check and buy price)
+    if snapshots:
+        prices_940 = await _fetch_940_prices(client, list(snapshots.keys()), trade_date)
+        updated = 0
+        for code, price in prices_940.items():
+            if code in snapshots and price > 0:
+                snapshots[code].latest_price = price
+                updated += 1
+        logger.info(f"Updated {updated}/{len(snapshots)} stocks with 9:40 price")
+
     return snapshots
+
+
+async def _fetch_940_prices(
+    client: IFinDHttpClient,
+    stock_codes: list[str],
+    trade_date: date,
+) -> dict[str, float]:
+    """Fetch the 9:40 price for stocks via high_frequency API (1-min bars)."""
+    result: dict[str, float] = {}
+    batch_size = 50
+    start_time = f"{trade_date} 09:30:00"
+    end_time = f"{trade_date} 09:40:00"
+
+    for i in range(0, len(stock_codes), batch_size):
+        batch = stock_codes[i : i + batch_size]
+        codes_str = ",".join(
+            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
+        )
+
+        try:
+            data = await client.high_frequency(
+                codes=codes_str,
+                indicators="close",
+                start_time=start_time,
+                end_time=end_time,
+                function_para={"Interval": "1"},  # 1-minute bars
+            )
+
+            for table_entry in data.get("tables", []):
+                thscode = table_entry.get("thscode", "")
+                bare_code = thscode.split(".")[0] if thscode else ""
+                if not bare_code:
+                    continue
+
+                tbl = table_entry.get("table", {})
+                close_vals = tbl.get("close", [])
+                if close_vals:
+                    last_close = close_vals[-1]
+                    if last_close is not None:
+                        result[bare_code] = float(last_close)
+
+        except IFinDHttpError as e:
+            logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
+
+    return result
 
 
 def print_scan_result(result: ScanResult, trade_date: date) -> None:

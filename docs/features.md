@@ -628,12 +628,12 @@ strategy:
 2. **Reverse Concept Lookup**: For each gainer, find its concept boards via iwencai, filter junk boards
 3. **Hot Board Detection**: Find boards containing ≥2 gainers from step 1
 4. **Board Constituents**: Get ALL stocks in each hot board
-5. **PE Filter**: Select stocks with opening gain >0 AND PE(TTM) within board median PE ±30%
+5. **PE Filter**: Select stocks with 9:40 gain >0 AND PE(TTM) within board median PE ±30%
 6. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (归母净利润同比增长率 via iwencai). Highlighted in UI + Feishu notification
 7. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest): iFinD `history_quotes`
+- Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)
 - Price (live): iFinD `real_time_quotation`
 - Concept boards: iFinD iwencai (`smart_stock_picking`)
 - PE data: `stock_fundamentals` table (external, read-only)
@@ -654,7 +654,7 @@ strategy:
 
 **Range Backtest Details**:
 - Input: start date, end date, initial capital (yuan)
-- Each trading day: run strategy → buy recommended stock at open (~9:45), sell at next day's open
+- Each trading day: run strategy → buy recommended stock at 9:40 price, sell at next day's open
 - Trading costs:
   - **Commission**: 0.3% of trade amount, minimum 5 yuan (both buy and sell)
   - **Transfer fee**: 0.001% (1/100,000) of trade amount (both buy and sell)
@@ -1231,8 +1231,8 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 | PREMARKET_ANALYSIS | 08:30 | Review overnight messages, select signals |
 | MORNING_AUCTION | 09:25 | Execute pending buys, check limit-up |
 | TRADING_HOURS | 09:30-15:00 | Monitor positions, check intraday messages for buying opportunities |
-| MARKET_CLOSE | 15:00 | Day summary, P&L calculation, optional sell at closing price |
-| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions, sell at closing price |
+| MARKET_CLOSE | 15:00 | Day summary, P&L calculation, decide sell/hold for next-day open |
+| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions, sell at next-day opening price |
 | COMPLETED | - | Simulation finished, show results |
 
 **Trading Hours Actions**:

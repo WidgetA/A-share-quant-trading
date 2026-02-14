@@ -357,6 +357,41 @@ class IFinDHttpClient:
 
         return await self._request("real_time_quotation", data)
 
+    async def high_frequency(
+        self,
+        codes: str,
+        indicators: str,
+        start_time: str,
+        end_time: str,
+        function_para: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Fetch high-frequency (intraday) bar data.
+
+        Endpoint: /api/v1/high_frequency
+
+        Args:
+            codes: Comma-separated stock codes (e.g., "600519.SH,000001.SZ")
+            indicators: Comma-separated indicators (e.g., "open,close,volume")
+            start_time: Start time in "YYYY-MM-DD HH:mm:ss" format
+            end_time: End time in "YYYY-MM-DD HH:mm:ss" format
+            function_para: Optional parameters (e.g., {"Interval": "1"} for 1-min bars)
+
+        Returns:
+            API response dict with structure similar to history_quotes.
+        """
+        data: dict[str, Any] = {
+            "codes": codes,
+            "indicators": indicators,
+            "starttime": start_time,
+            "endtime": end_time,
+        }
+
+        if function_para:
+            data["functionpara"] = function_para
+
+        return await self._request("high_frequency", data)
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected with valid token."""

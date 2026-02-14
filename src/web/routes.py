@@ -1414,10 +1414,22 @@ def create_momentum_router() -> APIRouter:
                         await asyncio.sleep(0.05)
                         continue
 
-                    # Fetch buy price (today) and sell price (next trading day)
-                    buy_price = rec.open_price
+                    # Fetch buy price: use 9:40 price (from scan), fallback to open
+                    buy_price = rec.latest_price
                     if buy_price <= 0:
-                        # Fallback: fetch from history_quotes
+                        buy_price = rec.open_price
+                    if buy_price <= 0:
+                        # Fallback: fetch 9:40 price directly
+                        try:
+                            prices = await _fetch_stock_940_price(
+                                ifind_client, rec.stock_code, day
+                            )
+                            if prices:
+                                buy_price = prices[0][1]
+                        except Exception as e:
+                            logger.warning(f"Buy 9:40 price fallback failed for {rec.stock_code}: {e}")
+                    if buy_price <= 0:
+                        # Last resort: use open price
                         try:
                             prices = await _fetch_stock_open_prices(
                                 ifind_client, rec.stock_code, day
@@ -1425,7 +1437,7 @@ def create_momentum_router() -> APIRouter:
                             if prices:
                                 buy_price = prices[0][1]
                         except Exception as e:
-                            logger.warning(f"Buy price fallback failed for {rec.stock_code}: {e}")
+                            logger.warning(f"Buy open price fallback failed for {rec.stock_code}: {e}")
 
                     if buy_price <= 0:
                         day_results.append(
@@ -1442,9 +1454,7 @@ def create_momentum_router() -> APIRouter:
                         await asyncio.sleep(0.05)
                         continue
 
-                    # Fetch next trading day close price for selling
-                    # Use trading calendar to find exact next day (single-day query
-                    # works reliably; range queries return empty from iFinD).
+                    # Fetch next trading day open price for selling (次日开盘卖)
                     sell_price = 0.0
                     sell_date_str = ""
                     sell_fetch_error = ""
@@ -1452,7 +1462,7 @@ def create_momentum_router() -> APIRouter:
                     if i + 1 < len(trading_days):
                         next_day = trading_days[i + 1]
                         try:
-                            sell_prices = await _fetch_stock_close_prices(
+                            sell_prices = await _fetch_stock_open_prices(
                                 ifind_client, rec.stock_code, next_day
                             )
                             if sell_prices:
@@ -1467,12 +1477,12 @@ def create_momentum_router() -> APIRouter:
                         sell_fetch_error = "无下一交易日"
 
                     if sell_price <= 0:
-                        detail = sell_fetch_error or "次日收盘价为0或无数据"
+                        detail = sell_fetch_error or "次日开盘价为0或无数据"
                         day_results.append(
                             {
                                 "trade_date": str(day),
                                 "has_trade": False,
-                                "skip_reason": f"无法获取次日卖出价: {detail}",
+                                "skip_reason": f"无法获取次日开盘卖出价: {detail}",
                                 "stock_code": rec.stock_code,
                                 "stock_name": rec.stock_name,
                                 "capital": round(capital, 2),
@@ -1714,6 +1724,13 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
         except IFinDHttpError as e:
             logger.error(f"history_quotes batch failed: {e}")
 
+    # Fetch 9:40 price to use as latest_price (for gain check and buy price)
+    if snapshots:
+        prices_940 = await _fetch_940_prices_batch(ifind_client, list(snapshots.keys()), trade_date)
+        for code, price in prices_940.items():
+            if code in snapshots and price > 0:
+                snapshots[code].latest_price = price
+
     return snapshots
 
 
@@ -1799,6 +1816,55 @@ async def _fetch_stock_close_prices(ifind_client, stock_code: str, target_date) 
     if not closes:
         raise ValueError(f"No close data for {code} ({date_str}): table={tbl}")
     return [(target_date, float(closes[0]))]
+
+
+async def _fetch_940_prices_batch(ifind_client, stock_codes: list[str], trade_date) -> dict[str, float]:
+    """Fetch the 9:40 price for a batch of stocks via high_frequency API (1-min bars)."""
+    result: dict[str, float] = {}
+    batch_size = 50
+    start_time = f"{trade_date} 09:30:00"
+    end_time = f"{trade_date} 09:40:00"
+
+    for i in range(0, len(stock_codes), batch_size):
+        batch = stock_codes[i : i + batch_size]
+        codes_str = ",".join(
+            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
+        )
+
+        try:
+            data = await ifind_client.high_frequency(
+                codes=codes_str,
+                indicators="close",
+                start_time=start_time,
+                end_time=end_time,
+                function_para={"Interval": "1"},
+            )
+
+            for table_entry in data.get("tables", []):
+                thscode = table_entry.get("thscode", "")
+                bare_code = thscode.split(".")[0] if thscode else ""
+                if not bare_code:
+                    continue
+
+                tbl = table_entry.get("table", {})
+                close_vals = tbl.get("close", [])
+                if close_vals:
+                    last_close = close_vals[-1]
+                    if last_close is not None:
+                        result[bare_code] = float(last_close)
+
+        except Exception as e:
+            logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
+
+    return result
+
+
+async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> list:
+    """Fetch 9:40 price for a single stock. Returns [(date, price)] or empty list."""
+    prices = await _fetch_940_prices_batch(ifind_client, [stock_code], target_date)
+    if stock_code in prices and prices[stock_code] > 0:
+        return [(target_date, prices[stock_code])]
+    return []
 
 
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):

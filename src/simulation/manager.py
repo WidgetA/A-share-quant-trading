@@ -933,22 +933,22 @@ class SimulationManager:
         if not self._position_manager or not self._price_service or not self._clock:
             return
 
-        # First: Execute pending sells from MORNING_CONFIRMATION at closing price
+        # First: Execute pending sells from MORNING_CONFIRMATION at open price
         if self._pending_morning_sells:
             for slot_id in self._pending_morning_sells:
                 slot = self._position_manager.get_slot(slot_id)
                 if slot and slot.holdings:
                     prices = {}
                     for h in slot.holdings:
-                        # Get closing price for sell (次日尾盘卖)
+                        # Get open price for sell (次日开盘卖)
                         daily = await self._price_service.get_daily_data(
                             h.stock_code, self._clock.current_date
                         )
                         if daily:
-                            prices[h.stock_code] = daily.close
+                            prices[h.stock_code] = daily.open
                         elif h.entry_price:
                             prices[h.stock_code] = h.entry_price
-                            self._add_message(f"警告: {h.stock_code} 无法获取收盘价，使用成本价")
+                            self._add_message(f"警告: {h.stock_code} 无法获取开盘价，使用成本价")
 
                     pnl = self._position_manager.release_slot(
                         slot_id, prices, self._clock.current_time

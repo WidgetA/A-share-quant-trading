@@ -15,7 +15,7 @@
 # Step 2: per-stock iwencai "所属同花顺概念" → concept boards (filtered)
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
-# Step 5: constituents with open_gain>0 AND PE within board median ±30%
+# Step 5: constituents with 9:40 gain>0 AND PE within board median ±30%
 # Step 6: recommend — from board with most picks, find highest YoY quarterly revenue growth
 # Step 7: → ScanResult → Feishu notification
 
@@ -84,8 +84,9 @@ class RecommendedStock:
     open_gain_pct: float
     pe_ttm: float
     board_avg_pe: float
-    open_price: float = 0.0  # Raw open price (for range backtest)
-    prev_close: float = 0.0  # Previous close price (for range backtest)
+    open_price: float = 0.0  # Raw open price
+    prev_close: float = 0.0  # Previous close price
+    latest_price: float = 0.0  # 9:40 price (buy price for range backtest)
 
 
 @dataclass
@@ -190,7 +191,7 @@ class MomentumSectorScanner:
         total_constituents = sum(len(v) for v in board_constituents.values())
         logger.info(f"Step 4: {total_constituents} total constituent stocks across hot boards")
 
-        # Step 5: PE filter — open gain > 0 AND PE within board avg ±10%
+        # Step 5: PE filter — 9:40 gain > 0 AND PE within board median ±30%
         selected, all_snapshots = await self._step5_pe_filter(board_constituents, price_snapshots)
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
@@ -292,7 +293,7 @@ class MomentumSectorScanner:
         """
         Step 5: From all constituent stocks, select those with:
         - Main board only (same filter as Step 1)
-        - Opening gain > 0
+        - 9:40 gain > 0 (uses latest_price, which is 9:40 price in backtest)
         - PE(TTM) within board median PE ± 30%
 
         For constituent stocks not in price_snapshots, we need to fetch
@@ -360,8 +361,8 @@ class MomentumSectorScanner:
                 if pe is None or pe <= 0:
                     continue
 
-                # Filter: opening gain > 0
-                if snap.open_gain_pct <= self.OPEN_GAIN_THRESHOLD:
+                # Filter: 9:40 gain > 0 (latest_price = 9:40 price in backtest)
+                if snap.current_gain_pct <= self.OPEN_GAIN_THRESHOLD:
                     continue
 
                 # Filter: PE within board median ± tolerance
@@ -489,6 +490,7 @@ class MomentumSectorScanner:
             board_avg_pe=best_stock.board_avg_pe,
             open_price=snap.open_price if snap else 0.0,
             prev_close=snap.prev_close if snap else 0.0,
+            latest_price=snap.latest_price if snap else 0.0,
         )
 
     async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:
@@ -552,7 +554,7 @@ class MomentumSectorScanner:
     async def _fetch_prices_historical(
         self, stock_codes: list[str], trade_date: date
     ) -> dict[str, PriceSnapshot]:
-        """Fetch prices via history_quotes (backtest mode)."""
+        """Fetch prices via history_quotes + high_frequency 9:40 price (backtest mode)."""
         result: dict[str, PriceSnapshot] = {}
         batch_size = 50
         date_str = trade_date.strftime("%Y-%m-%d")
@@ -588,10 +590,59 @@ class MomentumSectorScanner:
                                 stock_name="",
                                 open_price=open_price,
                                 prev_close=prev_close,
-                                latest_price=open_price,
+                                latest_price=open_price,  # default; overwritten by 9:40 price below
                             )
 
             except Exception as e:
                 logger.error(f"Error fetching historical prices for batch: {e}")
+
+        # Fetch 9:40 price for all stocks that got open/prevClose
+        if result:
+            prices_940 = await self._fetch_940_prices(list(result.keys()), trade_date)
+            for code, price in prices_940.items():
+                if code in result and price > 0:
+                    result[code].latest_price = price
+
+        return result
+
+    async def _fetch_940_prices(
+        self, stock_codes: list[str], trade_date: date
+    ) -> dict[str, float]:
+        """Fetch the 9:40 price for stocks via high_frequency API (1-min bars)."""
+        result: dict[str, float] = {}
+        batch_size = 50
+        # Query 9:39-9:40 to get exactly the 9:40 close
+        start_time = f"{trade_date} 09:30:00"
+        end_time = f"{trade_date} 09:40:00"
+
+        for i in range(0, len(stock_codes), batch_size):
+            batch = stock_codes[i : i + batch_size]
+            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
+
+            try:
+                data = await self._ifind.high_frequency(
+                    codes=codes_str,
+                    indicators="close",
+                    start_time=start_time,
+                    end_time=end_time,
+                    function_para={"Interval": "1"},  # 1-minute bars
+                )
+
+                for table_entry in data.get("tables", []):
+                    thscode = table_entry.get("thscode", "")
+                    bare_code = thscode.split(".")[0] if thscode else ""
+                    if not bare_code:
+                        continue
+
+                    tbl = table_entry.get("table", {})
+                    close_vals = tbl.get("close", [])
+                    # Take the last bar's close (= 9:40 price)
+                    if close_vals:
+                        last_close = close_vals[-1]
+                        if last_close is not None:
+                            result[bare_code] = float(last_close)
+
+            except Exception as e:
+                logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
 
         return result
