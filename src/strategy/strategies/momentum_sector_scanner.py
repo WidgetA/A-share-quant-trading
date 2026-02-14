@@ -605,9 +605,7 @@ class MomentumSectorScanner:
 
         return result
 
-    async def _fetch_940_prices(
-        self, stock_codes: list[str], trade_date: date
-    ) -> dict[str, float]:
+    async def _fetch_940_prices(self, stock_codes: list[str], trade_date: date) -> dict[str, float]:
         """Fetch the 9:40 price for stocks via high_frequency API (1-min bars)."""
         result: dict[str, float] = {}
         batch_size = 50

@@ -208,9 +208,7 @@ async def _fetch_940_prices(
 
     for i in range(0, len(stock_codes), batch_size):
         batch = stock_codes[i : i + batch_size]
-        codes_str = ",".join(
-            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-        )
+        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
         try:
             data = await client.high_frequency(

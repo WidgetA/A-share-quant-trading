@@ -1421,15 +1421,11 @@ def create_momentum_router() -> APIRouter:
                     if buy_price <= 0:
                         # Fallback: fetch 9:40 price directly
                         try:
-                            prices = await _fetch_stock_940_price(
-                                ifind_client, rec.stock_code, day
-                            )
+                            prices = await _fetch_stock_940_price(ifind_client, rec.stock_code, day)
                             if prices:
                                 buy_price = prices[0][1]
                         except Exception as e:
-                            logger.warning(
-                                f"Buy 9:40 fallback failed for {rec.stock_code}: {e}"
-                            )
+                            logger.warning(f"Buy 9:40 fallback failed for {rec.stock_code}: {e}")
                     if buy_price <= 0:
                         # Last resort: use open price
                         try:
@@ -1439,9 +1435,7 @@ def create_momentum_router() -> APIRouter:
                             if prices:
                                 buy_price = prices[0][1]
                         except Exception as e:
-                            logger.warning(
-                                f"Buy open fallback failed for {rec.stock_code}: {e}"
-                            )
+                            logger.warning(f"Buy open fallback failed for {rec.stock_code}: {e}")
 
                     if buy_price <= 0:
                         day_results.append(
@@ -1833,9 +1827,7 @@ async def _fetch_940_prices_batch(
 
     for i in range(0, len(stock_codes), batch_size):
         batch = stock_codes[i : i + batch_size]
-        codes_str = ",".join(
-            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-        )
+        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
         try:
             data = await ifind_client.high_frequency(
