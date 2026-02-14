@@ -1932,16 +1932,30 @@ async def _fetch_stock_day_trend(ifind_client, stock_code: str, trade_date_str: 
     }
 
 
+def _get_llm_api_key() -> str:
+    """Get Silicon Flow API key from env var (Docker) or secrets.yaml (local)."""
+    import os
+
+    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
+    if api_key:
+        return api_key
+
+    try:
+        from src.common.config import load_secrets
+
+        secrets = load_secrets()
+        return secrets.get_str("siliconflow.api_key", "")
+    except Exception:
+        return ""
+
+
 async def _call_llm_stock_analysis(
     trade: dict, board_data: dict, stock_day_data: dict, trigger_codes: list[str]
 ) -> str:
     """Call Silicon Flow LLM to analyze why a specific trade lost money."""
     import httpx
 
-    from src.common.config import load_secrets
-
-    secrets = load_secrets()
-    api_key = secrets.get_str("siliconflow.api_key", "")
+    api_key = _get_llm_api_key()
     if not api_key:
         return "LLM API key 未配置"
 
@@ -2025,10 +2039,7 @@ async def _call_llm_strategy_summary(analyses: list[dict]) -> str:
     """Call Silicon Flow LLM to summarize strategy weaknesses from all losing trades."""
     import httpx
 
-    from src.common.config import load_secrets
-
-    secrets = load_secrets()
-    api_key = secrets.get_str("siliconflow.api_key", "")
+    api_key = _get_llm_api_key()
     if not api_key:
         return "LLM API key 未配置"
 
