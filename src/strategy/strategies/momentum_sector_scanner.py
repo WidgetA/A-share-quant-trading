@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Core momentum sector scanning strategy.
-# Identifies "hot" concept boards by finding stocks with >5% gain,
+# Identifies "hot" concept boards by finding stocks with 9:40 gain from open >0.56%,
 # then selects PE-reasonable stocks from those boards.
 
 # === DEPENDENCIES ===
@@ -11,11 +11,12 @@
 # - board_filter: Junk board filtering
 
 # === DATA FLOW ===
-# Step 1: iwencai "涨幅>5%主板非ST" → initial gainers
+# Pre-filter: iwencai "涨幅>-0.5%主板非ST" → broad candidate pool
+# Step 1: 9:40 gain from open > 0.56% → initial gainers
 # Step 2: per-stock iwencai "所属同花顺概念" → concept boards (filtered)
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
-# Step 5: constituents with 9:40 gain>0 AND PE within board median ±30%
+# Step 5: constituents with 9:40 gain from open > 0.56% AND PE within board median ±30%
 # Step 6: recommend — from board with most picks, find highest YoY quarterly revenue growth
 # Step 7: → ScanResult → Feishu notification
 
@@ -58,6 +59,13 @@ class PriceSnapshot:
         if self.prev_close == 0:
             return 0.0
         return (self.latest_price - self.prev_close) / self.prev_close * 100
+
+    @property
+    def gain_from_open_pct(self) -> float:
+        """Gain from open price: (latest - open) / open * 100."""
+        if self.open_price == 0:
+            return 0.0
+        return (self.latest_price - self.open_price) / self.open_price * 100
 
 
 @dataclass
@@ -114,8 +122,10 @@ class MomentumSectorScanner:
     """
     Momentum sector scanning strategy.
 
-    Identifies concept boards with multiple momentum stocks (>5% gain),
-    then selects PE-reasonable constituents from those boards.
+    Pre-filter: stocks with opening gain > -0.5% (broad pool).
+    Step 1: keep stocks where 9:40 gain from open > 0.56%.
+    Then identifies concept boards with multiple such stocks,
+    and selects PE-reasonable constituents from those boards.
 
     This class contains the core strategy logic shared by both
     backtest and live intraday alert modes.
@@ -126,9 +136,8 @@ class MomentumSectorScanner:
     """
 
     # Strategy parameters
-    INITIAL_GAIN_THRESHOLD = 5.0  # Step 1: minimum gain % for initial scan
+    GAIN_FROM_OPEN_THRESHOLD = 0.56  # Step 1 & 5: minimum (9:40 - open) / open %
     MIN_STOCKS_PER_BOARD = 2  # Step 3: minimum gainers to qualify a hot board
-    OPEN_GAIN_THRESHOLD = 0.0  # Step 5: minimum opening gain %
     PE_TOLERANCE = 0.30  # Step 5: ±30% of board median PE
 
     def __init__(
@@ -164,10 +173,13 @@ class MomentumSectorScanner:
         self._trade_date = trade_date
         result = ScanResult(scan_time=datetime.now())
 
-        # Step 1: Filter initial gainers (>5%, main board, non-ST)
+        # Step 1: Filter initial gainers (9:40 vs open > 0.56%, main board, non-ST)
         gainers = await self._step1_filter_gainers(price_snapshots)
         result.initial_gainers = list(gainers.keys())
-        logger.info(f"Step 1: {len(gainers)} stocks with >{self.INITIAL_GAIN_THRESHOLD}% gain")
+        logger.info(
+            f"Step 1: {len(gainers)} stocks with gain from open "
+            f">{self.GAIN_FROM_OPEN_THRESHOLD}%"
+        )
 
         if not gainers:
             logger.info("No gainers found, scan complete")
@@ -191,7 +203,7 @@ class MomentumSectorScanner:
         total_constituents = sum(len(v) for v in board_constituents.values())
         logger.info(f"Step 4: {total_constituents} total constituent stocks across hot boards")
 
-        # Step 5: PE filter — 9:40 gain > 0 AND PE within board median ±30%
+        # Step 5: PE filter — 9:40 vs open > 0.56% AND PE within board median ±30%
         selected, all_snapshots = await self._step5_pe_filter(board_constituents, price_snapshots)
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
@@ -217,16 +229,16 @@ class MomentumSectorScanner:
         self, price_snapshots: dict[str, PriceSnapshot]
     ) -> dict[str, PriceSnapshot]:
         """
-        Step 1: Find stocks with gain > threshold, main board, non-ST.
+        Step 1: Find stocks with 9:40 gain from open > threshold, main board, non-ST.
 
         When price_snapshots is provided (from iwencai or pre-built),
         we just apply main board + ST filters on top.
         """
-        # Filter by gain threshold
+        # Filter by gain-from-open threshold (9:40 price vs open price)
         candidates = {
             code: snap
             for code, snap in price_snapshots.items()
-            if snap.current_gain_pct >= self.INITIAL_GAIN_THRESHOLD
+            if snap.gain_from_open_pct >= self.GAIN_FROM_OPEN_THRESHOLD
         }
 
         if not candidates:
@@ -293,7 +305,7 @@ class MomentumSectorScanner:
         """
         Step 5: From all constituent stocks, select those with:
         - Main board only (same filter as Step 1)
-        - 9:40 gain > 0 (uses latest_price, which is 9:40 price in backtest)
+        - 9:40 gain from open > 0.56% (uses latest_price, which is 9:40 price in backtest)
         - PE(TTM) within board median PE ± 30%
 
         For constituent stocks not in price_snapshots, we need to fetch
@@ -361,8 +373,8 @@ class MomentumSectorScanner:
                 if pe is None or pe <= 0:
                     continue
 
-                # Filter: 9:40 gain > 0 (latest_price = 9:40 price in backtest)
-                if snap.current_gain_pct <= self.OPEN_GAIN_THRESHOLD:
+                # Filter: 9:40 gain from open > 0.56%
+                if snap.gain_from_open_pct < self.GAIN_FROM_OPEN_THRESHOLD:
                     continue
 
                 # Filter: PE within board median ± tolerance

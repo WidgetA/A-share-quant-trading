@@ -3,8 +3,8 @@
 """
 盘中动量板块策略实时监控。
 
-9:30 开始每30秒轮询，追踪涨幅超过5%的沪深主板非ST股票。
-9:40 时运行完整策略流程，选股后飞书通知。
+9:30 开始每30秒轮询，追踪涨幅>-0.5%的沪深主板非ST股票（宽进）。
+9:40 时运行完整策略流程（9:40 vs 开盘 > 0.56%），选股后飞书通知。
 
 用法：
     uv run python scripts/intraday_momentum_alert.py
@@ -58,16 +58,17 @@ async def poll_realtime_gainers(
     client: IFinDHttpClient,
 ) -> dict[str, PriceSnapshot]:
     """
-    Poll real-time quotes to find stocks with >5% gain.
+    Poll real-time quotes to find stocks with gain > -0.5% (relaxed pre-filter).
 
-    Uses iwencai: "涨幅大于5%的沪深主板非ST股票"
-    Then fetches open + preClose via real_time_quotation for full data.
+    Uses iwencai: "涨幅大于-0.5%的沪深主板非ST股票"
+    Then fetches open + preClose + latest via real_time_quotation for full data.
+    The scanner's Step 1 will apply the 9:40 gain-from-open > 0.56% filter.
 
     Returns:
         Dict of stock_code → PriceSnapshot.
     """
     try:
-        result = await client.smart_stock_picking("涨幅大于5%的沪深主板非ST股票", "stock")
+        result = await client.smart_stock_picking("涨幅大于-0.5%的沪深主板非ST股票", "stock")
     except IFinDHttpError as e:
         logger.error(f"iwencai realtime query failed: {e}")
         return {}
@@ -196,7 +197,7 @@ async def monitor(
 
     1. Wait for start_time (or skip if no_wait)
     2. Poll every POLL_INTERVAL_SECONDS until end_time
-    3. Accumulate all >5% gainers seen during the window
+    3. Accumulate all pre-filtered stocks seen during the window
     4. At end_time, run full strategy scan
     5. Send Feishu notification
     """
@@ -232,7 +233,7 @@ async def monitor(
             logger.info(f"Poll #{poll_count} at {now.strftime('%H:%M:%S')}")
 
             snapshots = await poll_realtime_gainers(ifind_client)
-            logger.info(f"  Found {len(snapshots)} stocks with >5% gain")
+            logger.info(f"  Found {len(snapshots)} stocks (pre-filter: gain >-0.5%)")
 
             # Accumulate (update with latest prices)
             accumulated.update(snapshots)
@@ -262,7 +263,7 @@ async def monitor(
         print(f"  动量板块策略选股结果 — {scan_time.strftime('%Y-%m-%d %H:%M')}")
         print(f"{'=' * 70}")
         print(f"  轮询次数: {poll_count}")
-        print(f"  累计涨幅>5%: {len(accumulated)} 只")
+        print(f"  预筛入池: {len(accumulated)} 只")
         print(f"  初筛通过: {len(result.initial_gainers)} 只")
         print(f"  热门板块: {len(result.hot_boards)} 个")
         print(f"  最终选股: {len(result.selected_stocks)} 只")

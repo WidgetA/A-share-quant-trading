@@ -4,11 +4,11 @@
 回测动量板块策略。
 
 策略逻辑：
-1. 找到当日开盘涨幅 >5% 的沪深主板非ST股票
-2. 反查这些股票的概念板块（过滤垃圾板块）
-3. 找到包含 ≥2 只涨幅股的"热门板块"
+1. 预筛：开盘涨幅 > -0.5% 的沪深主板非ST股票（宽进）
+2. 9:40 筛选：(9:40价 - 开盘价) / 开盘价 > 0.56% 的股票
+3. 反查概念板块，找到 ≥2 只入选股的"热门板块"
 4. 拉取热门板块全部成分股
-5. 筛选：开盘涨幅 >0 且 PE(TTM) 在板块中位数 ±30%
+5. 成分股筛选：9:40 vs 开盘 > 0.56% 且 PE(TTM) 在板块中位数 ±30%
 
 用法：
     uv run python scripts/backtest_momentum.py --date 2026-02-10
@@ -57,10 +57,10 @@ async def fetch_main_board_prices_for_date(
     trade_date: date,
 ) -> dict[str, PriceSnapshot]:
     """
-    Fetch open + prev_close for all main board stocks on a given date.
+    Fetch open + prev_close for main board stocks on a given date.
 
-    Uses iwencai to get stocks with opening gain >5% directly,
-    rather than querying all ~3000 main board stocks.
+    Uses iwencai to get stocks with opening gain > -0.5% (relaxed pre-filter),
+    then the scanner's Step 1 applies the 9:40 gain-from-open filter.
 
     Args:
         client: iFinD HTTP client.
@@ -70,7 +70,7 @@ async def fetch_main_board_prices_for_date(
         Dict of stock_code → PriceSnapshot for stocks meeting initial gain criteria.
     """
     date_str = trade_date.strftime("%Y%m%d")
-    query = f"{date_str}开盘涨幅大于5%的沪深主板非ST股票"
+    query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
     logger.info(f"iwencai query: {query}")
 
     try:
@@ -243,7 +243,7 @@ def print_scan_result(result: ScanResult, trade_date: date) -> None:
     print(f"\n{'=' * 70}")
     print(f"  动量板块策略回测结果 — {trade_date}")
     print(f"{'=' * 70}")
-    print(f"  初筛: {len(result.initial_gainers)} 只涨幅>5%")
+    print(f"  初筛: {len(result.initial_gainers)} 只(9:40 vs 开盘 >0.56%)")
     print(f"  热门板块: {len(result.hot_boards)} 个")
     print(f"  最终选股: {len(result.selected_stocks)} 只")
     print(f"{'=' * 70}")

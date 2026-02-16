@@ -1169,9 +1169,9 @@ def create_momentum_router() -> APIRouter:
                 concept_mapper=concept_mapper,
             )
 
-            # Step 1: Use iwencai to get >5% gainers
+            # Step 1: Use iwencai to get pre-filter candidates (gain > -0.5%)
             date_str = trade_date.strftime("%Y%m%d")
-            query = f"{date_str}开盘涨幅大于5%的沪深主板非ST股票"
+            query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
             logger.info(f"Momentum backtest iwencai query: {query}")
 
             try:
@@ -1961,9 +1961,10 @@ async def _call_llm_stock_analysis(
 
     system_prompt = (
         "你是一个A股量化交易分析师。请分析以下亏损交易的原因。\n\n"
-        "策略说明：动量板块策略 - 每天早盘寻找开盘涨幅>5%的主板股票，"
+        "策略说明：动量板块策略 - 预筛开盘涨幅>-0.5%的主板股票，"
+        "9:40时筛选对比开盘涨幅>0.56%的股票，"
         "找到有>=2只这样股票的【热门概念板块】，"
-        "从这些板块中选出PE合理且9:40仍在上涨的股票，"
+        "从这些板块中选出PE合理且9:40 vs开盘>0.56%的股票，"
         "推荐业绩增长最高的那只。买入价为9:40价格，次日开盘卖出。"
     )
 
@@ -2004,7 +2005,7 @@ async def _call_llm_stock_analysis(
         f"- 买入日期：{trade['trade_date']}，买入价：{trade.get('buy_price', 0)}\n"
         f"- 卖出日期：{trade.get('sell_date', '')}，卖出价：{trade.get('sell_price', 0)}\n"
         f"- 亏损：{trade.get('profit', 0):.2f}元（{trade.get('return_pct', 0):+.2f}%）\n"
-        f"- 该板块触发股票（开盘涨幅>5%）：{trigger_text}\n"
+        f"- 该板块触发股票（9:40 vs 开盘>0.56%）：{trigger_text}\n"
         f"\n板块当日走势：\n{board_text}"
         f"{stock_text}\n\n"
         f"请分析这笔交易亏损的可能原因（2-3句话），重点关注：\n"
@@ -2062,9 +2063,10 @@ async def _call_llm_strategy_summary(analyses: list[dict]) -> str:
     system_prompt = (
         "你是一个A股量化交易策略分析师。请基于以下亏损交易的逐笔分析，"
         "总结该策略的问题和改进建议。\n\n"
-        "策略说明：动量板块策略 - 每天早盘寻找开盘涨幅>5%的主板股票，"
+        "策略说明：动量板块策略 - 预筛开盘涨幅>-0.5%的主板股票，"
+        "9:40时筛选对比开盘涨幅>0.56%的股票，"
         "找到有>=2只这样股票的【热门概念板块】，"
-        "从这些板块中选出PE合理且9:40仍在上涨的股票，"
+        "从这些板块中选出PE合理且9:40 vs开盘>0.56%的股票，"
         "推荐业绩增长最高的那只。买入价为9:40价格，次日开盘卖出。"
     )
 
@@ -2342,7 +2344,7 @@ async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
     from src.data.clients.ifind_http_client import IFinDHttpError
 
     date_str = trade_date.strftime("%Y%m%d")
-    query = f"{date_str}开盘涨幅大于5%的沪深主板非ST股票"
+    query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
 
     try:
         iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
@@ -2364,8 +2366,8 @@ async def _run_intraday_monitor(state: dict) -> None:
     """
     Background task: intraday momentum monitor.
 
-    Runs every trading day 9:30-9:40, polls for >5% gainers,
-    then runs the full strategy scan and sends Feishu notification.
+    Runs every trading day 9:30-9:40, polls for stocks with gain > -0.5%,
+    then runs the full strategy scan (9:40 vs open >0.56%) and sends Feishu notification.
     """
     import asyncio
     from datetime import datetime, time, timedelta
@@ -2441,12 +2443,12 @@ async def _run_intraday_monitor(state: dict) -> None:
 
                     try:
                         result = await ifind_client.smart_stock_picking(
-                            "涨幅大于5%的沪深主板非ST股票", "stock"
+                            "涨幅大于-0.5%的沪深主板非ST股票", "stock"
                         )
                         snapshots = await _parse_iwencai_realtime(ifind_client, result)
                         accumulated.update(snapshots)
                         logger.info(
-                            f"Poll #{poll_count}: {len(snapshots)} >5% stocks "
+                            f"Poll #{poll_count}: {len(snapshots)} pre-filtered stocks "
                             f"(accumulated: {len(accumulated)})"
                         )
                     except Exception as e:
@@ -2516,7 +2518,7 @@ async def _run_intraday_monitor(state: dict) -> None:
                         f"Monitor scan complete: {len(scan_result.selected_stocks)} stocks selected"
                     )
                 else:
-                    logger.info("Monitor: no >5% gainers found during window")
+                    logger.info("Monitor: no pre-filtered stocks found during window")
 
             finally:
                 await fundamentals_db.close()

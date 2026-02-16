@@ -621,16 +621,17 @@ strategy:
 
 **Status**: In Progress
 
-**Description**: Identifies "hot" concept boards by finding main board stocks with >5% gain, then selects PE-reasonable stocks from those boards.
+**Description**: Identifies "hot" concept boards by finding stocks with momentum after open, then selects PE-reasonable stocks from those boards.
 
 **Strategy Flow**:
-1. **Initial Scan (9:30-9:40)**: Track stocks with gain >5%, main board only (600/601/603/605/000/001), non-ST
-2. **Reverse Concept Lookup**: For each gainer, find its concept boards via iwencai, filter junk boards
-3. **Hot Board Detection**: Find boards containing ≥2 gainers from step 1
-4. **Board Constituents**: Get ALL stocks in each hot board
-5. **PE Filter**: Select stocks with 9:40 gain >0 AND PE(TTM) within board median PE ±30%
-6. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (归母净利润同比增长率 via iwencai). Highlighted in UI + Feishu notification
-7. **Notification**: Send selection + recommendation via Feishu
+1. **Pre-filter (iwencai)**: Get main board non-ST stocks with opening gain > -0.5% (broad candidate pool)
+2. **9:40 Filter**: Keep stocks where (9:40 price - open) / open > 0.56%
+3. **Reverse Concept Lookup**: For each qualified stock, find its concept boards via iwencai, filter junk boards
+4. **Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 2
+5. **Board Constituents**: Get ALL stocks in each hot board
+6. **PE Filter**: Select constituents with 9:40 gain from open >0.56% AND PE(TTM) within board median PE ±30%
+7. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (同比季度收入增长率 via iwencai). Highlighted in UI + Feishu notification
+8. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
 - Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)

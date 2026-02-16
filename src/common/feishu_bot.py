@@ -293,7 +293,7 @@ Limit-up (skipped):
 
         lines = [
             f"📊 动量板块策略选股 ({time_str})",
-            f"初筛: {initial_gainer_count}只涨幅>5% | 热门板块: {len(hot_boards)}个",
+            f"初筛: {initial_gainer_count}只(9:40 vs 开盘>0.56%) | 热门板块: {len(hot_boards)}个",
             "",
         ]
 
