@@ -177,8 +177,7 @@ class MomentumSectorScanner:
         gainers = await self._step1_filter_gainers(price_snapshots)
         result.initial_gainers = list(gainers.keys())
         logger.info(
-            f"Step 1: {len(gainers)} stocks with gain from open "
-            f">{self.GAIN_FROM_OPEN_THRESHOLD}%"
+            f"Step 1: {len(gainers)} stocks with gain from open >{self.GAIN_FROM_OPEN_THRESHOLD}%"
         )
 
         if not gainers:
