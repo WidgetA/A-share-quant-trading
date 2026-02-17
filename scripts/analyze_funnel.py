@@ -244,9 +244,7 @@ async def run_single_date(
             sorted_pe = sorted(board_pe_values)
             n = len(sorted_pe)
             board_median_pe = (
-                sorted_pe[n // 2]
-                if n % 2
-                else (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
+                sorted_pe[n // 2] if n % 2 else (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
             )
             pe_lower = board_median_pe * (1 - MomentumSectorScanner.PE_TOLERANCE)
             pe_upper = board_median_pe * (1 + MomentumSectorScanner.PE_TOLERANCE)
@@ -342,9 +340,7 @@ async def run_single_date(
         return None
 
     # Fetch T+1 close prices
-    next_close_prices = await fetch_next_day_close(
-        ifind_client, list(all_codes), next_trade_date
-    )
+    next_close_prices = await fetch_next_day_close(ifind_client, list(all_codes), next_trade_date)
     logger.info(f"Fetched T+1 close for {len(next_close_prices)}/{len(all_codes)} stocks")
 
     # Calculate returns for each layer

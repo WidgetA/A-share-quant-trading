@@ -1849,20 +1849,23 @@ def create_momentum_router() -> APIRouter:
 
                 if len(days_in_range) > 60:
                     days_in_range = days_in_range[:60]
-                    yield sse({
-                        "type": "warning",
-                        "message": (
-                            f"已截断至前 60 个交易日"
-                            f" ({days_in_range[0]} ~ {days_in_range[-1]})"
-                        ),
-                    })
+                    yield sse(
+                        {
+                            "type": "warning",
+                            "message": (
+                                f"已截断至前 60 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})"
+                            ),
+                        }
+                    )
 
-                yield sse({
-                    "type": "init",
-                    "total_days": len(days_in_range),
-                    "start_date": str(days_in_range[0]),
-                    "end_date": str(days_in_range[-1]),
-                })
+                yield sse(
+                    {
+                        "type": "init",
+                        "total_days": len(days_in_range),
+                        "start_date": str(days_in_range[0]),
+                        "end_date": str(days_in_range[-1]),
+                    }
+                )
 
                 concept_mapper = ConceptMapper(ifind_client)
                 stock_filter = create_main_board_only_filter()
@@ -1877,12 +1880,14 @@ def create_momentum_router() -> APIRouter:
                     if not next_trade_date:
                         continue
 
-                    yield sse({
-                        "type": "progress",
-                        "day": day_idx + 1,
-                        "total": len(days_in_range),
-                        "trade_date": str(trade_date),
-                    })
+                    yield sse(
+                        {
+                            "type": "progress",
+                            "day": day_idx + 1,
+                            "total": len(days_in_range),
+                            "trade_date": str(trade_date),
+                        }
+                    )
 
                     try:
                         # Fetch price data
@@ -1890,11 +1895,13 @@ def create_momentum_router() -> APIRouter:
                             ifind_client, trade_date
                         )
                         if not price_snapshots:
-                            yield sse({
-                                "type": "day_skip",
-                                "trade_date": str(trade_date),
-                                "reason": "无价格数据",
-                            })
+                            yield sse(
+                                {
+                                    "type": "day_skip",
+                                    "trade_date": str(trade_date),
+                                    "reason": "无价格数据",
+                                }
+                            )
                             await asyncio.sleep(0.05)
                             continue
 
@@ -1911,22 +1918,26 @@ def create_momentum_router() -> APIRouter:
 
                         gainers = await scanner._step1_filter_gainers(price_snapshots)
                         if not gainers:
-                            yield sse({
-                                "type": "day_skip",
-                                "trade_date": str(trade_date),
-                                "reason": "无初筛股",
-                            })
+                            yield sse(
+                                {
+                                    "type": "day_skip",
+                                    "trade_date": str(trade_date),
+                                    "reason": "无初筛股",
+                                }
+                            )
                             await asyncio.sleep(0.05)
                             continue
 
                         stock_boards = await scanner._step2_reverse_lookup(list(gainers.keys()))
                         hot_boards = scanner._step3_find_hot_boards(stock_boards)
                         if not hot_boards:
-                            yield sse({
-                                "type": "day_skip",
-                                "trade_date": str(trade_date),
-                                "reason": "无热门板块",
-                            })
+                            yield sse(
+                                {
+                                    "type": "day_skip",
+                                    "trade_date": str(trade_date),
+                                    "reason": "无热门板块",
+                                }
+                            )
                             await asyncio.sleep(0.05)
                             continue
 
@@ -1938,20 +1949,14 @@ def create_momentum_router() -> APIRouter:
                         all_constituent_codes: set[str] = set()
                         filtered_bc: dict[str, list[tuple[str, str]]] = {}
                         for bn, stocks in board_constituents.items():
-                            allowed = [
-                                (c, n) for c, n in stocks if stock_filter.is_allowed(c)
-                            ]
+                            allowed = [(c, n) for c, n in stocks if stock_filter.is_allowed(c)]
                             filtered_bc[bn] = allowed
                             for c, _ in allowed:
                                 all_constituent_codes.add(c)
 
-                        pe_data = await fundamentals_db.batch_get_pe(
-                            list(all_constituent_codes)
-                        )
+                        pe_data = await fundamentals_db.batch_get_pe(list(all_constituent_codes))
 
-                        missing = [
-                            c for c in all_constituent_codes if c not in price_snapshots
-                        ]
+                        missing = [c for c in all_constituent_codes if c not in price_snapshots]
                         if missing:
                             extra = await scanner._fetch_constituent_prices(missing)
                             price_snapshots = {**price_snapshots, **extra}
@@ -1963,9 +1968,7 @@ def create_momentum_router() -> APIRouter:
 
                         for bn, stocks in filtered_bc.items():
                             bpe = [
-                                pe_data[c]
-                                for c, _ in stocks
-                                if pe_data.get(c) and pe_data[c] > 0
+                                pe_data[c] for c, _ in stocks if pe_data.get(c) and pe_data[c] > 0
                             ]
                             if bpe:
                                 sp = sorted(bpe)
@@ -2016,9 +2019,7 @@ def create_momentum_router() -> APIRouter:
                         # L3: gap-fade filter
                         fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
                         if body.fade_filter and l2:
-                            l3, _ = await fade_filter.filter_stocks(
-                                l2, price_snapshots, trade_date
-                            )
+                            l3, _ = await fade_filter.filter_stocks(l2, price_snapshots, trade_date)
                         else:
                             l3 = list(l2)
 
@@ -2027,14 +2028,16 @@ def create_momentum_router() -> APIRouter:
                         if l3:
                             rec = await scanner._step6_recommend(l3, price_snapshots)
                             if rec:
-                                l4 = [SelectedStock(
-                                    stock_code=rec.stock_code,
-                                    stock_name=rec.stock_name,
-                                    board_name=rec.board_name,
-                                    open_gain_pct=rec.open_gain_pct,
-                                    pe_ttm=rec.pe_ttm,
-                                    board_avg_pe=rec.board_avg_pe,
-                                )]
+                                l4 = [
+                                    SelectedStock(
+                                        stock_code=rec.stock_code,
+                                        stock_name=rec.stock_name,
+                                        board_name=rec.board_name,
+                                        open_gain_pct=rec.open_gain_pct,
+                                        pe_ttm=rec.pe_ttm,
+                                        board_avg_pe=rec.board_avg_pe,
+                                    )
+                                ]
 
                         all_layers = [l0, l1, l2, l3, l4]
 
@@ -2045,11 +2048,13 @@ def create_momentum_router() -> APIRouter:
                                 all_codes.add(s.stock_code)
 
                         if not all_codes:
-                            yield sse({
-                                "type": "day_skip",
-                                "trade_date": str(trade_date),
-                                "reason": "成分股无价格",
-                            })
+                            yield sse(
+                                {
+                                    "type": "day_skip",
+                                    "trade_date": str(trade_date),
+                                    "reason": "成分股无价格",
+                                }
+                            )
                             await asyncio.sleep(0.05)
                             continue
 
@@ -2088,20 +2093,24 @@ def create_momentum_router() -> APIRouter:
                             }
 
                         days_processed += 1
-                        yield sse({
-                            "type": "day_result",
-                            "trade_date": str(trade_date),
-                            "layers": day_layers,
-                        })
+                        yield sse(
+                            {
+                                "type": "day_result",
+                                "trade_date": str(trade_date),
+                                "layers": day_layers,
+                            }
+                        )
                         await asyncio.sleep(0.05)
 
                     except Exception as e:
                         logger.error(f"Funnel analysis error on {trade_date}: {e}", exc_info=True)
-                        yield sse({
-                            "type": "day_skip",
-                            "trade_date": str(trade_date),
-                            "reason": f"出错: {str(e)[:60]}",
-                        })
+                        yield sse(
+                            {
+                                "type": "day_skip",
+                                "trade_date": str(trade_date),
+                                "reason": f"出错: {str(e)[:60]}",
+                            }
+                        )
                         await asyncio.sleep(0.05)
                         continue
 
@@ -2149,20 +2158,24 @@ def create_momentum_router() -> APIRouter:
                             verdict = "neutral"
                     else:
                         verdict = "no_data"
-                    conclusions.append({
-                        "filter": label,
-                        "prev_return": round(prev_r, 2),
-                        "curr_return": round(curr_r, 2),
-                        "diff": round(diff, 2),
-                        "verdict": verdict,
-                    })
+                    conclusions.append(
+                        {
+                            "filter": label,
+                            "prev_return": round(prev_r, 2),
+                            "curr_return": round(curr_r, 2),
+                            "diff": round(diff, 2),
+                            "verdict": verdict,
+                        }
+                    )
 
-                yield sse({
-                    "type": "complete",
-                    "days_processed": days_processed,
-                    "summary": summary_layers,
-                    "conclusions": conclusions,
-                })
+                yield sse(
+                    {
+                        "type": "complete",
+                        "days_processed": days_processed,
+                        "summary": summary_layers,
+                        "conclusions": conclusions,
+                    }
+                )
 
             except Exception as e:
                 logger.error(f"Funnel analysis error: {e}", exc_info=True)
