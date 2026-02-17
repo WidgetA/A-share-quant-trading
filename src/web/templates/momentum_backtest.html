@@ -26,6 +26,7 @@
             <div class="backtest-tabs">
                 <button class="backtest-tab active" data-tab="single">单日回测</button>
                 <button class="backtest-tab" data-tab="range">区间回测</button>
+                <button class="backtest-tab" data-tab="funnel">漏斗分析</button>
             </div>
 
             <!-- Single Day Backtest -->
@@ -65,6 +66,30 @@
                     </div>
                     <p class="form-hint">每天买入推荐股（9:40价），次日开盘卖出（开盘价）。最多 90 个交易日。含手续费、过户费、印花税。</p>
                     <button type="submit" class="btn btn-primary" id="range-btn">开始区间回测</button>
+                </form>
+            </div>
+
+            <!-- Funnel Analysis -->
+            <div id="tab-funnel" class="tab-content hidden">
+                <form id="funnel-form" class="sim-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="funnel_start">起始日期</label>
+                            <input type="date" id="funnel_start" name="funnel_start" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="funnel_end">结束日期</label>
+                            <input type="date" id="funnel_end" name="funnel_end" required>
+                        </div>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="funnel_fade" name="funnel_fade" checked>
+                            <span>启用高开低走过滤 (L3)</span>
+                        </label>
+                    </div>
+                    <p class="form-hint">逐层分析选股漏斗效果：全部成分股 → 涨幅筛选 → PE过滤 → 高开低走过滤 → 最终推荐。每层假设9:40买入，次日收盘卖出，对比收益。</p>
+                    <button type="submit" class="btn btn-primary" id="funnel-btn">开始分析</button>
                 </form>
             </div>
         </div>
@@ -187,6 +212,65 @@
         </div>
     </section>
 
+    <!-- Funnel Analysis Loading -->
+    <section id="funnel-loading" class="momentum-section hidden">
+        <div class="sim-card loading-card">
+            <div class="loading-spinner"></div>
+            <p id="funnel-progress-text">正在分析...</p>
+            <div class="range-progress-bar">
+                <div id="funnel-progress-fill" class="range-progress-fill"></div>
+            </div>
+            <p class="loading-hint" id="funnel-progress-hint"></p>
+        </div>
+    </section>
+
+    <!-- Funnel Analysis Results -->
+    <section id="funnel-results" class="momentum-section hidden">
+        <div class="sim-card">
+            <h3>漏斗层级收益分析</h3>
+
+            <!-- Summary table -->
+            <div class="range-table-wrap">
+                <table class="stock-table funnel-table">
+                    <thead>
+                        <tr>
+                            <th>层级</th>
+                            <th>平均股数</th>
+                            <th>平均次日收益</th>
+                            <th>胜率</th>
+                            <th>中位收益</th>
+                            <th>层级效果</th>
+                        </tr>
+                    </thead>
+                    <tbody id="funnel-summary-body"></tbody>
+                </table>
+            </div>
+
+            <!-- Conclusions -->
+            <div id="funnel-conclusions" class="funnel-conclusions"></div>
+
+            <!-- Per-day detail (collapsible) -->
+            <details class="funnel-details">
+                <summary>逐日明细</summary>
+                <div class="range-table-wrap">
+                    <table class="stock-table funnel-day-table">
+                        <thead>
+                            <tr>
+                                <th>日期</th>
+                                <th>L0 成分股</th>
+                                <th>L1 涨幅</th>
+                                <th>L2 PE</th>
+                                <th>L3 高开低走</th>
+                                <th>L4 推荐</th>
+                            </tr>
+                        </thead>
+                        <tbody id="funnel-day-body"></tbody>
+                    </table>
+                </div>
+            </details>
+        </div>
+    </section>
+
     <!-- History (today's monitor results) -->
     <section id="history-section" class="momentum-section">
         <div class="sim-card">
@@ -205,6 +289,11 @@
 let rangeResults = [];
 
 // === Tab Switching ===
+const allResultSections = [
+    'loading-section', 'results-section',
+    'range-loading', 'range-results', 'loss-analysis-section',
+    'funnel-loading', 'funnel-results',
+];
 document.querySelectorAll('.backtest-tab').forEach(tab => {
     tab.addEventListener('click', () => {
         document.querySelectorAll('.backtest-tab').forEach(t => t.classList.remove('active'));
@@ -213,14 +302,13 @@ document.querySelectorAll('.backtest-tab').forEach(tab => {
         document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
         document.getElementById('tab-' + target).classList.remove('hidden');
 
-        // Hide results from the other mode
-        if (target === 'single') {
-            document.getElementById('range-loading').classList.add('hidden');
-            document.getElementById('range-results').classList.add('hidden');
-        } else {
-            document.getElementById('loading-section').classList.add('hidden');
-            document.getElementById('results-section').classList.add('hidden');
-        }
+        // Hide all result sections except for the active tab's own
+        const keep = target === 'single' ? ['loading-section', 'results-section']
+                   : target === 'range' ? ['range-loading', 'range-results', 'loss-analysis-section']
+                   : ['funnel-loading', 'funnel-results'];
+        allResultSections.forEach(id => {
+            if (!keep.includes(id)) document.getElementById(id).classList.add('hidden');
+        });
     });
 });
 
@@ -805,6 +893,200 @@ function fmtGain(val) {
     if (val == null) return '-';
     const cls = val > 0 ? 'range-profit-pos' : (val < 0 ? 'range-profit-neg' : '');
     return `<span class="${cls}">${val >= 0 ? '+' : ''}${val.toFixed(2)}%</span>`;
+}
+
+// === Funnel Analysis ===
+const LAYER_NAMES = ['L0: 全部成分股', 'L1: 涨幅>0.56%', 'L2: PE过滤', 'L3: 高开低走过滤', 'L4: 最终推荐'];
+
+document.getElementById('funnel-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const startDate = document.getElementById('funnel_start').value;
+    const endDate = document.getElementById('funnel_end').value;
+    const fadeFilter = document.getElementById('funnel_fade').checked;
+
+    if (!startDate || !endDate) return;
+    if (endDate < startDate) { alert('结束日期不能早于起始日期'); return; }
+
+    // Reset UI
+    document.getElementById('funnel-loading').classList.remove('hidden');
+    document.getElementById('funnel-results').classList.add('hidden');
+    document.getElementById('funnel-summary-body').innerHTML = '';
+    document.getElementById('funnel-day-body').innerHTML = '';
+    document.getElementById('funnel-conclusions').innerHTML = '';
+    document.getElementById('funnel-btn').disabled = true;
+    document.getElementById('funnel-btn').textContent = '分析中...';
+
+    try {
+        const resp = await fetch('/api/momentum/funnel-analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                start_date: startDate,
+                end_date: endDate,
+                fade_filter: fadeFilter,
+            }),
+        });
+
+        if (!resp.ok) {
+            const errData = await resp.json();
+            alert(errData.detail || '分析失败');
+            return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const messages = buffer.split('\n\n');
+            buffer = messages.pop();
+
+            for (const msg of messages) {
+                const trimmed = msg.trim();
+                if (!trimmed.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(trimmed.substring(6));
+                    handleFunnelEvent(data);
+                } catch (parseErr) {}
+            }
+        }
+
+        if (buffer.trim().startsWith('data: ')) {
+            try {
+                const data = JSON.parse(buffer.trim().substring(6));
+                handleFunnelEvent(data);
+            } catch (e) {}
+        }
+
+    } catch (err) {
+        alert('请求失败: ' + err.message);
+    } finally {
+        document.getElementById('funnel-loading').classList.add('hidden');
+        document.getElementById('funnel-btn').disabled = false;
+        document.getElementById('funnel-btn').textContent = '开始分析';
+    }
+});
+
+function handleFunnelEvent(data) {
+    switch (data.type) {
+        case 'init':
+            document.getElementById('funnel-progress-hint').textContent =
+                `${data.start_date} ~ ${data.end_date}，共 ${data.total_days} 个交易日`;
+            break;
+
+        case 'warning':
+            document.getElementById('funnel-progress-hint').textContent = data.message;
+            break;
+
+        case 'progress': {
+            document.getElementById('funnel-progress-text').textContent =
+                `正在处理第 ${data.day} / ${data.total} 天 (${data.trade_date})...`;
+            const pct = (data.day / data.total * 100).toFixed(0);
+            document.getElementById('funnel-progress-fill').style.width = pct + '%';
+            break;
+        }
+
+        case 'day_skip':
+            appendFunnelDayRow(data.trade_date, null, data.reason);
+            break;
+
+        case 'day_result':
+            document.getElementById('funnel-results').classList.remove('hidden');
+            appendFunnelDayRow(data.trade_date, data.layers, null);
+            break;
+
+        case 'complete':
+            document.getElementById('funnel-loading').classList.add('hidden');
+            renderFunnelSummary(data.summary, data.conclusions);
+            break;
+
+        case 'error':
+            document.getElementById('funnel-loading').classList.add('hidden');
+            alert(data.message);
+            break;
+    }
+}
+
+function appendFunnelDayRow(tradeDate, layers, skipReason) {
+    const tbody = document.getElementById('funnel-day-body');
+    const tr = document.createElement('tr');
+
+    if (!layers) {
+        tr.className = 'range-skip-row';
+        tr.innerHTML = `<td>${tradeDate}</td><td colspan="5" class="range-skip-reason">${skipReason || '跳过'}</td>`;
+    } else {
+        let cells = `<td>${tradeDate}</td>`;
+        for (const ln of LAYER_NAMES) {
+            const l = layers[ln];
+            if (l && l.count > 0) {
+                const retClass = l.avg_return > 0 ? 'range-profit-pos' : (l.avg_return < 0 ? 'range-profit-neg' : '');
+                cells += `<td><span class="funnel-cell-count">${l.count}</span> <span class="${retClass}">${l.avg_return >= 0 ? '+' : ''}${l.avg_return.toFixed(2)}%</span></td>`;
+            } else {
+                cells += `<td class="range-skip-reason">-</td>`;
+            }
+        }
+        tr.innerHTML = cells;
+    }
+    tbody.appendChild(tr);
+}
+
+function renderFunnelSummary(summary, conclusions) {
+    const tbody = document.getElementById('funnel-summary-body');
+    tbody.innerHTML = '';
+
+    let prevReturn = null;
+    for (const ln of LAYER_NAMES) {
+        const s = summary[ln];
+        if (!s) continue;
+
+        const tr = document.createElement('tr');
+        const retClass = s.avg_return > 0 ? 'range-profit-pos' : (s.avg_return < 0 ? 'range-profit-neg' : '');
+        const medClass = s.median_return > 0 ? 'range-profit-pos' : (s.median_return < 0 ? 'range-profit-neg' : '');
+
+        // Effect indicator
+        let effectHtml = '-';
+        if (prevReturn !== null && s.avg_count > 0) {
+            const diff = s.avg_return - prevReturn;
+            if (diff > 0.05) {
+                effectHtml = `<span class="funnel-effect-pos">+${diff.toFixed(2)}%</span>`;
+            } else if (diff < -0.05) {
+                effectHtml = `<span class="funnel-effect-neg">${diff.toFixed(2)}%</span>`;
+            } else {
+                effectHtml = `<span class="funnel-effect-neutral">${diff >= 0 ? '+' : ''}${diff.toFixed(2)}%</span>`;
+            }
+        }
+        prevReturn = s.avg_count > 0 ? s.avg_return : prevReturn;
+
+        tr.innerHTML = `
+            <td class="funnel-layer-name">${ln}</td>
+            <td>${s.avg_count.toFixed(1)}</td>
+            <td class="${retClass}">${s.avg_return >= 0 ? '+' : ''}${s.avg_return.toFixed(2)}%</td>
+            <td>${s.win_rate.toFixed(1)}%</td>
+            <td class="${medClass}">${s.median_return >= 0 ? '+' : ''}${s.median_return.toFixed(2)}%</td>
+            <td>${effectHtml}</td>
+        `;
+        tbody.appendChild(tr);
+    }
+
+    // Render conclusions
+    if (conclusions && conclusions.length > 0) {
+        const el = document.getElementById('funnel-conclusions');
+        let html = '<div class="funnel-conclusion-box"><strong>结论:</strong><ul>';
+        for (const c of conclusions) {
+            let icon, cls;
+            if (c.verdict === 'positive') { icon = '^'; cls = 'range-profit-pos'; }
+            else if (c.verdict === 'negative') { icon = '!!'; cls = 'range-profit-neg'; }
+            else { icon = '-'; cls = ''; }
+            html += `<li class="${cls}">${c.filter}: 收益 ${c.prev_return >= 0 ? '+' : ''}${c.prev_return.toFixed(2)}% -> ${c.curr_return >= 0 ? '+' : ''}${c.curr_return.toFixed(2)}% (${c.diff >= 0 ? '+' : ''}${c.diff.toFixed(2)}%) ${icon === '!!' ? '疑似负面过滤!' : icon === '^' ? '有效过滤' : '影响不大'}</li>`;
+        }
+        html += '</ul></div>';
+        el.innerHTML = html;
+    }
 }
 </script>
 {% endblock %}

@@ -1101,6 +1101,14 @@ class MomentumRangeBacktestRequest(BaseModel):
     fade_filter: bool = True  # Enable gap-fade filter (高开低走过滤)
 
 
+class FunnelAnalysisRequest(BaseModel):
+    """Request body for funnel layer analysis."""
+
+    start_date: str  # YYYY-MM-DD format
+    end_date: str  # YYYY-MM-DD format
+    fade_filter: bool = True
+
+
 def create_momentum_router() -> APIRouter:
     """Create router for momentum backtest and intraday monitor endpoints."""
     import asyncio
@@ -1766,6 +1774,408 @@ def create_momentum_router() -> APIRouter:
             },
         )
 
+    @router.post("/api/momentum/funnel-analysis")
+    async def run_funnel_analysis(body: FunnelAnalysisRequest):
+        """Run funnel layer analysis with SSE streaming.
+
+        Evaluates each filter layer's effectiveness by calculating next-day
+        returns for stocks at every stage of the selection pipeline.
+        """
+        import json
+        from datetime import datetime
+        from statistics import median as stat_median
+
+        from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.data.sources.concept_mapper import ConceptMapper
+        from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
+        from src.strategy.filters.stock_filter import create_main_board_only_filter
+        from src.strategy.strategies.momentum_sector_scanner import (
+            MomentumSectorScanner,
+            SelectedStock,
+        )
+
+        # Validate dates
+        try:
+            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
+
+        if end_date < start_date:
+            raise HTTPException(status_code=400, detail="结束日期不能早于起始日期")
+
+        LAYER_NAMES = [
+            "L0: 全部成分股",
+            "L1: 涨幅>0.56%",
+            "L2: PE过滤",
+            "L3: 高开低走过滤",
+            "L4: 最终推荐",
+        ]
+
+        async def event_stream():
+            def sse(data: dict) -> str:
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+            ifind_client = IFinDHttpClient()
+            fundamentals_db = create_fundamentals_db_from_config()
+
+            try:
+                await ifind_client.start()
+                await fundamentals_db.connect()
+
+                # Get trading calendar (include extra days for T+1)
+                from datetime import timedelta
+
+                trading_days = _get_trading_calendar_akshare(
+                    start_date, end_date + timedelta(days=10)
+                )
+                if not trading_days:
+                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
+                    return
+
+                days_in_range = [d for d in trading_days if start_date <= d <= end_date]
+                if not days_in_range:
+                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
+                    return
+
+                # Build T+1 map
+                next_day_map = {}
+                for i, d in enumerate(trading_days):
+                    if d > end_date:
+                        break
+                    if d >= start_date and i + 1 < len(trading_days):
+                        next_day_map[d] = trading_days[i + 1]
+
+                if len(days_in_range) > 60:
+                    days_in_range = days_in_range[:60]
+                    yield sse({
+                        "type": "warning",
+                        "message": f"已截断至前 60 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})",
+                    })
+
+                yield sse({
+                    "type": "init",
+                    "total_days": len(days_in_range),
+                    "start_date": str(days_in_range[0]),
+                    "end_date": str(days_in_range[-1]),
+                })
+
+                concept_mapper = ConceptMapper(ifind_client)
+                stock_filter = create_main_board_only_filter()
+
+                # Accumulate all returns per layer across all days
+                all_layer_returns: dict[str, list[float]] = {n: [] for n in LAYER_NAMES}
+                all_layer_counts: dict[str, list[int]] = {n: [] for n in LAYER_NAMES}
+                days_processed = 0
+
+                for day_idx, trade_date in enumerate(days_in_range):
+                    next_trade_date = next_day_map.get(trade_date)
+                    if not next_trade_date:
+                        continue
+
+                    yield sse({
+                        "type": "progress",
+                        "day": day_idx + 1,
+                        "total": len(days_in_range),
+                        "trade_date": str(trade_date),
+                    })
+
+                    try:
+                        # Fetch price data
+                        price_snapshots = await _parse_iwencai_and_fetch_prices_for_date(
+                            ifind_client, trade_date
+                        )
+                        if not price_snapshots:
+                            yield sse({
+                                "type": "day_skip",
+                                "trade_date": str(trade_date),
+                                "reason": "无价格数据",
+                            })
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        # Steps 1-4 via scanner
+                        gap_fade_config = GapFadeConfig(enabled=body.fade_filter)
+                        scanner = MomentumSectorScanner(
+                            ifind_client=ifind_client,
+                            fundamentals_db=fundamentals_db,
+                            concept_mapper=concept_mapper,
+                            stock_filter=stock_filter,
+                            gap_fade_config=gap_fade_config,
+                        )
+                        scanner._trade_date = trade_date
+
+                        gainers = await scanner._step1_filter_gainers(price_snapshots)
+                        if not gainers:
+                            yield sse({
+                                "type": "day_skip",
+                                "trade_date": str(trade_date),
+                                "reason": "无初筛股",
+                            })
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        stock_boards = await scanner._step2_reverse_lookup(list(gainers.keys()))
+                        hot_boards = scanner._step3_find_hot_boards(stock_boards)
+                        if not hot_boards:
+                            yield sse({
+                                "type": "day_skip",
+                                "trade_date": str(trade_date),
+                                "reason": "无热门板块",
+                            })
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        board_constituents = await scanner._step4_get_constituents(
+                            list(hot_boards.keys())
+                        )
+
+                        # Step 5: layer capture
+                        all_constituent_codes: set[str] = set()
+                        filtered_bc: dict[str, list[tuple[str, str]]] = {}
+                        for bn, stocks in board_constituents.items():
+                            allowed = [
+                                (c, n) for c, n in stocks if stock_filter.is_allowed(c)
+                            ]
+                            filtered_bc[bn] = allowed
+                            for c, _ in allowed:
+                                all_constituent_codes.add(c)
+
+                        pe_data = await fundamentals_db.batch_get_pe(
+                            list(all_constituent_codes)
+                        )
+
+                        missing = [
+                            c for c in all_constituent_codes if c not in price_snapshots
+                        ]
+                        if missing:
+                            extra = await scanner._fetch_constituent_prices(missing)
+                            price_snapshots = {**price_snapshots, **extra}
+
+                        # Build layers
+                        l0: list[SelectedStock] = []
+                        l1: list[SelectedStock] = []
+                        l2: list[SelectedStock] = []
+
+                        for bn, stocks in filtered_bc.items():
+                            bpe = [
+                                pe_data[c]
+                                for c, _ in stocks
+                                if pe_data.get(c) and pe_data[c] > 0
+                            ]
+                            if bpe:
+                                sp = sorted(bpe)
+                                n = len(sp)
+                                med = sp[n // 2] if n % 2 else (sp[n // 2 - 1] + sp[n // 2]) / 2
+                                pe_lo = med * 0.70
+                                pe_hi = med * 1.30
+                            else:
+                                med = 0.0
+                                pe_lo = pe_hi = 0.0
+
+                            for code, name in stocks:
+                                snap = price_snapshots.get(code)
+                                if not snap:
+                                    continue
+                                pe = pe_data.get(code)
+                                pe_val = pe if pe and pe > 0 else 0.0
+
+                                ss = SelectedStock(
+                                    stock_code=code,
+                                    stock_name=name,
+                                    board_name=bn,
+                                    open_gain_pct=snap.open_gain_pct,
+                                    pe_ttm=pe_val,
+                                    board_avg_pe=med,
+                                )
+                                l0.append(ss)
+
+                                if snap.gain_from_open_pct >= MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD:
+                                    l1.append(ss)
+                                    if pe and pe > 0 and pe_lo > 0 and pe_lo <= pe <= pe_hi:
+                                        l2.append(ss)
+
+                        # Deduplicate
+                        def _dedup(stocks):
+                            seen = {}
+                            for s in stocks:
+                                ex = seen.get(s.stock_code)
+                                if ex is None or s.open_gain_pct > ex.open_gain_pct:
+                                    seen[s.stock_code] = s
+                            return list(seen.values())
+
+                        l0 = _dedup(l0)
+                        l1 = _dedup(l1)
+                        l2 = _dedup(l2)
+
+                        # L3: gap-fade filter
+                        fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
+                        if body.fade_filter and l2:
+                            l3, _ = await fade_filter.filter_stocks(
+                                l2, price_snapshots, trade_date
+                            )
+                        else:
+                            l3 = list(l2)
+
+                        # L4: recommendation
+                        l4 = []
+                        if l3:
+                            rec = await scanner._step6_recommend(l3, price_snapshots)
+                            if rec:
+                                l4 = [SelectedStock(
+                                    stock_code=rec.stock_code,
+                                    stock_name=rec.stock_name,
+                                    board_name=rec.board_name,
+                                    open_gain_pct=rec.open_gain_pct,
+                                    pe_ttm=rec.pe_ttm,
+                                    board_avg_pe=rec.board_avg_pe,
+                                )]
+
+                        all_layers = [l0, l1, l2, l3, l4]
+
+                        # Collect all codes for T+1 fetch
+                        all_codes = set()
+                        for layer in all_layers:
+                            for s in layer:
+                                all_codes.add(s.stock_code)
+
+                        if not all_codes:
+                            yield sse({
+                                "type": "day_skip",
+                                "trade_date": str(trade_date),
+                                "reason": "成分股无价格",
+                            })
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        # Fetch T+1 close
+                        next_close = await _fetch_batch_close(
+                            ifind_client, list(all_codes), next_trade_date
+                        )
+
+                        # Calculate returns per layer
+                        day_layers = {}
+                        for lname, lstocks in zip(LAYER_NAMES, all_layers):
+                            returns = []
+                            for s in lstocks:
+                                snap = price_snapshots.get(s.stock_code)
+                                nc = next_close.get(s.stock_code)
+                                if snap and nc and snap.latest_price > 0:
+                                    ret = (nc - snap.latest_price) / snap.latest_price * 100
+                                    returns.append(round(ret, 2))
+
+                            count = len(lstocks)
+                            all_layer_counts[lname].append(count)
+                            all_layer_returns[lname].extend(returns)
+
+                            if returns:
+                                avg_r = sum(returns) / len(returns)
+                                win_r = sum(1 for r in returns if r > 0) / len(returns) * 100
+                                med_r = stat_median(returns)
+                            else:
+                                avg_r = win_r = med_r = 0.0
+
+                            day_layers[lname] = {
+                                "count": count,
+                                "avg_return": round(avg_r, 2),
+                                "win_rate": round(win_r, 1),
+                                "median_return": round(med_r, 2),
+                            }
+
+                        days_processed += 1
+                        yield sse({
+                            "type": "day_result",
+                            "trade_date": str(trade_date),
+                            "layers": day_layers,
+                        })
+                        await asyncio.sleep(0.05)
+
+                    except Exception as e:
+                        logger.error(f"Funnel analysis error on {trade_date}: {e}", exc_info=True)
+                        yield sse({
+                            "type": "day_skip",
+                            "trade_date": str(trade_date),
+                            "reason": f"出错: {str(e)[:60]}",
+                        })
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    # Clear concept cache between days
+                    concept_mapper.clear_cache()
+
+                # Summary
+                summary_layers = {}
+                for lname in LAYER_NAMES:
+                    rets = all_layer_returns[lname]
+                    counts = all_layer_counts[lname]
+                    if rets:
+                        avg_r = sum(rets) / len(rets)
+                        win_r = sum(1 for r in rets if r > 0) / len(rets) * 100
+                        med_r = stat_median(rets)
+                    else:
+                        avg_r = win_r = med_r = 0.0
+                    avg_count = sum(counts) / len(counts) if counts else 0.0
+
+                    summary_layers[lname] = {
+                        "avg_count": round(avg_count, 1),
+                        "avg_return": round(avg_r, 2),
+                        "win_rate": round(win_r, 1),
+                        "median_return": round(med_r, 2),
+                    }
+
+                # Conclusions
+                conclusions = []
+                pairs = [
+                    (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "PE过滤"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "高开低走过滤"),
+                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
+                ]
+                for prev_n, curr_n, label in pairs:
+                    prev_r = summary_layers[prev_n]["avg_return"]
+                    curr_r = summary_layers[curr_n]["avg_return"]
+                    diff = curr_r - prev_r
+                    if all_layer_returns[prev_n] and all_layer_returns[curr_n]:
+                        if diff > 0.05:
+                            verdict = "positive"
+                        elif diff < -0.05:
+                            verdict = "negative"
+                        else:
+                            verdict = "neutral"
+                    else:
+                        verdict = "no_data"
+                    conclusions.append({
+                        "filter": label,
+                        "prev_return": round(prev_r, 2),
+                        "curr_return": round(curr_r, 2),
+                        "diff": round(diff, 2),
+                        "verdict": verdict,
+                    })
+
+                yield sse({
+                    "type": "complete",
+                    "days_processed": days_processed,
+                    "summary": summary_layers,
+                    "conclusions": conclusions,
+                })
+
+            except Exception as e:
+                logger.error(f"Funnel analysis error: {e}", exc_info=True)
+                yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
+            finally:
+                await fundamentals_db.close()
+                await ifind_client.stop()
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     return router
 
 
@@ -2341,6 +2751,53 @@ async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> 
     if stock_code in prices and prices[stock_code] > 0:
         return [(target_date, prices[stock_code])]
     return []
+
+
+async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> dict:
+    """Convenience wrapper: run iwencai pre-filter + fetch prices for a date."""
+    from src.data.clients.ifind_http_client import IFinDHttpError
+
+    date_str = trade_date.strftime("%Y%m%d")
+    query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
+    try:
+        iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
+    except IFinDHttpError as e:
+        logger.error(f"iwencai query failed for {trade_date}: {e}")
+        return {}
+    return await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
+
+
+async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) -> dict[str, float]:
+    """Fetch close prices for multiple stocks on a single date."""
+    from src.data.clients.ifind_http_client import IFinDHttpError
+
+    result: dict[str, float] = {}
+    batch_size = 50
+    date_str = target_date.strftime("%Y-%m-%d")
+
+    for i in range(0, len(stock_codes), batch_size):
+        batch = stock_codes[i : i + batch_size]
+        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
+        try:
+            data = await ifind_client.history_quotes(
+                codes=codes_str,
+                indicators="close",
+                start_date=date_str,
+                end_date=date_str,
+            )
+            for table_entry in data.get("tables", []):
+                thscode = table_entry.get("thscode", "")
+                bare = thscode.split(".")[0] if thscode else ""
+                if not bare:
+                    continue
+                tbl = table_entry.get("table", {})
+                close_vals = tbl.get("close", [])
+                if close_vals and close_vals[0] is not None:
+                    result[bare] = float(close_vals[0])
+        except IFinDHttpError as e:
+            logger.warning(f"Batch close fetch failed for {target_date}: {e}")
+
+    return result
 
 
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):

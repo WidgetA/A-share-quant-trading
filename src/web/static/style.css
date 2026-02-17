@@ -2283,3 +2283,91 @@ footer {
     line-height: 1.7;
     color: #333;
 }
+
+/* === Funnel Analysis === */
+
+.funnel-table th,
+.funnel-table td {
+    text-align: center;
+    padding: 10px 12px;
+}
+
+.funnel-table .funnel-layer-name {
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.funnel-cell-count {
+    display: inline-block;
+    min-width: 28px;
+    text-align: right;
+    color: #666;
+    margin-right: 4px;
+}
+
+.funnel-effect-pos {
+    color: #4CAF50;
+    font-weight: 600;
+}
+
+.funnel-effect-neg {
+    color: #f44336;
+    font-weight: 700;
+}
+
+.funnel-effect-neutral {
+    color: #888;
+}
+
+.funnel-conclusions {
+    margin-top: 16px;
+}
+
+.funnel-conclusion-box {
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 14px 18px;
+}
+
+.funnel-conclusion-box strong {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 0.95rem;
+}
+
+.funnel-conclusion-box ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.funnel-conclusion-box li {
+    padding: 4px 0;
+    font-size: 0.88rem;
+}
+
+.funnel-details {
+    margin-top: 18px;
+}
+
+.funnel-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #555;
+    padding: 8px 0;
+    user-select: none;
+}
+
+.funnel-details summary:hover {
+    color: #1a1a2e;
+}
+
+.funnel-day-table th,
+.funnel-day-table td {
+    text-align: center;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}

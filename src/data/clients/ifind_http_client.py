@@ -392,6 +392,54 @@ class IFinDHttpClient:
 
         return await self._request("high_frequency", data)
 
+    async def get_trade_dates(
+        self,
+        market_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[str]:
+        """
+        Get trading dates in a date range.
+
+        Endpoint: /api/v1/get_trade_dates
+
+        Args:
+            market_code: Exchange code ("212001"=SSE, "212100"=SZSE)
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            List of trading date strings in YYYY-MM-DD format.
+        """
+        data: dict[str, Any] = {
+            "marketcode": market_code,
+            "functionpara": {
+                "mode": "1",
+                "dateType": "0",
+                "dateFormat": "0",
+                "period": "D",
+                "periodnum": "1",
+            },
+            "startdate": start_date,
+            "enddate": end_date,
+        }
+
+        result = await self._request("get_trade_dates", data)
+        # Response contains date list in tables
+        tables = result.get("tables", [])
+        if isinstance(tables, list) and tables:
+            # Flatten: tables may be a list of date strings or nested structure
+            dates: list[str] = []
+            for item in tables:
+                if isinstance(item, str):
+                    dates.append(item)
+                elif isinstance(item, dict):
+                    # Try extracting from table structure
+                    time_col = item.get("table", {}).get("time", [])
+                    dates.extend(str(t) for t in time_col)
+            return dates if dates else [str(d) for d in tables]
+        return []
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected with valid token."""
