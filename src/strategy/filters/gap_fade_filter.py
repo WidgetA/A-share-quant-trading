@@ -12,15 +12,20 @@
 # === DATA FLOW ===
 # MomentumSectorScanner Step 5 → GapFadeFilter → Step 6 (recommend)
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 from src.data.clients.ifind_http_client import IFinDHttpClient
-from src.strategy.strategies.momentum_sector_scanner import (
-    PriceSnapshot,
-    SelectedStock,
-)
+
+if TYPE_CHECKING:
+    from src.strategy.strategies.momentum_sector_scanner import (
+        PriceSnapshot,
+        SelectedStock,
+    )
 
 logger = logging.getLogger(__name__)
 
