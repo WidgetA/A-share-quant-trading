@@ -28,6 +28,7 @@ from datetime import date, datetime
 from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
 from src.data.sources.concept_mapper import ConceptMapper
+from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
 from src.strategy.filters.stock_filter import StockFilter, create_main_board_only_filter
 
 logger = logging.getLogger(__name__)
@@ -146,11 +147,13 @@ class MomentumSectorScanner:
         fundamentals_db: FundamentalsDB,
         concept_mapper: ConceptMapper | None = None,
         stock_filter: StockFilter | None = None,
+        gap_fade_config: GapFadeConfig | None = None,
     ):
         self._ifind = ifind_client
         self._fundamentals_db = fundamentals_db
         self._concept_mapper = concept_mapper or ConceptMapper(ifind_client)
         self._stock_filter = stock_filter or create_main_board_only_filter()
+        self._gap_fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
 
     async def scan(
         self,
@@ -206,6 +209,13 @@ class MomentumSectorScanner:
         selected, all_snapshots = await self._step5_pe_filter(board_constituents, price_snapshots)
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
+
+        # Step 5.5: Gap-fade filter — remove stocks with high 高开低走 risk
+        if selected:
+            selected, fade_assessments = await self._gap_fade_filter.filter_stocks(
+                selected, all_snapshots, trade_date
+            )
+            result.selected_stocks = selected
 
         # Step 6: Recommend — best earnings growth from the board with most selected stocks
         if selected:

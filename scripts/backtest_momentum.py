@@ -36,6 +36,7 @@ from src.common.feishu_bot import FeishuBot
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 from src.data.sources.concept_mapper import ConceptMapper
+from src.strategy.filters.gap_fade_filter import GapFadeConfig
 from src.strategy.strategies.momentum_sector_scanner import (
     MomentumSectorScanner,
     PriceSnapshot,
@@ -275,7 +276,9 @@ def print_scan_result(result: ScanResult, trade_date: date) -> None:
     print()
 
 
-async def run_backtest(trade_date: date, notify: bool = False) -> ScanResult:
+async def run_backtest(
+    trade_date: date, notify: bool = False, fade_filter: bool = True
+) -> ScanResult:
     """Run backtest for a single date."""
     logger.info(f"Running backtest for {trade_date}")
 
@@ -288,10 +291,12 @@ async def run_backtest(trade_date: date, notify: bool = False) -> ScanResult:
         await fundamentals_db.connect()
 
         concept_mapper = ConceptMapper(ifind_client)
+        gap_fade_config = GapFadeConfig(enabled=fade_filter)
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
+            gap_fade_config=gap_fade_config,
         )
 
         # Fetch price data for the date
@@ -349,6 +354,11 @@ def main():
         action="store_true",
         help="显示调试信息",
     )
+    parser.add_argument(
+        "--no-fade-filter",
+        action="store_true",
+        help="禁用高开低走过滤器",
+    )
 
     args = parser.parse_args()
 
@@ -356,7 +366,7 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     trade_date = date.fromisoformat(args.date)
-    asyncio.run(run_backtest(trade_date, notify=args.notify))
+    asyncio.run(run_backtest(trade_date, notify=args.notify, fade_filter=not args.no_fade_filter))
 
 
 if __name__ == "__main__":

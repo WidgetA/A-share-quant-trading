@@ -1098,6 +1098,7 @@ class MomentumRangeBacktestRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
+    fade_filter: bool = True  # Enable gap-fade filter (高开低走过滤)
 
 
 def create_momentum_router() -> APIRouter:
@@ -1298,6 +1299,7 @@ def create_momentum_router() -> APIRouter:
         from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
+        from src.strategy.filters.gap_fade_filter import GapFadeConfig
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
         )
@@ -1329,10 +1331,12 @@ def create_momentum_router() -> APIRouter:
                 await fundamentals_db.connect()
 
                 concept_mapper = ConceptMapper(ifind_client)
+                gap_fade_config = GapFadeConfig(enabled=body.fade_filter)
                 scanner = MomentumSectorScanner(
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
+                    gap_fade_config=gap_fade_config,
                 )
 
                 # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
