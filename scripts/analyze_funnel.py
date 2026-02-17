@@ -481,10 +481,65 @@ def print_summary(all_days: list[DayResult]) -> None:
         )
         prev_avg_return = avg_ret
 
+    # Filtered-out best stocks per layer transition
+    print(f"\n  {'─' * 70}")
+    _print_filtered_out_best(all_days)
+
     # Conclusion
     print(f"\n  {'─' * 70}")
     _print_conclusions(all_days)
     print()
+
+
+def _print_filtered_out_best(all_days: list[DayResult]) -> None:
+    """Show best-performing stocks that were filtered out at each layer."""
+    print("  被误杀的高收益股票 (每层筛掉的票中收益最好的):")
+
+    transitions = [
+        (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
+        (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 PE过滤"),
+        (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 高开低走"),
+        (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
+    ]
+
+    for prev_name, curr_name, label in transitions:
+        # Collect filtered-out stock returns across all days
+        filtered_returns: list[tuple[date, StockReturn]] = []
+
+        for day in all_days:
+            prev_lr = day.layers.get(prev_name)
+            curr_lr = day.layers.get(curr_name)
+            if not prev_lr or not curr_lr:
+                continue
+
+            dropped_codes = prev_lr.stock_codes - curr_lr.stock_codes
+            for r in prev_lr.returns:
+                if r.stock_code in dropped_codes:
+                    filtered_returns.append((day.trade_date, r))
+
+        if not filtered_returns:
+            print(f"\n    {label}: 无筛除")
+            continue
+
+        # Stats
+        all_rets = [r.return_pct for _, r in filtered_returns]
+        avg_ret = sum(all_rets) / len(all_rets)
+        positive = sum(1 for x in all_rets if x > 0)
+
+        # Top 3 best filtered-out stocks
+        top3 = sorted(filtered_returns, key=lambda x: x[1].return_pct, reverse=True)[:3]
+
+        print(
+            f"\n    {label}: 共筛掉{len(filtered_returns)}只,"
+            f" 平均收益{avg_ret:+.2f}%,"
+            f" 其中{positive}只盈利"
+        )
+        for dt, r in top3:
+            print(
+                f"      {dt} {r.stock_code} {r.stock_name:<6}"
+                f"  {r.board_name:<10}"
+                f"  次日收益 {r.return_pct:+.2f}%"
+            )
 
 
 def _print_conclusions(all_days: list[DayResult]) -> None:

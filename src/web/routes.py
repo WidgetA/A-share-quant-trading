@@ -1107,6 +1107,7 @@ class FunnelAnalysisRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     fade_filter: bool = True
+    pe_filter: bool = True
 
 
 def create_momentum_router() -> APIRouter:
@@ -1884,6 +1885,8 @@ def create_momentum_router() -> APIRouter:
                 # Accumulate all returns per layer across all days
                 all_layer_returns: dict[str, list[float]] = {n: [] for n in LAYER_NAMES}
                 all_layer_counts: dict[str, list[int]] = {n: [] for n in LAYER_NAMES}
+                # Per-stock detail for filtered-out analysis
+                all_layer_detail: dict[str, list[dict]] = {n: [] for n in LAYER_NAMES}
                 days_processed = 0
 
                 for day_idx, trade_date in enumerate(days_in_range):
@@ -2011,7 +2014,13 @@ def create_momentum_router() -> APIRouter:
                                 threshold = MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD
                                 if snap.gain_from_open_pct >= threshold:
                                     l1.append(ss)
-                                    if pe and pe > 0 and pe_lo > 0 and pe_lo <= pe <= pe_hi:
+                                    if body.pe_filter:
+                                        pe_pass = (
+                                            pe and pe > 0 and pe_lo > 0 and pe_lo <= pe <= pe_hi
+                                        )
+                                    else:
+                                        pe_pass = True
+                                    if pe_pass:
                                         l2.append(ss)
 
                         # Deduplicate
@@ -2083,7 +2092,17 @@ def create_momentum_router() -> APIRouter:
                                 sell_price = next_open.get(s.stock_code)
                                 if snap and sell_price and snap.latest_price > 0:
                                     ret = _calc_net_return_pct(snap.latest_price, sell_price)
-                                    returns.append(round(ret, 2))
+                                    ret_rounded = round(ret, 2)
+                                    returns.append(ret_rounded)
+                                    all_layer_detail[lname].append(
+                                        {
+                                            "trade_date": str(trade_date),
+                                            "stock_code": s.stock_code,
+                                            "stock_name": s.stock_name,
+                                            "board_name": s.board_name,
+                                            "return_pct": ret_rounded,
+                                        }
+                                    )
 
                             count = len(lstocks)
                             all_layer_counts[lname].append(count)
@@ -2179,12 +2198,66 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
+                # Filtered-out best stocks per layer transition
+                filtered_out_best = []
+                transitions = [
+                    (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 PE过滤"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 高开低走"),
+                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
+                ]
+                for prev_n, curr_n, label in transitions:
+                    # Group by trade_date for set difference
+                    from collections import defaultdict
+
+                    prev_by_day: dict[str, list[dict]] = defaultdict(list)
+                    curr_codes_by_day: dict[str, set[str]] = defaultdict(set)
+                    for item in all_layer_detail[prev_n]:
+                        prev_by_day[item["trade_date"]].append(item)
+                    for item in all_layer_detail[curr_n]:
+                        curr_codes_by_day[item["trade_date"]].add(item["stock_code"])
+
+                    filtered: list[dict] = []
+                    for day_str, items in prev_by_day.items():
+                        curr_codes = curr_codes_by_day.get(day_str, set())
+                        for item in items:
+                            if item["stock_code"] not in curr_codes:
+                                filtered.append(item)
+
+                    if not filtered:
+                        filtered_out_best.append(
+                            {
+                                "label": label,
+                                "total_filtered": 0,
+                                "avg_return": 0,
+                                "positive_count": 0,
+                                "top_stocks": [],
+                            }
+                        )
+                        continue
+
+                    rets = [f["return_pct"] for f in filtered]
+                    avg_r = sum(rets) / len(rets)
+                    pos_count = sum(1 for r in rets if r > 0)
+                    top3 = sorted(filtered, key=lambda x: x["return_pct"], reverse=True)[:3]
+
+                    filtered_out_best.append(
+                        {
+                            "label": label,
+                            "total_filtered": len(filtered),
+                            "avg_return": round(avg_r, 2),
+                            "positive_count": pos_count,
+                            "top_stocks": top3,
+                        }
+                    )
+
                 yield sse(
                     {
                         "type": "complete",
                         "days_processed": days_processed,
                         "summary": summary_layers,
                         "conclusions": conclusions,
+                        "filtered_out_best": filtered_out_best,
                     }
                 )
 

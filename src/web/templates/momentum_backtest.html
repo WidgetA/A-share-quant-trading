@@ -84,6 +84,10 @@
                     </div>
                     <div class="form-group checkbox-group">
                         <label class="checkbox-label">
+                            <input type="checkbox" id="funnel_pe" name="funnel_pe" checked>
+                            <span>启用PE过滤 (L2)</span>
+                        </label>
+                        <label class="checkbox-label">
                             <input type="checkbox" id="funnel_fade" name="funnel_fade" checked>
                             <span>启用高开低走过滤 (L3)</span>
                         </label>
@@ -248,6 +252,9 @@
 
             <!-- Conclusions -->
             <div id="funnel-conclusions" class="funnel-conclusions"></div>
+
+            <!-- Filtered-out best stocks -->
+            <div id="funnel-filtered-out" class="funnel-filtered-out"></div>
 
             <!-- Per-day detail (collapsible) -->
             <details class="funnel-details">
@@ -904,6 +911,7 @@ document.getElementById('funnel-form').addEventListener('submit', async (e) => {
     const startDate = document.getElementById('funnel_start').value;
     const endDate = document.getElementById('funnel_end').value;
     const fadeFilter = document.getElementById('funnel_fade').checked;
+    const peFilter = document.getElementById('funnel_pe').checked;
 
     if (!startDate || !endDate) return;
     if (endDate < startDate) { alert('结束日期不能早于起始日期'); return; }
@@ -914,6 +922,7 @@ document.getElementById('funnel-form').addEventListener('submit', async (e) => {
     document.getElementById('funnel-summary-body').innerHTML = '';
     document.getElementById('funnel-day-body').innerHTML = '';
     document.getElementById('funnel-conclusions').innerHTML = '';
+    document.getElementById('funnel-filtered-out').innerHTML = '';
     document.getElementById('funnel-btn').disabled = true;
     document.getElementById('funnel-btn').textContent = '分析中...';
 
@@ -925,6 +934,7 @@ document.getElementById('funnel-form').addEventListener('submit', async (e) => {
                 start_date: startDate,
                 end_date: endDate,
                 fade_filter: fadeFilter,
+                pe_filter: peFilter,
             }),
         });
 
@@ -1003,6 +1013,7 @@ function handleFunnelEvent(data) {
         case 'complete':
             document.getElementById('funnel-loading').classList.add('hidden');
             renderFunnelSummary(data.summary, data.conclusions);
+            if (data.filtered_out_best) renderFilteredOutBest(data.filtered_out_best);
             break;
 
         case 'error':
@@ -1087,6 +1098,49 @@ function renderFunnelSummary(summary, conclusions) {
         html += '</ul></div>';
         el.innerHTML = html;
     }
+}
+
+function renderFilteredOutBest(filteredOutBest) {
+    const el = document.getElementById('funnel-filtered-out');
+    if (!filteredOutBest || filteredOutBest.length === 0) return;
+
+    let html = '<div class="funnel-filtered-box"><strong>被误杀的高收益股票</strong>';
+    html += '<p class="form-hint">每层筛掉的票中，次日收益最好的 Top 3</p>';
+
+    for (const layer of filteredOutBest) {
+        if (layer.total_filtered === 0) {
+            html += `<div class="filtered-layer"><span class="filtered-label">${layer.label}</span>: 无筛除</div>`;
+            continue;
+        }
+
+        const avgCls = layer.avg_return > 0 ? 'range-profit-pos' : (layer.avg_return < 0 ? 'range-profit-neg' : '');
+        html += `<div class="filtered-layer">`;
+        html += `<span class="filtered-label">${layer.label}</span>`;
+        html += `: 共筛掉 <strong>${layer.total_filtered}</strong> 只,`;
+        html += ` 平均收益 <span class="${avgCls}">${layer.avg_return >= 0 ? '+' : ''}${layer.avg_return.toFixed(2)}%</span>,`;
+        html += ` 其中 ${layer.positive_count} 只盈利`;
+
+        if (layer.top_stocks && layer.top_stocks.length > 0) {
+            html += '<table class="stock-table filtered-stock-table"><thead><tr>';
+            html += '<th>日期</th><th>代码</th><th>名称</th><th>板块</th><th>次日收益</th>';
+            html += '</tr></thead><tbody>';
+            for (const s of layer.top_stocks) {
+                const retCls = s.return_pct > 0 ? 'range-profit-pos' : (s.return_pct < 0 ? 'range-profit-neg' : '');
+                html += `<tr>`;
+                html += `<td>${s.trade_date}</td>`;
+                html += `<td>${s.stock_code}</td>`;
+                html += `<td>${s.stock_name}</td>`;
+                html += `<td>${s.board_name}</td>`;
+                html += `<td class="${retCls}">${s.return_pct >= 0 ? '+' : ''}${s.return_pct.toFixed(2)}%</td>`;
+                html += `</tr>`;
+            }
+            html += '</tbody></table>';
+        }
+        html += '</div>';
+    }
+
+    html += '</div>';
+    el.innerHTML = html;
 }
 </script>
 {% endblock %}
