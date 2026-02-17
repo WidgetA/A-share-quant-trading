@@ -1348,7 +1348,18 @@ def create_momentum_router() -> APIRouter:
                 )
 
                 # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
-                trading_days = _get_trading_calendar_akshare(start_date, end_date)
+                # Include extra days beyond end_date for T+1 sell price lookups.
+                from datetime import timedelta as _td
+
+                trading_days_all = _get_trading_calendar_akshare(
+                    start_date, end_date + _td(days=10)
+                )
+                trading_days = [d for d in trading_days_all if start_date <= d <= end_date]
+                # Build T+1 map from the full list (needed for selling on T+1)
+                _next_day_map: dict = {}
+                for _idx, _d in enumerate(trading_days_all):
+                    if _idx + 1 < len(trading_days_all):
+                        _next_day_map[_d] = trading_days_all[_idx + 1]
                 if not trading_days:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
@@ -1469,9 +1480,9 @@ def create_momentum_router() -> APIRouter:
                     sell_price = 0.0
                     sell_date_str = ""
                     sell_fetch_error = ""
+                    next_day = _next_day_map.get(day)
 
-                    if i + 1 < len(trading_days):
-                        next_day = trading_days[i + 1]
+                    if next_day:
                         try:
                             sell_prices = await _fetch_stock_open_prices(
                                 ifind_client, rec.stock_code, next_day
@@ -2058,20 +2069,20 @@ def create_momentum_router() -> APIRouter:
                             await asyncio.sleep(0.05)
                             continue
 
-                        # Fetch T+1 close
-                        next_close = await _fetch_batch_close(
-                            ifind_client, list(all_codes), next_trade_date
+                        # Fetch T+1 open (consistent with interval backtest: 次日开盘卖)
+                        next_open = await _fetch_batch_prices(
+                            ifind_client, list(all_codes), next_trade_date, indicator="open"
                         )
 
-                        # Calculate returns per layer
+                        # Calculate returns per layer (with costs, same as backtest)
                         day_layers = {}
                         for lname, lstocks in zip(LAYER_NAMES, all_layers):
                             returns = []
                             for s in lstocks:
                                 snap = price_snapshots.get(s.stock_code)
-                                nc = next_close.get(s.stock_code)
-                                if snap and nc and snap.latest_price > 0:
-                                    ret = (nc - snap.latest_price) / snap.latest_price * 100
+                                sell_price = next_open.get(s.stock_code)
+                                if snap and sell_price and snap.latest_price > 0:
+                                    ret = _calc_net_return_pct(snap.latest_price, sell_price)
                                     returns.append(round(ret, 2))
 
                             count = len(lstocks)
@@ -2784,13 +2795,46 @@ async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> 
     return await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
 
 
-async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) -> dict[str, float]:
-    """Fetch close prices for multiple stocks on a single date."""
+def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
+    """Calculate net return percentage after transaction costs (assuming 1 lot = 100 shares).
+
+    Uses the same cost model as interval backtest:
+    - Buy commission: max(0.3%, ¥5)
+    - Sell commission: max(0.3%, ¥5)
+    - Stamp tax (sell): 0.05%
+    - Transfer fee: 0.001% each way
+    """
+    shares = 100  # 1 lot
+    buy_amount = shares * buy_price
+    buy_commission = max(buy_amount * 0.003, 5.0)
+    buy_transfer = buy_amount * 0.00001
+    total_buy_cost = buy_amount + buy_commission + buy_transfer
+
+    sell_amount = shares * sell_price
+    sell_commission = max(sell_amount * 0.003, 5.0)
+    sell_transfer = sell_amount * 0.00001
+    sell_stamp = sell_amount * 0.0005
+    net_sell = sell_amount - sell_commission - sell_transfer - sell_stamp
+
+    return (net_sell - total_buy_cost) / total_buy_cost * 100 if total_buy_cost > 0 else 0.0
+
+
+async def _fetch_batch_prices(
+    ifind_client, stock_codes: list[str], target_date, indicator: str = "close"
+) -> dict[str, float]:
+    """Fetch a single price indicator for multiple stocks on a single date.
+
+    Args:
+        indicator: Price field to fetch, e.g. "close" or "open".
+    """
     from src.data.clients.ifind_http_client import IFinDHttpError
 
     result: dict[str, float] = {}
     batch_size = 50
     date_str = target_date.strftime("%Y-%m-%d")
+
+    # iFinD returns empty tables for single-indicator queries, so always include preClose
+    indicators_str = f"{indicator},preClose" if indicator != "preClose" else "close,preClose"
 
     for i in range(0, len(stock_codes), batch_size):
         batch = stock_codes[i : i + batch_size]
@@ -2798,7 +2842,7 @@ async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) 
         try:
             data = await ifind_client.history_quotes(
                 codes=codes_str,
-                indicators="close",
+                indicators=indicators_str,
                 start_date=date_str,
                 end_date=date_str,
             )
@@ -2808,13 +2852,18 @@ async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) 
                 if not bare:
                     continue
                 tbl = table_entry.get("table", {})
-                close_vals = tbl.get("close", [])
-                if close_vals and close_vals[0] is not None:
-                    result[bare] = float(close_vals[0])
+                vals = tbl.get(indicator, [])
+                if vals and vals[0] is not None:
+                    result[bare] = float(vals[0])
         except IFinDHttpError as e:
-            logger.warning(f"Batch close fetch failed for {target_date}: {e}")
+            logger.warning(f"Batch {indicator} fetch failed for {target_date}: {e}")
 
     return result
+
+
+async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) -> dict[str, float]:
+    """Fetch close prices for multiple stocks on a single date."""
+    return await _fetch_batch_prices(ifind_client, stock_codes, target_date, indicator="close")
 
 
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):

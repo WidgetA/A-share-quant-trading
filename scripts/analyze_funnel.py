@@ -4,8 +4,9 @@
 漏斗层级收益分析。
 
 对选股漏斗的每一层做收益回测：从热门板块全部成分股开始，逐层过滤，
-每层假设等权买入（每只1手），计算次日收益。如果收益逐层递增，说明漏斗有效；
-如果某层收益反降，说明该层在筛掉好股票。
+每层假设9:40买入（每只1手），次日开盘卖出，扣除手续费后计算净收益。
+与区间回测使用相同的卖出价（T+1开盘）和费用模型。
+如果收益逐层递增，说明漏斗有效；如果某层收益反降，说明该层在筛掉好股票。
 
 层级定义：
   L0: 热门板块全部成分股（主板，有价格数据）
@@ -64,14 +65,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StockReturn:
-    """A stock with its next-day return."""
+    """A stock with its next-day return (after transaction costs)."""
 
     stock_code: str
     stock_name: str
     board_name: str
     buy_price: float  # 9:40 price
-    next_close: float  # T+1 close
-    return_pct: float  # (next_close - buy_price) / buy_price * 100
+    sell_price: float  # T+1 open
+    return_pct: float  # net return after costs
 
 
 @dataclass
@@ -119,12 +120,36 @@ LAYER_NAMES = ["L0: 全部成分股", "L1: 涨幅>0.56%", "L2: PE过滤", "L3: �
 # === CORE ANALYSIS ===
 
 
-async def fetch_next_day_close(
+def calc_net_return_pct(buy_price: float, sell_price: float) -> float:
+    """Calculate net return percentage after transaction costs (assuming 1 lot = 100 shares).
+
+    Uses the same cost model as interval backtest:
+    - Buy commission: max(0.3%, ¥5)
+    - Sell commission: max(0.3%, ¥5)
+    - Stamp tax (sell): 0.05%
+    - Transfer fee: 0.001% each way
+    """
+    shares = 100  # 1 lot
+    buy_amount = shares * buy_price
+    buy_commission = max(buy_amount * 0.003, 5.0)
+    buy_transfer = buy_amount * 0.00001
+    total_buy_cost = buy_amount + buy_commission + buy_transfer
+
+    sell_amount = shares * sell_price
+    sell_commission = max(sell_amount * 0.003, 5.0)
+    sell_transfer = sell_amount * 0.00001
+    sell_stamp = sell_amount * 0.0005
+    net_sell = sell_amount - sell_commission - sell_transfer - sell_stamp
+
+    return (net_sell - total_buy_cost) / total_buy_cost * 100 if total_buy_cost > 0 else 0.0
+
+
+async def fetch_next_day_open(
     client: IFinDHttpClient,
     stock_codes: list[str],
     next_trade_date: date,
 ) -> dict[str, float]:
-    """Fetch close prices on the next trading day for return calculation."""
+    """Fetch open prices on the next trading day for return calculation (次日开盘卖)."""
     result: dict[str, float] = {}
     batch_size = 50
     date_str = next_trade_date.strftime("%Y-%m-%d")
@@ -134,9 +159,10 @@ async def fetch_next_day_close(
         codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
         try:
+            # iFinD returns empty tables for single-indicator queries, include preClose
             data = await client.history_quotes(
                 codes=codes_str,
-                indicators="close",
+                indicators="open,preClose",
                 start_date=date_str,
                 end_date=date_str,
             )
@@ -148,12 +174,12 @@ async def fetch_next_day_close(
                     continue
 
                 tbl = table_entry.get("table", {})
-                close_vals = tbl.get("close", [])
-                if close_vals and close_vals[0] is not None:
-                    result[bare] = float(close_vals[0])
+                open_vals = tbl.get("open", [])
+                if open_vals and open_vals[0] is not None:
+                    result[bare] = float(open_vals[0])
 
         except IFinDHttpError as e:
-            logger.warning(f"Failed to fetch T+1 close for batch: {e}")
+            logger.warning(f"Failed to fetch T+1 open for batch: {e}")
 
     return result
 
@@ -339,29 +365,29 @@ async def run_single_date(
         logger.info(f"{trade_date}: No stocks in any layer")
         return None
 
-    # Fetch T+1 close prices
-    next_close_prices = await fetch_next_day_close(ifind_client, list(all_codes), next_trade_date)
-    logger.info(f"Fetched T+1 close for {len(next_close_prices)}/{len(all_codes)} stocks")
+    # Fetch T+1 open prices (consistent with interval backtest: 次日开盘卖)
+    next_open_prices = await fetch_next_day_open(ifind_client, list(all_codes), next_trade_date)
+    logger.info(f"Fetched T+1 open for {len(next_open_prices)}/{len(all_codes)} stocks")
 
-    # Calculate returns for each layer
+    # Calculate returns for each layer (with transaction costs, consistent with backtest)
     for layer_name, layer_stocks in zip(LAYER_NAMES, all_layers):
         layer_result = LayerResult(stock_codes={s.stock_code for s in layer_stocks})
 
         for s in layer_stocks:
             snap = price_snapshots.get(s.stock_code)
-            next_close = next_close_prices.get(s.stock_code)
+            sell_price = next_open_prices.get(s.stock_code)
 
-            if not snap or not next_close or snap.latest_price <= 0:
+            if not snap or not sell_price or snap.latest_price <= 0:
                 continue
 
-            ret_pct = (next_close - snap.latest_price) / snap.latest_price * 100
+            ret_pct = calc_net_return_pct(snap.latest_price, sell_price)
             layer_result.returns.append(
                 StockReturn(
                     stock_code=s.stock_code,
                     stock_name=s.stock_name,
                     board_name=s.board_name,
                     buy_price=snap.latest_price,
-                    next_close=next_close,
+                    sell_price=sell_price,
                     return_pct=ret_pct,
                 )
             )
