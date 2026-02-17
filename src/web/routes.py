@@ -1785,7 +1785,7 @@ def create_momentum_router() -> APIRouter:
         from datetime import datetime
         from statistics import median as stat_median
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+        from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
@@ -1851,7 +1851,10 @@ def create_momentum_router() -> APIRouter:
                     days_in_range = days_in_range[:60]
                     yield sse({
                         "type": "warning",
-                        "message": f"已截断至前 60 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})",
+                        "message": (
+                            f"已截断至前 60 个交易日"
+                            f" ({days_in_range[0]} ~ {days_in_range[-1]})"
+                        ),
                     })
 
                 yield sse({
@@ -1991,7 +1994,8 @@ def create_momentum_router() -> APIRouter:
                                 )
                                 l0.append(ss)
 
-                                if snap.gain_from_open_pct >= MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD:
+                                threshold = MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD
+                                if snap.gain_from_open_pct >= threshold:
                                     l1.append(ss)
                                     if pe and pe > 0 and pe_lo > 0 and pe_lo <= pe <= pe_hi:
                                         l2.append(ss)

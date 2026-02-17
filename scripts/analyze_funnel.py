@@ -40,15 +40,15 @@ SCRIPTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from backtest_momentum import fetch_main_board_prices_for_date
-from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
-from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-from src.data.sources.concept_mapper import ConceptMapper
-from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
-from src.strategy.filters.stock_filter import create_main_board_only_filter
-from src.strategy.strategies.momentum_sector_scanner import (
+from backtest_momentum import fetch_main_board_prices_for_date  # noqa: E402
+
+from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError  # noqa: E402
+from src.data.database.fundamentals_db import create_fundamentals_db_from_config  # noqa: E402
+from src.data.sources.concept_mapper import ConceptMapper  # noqa: E402
+from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter  # noqa: E402
+from src.strategy.filters.stock_filter import create_main_board_only_filter  # noqa: E402
+from src.strategy.strategies.momentum_sector_scanner import (  # noqa: E402
     MomentumSectorScanner,
-    PriceSnapshot,
     SelectedStock,
 )
 
@@ -243,7 +243,11 @@ async def run_single_date(
         if board_pe_values:
             sorted_pe = sorted(board_pe_values)
             n = len(sorted_pe)
-            board_median_pe = sorted_pe[n // 2] if n % 2 else (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
+            board_median_pe = (
+                sorted_pe[n // 2]
+                if n % 2
+                else (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
+            )
             pe_lower = board_median_pe * (1 - MomentumSectorScanner.PE_TOLERANCE)
             pe_upper = board_median_pe * (1 + MomentumSectorScanner.PE_TOLERANCE)
         else:
@@ -397,7 +401,11 @@ def print_summary(all_days: list[DayResult]) -> None:
     n_days = len(all_days)
 
     print(f"\n{'=' * 76}")
-    print(f"  漏斗层级收益分析汇总 ({all_days[0].trade_date} ~ {all_days[-1].trade_date}, 共{n_days}个交易日)")
+    print(
+        f"  漏斗层级收益分析汇总"
+        f" ({all_days[0].trade_date} ~ {all_days[-1].trade_date},"
+        f" 共{n_days}个交易日)"
+    )
     print(f"{'=' * 76}")
 
     # Aggregate metrics per layer
@@ -474,12 +482,13 @@ def _print_conclusions(all_days: list[DayResult]) -> None:
         curr_ret = layer_avg_returns.get(curr_name)
         if prev_ret is not None and curr_ret is not None:
             diff = curr_ret - prev_ret
+            ret_str = f"{prev_ret:+.2f}% -> {curr_ret:+.2f}% ({diff:+.2f}%)"
             if diff > 0.05:
-                print(f"    {filter_label}: 收益 {prev_ret:+.2f}% -> {curr_ret:+.2f}% ({diff:+.2f}%), 有效过滤")
+                print(f"    {filter_label}: 收益 {ret_str}, 有效过滤")
             elif diff < -0.05:
-                print(f"    {filter_label}: 收益 {prev_ret:+.2f}% -> {curr_ret:+.2f}% ({diff:+.2f}%), 疑似负面过滤!")
+                print(f"    {filter_label}: 收益 {ret_str}, 疑似负面过滤!")
             else:
-                print(f"    {filter_label}: 收益 {prev_ret:+.2f}% -> {curr_ret:+.2f}% ({diff:+.2f}%), 影响不大")
+                print(f"    {filter_label}: 收益 {ret_str}, 影响不大")
 
 
 # === MAIN ===
@@ -534,7 +543,10 @@ async def run_analysis(
             logger.error(f"No trading dates in range {start_date} ~ {end_date}")
             return
 
-        logger.info(f"Analyzing {len(dates_in_range)} trading days: {dates_in_range[0]} ~ {dates_in_range[-1]}")
+        logger.info(
+            f"Analyzing {len(dates_in_range)} trading days:"
+            f" {dates_in_range[0]} ~ {dates_in_range[-1]}"
+        )
 
         concept_mapper = ConceptMapper(ifind_client)
         all_days: list[DayResult] = []
