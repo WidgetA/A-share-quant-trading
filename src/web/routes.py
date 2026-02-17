@@ -2214,9 +2214,7 @@ def create_momentum_router() -> APIRouter:
                     for item in all_layer_detail[prev_n]:
                         prev_by_day[item["trade_date"]].append(item)
                     for item in all_layer_detail[curr_n]:
-                        curr_codes_by_day[item["trade_date"]].add(
-                            item["stock_code"]
-                        )
+                        curr_codes_by_day[item["trade_date"]].add(item["stock_code"])
 
                     # Build per-day breakdown
                     daily_data: list[dict] = []
@@ -2224,10 +2222,7 @@ def create_momentum_router() -> APIRouter:
                     for day_str in sorted(prev_by_day.keys()):
                         items = prev_by_day[day_str]
                         curr_codes = curr_codes_by_day.get(day_str, set())
-                        day_filtered = [
-                            it for it in items
-                            if it["stock_code"] not in curr_codes
-                        ]
+                        day_filtered = [it for it in items if it["stock_code"] not in curr_codes]
                         all_filtered.extend(day_filtered)
                         if not day_filtered:
                             daily_data.append(
