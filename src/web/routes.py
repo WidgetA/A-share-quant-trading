@@ -2198,7 +2198,7 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
-                # Filtered-out best stocks per layer transition
+                # Filtered-out best stocks per layer transition (by day)
                 filtered_out_best = []
                 transitions = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
@@ -2207,7 +2207,6 @@ def create_momentum_router() -> APIRouter:
                     (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
-                    # Group by trade_date for set difference
                     from collections import defaultdict
 
                     prev_by_day: dict[str, list[dict]] = defaultdict(list)
@@ -2215,41 +2214,74 @@ def create_momentum_router() -> APIRouter:
                     for item in all_layer_detail[prev_n]:
                         prev_by_day[item["trade_date"]].append(item)
                     for item in all_layer_detail[curr_n]:
-                        curr_codes_by_day[item["trade_date"]].add(item["stock_code"])
+                        curr_codes_by_day[item["trade_date"]].add(
+                            item["stock_code"]
+                        )
 
-                    filtered: list[dict] = []
-                    for day_str, items in prev_by_day.items():
+                    # Build per-day breakdown
+                    daily_data: list[dict] = []
+                    all_filtered: list[dict] = []
+                    for day_str in sorted(prev_by_day.keys()):
+                        items = prev_by_day[day_str]
                         curr_codes = curr_codes_by_day.get(day_str, set())
-                        for item in items:
-                            if item["stock_code"] not in curr_codes:
-                                filtered.append(item)
+                        day_filtered = [
+                            it for it in items
+                            if it["stock_code"] not in curr_codes
+                        ]
+                        all_filtered.extend(day_filtered)
+                        if not day_filtered:
+                            daily_data.append(
+                                {
+                                    "trade_date": day_str,
+                                    "filtered_count": 0,
+                                    "avg_return": 0,
+                                    "positive_count": 0,
+                                    "top_stocks": [],
+                                }
+                            )
+                            continue
+                        d_rets = [f["return_pct"] for f in day_filtered]
+                        d_avg = sum(d_rets) / len(d_rets)
+                        d_pos = sum(1 for r in d_rets if r > 0)
+                        d_top3 = sorted(
+                            day_filtered,
+                            key=lambda x: x["return_pct"],
+                            reverse=True,
+                        )[:3]
+                        daily_data.append(
+                            {
+                                "trade_date": day_str,
+                                "filtered_count": len(day_filtered),
+                                "avg_return": round(d_avg, 2),
+                                "positive_count": d_pos,
+                                "top_stocks": d_top3,
+                            }
+                        )
 
-                    if not filtered:
+                    # Overall summary for this layer
+                    if not all_filtered:
                         filtered_out_best.append(
                             {
                                 "label": label,
                                 "total_filtered": 0,
                                 "avg_return": 0,
                                 "positive_count": 0,
-                                "top_stocks": [],
+                                "days": daily_data,
                             }
                         )
-                        continue
-
-                    rets = [f["return_pct"] for f in filtered]
-                    avg_r = sum(rets) / len(rets)
-                    pos_count = sum(1 for r in rets if r > 0)
-                    top3 = sorted(filtered, key=lambda x: x["return_pct"], reverse=True)[:3]
-
-                    filtered_out_best.append(
-                        {
-                            "label": label,
-                            "total_filtered": len(filtered),
-                            "avg_return": round(avg_r, 2),
-                            "positive_count": pos_count,
-                            "top_stocks": top3,
-                        }
-                    )
+                    else:
+                        rets = [f["return_pct"] for f in all_filtered]
+                        avg_r = sum(rets) / len(rets)
+                        pos_count = sum(1 for r in rets if r > 0)
+                        filtered_out_best.append(
+                            {
+                                "label": label,
+                                "total_filtered": len(all_filtered),
+                                "avg_return": round(avg_r, 2),
+                                "positive_count": pos_count,
+                                "days": daily_data,
+                            }
+                        )
 
                 yield sse(
                     {

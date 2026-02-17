@@ -1100,34 +1100,83 @@ function renderFunnelSummary(summary, conclusions) {
     }
 }
 
+// Per-layer pager state: { layerIdx: currentDayIdx }
+const _filteredPagerState = {};
+let _filteredOutData = null;
+
 function renderFilteredOutBest(filteredOutBest) {
     const el = document.getElementById('funnel-filtered-out');
     if (!filteredOutBest || filteredOutBest.length === 0) return;
 
+    _filteredOutData = filteredOutBest;
+    // Reset pager state
+    for (let i = 0; i < filteredOutBest.length; i++) {
+        _filteredPagerState[i] = 0;
+    }
+
     let html = '<div class="funnel-filtered-box"><strong>被误杀的高收益股票</strong>';
     html += '<p class="form-hint">每层筛掉的票中，次日收益最好的 Top 3</p>';
 
-    for (const layer of filteredOutBest) {
-        if (layer.total_filtered === 0) {
-            html += `<div class="filtered-layer"><span class="filtered-label">${layer.label}</span>: 无筛除</div>`;
-            continue;
-        }
-
+    for (let i = 0; i < filteredOutBest.length; i++) {
+        const layer = filteredOutBest[i];
         const avgCls = layer.avg_return > 0 ? 'range-profit-pos' : (layer.avg_return < 0 ? 'range-profit-neg' : '');
+
         html += `<div class="filtered-layer">`;
         html += `<span class="filtered-label">${layer.label}</span>`;
         html += `: 共筛掉 <strong>${layer.total_filtered}</strong> 只,`;
         html += ` 平均收益 <span class="${avgCls}">${layer.avg_return >= 0 ? '+' : ''}${layer.avg_return.toFixed(2)}%</span>,`;
         html += ` 其中 ${layer.positive_count} 只盈利`;
 
-        if (layer.top_stocks && layer.top_stocks.length > 0) {
+        // Day pager + content container
+        html += `<div id="filtered-layer-${i}-content"></div>`;
+        html += '</div>';
+    }
+
+    html += '</div>';
+    el.innerHTML = html;
+
+    // Render initial day for each layer
+    for (let i = 0; i < filteredOutBest.length; i++) {
+        _renderFilteredDay(i);
+    }
+}
+
+function _renderFilteredDay(layerIdx) {
+    const container = document.getElementById(`filtered-layer-${layerIdx}-content`);
+    if (!container || !_filteredOutData) return;
+
+    const layer = _filteredOutData[layerIdx];
+    const days = layer.days || [];
+    if (days.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const dayIdx = _filteredPagerState[layerIdx] || 0;
+    const day = days[dayIdx];
+    const total = days.length;
+
+    let html = '<div class="filtered-pager">';
+    html += `<button onclick="_filteredPagePrev(${layerIdx})" ${dayIdx === 0 ? 'disabled' : ''}>&laquo; 前一天</button>`;
+    html += `<span class="pager-info">${day.trade_date} (${dayIdx + 1}/${total})</span>`;
+    html += `<button onclick="_filteredPageNext(${layerIdx})" ${dayIdx >= total - 1 ? 'disabled' : ''}>后一天 &raquo;</button>`;
+    html += '</div>';
+
+    if (day.filtered_count === 0) {
+        html += '<div class="filtered-day-stats">该日无筛除</div>';
+    } else {
+        const dAvgCls = day.avg_return > 0 ? 'range-profit-pos' : (day.avg_return < 0 ? 'range-profit-neg' : '');
+        html += `<div class="filtered-day-stats">筛掉 ${day.filtered_count} 只,`;
+        html += ` 平均收益 <span class="${dAvgCls}">${day.avg_return >= 0 ? '+' : ''}${day.avg_return.toFixed(2)}%</span>,`;
+        html += ` 其中 ${day.positive_count} 只盈利</div>`;
+
+        if (day.top_stocks && day.top_stocks.length > 0) {
             html += '<table class="stock-table filtered-stock-table"><thead><tr>';
-            html += '<th>日期</th><th>代码</th><th>名称</th><th>板块</th><th>次日收益</th>';
+            html += '<th>代码</th><th>名称</th><th>板块</th><th>次日收益</th>';
             html += '</tr></thead><tbody>';
-            for (const s of layer.top_stocks) {
+            for (const s of day.top_stocks) {
                 const retCls = s.return_pct > 0 ? 'range-profit-pos' : (s.return_pct < 0 ? 'range-profit-neg' : '');
                 html += `<tr>`;
-                html += `<td>${s.trade_date}</td>`;
                 html += `<td>${s.stock_code}</td>`;
                 html += `<td>${s.stock_name}</td>`;
                 html += `<td>${s.board_name}</td>`;
@@ -1136,11 +1185,24 @@ function renderFilteredOutBest(filteredOutBest) {
             }
             html += '</tbody></table>';
         }
-        html += '</div>';
     }
 
-    html += '</div>';
-    el.innerHTML = html;
+    container.innerHTML = html;
+}
+
+function _filteredPagePrev(layerIdx) {
+    if ((_filteredPagerState[layerIdx] || 0) > 0) {
+        _filteredPagerState[layerIdx]--;
+        _renderFilteredDay(layerIdx);
+    }
+}
+
+function _filteredPageNext(layerIdx) {
+    const days = _filteredOutData[layerIdx].days || [];
+    if ((_filteredPagerState[layerIdx] || 0) < days.length - 1) {
+        _filteredPagerState[layerIdx]++;
+        _renderFilteredDay(layerIdx);
+    }
 }
 </script>
 {% endblock %}

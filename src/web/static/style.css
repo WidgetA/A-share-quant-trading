@@ -2387,6 +2387,46 @@ footer {
     white-space: nowrap;
 }
 
+.filtered-pager {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 0.85rem;
+}
+
+.filtered-pager button {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 2px 10px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    line-height: 1.6;
+}
+
+.filtered-pager button:hover:not(:disabled) {
+    background: #f0f0f0;
+    border-color: #999;
+}
+
+.filtered-pager button:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.filtered-pager .pager-info {
+    color: #666;
+    min-width: 120px;
+    text-align: center;
+}
+
+.filtered-day-stats {
+    font-size: 0.85rem;
+    color: #555;
+    margin-top: 4px;
+}
+
 .funnel-details {
     margin-top: 18px;
 }
