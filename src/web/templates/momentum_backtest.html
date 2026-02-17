@@ -1171,8 +1171,13 @@ function _renderFilteredDay(layerIdx) {
         html += ` 其中 ${day.positive_count} 只盈利</div>`;
 
         if (day.top_stocks && day.top_stocks.length > 0) {
+            const showPE = layer.label.includes('PE过滤');
+            const showGrowth = layer.label.includes('最终推荐');
             html += '<table class="stock-table filtered-stock-table"><thead><tr>';
-            html += '<th>代码</th><th>名称</th><th>板块</th><th>次日收益</th>';
+            html += '<th>代码</th><th>名称</th><th>板块</th>';
+            if (showPE) html += '<th>PE(TTM)</th><th>板块中位PE</th>';
+            if (showGrowth) html += '<th>营收增长率</th>';
+            html += '<th>次日收益</th>';
             html += '</tr></thead><tbody>';
             for (const s of day.top_stocks) {
                 const retCls = s.return_pct > 0 ? 'range-profit-pos' : (s.return_pct < 0 ? 'range-profit-neg' : '');
@@ -1180,6 +1185,15 @@ function _renderFilteredDay(layerIdx) {
                 html += `<td>${s.stock_code}</td>`;
                 html += `<td>${s.stock_name}</td>`;
                 html += `<td>${s.board_name}</td>`;
+                if (showPE) {
+                    const pe = s.pe_ttm != null ? s.pe_ttm.toFixed(1) : '-';
+                    const bpe = s.board_avg_pe != null ? s.board_avg_pe.toFixed(1) : '-';
+                    html += `<td>${pe}</td><td>${bpe}</td>`;
+                }
+                if (showGrowth) {
+                    const rg = s.revenue_growth != null ? `${s.revenue_growth >= 0 ? '+' : ''}${s.revenue_growth.toFixed(1)}%` : '-';
+                    html += `<td>${rg}</td>`;
+                }
                 html += `<td class="${retCls}">${s.return_pct >= 0 ? '+' : ''}${s.return_pct.toFixed(2)}%</td>`;
                 html += `</tr>`;
             }

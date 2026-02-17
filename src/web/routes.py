@@ -2061,6 +2061,42 @@ def create_momentum_router() -> APIRouter:
 
                         all_layers = [l0, l1, l2, l3, l4]
 
+                        # Fetch revenue growth for L3 stocks (for L3→L4 误杀 analysis)
+                        day_revenue_growth: dict[str, float] = {}
+                        if l3:
+                            l3_codes_str = ";".join(s.stock_code for s in l3)
+                            try:
+                                growth_result = await ifind_client.smart_stock_picking(
+                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
+                                )
+                                g_tables = growth_result.get("tables", [])
+                                if g_tables:
+                                    g_table = g_tables[0].get("table", {})
+                                    g_code_col = g_table.get("股票代码", [])
+                                    g_growth_col = []
+                                    for cn, cv in g_table.items():
+                                        if ("收入" in cn and "增长率" in cn) or (
+                                            "收入" in cn and "同比" in cn
+                                        ):
+                                            g_growth_col = cv
+                                            break
+                                    if g_code_col and g_growth_col:
+                                        for gi, gc in enumerate(g_code_col):
+                                            bare = (
+                                                gc.split(".")[0] if isinstance(gc, str) else str(gc)
+                                            )
+                                            if gi < len(g_growth_col):
+                                                gv = g_growth_col[gi]
+                                                if gv is not None and gv != "--":
+                                                    try:
+                                                        day_revenue_growth[bare] = float(gv)
+                                                    except (ValueError, TypeError):
+                                                        pass
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to fetch revenue growth for L3 on {trade_date}: {e}"
+                                )
+
                         # Collect all codes for T+1 fetch
                         all_codes = set()
                         for layer in all_layers:
@@ -2094,15 +2130,22 @@ def create_momentum_router() -> APIRouter:
                                     ret = _calc_net_return_pct(snap.latest_price, sell_price)
                                     ret_rounded = round(ret, 2)
                                     returns.append(ret_rounded)
-                                    all_layer_detail[lname].append(
-                                        {
-                                            "trade_date": str(trade_date),
-                                            "stock_code": s.stock_code,
-                                            "stock_name": s.stock_name,
-                                            "board_name": s.board_name,
-                                            "return_pct": ret_rounded,
-                                        }
-                                    )
+                                    detail_entry = {
+                                        "trade_date": str(trade_date),
+                                        "stock_code": s.stock_code,
+                                        "stock_name": s.stock_name,
+                                        "board_name": s.board_name,
+                                        "return_pct": ret_rounded,
+                                        "pe_ttm": round(s.pe_ttm, 2) if s.pe_ttm else None,
+                                        "board_avg_pe": (
+                                            round(s.board_avg_pe, 2) if s.board_avg_pe else None
+                                        ),
+                                    }
+                                    # Include revenue growth for L3 stocks
+                                    rg = day_revenue_growth.get(s.stock_code)
+                                    if rg is not None:
+                                        detail_entry["revenue_growth"] = round(rg, 2)
+                                    all_layer_detail[lname].append(detail_entry)
 
                             count = len(lstocks)
                             all_layer_counts[lname].append(count)

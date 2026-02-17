@@ -73,6 +73,9 @@ class StockReturn:
     buy_price: float  # 9:40 price
     sell_price: float  # T+1 open
     return_pct: float  # net return after costs
+    pe_ttm: float = 0.0
+    board_avg_pe: float = 0.0
+    revenue_growth: float | None = None  # 同比季度收入增长率
 
 
 @dataclass
@@ -362,6 +365,36 @@ async def run_single_date(
 
     all_layers = [layer0_stocks, layer1_stocks, layer2_stocks, layer3_stocks, layer4_stocks]
 
+    # Fetch revenue growth for L3 stocks (for L3→L4 误杀 analysis)
+    revenue_growth_map: dict[str, float] = {}
+    if layer3_stocks:
+        l3_codes_str = ";".join(s.stock_code for s in layer3_stocks)
+        try:
+            growth_result = await ifind_client.smart_stock_picking(
+                f"{l3_codes_str} 同比季度收入增长率", "stock"
+            )
+            g_tables = growth_result.get("tables", [])
+            if g_tables:
+                g_table = g_tables[0].get("table", {})
+                g_code_col = g_table.get("股票代码", [])
+                g_growth_col: list = []
+                for cn, cv in g_table.items():
+                    if ("收入" in cn and "增长率" in cn) or ("收入" in cn and "同比" in cn):
+                        g_growth_col = cv
+                        break
+                if g_code_col and g_growth_col:
+                    for gi, gc in enumerate(g_code_col):
+                        bare = gc.split(".")[0] if isinstance(gc, str) else str(gc)
+                        if gi < len(g_growth_col):
+                            gv = g_growth_col[gi]
+                            if gv is not None and gv != "--":
+                                try:
+                                    revenue_growth_map[bare] = float(gv)
+                                except (ValueError, TypeError):
+                                    pass
+        except Exception as e:
+            logger.warning(f"Failed to fetch revenue growth for L3 stocks: {e}")
+
     # Collect all unique stock codes across all layers for T+1 fetch
     all_codes: set[str] = set()
     for layer_stocks in all_layers:
@@ -396,6 +429,9 @@ async def run_single_date(
                     buy_price=snap.latest_price,
                     sell_price=sell_price,
                     return_pct=ret_pct,
+                    pe_ttm=s.pe_ttm,
+                    board_avg_pe=s.board_avg_pe,
+                    revenue_growth=revenue_growth_map.get(s.stock_code),
                 )
             )
 
@@ -534,11 +570,18 @@ def _print_filtered_out_best(all_days: list[DayResult]) -> None:
             f" 平均收益{avg_ret:+.2f}%,"
             f" 其中{positive}只盈利"
         )
+        is_pe_layer = "PE过滤" in label
+        is_rec_layer = "最终推荐" in label
         for dt, r in top3:
+            extra = ""
+            if is_pe_layer and r.pe_ttm:
+                extra = f"  PE={r.pe_ttm:.1f}(板块{r.board_avg_pe:.1f})"
+            elif is_rec_layer and r.revenue_growth is not None:
+                extra = f"  营收增长{r.revenue_growth:+.1f}%"
             print(
                 f"      {dt} {r.stock_code} {r.stock_name:<6}"
                 f"  {r.board_name:<10}"
-                f"  次日收益 {r.return_pct:+.2f}%"
+                f"  次日收益 {r.return_pct:+.2f}%{extra}"
             )
 
 
