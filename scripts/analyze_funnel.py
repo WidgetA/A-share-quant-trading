@@ -656,7 +656,9 @@ def main():
     s = date.fromisoformat(args.start_date)
     e = date.fromisoformat(args.end_date)
 
-    asyncio.run(run_analysis(s, e, fade_filter=not args.no_fade_filter, pe_filter=not args.no_pe_filter))
+    asyncio.run(
+        run_analysis(s, e, fade_filter=not args.no_fade_filter, pe_filter=not args.no_pe_filter)
+    )
 
 
 if __name__ == "__main__":
