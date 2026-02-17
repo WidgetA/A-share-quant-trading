@@ -84,15 +84,11 @@
                     </div>
                     <div class="form-group checkbox-group">
                         <label class="checkbox-label">
-                            <input type="checkbox" id="funnel_pe" name="funnel_pe" checked>
-                            <span>启用PE过滤 (L2)</span>
-                        </label>
-                        <label class="checkbox-label">
                             <input type="checkbox" id="funnel_fade" name="funnel_fade" checked>
-                            <span>启用高开低走过滤 (L3)</span>
+                            <span>启用高开低走过滤 (L2)</span>
                         </label>
                     </div>
-                    <p class="form-hint">逐层分析选股漏斗效果：全部成分股 → 涨幅筛选 → PE过滤 → 高开低走过滤 → 最终推荐。每层假设9:40买入，次日开盘卖出，对比收益。</p>
+                    <p class="form-hint">逐层分析选股漏斗效果：全部成分股 → 涨幅筛选 → 高开低走过滤 → 最终推荐。每层假设9:40买入，次日开盘卖出，对比收益。</p>
                     <button type="submit" class="btn btn-primary" id="funnel-btn">开始分析</button>
                 </form>
             </div>
@@ -903,7 +899,7 @@ function fmtGain(val) {
 }
 
 // === Funnel Analysis ===
-const LAYER_NAMES = ['L0: 全部成分股', 'L1: 涨幅>0.56%', 'L2: PE过滤', 'L3: 高开低走过滤', 'L4: 最终推荐'];
+const LAYER_NAMES = ['L0: 全部成分股', 'L1: 涨幅>0.56%', 'L2: 高开低走过滤', 'L3: 最终推荐'];
 
 document.getElementById('funnel-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -911,7 +907,6 @@ document.getElementById('funnel-form').addEventListener('submit', async (e) => {
     const startDate = document.getElementById('funnel_start').value;
     const endDate = document.getElementById('funnel_end').value;
     const fadeFilter = document.getElementById('funnel_fade').checked;
-    const peFilter = document.getElementById('funnel_pe').checked;
 
     if (!startDate || !endDate) return;
     if (endDate < startDate) { alert('结束日期不能早于起始日期'); return; }
@@ -934,7 +929,6 @@ document.getElementById('funnel-form').addEventListener('submit', async (e) => {
                 start_date: startDate,
                 end_date: endDate,
                 fade_filter: fadeFilter,
-                pe_filter: peFilter,
             }),
         });
 
@@ -1171,11 +1165,9 @@ function _renderFilteredDay(layerIdx) {
         html += ` 其中 ${day.positive_count} 只盈利</div>`;
 
         if (day.top_stocks && day.top_stocks.length > 0) {
-            const showPE = layer.label.includes('PE过滤');
             const showGrowth = layer.label.includes('最终推荐');
             html += '<table class="stock-table filtered-stock-table"><thead><tr>';
             html += '<th>代码</th><th>名称</th><th>板块</th>';
-            if (showPE) html += '<th>PE(TTM)</th><th>板块中位PE</th>';
             if (showGrowth) html += '<th>营收增长率</th>';
             html += '<th>次日收益</th>';
             html += '</tr></thead><tbody>';
@@ -1185,11 +1177,6 @@ function _renderFilteredDay(layerIdx) {
                 html += `<td>${s.stock_code}</td>`;
                 html += `<td>${s.stock_name}</td>`;
                 html += `<td>${s.board_name}</td>`;
-                if (showPE) {
-                    const pe = s.pe_ttm != null ? s.pe_ttm.toFixed(1) : '-';
-                    const bpe = s.board_avg_pe != null ? s.board_avg_pe.toFixed(1) : '-';
-                    html += `<td>${pe}</td><td>${bpe}</td>`;
-                }
                 if (showGrowth) {
                     const rg = s.revenue_growth != null ? `${s.revenue_growth >= 0 ? '+' : ''}${s.revenue_growth.toFixed(1)}%` : '-';
                     html += `<td>${rg}</td>`;

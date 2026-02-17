@@ -1,12 +1,12 @@
 # === MODULE PURPOSE ===
 # Core momentum sector scanning strategy.
 # Identifies "hot" concept boards by finding stocks with 9:40 gain from open >0.56%,
-# then selects PE-reasonable stocks from those boards.
+# then selects constituent gainers from those boards.
 
 # === DEPENDENCIES ===
 # - IFinDHttpClient: Price data (historical + real-time)
 # - ConceptMapper: Stock ↔ concept board mapping via iwencai
-# - FundamentalsDB: PE(TTM) data from stock_fundamentals table
+# - FundamentalsDB: ST detection from stock_fundamentals table
 # - StockFilter: Main board filtering
 # - board_filter: Junk board filtering
 
@@ -16,7 +16,7 @@
 # Step 2: per-stock iwencai "所属同花顺概念" → concept boards (filtered)
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
-# Step 5: constituents with 9:40 gain from open > 0.56% AND PE within board median ±30%
+# Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
 # Step 6: recommend — from board with most picks, find highest YoY quarterly revenue growth
 # Step 7: → ScanResult → Feishu notification
 
@@ -126,7 +126,7 @@ class MomentumSectorScanner:
     Pre-filter: stocks with opening gain > -0.5% (broad pool).
     Step 1: keep stocks where 9:40 gain from open > 0.56%.
     Then identifies concept boards with multiple such stocks,
-    and selects PE-reasonable constituents from those boards.
+    and selects constituent gainers from those boards.
 
     This class contains the core strategy logic shared by both
     backtest and live intraday alert modes.
@@ -139,7 +139,6 @@ class MomentumSectorScanner:
     # Strategy parameters
     GAIN_FROM_OPEN_THRESHOLD = 0.56  # Step 1 & 5: minimum (9:40 - open) / open %
     MIN_STOCKS_PER_BOARD = 2  # Step 3: minimum gainers to qualify a hot board
-    PE_TOLERANCE = 0.30  # Step 5: ±30% of board median PE
 
     def __init__(
         self,
@@ -205,10 +204,12 @@ class MomentumSectorScanner:
         total_constituents = sum(len(v) for v in board_constituents.values())
         logger.info(f"Step 4: {total_constituents} total constituent stocks across hot boards")
 
-        # Step 5: PE filter — 9:40 vs open > 0.56% AND PE within board median ±30%
-        selected, all_snapshots = await self._step5_pe_filter(board_constituents, price_snapshots)
+        # Step 5: Select constituents with gain from open > threshold
+        selected, all_snapshots = await self._step5_select_constituents(
+            board_constituents, price_snapshots
+        )
         result.selected_stocks = selected
-        logger.info(f"Step 5: {len(selected)} stocks selected after PE filter")
+        logger.info(f"Step 5: {len(selected)} stocks selected from constituents")
 
         # Step 5.5: Gap-fade filter — remove stocks with high 高开低走 risk
         if selected:
@@ -306,7 +307,7 @@ class MomentumSectorScanner:
         """
         return await self._concept_mapper.batch_get_board_stocks(board_names)
 
-    async def _step5_pe_filter(
+    async def _step5_select_constituents(
         self,
         board_constituents: dict[str, list[tuple[str, str]]],
         price_snapshots: dict[str, PriceSnapshot],
@@ -315,7 +316,6 @@ class MomentumSectorScanner:
         Step 5: From all constituent stocks, select those with:
         - Main board only (same filter as Step 1)
         - 9:40 gain from open > 0.56% (uses latest_price, which is 9:40 price in backtest)
-        - PE(TTM) within board median PE ± 30%
 
         For constituent stocks not in price_snapshots, we need to fetch
         their prices. This is done per-board.
@@ -331,7 +331,7 @@ class MomentumSectorScanner:
 
         board_constituents = filtered_board_constituents
 
-        # Get PE data for all constituents
+        # Get PE data for display purposes (feishu notification, etc.)
         pe_data = await self._fundamentals_db.batch_get_pe(list(all_constituent_codes))
 
         # Get price data for constituents not already in price_snapshots
@@ -344,60 +344,24 @@ class MomentumSectorScanner:
         selected: list[SelectedStock] = []
 
         for board_name, stocks in board_constituents.items():
-            # Collect valid PE values for board median calculation
-            board_pe_values: list[float] = []
-            for code, _ in stocks:
-                pe = pe_data.get(code)
-                if pe is not None and pe > 0:
-                    board_pe_values.append(pe)
-
-            if not board_pe_values:
-                logger.debug(f"Board '{board_name}': no valid PE data, skipping")
-                continue
-
-            # Use median instead of average (more robust to outliers)
-            sorted_pe = sorted(board_pe_values)
-            n = len(sorted_pe)
-            if n % 2 == 1:
-                board_median_pe = sorted_pe[n // 2]
-            else:
-                board_median_pe = (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
-            pe_lower = board_median_pe * (1 - self.PE_TOLERANCE)
-            pe_upper = board_median_pe * (1 + self.PE_TOLERANCE)
-
-            logger.debug(
-                f"Board '{board_name}': median PE={board_median_pe:.2f}, "
-                f"range=[{pe_lower:.2f}, {pe_upper:.2f}]"
-            )
-
             for code, name in stocks:
                 snap = price_snapshots.get(code)
-                pe = pe_data.get(code)
-
-                # Skip if no price data
                 if not snap:
                     continue
 
-                # Skip if no PE data
-                if pe is None or pe <= 0:
-                    continue
-
-                # Filter: 9:40 gain from open > 0.56%
+                # Filter: 9:40 gain from open > threshold
                 if snap.gain_from_open_pct < self.GAIN_FROM_OPEN_THRESHOLD:
                     continue
 
-                # Filter: PE within board median ± tolerance
-                if not (pe_lower <= pe <= pe_upper):
-                    continue
-
+                pe = pe_data.get(code)
                 selected.append(
                     SelectedStock(
                         stock_code=code,
                         stock_name=name,
                         board_name=board_name,
                         open_gain_pct=snap.open_gain_pct,
-                        pe_ttm=pe,
-                        board_avg_pe=board_median_pe,
+                        pe_ttm=pe if pe and pe > 0 else 0.0,
+                        board_avg_pe=0.0,
                     )
                 )
 

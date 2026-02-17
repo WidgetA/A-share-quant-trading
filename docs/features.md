@@ -621,7 +621,7 @@ strategy:
 
 **Status**: In Progress
 
-**Description**: Identifies "hot" concept boards by finding stocks with momentum after open, then selects PE-reasonable stocks from those boards.
+**Description**: Identifies "hot" concept boards by finding stocks with momentum after open, then selects constituent gainers from those boards.
 
 **Strategy Flow**:
 1. **Pre-filter (iwencai)**: Get main board non-ST stocks with opening gain > -0.5% (broad candidate pool)
@@ -629,15 +629,15 @@ strategy:
 3. **Reverse Concept Lookup**: For each qualified stock, find its concept boards via iwencai, filter junk boards
 4. **Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 2
 5. **Board Constituents**: Get ALL stocks in each hot board
-6. **PE Filter**: Select constituents with 9:40 gain from open >0.56% AND PE(TTM) within board median PE ±30%
-7. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (同比季度收入增长率 via iwencai). Highlighted in UI + Feishu notification
-8. **Notification**: Send selection + recommendation via Feishu
+6. **Gain Filter**: Select constituents with 9:40 gain from open >0.56%
+7. **Gap-Fade Filter**: Remove stocks with high-open-low-walk risk
+8. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (同比季度收入增长率 via iwencai). Highlighted in UI + Feishu notification
+9. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
 - Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)
 - Price (live): iFinD `real_time_quotation`
 - Concept boards: iFinD iwencai (`smart_stock_picking`)
-- PE data: `stock_fundamentals` table (external, read-only)
 
 **Key Files**:
 - `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic

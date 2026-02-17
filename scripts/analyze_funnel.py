@@ -11,9 +11,8 @@
 层级定义：
   L0: 热门板块全部成分股（主板，有价格数据）
   L1: L0 + 9:40涨幅 >= 0.56%
-  L2: L1 + PE(TTM) 在板块中位数 ±30%
-  L3: L2 + 高开低走过滤
-  L4: 最终推荐（单只）
+  L2: L1 + 高开低走过滤
+  L3: 最终推荐（单只）
 
 用法：
     uv run python scripts/analyze_funnel.py -s 2026-02-10 -e 2026-02-14
@@ -117,7 +116,7 @@ class DayResult:
     layers: dict[str, LayerResult] = field(default_factory=dict)
 
 
-LAYER_NAMES = ["L0: 全部成分股", "L1: 涨幅>0.56%", "L2: PE过滤", "L3: 高开低走过滤", "L4: 最终推荐"]
+LAYER_NAMES = ["L0: 全部成分股", "L1: 涨幅>0.56%", "L2: 高开低走过滤", "L3: 最终推荐"]
 
 
 # === CORE ANALYSIS ===
@@ -204,7 +203,6 @@ async def run_single_date(
     fundamentals_db,
     concept_mapper: ConceptMapper,
     fade_filter_enabled: bool = True,
-    pe_filter_enabled: bool = True,
 ) -> DayResult | None:
     """Run funnel analysis for a single trading day."""
     logger.info(f"=== Analyzing {trade_date} (T+1={next_trade_date}) ===")
@@ -253,9 +251,6 @@ async def run_single_date(
         for code, _ in allowed:
             all_constituent_codes.add(code)
 
-    # Fetch PE data
-    pe_data = await fundamentals_db.batch_get_pe(list(all_constituent_codes))
-
     # Fetch prices for missing constituents
     missing_codes = [c for c in all_constituent_codes if c not in price_snapshots]
     if missing_codes:
@@ -265,29 +260,12 @@ async def run_single_date(
     # Per-layer stock lists (as SelectedStock for compatibility with gap-fade filter)
     layer0_stocks: list[SelectedStock] = []  # all with valid price
     layer1_stocks: list[SelectedStock] = []  # + gain filter
-    layer2_stocks: list[SelectedStock] = []  # + PE filter
 
     for board_name, stocks in filtered_board_constituents.items():
-        # Calculate board median PE
-        board_pe_values = [pe_data[c] for c, _ in stocks if pe_data.get(c) and pe_data[c] > 0]
-        if board_pe_values:
-            sorted_pe = sorted(board_pe_values)
-            n = len(sorted_pe)
-            board_median_pe = (
-                sorted_pe[n // 2] if n % 2 else (sorted_pe[n // 2 - 1] + sorted_pe[n // 2]) / 2
-            )
-            pe_lower = board_median_pe * (1 - MomentumSectorScanner.PE_TOLERANCE)
-            pe_upper = board_median_pe * (1 + MomentumSectorScanner.PE_TOLERANCE)
-        else:
-            board_median_pe = 0.0
-            pe_lower = pe_upper = 0.0
-
         for code, name in stocks:
             snap = price_snapshots.get(code)
             if not snap:
                 continue
-
-            pe = pe_data.get(code)
 
             # L0: has valid price data (main board already filtered)
             layer0_stocks.append(
@@ -296,8 +274,8 @@ async def run_single_date(
                     stock_name=name,
                     board_name=board_name,
                     open_gain_pct=snap.open_gain_pct,
-                    pe_ttm=pe if pe and pe > 0 else 0.0,
-                    board_avg_pe=board_median_pe,
+                    pe_ttm=0.0,
+                    board_avg_pe=0.0,
                 )
             )
 
@@ -309,50 +287,30 @@ async def run_single_date(
                         stock_name=name,
                         board_name=board_name,
                         open_gain_pct=snap.open_gain_pct,
-                        pe_ttm=pe if pe and pe > 0 else 0.0,
-                        board_avg_pe=board_median_pe,
+                        pe_ttm=0.0,
+                        board_avg_pe=0.0,
                     )
                 )
-
-                # L2: + PE filter (need valid PE and within range)
-                # When PE filter disabled, L2 passes through all L1 stocks
-                if pe_filter_enabled:
-                    pe_pass = pe and pe > 0 and pe_lower > 0 and pe_lower <= pe <= pe_upper
-                else:
-                    pe_pass = True
-
-                if pe_pass:
-                    layer2_stocks.append(
-                        SelectedStock(
-                            stock_code=code,
-                            stock_name=name,
-                            board_name=board_name,
-                            open_gain_pct=snap.open_gain_pct,
-                            pe_ttm=pe if pe and pe > 0 else 0.0,
-                            board_avg_pe=board_median_pe,
-                        )
-                    )
 
     # Deduplicate each layer
     layer0_stocks = _dedup_stocks(layer0_stocks)
     layer1_stocks = _dedup_stocks(layer1_stocks)
-    layer2_stocks = _dedup_stocks(layer2_stocks)
 
-    # L3: gap-fade filter applied to L2
+    # L2: gap-fade filter applied to L1
     gap_fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
-    if fade_filter_enabled and layer2_stocks:
-        layer3_stocks, _ = await gap_fade_filter.filter_stocks(
-            layer2_stocks, price_snapshots, trade_date
+    if fade_filter_enabled and layer1_stocks:
+        layer2_stocks, _ = await gap_fade_filter.filter_stocks(
+            layer1_stocks, price_snapshots, trade_date
         )
     else:
-        layer3_stocks = list(layer2_stocks)
+        layer2_stocks = list(layer1_stocks)
 
-    # L4: recommendation (single stock)
-    layer4_stocks: list[SelectedStock] = []
-    if layer3_stocks:
-        rec = await scanner._step6_recommend(layer3_stocks, price_snapshots)
+    # L3: recommendation (single stock)
+    layer3_stocks: list[SelectedStock] = []
+    if layer2_stocks:
+        rec = await scanner._step6_recommend(layer2_stocks, price_snapshots)
         if rec:
-            layer4_stocks = [
+            layer3_stocks = [
                 SelectedStock(
                     stock_code=rec.stock_code,
                     stock_name=rec.stock_name,
@@ -363,15 +321,15 @@ async def run_single_date(
                 )
             ]
 
-    all_layers = [layer0_stocks, layer1_stocks, layer2_stocks, layer3_stocks, layer4_stocks]
+    all_layers = [layer0_stocks, layer1_stocks, layer2_stocks, layer3_stocks]
 
-    # Fetch revenue growth for L3 stocks (for L3→L4 误杀 analysis)
+    # Fetch revenue growth for L2 stocks (for L2→L3 误杀 analysis)
     revenue_growth_map: dict[str, float] = {}
-    if layer3_stocks:
-        l3_codes_str = ";".join(s.stock_code for s in layer3_stocks)
+    if layer2_stocks:
+        l2_codes_str = ";".join(s.stock_code for s in layer2_stocks)
         try:
             growth_result = await ifind_client.smart_stock_picking(
-                f"{l3_codes_str} 同比季度收入增长率", "stock"
+                f"{l2_codes_str} 同比季度收入增长率", "stock"
             )
             g_tables = growth_result.get("tables", [])
             if g_tables:
@@ -393,7 +351,7 @@ async def run_single_date(
                                 except (ValueError, TypeError):
                                     pass
         except Exception as e:
-            logger.warning(f"Failed to fetch revenue growth for L3 stocks: {e}")
+            logger.warning(f"Failed to fetch revenue growth for L2 stocks: {e}")
 
     # Collect all unique stock codes across all layers for T+1 fetch
     all_codes: set[str] = set()
@@ -533,9 +491,8 @@ def _print_filtered_out_best(all_days: list[DayResult]) -> None:
 
     transitions = [
         (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-        (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 PE过滤"),
-        (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 高开低走"),
-        (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
+        (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
+        (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
     ]
 
     for prev_name, curr_name, label in transitions:
@@ -570,13 +527,9 @@ def _print_filtered_out_best(all_days: list[DayResult]) -> None:
             f" 平均收益{avg_ret:+.2f}%,"
             f" 其中{positive}只盈利"
         )
-        is_pe_layer = "PE过滤" in label
-        is_rec_layer = "最终推荐" in label
         for dt, r in top3:
             extra = ""
-            if is_pe_layer and r.pe_ttm:
-                extra = f"  PE={r.pe_ttm:.1f}(板块{r.board_avg_pe:.1f})"
-            elif is_rec_layer and r.revenue_growth is not None:
+            if "最终推荐" in label and r.revenue_growth is not None:
                 extra = f"  营收增长{r.revenue_growth:+.1f}%"
             print(
                 f"      {dt} {r.stock_code} {r.stock_name:<6}"
@@ -600,9 +553,8 @@ def _print_conclusions(all_days: list[DayResult]) -> None:
     print("  结论:")
     pairs = [
         (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-        (LAYER_NAMES[1], LAYER_NAMES[2], "PE过滤"),
-        (LAYER_NAMES[2], LAYER_NAMES[3], "高开低走过滤"),
-        (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
+        (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
+        (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
     ]
     for prev_name, curr_name, filter_label in pairs:
         prev_ret = layer_avg_returns.get(prev_name)
@@ -625,7 +577,6 @@ async def run_analysis(
     start_date: date,
     end_date: date,
     fade_filter: bool = True,
-    pe_filter: bool = True,
 ) -> None:
     """Run funnel analysis across a date range."""
     ifind_client = IFinDHttpClient()
@@ -696,7 +647,6 @@ async def run_analysis(
                 fundamentals_db=fundamentals_db,
                 concept_mapper=concept_mapper,
                 fade_filter_enabled=fade_filter,
-                pe_filter_enabled=pe_filter,
             )
 
             if day_result:
@@ -733,12 +683,7 @@ def main():
     parser.add_argument(
         "--no-fade-filter",
         action="store_true",
-        help="禁用高开低走过滤器 (L3 = L2)",
-    )
-    parser.add_argument(
-        "--no-pe-filter",
-        action="store_true",
-        help="禁用PE过滤 (L2 = L1)",
+        help="禁用高开低走过滤器 (L2 = L1)",
     )
     parser.add_argument(
         "--debug",
@@ -754,9 +699,7 @@ def main():
     s = date.fromisoformat(args.start_date)
     e = date.fromisoformat(args.end_date)
 
-    asyncio.run(
-        run_analysis(s, e, fade_filter=not args.no_fade_filter, pe_filter=not args.no_pe_filter)
-    )
+    asyncio.run(run_analysis(s, e, fade_filter=not args.no_fade_filter))
 
 
 if __name__ == "__main__":

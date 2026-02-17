@@ -1107,7 +1107,6 @@ class FunnelAnalysisRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     fade_filter: bool = True
-    pe_filter: bool = True
 
 
 def create_momentum_router() -> APIRouter:
@@ -1820,9 +1819,8 @@ def create_momentum_router() -> APIRouter:
         LAYER_NAMES = [
             "L0: 全部成分股",
             "L1: 涨幅>0.56%",
-            "L2: PE过滤",
-            "L3: 高开低走过滤",
-            "L4: 最终推荐",
+            "L2: 高开低走过滤",
+            "L3: 最终推荐",
         ]
 
         async def event_stream():
@@ -1959,7 +1957,7 @@ def create_momentum_router() -> APIRouter:
                             list(hot_boards.keys())
                         )
 
-                        # Step 5: layer capture
+                        # Step 5: layer capture (no PE filter)
                         all_constituent_codes: set[str] = set()
                         filtered_bc: dict[str, list[tuple[str, str]]] = {}
                         for bn, stocks in board_constituents.items():
@@ -1968,60 +1966,34 @@ def create_momentum_router() -> APIRouter:
                             for c, _ in allowed:
                                 all_constituent_codes.add(c)
 
-                        pe_data = await fundamentals_db.batch_get_pe(list(all_constituent_codes))
-
                         missing = [c for c in all_constituent_codes if c not in price_snapshots]
                         if missing:
                             extra = await scanner._fetch_constituent_prices(missing)
                             price_snapshots = {**price_snapshots, **extra}
 
-                        # Build layers
+                        # Build layers: L0 (all constituents), L1 (gain filter)
                         l0: list[SelectedStock] = []
                         l1: list[SelectedStock] = []
-                        l2: list[SelectedStock] = []
 
                         for bn, stocks in filtered_bc.items():
-                            bpe = [
-                                pe_data[c] for c, _ in stocks if pe_data.get(c) and pe_data[c] > 0
-                            ]
-                            if bpe:
-                                sp = sorted(bpe)
-                                n = len(sp)
-                                med = sp[n // 2] if n % 2 else (sp[n // 2 - 1] + sp[n // 2]) / 2
-                                pe_lo = med * 0.70
-                                pe_hi = med * 1.30
-                            else:
-                                med = 0.0
-                                pe_lo = pe_hi = 0.0
-
                             for code, name in stocks:
                                 snap = price_snapshots.get(code)
                                 if not snap:
                                     continue
-                                pe = pe_data.get(code)
-                                pe_val = pe if pe and pe > 0 else 0.0
 
                                 ss = SelectedStock(
                                     stock_code=code,
                                     stock_name=name,
                                     board_name=bn,
                                     open_gain_pct=snap.open_gain_pct,
-                                    pe_ttm=pe_val,
-                                    board_avg_pe=med,
+                                    pe_ttm=0.0,
+                                    board_avg_pe=0.0,
                                 )
                                 l0.append(ss)
 
                                 threshold = MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD
                                 if snap.gain_from_open_pct >= threshold:
                                     l1.append(ss)
-                                    if body.pe_filter:
-                                        pe_pass = (
-                                            pe and pe > 0 and pe_lo > 0 and pe_lo <= pe <= pe_hi
-                                        )
-                                    else:
-                                        pe_pass = True
-                                    if pe_pass:
-                                        l2.append(ss)
 
                         # Deduplicate
                         def _dedup(stocks):
@@ -2034,21 +2006,20 @@ def create_momentum_router() -> APIRouter:
 
                         l0 = _dedup(l0)
                         l1 = _dedup(l1)
-                        l2 = _dedup(l2)
 
-                        # L3: gap-fade filter
+                        # L2: gap-fade filter
                         fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
-                        if body.fade_filter and l2:
-                            l3, _ = await fade_filter.filter_stocks(l2, price_snapshots, trade_date)
+                        if body.fade_filter and l1:
+                            l2, _ = await fade_filter.filter_stocks(l1, price_snapshots, trade_date)
                         else:
-                            l3 = list(l2)
+                            l2 = list(l1)
 
-                        # L4: recommendation
-                        l4 = []
-                        if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots)
+                        # L3: recommendation
+                        l3 = []
+                        if l2:
+                            rec = await scanner._step6_recommend(l2, price_snapshots)
                             if rec:
-                                l4 = [
+                                l3 = [
                                     SelectedStock(
                                         stock_code=rec.stock_code,
                                         stock_name=rec.stock_name,
@@ -2059,15 +2030,15 @@ def create_momentum_router() -> APIRouter:
                                     )
                                 ]
 
-                        all_layers = [l0, l1, l2, l3, l4]
+                        all_layers = [l0, l1, l2, l3]
 
-                        # Fetch revenue growth for L3 stocks (for L3→L4 误杀 analysis)
+                        # Fetch revenue growth for L2 stocks (for L2→L3 误杀)
                         day_revenue_growth: dict[str, float] = {}
-                        if l3:
-                            l3_codes_str = ";".join(s.stock_code for s in l3)
+                        if l2:
+                            l2_codes_str = ";".join(s.stock_code for s in l2)
                             try:
                                 growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
+                                    f"{l2_codes_str} 同比季度收入增长率", "stock"
                                 )
                                 g_tables = growth_result.get("tables", [])
                                 if g_tables:
@@ -2094,7 +2065,7 @@ def create_momentum_router() -> APIRouter:
                                                         pass
                             except Exception as e:
                                 logger.warning(
-                                    f"Failed to fetch revenue growth for L3 on {trade_date}: {e}"
+                                    f"Failed to fetch revenue growth on {trade_date}: {e}"
                                 )
 
                         # Collect all codes for T+1 fetch
@@ -2136,12 +2107,7 @@ def create_momentum_router() -> APIRouter:
                                         "stock_name": s.stock_name,
                                         "board_name": s.board_name,
                                         "return_pct": ret_rounded,
-                                        "pe_ttm": round(s.pe_ttm, 2) if s.pe_ttm else None,
-                                        "board_avg_pe": (
-                                            round(s.board_avg_pe, 2) if s.board_avg_pe else None
-                                        ),
                                     }
-                                    # Include revenue growth for L3 stocks
                                     rg = day_revenue_growth.get(s.stock_code)
                                     if rg is not None:
                                         detail_entry["revenue_growth"] = round(rg, 2)
@@ -2214,9 +2180,8 @@ def create_momentum_router() -> APIRouter:
                 conclusions = []
                 pairs = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "PE过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "高开低走过滤"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
                 ]
                 for prev_n, curr_n, label in pairs:
                     prev_r = summary_layers[prev_n]["avg_return"]
@@ -2245,9 +2210,8 @@ def create_momentum_router() -> APIRouter:
                 filtered_out_best = []
                 transitions = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 PE过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 高开低走"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
                     from collections import defaultdict
