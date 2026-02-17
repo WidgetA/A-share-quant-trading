@@ -201,6 +201,7 @@ async def run_single_date(
     fundamentals_db,
     concept_mapper: ConceptMapper,
     fade_filter_enabled: bool = True,
+    pe_filter_enabled: bool = True,
 ) -> DayResult | None:
     """Run funnel analysis for a single trading day."""
     logger.info(f"=== Analyzing {trade_date} (T+1={next_trade_date}) ===")
@@ -311,14 +312,20 @@ async def run_single_date(
                 )
 
                 # L2: + PE filter (need valid PE and within range)
-                if pe and pe > 0 and pe_lower > 0 and pe_lower <= pe <= pe_upper:
+                # When PE filter disabled, L2 passes through all L1 stocks
+                if pe_filter_enabled:
+                    pe_pass = pe and pe > 0 and pe_lower > 0 and pe_lower <= pe <= pe_upper
+                else:
+                    pe_pass = True
+
+                if pe_pass:
                     layer2_stocks.append(
                         SelectedStock(
                             stock_code=code,
                             stock_name=name,
                             board_name=board_name,
                             open_gain_pct=snap.open_gain_pct,
-                            pe_ttm=pe,
+                            pe_ttm=pe if pe and pe > 0 else 0.0,
                             board_avg_pe=board_median_pe,
                         )
                     )
@@ -520,6 +527,7 @@ async def run_analysis(
     start_date: date,
     end_date: date,
     fade_filter: bool = True,
+    pe_filter: bool = True,
 ) -> None:
     """Run funnel analysis across a date range."""
     ifind_client = IFinDHttpClient()
@@ -590,6 +598,7 @@ async def run_analysis(
                 fundamentals_db=fundamentals_db,
                 concept_mapper=concept_mapper,
                 fade_filter_enabled=fade_filter,
+                pe_filter_enabled=pe_filter,
             )
 
             if day_result:
@@ -629,6 +638,11 @@ def main():
         help="禁用高开低走过滤器 (L3 = L2)",
     )
     parser.add_argument(
+        "--no-pe-filter",
+        action="store_true",
+        help="禁用PE过滤 (L2 = L1)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="显示调试信息",
@@ -642,7 +656,7 @@ def main():
     s = date.fromisoformat(args.start_date)
     e = date.fromisoformat(args.end_date)
 
-    asyncio.run(run_analysis(s, e, fade_filter=not args.no_fade_filter))
+    asyncio.run(run_analysis(s, e, fade_filter=not args.no_fade_filter, pe_filter=not args.no_pe_filter))
 
 
 if __name__ == "__main__":
