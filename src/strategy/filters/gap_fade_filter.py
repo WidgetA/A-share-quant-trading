@@ -202,9 +202,7 @@ class GapFadeFilter:
 
         for i in range(0, len(stock_codes), batch_size):
             batch = stock_codes[i : i + batch_size]
-            codes_str = ",".join(
-                f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-            )
+            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
             try:
                 data = await self._ifind.history_quotes(
@@ -228,19 +226,13 @@ class GapFadeFilter:
                     entry: dict = {}
 
                     if vol_vals:
-                        volumes = [
-                            float(v) for v in vol_vals
-                            if v is not None and float(v) > 0
-                        ]
+                        volumes = [float(v) for v in vol_vals if v is not None and float(v) > 0]
                         if volumes:
                             recent = volumes[-lookback:]
                             entry["avg_daily_volume"] = sum(recent) / len(recent)
 
                     if turn_vals:
-                        turnovers = [
-                            float(t) for t in turn_vals
-                            if t is not None and float(t) >= 0
-                        ]
+                        turnovers = [float(t) for t in turn_vals if t is not None and float(t) >= 0]
                         if turnovers:
                             recent = turnovers[-lookback:]
                             entry["avg_daily_turnover"] = sum(recent) / len(recent)
