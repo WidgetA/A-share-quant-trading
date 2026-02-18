@@ -2537,9 +2537,7 @@ def create_momentum_router() -> APIRouter:
                         # Filter out ST stocks
                         if all_constituent_codes:
                             non_st = set(
-                                await fundamentals_db.batch_filter_st(
-                                    list(all_constituent_codes)
-                                )
+                                await fundamentals_db.batch_filter_st(list(all_constituent_codes))
                             )
                             filtered_bc = {
                                 bn: [(c, n) for c, n in stocks if c in non_st]
