@@ -332,6 +332,17 @@ class MomentumSectorScanner:
 
         board_constituents = filtered_board_constituents
 
+        # Filter out ST stocks (same as Step 1)
+        if all_constituent_codes:
+            non_st_codes = set(
+                await self._fundamentals_db.batch_filter_st(list(all_constituent_codes))
+            )
+            board_constituents = {
+                board: [(c, n) for c, n in stocks if c in non_st_codes]
+                for board, stocks in board_constituents.items()
+            }
+            all_constituent_codes &= non_st_codes
+
         # Get PE data for display purposes (feishu notification, etc.)
         pe_data = await self._fundamentals_db.batch_get_pe(list(all_constituent_codes))
 
