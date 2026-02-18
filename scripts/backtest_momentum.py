@@ -183,26 +183,31 @@ async def fetch_main_board_prices_for_date(
 
     logger.info(f"Fetched prices for {len(snapshots)} stocks")
 
-    # Fetch 9:40 price to use as latest_price (for gain check and buy price)
+    # Fetch 9:40 price and volume (for gain check, buy price, and gap-fade filter)
     if snapshots:
-        prices_940 = await _fetch_940_prices(client, list(snapshots.keys()), trade_date)
+        data_940 = await _fetch_940_data(client, list(snapshots.keys()), trade_date)
         updated = 0
-        for code, price in prices_940.items():
+        for code, (price, volume) in data_940.items():
             if code in snapshots and price > 0:
                 snapshots[code].latest_price = price
+                snapshots[code].early_volume = volume
                 updated += 1
-        logger.info(f"Updated {updated}/{len(snapshots)} stocks with 9:40 price")
+        logger.info(f"Updated {updated}/{len(snapshots)} stocks with 9:40 price/volume")
 
     return snapshots
 
 
-async def _fetch_940_prices(
+async def _fetch_940_data(
     client: IFinDHttpClient,
     stock_codes: list[str],
     trade_date: date,
-) -> dict[str, float]:
-    """Fetch the 9:40 price for stocks via high_frequency API (1-min bars)."""
-    result: dict[str, float] = {}
+) -> dict[str, tuple[float, float]]:
+    """Fetch 9:40 price and cumulative volume via high_frequency API (1-min bars).
+
+    Returns:
+        dict: stock_code → (price_at_940, cumulative_volume_930_to_940)
+    """
+    result: dict[str, tuple[float, float]] = {}
     batch_size = 50
     start_time = f"{trade_date} 09:30:00"
     end_time = f"{trade_date} 09:40:00"
@@ -214,7 +219,7 @@ async def _fetch_940_prices(
         try:
             data = await client.high_frequency(
                 codes=codes_str,
-                indicators="close",
+                indicators="close,volume",
                 start_time=start_time,
                 end_time=end_time,
                 function_para={"Interval": "1"},  # 1-minute bars
@@ -228,10 +233,21 @@ async def _fetch_940_prices(
 
                 tbl = table_entry.get("table", {})
                 close_vals = tbl.get("close", [])
+                vol_vals = tbl.get("volume", [])
+
+                price = 0.0
+                cum_volume = 0.0
+
                 if close_vals:
                     last_close = close_vals[-1]
                     if last_close is not None:
-                        result[bare_code] = float(last_close)
+                        price = float(last_close)
+
+                if vol_vals:
+                    cum_volume = sum(float(v) for v in vol_vals if v is not None)
+
+                if price > 0:
+                    result[bare_code] = (price, cum_volume)
 
         except IFinDHttpError as e:
             logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")

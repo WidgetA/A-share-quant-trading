@@ -133,7 +133,7 @@ async def poll_realtime_gainers(
         try:
             data = await client.real_time_quotation(
                 codes=codes_str,
-                indicators="open,preClose,latest",
+                indicators="open,preClose,latest,volume",
             )
 
             for table_entry in data.get("tables", []):
@@ -146,11 +146,13 @@ async def poll_realtime_gainers(
                 open_vals = tbl.get("open", [])
                 prev_vals = tbl.get("preClose", [])
                 latest_vals = tbl.get("latest", [])
+                vol_vals = tbl.get("volume", [])
 
                 if open_vals and prev_vals and latest_vals:
                     open_price = float(open_vals[0]) if open_vals[0] else 0.0
                     prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
                     latest = float(latest_vals[0]) if latest_vals[0] else 0.0
+                    volume = float(vol_vals[0]) if vol_vals and vol_vals[0] else 0.0
 
                     if prev_close > 0:
                         snapshots[bare] = PriceSnapshot(
@@ -159,6 +161,7 @@ async def poll_realtime_gainers(
                             open_price=open_price,
                             prev_close=prev_close,
                             latest_price=latest,
+                            early_volume=volume,
                         )
 
         except IFinDHttpError as e:

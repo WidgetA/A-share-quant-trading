@@ -46,6 +46,7 @@ class PriceSnapshot:
     open_price: float
     prev_close: float
     latest_price: float  # For live mode; equals open_price in backtest
+    early_volume: float = 0.0  # Cumulative volume from 9:30 to scan time (~9:40)
 
     @property
     def open_gain_pct(self) -> float:
@@ -501,7 +502,7 @@ class MomentumSectorScanner:
             try:
                 data = await self._ifind.real_time_quotation(
                     codes=codes_str,
-                    indicators="open,preClose,latest",
+                    indicators="open,preClose,latest,volume",
                 )
 
                 for table_wrapper in data.get("tables", []):
@@ -516,11 +517,13 @@ class MomentumSectorScanner:
                     open_vals = table.get("open", [])
                     prev_vals = table.get("preClose", [])
                     latest_vals = table.get("latest", [])
+                    vol_vals = table.get("volume", [])
 
                     if open_vals and prev_vals and latest_vals:
                         open_price = float(open_vals[0]) if open_vals[0] else 0.0
                         prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
                         latest = float(latest_vals[0]) if latest_vals[0] else open_price
+                        volume = float(vol_vals[0]) if vol_vals and vol_vals[0] else 0.0
 
                         if prev_close > 0:
                             result[bare_code] = PriceSnapshot(
@@ -529,6 +532,7 @@ class MomentumSectorScanner:
                                 open_price=open_price,
                                 prev_close=prev_close,
                                 latest_price=latest,
+                                early_volume=volume,
                             )
 
             except Exception as e:
@@ -581,20 +585,26 @@ class MomentumSectorScanner:
             except Exception as e:
                 logger.error(f"Error fetching historical prices for batch: {e}")
 
-        # Fetch 9:40 price for all stocks that got open/prevClose
+        # Fetch 9:40 price and volume for all stocks that got open/prevClose
         if result:
-            prices_940 = await self._fetch_940_prices(list(result.keys()), trade_date)
-            for code, price in prices_940.items():
+            data_940 = await self._fetch_940_data(list(result.keys()), trade_date)
+            for code, (price, volume) in data_940.items():
                 if code in result and price > 0:
                     result[code].latest_price = price
+                    result[code].early_volume = volume
 
         return result
 
-    async def _fetch_940_prices(self, stock_codes: list[str], trade_date: date) -> dict[str, float]:
-        """Fetch the 9:40 price for stocks via high_frequency API (1-min bars)."""
-        result: dict[str, float] = {}
+    async def _fetch_940_data(
+        self, stock_codes: list[str], trade_date: date
+    ) -> dict[str, tuple[float, float]]:
+        """Fetch 9:40 price and cumulative volume via high_frequency API (1-min bars).
+
+        Returns:
+            dict: stock_code → (price_at_940, cumulative_volume_930_to_940)
+        """
+        result: dict[str, tuple[float, float]] = {}
         batch_size = 50
-        # Query 9:39-9:40 to get exactly the 9:40 close
         start_time = f"{trade_date} 09:30:00"
         end_time = f"{trade_date} 09:40:00"
 
@@ -605,7 +615,7 @@ class MomentumSectorScanner:
             try:
                 data = await self._ifind.high_frequency(
                     codes=codes_str,
-                    indicators="close",
+                    indicators="close,volume",
                     start_time=start_time,
                     end_time=end_time,
                     function_para={"Interval": "1"},  # 1-minute bars
@@ -619,11 +629,21 @@ class MomentumSectorScanner:
 
                     tbl = table_entry.get("table", {})
                     close_vals = tbl.get("close", [])
-                    # Take the last bar's close (= 9:40 price)
+                    vol_vals = tbl.get("volume", [])
+
+                    price = 0.0
+                    cum_volume = 0.0
+
                     if close_vals:
                         last_close = close_vals[-1]
                         if last_close is not None:
-                            result[bare_code] = float(last_close)
+                            price = float(last_close)
+
+                    if vol_vals:
+                        cum_volume = sum(float(v) for v in vol_vals if v is not None)
+
+                    if price > 0:
+                        result[bare_code] = (price, cum_volume)
 
             except Exception as e:
                 logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")

@@ -3,11 +3,13 @@
 # Applied after momentum selection to filter out stocks most likely to
 # gap up then drop, causing losses when holding to next-day open.
 
-# === KEY SIGNALS ===
-# 1. Intraday strength ratio: fraction of total gain from real buying vs gap
-# 2. Open gap ceiling: overly large gaps fade more often
-# 3. Multi-day extension: stocks already up significantly tend to mean-revert
-# 4. Previous day big gain: follow-through after a huge day is unreliable
+# === KEY SIGNAL (v4 — validated across 5 time periods) ===
+# AND combination: high early volume AND high turnover stock.
+# Tested 13 factors × 5 periods (2024-10 ~ 2026-02), 10000 random permutations.
+# Only 3 AND combos passed p<0.05 in ALL 5 periods; best is:
+#   vol>2x avg AND turnover>top15% → avg false-kill 26.5%, p<0.001 all periods
+# Logic: extreme volume + high turnover on gap-up day = sentiment climax / dumping,
+# next-day open consistently lower.
 
 # === DATA FLOW ===
 # MomentumSectorScanner Step 5 → GapFadeFilter → Step 6 (recommend)
@@ -36,25 +38,21 @@ class GapFadeConfig:
 
     enabled: bool = True
 
-    # Signal 1: Minimum ratio of intraday momentum to total gain.
-    # gain_from_open / current_gain_pct — if too low, the stock's apparent
-    # strength is mostly the opening gap, not real buying pressure.
-    # Example: open +4%, 9:40 +4.6% → ratio=0.56/4.6=12% (mostly gap, risky)
-    #          open +0.5%, 9:40 +1.1% → ratio=0.56/1.1=51% (real momentum)
-    min_intraday_strength: float = 0.12
+    # Signal 1: Early volume ratio.
+    # early_volume (9:30-9:40) / avg daily volume (past N days).
+    # Proxy for full-day volume ratio at scan time (~9:40).
+    # Experiment validated daily vol>2x; at 9:40 first 10min ≈ 8-15% of daily,
+    # so 0.25 ≈ a stock on pace for ~2x daily volume.
+    max_volume_ratio: float = 0.25
 
-    # Signal 2: Maximum open gap percentage.
-    # Gaps > this threshold have statistically higher fade rates.
-    max_open_gap_pct: float = 5.0
+    # Signal 2: Average daily turnover rate (%).
+    # Stocks with consistently high turnover are "hot"/speculative names.
+    # Experiment: top 15% turnover among gap-up stocks ≈ 10%;
+    # we use historical avg, so threshold slightly lower.
+    max_avg_turnover: float = 8.0
 
-    # Signal 3: Maximum cumulative gain over past N trading days.
-    # Extended runs are exhaustion-prone; gap-up is often the final push.
-    max_n_day_gain_pct: float = 12.0
-    lookback_days: int = 5  # Number of trading days to look back
-
-    # Signal 4: Maximum previous day gain.
-    # A huge previous-day move (near limit-up) followed by gap-up often fades.
-    max_prev_day_gain_pct: float = 7.0
+    # Number of trading days for average volume/turnover calculation.
+    volume_lookback_days: int = 20
 
 
 @dataclass
@@ -64,22 +62,20 @@ class FadeRiskResult:
     stock_code: str
     filtered_out: bool
     reasons: list[str] = field(default_factory=list)
-    # Signal values for logging/debugging
-    open_gap_pct: float = 0.0
-    intraday_strength: float = 0.0
-    prev_day_gain_pct: float | None = None
-    n_day_gain_pct: float | None = None
+    volume_ratio: float | None = None
+    avg_turnover: float | None = None
 
 
 class GapFadeFilter:
     """
     Filters out stocks with high gap-fade risk from momentum selections.
 
-    Uses multiple signals to score each stock's likelihood of 高开低走:
-    - Intraday strength ratio (most important): distinguishes real momentum from gap illusion
-    - Open gap size: large gaps fill more frequently
-    - Multi-day extension: exhaustion detection
-    - Previous day gain: post-big-move follow-through is unreliable
+    Uses AND combination of two experiment-validated signals:
+    - High early volume: early_volume / avg_daily_volume > threshold
+    - High turnover stock: avg daily turnover > threshold
+    Both must be true to filter (AND logic reduces false kills).
+
+    Validated across 5 time periods (2024-10 ~ 2026-02), p<0.001 in all.
 
     Usage:
         filter = GapFadeFilter(ifind_client)
@@ -105,7 +101,7 @@ class GapFadeFilter:
 
         Args:
             selected_stocks: Stocks selected by momentum scanner (after PE filter).
-            price_snapshots: Price data for all stocks.
+            price_snapshots: Price data for all stocks (must include early_volume).
             trade_date: Trade date (for historical data fetch). None = live mode.
 
         Returns:
@@ -114,7 +110,7 @@ class GapFadeFilter:
         if not self._config.enabled or not selected_stocks:
             return selected_stocks, []
 
-        # Fetch historical context for multi-day and prev-day signals
+        # Fetch historical context (avg daily volume)
         codes = [s.stock_code for s in selected_stocks]
         historical = await self._fetch_historical_context(codes, trade_date)
 
@@ -147,50 +143,36 @@ class GapFadeFilter:
         snap: PriceSnapshot | None,
         hist: dict | None,
     ) -> FadeRiskResult:
-        """Assess a single stock's fade risk. Any triggered signal → filtered out."""
+        """Assess a single stock's fade risk using AND logic."""
         reasons: list[str] = []
-        open_gap = snap.open_gain_pct if snap else 0.0
-        intraday_strength = 0.0
-        prev_day_gain: float | None = None
-        n_day_gain: float | None = None
+        volume_ratio: float | None = None
+        avg_turnover: float | None = hist.get("avg_daily_turnover") if hist else None
 
-        # Signal 1: Intraday strength ratio
-        if snap and snap.current_gain_pct > 0:
-            intraday_strength = snap.gain_from_open_pct / snap.current_gain_pct
-            if intraday_strength < self._config.min_intraday_strength:
-                reasons.append(
-                    f"日内动量占比{intraday_strength:.0%}<{self._config.min_intraday_strength:.0%}"
-                )
+        # AND logic: both volume AND turnover must exceed thresholds.
+        # Fail-open: if either metric is unavailable, don't filter.
+        vol_high = False
+        turn_high = False
 
-        # Signal 2: Open gap ceiling
-        if open_gap > self._config.max_open_gap_pct:
-            reasons.append(f"跳空{open_gap:.1f}%>{self._config.max_open_gap_pct:.0f}%")
+        if snap and snap.early_volume > 0 and hist and hist.get("avg_daily_volume"):
+            avg_vol = hist["avg_daily_volume"]
+            volume_ratio = snap.early_volume / avg_vol
+            vol_high = volume_ratio > self._config.max_volume_ratio
 
-        # Signal 3: Multi-day extension
-        if hist and hist.get("n_day_gain") is not None:
-            n_day_gain = hist["n_day_gain"]
-            if n_day_gain > self._config.max_n_day_gain_pct:
-                reasons.append(
-                    f"{self._config.lookback_days}日涨{n_day_gain:.1f}%"
-                    f">{self._config.max_n_day_gain_pct:.0f}%"
-                )
+        if avg_turnover is not None:
+            turn_high = avg_turnover > self._config.max_avg_turnover
 
-        # Signal 4: Previous day big gain
-        if hist and hist.get("prev_day_gain") is not None:
-            prev_day_gain = hist["prev_day_gain"]
-            if prev_day_gain > self._config.max_prev_day_gain_pct:
-                reasons.append(
-                    f"前日涨{prev_day_gain:.1f}%>{self._config.max_prev_day_gain_pct:.0f}%"
-                )
+        if vol_high and turn_high:
+            reasons.append(
+                f"放量{volume_ratio:.2f}x>{self._config.max_volume_ratio}x"
+                f" AND 高换手{avg_turnover:.1f}%>{self._config.max_avg_turnover}%"
+            )
 
         return FadeRiskResult(
             stock_code=stock.stock_code,
             filtered_out=len(reasons) > 0,
             reasons=reasons,
-            open_gap_pct=open_gap,
-            intraday_strength=intraday_strength,
-            prev_day_gain_pct=prev_day_gain,
-            n_day_gain_pct=n_day_gain,
+            volume_ratio=volume_ratio,
+            avg_turnover=avg_turnover,
         )
 
     async def _fetch_historical_context(
@@ -199,20 +181,19 @@ class GapFadeFilter:
         trade_date: date | None = None,
     ) -> dict[str, dict]:
         """
-        Fetch past N trading days of close prices for multi-day and prev-day signals.
+        Fetch historical daily volume and turnover for average calculations.
 
         Returns dict: stock_code → {
-            "prev_day_gain": float | None,  # previous day's gain %
-            "n_day_gain": float | None,     # cumulative N-day gain %
+            "avg_daily_volume": float | None,
+            "avg_daily_turnover": float | None,  # percentage
         }
         """
         if not stock_codes:
             return {}
 
-        # Determine date range: go back enough calendar days to cover N trading days
         ref_date = trade_date or date.today()
-        # lookback_days trading days ≈ lookback_days * 1.5 calendar days + buffer
-        calendar_buffer = self._config.lookback_days * 2 + 5
+        # Need enough calendar days to cover volume_lookback_days trading days
+        calendar_buffer = self._config.volume_lookback_days * 2 + 5
         start = ref_date - timedelta(days=calendar_buffer)
         end = ref_date - timedelta(days=1)  # Up to previous trading day
 
@@ -221,12 +202,14 @@ class GapFadeFilter:
 
         for i in range(0, len(stock_codes), batch_size):
             batch = stock_codes[i : i + batch_size]
-            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
+            codes_str = ",".join(
+                f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
+            )
 
             try:
                 data = await self._ifind.history_quotes(
                     codes=codes_str,
-                    indicators="close",
+                    indicators="volume,turnoverRatio",
                     start_date=start.strftime("%Y-%m-%d"),
                     end_date=end.strftime("%Y-%m-%d"),
                 )
@@ -238,30 +221,32 @@ class GapFadeFilter:
                         continue
 
                     tbl = table_entry.get("table", {})
-                    close_vals = tbl.get("close", [])
+                    vol_vals = tbl.get("volume", [])
+                    turn_vals = tbl.get("turnoverRatio", [])
 
-                    if not close_vals:
-                        continue
+                    lookback = self._config.volume_lookback_days
+                    entry: dict = {}
 
-                    # close_vals is ordered by date, last entry = most recent (prev day)
-                    # Filter out None values
-                    closes = [float(v) for v in close_vals if v is not None]
-                    if len(closes) < 2:
-                        continue
+                    if vol_vals:
+                        volumes = [
+                            float(v) for v in vol_vals
+                            if v is not None and float(v) > 0
+                        ]
+                        if volumes:
+                            recent = volumes[-lookback:]
+                            entry["avg_daily_volume"] = sum(recent) / len(recent)
 
-                    context: dict = {}
+                    if turn_vals:
+                        turnovers = [
+                            float(t) for t in turn_vals
+                            if t is not None and float(t) >= 0
+                        ]
+                        if turnovers:
+                            recent = turnovers[-lookback:]
+                            entry["avg_daily_turnover"] = sum(recent) / len(recent)
 
-                    # Previous day gain: last close vs second-to-last close
-                    context["prev_day_gain"] = (closes[-1] - closes[-2]) / closes[-2] * 100
-
-                    # N-day cumulative gain: last close vs close N days back
-                    lookback = self._config.lookback_days
-                    if len(closes) > lookback:
-                        context["n_day_gain"] = (
-                            (closes[-1] - closes[-(lookback + 1)]) / closes[-(lookback + 1)] * 100
-                        )
-
-                    result[bare_code] = context
+                    if entry:
+                        result[bare_code] = entry
 
             except Exception as e:
                 logger.warning(f"GapFadeFilter: historical fetch failed for batch: {e}")

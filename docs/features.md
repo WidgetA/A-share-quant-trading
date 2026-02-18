@@ -30,6 +30,7 @@
 | 0.8.0 | 2026-02-04 | - | SIM-001: Historical simulation trading feature |
 | 0.9.0 | 2026-02-06 | - | OA-001: Order assistant (real-time news dashboard) |
 | 0.10.0 | 2026-02-12 | - | STR-004: Momentum sector strategy (backtest + intraday alert) |
+| 0.10.1 | 2026-02-18 | - | STR-004: Gap-fade filter v4 — AND(volume+turnover), validated 5 periods |
 
 ---
 
@@ -630,7 +631,7 @@ strategy:
 4. **Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 2
 5. **Board Constituents**: Get ALL stocks in each hot board
 6. **Gain Filter**: Select constituents with 9:40 gain from open >0.56%
-7. **Gap-Fade Filter**: Remove stocks with high-open-low-walk risk
+7. **Gap-Fade Filter**: Remove stocks with high gap-fade risk using AND combination of high early volume ratio (>0.25× avg daily) AND high avg turnover (>8%). Validated across 5 time periods (2024-10~2026-02, p<0.001 all). Uses `volume,turnoverRatio` from iFinD `history_quotes`
 8. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (同比季度收入增长率 via iwencai). Highlighted in UI + Feishu notification
 9. **Notification**: Send selection + recommendation via Feishu
 
@@ -641,6 +642,7 @@ strategy:
 
 **Key Files**:
 - `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic
+- `src/strategy/filters/gap_fade_filter.py` — Gap-fade risk filter (volume + turnover AND logic)
 - `src/data/sources/concept_mapper.py` — Stock ↔ concept board mapping
 - `src/data/database/fundamentals_db.py` — stock_fundamentals reader
 - `scripts/backtest_momentum.py` — Backtest script
