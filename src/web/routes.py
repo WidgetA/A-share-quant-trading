@@ -1116,6 +1116,7 @@ class CombinedAnalysisRequest(BaseModel):
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
     fade_filter: bool = True
+    quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
 
 
 def create_momentum_router() -> APIRouter:
@@ -1833,7 +1834,8 @@ def create_momentum_router() -> APIRouter:
             "L0: 全部成分股",
             "L1: 涨幅>0.56%",
             "L2: 高开低走过滤",
-            "L3: 最终推荐",
+            "L3: 动量质量过滤",
+            "L4: 最终推荐",
         ]
 
         async def event_stream():
@@ -2027,12 +2029,27 @@ def create_momentum_router() -> APIRouter:
                         else:
                             l2 = list(l1)
 
-                        # L3: recommendation
-                        l3 = []
+                        # L3: momentum quality filter
+                        from src.strategy.filters.momentum_quality_filter import (
+                            MomentumQualityConfig,
+                            MomentumQualityFilter,
+                        )
+
+                        quality_config = MomentumQualityConfig(enabled=True)
+                        quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
                         if l2:
-                            rec = await scanner._step6_recommend(l2, price_snapshots)
+                            l3, _ = await quality_filter_inst.filter_stocks(
+                                l2, price_snapshots, trade_date
+                            )
+                        else:
+                            l3 = list(l2)
+
+                        # L4: recommendation
+                        l4 = []
+                        if l3:
+                            rec = await scanner._step6_recommend(l3, price_snapshots)
                             if rec:
-                                l3 = [
+                                l4 = [
                                     SelectedStock(
                                         stock_code=rec.stock_code,
                                         stock_name=rec.stock_name,
@@ -2043,15 +2060,15 @@ def create_momentum_router() -> APIRouter:
                                     )
                                 ]
 
-                        all_layers = [l0, l1, l2, l3]
+                        all_layers = [l0, l1, l2, l3, l4]
 
-                        # Fetch revenue growth for L2 stocks (for L2→L3 误杀)
+                        # Fetch revenue growth for L3 stocks (for L3→L4 误杀)
                         day_revenue_growth: dict[str, float] = {}
-                        if l2:
-                            l2_codes_str = ";".join(s.stock_code for s in l2)
+                        if l3:
+                            l3_codes_str = ";".join(s.stock_code for s in l3)
                             try:
                                 growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l2_codes_str} 同比季度收入增长率", "stock"
+                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
                                 )
                                 g_tables = growth_result.get("tables", [])
                                 if g_tables:
@@ -2194,7 +2211,8 @@ def create_momentum_router() -> APIRouter:
                 pairs = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
                     (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "动量质量过滤"),
+                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
                 ]
                 for prev_n, curr_n, label in pairs:
                     prev_r = summary_layers[prev_n]["avg_return"]
@@ -2224,7 +2242,8 @@ def create_momentum_router() -> APIRouter:
                 transitions = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
                     (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 动量质量"),
+                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
                     from collections import defaultdict
@@ -2340,6 +2359,10 @@ def create_momentum_router() -> APIRouter:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
+        from src.strategy.filters.momentum_quality_filter import (
+            MomentumQualityConfig,
+            MomentumQualityFilter,
+        )
         from src.strategy.filters.stock_filter import create_main_board_only_filter
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
@@ -2363,7 +2386,8 @@ def create_momentum_router() -> APIRouter:
             "L0: 全部成分股",
             "L1: 涨幅>0.56%",
             "L2: 高开低走过滤",
-            "L3: 最终推荐",
+            "L3: 动量质量过滤",
+            "L4: 最终推荐",
         ]
 
         async def event_stream():
@@ -2593,13 +2617,23 @@ def create_momentum_router() -> APIRouter:
                         else:
                             l2 = list(l1)
 
-                        # L3: recommendation
-                        l3 = []
+                        # L3: momentum quality filter
+                        quality_config = MomentumQualityConfig(enabled=body.quality_filter)
+                        quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
+                        if body.quality_filter and l2:
+                            l3, _ = await quality_filter_inst.filter_stocks(
+                                l2, price_snapshots, trade_date
+                            )
+                        else:
+                            l3 = list(l2)
+
+                        # L4: recommendation
+                        l4 = []
                         rec = None
-                        if l2:
-                            rec = await scanner._step6_recommend(l2, price_snapshots)
+                        if l3:
+                            rec = await scanner._step6_recommend(l3, price_snapshots)
                             if rec:
-                                l3 = [
+                                l4 = [
                                     SelectedStock(
                                         stock_code=rec.stock_code,
                                         stock_name=rec.stock_name,
@@ -2610,15 +2644,15 @@ def create_momentum_router() -> APIRouter:
                                     )
                                 ]
 
-                        all_layers = [l0, l1, l2, l3]
+                        all_layers = [l0, l1, l2, l3, l4]
 
-                        # Fetch revenue growth for L2 stocks
+                        # Fetch revenue growth for L3 stocks
                         day_revenue_growth: dict[str, float] = {}
-                        if l2:
-                            l2_codes_str = ";".join(s.stock_code for s in l2)
+                        if l3:
+                            l3_codes_str = ";".join(s.stock_code for s in l3)
                             try:
                                 growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l2_codes_str} 同比季度收入增长率", "stock"
+                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
                                 )
                                 g_tables = growth_result.get("tables", [])
                                 if g_tables:
@@ -2722,7 +2756,7 @@ def create_momentum_router() -> APIRouter:
                                 "median_return": round(med_r, 2),
                             }
 
-                        # === Backtest: capital tracking on L3 recommendation ===
+                        # === Backtest: capital tracking on L4 recommendation ===
                         day_backtest: dict = {
                             "trade_date": str(trade_date),
                             "has_trade": False,
@@ -2889,7 +2923,8 @@ def create_momentum_router() -> APIRouter:
                 pairs = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
                     (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "动量质量过滤"),
+                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
                 ]
                 for prev_n, curr_n, label in pairs:
                     prev_r = summary_layers[prev_n]["avg_return"]
@@ -2919,7 +2954,8 @@ def create_momentum_router() -> APIRouter:
                 transitions = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
                     (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 动量质量"),
+                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
                     from collections import defaultdict

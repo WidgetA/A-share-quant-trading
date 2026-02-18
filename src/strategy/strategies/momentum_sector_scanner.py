@@ -17,6 +17,8 @@
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
 # Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
+# Step 5.5: gap-fade filter (high volume + high turnover → dump risk)
+# Step 5.6: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 6: recommend — from board with most picks, find highest YoY quarterly revenue growth
 # Step 7: → ScanResult → Feishu notification
 
@@ -29,6 +31,10 @@ from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
 from src.data.sources.concept_mapper import ConceptMapper
 from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
+from src.strategy.filters.momentum_quality_filter import (
+    MomentumQualityConfig,
+    MomentumQualityFilter,
+)
 from src.strategy.filters.stock_filter import StockFilter, create_main_board_only_filter
 
 logger = logging.getLogger(__name__)
@@ -148,12 +154,14 @@ class MomentumSectorScanner:
         concept_mapper: ConceptMapper | None = None,
         stock_filter: StockFilter | None = None,
         gap_fade_config: GapFadeConfig | None = None,
+        momentum_quality_config: MomentumQualityConfig | None = None,
     ):
         self._ifind = ifind_client
         self._fundamentals_db = fundamentals_db
         self._concept_mapper = concept_mapper or ConceptMapper(ifind_client)
         self._stock_filter = stock_filter or create_main_board_only_filter()
         self._gap_fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
+        self._quality_filter = MomentumQualityFilter(ifind_client, momentum_quality_config)
 
     async def scan(
         self,
@@ -215,6 +223,14 @@ class MomentumSectorScanner:
         # Step 5.5: Gap-fade filter — remove stocks with high 高开低走 risk
         if selected:
             selected, fade_assessments = await self._gap_fade_filter.filter_stocks(
+                selected, all_snapshots, trade_date
+            )
+            result.selected_stocks = selected
+
+        # Step 5.6: Momentum quality filter — remove fake breakouts
+        # (declining trend + low turnover amplification)
+        if selected:
+            selected, quality_assessments = await self._quality_filter.filter_stocks(
                 selected, all_snapshots, trade_date
             )
             result.selected_stocks = selected
