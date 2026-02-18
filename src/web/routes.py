@@ -2534,6 +2534,19 @@ def create_momentum_router() -> APIRouter:
                             for c, _ in allowed:
                                 all_constituent_codes.add(c)
 
+                        # Filter out ST stocks
+                        if all_constituent_codes:
+                            non_st = set(
+                                await fundamentals_db.batch_filter_st(
+                                    list(all_constituent_codes)
+                                )
+                            )
+                            filtered_bc = {
+                                bn: [(c, n) for c, n in stocks if c in non_st]
+                                for bn, stocks in filtered_bc.items()
+                            }
+                            all_constituent_codes &= non_st
+
                         missing = [c for c in all_constituent_codes if c not in price_snapshots]
                         if missing:
                             extra = await scanner._fetch_constituent_prices(missing)
