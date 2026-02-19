@@ -110,9 +110,7 @@ async def fetch_batch_open_prices(
 
     for i in range(0, len(stock_codes), batch_size):
         batch = stock_codes[i : i + batch_size]
-        codes_str = ",".join(
-            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-        )
+        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
         date_str = target_date.strftime("%Y-%m-%d")
 
         try:

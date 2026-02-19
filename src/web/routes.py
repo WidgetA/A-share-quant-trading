@@ -4273,9 +4273,7 @@ def create_settings_router() -> APIRouter:
                 )
 
                 # Trading calendar
-                full_cal = _get_trading_calendar_akshare(
-                    start_date, end_date + timedelta(days=10)
-                )
+                full_cal = _get_trading_calendar_akshare(start_date, end_date + timedelta(days=10))
                 trading_days = [d for d in full_cal if start_date <= d <= end_date]
 
                 if not trading_days:
@@ -4289,16 +4287,21 @@ def create_settings_router() -> APIRouter:
                         next_day_map[d] = full_cal[idx + 1]
 
                 # Skip already-backfilled dates
-                existing = set(await scan_db.get_dates_with_data(
-                    start_date=body.start_date, end_date=body.end_date,
-                ))
+                existing = set(
+                    await scan_db.get_dates_with_data(
+                        start_date=body.start_date,
+                        end_date=body.end_date,
+                    )
+                )
                 remaining = [d for d in trading_days if d not in existing]
 
-                yield sse({
-                    "type": "init",
-                    "total_days": len(remaining),
-                    "skipped_days": len(trading_days) - len(remaining),
-                })
+                yield sse(
+                    {
+                        "type": "init",
+                        "total_days": len(remaining),
+                        "skipped_days": len(trading_days) - len(remaining),
+                    }
+                )
 
                 if not remaining:
                     yield sse({"type": "complete", "message": "所有日期已回填，无需操作"})
@@ -4309,12 +4312,14 @@ def create_settings_router() -> APIRouter:
                 total_stocks = 0
 
                 for i, day in enumerate(remaining):
-                    yield sse({
-                        "type": "progress",
-                        "day": i + 1,
-                        "total": len(remaining),
-                        "trade_date": str(day),
-                    })
+                    yield sse(
+                        {
+                            "type": "progress",
+                            "day": i + 1,
+                            "total": len(remaining),
+                            "trade_date": str(day),
+                        }
+                    )
 
                     try:
                         price_snapshots = await _parse_iwencai_and_fetch_prices_for_date(
@@ -4322,13 +4327,15 @@ def create_settings_router() -> APIRouter:
                         )
 
                         if not price_snapshots:
-                            yield sse({
-                                "type": "day_result",
-                                "trade_date": str(day),
-                                "stocks": 0,
-                                "status": "skip",
-                                "message": "无价格数据",
-                            })
+                            yield sse(
+                                {
+                                    "type": "day_result",
+                                    "trade_date": str(day),
+                                    "stocks": 0,
+                                    "status": "skip",
+                                    "message": "无价格数据",
+                                }
+                            )
                             success += 1
                             await asyncio.sleep(0.05)
                             continue
@@ -4338,13 +4345,15 @@ def create_settings_router() -> APIRouter:
                         all_snapshots = result.all_snapshots
 
                         if not selected:
-                            yield sse({
-                                "type": "day_result",
-                                "trade_date": str(day),
-                                "stocks": 0,
-                                "status": "ok",
-                                "message": "无选股",
-                            })
+                            yield sse(
+                                {
+                                    "type": "day_result",
+                                    "trade_date": str(day),
+                                    "stocks": 0,
+                                    "status": "ok",
+                                    "message": "无选股",
+                                }
+                            )
                             success += 1
                             await asyncio.sleep(0.05)
                             continue
@@ -4371,51 +4380,59 @@ def create_settings_router() -> APIRouter:
                             ret = None
                             if ndo and bp > 0:
                                 ret = round(_calc_net_return_pct(bp, ndo), 4)
-                            db_rows.append({
-                                "stock_code": s.stock_code,
-                                "stock_name": s.stock_name,
-                                "board_name": s.board_name,
-                                "open_gain_pct": s.open_gain_pct,
-                                "pe_ttm": s.pe_ttm,
-                                "board_avg_pe": s.board_avg_pe,
-                                "open_price": snap.open_price if snap else 0.0,
-                                "prev_close": snap.prev_close if snap else 0.0,
-                                "buy_price": bp,
-                                "next_day_open": ndo,
-                                "return_pct": ret,
-                                "growth_rate": growth_map.get(s.stock_code),
-                            })
+                            db_rows.append(
+                                {
+                                    "stock_code": s.stock_code,
+                                    "stock_name": s.stock_name,
+                                    "board_name": s.board_name,
+                                    "open_gain_pct": s.open_gain_pct,
+                                    "pe_ttm": s.pe_ttm,
+                                    "board_avg_pe": s.board_avg_pe,
+                                    "open_price": snap.open_price if snap else 0.0,
+                                    "prev_close": snap.prev_close if snap else 0.0,
+                                    "buy_price": bp,
+                                    "next_day_open": ndo,
+                                    "return_pct": ret,
+                                    "growth_rate": growth_map.get(s.stock_code),
+                                }
+                            )
 
                         saved = await scan_db.save_day(day, db_rows)
                         total_stocks += saved
                         success += 1
 
-                        yield sse({
-                            "type": "day_result",
-                            "trade_date": str(day),
-                            "stocks": saved,
-                            "status": "ok",
-                        })
+                        yield sse(
+                            {
+                                "type": "day_result",
+                                "trade_date": str(day),
+                                "stocks": saved,
+                                "status": "ok",
+                            }
+                        )
 
                     except Exception as e:
                         errors += 1
                         logger.error(f"Backfill error on {day}: {e}")
-                        yield sse({
-                            "type": "day_result",
-                            "trade_date": str(day),
-                            "stocks": 0,
-                            "status": "error",
-                            "message": str(e)[:80],
-                        })
+                        yield sse(
+                            {
+                                "type": "day_result",
+                                "trade_date": str(day),
+                                "stocks": 0,
+                                "status": "error",
+                                "message": str(e)[:80],
+                            }
+                        )
 
                     await asyncio.sleep(0.05)
 
-                yield sse({
-                    "type": "complete",
-                    "success": success,
-                    "errors": errors,
-                    "total_stocks": total_stocks,
-                })
+                yield sse(
+                    {
+                        "type": "complete",
+                        "success": success,
+                        "errors": errors,
+                        "total_stocks": total_stocks,
+                    }
+                )
 
             except Exception as e:
                 logger.error(f"Backfill fatal error: {e}", exc_info=True)

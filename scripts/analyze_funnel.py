@@ -199,7 +199,6 @@ async def run_single_date(
     ifind_client: IFinDHttpClient,
     fundamentals_db,
     concept_mapper: ConceptMapper,
-
 ) -> DayResult | None:
     """Run funnel analysis for a single trading day."""
     logger.info(f"=== Analyzing {trade_date} (T+1={next_trade_date}) ===")
