@@ -55,7 +55,8 @@ def fetch_data(codes: list[str], start: str, end: str) -> pd.DataFrame:
                     }
                 )
                 df["code"] = code
-                dfs.append(df[["code", "date", "open", "high", "low", "close", "volume", "turnover_pct"]])
+                cols = ["code", "date", "open", "high", "low", "close", "volume", "turnover_pct"]
+                dfs.append(df[cols])
         except Exception:
             pass
         if (i + 1) % 50 == 0:
@@ -243,8 +244,8 @@ def combined_classification(universe: pd.DataFrame) -> None:
     configs = [
         ("V_high>0.02 + Gap>3%", (universe["f_vhigh"] > 0.02) & (universe["f_gap"] > 3.0)),
         ("V_high>0.02 + Gap>2%", (universe["f_vhigh"] > 0.02) & (universe["f_gap"] > 2.0)),
-        (f"V_high>P70 + Gap>3%", (universe["f_vhigh"] > vh_p70) & (universe["f_gap"] > 3.0)),
-        (f"V_high>P70 + Gap>2%", (universe["f_vhigh"] > vh_p70) & (universe["f_gap"] > 2.0)),
+        ("V_high>P70 + Gap>3%", (universe["f_vhigh"] > vh_p70) & (universe["f_gap"] > 3.0)),
+        ("V_high>P70 + Gap>2%", (universe["f_vhigh"] > vh_p70) & (universe["f_gap"] > 2.0)),
         (
             "三因子>=2触发",
             (
@@ -301,8 +302,9 @@ def analyze_period(data: pd.DataFrame, period_label: str) -> None:
     print(f"\n{'=' * 110}")
     print(f"  {period_label}")
     print(f"  样本: {n}只 (高开>0.5%, 排除开盘涨停)")
-    print(f"  日内亏损: {n_rev}只 ({base_rate:.1%})   日内盈利: {n - n_rev}只 ({1 - base_rate:.1%})")
-    print(f"  日内亏损定义: 收盘 < 开盘")
+    n_win = n - n_rev
+    print(f"  日内亏损: {n_rev}只 ({base_rate:.1%})   日内盈利: {n_win}只 ({1 - base_rate:.1%})")
+    print("  日内亏损定义: 收盘 < 开盘")
     print(f"{'=' * 110}")
 
     # 各因子分类报告

@@ -347,7 +347,7 @@ def main():
     else:
         print("  (No stocks with >= 4 flags)")
 
-    print(f"\nExamples: Lowest risk (n_flags <= 1)")
+    print("\nExamples: Lowest risk (n_flags <= 1)")
     low_risk = df[df["n_flags"] <= 1].head(10)
     for _, r in low_risk.iterrows():
         result = "亏 ✗" if r["is_loss"] else "赚 ✓"
