@@ -11,13 +11,14 @@
 # works because it measures fade FROM INTRADAY HIGH, not from open.
 
 # === EVIDENCE ===
-# Optimized via scripts/optimize_early_fade.py, 2244 scanner-condition samples
+# Tested via scripts/optimize_early_fade.py, 2244 scanner-condition samples
 # (gain_from_open >= 0.56%, main board, 199 stocks, 2025-12~2026-02):
 #   Base loss rate: 23.8%, base return: +2.34%
-#   Early Fade 0.55: precision 34.8%, recall 14.6%, lift 1.47x, return +0.10%
-#   Early Fade 0.70 (old): precision 39.3%, recall 4.1%, return +0.02% (too few filtered)
-#   Price Position <= 0.25: precision 55.6%, lift 2.34x (few samples, kept as-is)
-# Factor most effective for mid-gain stocks (2-5%): precision 54.5% at 0.55 threshold.
+#   Early Fade 0.55: precision 34.8%, recall 14.6%, but 65% false alarm
+#   Early Fade 0.70: precision 39.3%, recall 4.1%, 61% false alarm
+#   Conclusion: factor has limited standalone power for scanner candidates;
+#   lowering threshold increases false alarms without meaningful gain.
+#   Price Position <= 0.25: precision 55.6%, lift 2.34x (few samples, kept as-is).
 
 # === DATA FLOW ===
 # PriceSnapshot (with high_price) → ReversalFactorFilter → filtered list
@@ -47,11 +48,8 @@ class ReversalFactorConfig:
 
     # Early Fade: (high - latest) / (high - open).
     # How much of the peak-to-open gain has been given back.
-    # 0.55 = stock gave back 55% of its intraday surge.
-    # Optimized from 0.70 via scripts/optimize_early_fade.py (2244 samples):
-    #   0.70: filters 2.5%, recall 4.1%, return +0.02% (too conservative)
-    #   0.55: filters 10%, recall 14.6%, precision 34.8%, return +0.10%
-    early_fade_threshold: float = 0.55
+    # 0.7 = stock gave back 70% of its intraday surge.
+    early_fade_threshold: float = 0.7
 
     # Price Position: (latest - low) / (high - low).
     # Where current price sits in the 10-min range.
