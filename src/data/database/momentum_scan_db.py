@@ -327,10 +327,11 @@ class MomentumScanDB:
     async def count_by_date(self, trade_date: str) -> int:
         """Count selected stocks for a specific date."""
         async with self._db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT COUNT(*) as cnt FROM {self._schema}.momentum_scan_stocks WHERE trade_date = $1",
-                date.fromisoformat(trade_date),
+            sql = (
+                f"SELECT COUNT(*) as cnt FROM {self._schema}"
+                f".momentum_scan_stocks WHERE trade_date = $1"
             )
+            row = await conn.fetchrow(sql, date.fromisoformat(trade_date))
             return row["cnt"] if row else 0
 
 

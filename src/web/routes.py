@@ -4237,7 +4237,7 @@ def create_settings_router() -> APIRouter:
         import json
         from datetime import datetime, timedelta
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+        from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
