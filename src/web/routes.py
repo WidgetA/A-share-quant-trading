@@ -3679,9 +3679,7 @@ async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> 
     return []
 
 
-async def _parse_iwencai_and_fetch_prices_for_date(
-    ifind_client, trade_date
-) -> tuple[dict, str]:
+async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> tuple[dict, str]:
     """Convenience wrapper: run iwencai pre-filter + fetch prices for a date.
 
     Returns:
@@ -3705,9 +3703,7 @@ async def _parse_iwencai_and_fetch_prices_for_date(
     if not tables:
         return {}, "iwencai返回空结果(无tables)"
 
-    snapshots = await _parse_iwencai_and_fetch_prices(
-        ifind_client, iwencai_result, trade_date
-    )
+    snapshots = await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
     if not snapshots:
         # iwencai returned tables but no valid price data could be parsed
         return {}, "iwencai有结果但无法解析价格数据"
