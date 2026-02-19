@@ -4242,6 +4242,7 @@ def create_settings_router() -> APIRouter:
             scan_db = create_momentum_scan_db_from_config()
 
             try:
+                yield sse({"type": "status", "message": "连接数据库..."})
                 await scan_db.connect()
 
                 concept_mapper = ConceptMapper(ifind_client)
@@ -4252,6 +4253,7 @@ def create_settings_router() -> APIRouter:
                 )
 
                 # Trading calendar
+                yield sse({"type": "status", "message": "获取交易日历..."})
                 full_cal = _get_trading_calendar_akshare(start_date, end_date + timedelta(days=10))
                 trading_days = [d for d in full_cal if start_date <= d <= end_date]
 
@@ -4266,6 +4268,7 @@ def create_settings_router() -> APIRouter:
                         next_day_map[d] = full_cal[idx + 1]
 
                 # Skip already-backfilled dates
+                yield sse({"type": "status", "message": "检查已有数据..."})
                 existing = set(
                     await scan_db.get_dates_with_data(
                         start_date=body.start_date,
