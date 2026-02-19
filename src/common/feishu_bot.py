@@ -333,5 +333,8 @@ Limit-up (skipped):
             lines.append(f"  板块: {rec.board_name} (选出{rec.board_stock_count}只，为最多板块)")
             lines.append(f"  业绩增长率: {growth_sign}{rec.growth_rate:.1f}%")
             lines.append(f"  开盘涨幅: {rec.open_gain_pct:+.1f}%  PE: {rec.pe_ttm:.1f}")
+        else:
+            lines.append("")
+            lines.append("⭐ 推荐: 无 (今日无符合条件的推荐标的)")
 
         return await self.send_message("\n".join(lines))

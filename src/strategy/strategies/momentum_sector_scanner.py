@@ -255,7 +255,7 @@ class MomentumSectorScanner:
                     f"(OG={rec.open_gain_pct:+.1f}%, GR={rec.growth_rate:+.1f}%)"
                 )
             else:
-                logger.info("Step 6: No recommendation (no stock passed OG+GR filter)")
+                logger.info("Step 6: No recommendation (scoring returned None)")
 
         return result
 
