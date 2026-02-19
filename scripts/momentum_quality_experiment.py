@@ -239,11 +239,11 @@ def build_and_masks(valid: pd.DataFrame) -> dict[str, np.ndarray]:
     # 百分位阈值
     tp_high = tp > np.nanpercentile(tp, 85)
     amp_high = amp > np.nanpercentile(amp, 85)
-    ta_low = ta < np.nanpercentile(ta, 15)
-    at20_low = at20 < np.nanpercentile(at20, 15)
+    _ta_low = ta < np.nanpercentile(ta, 15)  # noqa: F841
+    _at20_low = at20 < np.nanpercentile(at20, 15)  # noqa: F841
     at20_high = at20 > np.nanpercentile(at20, 85)
-    n3_low = n3 < np.nanpercentile(n3, 15)
-    n5_low = n5 < np.nanpercentile(n5, 15)
+    _n3_low = n3 < np.nanpercentile(n3, 15)  # noqa: F841
+    _n5_low = n5 < np.nanpercentile(n5, 15)  # noqa: F841
 
     # 生产代理: 估算当日换手 = volume_ratio * avg_turnover_20d
     est_daily_turn = np.where(at20 > 0, vr * at20, np.nan)
