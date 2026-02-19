@@ -1117,7 +1117,10 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
             let msg = `请求失败 (${resp.status})`;
             try {
                 const errData = await resp.json();
-                msg = errData.detail || msg;
+                const d = errData.detail;
+                if (typeof d === 'string') msg = d;
+                else if (Array.isArray(d)) msg = d.map(e => e.msg || JSON.stringify(e)).join('; ');
+                else if (d) msg = JSON.stringify(d);
             } catch (_) {}
             throw new Error(msg);
         }
@@ -1204,7 +1207,9 @@ document.getElementById('csv-export-btn').addEventListener('click', async () => 
         const resp = await fetch(url);
         if (!resp.ok) {
             const data = await resp.json();
-            throw new Error(data.detail || '下载失败');
+            const d = data.detail;
+            const msg = typeof d === 'string' ? d : (Array.isArray(d) ? d.map(e => e.msg || JSON.stringify(e)).join('; ') : '下载失败');
+            throw new Error(msg);
         }
         const blob = await resp.blob();
         const a = document.createElement('a');
