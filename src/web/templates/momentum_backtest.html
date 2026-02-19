@@ -1105,6 +1105,7 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
     progressEl.classList.remove('hidden');
     logEl.textContent = '';
     barEl.style.width = '0%';
+    statusEl.textContent = '正在连接服务器...';
 
     try {
         const resp = await fetch('/api/momentum/backfill', {
@@ -1120,6 +1121,7 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
             } catch (_) {}
             throw new Error(msg);
         }
+        statusEl.textContent = '已连接，等待数据...';
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -1133,10 +1135,17 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
 
             for (const line of lines) {
                 if (!line.startsWith('data: ')) continue;
-                const data = JSON.parse(line.slice(6));
+                let data;
+                try {
+                    data = JSON.parse(line.slice(6));
+                } catch (e) {
+                    logEl.textContent += `[parse error] ${line}\n`;
+                    continue;
+                }
 
                 if (data.type === 'status') {
                     statusEl.textContent = data.message;
+                    logEl.textContent += data.message + '\n';
                 } else if (data.type === 'init') {
                     statusEl.textContent = `待回填 ${data.total_days} 天（已跳过 ${data.skipped_days} 天）`;
                     logEl.textContent += `待回填 ${data.total_days} 天\n`;
@@ -1158,11 +1167,16 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
                     errEl.classList.remove('hidden');
                     statusEl.textContent = '出错';
                 }
+                logEl.scrollTop = logEl.scrollHeight;
             }
+        }
+        if (statusEl.textContent === '已连接，等待数据...') {
+            statusEl.textContent = '流已结束（未收到数据）';
         }
     } catch (err) {
         errEl.textContent = err.message;
         errEl.classList.remove('hidden');
+        statusEl.textContent = '出错';
     } finally {
         btn.disabled = false;
         btn.textContent = '开始回填';

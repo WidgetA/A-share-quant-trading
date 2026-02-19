@@ -1158,13 +1158,15 @@ def create_momentum_router() -> APIRouter:
         """Momentum backtest and monitor page."""
         templates = request.app.state.templates
         monitor_state = _get_monitor_state(request)
-        return templates.TemplateResponse(
+        resp = templates.TemplateResponse(
             "momentum_backtest.html",
             {
                 "request": request,
                 "monitor_running": monitor_state["running"],
             },
         )
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
 
     @router.post("/api/momentum/backtest")
     async def run_backtest(request: Request, body: MomentumBacktestRequest) -> dict:
@@ -4239,10 +4241,10 @@ def create_settings_router() -> APIRouter:
             def sse(data: dict) -> str:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-            scan_db = create_momentum_scan_db_from_config()
-
+            scan_db = None
             try:
                 yield sse({"type": "status", "message": "连接数据库..."})
+                scan_db = create_momentum_scan_db_from_config()
                 await scan_db.connect()
 
                 concept_mapper = ConceptMapper(ifind_client)
@@ -4420,7 +4422,8 @@ def create_settings_router() -> APIRouter:
                 logger.error(f"Backfill fatal error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": str(e)[:200]})
             finally:
-                await scan_db.close()
+                if scan_db:
+                    await scan_db.close()
 
         return StreamingResponse(
             event_stream(),
