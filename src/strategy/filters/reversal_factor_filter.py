@@ -200,16 +200,9 @@ class ReversalFactorFilter:
             )
 
         # Factor 1: Early Fade
-        early_fade = self.compute_early_fade(
-            snap.open_price, snap.high_price, snap.latest_price
-        )
-        if (
-            early_fade is not None
-            and early_fade >= self._config.early_fade_threshold
-        ):
-            reasons.append(
-                f"冲高回落{early_fade:.0%}≥{self._config.early_fade_threshold:.0%}"
-            )
+        early_fade = self.compute_early_fade(snap.open_price, snap.high_price, snap.latest_price)
+        if early_fade is not None and early_fade >= self._config.early_fade_threshold:
+            reasons.append(f"冲高回落{early_fade:.0%}≥{self._config.early_fade_threshold:.0%}")
 
         # Factor 2: Price Position (only if low_price available)
         if snap.low_price > 0:

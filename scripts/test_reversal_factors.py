@@ -49,8 +49,12 @@ def fetch_data(codes: list[str], start: str, end: str) -> pd.DataFrame:
             if df is not None and len(df) > 25:
                 df = df.rename(
                     columns={
-                        "日期": "date", "开盘": "open", "收盘": "close",
-                        "最高": "high", "最低": "low", "成交量": "volume",
+                        "日期": "date",
+                        "开盘": "open",
+                        "收盘": "close",
+                        "最高": "high",
+                        "最低": "low",
+                        "成交量": "volume",
                         "换手率": "turnover_pct",
                     }
                 )
@@ -76,7 +80,8 @@ def compute_factors(data: pd.DataFrame) -> pd.DataFrame:
     # 开盘涨幅 (vs prev_close)
     data["open_gap_pct"] = np.where(
         data["prev_close"] > 0,
-        (data["open"] - data["prev_close"]) / data["prev_close"] * 100, np.nan,
+        (data["open"] - data["prev_close"]) / data["prev_close"] * 100,
+        np.nan,
     )
 
     # 排除开盘涨停 (>=9.5%)
@@ -89,7 +94,9 @@ def compute_factors(data: pd.DataFrame) -> pd.DataFrame:
 
     # 日内收益 (仅用于展示)
     data["intraday_return"] = np.where(
-        data["open"] > 0, (data["close"] - data["open"]) / data["open"] * 100, np.nan,
+        data["open"] > 0,
+        (data["close"] - data["open"]) / data["open"] * 100,
+        np.nan,
     )
     hl_range = data["high"] - data["low"]
     data["pullback_ratio"] = np.where(hl_range > 0, (data["high"] - data["close"]) / hl_range, 0)
@@ -154,14 +161,14 @@ def classification_report(
             print(f"  >{thresh:<14}  {0:>5}  —")
             continue
 
-        tp = (flagged & is_rev).sum()        # true positive: flagged AND actually reversed
-        fn = (~flagged & is_rev).sum()       # false negative: not flagged BUT actually reversed
-        fp = (flagged & ~is_rev).sum()       # false positive: flagged BUT did NOT reverse
+        tp = (flagged & is_rev).sum()  # true positive: flagged AND actually reversed
+        fn = (~flagged & is_rev).sum()  # false negative: not flagged BUT actually reversed
+        fp = (flagged & ~is_rev).sum()  # false positive: flagged BUT did NOT reverse
 
-        precision = tp / n_flagged           # 标记的里面多少是真冲高回落
+        precision = tp / n_flagged  # 标记的里面多少是真冲高回落
         recall = tp / is_rev.sum() if is_rev.sum() > 0 else 0  # 真冲高回落里多少被标记
-        lift = precision / base_rate if base_rate > 0 else 0    # 比随机好多少倍
-        false_alarm = fp / n_flagged         # 标记的里面多少其实没回落 (误杀)
+        lift = precision / base_rate if base_rate > 0 else 0  # 比随机好多少倍
+        false_alarm = fp / n_flagged  # 标记的里面多少其实没回落 (误杀)
 
         print(
             f"  >{thresh:<14}  {n_flagged:>5}  {tp:>4}  {fn:>4}  "
@@ -309,15 +316,21 @@ def analyze_period(data: pd.DataFrame, period_label: str) -> None:
 
     # 各因子分类报告
     classification_report(
-        universe, "f_shadow", "因子1: 上影线因子",
+        universe,
+        "f_shadow",
+        "因子1: 上影线因子",
         [0.15, 0.20, 0.25, 0.30],
     )
     classification_report(
-        universe, "f_vhigh", "因子2: V_high振幅因子",
+        universe,
+        "f_vhigh",
+        "因子2: V_high振幅因子",
         [0.01, 0.015, 0.02, 0.03, 0.04],
     )
     classification_report(
-        universe, "f_gap", "因子3: 隔夜Gap (%)",
+        universe,
+        "f_gap",
+        "因子3: 隔夜Gap (%)",
         [1.0, 1.5, 2.0, 3.0, 5.0],
     )
 
@@ -333,7 +346,9 @@ def main():
     parser = argparse.ArgumentParser(description="冲高回落因子识别准确率测试")
     parser.add_argument("--n-stocks", type=int, default=300, help="抽样股票数 (默认300)")
     parser.add_argument(
-        "--period", type=str, default="20251001,20260218",
+        "--period",
+        type=str,
+        default="20251001,20260218",
         help="数据区间 start,end (默认20251001,20260218)",
     )
     args = parser.parse_args()

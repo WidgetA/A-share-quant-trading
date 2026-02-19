@@ -59,7 +59,7 @@ def main():
 
     for i, code in enumerate(codes):
         pct = (i + 1) / len(codes) * 100
-        print(f"\r  [{i+1}/{len(codes)}] {pct:.0f}% Fetching {code}...", end="", flush=True)
+        print(f"\r  [{i + 1}/{len(codes)}] {pct:.0f}% Fetching {code}...", end="", flush=True)
 
         # ── Daily data ──
         try:
@@ -105,9 +105,7 @@ def main():
         daily["日期"] = pd.to_datetime(daily["日期"])
         daily["date"] = daily["日期"].dt.date
         daily["prev_close"] = daily["收盘"].shift(1)
-        daily["open_gap_pct"] = (
-            (daily["开盘"] - daily["prev_close"]) / daily["prev_close"] * 100
-        )
+        daily["open_gap_pct"] = (daily["开盘"] - daily["prev_close"]) / daily["prev_close"] * 100
 
         minute = minute.copy()
         minute["时间"] = pd.to_datetime(minute["时间"])
@@ -178,9 +176,7 @@ def main():
 
             # ── Factor 5: Bar Pattern ──
             # How many of the 2 bars are red (close < open)?
-            red_count = int(bar1["收盘"] < bar1["开盘"]) + int(
-                bar2["收盘"] < bar2["开盘"]
-            )
+            red_count = int(bar1["收盘"] < bar1["开盘"]) + int(bar2["收盘"] < bar2["开盘"])
 
             # ── Label ──
             is_loss = 1 if day_close < day_open else 0
@@ -245,10 +241,7 @@ def main():
         )
 
         # Test at percentile thresholds
-        print(
-            f"\n  {'Threshold':>15} {'Flagged':>8} {'Precision':>10} "
-            f"{'Recall':>8} {'Lift':>6}"
-        )
+        print(f"\n  {'Threshold':>15} {'Flagged':>8} {'Precision':>10} {'Recall':>8} {'Lift':>6}")
         print(f"  {'─' * 52}")
 
         for pct in [90, 80, 70, 60, 50]:
@@ -267,10 +260,7 @@ def main():
             lift = prec / base_rate if base_rate > 0 else 0
 
             label = f"P{pct}({thresh:.3f})"
-            print(
-                f"  {label:>15} {len(flagged):>8} {prec:>10.1%} "
-                f"{recall:>8.1%} {lift:>6.2f}x"
-            )
+            print(f"  {label:>15} {len(flagged):>8} {prec:>10.1%} {recall:>8.1%} {lift:>6.2f}x")
 
     # ── Red candle count analysis ──
     print(f"\n{'─' * 55}")
