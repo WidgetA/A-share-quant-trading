@@ -76,13 +76,16 @@ def fetch_all_data(codes: list[str]) -> pd.DataFrame:
 
     for i, code in enumerate(codes):
         pct = (i + 1) / len(codes) * 100
-        print(f"\r  [{i+1}/{len(codes)}] {pct:.0f}% {code}", end="", flush=True)
+        print(f"\r  [{i + 1}/{len(codes)}] {pct:.0f}% {code}", end="", flush=True)
 
         # 日线
         try:
             daily = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=DAILY_START, end_date=DAILY_END, adjust="qfq",
+                symbol=code,
+                period="daily",
+                start_date=DAILY_START,
+                end_date=DAILY_END,
+                adjust="qfq",
             )
         except Exception:
             fail += 1
@@ -96,8 +99,11 @@ def fetch_all_data(codes: list[str]) -> pd.DataFrame:
         # 5分钟线
         try:
             minute = ak.stock_zh_a_hist_min_em(
-                symbol=code, start_date=MIN_START, end_date=MIN_END,
-                period="5", adjust="",
+                symbol=code,
+                start_date=MIN_START,
+                end_date=MIN_END,
+                period="5",
+                adjust="",
             )
         except Exception:
             fail += 1
@@ -192,25 +198,27 @@ def fetch_all_data(codes: list[str]) -> pd.DataFrame:
             # 日内收益
             intraday_return = (day_close - day_open) / day_open * 100
 
-            all_records.append({
-                "code": code,
-                "date": trade_date,
-                "open_gap_pct": open_gap_pct,
-                "gain_from_open": gain_from_open,
-                "early_fade": early_fade,
-                "price_pos": price_pos,
-                "vol_decay": vol_decay,
-                "erosion": erosion,
-                "intraday_return": intraday_return,
-                "is_loss": int(day_close < day_open),
-                "day_open": day_open,
-                "day_close": day_close,
-                "close_940": close_940,
-                "max_high_10m": max_high,
-                "min_low_10m": min_low,
-                "day_high": day_high,
-                "day_low": day_low,
-            })
+            all_records.append(
+                {
+                    "code": code,
+                    "date": trade_date,
+                    "open_gap_pct": open_gap_pct,
+                    "gain_from_open": gain_from_open,
+                    "early_fade": early_fade,
+                    "price_pos": price_pos,
+                    "vol_decay": vol_decay,
+                    "erosion": erosion,
+                    "intraday_return": intraday_return,
+                    "is_loss": int(day_close < day_open),
+                    "day_open": day_open,
+                    "day_close": day_close,
+                    "close_940": close_940,
+                    "max_high_10m": max_high,
+                    "min_low_10m": min_low,
+                    "day_high": day_high,
+                    "day_low": day_low,
+                }
+            )
 
     print(f"\n  获取成功: {ok}, 失败: {fail}")
     print(f"  满足条件的样本: {len(all_records)}")
@@ -263,21 +271,23 @@ def threshold_analysis(
         # 留下的亏损率
         kept_loss_rate = fn / n_kept if n_kept > 0 else 0
 
-        rows.append({
-            "threshold": t,
-            "n_flagged": n_flagged,
-            "pct_flagged": n_flagged / n_total * 100,
-            "n_kept": n_kept,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "lift": lift,
-            "false_alarm": false_alarm_rate,
-            "kept_loss_rate": kept_loss_rate,
-            "avg_return_kept": avg_return_kept,
-            "avg_return_filtered": avg_return_filtered,
-            "return_improvement": return_improvement,
-        })
+        rows.append(
+            {
+                "threshold": t,
+                "n_flagged": n_flagged,
+                "pct_flagged": n_flagged / n_total * 100,
+                "n_kept": n_kept,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "lift": lift,
+                "false_alarm": false_alarm_rate,
+                "kept_loss_rate": kept_loss_rate,
+                "avg_return_kept": avg_return_kept,
+                "avg_return_filtered": avg_return_filtered,
+                "return_improvement": return_improvement,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -286,9 +296,11 @@ def print_threshold_table(result: pd.DataFrame, label: str, base_rate: float, ba
     """打印阈值分析结果表。"""
     print(f"\n  {label}")
     print(f"  基础亏损率: {base_rate:.1%}  基础日内收益: {base_return:+.2f}%")
-    print(f"  {'阈值':>6}  {'过滤数':>5} {'过滤%':>5}  {'精确率':>6} {'召回率':>6} "
-          f"{'F1':>5}  {'提升':>5}  {'误杀率':>6}  {'留下亏损率':>8}  "
-          f"{'留下均收益':>8}  {'被滤均收益':>8}  {'收益提升':>6}")
+    print(
+        f"  {'阈值':>6}  {'过滤数':>5} {'过滤%':>5}  {'精确率':>6} {'召回率':>6} "
+        f"{'F1':>5}  {'提升':>5}  {'误杀率':>6}  {'留下亏损率':>8}  "
+        f"{'留下均收益':>8}  {'被滤均收益':>8}  {'收益提升':>6}"
+    )
     print(f"  {'─' * 115}")
 
     for _, r in result.iterrows():
@@ -328,21 +340,30 @@ def find_optimal(result: pd.DataFrame) -> dict:
     best_nv = result.loc[best_nv_idx]
 
     return {
-        "best_f1": {"threshold": best_f1["threshold"], "f1": best_f1["f1"],
-                     "precision": best_f1["precision"], "recall": best_f1["recall"]},
-        "best_return": {"threshold": best_return["threshold"],
-                        "improvement": best_return["return_improvement"],
-                        "avg_kept": best_return["avg_return_kept"]},
+        "best_f1": {
+            "threshold": best_f1["threshold"],
+            "f1": best_f1["f1"],
+            "precision": best_f1["precision"],
+            "recall": best_f1["recall"],
+        },
+        "best_return": {
+            "threshold": best_return["threshold"],
+            "improvement": best_return["return_improvement"],
+            "avg_kept": best_return["avg_return_kept"],
+        },
         "best_geo": {"threshold": best_geo["threshold"], "geo_mean": best_geo["geo_mean"]},
-        "best_net_value": {"threshold": best_nv["threshold"],
-                           "net_value": best_nv["net_value"],
-                           "improvement": best_nv["return_improvement"],
-                           "pct_filtered": best_nv["pct_flagged"]},
+        "best_net_value": {
+            "threshold": best_nv["threshold"],
+            "net_value": best_nv["net_value"],
+            "improvement": best_nv["return_improvement"],
+            "pct_filtered": best_nv["pct_flagged"],
+        },
     }
 
 
-def bootstrap_ci(df: pd.DataFrame, col: str, threshold: float,
-                  n_bootstrap: int = 1000, ci: float = 0.95) -> dict:
+def bootstrap_ci(
+    df: pd.DataFrame, col: str, threshold: float, n_bootstrap: int = 1000, ci: float = 0.95
+) -> dict:
     """Bootstrap 置信区间。"""
     n = len(df)
     precisions = []
@@ -416,12 +437,14 @@ def main():
     print(f"  总样本: {n} 条 ({n_stocks}只股票 × {n_dates}个交易日)")
     print(f"  日期范围: {df['date'].min()} ~ {df['date'].max()}")
     print(f"  日内亏损 (close<open): {n_loss} ({base_rate:.1%})")
-    print(f"  日内盈利: {n - n_loss} ({1-base_rate:.1%})")
+    print(f"  日内盈利: {n - n_loss} ({1 - base_rate:.1%})")
     print(f"  平均日内收益: {base_return:+.3f}%")
     print(f"  开盘涨幅分布: {df['open_gap_pct'].describe().to_dict()}")
-    print(f"  9:40涨幅分布: mean={df['gain_from_open'].mean():.2f}%, "
-          f"median={df['gain_from_open'].median():.2f}%, "
-          f"max={df['gain_from_open'].max():.2f}%")
+    print(
+        f"  9:40涨幅分布: mean={df['gain_from_open'].mean():.2f}%, "
+        f"median={df['gain_from_open'].median():.2f}%, "
+        f"max={df['gain_from_open'].max():.2f}%"
+    )
 
     # Early Fade 分布
     print("\n  Early Fade 分布:")
@@ -454,20 +477,28 @@ def main():
     df1 = df[df["date"].isin(dates_sorted[:mid])]
     df2 = df[df["date"].isin(dates_sorted[mid:])]
 
-    print(f"\n  前半段: {dates_sorted[0]} ~ {dates_sorted[mid-1]}, n={len(df1)}, "
-          f"亏损率={df1['is_loss'].mean():.1%}, 均收益={df1['intraday_return'].mean():+.3f}%")
+    print(
+        f"\n  前半段: {dates_sorted[0]} ~ {dates_sorted[mid - 1]}, n={len(df1)}, "
+        f"亏损率={df1['is_loss'].mean():.1%}, 均收益={df1['intraday_return'].mean():+.3f}%"
+    )
     result_h1 = threshold_analysis(df1, "early_fade", "前半段", thresholds_fine)
     print_threshold_table(
-        result_h1, "Early Fade (前半段)",
-        df1["is_loss"].mean(), df1["intraday_return"].mean(),
+        result_h1,
+        "Early Fade (前半段)",
+        df1["is_loss"].mean(),
+        df1["intraday_return"].mean(),
     )
 
-    print(f"\n  后半段: {dates_sorted[mid]} ~ {dates_sorted[-1]}, n={len(df2)}, "
-          f"亏损率={df2['is_loss'].mean():.1%}, 均收益={df2['intraday_return'].mean():+.3f}%")
+    print(
+        f"\n  后半段: {dates_sorted[mid]} ~ {dates_sorted[-1]}, n={len(df2)}, "
+        f"亏损率={df2['is_loss'].mean():.1%}, 均收益={df2['intraday_return'].mean():+.3f}%"
+    )
     result_h2 = threshold_analysis(df2, "early_fade", "后半段", thresholds_fine)
     print_threshold_table(
-        result_h2, "Early Fade (后半段)",
-        df2["is_loss"].mean(), df2["intraday_return"].mean(),
+        result_h2,
+        "Early Fade (后半段)",
+        df2["is_loss"].mean(),
+        df2["intraday_return"].mean(),
     )
 
     # === 按开盘涨幅分层 ===
@@ -485,12 +516,16 @@ def main():
         if len(sub) < 30:
             print(f"\n  {label}: 样本不足 ({len(sub)})")
             continue
-        print(f"\n  {label}: n={len(sub)}, 亏损率={sub['is_loss'].mean():.1%}, "
-              f"均收益={sub['intraday_return'].mean():+.3f}%")
+        print(
+            f"\n  {label}: n={len(sub)}, 亏损率={sub['is_loss'].mean():.1%}, "
+            f"均收益={sub['intraday_return'].mean():+.3f}%"
+        )
         result_sub = threshold_analysis(sub, "early_fade", label, thresholds_fine)
         print_threshold_table(
-            result_sub, f"Early Fade ({label})",
-            sub["is_loss"].mean(), sub["intraday_return"].mean(),
+            result_sub,
+            f"Early Fade ({label})",
+            sub["is_loss"].mean(),
+            sub["intraday_return"].mean(),
         )
 
     # === Price Position 阈值分析 ===
@@ -500,8 +535,11 @@ def main():
 
     pp_thresholds = [round(x, 2) for x in np.arange(0.10, 0.61, 0.05)]
     result_pp = threshold_analysis(
-        df, "price_pos", "Price Position",
-        pp_thresholds, higher_is_worse=False,
+        df,
+        "price_pos",
+        "Price Position",
+        pp_thresholds,
+        higher_is_worse=False,
     )
     print_threshold_table(result_pp, "Price Position ≤ 阈值 (全样本)", base_rate, base_return)
 
@@ -533,21 +571,31 @@ def main():
                 avg_ret_kept = df.loc[kept, "intraday_return"].mean()
                 improvement = avg_ret_kept - base_return
 
-                combo_rows.append({
-                    "ef_thresh": ef_t, "pp_thresh": pp_t, "logic": logic,
-                    "n_flagged": n_flagged, "pct_flagged": n_flagged / n * 100,
-                    "precision": precision, "recall": recall, "f1": f1,
-                    "false_alarm": fp / n_flagged,
-                    "avg_return_kept": avg_ret_kept, "improvement": improvement,
-                })
+                combo_rows.append(
+                    {
+                        "ef_thresh": ef_t,
+                        "pp_thresh": pp_t,
+                        "logic": logic,
+                        "n_flagged": n_flagged,
+                        "pct_flagged": n_flagged / n * 100,
+                        "precision": precision,
+                        "recall": recall,
+                        "f1": f1,
+                        "false_alarm": fp / n_flagged,
+                        "avg_return_kept": avg_ret_kept,
+                        "improvement": improvement,
+                    }
+                )
 
     combo_df = pd.DataFrame(combo_rows)
     if not combo_df.empty:
         # 按收益提升排序, 取 top 15
         print("\n  组合策略 Top 15 (按收益提升排序):")
-        print(f"  {'EF阈值':>6} {'PP阈值':>6} {'逻辑':>4}  {'过滤数':>5} {'过滤%':>5}  "
-              f"{'精确率':>6} {'召回率':>6} {'F1':>5}  {'误杀率':>6}  "
-              f"{'留下均收益':>8}  {'收益提升':>6}")
+        print(
+            f"  {'EF阈值':>6} {'PP阈值':>6} {'逻辑':>4}  {'过滤数':>5} {'过滤%':>5}  "
+            f"{'精确率':>6} {'召回率':>6} {'F1':>5}  {'误杀率':>6}  "
+            f"{'留下均收益':>8}  {'收益提升':>6}"
+        )
         print(f"  {'─' * 95}")
 
         top = combo_df.nlargest(15, "improvement")
@@ -562,9 +610,11 @@ def main():
 
         # 按 F1 排序, 取 top 10
         print("\n  组合策略 Top 10 (按F1排序):")
-        print(f"  {'EF阈值':>6} {'PP阈值':>6} {'逻辑':>4}  {'过滤数':>5} {'过滤%':>5}  "
-              f"{'精确率':>6} {'召回率':>6} {'F1':>5}  "
-              f"{'留下均收益':>8}  {'收益提升':>6}")
+        print(
+            f"  {'EF阈值':>6} {'PP阈值':>6} {'逻辑':>4}  {'过滤数':>5} {'过滤%':>5}  "
+            f"{'精确率':>6} {'召回率':>6} {'F1':>5}  "
+            f"{'留下均收益':>8}  {'收益提升':>6}"
+        )
         print(f"  {'─' * 85}")
 
         top_f1 = combo_df.nlargest(10, "f1")
@@ -589,8 +639,10 @@ def main():
     candidates.update([0.50, 0.55, 0.60, 0.65, 0.70])
     candidates = sorted(candidates)
 
-    print(f"\n  {'阈值':>6}  {'精确率均值':>8}  {'精确率95%CI':>16}  "
-          f"{'留下收益均值':>10}  {'留下收益95%CI':>18}")
+    print(
+        f"\n  {'阈值':>6}  {'精确率均值':>8}  {'精确率95%CI':>16}  "
+        f"{'留下收益均值':>10}  {'留下收益95%CI':>18}"
+    )
     print(f"  {'─' * 75}")
 
     for t in candidates:
@@ -640,8 +692,10 @@ def main():
         curr = result_all[result_all["threshold"] == 0.70]
         if not curr.empty:
             c = curr.iloc[0]
-            print(f"精确率{c['precision']:.1%}, 召回率{c['recall']:.1%}, "
-                  f"收益提升{c['return_improvement']:+.3f}%")
+            print(
+                f"精确率{c['precision']:.1%}, 召回率{c['recall']:.1%}, "
+                f"收益提升{c['return_improvement']:+.3f}%"
+            )
         else:
             print("(0.70不在结果中)")
 
