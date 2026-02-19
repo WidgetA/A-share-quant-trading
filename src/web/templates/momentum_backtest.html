@@ -325,13 +325,13 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
         const data = await resp.json();
 
         if (!resp.ok) {
-            alert(data.detail || '回测失败');
+            showBacktestError(data.detail || '回测失败');
             return;
         }
 
         renderResults(data);
     } catch (err) {
-        alert('请求失败: ' + err.message);
+        showBacktestError('请求失败: ' + err.message);
     } finally {
         document.getElementById('loading-section').classList.add('hidden');
         document.getElementById('backtest-btn').disabled = false;
@@ -339,8 +339,31 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
     }
 });
 
+function showBacktestError(message) {
+    const section = document.getElementById('results-section');
+    section.classList.remove('hidden');
+    document.getElementById('result-date').textContent = document.getElementById('trade_date').value;
+    document.getElementById('result-gainers').textContent = '-';
+    document.getElementById('result-boards').textContent = '-';
+    document.getElementById('result-selected').textContent = '-';
+    const recBadge = document.getElementById('result-recommend-badge');
+    recBadge.style.display = '';
+    document.getElementById('result-recommend-name').textContent = '出错';
+    const recCard = document.getElementById('recommend-card');
+    recCard.classList.remove('hidden');
+    document.getElementById('rec-code').textContent = '';
+    document.getElementById('rec-name').textContent = message;
+    document.getElementById('rec-name').style.color = '#dc2626';
+    document.getElementById('rec-growth').textContent = '';
+    document.getElementById('rec-gain').textContent = '';
+    document.getElementById('rec-board').textContent = '请检查服务端日志或重试';
+    document.getElementById('result-boards-container').innerHTML = '';
+    document.getElementById('result-empty').classList.add('hidden');
+}
+
 function renderResults(data) {
     document.getElementById('results-section').classList.remove('hidden');
+    document.getElementById('rec-name').style.color = '';
     document.getElementById('result-date').textContent = data.trade_date;
     document.getElementById('result-gainers').textContent = data.initial_gainers;
     document.getElementById('result-boards').textContent = Object.keys(data.hot_boards || {}).length;
@@ -541,6 +564,7 @@ function handleCombinedEvent(data) {
         }
 
         case 'day_skip':
+            document.getElementById('combined-results').classList.remove('hidden');
             appendCombinedTradeRow({
                 trade_date: data.trade_date,
                 has_trade: false,
@@ -551,6 +575,7 @@ function handleCombinedEvent(data) {
             break;
 
         case 'complete': {
+            document.getElementById('combined-results').classList.remove('hidden');
             document.getElementById('combined-loading').classList.add('hidden');
             // Backtest summary
             renderCombinedBacktestSummary(data.backtest_summary);
@@ -568,8 +593,12 @@ function handleCombinedEvent(data) {
         }
 
         case 'error':
+            document.getElementById('combined-results').classList.remove('hidden');
             document.getElementById('combined-loading').classList.add('hidden');
-            alert(data.message);
+            document.getElementById('combined-backtest-summary').innerHTML =
+                `<div style="color:#dc2626;padding:16px;background:#fef2f2;border-radius:8px;margin:8px 0">
+                    <strong>出错:</strong> ${data.message}
+                </div>`;
             break;
     }
 }
