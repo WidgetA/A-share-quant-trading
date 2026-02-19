@@ -105,23 +105,43 @@ def create_app(
     async def startup():
         import asyncio
 
+        from src.data.clients.ifind_http_client import IFinDHttpClient
+        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.web.routes import _run_intraday_monitor
 
         logger.info("Web UI started")
         store.start_cleanup_task()
 
+        # Shared iFinD HTTP client (token obtained once, reused by all endpoints)
+        ifind_client = IFinDHttpClient()
+        try:
+            await ifind_client.start()
+            app.state.ifind_client = ifind_client
+            logger.info("Shared iFinD HTTP client started")
+        except Exception as e:
+            logger.error(f"Failed to start shared iFinD client: {e}")
+            app.state.ifind_client = None
+
+        # Shared fundamentals DB connection pool
+        fundamentals_db = create_fundamentals_db_from_config()
+        try:
+            await fundamentals_db.connect()
+            app.state.fundamentals_db = fundamentals_db
+            logger.info("Shared fundamentals DB connected")
+        except Exception as e:
+            logger.error(f"Failed to connect shared fundamentals DB: {e}")
+            app.state.fundamentals_db = None
+
         # Auto-start intraday momentum monitor as background task
-        # Access the monitor state from the momentum router's closure
-        for route in momentum_router.routes:
-            if hasattr(route, "endpoint") and hasattr(route.endpoint, "__self__"):
-                break
-        # Use the module-level runner with a fresh state dict stored on app
+        # Pass shared clients via state dict so monitor doesn't create its own
         app.state.momentum_monitor_state = {
             "running": False,
             "last_scan_time": None,
             "last_result": None,
             "today_results": [],
             "task": None,
+            "ifind_client": app.state.ifind_client,
+            "fundamentals_db": app.state.fundamentals_db,
         }
         task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
         app.state.momentum_monitor_state["task"] = task
@@ -140,6 +160,18 @@ def create_app(
                 task.cancel()
             monitor_state["running"] = False
             logger.info("Intraday momentum monitor stopped")
+
+        # Close shared iFinD client
+        ifind_client = getattr(app.state, "ifind_client", None)
+        if ifind_client:
+            await ifind_client.stop()
+            logger.info("Shared iFinD HTTP client stopped")
+
+        # Close shared fundamentals DB
+        fundamentals_db = getattr(app.state, "fundamentals_db", None)
+        if fundamentals_db:
+            await fundamentals_db.close()
+            logger.info("Shared fundamentals DB closed")
 
     return app
 

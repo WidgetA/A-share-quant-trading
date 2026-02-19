@@ -1139,6 +1139,20 @@ def create_momentum_router() -> APIRouter:
             },
         )
 
+    def _get_ifind_client(request: Request):
+        """Get shared iFinD HTTP client from app.state."""
+        client = getattr(request.app.state, "ifind_client", None)
+        if client is None:
+            raise HTTPException(status_code=503, detail="iFinD 客户端未就绪")
+        return client
+
+    def _get_fundamentals_db(request: Request):
+        """Get shared fundamentals DB from app.state."""
+        db = getattr(request.app.state, "fundamentals_db", None)
+        if db is None:
+            raise HTTPException(status_code=503, detail="基本面数据库未就绪")
+        return db
+
     @router.get("/momentum", response_class=HTMLResponse)
     async def momentum_page(request: Request):
         """Momentum backtest and monitor page."""
@@ -1153,11 +1167,10 @@ def create_momentum_router() -> APIRouter:
         )
 
     @router.post("/api/momentum/backtest")
-    async def run_backtest(body: MomentumBacktestRequest) -> dict:
+    async def run_backtest(request: Request, body: MomentumBacktestRequest) -> dict:
         """Run momentum sector strategy backtest for a specific date."""
         from src.common.feishu_bot import FeishuBot
-        from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.data.clients.ifind_http_client import IFinDHttpError
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
@@ -1172,14 +1185,10 @@ def create_momentum_router() -> APIRouter:
                 detail=f"日期格式错误: {body.trade_date}，请使用 YYYY-MM-DD",
             )
 
-        # Initialize components
-        ifind_client = IFinDHttpClient()
-        fundamentals_db = create_fundamentals_db_from_config()
+        ifind_client = _get_ifind_client(request)
+        fundamentals_db = _get_fundamentals_db(request)
 
         try:
-            await ifind_client.start()
-            await fundamentals_db.connect()
-
             concept_mapper = ConceptMapper(ifind_client)
             scanner = MomentumSectorScanner(
                 ifind_client=ifind_client,
@@ -1269,9 +1278,6 @@ def create_momentum_router() -> APIRouter:
         except Exception as e:
             logger.error(f"Momentum backtest error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
-        finally:
-            await fundamentals_db.close()
-            await ifind_client.stop()
 
     @router.get("/api/momentum/monitor-status")
     async def get_monitor_status(request: Request) -> dict:
@@ -1306,7 +1312,7 @@ def create_momentum_router() -> APIRouter:
         return {"success": True, "message": "监控已停止"}
 
     @router.post("/api/momentum/range-backtest")
-    async def run_range_backtest(body: MomentumRangeBacktestRequest):
+    async def run_range_backtest(request: Request, body: MomentumRangeBacktestRequest):
         """[DEPRECATED] Use /api/momentum/combined-analysis instead.
 
         Run momentum range backtest with SSE streaming progress."""
@@ -1315,8 +1321,6 @@ def create_momentum_router() -> APIRouter:
         import math
         from datetime import datetime
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
@@ -1335,19 +1339,16 @@ def create_momentum_router() -> APIRouter:
         if body.initial_capital < 1000:
             raise HTTPException(status_code=400, detail="起始资金不能低于 1000 元")
 
+        ifind_client = _get_ifind_client(request)
+        fundamentals_db = _get_fundamentals_db(request)
+
         async def event_stream():
             """SSE event generator for range backtest."""
 
             def sse(data: dict) -> str:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-            ifind_client = IFinDHttpClient()
-            fundamentals_db = create_fundamentals_db_from_config()
-
             try:
-                await ifind_client.start()
-                await fundamentals_db.connect()
-
                 concept_mapper = ConceptMapper(ifind_client)
                 scanner = MomentumSectorScanner(
                     ifind_client=ifind_client,
@@ -1649,9 +1650,6 @@ def create_momentum_router() -> APIRouter:
             except Exception as e:
                 logger.error(f"Range backtest error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"回测出错: {str(e)}"})
-            finally:
-                await fundamentals_db.close()
-                await ifind_client.stop()
 
         return StreamingResponse(
             event_stream(),
@@ -1667,7 +1665,7 @@ def create_momentum_router() -> APIRouter:
         """Analyze losing trades from range backtest with board trend data and LLM."""
         import json
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient
+        ifind_client = _get_ifind_client(request)
 
         body = await request.json()
         losing_trades = body.get("losing_trades", [])
@@ -1681,10 +1679,7 @@ def create_momentum_router() -> APIRouter:
 
             yield sse({"type": "init", "total": len(losing_trades)})
 
-            ifind_client = IFinDHttpClient()
             try:
-                await ifind_client.start()
-
                 analyses = []
                 for idx, trade in enumerate(losing_trades):
                     trade_date_str = trade["trade_date"]
@@ -1781,8 +1776,6 @@ def create_momentum_router() -> APIRouter:
             except Exception as e:
                 logger.error(f"Loss analysis error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
-            finally:
-                await ifind_client.stop()
 
         return StreamingResponse(
             analysis_stream(),
@@ -1794,7 +1787,7 @@ def create_momentum_router() -> APIRouter:
         )
 
     @router.post("/api/momentum/funnel-analysis")
-    async def run_funnel_analysis(body: FunnelAnalysisRequest):
+    async def run_funnel_analysis(request: Request, body: FunnelAnalysisRequest):
         """[DEPRECATED] Use /api/momentum/combined-analysis instead.
 
         Run funnel layer analysis with SSE streaming.
@@ -1806,8 +1799,6 @@ def create_momentum_router() -> APIRouter:
         from datetime import datetime
         from statistics import median as stat_median
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.filters.stock_filter import create_main_board_only_filter
         from src.strategy.strategies.momentum_sector_scanner import (
@@ -1833,17 +1824,14 @@ def create_momentum_router() -> APIRouter:
             "L4: 最终推荐",
         ]
 
+        ifind_client = _get_ifind_client(request)
+        fundamentals_db = _get_fundamentals_db(request)
+
         async def event_stream():
             def sse(data: dict) -> str:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-            ifind_client = IFinDHttpClient()
-            fundamentals_db = create_fundamentals_db_from_config()
-
             try:
-                await ifind_client.start()
-                await fundamentals_db.connect()
-
                 # Get trading calendar (include extra days for T+1)
                 from datetime import timedelta
 
@@ -2331,9 +2319,6 @@ def create_momentum_router() -> APIRouter:
             except Exception as e:
                 logger.error(f"Funnel analysis error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
-            finally:
-                await fundamentals_db.close()
-                await ifind_client.stop()
 
         return StreamingResponse(
             event_stream(),
@@ -2345,7 +2330,7 @@ def create_momentum_router() -> APIRouter:
         )
 
     @router.post("/api/momentum/combined-analysis")
-    async def run_combined_analysis(body: CombinedAnalysisRequest):
+    async def run_combined_analysis(request: Request, body: CombinedAnalysisRequest):
         """Run combined range backtest + funnel analysis with SSE streaming.
 
         Single pass: builds funnel layers per day AND simulates capital trading
@@ -2356,8 +2341,6 @@ def create_momentum_router() -> APIRouter:
         from datetime import datetime
         from statistics import median as stat_median
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.filters.momentum_quality_filter import (
             MomentumQualityConfig,
@@ -2390,17 +2373,14 @@ def create_momentum_router() -> APIRouter:
             "L4: 最终推荐",
         ]
 
+        ifind_client = _get_ifind_client(request)
+        fundamentals_db = _get_fundamentals_db(request)
+
         async def event_stream():
             def sse(data: dict) -> str:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-            ifind_client = IFinDHttpClient()
-            fundamentals_db = create_fundamentals_db_from_config()
-
             try:
-                await ifind_client.start()
-                await fundamentals_db.connect()
-
                 from datetime import timedelta
 
                 trading_days_all = _get_trading_calendar_akshare(
@@ -3077,9 +3057,6 @@ def create_momentum_router() -> APIRouter:
             except Exception as e:
                 logger.error(f"Combined analysis error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
-            finally:
-                await fundamentals_db.close()
-                await ifind_client.stop()
 
         return StreamingResponse(
             event_stream(),
@@ -3860,14 +3837,14 @@ async def _run_intraday_monitor(state: dict) -> None:
 
     Runs every trading day 9:30-9:40, polls for stocks with gain > -0.5%,
     then runs the full strategy scan (9:40 vs open >0.56%) and sends Feishu notification.
+
+    Uses shared iFinD client and fundamentals DB from app.state (passed via state dict).
     """
     import asyncio
     from datetime import datetime, time, timedelta
     from zoneinfo import ZoneInfo
 
     from src.common.feishu_bot import FeishuBot
-    from src.data.clients.ifind_http_client import IFinDHttpClient
-    from src.data.database.fundamentals_db import create_fundamentals_db_from_config
     from src.data.sources.concept_mapper import ConceptMapper
     from src.strategy.strategies.momentum_sector_scanner import (
         MomentumSectorScanner,
@@ -3918,13 +3895,15 @@ async def _run_intraday_monitor(state: dict) -> None:
             accumulated: dict[str, PriceSnapshot] = {}
             poll_count = 0
 
-            ifind_client = IFinDHttpClient()
-            fundamentals_db = create_fundamentals_db_from_config()
+            ifind_client = state.get("ifind_client")
+            fundamentals_db = state.get("fundamentals_db")
+
+            if not ifind_client or not fundamentals_db:
+                logger.error("Monitor: shared iFinD client or fundamentals DB not available")
+                await asyncio.sleep(60)
+                continue
 
             try:
-                await ifind_client.start()
-                await fundamentals_db.connect()
-
                 while state["running"]:
                     current_time = datetime.now(beijing_tz).time()
                     if current_time >= MONITOR_END:
@@ -4012,9 +3991,8 @@ async def _run_intraday_monitor(state: dict) -> None:
                 else:
                     logger.info("Monitor: no pre-filtered stocks found during window")
 
-            finally:
-                await fundamentals_db.close()
-                await ifind_client.stop()
+            except Exception as e:
+                logger.error(f"Monitor active window error: {e}", exc_info=True)
 
             # After scan, wait until next day
             tomorrow = now + timedelta(days=1)
@@ -4231,14 +4209,12 @@ def create_settings_router() -> APIRouter:
         end_date: str
 
     @router.post("/api/momentum/backfill")
-    async def run_backfill(body: BackfillRequest):
+    async def run_backfill(request: Request, body: BackfillRequest):
         """Backfill momentum scan selected stocks with SSE streaming progress."""
         import asyncio
         import json
         from datetime import datetime, timedelta
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
@@ -4252,17 +4228,20 @@ def create_settings_router() -> APIRouter:
         if end_date <= start_date:
             raise HTTPException(status_code=400, detail="结束日期必须晚于起始日期")
 
+        ifind_client = getattr(request.app.state, "ifind_client", None)
+        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
+        if not ifind_client:
+            raise HTTPException(status_code=503, detail="iFinD 客户端未就绪")
+        if not fundamentals_db:
+            raise HTTPException(status_code=503, detail="基本面数据库未就绪")
+
         async def event_stream():
             def sse(data: dict) -> str:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-            ifind_client = IFinDHttpClient()
-            fundamentals_db = create_fundamentals_db_from_config()
             scan_db = create_momentum_scan_db_from_config()
 
             try:
-                await ifind_client.start()
-                await fundamentals_db.connect()
                 await scan_db.connect()
 
                 concept_mapper = ConceptMapper(ifind_client)
@@ -4439,8 +4418,6 @@ def create_settings_router() -> APIRouter:
                 yield sse({"type": "error", "message": str(e)[:200]})
             finally:
                 await scan_db.close()
-                await fundamentals_db.close()
-                await ifind_client.stop()
 
         return StreamingResponse(
             event_stream(),
