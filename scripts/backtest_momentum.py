@@ -36,7 +36,6 @@ from src.common.feishu_bot import FeishuBot
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 from src.data.sources.concept_mapper import ConceptMapper
-from src.strategy.filters.gap_fade_filter import GapFadeConfig
 from src.strategy.strategies.momentum_sector_scanner import (
     MomentumSectorScanner,
     PriceSnapshot,
@@ -187,10 +186,12 @@ async def fetch_main_board_prices_for_date(
     if snapshots:
         data_940 = await _fetch_940_data(client, list(snapshots.keys()), trade_date)
         updated = 0
-        for code, (price, volume) in data_940.items():
+        for code, (price, volume, high, low) in data_940.items():
             if code in snapshots and price > 0:
                 snapshots[code].latest_price = price
                 snapshots[code].early_volume = volume
+                snapshots[code].high_price = high
+                snapshots[code].low_price = low
                 updated += 1
         logger.info(f"Updated {updated}/{len(snapshots)} stocks with 9:40 price/volume")
 
@@ -201,13 +202,13 @@ async def _fetch_940_data(
     client: IFinDHttpClient,
     stock_codes: list[str],
     trade_date: date,
-) -> dict[str, tuple[float, float]]:
-    """Fetch 9:40 price and cumulative volume via high_frequency API (1-min bars).
+) -> dict[str, tuple[float, float, float, float]]:
+    """Fetch 9:40 price, volume, high, low via high_frequency API (1-min bars).
 
     Returns:
-        dict: stock_code → (price_at_940, cumulative_volume_930_to_940)
+        dict: stock_code → (price_at_940, cumulative_volume, max_high, min_low)
     """
-    result: dict[str, tuple[float, float]] = {}
+    result: dict[str, tuple[float, float, float, float]] = {}
     batch_size = 50
     start_time = f"{trade_date} 09:30:00"
     end_time = f"{trade_date} 09:40:00"
@@ -219,7 +220,7 @@ async def _fetch_940_data(
         try:
             data = await client.high_frequency(
                 codes=codes_str,
-                indicators="close,volume",
+                indicators="close,volume,high,low",
                 start_time=start_time,
                 end_time=end_time,
                 function_para={"Interval": "1"},  # 1-minute bars
@@ -234,9 +235,13 @@ async def _fetch_940_data(
                 tbl = table_entry.get("table", {})
                 close_vals = tbl.get("close", [])
                 vol_vals = tbl.get("volume", [])
+                high_vals = tbl.get("high", [])
+                low_vals = tbl.get("low", [])
 
                 price = 0.0
                 cum_volume = 0.0
+                max_high = 0.0
+                min_low = 0.0
 
                 if close_vals:
                     last_close = close_vals[-1]
@@ -246,8 +251,18 @@ async def _fetch_940_data(
                 if vol_vals:
                     cum_volume = sum(float(v) for v in vol_vals if v is not None)
 
+                if high_vals:
+                    valid_highs = [float(v) for v in high_vals if v is not None]
+                    if valid_highs:
+                        max_high = max(valid_highs)
+
+                if low_vals:
+                    valid_lows = [float(v) for v in low_vals if v is not None]
+                    if valid_lows:
+                        min_low = min(valid_lows)
+
                 if price > 0:
-                    result[bare_code] = (price, cum_volume)
+                    result[bare_code] = (price, cum_volume, max_high, min_low)
 
         except IFinDHttpError as e:
             logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
@@ -293,7 +308,8 @@ def print_scan_result(result: ScanResult, trade_date: date) -> None:
 
 
 async def run_backtest(
-    trade_date: date, notify: bool = False, fade_filter: bool = True
+    trade_date: date,
+    notify: bool = False,
 ) -> ScanResult:
     """Run backtest for a single date."""
     logger.info(f"Running backtest for {trade_date}")
@@ -307,12 +323,10 @@ async def run_backtest(
         await fundamentals_db.connect()
 
         concept_mapper = ConceptMapper(ifind_client)
-        gap_fade_config = GapFadeConfig(enabled=fade_filter)
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
-            gap_fade_config=gap_fade_config,
         )
 
         # Fetch price data for the date
@@ -370,19 +384,13 @@ def main():
         action="store_true",
         help="显示调试信息",
     )
-    parser.add_argument(
-        "--no-fade-filter",
-        action="store_true",
-        help="禁用高开低走过滤器",
-    )
-
     args = parser.parse_args()
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
     trade_date = date.fromisoformat(args.date)
-    asyncio.run(run_backtest(trade_date, notify=args.notify, fade_filter=not args.no_fade_filter))
+    asyncio.run(run_backtest(trade_date, notify=args.notify))
 
 
 if __name__ == "__main__":

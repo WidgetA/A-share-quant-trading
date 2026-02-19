@@ -1098,7 +1098,6 @@ class MomentumRangeBacktestRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
-    fade_filter: bool = True  # Enable gap-fade filter (高开低走过滤)
 
 
 class FunnelAnalysisRequest(BaseModel):
@@ -1106,7 +1105,6 @@ class FunnelAnalysisRequest(BaseModel):
 
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
-    fade_filter: bool = True
 
 
 class CombinedAnalysisRequest(BaseModel):
@@ -1115,7 +1113,6 @@ class CombinedAnalysisRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
-    fade_filter: bool = True
     quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
 
 
@@ -1319,7 +1316,6 @@ def create_momentum_router() -> APIRouter:
         from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
-        from src.strategy.filters.gap_fade_filter import GapFadeConfig
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
         )
@@ -1351,12 +1347,10 @@ def create_momentum_router() -> APIRouter:
                 await fundamentals_db.connect()
 
                 concept_mapper = ConceptMapper(ifind_client)
-                gap_fade_config = GapFadeConfig(enabled=body.fade_filter)
                 scanner = MomentumSectorScanner(
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
-                    gap_fade_config=gap_fade_config,
                 )
 
                 # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
@@ -1813,7 +1807,6 @@ def create_momentum_router() -> APIRouter:
         from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
-        from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
         from src.strategy.filters.stock_filter import create_main_board_only_filter
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
@@ -1833,9 +1826,8 @@ def create_momentum_router() -> APIRouter:
         LAYER_NAMES = [
             "L0: 全部成分股",
             "L1: 涨幅>0.56%",
-            "L2: 高开低走过滤",
-            "L3: 动量质量过滤",
-            "L4: 最终推荐",
+            "L2: 动量质量过滤",
+            "L3: 最终推荐",
         ]
 
         async def event_stream():
@@ -1933,13 +1925,11 @@ def create_momentum_router() -> APIRouter:
                             continue
 
                         # Steps 1-4 via scanner
-                        gap_fade_config = GapFadeConfig(enabled=body.fade_filter)
                         scanner = MomentumSectorScanner(
                             ifind_client=ifind_client,
                             fundamentals_db=fundamentals_db,
                             concept_mapper=concept_mapper,
                             stock_filter=stock_filter,
-                            gap_fade_config=gap_fade_config,
                         )
                         scanner._trade_date = trade_date
 
@@ -2022,14 +2012,7 @@ def create_momentum_router() -> APIRouter:
                         l0 = _dedup(l0)
                         l1 = _dedup(l1)
 
-                        # L2: gap-fade filter
-                        fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
-                        if body.fade_filter and l1:
-                            l2, _ = await fade_filter.filter_stocks(l1, price_snapshots, trade_date)
-                        else:
-                            l2 = list(l1)
-
-                        # L3: momentum quality filter
+                        # L2: momentum quality filter
                         from src.strategy.filters.momentum_quality_filter import (
                             MomentumQualityConfig,
                             MomentumQualityFilter,
@@ -2037,19 +2020,19 @@ def create_momentum_router() -> APIRouter:
 
                         quality_config = MomentumQualityConfig(enabled=True)
                         quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
-                        if l2:
-                            l3, _ = await quality_filter_inst.filter_stocks(
-                                l2, price_snapshots, trade_date
+                        if l1:
+                            l2, _ = await quality_filter_inst.filter_stocks(
+                                l1, price_snapshots, trade_date
                             )
                         else:
-                            l3 = list(l2)
+                            l2 = list(l1)
 
-                        # L4: recommendation
-                        l4 = []
-                        if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots)
+                        # L3: recommendation
+                        l3 = []
+                        if l2:
+                            rec = await scanner._step6_recommend(l2, price_snapshots)
                             if rec:
-                                l4 = [
+                                l3 = [
                                     SelectedStock(
                                         stock_code=rec.stock_code,
                                         stock_name=rec.stock_name,
@@ -2060,15 +2043,15 @@ def create_momentum_router() -> APIRouter:
                                     )
                                 ]
 
-                        all_layers = [l0, l1, l2, l3, l4]
+                        all_layers = [l0, l1, l2, l3]
 
-                        # Fetch revenue growth for L3 stocks (for L3→L4 误杀)
+                        # Fetch revenue growth for L2 stocks (for L2→L3 误杀)
                         day_revenue_growth: dict[str, float] = {}
-                        if l3:
-                            l3_codes_str = ";".join(s.stock_code for s in l3)
+                        if l2:
+                            l2_codes_str = ";".join(s.stock_code for s in l2)
                             try:
                                 growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
+                                    f"{l2_codes_str} 同比季度收入增长率", "stock"
                                 )
                                 g_tables = growth_result.get("tables", [])
                                 if g_tables:
@@ -2210,9 +2193,8 @@ def create_momentum_router() -> APIRouter:
                 conclusions = []
                 pairs = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "动量质量过滤"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "动量质量过滤"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
                 ]
                 for prev_n, curr_n, label in pairs:
                     prev_r = summary_layers[prev_n]["avg_return"]
@@ -2241,9 +2223,8 @@ def create_momentum_router() -> APIRouter:
                 filtered_out_best = []
                 transitions = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 动量质量"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 动量质量"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
                     from collections import defaultdict
@@ -2358,7 +2339,6 @@ def create_momentum_router() -> APIRouter:
         from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.concept_mapper import ConceptMapper
-        from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
         from src.strategy.filters.momentum_quality_filter import (
             MomentumQualityConfig,
             MomentumQualityFilter,
@@ -2385,9 +2365,8 @@ def create_momentum_router() -> APIRouter:
         LAYER_NAMES = [
             "L0: 全部成分股",
             "L1: 涨幅>0.56%",
-            "L2: 高开低走过滤",
-            "L3: 动量质量过滤",
-            "L4: 最终推荐",
+            "L2: 动量质量过滤",
+            "L3: 最终推荐",
         ]
 
         async def event_stream():
@@ -2494,13 +2473,11 @@ def create_momentum_router() -> APIRouter:
                             await asyncio.sleep(0.05)
                             continue
 
-                        gap_fade_config = GapFadeConfig(enabled=body.fade_filter)
                         scanner = MomentumSectorScanner(
                             ifind_client=ifind_client,
                             fundamentals_db=fundamentals_db,
                             concept_mapper=concept_mapper,
                             stock_filter=stock_filter,
-                            gap_fade_config=gap_fade_config,
                         )
                         scanner._trade_date = trade_date
 
@@ -2608,32 +2585,23 @@ def create_momentum_router() -> APIRouter:
                         l0 = _dedup(l0)
                         l1 = _dedup(l1)
 
-                        # L2: gap-fade filter
-                        fade_filter_inst = GapFadeFilter(ifind_client, gap_fade_config)
-                        if body.fade_filter and l1:
-                            l2, _ = await fade_filter_inst.filter_stocks(
+                        # L2: momentum quality filter
+                        quality_config = MomentumQualityConfig(enabled=body.quality_filter)
+                        quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
+                        if body.quality_filter and l1:
+                            l2, _ = await quality_filter_inst.filter_stocks(
                                 l1, price_snapshots, trade_date
                             )
                         else:
                             l2 = list(l1)
 
-                        # L3: momentum quality filter
-                        quality_config = MomentumQualityConfig(enabled=body.quality_filter)
-                        quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
-                        if body.quality_filter and l2:
-                            l3, _ = await quality_filter_inst.filter_stocks(
-                                l2, price_snapshots, trade_date
-                            )
-                        else:
-                            l3 = list(l2)
-
-                        # L4: recommendation
-                        l4 = []
+                        # L3: recommendation
+                        l3 = []
                         rec = None
-                        if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots)
+                        if l2:
+                            rec = await scanner._step6_recommend(l2, price_snapshots)
                             if rec:
-                                l4 = [
+                                l3 = [
                                     SelectedStock(
                                         stock_code=rec.stock_code,
                                         stock_name=rec.stock_name,
@@ -2644,15 +2612,15 @@ def create_momentum_router() -> APIRouter:
                                     )
                                 ]
 
-                        all_layers = [l0, l1, l2, l3, l4]
+                        all_layers = [l0, l1, l2, l3]
 
-                        # Fetch revenue growth for L3 stocks
+                        # Fetch revenue growth for L2 stocks
                         day_revenue_growth: dict[str, float] = {}
-                        if l3:
-                            l3_codes_str = ";".join(s.stock_code for s in l3)
+                        if l2:
+                            l2_codes_str = ";".join(s.stock_code for s in l2)
                             try:
                                 growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
+                                    f"{l2_codes_str} 同比季度收入增长率", "stock"
                                 )
                                 g_tables = growth_result.get("tables", [])
                                 if g_tables:
@@ -2922,9 +2890,8 @@ def create_momentum_router() -> APIRouter:
                 conclusions = []
                 pairs = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "动量质量过滤"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "动量质量过滤"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
                 ]
                 for prev_n, curr_n, label in pairs:
                     prev_r = summary_layers[prev_n]["avg_return"]
@@ -2953,9 +2920,8 @@ def create_momentum_router() -> APIRouter:
                 filtered_out_best = []
                 transitions = [
                     (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 动量质量"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
+                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 动量质量"),
+                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
                     from collections import defaultdict
@@ -3523,10 +3489,12 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
     # Fetch 9:40 price and volume (for gain check, buy price, and gap-fade filter)
     if snapshots:
         data_940 = await _fetch_940_data_batch(ifind_client, list(snapshots.keys()), trade_date)
-        for code, (price, volume) in data_940.items():
+        for code, (price, volume, high, low) in data_940.items():
             if code in snapshots and price > 0:
                 snapshots[code].latest_price = price
                 snapshots[code].early_volume = volume
+                snapshots[code].high_price = high
+                snapshots[code].low_price = low
 
     return snapshots
 
@@ -3617,13 +3585,13 @@ async def _fetch_stock_close_prices(ifind_client, stock_code: str, target_date) 
 
 async def _fetch_940_data_batch(
     ifind_client, stock_codes: list[str], trade_date
-) -> dict[str, tuple[float, float]]:
-    """Fetch 9:40 price and cumulative volume via high_frequency API (1-min bars).
+) -> dict[str, tuple[float, float, float, float]]:
+    """Fetch 9:40 price, volume, high, low via high_frequency API (1-min bars).
 
     Returns:
-        dict: stock_code → (price_at_940, cumulative_volume_930_to_940)
+        dict: stock_code → (price_at_940, cumulative_volume, max_high, min_low)
     """
-    result: dict[str, tuple[float, float]] = {}
+    result: dict[str, tuple[float, float, float, float]] = {}
     batch_size = 50
     start_time = f"{trade_date} 09:30:00"
     end_time = f"{trade_date} 09:40:00"
@@ -3635,7 +3603,7 @@ async def _fetch_940_data_batch(
         try:
             data = await ifind_client.high_frequency(
                 codes=codes_str,
-                indicators="close,volume",
+                indicators="close,volume,high,low",
                 start_time=start_time,
                 end_time=end_time,
                 function_para={"Interval": "1"},
@@ -3650,9 +3618,13 @@ async def _fetch_940_data_batch(
                 tbl = table_entry.get("table", {})
                 close_vals = tbl.get("close", [])
                 vol_vals = tbl.get("volume", [])
+                high_vals = tbl.get("high", [])
+                low_vals = tbl.get("low", [])
 
                 price = 0.0
                 cum_volume = 0.0
+                max_high = 0.0
+                min_low = 0.0
 
                 if close_vals:
                     last_close = close_vals[-1]
@@ -3662,8 +3634,18 @@ async def _fetch_940_data_batch(
                 if vol_vals:
                     cum_volume = sum(float(v) for v in vol_vals if v is not None)
 
+                if high_vals:
+                    valid_highs = [float(v) for v in high_vals if v is not None]
+                    if valid_highs:
+                        max_high = max(valid_highs)
+
+                if low_vals:
+                    valid_lows = [float(v) for v in low_vals if v is not None]
+                    if valid_lows:
+                        min_low = min(valid_lows)
+
                 if price > 0:
-                    result[bare_code] = (price, cum_volume)
+                    result[bare_code] = (price, cum_volume, max_high, min_low)
 
         except Exception as e:
             logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
