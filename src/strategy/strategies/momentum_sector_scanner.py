@@ -122,6 +122,8 @@ class ScanResult:
     scan_time: datetime = field(default_factory=datetime.now)
     # Step 6: recommended stock (best earnings growth from the most-populated board)
     recommended_stock: RecommendedStock | None = None
+    # Price snapshots for selected stocks (for backfill/export use)
+    all_snapshots: dict[str, PriceSnapshot] = field(default_factory=dict)
 
     @property
     def has_results(self) -> bool:
@@ -223,6 +225,7 @@ class MomentumSectorScanner:
             board_constituents, price_snapshots
         )
         result.selected_stocks = selected
+        result.all_snapshots = all_snapshots
         logger.info(f"Step 5: {len(selected)} stocks selected from constituents")
 
         # Step 5.5: Momentum quality filter — remove fake breakouts

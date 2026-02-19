@@ -34,6 +34,8 @@
 # POST /api/momentum/range-backtest - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status - Get intraday monitor status (JSON)
 # POST /api/momentum/loss-analysis  - Analyze losing trades with LLM (SSE streaming)
+# POST /api/momentum/backfill         - Backfill scan stocks to DB (SSE streaming)
+# GET  /api/momentum/scan-stocks/csv  - Export scan selected stocks as CSV download
 
 from __future__ import annotations
 
@@ -3782,6 +3784,53 @@ async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) 
     return await _fetch_batch_prices(ifind_client, stock_codes, target_date, indicator="close")
 
 
+async def _fetch_batch_growth(ifind_client, stock_codes: list[str]) -> dict[str, float]:
+    """Fetch YoY quarterly revenue growth rates via iwencai for multiple stocks."""
+    from src.data.clients.ifind_http_client import IFinDHttpError
+
+    if not stock_codes:
+        return {}
+
+    result: dict[str, float] = {}
+    batch_size = 30
+
+    for i in range(0, len(stock_codes), batch_size):
+        batch = stock_codes[i : i + batch_size]
+        codes_str = ";".join(batch)
+        query = f"{codes_str} 同比季度收入增长率"
+
+        try:
+            data = await ifind_client.smart_stock_picking(query, "stock")
+            tables = data.get("tables", [])
+            if not tables:
+                continue
+
+            table = tables[0].get("table", {})
+            code_col = table.get("股票代码", [])
+
+            growth_col_values = []
+            for col_name, col_values in table.items():
+                if "收入" in col_name and ("增长率" in col_name or "同比" in col_name):
+                    growth_col_values = col_values
+                    break
+
+            if code_col and growth_col_values:
+                for j, code in enumerate(code_col):
+                    bare = code.split(".")[0] if isinstance(code, str) else str(code)
+                    if j < len(growth_col_values):
+                        val = growth_col_values[j]
+                        if val is not None and val != "--":
+                            try:
+                                result[bare] = float(val)
+                            except (ValueError, TypeError):
+                                pass
+
+        except IFinDHttpError as e:
+            logger.warning(f"Growth rate fetch failed: {e}")
+
+    return result
+
+
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
     """Run full momentum scan for a specific date. Returns ScanResult or None."""
     from src.data.clients.ifind_http_client import IFinDHttpError
@@ -4174,5 +4223,277 @@ def create_settings_router() -> APIRouter:
             return {"success": False, "message": "请求超时，请检查网络连接"}
         except httpx.HTTPError as e:
             return {"success": False, "message": f"HTTP 请求失败: {e}"}
+
+    # === SCAN STOCKS BACKFILL (SSE) ===
+
+    class BackfillRequest(BaseModel):
+        start_date: str
+        end_date: str
+
+    @router.post("/api/momentum/backfill")
+    async def run_backfill(body: BackfillRequest):
+        """Backfill momentum scan selected stocks with SSE streaming progress."""
+        import asyncio
+        import json
+        from datetime import datetime, timedelta
+
+        from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
+        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
+        from src.data.sources.concept_mapper import ConceptMapper
+        from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
+
+        try:
+            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
+
+        if end_date <= start_date:
+            raise HTTPException(status_code=400, detail="结束日期必须晚于起始日期")
+
+        async def event_stream():
+            def sse(data: dict) -> str:
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+            ifind_client = IFinDHttpClient()
+            fundamentals_db = create_fundamentals_db_from_config()
+            scan_db = create_momentum_scan_db_from_config()
+
+            try:
+                await ifind_client.start()
+                await fundamentals_db.connect()
+                await scan_db.connect()
+
+                concept_mapper = ConceptMapper(ifind_client)
+                scanner = MomentumSectorScanner(
+                    ifind_client=ifind_client,
+                    fundamentals_db=fundamentals_db,
+                    concept_mapper=concept_mapper,
+                )
+
+                # Trading calendar
+                full_cal = _get_trading_calendar_akshare(
+                    start_date, end_date + timedelta(days=10)
+                )
+                trading_days = [d for d in full_cal if start_date <= d <= end_date]
+
+                if not trading_days:
+                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
+                    return
+
+                # T+1 map
+                next_day_map: dict = {}
+                for idx, d in enumerate(full_cal):
+                    if idx + 1 < len(full_cal):
+                        next_day_map[d] = full_cal[idx + 1]
+
+                # Skip already-backfilled dates
+                existing = set(await scan_db.get_dates_with_data(
+                    start_date=body.start_date, end_date=body.end_date,
+                ))
+                remaining = [d for d in trading_days if d not in existing]
+
+                yield sse({
+                    "type": "init",
+                    "total_days": len(remaining),
+                    "skipped_days": len(trading_days) - len(remaining),
+                })
+
+                if not remaining:
+                    yield sse({"type": "complete", "message": "所有日期已回填，无需操作"})
+                    return
+
+                success = 0
+                errors = 0
+                total_stocks = 0
+
+                for i, day in enumerate(remaining):
+                    yield sse({
+                        "type": "progress",
+                        "day": i + 1,
+                        "total": len(remaining),
+                        "trade_date": str(day),
+                    })
+
+                    try:
+                        price_snapshots = await _parse_iwencai_and_fetch_prices_for_date(
+                            ifind_client, day
+                        )
+
+                        if not price_snapshots:
+                            yield sse({
+                                "type": "day_result",
+                                "trade_date": str(day),
+                                "stocks": 0,
+                                "status": "skip",
+                                "message": "无价格数据",
+                            })
+                            success += 1
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        result = await scanner.scan(price_snapshots, trade_date=day)
+                        selected = result.selected_stocks
+                        all_snapshots = result.all_snapshots
+
+                        if not selected:
+                            yield sse({
+                                "type": "day_result",
+                                "trade_date": str(day),
+                                "stocks": 0,
+                                "status": "ok",
+                                "message": "无选股",
+                            })
+                            success += 1
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        unique_codes = list({s.stock_code for s in selected})
+
+                        # T+1 open prices
+                        next_day = next_day_map.get(day)
+                        ndo_map: dict[str, float] = {}
+                        if next_day:
+                            ndo_map = await _fetch_batch_prices(
+                                ifind_client, unique_codes, next_day, indicator="open"
+                            )
+
+                        # Growth rates
+                        growth_map = await _fetch_batch_growth(ifind_client, unique_codes)
+
+                        # Build rows
+                        db_rows = []
+                        for s in selected:
+                            snap = all_snapshots.get(s.stock_code)
+                            bp = snap.latest_price if snap else 0.0
+                            ndo = ndo_map.get(s.stock_code)
+                            ret = None
+                            if ndo and bp > 0:
+                                ret = round(_calc_net_return_pct(bp, ndo), 4)
+                            db_rows.append({
+                                "stock_code": s.stock_code,
+                                "stock_name": s.stock_name,
+                                "board_name": s.board_name,
+                                "open_gain_pct": s.open_gain_pct,
+                                "pe_ttm": s.pe_ttm,
+                                "board_avg_pe": s.board_avg_pe,
+                                "open_price": snap.open_price if snap else 0.0,
+                                "prev_close": snap.prev_close if snap else 0.0,
+                                "buy_price": bp,
+                                "next_day_open": ndo,
+                                "return_pct": ret,
+                                "growth_rate": growth_map.get(s.stock_code),
+                            })
+
+                        saved = await scan_db.save_day(day, db_rows)
+                        total_stocks += saved
+                        success += 1
+
+                        yield sse({
+                            "type": "day_result",
+                            "trade_date": str(day),
+                            "stocks": saved,
+                            "status": "ok",
+                        })
+
+                    except Exception as e:
+                        errors += 1
+                        logger.error(f"Backfill error on {day}: {e}")
+                        yield sse({
+                            "type": "day_result",
+                            "trade_date": str(day),
+                            "stocks": 0,
+                            "status": "error",
+                            "message": str(e)[:80],
+                        })
+
+                    await asyncio.sleep(0.05)
+
+                yield sse({
+                    "type": "complete",
+                    "success": success,
+                    "errors": errors,
+                    "total_stocks": total_stocks,
+                })
+
+            except Exception as e:
+                logger.error(f"Backfill fatal error: {e}", exc_info=True)
+                yield sse({"type": "error", "message": str(e)[:200]})
+            finally:
+                await scan_db.close()
+                await fundamentals_db.close()
+                await ifind_client.stop()
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # === SCAN STOCKS CSV EXPORT ===
+
+    @router.get("/api/momentum/scan-stocks/csv")
+    async def export_scan_stocks_csv(start_date: str, end_date: str):
+        """Export momentum scan selected stocks as CSV file download.
+
+        Query params:
+            start_date: YYYY-MM-DD
+            end_date: YYYY-MM-DD
+        """
+        import csv
+        import io as _io
+        from datetime import datetime
+
+        from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
+
+        # Validate dates
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")
+            datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
+
+        scan_db = create_momentum_scan_db_from_config()
+        try:
+            await scan_db.connect()
+            rows = await scan_db.query(start_date=start_date, end_date=end_date)
+        finally:
+            await scan_db.close()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="所选日期范围内无数据")
+
+        # Build CSV in memory
+        output = _io.StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=[
+                "trade_date",
+                "stock_code",
+                "stock_name",
+                "board_name",
+                "open_gain_pct",
+                "pe_ttm",
+                "board_avg_pe",
+                "open_price",
+                "prev_close",
+                "buy_price",
+                "next_day_open",
+                "return_pct",
+                "growth_rate",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+        csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM for Excel compatibility
+        filename = f"momentum_scan_stocks_{start_date}_{end_date}.csv"
+
+        return StreamingResponse(
+            _io.BytesIO(csv_bytes),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     return router

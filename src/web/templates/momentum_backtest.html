@@ -70,6 +70,42 @@
         </div>
     </section>
 
+    <!-- Backfill & CSV Export -->
+    <section class="momentum-section">
+        <div class="sim-card">
+            <h3>选股数据回填 & 导出</h3>
+            <p class="form-hint">回填历史选股候选池（Step 5.6 之后、推荐之前），含价格、次日收益、业绩增长率。支持断点续填。</p>
+            <form id="backfill-form" class="sim-form">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="bf_start">起始日期</label>
+                        <input type="date" id="bf_start" name="bf_start" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="bf_end">结束日期</label>
+                        <input type="date" id="bf_end" name="bf_end" required>
+                    </div>
+                </div>
+                <div class="form-row" style="gap:8px">
+                    <button type="submit" class="btn btn-primary" id="backfill-btn">开始回填</button>
+                    <button type="button" class="btn btn-primary" id="csv-export-btn" style="background:#2563eb">下载 CSV</button>
+                </div>
+            </form>
+            <p id="backfill-error" class="error-text hidden"></p>
+            <!-- Backfill progress -->
+            <div id="backfill-progress" class="hidden" style="margin-top:12px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <div class="loading-spinner" style="width:16px;height:16px;border-width:2px"></div>
+                    <span id="bf-status">准备中...</span>
+                </div>
+                <div style="background:#e5e7eb;border-radius:4px;height:8px;overflow:hidden">
+                    <div id="bf-bar" style="background:#10b981;height:100%;width:0%;transition:width 0.3s"></div>
+                </div>
+                <pre id="bf-log" style="max-height:200px;overflow-y:auto;font-size:12px;margin-top:8px;padding:8px;background:#f9fafb;border-radius:4px"></pre>
+            </div>
+        </div>
+    </section>
+
     <!-- Single Day Loading -->
     <section id="loading-section" class="momentum-section hidden">
         <div class="sim-card loading-card">
@@ -1044,5 +1080,121 @@ function _filteredPageNext(layerIdx) {
         _renderFilteredDay(layerIdx);
     }
 }
+
+// === Backfill ===
+document.getElementById('backfill-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const startDate = document.getElementById('bf_start').value;
+    const endDate = document.getElementById('bf_end').value;
+    const errEl = document.getElementById('backfill-error');
+    const btn = document.getElementById('backfill-btn');
+    const progressEl = document.getElementById('backfill-progress');
+    const statusEl = document.getElementById('bf-status');
+    const barEl = document.getElementById('bf-bar');
+    const logEl = document.getElementById('bf-log');
+    errEl.classList.add('hidden');
+
+    if (!startDate || !endDate) {
+        errEl.textContent = '请选择起始和结束日期';
+        errEl.classList.remove('hidden');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '回填中...';
+    progressEl.classList.remove('hidden');
+    logEl.textContent = '';
+    barEl.style.width = '0%';
+
+    try {
+        const resp = await fetch('/api/momentum/backfill', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({start_date: startDate, end_date: endDate}),
+        });
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, {stream: true});
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const data = JSON.parse(line.slice(6));
+
+                if (data.type === 'init') {
+                    statusEl.textContent = `待回填 ${data.total_days} 天（已跳过 ${data.skipped_days} 天）`;
+                    logEl.textContent += `待回填 ${data.total_days} 天\n`;
+                } else if (data.type === 'progress') {
+                    const pct = Math.round(data.day / data.total * 100);
+                    barEl.style.width = pct + '%';
+                    statusEl.textContent = `[${data.day}/${data.total}] ${data.trade_date}`;
+                } else if (data.type === 'day_result') {
+                    const icon = data.status === 'ok' ? (data.stocks > 0 ? data.stocks + ' stocks' : '无选股') : data.status === 'skip' ? '跳过' : 'ERROR';
+                    logEl.textContent += `${data.trade_date}: ${icon}${data.message ? ' — ' + data.message : ''}\n`;
+                    logEl.scrollTop = logEl.scrollHeight;
+                } else if (data.type === 'complete') {
+                    barEl.style.width = '100%';
+                    const msg = data.message || `完成: ${data.success} 天成功, ${data.errors} 天失败, 共 ${data.total_stocks} 条`;
+                    statusEl.textContent = msg;
+                    logEl.textContent += '\n' + msg + '\n';
+                } else if (data.type === 'error') {
+                    errEl.textContent = data.message;
+                    errEl.classList.remove('hidden');
+                    statusEl.textContent = '出错';
+                }
+            }
+        }
+    } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '开始回填';
+    }
+});
+
+// === CSV Export ===
+document.getElementById('csv-export-btn').addEventListener('click', async () => {
+    const startDate = document.getElementById('bf_start').value;
+    const endDate = document.getElementById('bf_end').value;
+    const errEl = document.getElementById('backfill-error');
+    const btn = document.getElementById('csv-export-btn');
+    errEl.classList.add('hidden');
+
+    if (!startDate || !endDate) {
+        errEl.textContent = '请选择起始和结束日期';
+        errEl.classList.remove('hidden');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '下载中...';
+    try {
+        const url = `/api/momentum/scan-stocks/csv?start_date=${startDate}&end_date=${endDate}`;
+        const resp = await fetch(url);
+        if (!resp.ok) {
+            const data = await resp.json();
+            throw new Error(data.detail || '下载失败');
+        }
+        const blob = await resp.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `momentum_scan_stocks_${startDate}_${endDate}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '下载 CSV';
+    }
+});
 </script>
 {% endblock %}
