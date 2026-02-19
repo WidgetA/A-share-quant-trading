@@ -17,8 +17,8 @@
 # Step 3: boards with ≥2 gainers → "hot boards"
 # Step 4: per-board iwencai "XX成分股" → all constituent stocks
 # Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
-# Step 5.5: gap-fade filter (high volume + high turnover → dump risk)
-# Step 5.6: momentum quality filter (declining trend + low turnover amp → fake breakout)
+# Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
+# Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
 # Step 6: recommend — from board with most picks, find highest YoY quarterly revenue growth
 # Step 7: → ScanResult → Feishu notification
 
@@ -30,10 +30,13 @@ from datetime import date, datetime
 from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
 from src.data.sources.concept_mapper import ConceptMapper
-from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter
 from src.strategy.filters.momentum_quality_filter import (
     MomentumQualityConfig,
     MomentumQualityFilter,
+)
+from src.strategy.filters.reversal_factor_filter import (
+    ReversalFactorConfig,
+    ReversalFactorFilter,
 )
 from src.strategy.filters.stock_filter import StockFilter, create_main_board_only_filter
 
@@ -53,6 +56,8 @@ class PriceSnapshot:
     prev_close: float
     latest_price: float  # For live mode; equals open_price in backtest
     early_volume: float = 0.0  # Cumulative volume from 9:30 to scan time (~9:40)
+    high_price: float = 0.0  # Intraday high up to scan time (for reversal filter)
+    low_price: float = 0.0  # Intraday low up to scan time (for reversal filter)
 
     @property
     def open_gain_pct(self) -> float:
@@ -153,15 +158,15 @@ class MomentumSectorScanner:
         fundamentals_db: FundamentalsDB,
         concept_mapper: ConceptMapper | None = None,
         stock_filter: StockFilter | None = None,
-        gap_fade_config: GapFadeConfig | None = None,
         momentum_quality_config: MomentumQualityConfig | None = None,
+        reversal_factor_config: ReversalFactorConfig | None = None,
     ):
         self._ifind = ifind_client
         self._fundamentals_db = fundamentals_db
         self._concept_mapper = concept_mapper or ConceptMapper(ifind_client)
         self._stock_filter = stock_filter or create_main_board_only_filter()
-        self._gap_fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
         self._quality_filter = MomentumQualityFilter(ifind_client, momentum_quality_config)
+        self._reversal_filter = ReversalFactorFilter(reversal_factor_config)
 
     async def scan(
         self,
@@ -220,17 +225,18 @@ class MomentumSectorScanner:
         result.selected_stocks = selected
         logger.info(f"Step 5: {len(selected)} stocks selected from constituents")
 
-        # Step 5.5: Gap-fade filter — remove stocks with high 高开低走 risk
+        # Step 5.5: Momentum quality filter — remove fake breakouts
+        # (declining trend + low turnover amplification)
         if selected:
-            selected, fade_assessments = await self._gap_fade_filter.filter_stocks(
+            selected, quality_assessments = await self._quality_filter.filter_stocks(
                 selected, all_snapshots, trade_date
             )
             result.selected_stocks = selected
 
-        # Step 5.6: Momentum quality filter — remove fake breakouts
-        # (declining trend + low turnover amplification)
+        # Step 5.6: Reversal factor filter — remove stocks showing 冲高回落 at 9:40
+        # (early fade from intraday high + weak price position)
         if selected:
-            selected, quality_assessments = await self._quality_filter.filter_stocks(
+            selected, reversal_assessments = await self._reversal_filter.filter_stocks(
                 selected, all_snapshots, trade_date
             )
             result.selected_stocks = selected
@@ -529,7 +535,7 @@ class MomentumSectorScanner:
             try:
                 data = await self._ifind.real_time_quotation(
                     codes=codes_str,
-                    indicators="open,preClose,latest,volume",
+                    indicators="open,preClose,latest,volume,high,low",
                 )
 
                 for table_wrapper in data.get("tables", []):
@@ -545,12 +551,16 @@ class MomentumSectorScanner:
                     prev_vals = table.get("preClose", [])
                     latest_vals = table.get("latest", [])
                     vol_vals = table.get("volume", [])
+                    high_vals = table.get("high", [])
+                    low_vals = table.get("low", [])
 
                     if open_vals and prev_vals and latest_vals:
                         open_price = float(open_vals[0]) if open_vals[0] else 0.0
                         prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
                         latest = float(latest_vals[0]) if latest_vals[0] else open_price
                         volume = float(vol_vals[0]) if vol_vals and vol_vals[0] else 0.0
+                        high = float(high_vals[0]) if high_vals and high_vals[0] else 0.0
+                        low = float(low_vals[0]) if low_vals and low_vals[0] else 0.0
 
                         if prev_close > 0:
                             result[bare_code] = PriceSnapshot(
@@ -560,6 +570,8 @@ class MomentumSectorScanner:
                                 prev_close=prev_close,
                                 latest_price=latest,
                                 early_volume=volume,
+                                high_price=high,
+                                low_price=low,
                             )
 
             except Exception as e:
@@ -612,25 +624,27 @@ class MomentumSectorScanner:
             except Exception as e:
                 logger.error(f"Error fetching historical prices for batch: {e}")
 
-        # Fetch 9:40 price and volume for all stocks that got open/prevClose
+        # Fetch 9:40 price, volume, high, low for all stocks that got open/prevClose
         if result:
             data_940 = await self._fetch_940_data(list(result.keys()), trade_date)
-            for code, (price, volume) in data_940.items():
+            for code, (price, volume, high, low) in data_940.items():
                 if code in result and price > 0:
                     result[code].latest_price = price
                     result[code].early_volume = volume
+                    result[code].high_price = high
+                    result[code].low_price = low
 
         return result
 
     async def _fetch_940_data(
         self, stock_codes: list[str], trade_date: date
-    ) -> dict[str, tuple[float, float]]:
-        """Fetch 9:40 price and cumulative volume via high_frequency API (1-min bars).
+    ) -> dict[str, tuple[float, float, float, float]]:
+        """Fetch 9:40 price, volume, high, low via high_frequency API (1-min bars).
 
         Returns:
-            dict: stock_code → (price_at_940, cumulative_volume_930_to_940)
+            dict: stock_code → (price_at_940, cumulative_volume, max_high, min_low)
         """
-        result: dict[str, tuple[float, float]] = {}
+        result: dict[str, tuple[float, float, float, float]] = {}
         batch_size = 50
         start_time = f"{trade_date} 09:30:00"
         end_time = f"{trade_date} 09:40:00"
@@ -642,7 +656,7 @@ class MomentumSectorScanner:
             try:
                 data = await self._ifind.high_frequency(
                     codes=codes_str,
-                    indicators="close,volume",
+                    indicators="close,volume,high,low",
                     start_time=start_time,
                     end_time=end_time,
                     function_para={"Interval": "1"},  # 1-minute bars
@@ -657,9 +671,13 @@ class MomentumSectorScanner:
                     tbl = table_entry.get("table", {})
                     close_vals = tbl.get("close", [])
                     vol_vals = tbl.get("volume", [])
+                    high_vals = tbl.get("high", [])
+                    low_vals = tbl.get("low", [])
 
                     price = 0.0
                     cum_volume = 0.0
+                    max_high = 0.0
+                    min_low = 0.0
 
                     if close_vals:
                         last_close = close_vals[-1]
@@ -669,8 +687,18 @@ class MomentumSectorScanner:
                     if vol_vals:
                         cum_volume = sum(float(v) for v in vol_vals if v is not None)
 
+                    if high_vals:
+                        valid_highs = [float(v) for v in high_vals if v is not None]
+                        if valid_highs:
+                            max_high = max(valid_highs)
+
+                    if low_vals:
+                        valid_lows = [float(v) for v in low_vals if v is not None]
+                        if valid_lows:
+                            min_low = min(valid_lows)
+
                     if price > 0:
-                        result[bare_code] = (price, cum_volume)
+                        result[bare_code] = (price, cum_volume, max_high, min_low)
 
             except Exception as e:
                 logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
