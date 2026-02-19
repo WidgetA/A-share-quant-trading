@@ -91,9 +91,9 @@
                     <button type="button" class="btn btn-primary" id="csv-export-btn" style="background:#2563eb">下载 CSV</button>
                 </div>
             </form>
-            <p id="backfill-error" class="error-text hidden"></p>
+            <p id="backfill-error" style="color:#dc2626;display:none"></p>
             <!-- Backfill progress -->
-            <div id="backfill-progress" class="hidden" style="margin-top:12px">
+            <div id="backfill-progress" style="display:none;margin-top:12px">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
                     <div class="loading-spinner" style="width:16px;height:16px;border-width:2px"></div>
                     <span id="bf-status">准备中...</span>
@@ -1092,17 +1092,17 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
     const statusEl = document.getElementById('bf-status');
     const barEl = document.getElementById('bf-bar');
     const logEl = document.getElementById('bf-log');
-    errEl.classList.add('hidden');
+    errEl.style.display = 'none';
 
     if (!startDate || !endDate) {
         errEl.textContent = '请选择起始和结束日期';
-        errEl.classList.remove('hidden');
+        errEl.style.display = '';
         return;
     }
 
     btn.disabled = true;
     btn.textContent = '回填中...';
-    progressEl.classList.remove('hidden');
+    progressEl.style.display = '';
     logEl.textContent = '';
     barEl.style.width = '0%';
     statusEl.textContent = '正在连接服务器...';
@@ -1164,7 +1164,7 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
                     logEl.textContent += '\n' + msg + '\n';
                 } else if (data.type === 'error') {
                     errEl.textContent = data.message;
-                    errEl.classList.remove('hidden');
+                    errEl.style.display = '';
                     statusEl.textContent = '出错';
                 }
                 logEl.scrollTop = logEl.scrollHeight;
@@ -1175,7 +1175,7 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
         }
     } catch (err) {
         errEl.textContent = err.message;
-        errEl.classList.remove('hidden');
+        errEl.style.display = '';
         statusEl.textContent = '出错';
     } finally {
         btn.disabled = false;
@@ -1189,11 +1189,11 @@ document.getElementById('csv-export-btn').addEventListener('click', async () => 
     const endDate = document.getElementById('bf_end').value;
     const errEl = document.getElementById('backfill-error');
     const btn = document.getElementById('csv-export-btn');
-    errEl.classList.add('hidden');
+    errEl.style.display = 'none';
 
     if (!startDate || !endDate) {
         errEl.textContent = '请选择起始和结束日期';
-        errEl.classList.remove('hidden');
+        errEl.style.display = '';
         return;
     }
 
@@ -1214,7 +1214,7 @@ document.getElementById('csv-export-btn').addEventListener('click', async () => 
         URL.revokeObjectURL(a.href);
     } catch (err) {
         errEl.textContent = err.message;
-        errEl.classList.remove('hidden');
+        errEl.style.display = '';
     } finally {
         btn.disabled = false;
         btn.textContent = '下载 CSV';
