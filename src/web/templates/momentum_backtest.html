@@ -397,6 +397,7 @@ function renderResults(data) {
 
     if (!data.selected_stocks || data.selected_stocks.length === 0) {
         container.innerHTML = '';
+        emptyEl.innerHTML = `<p>${data.message || '未筛选到符合条件的股票'}</p>`;
         emptyEl.classList.remove('hidden');
         return;
     }

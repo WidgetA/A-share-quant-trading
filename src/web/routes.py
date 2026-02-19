@@ -1209,7 +1209,7 @@ def create_momentum_router() -> APIRouter:
                 raise HTTPException(status_code=502, detail=f"iFinD查询失败: {e}")
 
             # Parse iwencai response → fetch prices
-            price_snapshots = await _parse_iwencai_and_fetch_prices(
+            price_snapshots, price_err = await _parse_iwencai_and_fetch_prices(
                 ifind_client, iwencai_result, trade_date
             )
 
@@ -1220,7 +1220,7 @@ def create_momentum_router() -> APIRouter:
                     "initial_gainers": 0,
                     "hot_boards": {},
                     "selected_stocks": [],
-                    "message": "未找到符合条件的股票",
+                    "message": price_err or "未找到符合条件的股票",
                 }
 
             # Run scan (pass trade_date so constituent prices use history_quotes)
@@ -3409,14 +3409,20 @@ async def _call_llm_strategy_summary(analyses: list[dict]) -> str:
         return data["choices"][0]["message"]["content"]
 
 
-async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, trade_date) -> dict:
-    """Parse iwencai response and fetch historical prices via history_quotes."""
+async def _parse_iwencai_and_fetch_prices(
+    ifind_client, iwencai_result: dict, trade_date
+) -> tuple[dict, str]:
+    """Parse iwencai response and fetch historical prices via history_quotes.
+
+    Returns:
+        (snapshots_dict, error_reason) — error_reason is empty on success.
+    """
     from src.data.clients.ifind_http_client import IFinDHttpError
     from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
 
     tables = iwencai_result.get("tables", [])
     if not tables:
-        return {}
+        return {}, "iwencai返回无tables"
 
     raw_codes: list[str] = []
     names_map: dict[str, str] = {}
@@ -3452,12 +3458,13 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
                 names_map[bare] = name
 
     if not raw_codes:
-        return {}
+        return {}, "iwencai结果中无有效股票代码"
 
     # Batch fetch prices
     snapshots: dict[str, PriceSnapshot] = {}
     batch_size = 50
     date_fmt = trade_date.strftime("%Y-%m-%d")
+    last_price_err = ""
 
     for i in range(0, len(raw_codes), batch_size):
         batch = raw_codes[i : i + batch_size]
@@ -3502,19 +3509,28 @@ async def _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result: dict, tr
                         )
 
         except IFinDHttpError as e:
+            last_price_err = str(e)
             logger.error(f"history_quotes batch failed: {e}")
+        except Exception as e:
+            last_price_err = str(e)
+            logger.error(f"history_quotes unexpected error: {e}")
+
+    if not snapshots:
+        reason = f"iwencai返回{len(raw_codes)}只股票，history_quotes失败"
+        if last_price_err:
+            reason += f": {last_price_err[:80]}"
+        return {}, reason
 
     # Fetch 9:40 price and volume (for gain check, buy price, and gap-fade filter)
-    if snapshots:
-        data_940 = await _fetch_940_data_batch(ifind_client, list(snapshots.keys()), trade_date)
-        for code, (price, volume, high, low) in data_940.items():
-            if code in snapshots and price > 0:
-                snapshots[code].latest_price = price
-                snapshots[code].early_volume = volume
-                snapshots[code].high_price = high
-                snapshots[code].low_price = low
+    data_940 = await _fetch_940_data_batch(ifind_client, list(snapshots.keys()), trade_date)
+    for code, (price, volume, high, low) in data_940.items():
+        if code in snapshots and price > 0:
+            snapshots[code].latest_price = price
+            snapshots[code].early_volume = volume
+            snapshots[code].high_price = high
+            snapshots[code].low_price = low
 
-    return snapshots
+    return snapshots, ""
 
 
 def _get_trading_calendar_akshare(start_date, end_date) -> list:
@@ -3699,15 +3715,7 @@ async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> 
         logger.error(f"iwencai query unexpected error for {trade_date}: {e}")
         return {}, f"iwencai异常: {e}"
 
-    tables = iwencai_result.get("tables", [])
-    if not tables:
-        return {}, "iwencai返回空结果(无tables)"
-
-    snapshots = await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
-    if not snapshots:
-        # iwencai returned tables but no valid price data could be parsed
-        return {}, "iwencai有结果但无法解析价格数据"
-    return snapshots, ""
+    return await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
 
 
 def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
@@ -3841,7 +3849,7 @@ async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
         logger.error(f"iwencai query failed for {trade_date}: {e}")
         return None
 
-    price_snapshots = await _parse_iwencai_and_fetch_prices(
+    price_snapshots, _price_err = await _parse_iwencai_and_fetch_prices(
         ifind_client, iwencai_result, trade_date
     )
 
