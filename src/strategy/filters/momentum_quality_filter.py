@@ -12,7 +12,7 @@
 # but high turnover amp = real buying interest).
 
 # === DATA FLOW ===
-# MomentumSectorScanner Step 5.5 (GapFade) → MomentumQualityFilter → Step 6
+# MomentumSectorScanner Step 5 → MomentumQualityFilter → Step 6
 
 from __future__ import annotations
 

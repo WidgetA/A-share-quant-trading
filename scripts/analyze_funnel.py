@@ -11,12 +11,10 @@
 层级定义：
   L0: 热门板块全部成分股（主板，有价格数据）
   L1: L0 + 9:40涨幅 >= 0.56%
-  L2: L1 + 高开低走过滤
-  L3: 最终推荐（单只）
+  L2: 最终推荐（单只）
 
 用法：
     uv run python scripts/analyze_funnel.py -s 2026-02-10 -e 2026-02-14
-    uv run python scripts/analyze_funnel.py -s 2026-02-10 -e 2026-02-10 --no-fade-filter
 """
 
 import argparse
@@ -45,7 +43,6 @@ from backtest_momentum import fetch_main_board_prices_for_date  # noqa: E402
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError  # noqa: E402
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config  # noqa: E402
 from src.data.sources.concept_mapper import ConceptMapper  # noqa: E402
-from src.strategy.filters.gap_fade_filter import GapFadeConfig, GapFadeFilter  # noqa: E402
 from src.strategy.filters.stock_filter import create_main_board_only_filter  # noqa: E402
 from src.strategy.strategies.momentum_sector_scanner import (  # noqa: E402
     MomentumSectorScanner,
@@ -116,7 +113,7 @@ class DayResult:
     layers: dict[str, LayerResult] = field(default_factory=dict)
 
 
-LAYER_NAMES = ["L0: 全部成分股", "L1: 涨幅>0.56%", "L2: 高开低走过滤", "L3: 最终推荐"]
+LAYER_NAMES = ["L0: 全部成分股", "L1: 涨幅>0.56%", "L2: 最终推荐"]
 
 
 # === CORE ANALYSIS ===
@@ -202,20 +199,18 @@ async def run_single_date(
     ifind_client: IFinDHttpClient,
     fundamentals_db,
     concept_mapper: ConceptMapper,
-    fade_filter_enabled: bool = True,
+
 ) -> DayResult | None:
     """Run funnel analysis for a single trading day."""
     logger.info(f"=== Analyzing {trade_date} (T+1={next_trade_date}) ===")
     day_result = DayResult(trade_date=trade_date)
 
     stock_filter = create_main_board_only_filter()
-    gap_fade_config = GapFadeConfig(enabled=fade_filter_enabled)
     scanner = MomentumSectorScanner(
         ifind_client=ifind_client,
         fundamentals_db=fundamentals_db,
         concept_mapper=concept_mapper,
         stock_filter=stock_filter,
-        gap_fade_config=gap_fade_config,
     )
 
     # Fetch price data for the date
@@ -296,21 +291,12 @@ async def run_single_date(
     layer0_stocks = _dedup_stocks(layer0_stocks)
     layer1_stocks = _dedup_stocks(layer1_stocks)
 
-    # L2: gap-fade filter applied to L1
-    gap_fade_filter = GapFadeFilter(ifind_client, gap_fade_config)
-    if fade_filter_enabled and layer1_stocks:
-        layer2_stocks, _ = await gap_fade_filter.filter_stocks(
-            layer1_stocks, price_snapshots, trade_date
-        )
-    else:
-        layer2_stocks = list(layer1_stocks)
-
-    # L3: recommendation (single stock)
-    layer3_stocks: list[SelectedStock] = []
-    if layer2_stocks:
-        rec = await scanner._step6_recommend(layer2_stocks, price_snapshots)
+    # L2: recommendation (single stock)
+    layer2_stocks: list[SelectedStock] = []
+    if layer1_stocks:
+        rec = await scanner._step6_recommend(layer1_stocks, price_snapshots)
         if rec:
-            layer3_stocks = [
+            layer2_stocks = [
                 SelectedStock(
                     stock_code=rec.stock_code,
                     stock_name=rec.stock_name,
@@ -321,15 +307,15 @@ async def run_single_date(
                 )
             ]
 
-    all_layers = [layer0_stocks, layer1_stocks, layer2_stocks, layer3_stocks]
+    all_layers = [layer0_stocks, layer1_stocks, layer2_stocks]
 
-    # Fetch revenue growth for L2 stocks (for L2→L3 误杀 analysis)
+    # Fetch revenue growth for L1 stocks (for L1→L2 误杀 analysis)
     revenue_growth_map: dict[str, float] = {}
-    if layer2_stocks:
-        l2_codes_str = ";".join(s.stock_code for s in layer2_stocks)
+    if layer1_stocks:
+        l1_codes_str = ";".join(s.stock_code for s in layer1_stocks)
         try:
             growth_result = await ifind_client.smart_stock_picking(
-                f"{l2_codes_str} 同比季度收入增长率", "stock"
+                f"{l1_codes_str} 同比季度收入增长率", "stock"
             )
             g_tables = growth_result.get("tables", [])
             if g_tables:
@@ -491,8 +477,7 @@ def _print_filtered_out_best(all_days: list[DayResult]) -> None:
 
     transitions = [
         (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-        (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 高开低走"),
-        (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 最终推荐"),
+        (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 最终推荐"),
     ]
 
     for prev_name, curr_name, label in transitions:
@@ -553,8 +538,7 @@ def _print_conclusions(all_days: list[DayResult]) -> None:
     print("  结论:")
     pairs = [
         (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-        (LAYER_NAMES[1], LAYER_NAMES[2], "高开低走过滤"),
-        (LAYER_NAMES[2], LAYER_NAMES[3], "最终推荐"),
+        (LAYER_NAMES[1], LAYER_NAMES[2], "最终推荐"),
     ]
     for prev_name, curr_name, filter_label in pairs:
         prev_ret = layer_avg_returns.get(prev_name)
@@ -576,7 +560,6 @@ def _print_conclusions(all_days: list[DayResult]) -> None:
 async def run_analysis(
     start_date: date,
     end_date: date,
-    fade_filter: bool = True,
 ) -> None:
     """Run funnel analysis across a date range."""
     ifind_client = IFinDHttpClient()
@@ -646,7 +629,6 @@ async def run_analysis(
                 ifind_client=ifind_client,
                 fundamentals_db=fundamentals_db,
                 concept_mapper=concept_mapper,
-                fade_filter_enabled=fade_filter,
             )
 
             if day_result:
@@ -681,11 +663,6 @@ def main():
         help="结束日期 (YYYY-MM-DD)",
     )
     parser.add_argument(
-        "--no-fade-filter",
-        action="store_true",
-        help="禁用高开低走过滤器 (L2 = L1)",
-    )
-    parser.add_argument(
         "--debug",
         action="store_true",
         help="显示调试信息",
@@ -699,7 +676,7 @@ def main():
     s = date.fromisoformat(args.start_date)
     e = date.fromisoformat(args.end_date)
 
-    asyncio.run(run_analysis(s, e, fade_filter=not args.no_fade_filter))
+    asyncio.run(run_analysis(s, e))
 
 
 if __name__ == "__main__":

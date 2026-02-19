@@ -1,22 +1,18 @@
 """
-动量质量因子筛查 + 高开低走生产指标校准。
+高开低走过滤器生产参数校准实验。
 
 目的:
-1. 验证新候选因子（趋势 + 换手放大）的统计显著性
-2. 用生产实际指标（avg_turnover_20d）替代手动换算的阈值
-3. 测试 AND 组合在多时段的稳定性
-
-新增候选因子:
-  - turnover_amp:    当日换手 / 20日均换手 (换手放大倍数)
-  - avg_turnover_20d: 20日平均换手率
-  - n3_gain (low):   近3日下跌趋势
-  - n5_gain (low):   近5日下跌趋势
+1. 验证实验最佳组合 B (vol>2x AND turnover top15%) 的稳定性
+2. 对比旧生产参数 (20日均换手 > 阈值) vs 新参数 (当日换手绝对阈值)
+3. 测试生产代理指标: est_daily_turnover = volume_ratio * avg_turnover_20d
 
 AND 组合:
-  - n5_gain_low AND turnover_amp_low  (趋势+放大，核心组合)
-  - n3_gain_low AND turnover_amp_low
-  - n5_gain_low AND avg_turnover_20d_low
-  - volume_ratio_high AND avg_turnover_20d_high (gap-fade 生产匹配版)
+  - B: vol>2.0 AND turnover_pct top15% (实验最佳, 全5段显著)
+  - P1: vol>2.0 AND avg_turn20d top15% (旧生产, 不稳定)
+  - P2: vol>2.0 AND turnover_pct > 10% (绝对阈值版)
+  - P3: vol>2.0 AND turnover_pct > 8%  (更宽松)
+  - P4: vol>2.0 AND est_daily_turn > 10% (生产代理, 用于live模式)
+  - P5: vol>2.0 AND est_daily_turn > 8%  (更宽松代理)
 
 验证方法: 5个时段 × 10000次随机排列, p<0.05 才算有效。
 """
@@ -249,22 +245,22 @@ def build_and_masks(valid: pd.DataFrame) -> dict[str, np.ndarray]:
     n3_low = n3 < np.nanpercentile(n3, 15)
     n5_low = n5 < np.nanpercentile(n5, 15)
 
+    # 生产代理: 估算当日换手 = volume_ratio * avg_turnover_20d
+    est_daily_turn = np.where(at20 > 0, vr * at20, np.nan)
+
     return {
         # --- 原有 gap-fade 组合 ---
         "F: vol>2.0 (baseline)": vr > 2.0,
         "B: vol>2.0 AND turn_pct": (vr > 2.0) & tp_high,
         "A: vol>2.0 AND amp": (vr > 2.0) & amp_high,
-        # --- gap-fade 生产匹配版 (用 avg_turnover_20d 替代 turnover_pct) ---
+        # --- gap-fade 旧生产 (20日均换手, 已证明不可靠) ---
         "P1: vol>2.0 AND avg_turn20d": (vr > 2.0) & at20_high,
-        # --- 新增: 动量质量组合 ---
-        "Q1: n5_low AND ta_low": n5_low & ta_low,
-        "Q2: n3_low AND ta_low": n3_low & ta_low,
-        "Q3: n5_low AND at20d_low": n5_low & at20_low,
-        "Q4: n3_low AND at20d_low": n3_low & at20_low,
-        # --- 单因子 baseline ---
-        "S1: turnover_amp_low": ta_low,
-        "S2: n5_gain_low": n5_low,
-        "S3: avg_turn20d_low": at20_low,
+        # --- gap-fade v5 生产: 用当日换手绝对阈值 ---
+        "P2: vol>2.0 AND tp>10%": (vr > 2.0) & (tp > 10.0),
+        "P3: vol>2.0 AND tp>8%": (vr > 2.0) & (tp > 8.0),
+        # --- gap-fade v5 代理: vol_ratio * avg_turn > 阈值 ---
+        "P4: vol>2 AND est_t>10%": (vr > 2.0) & (est_daily_turn > 10.0),
+        "P5: vol>2 AND est_t>8%": (vr > 2.0) & (est_daily_turn > 8.0),
     }
 
 
