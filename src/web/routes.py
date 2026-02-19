@@ -1903,7 +1903,7 @@ def create_momentum_router() -> APIRouter:
 
                     try:
                         # Fetch price data
-                        price_snapshots = await _parse_iwencai_and_fetch_prices_for_date(
+                        price_snapshots, price_err = await _parse_iwencai_and_fetch_prices_for_date(
                             ifind_client, trade_date
                         )
                         if not price_snapshots:
@@ -1911,7 +1911,7 @@ def create_momentum_router() -> APIRouter:
                                 {
                                     "type": "day_skip",
                                     "trade_date": str(trade_date),
-                                    "reason": "无价格数据",
+                                    "reason": price_err or "无价格数据",
                                 }
                             )
                             await asyncio.sleep(0.05)
@@ -2454,15 +2454,16 @@ def create_momentum_router() -> APIRouter:
                     )
 
                     try:
-                        price_snapshots = await _parse_iwencai_and_fetch_prices_for_date(
+                        price_snapshots, price_err = await _parse_iwencai_and_fetch_prices_for_date(
                             ifind_client, trade_date
                         )
                         if not price_snapshots:
+                            skip_reason = price_err or "无价格数据"
                             day_results.append(
                                 {
                                     "trade_date": str(trade_date),
                                     "has_trade": False,
-                                    "skip_reason": "无价格数据",
+                                    "skip_reason": skip_reason,
                                     "capital": round(capital, 2),
                                 }
                             )
@@ -2470,7 +2471,7 @@ def create_momentum_router() -> APIRouter:
                                 {
                                     "type": "day_skip",
                                     "trade_date": str(trade_date),
-                                    "reason": "无价格数据",
+                                    "reason": skip_reason,
                                 }
                             )
                             await asyncio.sleep(0.05)
@@ -3678,8 +3679,15 @@ async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> 
     return []
 
 
-async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> dict:
-    """Convenience wrapper: run iwencai pre-filter + fetch prices for a date."""
+async def _parse_iwencai_and_fetch_prices_for_date(
+    ifind_client, trade_date
+) -> tuple[dict, str]:
+    """Convenience wrapper: run iwencai pre-filter + fetch prices for a date.
+
+    Returns:
+        (snapshots_dict, error_reason) — snapshots is empty dict on failure,
+        error_reason is empty string on success or describes the failure.
+    """
     from src.data.clients.ifind_http_client import IFinDHttpError
 
     date_str = trade_date.strftime("%Y%m%d")
@@ -3688,8 +3696,22 @@ async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> 
         iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
     except IFinDHttpError as e:
         logger.error(f"iwencai query failed for {trade_date}: {e}")
-        return {}
-    return await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
+        return {}, f"iwencai查询失败: {e}"
+    except Exception as e:
+        logger.error(f"iwencai query unexpected error for {trade_date}: {e}")
+        return {}, f"iwencai异常: {e}"
+
+    tables = iwencai_result.get("tables", [])
+    if not tables:
+        return {}, "iwencai返回空结果(无tables)"
+
+    snapshots = await _parse_iwencai_and_fetch_prices(
+        ifind_client, iwencai_result, trade_date
+    )
+    if not snapshots:
+        # iwencai returned tables but no valid price data could be parsed
+        return {}, "iwencai有结果但无法解析价格数据"
+    return snapshots, ""
 
 
 def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
@@ -4315,7 +4337,7 @@ def create_settings_router() -> APIRouter:
                     )
 
                     try:
-                        price_snapshots = await _parse_iwencai_and_fetch_prices_for_date(
+                        price_snapshots, price_err = await _parse_iwencai_and_fetch_prices_for_date(
                             ifind_client, day
                         )
 
@@ -4326,7 +4348,7 @@ def create_settings_router() -> APIRouter:
                                     "trade_date": str(day),
                                     "stocks": 0,
                                     "status": "skip",
-                                    "message": "无价格数据",
+                                    "message": price_err or "无价格数据",
                                 }
                             )
                             success += 1
