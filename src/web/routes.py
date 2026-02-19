@@ -4206,12 +4206,8 @@ def create_settings_router() -> APIRouter:
 
     # === SCAN STOCKS BACKFILL (SSE) ===
 
-    class BackfillRequest(BaseModel):
-        start_date: str
-        end_date: str
-
     @router.post("/api/momentum/backfill")
-    async def run_backfill(request: Request, body: BackfillRequest):
+    async def run_backfill(request: Request):
         """Backfill momentum scan selected stocks with SSE streaming progress."""
         import asyncio
         import json
@@ -4222,8 +4218,21 @@ def create_settings_router() -> APIRouter:
         from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
 
         try:
-            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
-            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="请求体不是有效 JSON")
+
+        start_date_str = body.get("start_date", "")
+        end_date_str = body.get("end_date", "")
+        if not start_date_str or not end_date_str:
+            raise HTTPException(
+                status_code=400,
+                detail=f"缺少日期参数 (received keys: {list(body.keys())})",
+            )
+
+        try:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
 
@@ -4273,8 +4282,8 @@ def create_settings_router() -> APIRouter:
                 yield sse({"type": "status", "message": "检查已有数据..."})
                 existing = set(
                     await scan_db.get_dates_with_data(
-                        start_date=body.start_date,
-                        end_date=body.end_date,
+                        start_date=start_date_str,
+                        end_date=end_date_str,
                     )
                 )
                 remaining = [d for d in trading_days if d not in existing]

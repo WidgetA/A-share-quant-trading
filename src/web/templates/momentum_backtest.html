@@ -1108,10 +1108,12 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
     statusEl.textContent = '正在连接服务器...';
 
     try {
+        const payload = {start_date: startDate, end_date: endDate};
+        console.log('Backfill request payload:', payload);
         const resp = await fetch('/api/momentum/backfill', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({start_date: startDate, end_date: endDate}),
+            body: JSON.stringify(payload),
         });
         if (!resp.ok) {
             let msg = `请求失败 (${resp.status})`;
@@ -1119,7 +1121,10 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
                 const errData = await resp.json();
                 const d = errData.detail;
                 if (typeof d === 'string') msg = d;
-                else if (Array.isArray(d)) msg = d.map(e => e.msg || JSON.stringify(e)).join('; ');
+                else if (Array.isArray(d)) msg = d.map(e => {
+                    const loc = e.loc ? e.loc.join(' → ') : '';
+                    return (loc ? loc + ': ' : '') + (e.msg || JSON.stringify(e));
+                }).join('; ');
                 else if (d) msg = JSON.stringify(d);
             } catch (_) {}
             throw new Error(msg);
