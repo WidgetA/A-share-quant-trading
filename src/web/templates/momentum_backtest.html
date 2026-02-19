@@ -63,12 +63,6 @@
                                    value="100000" min="1000" step="1000" required>
                         </div>
                     </div>
-                    <div class="form-group checkbox-group">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="combined_fade" name="combined_fade" checked>
-                            <span>启用高开低走过滤 (L2)</span>
-                        </label>
-                    </div>
                     <p class="form-hint">综合分析：逐日运行选股漏斗 + 资金模拟回测。9:40 买入推荐股，次日开盘卖出。最多 90 个交易日。含手续费。</p>
                     <button type="submit" class="btn btn-primary" id="combined-btn">开始区间分析</button>
                 </form>
@@ -195,8 +189,9 @@
                                 <th>日期</th>
                                 <th>L0 成分股</th>
                                 <th>L1 涨幅</th>
-                                <th>L2 高开低走</th>
-                                <th>L3 推荐</th>
+                                <th>L2 动量质量</th>
+                                <th>L3 冲高回落</th>
+                                <th>L4 推荐</th>
                             </tr>
                         </thead>
                         <tbody id="combined-funnel-day-body"></tbody>
@@ -390,7 +385,7 @@ function renderResults(data) {
 }
 
 // === Combined Analysis ===
-const LAYER_NAMES = ['L0: 全部成分股', 'L1: 涨幅>0.56%', 'L2: 高开低走过滤', 'L3: 最终推荐'];
+const LAYER_NAMES = ['L0: 全部成分股', 'L1: 涨幅>0.56%', 'L2: 动量质量过滤', 'L3: 冲高回落过滤', 'L4: 最终推荐'];
 
 document.getElementById('combined-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -398,7 +393,6 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
     const startDate = document.getElementById('combined_start').value;
     const endDate = document.getElementById('combined_end').value;
     const initialCapital = parseFloat(document.getElementById('combined_capital').value);
-    const fadeFilter = document.getElementById('combined_fade').checked;
 
     if (!startDate || !endDate) return;
     if (endDate <= startDate) { alert('结束日期必须晚于起始日期'); return; }
@@ -427,7 +421,6 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
                 start_date: startDate,
                 end_date: endDate,
                 initial_capital: initialCapital,
-                fade_filter: fadeFilter,
             }),
         });
 
@@ -577,7 +570,7 @@ function appendCombinedFunnelDayRow(tradeDate, layers, skipReason) {
 
     if (!layers) {
         tr.className = 'range-skip-row';
-        tr.innerHTML = `<td>${tradeDate}</td><td colspan="4" class="range-skip-reason">${skipReason || '跳过'}</td>`;
+        tr.innerHTML = `<td>${tradeDate}</td><td colspan="5" class="range-skip-reason">${skipReason || '跳过'}</td>`;
     } else {
         let cells = `<td>${tradeDate}</td>`;
         for (const ln of LAYER_NAMES) {
