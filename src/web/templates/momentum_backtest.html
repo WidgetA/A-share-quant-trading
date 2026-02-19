@@ -362,8 +362,14 @@ function renderResults(data) {
         document.getElementById('rec-gain').textContent = `开盘涨幅: +${rec.open_gain_pct.toFixed(2)}%`;
         document.getElementById('rec-board').textContent = `板块: ${rec.board_name} (选出${rec.board_stock_count}只最多)`;
     } else {
-        recBadge.style.display = 'none';
-        recCard.classList.add('hidden');
+        recBadge.style.display = '';
+        document.getElementById('result-recommend-name').textContent = '无';
+        recCard.classList.remove('hidden');
+        document.getElementById('rec-code').textContent = '--';
+        document.getElementById('rec-name').textContent = '今日无推荐标的';
+        document.getElementById('rec-growth').textContent = '';
+        document.getElementById('rec-gain').textContent = '';
+        document.getElementById('rec-board').textContent = '池中无股票通过评分筛选';
     }
 
     if (!data.selected_stocks || data.selected_stocks.length === 0) {
