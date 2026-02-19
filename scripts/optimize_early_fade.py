@@ -411,7 +411,7 @@ def main():
     n_dates = df["date"].nunique()
 
     print(f"\n{'=' * 120}")
-    print(f"[Step 3] 样本概况")
+    print("[Step 3] 样本概况")
     print(f"{'=' * 120}")
     print(f"  总样本: {n} 条 ({n_stocks}只股票 × {n_dates}个交易日)")
     print(f"  日期范围: {df['date'].min()} ~ {df['date'].max()}")
@@ -424,7 +424,7 @@ def main():
           f"max={df['gain_from_open'].max():.2f}%")
 
     # Early Fade 分布
-    print(f"\n  Early Fade 分布:")
+    print("\n  Early Fade 分布:")
     for p in [10, 25, 50, 75, 80, 85, 90, 95]:
         v = np.percentile(df["early_fade"], p)
         print(f"    P{p}: {v:.4f}", end="")
@@ -440,13 +440,13 @@ def main():
     print_threshold_table(result_all, "Early Fade (全样本)", base_rate, base_return)
 
     optimal_all = find_optimal(result_all)
-    print(f"\n  最优阈值 (全样本):")
+    print("\n  最优阈值 (全样本):")
     for method, info in optimal_all.items():
         print(f"    {method}: {info}")
 
     # === 分段验证 ===
     print(f"\n{'=' * 120}")
-    print(f"[Step 5] 分段验证 (前半 vs 后半)")
+    print("[Step 5] 分段验证 (前半 vs 后半)")
     print(f"{'=' * 120}")
 
     dates_sorted = sorted(df["date"].unique())
@@ -457,19 +457,30 @@ def main():
     print(f"\n  前半段: {dates_sorted[0]} ~ {dates_sorted[mid-1]}, n={len(df1)}, "
           f"亏损率={df1['is_loss'].mean():.1%}, 均收益={df1['intraday_return'].mean():+.3f}%")
     result_h1 = threshold_analysis(df1, "early_fade", "前半段", thresholds_fine)
-    print_threshold_table(result_h1, "Early Fade (前半段)", df1["is_loss"].mean(), df1["intraday_return"].mean())
+    print_threshold_table(
+        result_h1, "Early Fade (前半段)",
+        df1["is_loss"].mean(), df1["intraday_return"].mean(),
+    )
 
     print(f"\n  后半段: {dates_sorted[mid]} ~ {dates_sorted[-1]}, n={len(df2)}, "
           f"亏损率={df2['is_loss'].mean():.1%}, 均收益={df2['intraday_return'].mean():+.3f}%")
     result_h2 = threshold_analysis(df2, "early_fade", "后半段", thresholds_fine)
-    print_threshold_table(result_h2, "Early Fade (后半段)", df2["is_loss"].mean(), df2["intraday_return"].mean())
+    print_threshold_table(
+        result_h2, "Early Fade (后半段)",
+        df2["is_loss"].mean(), df2["intraday_return"].mean(),
+    )
 
     # === 按开盘涨幅分层 ===
     print(f"\n{'=' * 120}")
-    print(f"[Step 6] 按开盘涨幅分层分析")
+    print("[Step 6] 按开盘涨幅分层分析")
     print(f"{'=' * 120}")
 
-    for lo, hi, label in [(0.56, 2.0, "小涨 0.56~2%"), (2.0, 5.0, "中涨 2~5%"), (5.0, 10.0, "大涨 5%+")]:
+    gain_bins = [
+        (0.56, 2.0, "小涨 0.56~2%"),
+        (2.0, 5.0, "中涨 2~5%"),
+        (5.0, 10.0, "大涨 5%+"),
+    ]
+    for lo, hi, label in gain_bins:
         sub = df[(df["gain_from_open"] >= lo) & (df["gain_from_open"] < hi)]
         if len(sub) < 30:
             print(f"\n  {label}: 样本不足 ({len(sub)})")
@@ -477,20 +488,26 @@ def main():
         print(f"\n  {label}: n={len(sub)}, 亏损率={sub['is_loss'].mean():.1%}, "
               f"均收益={sub['intraday_return'].mean():+.3f}%")
         result_sub = threshold_analysis(sub, "early_fade", label, thresholds_fine)
-        print_threshold_table(result_sub, f"Early Fade ({label})", sub["is_loss"].mean(), sub["intraday_return"].mean())
+        print_threshold_table(
+            result_sub, f"Early Fade ({label})",
+            sub["is_loss"].mean(), sub["intraday_return"].mean(),
+        )
 
     # === Price Position 阈值分析 ===
     print(f"\n{'=' * 120}")
-    print(f"[Step 7] Price Position 阈值分析 (越低越危险)")
+    print("[Step 7] Price Position 阈值分析 (越低越危险)")
     print(f"{'=' * 120}")
 
     pp_thresholds = [round(x, 2) for x in np.arange(0.10, 0.61, 0.05)]
-    result_pp = threshold_analysis(df, "price_pos", "Price Position", pp_thresholds, higher_is_worse=False)
+    result_pp = threshold_analysis(
+        df, "price_pos", "Price Position",
+        pp_thresholds, higher_is_worse=False,
+    )
     print_threshold_table(result_pp, "Price Position ≤ 阈值 (全样本)", base_rate, base_return)
 
     # === 组合策略 ===
     print(f"\n{'=' * 120}")
-    print(f"[Step 8] 组合策略分析 (Early Fade + Price Position)")
+    print("[Step 8] 组合策略分析 (Early Fade + Price Position)")
     print(f"{'=' * 120}")
 
     combo_rows = []
@@ -507,12 +524,12 @@ def main():
                     continue
 
                 kept = ~flagged
-                n_kept = kept.sum()
                 tp = (flagged & (df["is_loss"] == 1)).sum()
                 fp = (flagged & (df["is_loss"] == 0)).sum()
                 precision = tp / n_flagged
                 recall = tp / n_loss if n_loss > 0 else 0
-                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                pr_sum = precision + recall
+                f1 = 2 * precision * recall / pr_sum if pr_sum > 0 else 0
                 avg_ret_kept = df.loc[kept, "intraday_return"].mean()
                 improvement = avg_ret_kept - base_return
 
@@ -527,7 +544,7 @@ def main():
     combo_df = pd.DataFrame(combo_rows)
     if not combo_df.empty:
         # 按收益提升排序, 取 top 15
-        print(f"\n  组合策略 Top 15 (按收益提升排序):")
+        print("\n  组合策略 Top 15 (按收益提升排序):")
         print(f"  {'EF阈值':>6} {'PP阈值':>6} {'逻辑':>4}  {'过滤数':>5} {'过滤%':>5}  "
               f"{'精确率':>6} {'召回率':>6} {'F1':>5}  {'误杀率':>6}  "
               f"{'留下均收益':>8}  {'收益提升':>6}")
@@ -544,7 +561,7 @@ def main():
             )
 
         # 按 F1 排序, 取 top 10
-        print(f"\n  组合策略 Top 10 (按F1排序):")
+        print("\n  组合策略 Top 10 (按F1排序):")
         print(f"  {'EF阈值':>6} {'PP阈值':>6} {'逻辑':>4}  {'过滤数':>5} {'过滤%':>5}  "
               f"{'精确率':>6} {'召回率':>6} {'F1':>5}  "
               f"{'留下均收益':>8}  {'收益提升':>6}")
@@ -561,7 +578,7 @@ def main():
 
     # === Bootstrap 置信区间 ===
     print(f"\n{'=' * 120}")
-    print(f"[Step 9] Bootstrap 置信区间 (关键阈值)")
+    print("[Step 9] Bootstrap 置信区间 (关键阈值)")
     print(f"{'=' * 120}")
 
     # 取全样本最优阈值和几个候选
@@ -588,24 +605,26 @@ def main():
 
     # === 600678 案例验证 ===
     print(f"\n{'=' * 120}")
-    print(f"[Step 10] 600678 四川金顶案例验证")
+    print("[Step 10] 600678 四川金顶案例验证")
     print(f"{'=' * 120}")
     case = df[df["code"] == "600678"]
     if len(case) > 0:
         print(f"  600678 在样本中有 {len(case)} 条记录:")
         for _, r in case.iterrows():
             ef_flag = "← 会被过滤" if r["early_fade"] >= 0.63 else ""
+            tag = "亏" if r["is_loss"] else "赚"
             print(
-                f"    {r['date']}  gap={r['open_gap_pct']:+.1f}%  9:40涨幅={r['gain_from_open']:.2f}%  "
-                f"early_fade={r['early_fade']:.3f}  price_pos={r['price_pos']:.3f}  "
-                f"日内收益={r['intraday_return']:+.2f}%  {'亏' if r['is_loss'] else '赚'}  {ef_flag}"
+                f"    {r['date']}  gap={r['open_gap_pct']:+.1f}%  "
+                f"9:40涨={r['gain_from_open']:.2f}%  "
+                f"fade={r['early_fade']:.3f}  pos={r['price_pos']:.3f}  "
+                f"ret={r['intraday_return']:+.2f}%  {tag}  {ef_flag}"
             )
     else:
         print("  600678 不在本次样本中 (可重新运行扩大样本)")
 
     # === 最终推荐 ===
     print(f"\n{'=' * 120}")
-    print(f"[结论] 最终推荐")
+    print("[结论] 最终推荐")
     print(f"{'=' * 120}")
 
     if not result_all.empty:
@@ -617,7 +636,7 @@ def main():
         print(f"    召回率: {best['recall']:.1%} (亏损票中{best['recall']:.0%}被拦住)")
         print(f"    误杀率: {best['false_alarm']:.1%}")
         print(f"    日内收益提升: {best['return_improvement']:+.3f}% (过滤后均值 vs 过滤前)")
-        print(f"    对比当前 0.70: ", end="")
+        print("    对比当前 0.70: ", end="")
         curr = result_all[result_all["threshold"] == 0.70]
         if not curr.empty:
             c = curr.iloc[0]
