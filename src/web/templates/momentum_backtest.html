@@ -1112,6 +1112,14 @@ document.getElementById('backfill-form').addEventListener('submit', async (e) =>
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({start_date: startDate, end_date: endDate}),
         });
+        if (!resp.ok) {
+            let msg = `请求失败 (${resp.status})`;
+            try {
+                const errData = await resp.json();
+                msg = errData.detail || msg;
+            } catch (_) {}
+            throw new Error(msg);
+        }
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
