@@ -320,6 +320,7 @@ class AkshareBacktestCache:
                                 "preClose": prev_close,
                                 "volume": float(row["成交量"]),
                                 "amount": float(row["成交额"]),
+                                "turnoverRatio": float(row["换手率"]),
                             }
                             prev_close = float(row["收盘"])
 

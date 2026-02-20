@@ -479,52 +479,23 @@ When user mentions any date/time reference:
 
 ### 14. Market Data Source Policy
 
-**Core Principle: All trading-related price data MUST use THS iFinD.**
+**Core Principle: Follow the `data_source` toggle — use whichever source the user selects.**
 
-#### Data Source Selection Rules
+The UI provides a `data_source` radio toggle (`"ifind"` or `"akshare"`). All code paths (strategies, filters, backtests) MUST respect this toggle and use the selected data source consistently for ALL data types (price, volume, turnover, etc.).
 
-| Data Type | Required Source | Rationale |
-|-----------|----------------|-----------|
-| **Real-time quotes** | iFinD | Trading execution requires accurate, low-latency data |
-| **Historical OHLCV** | iFinD | Backtesting and position tracking need consistent data |
-| **Opening/Closing prices** | iFinD | Order price calculation must be accurate |
-| **Limit up/down prices** | iFinD | Risk control requires precise limit prices |
-| **News/Announcements** | akshare/other | Non-trading data, accuracy less critical |
-| **Sector/Industry mapping** | akshare/other | Reference data, not directly used for trading |
+#### Data Source Toggle
 
-#### Why iFinD for Trading Prices?
+| Toggle Value | Price/Volume Source | Adapter |
+|-------------|---------------------|---------|
+| `"ifind"` | THS iFinD HTTP API | `IFinDHttpClient` |
+| `"akshare"` | akshare + baostock (pre-downloaded cache) | `AkshareHistoricalAdapter` |
 
-1. **Data accuracy** - iFinD is an official data vendor with verified data quality
-2. **Consistency** - Using single source avoids price discrepancies
-3. **Liability** - Official data source provides audit trail
-4. **Real-time capability** - iFinD supports real-time streaming
+#### Rules
 
-#### Prohibited Patterns
-
-```python
-# FORBIDDEN: Using akshare for trading price data - NO EXCEPTIONS
-import akshare as ak
-price = ak.stock_zh_a_hist(symbol='600489')  # NEVER USE for any price data!
-
-# CORRECT: Use iFinD for ALL price data
-from iFinDPy import THS_HQ, THS_HistoryQuotes
-price = THS_HQ('600489.SH', 'open')  # Use iFinD API
-```
-
-#### NO EXCEPTIONS - Including Tests
-
-**There are NO exceptions to this rule.** akshare MUST NOT be used for price data in ANY scenario:
-
-- Production environment
-- Development environment
-- Unit tests
-- Integration tests
-- Analysis scripts
-- Backtesting
-
-**Rationale:** Using different data sources in test vs production creates hidden risks. A strategy that passes tests with akshare data may behave differently with iFinD data in production. This violates the Trading Safety Priority Principle (Section 12).
-
-If iFinD is unavailable, the correct action is to **halt** and fix the data source issue, NOT to fall back to akshare.
+1. **One source per session** — when the toggle says akshare, ALL data (OHLCV, turnover, etc.) comes from akshare. No mixing sources within a single backtest/scan.
+2. **Adapter must support all indicators** — `AkshareHistoricalAdapter` must return the same indicator set as `IFinDHttpClient` (including `turnoverRatio`). If akshare provides the data, store and serve it.
+3. **Live trading uses iFinD** — the toggle only applies to backtesting. Real-time live trading always uses iFinD for accuracy and latency.
+4. **Non-trading data** (news, sector mapping, fundamentals) uses its own dedicated source regardless of toggle (PostgreSQL for fundamentals, local JSON for boards).
 
 ### 15. asyncpg Timezone Handling (Critical)
 
