@@ -212,6 +212,7 @@ class AkshareBacktestCache:
         """Load cache from OSS if available. Returns None if not found."""
         bucket = _get_oss_bucket()
         if bucket is None:
+            logger.warning("load_from_oss: _get_oss_bucket() returned None")
             return None
 
         try:
@@ -219,10 +220,13 @@ class AkshareBacktestCache:
             for name in ("meta.pkl", "daily.pkl", "minute.pkl"):
                 key = f"{_OSS_PREFIX}{name}"
                 if not bucket.object_exists(key):
-                    logger.info(f"OSS cache key not found: {key}")
+                    logger.warning(f"load_from_oss: key not found: {key}")
                     return None
+                logger.info(f"load_from_oss: downloading {key}...")
                 result = bucket.get_object(key)
-                files[name] = pickle.load(result)  # noqa: S301
+                data = result.read()
+                logger.info(f"load_from_oss: {key} downloaded ({len(data)} bytes)")
+                files[name] = pickle.loads(data)  # noqa: S301
 
             meta = files["meta.pkl"]
             cache = cls()
@@ -239,7 +243,7 @@ class AkshareBacktestCache:
             )
             return cache
         except Exception as e:
-            logger.error(f"Failed to load cache from OSS: {e}")
+            logger.error(f"Failed to load cache from OSS: {e}", exc_info=True)
             return None
 
     async def download_prices(

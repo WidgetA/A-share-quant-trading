@@ -1178,6 +1178,22 @@ def create_momentum_router() -> APIRouter:
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
+    @router.get("/api/momentum/akshare-cache-status")
+    async def akshare_cache_status(request: Request):
+        """Diagnostic: show akshare cache state."""
+        cache = getattr(request.app.state, "akshare_cache", None)
+        if cache is None:
+            return {"loaded": False}
+        return {
+            "loaded": True,
+            "is_ready": cache._is_ready,
+            "start_date": str(cache._start_date) if cache._start_date else None,
+            "end_date": str(cache._end_date) if cache._end_date else None,
+            "daily_stocks": len(cache._daily),
+            "minute_stocks": len(cache._minute),
+            "stock_codes_count": len(cache._stock_codes),
+        }
+
     @router.post("/api/momentum/akshare-prepare")
     async def akshare_prepare(request: Request, body: AksharePrepareRequest):
         """Pre-download akshare data as SSE stream (incremental).

@@ -137,12 +137,17 @@ def create_app(
         try:
             from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
 
+            logger.info("Loading akshare cache from OSS...")
             oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
             if oss_cache:
                 app.state.akshare_cache = oss_cache
-                logger.info("Akshare cache pre-loaded from OSS")
+                logger.info(
+                    f"Akshare cache pre-loaded from OSS: "
+                    f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
+                    f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
+                )
             else:
-                logger.info("No akshare cache found in OSS, will download on demand")
+                logger.warning("load_from_oss returned None — check OSS config/logs")
         except Exception as e:
             logger.warning(f"Failed to pre-load akshare cache from OSS: {e}")
 
