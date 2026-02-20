@@ -3556,7 +3556,7 @@ async def _call_llm_stock_analysis(
         if board_data.get("min_gain") is not None:
             parts.append(f"盘中最低: {board_data['min_gain']:+.2f}%")
         if parts:
-            board_text = f"\n板块当日走势：\n" + "\n".join(f"- {p}" for p in parts)
+            board_text = "\n板块当日走势：\n" + "\n".join(f"- {p}" for p in parts)
 
     # Build stock day trend text
     stock_text = ""
