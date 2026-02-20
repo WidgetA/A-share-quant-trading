@@ -23,7 +23,7 @@ import json
 import logging
 from pathlib import Path
 
-from src.strategy.filters.board_filter import filter_boards
+from src.strategy.filters.board_filter import filter_boards, is_junk_board
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,19 @@ class LocalConceptMapper:
                 f"Run: uv run python scripts/download_board_constituents.py"
             )
 
-        # Halt if any board has >2000 constituents — likely corrupt data
-        # (iwencai returning full market). Largest legitimate board is
+        # Remove junk boards from forward index — they're noise, not themes.
+        # Must happen before the >2000 corruption check (junk boards like
+        # 股权转让(并购重组) legitimately have thousands of stocks).
+        junk_count = 0
+        for b in list(self._board_stocks):
+            if is_junk_board(b):
+                del self._board_stocks[b]
+                junk_count += 1
+        if junk_count:
+            logger.info(f"LocalConceptMapper: removed {junk_count} junk boards")
+
+        # Halt if any NON-JUNK board has >2000 constituents — likely corrupt
+        # data (iwencai returning full market). Largest legitimate board is
         # ~1200 (机器人概念, 人工智能, etc.)
         # Trading safety: corrupt data → HALT, never silently drop.
         _MAX_BOARD_SIZE = 2000
@@ -113,7 +124,7 @@ class LocalConceptMapper:
                 f"Re-run: uv run python scripts/download_board_constituents.py"
             )
 
-        # Build reverse index: stock → boards (with junk filtering)
+        # Build reverse index: stock → boards (junk already removed above)
         reverse: dict[str, list[str]] = {}
         for board_name, members in self._board_stocks.items():
             for code, _name in members:
