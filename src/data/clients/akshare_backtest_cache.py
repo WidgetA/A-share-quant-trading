@@ -151,11 +151,11 @@ class AkshareBacktestCache:
                 self._daily[code].update(dates)
             else:
                 self._daily[code] = dates
-        for code, dates in other._minute.items():
+        for code, min_dates in other._minute.items():
             if code in self._minute:
-                self._minute[code].update(dates)
+                self._minute[code].update(min_dates)
             else:
-                self._minute[code] = dates
+                self._minute[code] = min_dates
         existing_codes = set(self._stock_codes)
         for code in other._stock_codes:
             if code not in existing_codes:
