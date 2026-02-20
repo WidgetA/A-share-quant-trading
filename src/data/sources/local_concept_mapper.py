@@ -99,6 +99,22 @@ class LocalConceptMapper:
                 f"Run: uv run python scripts/download_board_constituents.py"
             )
 
+        # Halt if any board has >2000 constituents — likely corrupt data
+        # (iwencai returning full market). Largest legitimate board is
+        # ~1200 (机器人概念, 人工智能, etc.)
+        # Trading safety: corrupt data → HALT, never silently drop.
+        _MAX_BOARD_SIZE = 2000
+        oversized = [
+            (b, len(s)) for b, s in self._board_stocks.items() if len(s) > _MAX_BOARD_SIZE
+        ]
+        if oversized:
+            details = ", ".join(f"'{b}' ({n} stocks)" for b, n in oversized)
+            raise RuntimeError(
+                f"LocalConceptMapper: corrupt board_constituents.json — "
+                f"boards with >{_MAX_BOARD_SIZE} constituents detected: {details}. "
+                f"Re-run: uv run python scripts/download_board_constituents.py"
+            )
+
         # Build reverse index: stock → boards (with junk filtering)
         reverse: dict[str, list[str]] = {}
         for board_name, members in self._board_stocks.items():

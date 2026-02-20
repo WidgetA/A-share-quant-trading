@@ -111,10 +111,27 @@ async def download_all(dry_run: bool = False) -> None:
     async def _fetch(board_name: str) -> None:
         nonlocal done
         async with sem:
-            query = f"{board_name}概念板块成分股"
+            # Query pattern matters:
+            # - Boards ending with "概念": use "{name}股" (safest)
+            #   "{name}板块成分股" causes iwencai to return full market for some
+            #   boards (e.g. 净水概念板块成分股 → 5488 = all stocks)
+            # - Other boards: use "{name}概念板块成分股"
+            if board_name.endswith("概念"):
+                query = f"{board_name}股"
+            else:
+                query = f"{board_name}概念板块成分股"
             try:
                 resp = await client.smart_stock_picking(query, "stock")
                 stocks = _parse_stock_list(resp)
+                # Sanity check: >3000 stocks means iwencai returned full market
+                if len(stocks) > 3000:
+                    logger.warning(
+                        f"SUSPECT: {board_name} → {len(stocks)} stocks "
+                        f"(query=\"{query}\"). Likely full-market dump — skipping."
+                    )
+                    failed.append(board_name)
+                    done += 1
+                    return
                 result[board_name] = stocks
                 done += 1
                 if done % 20 == 0 or done == len(board_names):
