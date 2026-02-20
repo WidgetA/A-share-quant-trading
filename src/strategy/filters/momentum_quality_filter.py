@@ -270,9 +270,13 @@ class MomentumQualityFilter:
 
                     # Trend: compare last close (prev_close) vs close N days earlier
                     # + consecutive up days count (for Step 6 filtering)
-                    if close_vals and len(close_vals) >= self._config.trend_lookback_days + 1:
+                    # Backtest needs lookback+2 elements (trade_date + prev_close + N-ago)
+                    min_trend_len = self._config.trend_lookback_days + (
+                        2 if trade_date is not None else 1
+                    )
+                    if close_vals and len(close_vals) >= min_trend_len:
                         closes = [float(c) for c in close_vals if c is not None]
-                        if len(closes) >= self._config.trend_lookback_days + 1:
+                        if len(closes) >= min_trend_len:
                             if trade_date is not None:
                                 # Backtest: prev_close = second-to-last, N-ago = further back
                                 prev_close = closes[-2]  # day before trade_date

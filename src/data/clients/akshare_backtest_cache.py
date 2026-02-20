@@ -173,6 +173,13 @@ class AkshareBacktestCache:
             return False
         return self._start_date <= start_date and self._end_date >= end_date
 
+    def _has_turnover_ratio(self) -> bool:
+        """Check if daily data includes turnoverRatio (vs old cache format)."""
+        for _code, dates in self._daily.items():
+            for _ds, day in dates.items():
+                return "turnoverRatio" in day
+        return False
+
     def _save_to_oss(self) -> str | None:
         """Persist cache to Alibaba Cloud OSS as pickle files.
 
@@ -235,6 +242,17 @@ class AkshareBacktestCache:
             cache._stock_codes = meta["stock_codes"]
             cache._daily = files["daily.pkl"]
             cache._minute = files["minute.pkl"]
+
+            # Validate cache format: turnoverRatio must exist in daily data.
+            # Old caches saved before the turnoverRatio fix lack this field,
+            # causing QualityFilter to halt on every stock.
+            if not cache._has_turnover_ratio():
+                logger.warning(
+                    "OSS cache is STALE: daily data missing turnoverRatio field. "
+                    "Discarding — will re-download."
+                )
+                return None
+
             cache._is_ready = True
             logger.info(
                 f"Cache loaded from OSS: {len(cache._daily)} daily, "
@@ -265,8 +283,12 @@ class AkshareBacktestCache:
 
         self._start_date = start_date
         self._end_date = end_date
-        # Download one extra week before start_date to get preClose for first day
-        dl_start = start_date - timedelta(days=10)
+        # Download extra history before start_date:
+        # - preClose needs 1 trading day before start
+        # - QualityFilter needs 20 trading days of turnover lookback (~30 calendar)
+        # - Trend lookback needs 5 additional trading days
+        # Use 60 calendar days to safely cover all lookback requirements.
+        dl_start = start_date - timedelta(days=60)
         start_str = dl_start.strftime("%Y%m%d")
         end_str = end_date.strftime("%Y%m%d")
 
