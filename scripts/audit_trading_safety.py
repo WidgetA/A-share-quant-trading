@@ -70,7 +70,7 @@ class TradingSafetyAuditor(ast.NodeVisitor):
         self.violations.append(
             Violation(
                 file=self.filepath,
-                line=node.lineno,
+                line=getattr(node, "lineno", 0),
                 category=category,
                 detail=detail,
                 severity=severity,
@@ -152,11 +152,13 @@ class TradingSafetyAuditor(ast.NodeVisitor):
 
         self.generic_visit(node)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef):
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Check for functions that return empty defaults on failure paths."""
         self.generic_visit(node)
 
-    visit_AsyncFunctionDef = visit_FunctionDef
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Check async functions (same logic as sync)."""
+        self.generic_visit(node)
 
 
 def audit_file(filepath: Path) -> list[Violation]:
@@ -194,7 +196,7 @@ def run_audit(strict: bool = False) -> AuditResult:
 def print_report(result: AuditResult):
     """Print the audit report."""
     print(f"\n{'=' * 70}")
-    print(f"  交易安全审计报告")
+    print("  交易安全审计报告")
     print(f"{'=' * 70}")
     print(f"  扫描文件: {result.files_scanned}")
     print(f"  发现问题: {len(result.violations)}")
@@ -217,7 +219,7 @@ def print_report(result: AuditResult):
             print(f"    {v.detail}")
 
     if not result.violations:
-        print(f"\n  ✅ 没有发现交易安全问题")
+        print("\n  没有发现交易安全问题")
 
     print(f"\n{'=' * 70}")
 
