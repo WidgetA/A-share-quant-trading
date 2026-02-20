@@ -486,6 +486,32 @@ class MomentumSectorScanner:
         except Exception as e:
             logger.error(f"Step 6: Failed to query growth rates: {e}")
 
+        # --- Filter out stocks at limit-up at 9:40 ---
+        # If 9:40 price >= 99.5% of limit-up price, the stock is effectively
+        # sealed at limit-up and unbuyable (or extremely risky if bought).
+        # Only main board stocks reach here (创业板/科创板 already excluded in Step 1).
+        LIMIT_UP_RATIO = 0.10  # Main board +10%
+        LIMIT_UP_THRESHOLD = 0.995  # within 0.5% of limit-up counts as "at limit"
+        non_limit_up: list[SelectedStock] = []
+        for s in top_board_stocks:
+            snap = price_snapshots.get(s.stock_code) if price_snapshots else None
+            if snap and snap.prev_close > 0 and snap.latest_price > 0:
+                limit_up_price = snap.prev_close * (1 + LIMIT_UP_RATIO)
+                if snap.latest_price >= limit_up_price * LIMIT_UP_THRESHOLD:
+                    logger.info(
+                        f"Step 6: Skip {s.stock_code} ({s.stock_name}): "
+                        f"9:40 price {snap.latest_price:.2f} at limit-up "
+                        f"({limit_up_price:.2f})"
+                    )
+                    continue
+            non_limit_up.append(s)
+
+        if not non_limit_up:
+            logger.info("Step 6: All candidates at limit-up, no recommendation")
+            return None
+
+        top_board_stocks = non_limit_up
+
         # --- Score and pick ---
         # Candidates: must have growth data to compute score
         candidates = [s for s in top_board_stocks if s.stock_code in growth_data]

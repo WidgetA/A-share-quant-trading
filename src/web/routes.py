@@ -1838,10 +1838,22 @@ def create_momentum_router() -> APIRouter:
         """Analyze losing trades from range backtest with board trend data and LLM."""
         import json
 
-        ifind_client = _get_ifind_client(request)
-
         body = await request.json()
         losing_trades = body.get("losing_trades", [])
+        data_source = body.get("data_source", "ifind")
+
+        if data_source == "akshare":
+            from src.data.clients.akshare_backtest_cache import (
+                AkshareHistoricalAdapter,
+            )
+
+            ak_cache = getattr(request.app.state, "akshare_cache", None)
+            if ak_cache and ak_cache.is_ready:
+                quote_client = AkshareHistoricalAdapter(ak_cache)
+            else:
+                quote_client = _get_ifind_client(request)
+        else:
+            quote_client = _get_ifind_client(request)
 
         if not losing_trades:
             raise HTTPException(status_code=400, detail="没有亏损交易数据")
@@ -1873,12 +1885,12 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
-                    # Fetch board trend data
+                    # Fetch board trend data (only available with iFinD)
                     board_data = {}
-                    if board_name:
+                    if board_name and data_source != "akshare":
                         try:
                             board_data = await _fetch_board_trend(
-                                ifind_client, board_name, trade_date_str
+                                quote_client, board_name, trade_date_str
                             )
                         except Exception as e:
                             logger.warning(
@@ -1890,7 +1902,7 @@ def create_momentum_router() -> APIRouter:
                     stock_day_data = {}
                     try:
                         stock_day_data = await _fetch_stock_day_trend(
-                            ifind_client, trade["stock_code"], trade_date_str
+                            quote_client, trade["stock_code"], trade_date_str
                         )
                     except Exception as e:
                         logger.warning(

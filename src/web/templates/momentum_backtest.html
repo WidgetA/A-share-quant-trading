@@ -994,7 +994,7 @@ async function startCombinedLossAnalysis() {
         const resp = await fetch('/api/momentum/loss-analysis', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ losing_trades: payload }),
+            body: JSON.stringify({ losing_trades: payload, data_source: getDataSource() }),
         });
 
         if (!resp.ok) {
