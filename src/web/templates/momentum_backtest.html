@@ -39,18 +39,32 @@
 
             <!-- Akshare Download Section (shown when akshare selected) -->
             <div id="akshare-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
-                <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线数据来自 akshare (东财)，分钟数据来自 baostock，首次约 25-30 分钟</p>
-                <div style="display:flex;gap:8px;align-items:center">
-                    <button type="button" class="btn btn-primary" id="akshare-download-btn" style="background:#0284c7" onclick="startAkshareDownload()">预下载数据</button>
-                    <span id="akshare-status" style="font-size:13px;color:#64748b"></span>
-                </div>
-                <div id="akshare-progress" style="display:none;margin-top:10px">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                <!-- Loading from OSS indicator (shown during startup cache load) -->
+                <div id="akshare-oss-loading" style="display:none;margin-bottom:8px">
+                    <div style="display:flex;align-items:center;gap:8px">
                         <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
-                        <span id="akshare-progress-text" style="font-size:12px">准备中...</span>
+                        <span style="font-size:13px;color:#0369a1">正在从缓存加载数据...</span>
                     </div>
-                    <div style="background:#e5e7eb;border-radius:4px;height:6px;overflow:hidden">
-                        <div id="akshare-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
+                    <div style="background:#e5e7eb;border-radius:4px;height:4px;overflow:hidden;margin-top:6px">
+                        <div style="background:#0284c7;height:100%;width:100%;animation:pulse-bar 1.5s ease-in-out infinite"></div>
+                    </div>
+                    <style>@keyframes pulse-bar{0%,100%{opacity:.3}50%{opacity:1}}</style>
+                </div>
+                <!-- Normal download UI -->
+                <div id="akshare-download-ui">
+                    <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线数据来自 akshare (东财)，分钟数据来自 baostock，首次约 25-30 分钟</p>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <button type="button" class="btn btn-primary" id="akshare-download-btn" style="background:#0284c7" onclick="startAkshareDownload()">预下载数据</button>
+                        <span id="akshare-status" style="font-size:13px;color:#64748b"></span>
+                    </div>
+                    <div id="akshare-progress" style="display:none;margin-top:10px">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                            <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
+                            <span id="akshare-progress-text" style="font-size:12px">准备中...</span>
+                        </div>
+                        <div style="background:#e5e7eb;border-radius:4px;height:6px;overflow:hidden">
+                            <div id="akshare-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -320,9 +334,59 @@ function getDataSource() {
 document.querySelectorAll('input[name="data_source"]').forEach(radio => {
     radio.addEventListener('change', () => {
         const section = document.getElementById('akshare-download-section');
-        section.style.display = getDataSource() === 'akshare' ? 'block' : 'none';
+        if (getDataSource() === 'akshare') {
+            section.style.display = 'block';
+            checkAkshareCache();
+        } else {
+            section.style.display = 'none';
+        }
     });
 });
+
+// Auto-check cache status on page load and when switching to akshare
+async function checkAkshareCache() {
+    const ossLoading = document.getElementById('akshare-oss-loading');
+    const downloadUI = document.getElementById('akshare-download-ui');
+    const statusEl = document.getElementById('akshare-status');
+    const btn = document.getElementById('akshare-download-btn');
+
+    try {
+        const resp = await fetch('/api/momentum/akshare-cache-status');
+        const data = await resp.json();
+
+        if (data.status === 'loading') {
+            // OSS cache is being loaded at startup
+            ossLoading.style.display = 'block';
+            downloadUI.style.display = 'none';
+            // Poll until loaded
+            setTimeout(checkAkshareCache, 1500);
+            return;
+        }
+
+        ossLoading.style.display = 'none';
+        downloadUI.style.display = 'block';
+
+        if (data.status === 'ready') {
+            // Cache already loaded — check if it covers selected date range
+            const readyText = `已就绪 (${data.daily_stocks} 只日线, ${data.minute_stocks} 只分钟, ${data.start_date} ~ ${data.end_date})`;
+            statusEl.textContent = readyText;
+            statusEl.style.color = '#059669';
+            akshareReady = true;
+            btn.textContent = '已缓存';
+            btn.disabled = false;
+        }
+    } catch (e) {
+        // Ignore — user can still manually download
+        ossLoading.style.display = 'none';
+        downloadUI.style.display = 'block';
+    }
+}
+
+// Check on page load if akshare is selected
+if (getDataSource() === 'akshare') {
+    document.getElementById('akshare-download-section').style.display = 'block';
+    checkAkshareCache();
+}
 
 async function startAkshareDownload() {
     const btn = document.getElementById('akshare-download-btn');

@@ -1180,18 +1180,19 @@ def create_momentum_router() -> APIRouter:
 
     @router.get("/api/momentum/akshare-cache-status")
     async def akshare_cache_status(request: Request):
-        """Diagnostic: show akshare cache state."""
+        """Return akshare cache state for frontend polling."""
+        loading = getattr(request.app.state, "akshare_cache_loading", False)
         cache = getattr(request.app.state, "akshare_cache", None)
+        if loading and cache is None:
+            return {"status": "loading"}
         if cache is None:
-            return {"loaded": False}
+            return {"status": "empty"}
         return {
-            "loaded": True,
-            "is_ready": cache._is_ready,
+            "status": "ready",
             "start_date": str(cache._start_date) if cache._start_date else None,
             "end_date": str(cache._end_date) if cache._end_date else None,
             "daily_stocks": len(cache._daily),
             "minute_stocks": len(cache._minute),
-            "stock_codes_count": len(cache._stock_codes),
         }
 
     @router.post("/api/momentum/akshare-prepare")

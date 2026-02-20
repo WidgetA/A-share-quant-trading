@@ -132,24 +132,31 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
-        # Akshare backtest cache — try to pre-load from OSS on startup
+        # Akshare backtest cache — load from OSS in background (non-blocking)
         app.state.akshare_cache = None
-        try:
-            from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
+        app.state.akshare_cache_loading = True  # frontend polls this
 
-            logger.info("Loading akshare cache from OSS...")
-            oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
-            if oss_cache:
-                app.state.akshare_cache = oss_cache
-                logger.info(
-                    f"Akshare cache pre-loaded from OSS: "
-                    f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
-                    f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
-                )
-            else:
-                logger.warning("load_from_oss returned None — check OSS config/logs")
-        except Exception as e:
-            logger.warning(f"Failed to pre-load akshare cache from OSS: {e}")
+        async def _bg_load_oss_cache():
+            try:
+                from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
+
+                logger.info("Loading akshare cache from OSS (background)...")
+                oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
+                if oss_cache:
+                    app.state.akshare_cache = oss_cache
+                    logger.info(
+                        f"Akshare cache pre-loaded from OSS: "
+                        f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
+                        f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
+                    )
+                else:
+                    logger.warning("load_from_oss returned None — check OSS config/logs")
+            except Exception as e:
+                logger.warning(f"Failed to pre-load akshare cache from OSS: {e}")
+            finally:
+                app.state.akshare_cache_loading = False
+
+        asyncio.create_task(_bg_load_oss_cache())
 
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own
