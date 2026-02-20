@@ -64,6 +64,7 @@
                     <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线数据来自 akshare (东财)，分钟数据来自 baostock，首次约 25-30 分钟</p>
                     <div style="display:flex;gap:8px;align-items:center">
                         <button type="button" class="btn btn-primary" id="akshare-download-btn" style="background:#0284c7" onclick="startAkshareDownload()">预下载数据</button>
+                        <button type="button" id="akshare-redownload-btn" style="display:none;background:transparent;border:1px solid #94a3b8;color:#64748b;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer" onclick="startAkshareDownload(true)">重新下载</button>
                         <span id="akshare-status" style="font-size:13px;color:#64748b"></span>
                     </div>
                     <div id="akshare-progress" style="display:none;margin-top:10px">
@@ -398,6 +399,8 @@ async function checkAkshareCache() {
             akshareReady = true;
             btn.textContent = '已缓存';
             btn.disabled = false;
+            const reBtn = document.getElementById('akshare-redownload-btn');
+            if (reBtn) reBtn.style.display = '';
         }
     } catch (e) {
         // Ignore — user can still manually download
@@ -412,8 +415,9 @@ if (getDataSource() === 'akshare') {
     checkAkshareCache();
 }
 
-async function startAkshareDownload() {
+async function startAkshareDownload(force = false) {
     const btn = document.getElementById('akshare-download-btn');
+    const reBtn = document.getElementById('akshare-redownload-btn');
     const progress = document.getElementById('akshare-progress');
     const statusEl = document.getElementById('akshare-status');
     const progressText = document.getElementById('akshare-progress-text');
@@ -434,7 +438,12 @@ async function startAkshareDownload() {
 
     btn.disabled = true;
     btn.textContent = '下载中...';
+    if (reBtn) reBtn.style.display = 'none';
     progress.style.display = 'block';
+    progressText.textContent = '准备中...';
+    progressBar.style.width = '0%';
+    const spinner = progress.querySelector('.loading-spinner');
+    if (spinner) spinner.style.display = '';
     statusEl.textContent = '';
     akshareReady = false;
 
@@ -442,7 +451,7 @@ async function startAkshareDownload() {
         const resp = await fetch('/api/momentum/akshare-prepare', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ start_date: startDate, end_date: endDate }),
+            body: JSON.stringify({ start_date: startDate, end_date: endDate, force }),
         });
 
         if (!resp.ok) {
@@ -485,6 +494,7 @@ async function startAkshareDownload() {
                         statusEl.textContent = readyText;
                         akshareReady = true;
                         btn.textContent = '已下载';
+                        if (reBtn) reBtn.style.display = '';
                     } else if (data.type === 'error') {
                         statusEl.textContent = '下载失败: ' + data.message;
                         btn.disabled = false;

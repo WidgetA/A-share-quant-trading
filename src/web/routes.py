@@ -1127,6 +1127,7 @@ class AksharePrepareRequest(BaseModel):
 
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
+    force: bool = False  # Force full re-download (clears existing cache)
 
 
 def create_momentum_router() -> APIRouter:
@@ -1215,15 +1216,24 @@ def create_momentum_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
+        # Force re-download: clear existing cache so it downloads fresh
+        if body.force:
+            request.app.state.akshare_cache = None
+
         # 1) Try in-memory cache
         existing: AkshareBacktestCache | None = getattr(request.app.state, "akshare_cache", None)
         if existing and existing.covers_range(start_date, end_date):
-            return {
-                "type": "complete",
-                "daily_count": len(existing._daily),
-                "minute_count": len(existing._minute),
-                "cached": True,
-            }
+
+            async def mem_cached_stream():
+                msg = {
+                    "type": "complete",
+                    "daily_count": len(existing._daily),  # type: ignore[union-attr]
+                    "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                    "cached": True,
+                }
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+
+            return StreamingResponse(mem_cached_stream(), media_type="text/event-stream")
 
         # 2) Try OSS cache
         if not existing:
@@ -1260,12 +1270,17 @@ def create_momentum_router() -> APIRouter:
         if not gaps:
             # Shouldn't happen (covers_range check above), but just in case
             request.app.state.akshare_cache = existing
-            return {
-                "type": "complete",
-                "daily_count": len(existing._daily),
-                "minute_count": len(existing._minute),
-                "cached": True,
-            }
+
+            async def nogap_stream():
+                msg = {
+                    "type": "complete",
+                    "daily_count": len(existing._daily),  # type: ignore[union-attr]
+                    "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                    "cached": True,
+                }
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+
+            return StreamingResponse(nogap_stream(), media_type="text/event-stream")
 
         async def generate():
             def sse(data: dict) -> str:
