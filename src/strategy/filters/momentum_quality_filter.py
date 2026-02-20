@@ -146,17 +146,24 @@ class MomentumQualityFilter:
 
         Raises RuntimeError if required data is missing (fail-fast).
         """
-        # Trading safety: data must be available. No data = no trading.
+        # Trading safety: no data at all = data fetch failed → halt.
         if not hist:
             raise RuntimeError(
                 f"QualityFilter: no historical data for {stock.stock_code} "
                 f"({stock.stock_name}). Cannot assess momentum quality — halting."
             )
 
+        # Insufficient history (e.g. recent IPO): conservatively filter out.
+        # This is NOT a data error — the stock simply lacks enough trading days.
         if hist.get("trend_pct") is None:
-            raise RuntimeError(
-                f"QualityFilter: missing trend_pct for {stock.stock_code} "
-                f"({stock.stock_name}). Insufficient price history — halting."
+            logger.warning(
+                f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
+                f"insufficient history for trend — filtering out"
+            )
+            return QualityAssessment(
+                stock_code=stock.stock_code,
+                filtered_out=True,
+                reasons=["历史数据不足，无法评估趋势"],
             )
 
         reasons: list[str] = []
@@ -173,10 +180,17 @@ class MomentumQualityFilter:
         # Signal 2: Turnover amplification
         if trade_date is not None:
             # Backtest mode: use actual daily turnover
+            # Insufficient turnover history (IPO): conservatively filter out.
             if not hist.get("buy_day_turnover") or not hist.get("avg_daily_turnover"):
-                raise RuntimeError(
-                    f"QualityFilter: missing turnover data for {stock.stock_code} "
-                    f"({stock.stock_name}). Cannot assess volume — halting."
+                logger.warning(
+                    f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
+                    f"insufficient history for turnover — filtering out"
+                )
+                return QualityAssessment(
+                    stock_code=stock.stock_code,
+                    filtered_out=True,
+                    reasons=["历史数据不足，无法评估换手率"],
+                    trend_pct=trend_pct,
                 )
             buy_turn = hist["buy_day_turnover"]
             avg_turn = hist["avg_daily_turnover"]
