@@ -494,7 +494,8 @@ class MomentumSectorScanner:
         for s in top_board_stocks:
             snap = price_snapshots.get(s.stock_code) if price_snapshots else None
             if snap and snap.prev_close > 0 and snap.latest_price > 0:
-                limit_up_price = snap.prev_close * (1 + LIMIT_UP_RATIO)
+                # Exchange rounds limit-up price to 2 decimals (四舍五入到分)
+                limit_up_price = round(snap.prev_close * (1 + LIMIT_UP_RATIO), 2)
                 if snap.latest_price >= limit_up_price:
                     logger.info(
                         f"Step 6: Skip {s.stock_code} ({s.stock_name}): "
