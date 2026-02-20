@@ -628,9 +628,9 @@ strategy:
 **Strategy Flow**:
 1. **Pre-filter (iwencai)**: Get main board non-ST stocks with opening gain > -0.5% (broad candidate pool)
 2. **Step 1 — 9:40 Filter**: Keep stocks where (9:40 price - open) / open > 0.56%, main board, non-ST
-3. **Step 2 — Reverse Concept Lookup**: For each qualified stock, find its concept boards via iwencai, filter junk boards
+3. **Step 2 — Reverse Concept Lookup**: For each qualified stock, find its concept boards from local `data/board_constituents.json`, filter junk boards
 4. **Step 3 — Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 1
-5. **Step 4 — Board Constituents**: Get ALL stocks in each hot board
+5. **Step 4 — Board Constituents**: Get ALL stocks in each hot board from local `data/board_constituents.json`
 6. **Step 5 — Gain Filter**: Select constituents with 9:40 gain from open >0.56%, main board, non-ST
 7. **Step 5.5 — Momentum Quality Filter**: Remove "fake breakouts" — stocks in a declining trend (5-day) AND low turnover amplification (<1.3x vs 20-day avg). AND logic: both conditions must be true to filter out
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
@@ -646,14 +646,16 @@ strategy:
 **Data Sources**:
 - Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)
 - Price (live): iFinD `real_time_quotation`
-- Concept boards: iFinD iwencai (`smart_stock_picking`)
+- Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
 
 **Key Files**:
 - `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic (Step 1–6)
 - `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: fake breakout filter
 - `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
-- `src/data/sources/concept_mapper.py` — Stock ↔ concept board mapping
+- `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping (reads local JSON)
+- `data/sectors.json` — THS concept board name list (390 boards)
+- `data/board_constituents.json` — Board → constituent stocks mapping (pre-downloaded)
 - `src/data/database/fundamentals_db.py` — stock_fundamentals reader
 - `scripts/backtest_momentum.py` — Backtest script
 - `scripts/intraday_momentum_alert.py` — Live monitoring + Feishu alert
@@ -681,7 +683,7 @@ strategy:
 **Checklist**:
 - [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
-- [x] ConceptMapper: iwencai-based stock-to-board and board-to-stock lookups
+- [x] LocalConceptMapper: local JSON-based stock-to-board and board-to-stock lookups (replaced iwencai ConceptMapper)
 - [x] MomentumSectorScanner: Step 1–6 pipeline with recommendation scoring
 - [x] MomentumQualityFilter: Step 5.5 fake breakout filter (declining trend + low turnover)
 - [x] ReversalFactorFilter: Step 5.6 冲高回落 filter (early fade + price position)

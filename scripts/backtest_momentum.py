@@ -35,7 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.common.feishu_bot import FeishuBot
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-from src.data.sources.concept_mapper import ConceptMapper
+from src.data.sources.local_concept_mapper import LocalConceptMapper
 from src.strategy.strategies.momentum_sector_scanner import (
     MomentumSectorScanner,
     PriceSnapshot,
@@ -322,7 +322,7 @@ async def run_backtest(
         await ifind_client.start()
         await fundamentals_db.connect()
 
-        concept_mapper = ConceptMapper(ifind_client)
+        concept_mapper = LocalConceptMapper()
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,

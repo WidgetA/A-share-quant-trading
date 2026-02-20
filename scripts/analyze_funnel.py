@@ -42,7 +42,7 @@ from backtest_momentum import fetch_main_board_prices_for_date  # noqa: E402
 
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError  # noqa: E402
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config  # noqa: E402
-from src.data.sources.concept_mapper import ConceptMapper  # noqa: E402
+from src.data.sources.local_concept_mapper import LocalConceptMapper  # noqa: E402
 from src.strategy.filters.stock_filter import create_main_board_only_filter  # noqa: E402
 from src.strategy.strategies.momentum_sector_scanner import (  # noqa: E402
     MomentumSectorScanner,
@@ -198,7 +198,7 @@ async def run_single_date(
     next_trade_date: date,
     ifind_client: IFinDHttpClient,
     fundamentals_db,
-    concept_mapper: ConceptMapper,
+    concept_mapper: LocalConceptMapper,
 ) -> DayResult | None:
     """Run funnel analysis for a single trading day."""
     logger.info(f"=== Analyzing {trade_date} (T+1={next_trade_date}) ===")
@@ -609,7 +609,7 @@ async def run_analysis(
             f" {dates_in_range[0]} ~ {dates_in_range[-1]}"
         )
 
-        concept_mapper = ConceptMapper(ifind_client)
+        concept_mapper = LocalConceptMapper()
         all_days: list[DayResult] = []
 
         for trade_date in dates_in_range:

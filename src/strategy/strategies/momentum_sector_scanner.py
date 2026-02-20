@@ -5,7 +5,7 @@
 
 # === DEPENDENCIES ===
 # - IFinDHttpClient: Price data (historical + real-time)
-# - ConceptMapper: Stock ↔ concept board mapping via iwencai
+# - LocalConceptMapper: Stock ↔ concept board mapping via local JSON files
 # - FundamentalsDB: ST detection from stock_fundamentals table
 # - StockFilter: Main board filtering
 # - board_filter: Junk board filtering
@@ -13,9 +13,9 @@
 # === DATA FLOW ===
 # Pre-filter: iwencai "涨幅>-0.5%主板非ST" → broad candidate pool
 # Step 1: 9:40 gain from open > 0.56% → initial gainers
-# Step 2: per-stock iwencai "所属同花顺概念" → concept boards (filtered)
+# Step 2: reverse lookup stock → concept boards (from local board_constituents.json)
 # Step 3: boards with ≥2 gainers → "hot boards"
-# Step 4: per-board iwencai "XX成分股" → all constituent stocks
+# Step 4: board → constituent stocks (from local board_constituents.json)
 # Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
 # Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
-from src.data.sources.concept_mapper import ConceptMapper
+from src.data.sources.local_concept_mapper import LocalConceptMapper
 from src.strategy.filters.momentum_quality_filter import (
     MomentumQualityConfig,
     MomentumQualityFilter,
@@ -168,7 +168,7 @@ class MomentumSectorScanner:
         self,
         ifind_client: IFinDHttpClient,
         fundamentals_db: FundamentalsDB,
-        concept_mapper: ConceptMapper | None = None,
+        concept_mapper: LocalConceptMapper | None = None,
         stock_filter: StockFilter | None = None,
         momentum_quality_config: MomentumQualityConfig | None = None,
         reversal_factor_config: ReversalFactorConfig | None = None,
@@ -176,7 +176,7 @@ class MomentumSectorScanner:
     ):
         self._ifind = ifind_client
         self._fundamentals_db = fundamentals_db
-        self._concept_mapper = concept_mapper or ConceptMapper(ifind_client)
+        self._concept_mapper = concept_mapper or LocalConceptMapper()
         self._stock_filter = stock_filter or create_main_board_only_filter()
         self._quality_filter = MomentumQualityFilter(ifind_client, momentum_quality_config)
         self._reversal_filter = ReversalFactorFilter(reversal_factor_config)

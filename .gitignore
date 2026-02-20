@@ -70,8 +70,10 @@ Thumbs.db
 # SDK files are tracked for team convenience
 # vendor/*.tar.gz  # Uncomment to ignore large SDK files
 
-# === Data (local data not tracked) ===
-/data/
+# === Data (local data not tracked, except board mapping files) ===
+/data/*
+!/data/sectors.json
+!/data/board_constituents.json
 *.csv
 *.parquet
 *.db

@@ -37,7 +37,7 @@ from src.common.siliconflow_client import SiliconFlowClient, SiliconFlowConfig
 from src.common.tavily_client import TavilyClient
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-from src.data.sources.concept_mapper import ConceptMapper
+from src.data.sources.local_concept_mapper import LocalConceptMapper
 from src.strategy.analyzers.negative_news_checker import NegativeNewsChecker
 from src.strategy.strategies.momentum_sector_scanner import (
     MomentumSectorScanner,
@@ -277,7 +277,7 @@ async def monitor(
         # Run full strategy scan on accumulated data
         logger.info(f"Running strategy scan on {len(accumulated)} accumulated stocks...")
 
-        concept_mapper = ConceptMapper(ifind_client)
+        concept_mapper = LocalConceptMapper()
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,

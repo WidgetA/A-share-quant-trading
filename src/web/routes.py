@@ -1340,7 +1340,7 @@ def create_momentum_router() -> APIRouter:
         """Run momentum sector strategy backtest for a specific date."""
         from src.common.feishu_bot import FeishuBot
         from src.data.clients.ifind_http_client import IFinDHttpError
-        from src.data.sources.concept_mapper import ConceptMapper
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
         )
@@ -1357,13 +1357,11 @@ def create_momentum_router() -> APIRouter:
         fundamentals_db = _get_fundamentals_db(request)
 
         try:
+            concept_mapper = LocalConceptMapper()
             if body.data_source == "akshare":
                 # --- Akshare path: read from pre-downloaded cache ---
                 from src.data.clients.akshare_backtest_cache import (
                     AkshareHistoricalAdapter,
-                )
-                from src.data.sources.akshare_concept_mapper import (
-                    AkshareConceptMapper,
                 )
 
                 ak_cache = getattr(request.app.state, "akshare_cache", None)
@@ -1371,11 +1369,10 @@ def create_momentum_router() -> APIRouter:
                     raise HTTPException(status_code=400, detail="请先预下载 akshare 数据")
 
                 adapter = AkshareHistoricalAdapter(ak_cache)
-                ak_mapper = AkshareConceptMapper()
                 scanner = MomentumSectorScanner(
                     ifind_client=adapter,  # type: ignore[arg-type]
                     fundamentals_db=fundamentals_db,
-                    concept_mapper=ak_mapper,  # type: ignore[arg-type]
+                    concept_mapper=concept_mapper,
                 )
 
                 date_key = trade_date.strftime("%Y-%m-%d")
@@ -1392,7 +1389,6 @@ def create_momentum_router() -> APIRouter:
             else:
                 # --- iFinD path: original logic ---
                 ifind_client = _get_ifind_client(request)
-                concept_mapper = ConceptMapper(ifind_client)
                 scanner = MomentumSectorScanner(
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
@@ -1522,7 +1518,7 @@ def create_momentum_router() -> APIRouter:
         import math
         from datetime import datetime
 
-        from src.data.sources.concept_mapper import ConceptMapper
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
         )
@@ -1550,7 +1546,7 @@ def create_momentum_router() -> APIRouter:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
             try:
-                concept_mapper = ConceptMapper(ifind_client)
+                concept_mapper = LocalConceptMapper()
                 scanner = MomentumSectorScanner(
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
@@ -2012,7 +2008,7 @@ def create_momentum_router() -> APIRouter:
         from datetime import datetime
         from statistics import median as stat_median
 
-        from src.data.sources.concept_mapper import ConceptMapper
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.stock_filter import create_main_board_only_filter
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
@@ -2088,7 +2084,7 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-                concept_mapper = ConceptMapper(ifind_client)
+                concept_mapper = LocalConceptMapper()
                 stock_filter = create_main_board_only_filter()
 
                 # Accumulate all returns per layer across all days
@@ -2532,7 +2528,7 @@ def create_momentum_router() -> APIRouter:
         from datetime import datetime
         from statistics import median as stat_median
 
-        from src.data.sources.concept_mapper import ConceptMapper
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.momentum_quality_filter import (
             MomentumQualityConfig,
             MomentumQualityFilter,
@@ -2564,22 +2560,20 @@ def create_momentum_router() -> APIRouter:
             "L4: 最终推荐",
         ]
 
+        concept_mapper = LocalConceptMapper()
         use_akshare = body.data_source == "akshare"
         if use_akshare:
             from src.data.clients.akshare_backtest_cache import (
                 AkshareHistoricalAdapter,
             )
-            from src.data.sources.akshare_concept_mapper import AkshareConceptMapper
 
             akshare_cache = getattr(request.app.state, "akshare_cache", None)
             if not akshare_cache or not akshare_cache.is_ready:
                 raise HTTPException(status_code=400, detail="请先预下载 akshare 数据")
             ifind_client = AkshareHistoricalAdapter(akshare_cache)
-            ak_concept_mapper = AkshareConceptMapper()
         else:
             ifind_client = _get_ifind_client(request)
             akshare_cache = None
-            ak_concept_mapper = None
 
         fundamentals_db = _get_fundamentals_db(request)
 
@@ -2631,10 +2625,7 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-                if use_akshare:
-                    concept_mapper = ak_concept_mapper
-                else:
-                    concept_mapper = ConceptMapper(ifind_client)
+                # concept_mapper already created above (LocalConceptMapper)
                 stock_filter = create_main_board_only_filter()
 
                 # Funnel accumulators
@@ -4086,7 +4077,7 @@ async def _run_intraday_monitor(state: dict) -> None:
     from zoneinfo import ZoneInfo
 
     from src.common.feishu_bot import FeishuBot
-    from src.data.sources.concept_mapper import ConceptMapper
+    from src.data.sources.local_concept_mapper import LocalConceptMapper
     from src.strategy.strategies.momentum_sector_scanner import (
         MomentumSectorScanner,
         PriceSnapshot,
@@ -4171,7 +4162,7 @@ async def _run_intraday_monitor(state: dict) -> None:
                 # Run full strategy scan
                 if accumulated:
                     logger.info(f"Running strategy scan on {len(accumulated)} accumulated stocks")
-                    concept_mapper = ConceptMapper(ifind_client)
+                    concept_mapper = LocalConceptMapper()
                     scanner = MomentumSectorScanner(
                         ifind_client=ifind_client,
                         fundamentals_db=fundamentals_db,
@@ -4584,7 +4575,7 @@ def create_settings_router() -> APIRouter:
         from datetime import datetime, timedelta
 
         from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
-        from src.data.sources.concept_mapper import ConceptMapper
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
 
         try:
@@ -4626,7 +4617,7 @@ def create_settings_router() -> APIRouter:
                 scan_db = create_momentum_scan_db_from_config()
                 await scan_db.connect()
 
-                concept_mapper = ConceptMapper(ifind_client)
+                concept_mapper = LocalConceptMapper()
                 scanner = MomentumSectorScanner(
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,

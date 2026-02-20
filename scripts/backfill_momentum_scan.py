@@ -34,7 +34,7 @@ from scripts.backtest_momentum import fetch_main_board_prices_for_date
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
-from src.data.sources.concept_mapper import ConceptMapper
+from src.data.sources.local_concept_mapper import LocalConceptMapper
 from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
 
 logging.basicConfig(
@@ -235,7 +235,7 @@ async def backfill(start_date: date, end_date: date, delay: float = 1.0) -> None
         await ifind_client.start()
         await fundamentals_db.connect()
 
-        concept_mapper = ConceptMapper(ifind_client)
+        concept_mapper = LocalConceptMapper()
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,
