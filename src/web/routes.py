@@ -2232,8 +2232,7 @@ def create_momentum_router() -> APIRouter:
 
                         # Build trend_data from quality assessments for Step 6 scoring
                         trend_data_l = {
-                            a.stock_code: a.trend_pct
-                            for a in qa if a.trend_pct is not None
+                            a.stock_code: a.trend_pct for a in qa if a.trend_pct is not None
                         }
 
                         # L3: reversal factor filter (冲高回落)
@@ -2851,13 +2850,13 @@ def create_momentum_router() -> APIRouter:
                                 [s.stock_code for s in l1], trade_date
                             )
                             trend_data_l2 = {
-                                code: v["trend_pct"] for code, v in qa2_data.items()
+                                code: v["trend_pct"]
+                                for code, v in qa2_data.items()
                                 if v.get("trend_pct") is not None
                             }
                         else:
                             trend_data_l2 = {
-                                a.stock_code: a.trend_pct
-                                for a in qa2 if a.trend_pct is not None
+                                a.stock_code: a.trend_pct for a in qa2 if a.trend_pct is not None
                             }
 
                         # L3: reversal factor filter (冲高回落)

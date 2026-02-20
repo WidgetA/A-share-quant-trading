@@ -249,9 +249,7 @@ class MomentumSectorScanner:
         # Step 6: Recommend — high opening gap + negative growth + recent trend
         # Pass trend_pct from Step 5.5 to avoid extra API calls
         trend_data = {
-            a.stock_code: a.trend_pct
-            for a in quality_assessments
-            if a.trend_pct is not None
+            a.stock_code: a.trend_pct for a in quality_assessments if a.trend_pct is not None
         }
         if selected:
             result.recommended_stock = await self._step6_recommend(
@@ -526,13 +524,13 @@ class MomentumSectorScanner:
         # ALL candidates must have growth + trend data. Any missing → don't trade.
         _trend_data = trend_data or {}
         missing = [
-            s.stock_code for s in top_board_stocks
+            s.stock_code
+            for s in top_board_stocks
             if s.stock_code not in growth_data or s.stock_code not in _trend_data
         ]
         if missing:
             logger.info(
-                f"Step 6: Incomplete data for {missing}, "
-                "no recommendation (数据不全不交易)"
+                f"Step 6: Incomplete data for {missing}, no recommendation (数据不全不交易)"
             )
             return None
 
