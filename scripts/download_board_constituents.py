@@ -127,7 +127,7 @@ async def download_all(dry_run: bool = False) -> None:
                 if len(stocks) > 3000:
                     logger.warning(
                         f"SUSPECT: {board_name} → {len(stocks)} stocks "
-                        f"(query=\"{query}\"). Likely full-market dump — skipping."
+                        f'(query="{query}"). Likely full-market dump — skipping.'
                     )
                     failed.append(board_name)
                     done += 1

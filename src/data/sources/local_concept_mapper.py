@@ -104,9 +104,7 @@ class LocalConceptMapper:
         # ~1200 (机器人概念, 人工智能, etc.)
         # Trading safety: corrupt data → HALT, never silently drop.
         _MAX_BOARD_SIZE = 2000
-        oversized = [
-            (b, len(s)) for b, s in self._board_stocks.items() if len(s) > _MAX_BOARD_SIZE
-        ]
+        oversized = [(b, len(s)) for b, s in self._board_stocks.items() if len(s) > _MAX_BOARD_SIZE]
         if oversized:
             details = ", ".join(f"'{b}' ({n} stocks)" for b, n in oversized)
             raise RuntimeError(
