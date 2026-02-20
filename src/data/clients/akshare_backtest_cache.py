@@ -8,16 +8,19 @@
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
-# - AkshareBacktestCache: Downloads and stores all price data in memory
+# - AkshareBacktestCache: Downloads and stores all price data in memory + disk
 # - AkshareHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
 # - Pre-download strategy: ~3500 stocks × (daily + minute) ≈ 25-30 min
+# - Disk cache: data/cache/akshare_*.pkl — survives server restarts
 # - Data is NOT used for live trading (backtest only)
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import pickle
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -27,17 +30,26 @@ logger = logging.getLogger(__name__)
 # Akshare calls are synchronous; we limit concurrency to avoid hammering the API
 _DOWNLOAD_WORKERS = 8
 
+# Disk cache directory
+_CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cache"
+
 
 class AkshareBacktestCache:
     """
     Pre-downloads daily OHLCV and 09:30-09:40 minute bar data for all
     main-board A-share stocks, keyed by (stock_code, date).
 
+    Disk persistence:
+        After download, data is saved to data/cache/akshare_daily.pkl and
+        akshare_minute.pkl. On next request, if the cached range covers
+        the requested range, data is loaded from disk (~2s) instead of
+        re-downloading (~25 min).
+
     Usage:
         cache = AkshareBacktestCache()
         await cache.download_prices(start_date, end_date, progress_cb)
-        snap = cache.get_daily(code, trade_date)  # (open, high, low, close, preClose, volume)
-        p940 = cache.get_940_price(code, trade_date)  # (close_at_940, cum_vol, max_high, min_low)
+        snap = cache.get_daily(code, trade_date)
+        p940 = cache.get_940_price(code, trade_date)
     """
 
     def __init__(self) -> None:
@@ -75,6 +87,67 @@ class AkshareBacktestCache:
             if day_data:
                 result[code] = day_data
         return result
+
+    def covers_range(self, start_date: date, end_date: date) -> bool:
+        """Check if cached data covers the requested date range."""
+        if not self._is_ready or not self._start_date or not self._end_date:
+            return False
+        return self._start_date <= start_date and self._end_date >= end_date
+
+    def _save_to_disk(self) -> None:
+        """Persist cache to disk as pickle files."""
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "start_date": self._start_date,
+            "end_date": self._end_date,
+            "stock_codes": self._stock_codes,
+        }
+        try:
+            with open(_CACHE_DIR / "akshare_meta.pkl", "wb") as f:
+                pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(_CACHE_DIR / "akshare_daily.pkl", "wb") as f:
+                pickle.dump(self._daily, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(_CACHE_DIR / "akshare_minute.pkl", "wb") as f:
+                pickle.dump(self._minute, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(
+                f"Cache saved to disk: {len(self._daily)} daily, {len(self._minute)} minute"
+            )
+        except Exception as e:
+            logger.error(f"Failed to save cache to disk: {e}")
+
+    @classmethod
+    def load_from_disk(cls) -> AkshareBacktestCache | None:
+        """Load cache from disk if available. Returns None if no cache found."""
+        meta_path = _CACHE_DIR / "akshare_meta.pkl"
+        daily_path = _CACHE_DIR / "akshare_daily.pkl"
+        minute_path = _CACHE_DIR / "akshare_minute.pkl"
+        if not (meta_path.exists() and daily_path.exists() and minute_path.exists()):
+            return None
+
+        try:
+            with open(meta_path, "rb") as f:
+                meta = pickle.load(f)  # noqa: S301
+            with open(daily_path, "rb") as f:
+                daily = pickle.load(f)  # noqa: S301
+            with open(minute_path, "rb") as f:
+                minute = pickle.load(f)  # noqa: S301
+
+            cache = cls()
+            cache._start_date = meta["start_date"]
+            cache._end_date = meta["end_date"]
+            cache._stock_codes = meta["stock_codes"]
+            cache._daily = daily
+            cache._minute = minute
+            cache._is_ready = True
+            logger.info(
+                f"Cache loaded from disk: {len(daily)} daily, "
+                f"{len(minute)} minute, "
+                f"range [{cache._start_date} ~ {cache._end_date}]"
+            )
+            return cache
+        except Exception as e:
+            logger.error(f"Failed to load cache from disk: {e}")
+            return None
 
     async def download_prices(
         self,
@@ -237,6 +310,9 @@ class AkshareBacktestCache:
         logger.info(f"Minute download complete: {len(self._minute)}/{total} stocks")
 
         self._is_ready = True
+
+        # Persist to disk for reuse across restarts
+        await asyncio.to_thread(self._save_to_disk)
 
 
 class AkshareHistoricalAdapter:

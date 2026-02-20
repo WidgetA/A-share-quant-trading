@@ -1180,7 +1180,11 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/akshare-prepare")
     async def akshare_prepare(request: Request, body: AksharePrepareRequest):
-        """Pre-download akshare data as SSE stream."""
+        """Pre-download akshare data as SSE stream.
+
+        First checks disk cache — if it covers the requested range, loads
+        in ~2s instead of re-downloading (~25 min).
+        """
         from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
 
         try:
@@ -1189,6 +1193,33 @@ def create_momentum_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
+        # Check if existing in-memory cache already covers the range
+        existing = getattr(request.app.state, "akshare_cache", None)
+        if existing and existing.covers_range(start_date, end_date):
+            return {
+                "type": "complete",
+                "daily_count": len(existing._daily),
+                "minute_count": len(existing._minute),
+                "cached": True,
+            }
+
+        # Try loading from disk cache
+        disk_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_disk)
+        if disk_cache and disk_cache.covers_range(start_date, end_date):
+            request.app.state.akshare_cache = disk_cache
+
+            async def cached_stream():
+                msg = {
+                    "type": "complete",
+                    "daily_count": len(disk_cache._daily),
+                    "minute_count": len(disk_cache._minute),
+                    "cached": True,
+                }
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+
+            return StreamingResponse(cached_stream(), media_type="text/event-stream")
+
+        # No usable cache — download fresh
         cache = AkshareBacktestCache()
 
         async def generate():
