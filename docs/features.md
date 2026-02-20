@@ -636,7 +636,7 @@ strategy:
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
 9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
-   - Query 同比季度收入增长率 via iwencai
+   - Read 季度营收同比增长率 (`quarterly_revenue_yoy`) from PostgreSQL `stock_fundamentals` table
    - Reuse 5日涨跌幅 (`trend_pct`) already computed in Step 5.5 (no extra API call; works with both iFinD and akshare data sources)
    - Score: `Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)` — 开盘涨幅越高越好，营收增长率越低越好，近期趋势越强越好（过滤连跌后超跌反弹的票，如600337在2026-01-14连跌3天累计-20%后冲涨停炸板，次日-10%）
    - **Data completeness requirement**: 板块内所有候选票必须同时具备营收增长率和5日涨跌幅数据。任何一只票缺数据 → 当天不推票、不交易（Trading Safety §12: 宁可不交易也不用残缺数据做决策）
@@ -647,6 +647,7 @@ strategy:
 - Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)
 - Price (live): iFinD `real_time_quotation`
 - Concept boards: iFinD iwencai (`smart_stock_picking`)
+- Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
 
 **Key Files**:
 - `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic (Step 1–6)

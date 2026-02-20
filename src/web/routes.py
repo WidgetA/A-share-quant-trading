@@ -2268,41 +2268,13 @@ def create_momentum_router() -> APIRouter:
 
                         all_layers = [l0, l1, l2, l3, l4]
 
-                        # Fetch revenue growth for L3 stocks (for L3→L4 误杀)
+                        # Fetch revenue growth for L3 stocks from DB
                         day_revenue_growth: dict[str, float] = {}
                         if l3:
-                            l3_codes_str = ";".join(s.stock_code for s in l3)
-                            try:
-                                growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
-                                )
-                                g_tables = growth_result.get("tables", [])
-                                if g_tables:
-                                    g_table = g_tables[0].get("table", {})
-                                    g_code_col = g_table.get("股票代码", [])
-                                    g_growth_col = []
-                                    for cn, cv in g_table.items():
-                                        if ("收入" in cn and "增长率" in cn) or (
-                                            "收入" in cn and "同比" in cn
-                                        ):
-                                            g_growth_col = cv
-                                            break
-                                    if g_code_col and g_growth_col:
-                                        for gi, gc in enumerate(g_code_col):
-                                            bare = (
-                                                gc.split(".")[0] if isinstance(gc, str) else str(gc)
-                                            )
-                                            if gi < len(g_growth_col):
-                                                gv = g_growth_col[gi]
-                                                if gv is not None and gv != "--":
-                                                    try:
-                                                        day_revenue_growth[bare] = float(gv)
-                                                    except (ValueError, TypeError):
-                                                        pass
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to fetch revenue growth on {trade_date}: {e}"
-                                )
+                            l3_codes = [s.stock_code for s in l3]
+                            day_revenue_growth = await fundamentals_db.batch_get_revenue_growth(
+                                l3_codes
+                            )
 
                         # Collect all codes for T+1 fetch
                         all_codes = set()
@@ -2893,41 +2865,13 @@ def create_momentum_router() -> APIRouter:
 
                         all_layers = [l0, l1, l2, l3, l4]
 
-                        # Fetch revenue growth for L3 stocks
+                        # Fetch revenue growth for L3 stocks from DB
                         day_revenue_growth: dict[str, float] = {}
                         if l3:
-                            l3_codes_str = ";".join(s.stock_code for s in l3)
-                            try:
-                                growth_result = await ifind_client.smart_stock_picking(
-                                    f"{l3_codes_str} 同比季度收入增长率", "stock"
-                                )
-                                g_tables = growth_result.get("tables", [])
-                                if g_tables:
-                                    g_table = g_tables[0].get("table", {})
-                                    g_code_col = g_table.get("股票代码", [])
-                                    g_growth_col = []
-                                    for cn, cv in g_table.items():
-                                        if ("收入" in cn and "增长率" in cn) or (
-                                            "收入" in cn and "同比" in cn
-                                        ):
-                                            g_growth_col = cv
-                                            break
-                                    if g_code_col and g_growth_col:
-                                        for gi, gc in enumerate(g_code_col):
-                                            bare = (
-                                                gc.split(".")[0] if isinstance(gc, str) else str(gc)
-                                            )
-                                            if gi < len(g_growth_col):
-                                                gv = g_growth_col[gi]
-                                                if gv is not None and gv != "--":
-                                                    try:
-                                                        day_revenue_growth[bare] = float(gv)
-                                                    except (ValueError, TypeError):
-                                                        pass
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to fetch revenue growth on {trade_date}: {e}"
-                                )
+                            l3_codes = [s.stock_code for s in l3]
+                            day_revenue_growth = await fundamentals_db.batch_get_revenue_growth(
+                                l3_codes
+                            )
 
                         # Collect all codes for T+1 fetch
                         all_codes = set()
@@ -4103,53 +4047,6 @@ async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) 
     return await _fetch_batch_prices(ifind_client, stock_codes, target_date, indicator="close")
 
 
-async def _fetch_batch_growth(ifind_client, stock_codes: list[str]) -> dict[str, float]:
-    """Fetch YoY quarterly revenue growth rates via iwencai for multiple stocks."""
-    from src.data.clients.ifind_http_client import IFinDHttpError
-
-    if not stock_codes:
-        return {}
-
-    result: dict[str, float] = {}
-    batch_size = 30
-
-    for i in range(0, len(stock_codes), batch_size):
-        batch = stock_codes[i : i + batch_size]
-        codes_str = ";".join(batch)
-        query = f"{codes_str} 同比季度收入增长率"
-
-        try:
-            data = await ifind_client.smart_stock_picking(query, "stock")
-            tables = data.get("tables", [])
-            if not tables:
-                continue
-
-            table = tables[0].get("table", {})
-            code_col = table.get("股票代码", [])
-
-            growth_col_values = []
-            for col_name, col_values in table.items():
-                if "收入" in col_name and ("增长率" in col_name or "同比" in col_name):
-                    growth_col_values = col_values
-                    break
-
-            if code_col and growth_col_values:
-                for j, code in enumerate(code_col):
-                    bare = code.split(".")[0] if isinstance(code, str) else str(code)
-                    if j < len(growth_col_values):
-                        val = growth_col_values[j]
-                        if val is not None and val != "--":
-                            try:
-                                result[bare] = float(val)
-                            except (ValueError, TypeError):
-                                pass
-
-        except IFinDHttpError as e:
-            logger.warning(f"Growth rate fetch failed: {e}")
-
-    return result
-
-
 async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
     """Run full momentum scan for a specific date. Returns ScanResult or None."""
     from src.data.clients.ifind_http_client import IFinDHttpError
@@ -4701,8 +4598,8 @@ def create_settings_router() -> APIRouter:
                                 ifind_client, unique_codes, next_day, indicator="open"
                             )
 
-                        # Growth rates
-                        growth_map = await _fetch_batch_growth(ifind_client, unique_codes)
+                        # Growth rates from DB
+                        growth_map = await fundamentals_db.batch_get_revenue_growth(unique_codes)
 
                         # Build rows
                         db_rows = []

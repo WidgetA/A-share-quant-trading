@@ -455,45 +455,9 @@ class MomentumSectorScanner:
         top_board_stocks = board_groups[top_board]
         logger.info(f"Step 6: Top board '{top_board}' has {len(top_board_stocks)} selected stocks")
 
-        # --- Query growth rates for stocks in the top board ---
-        codes_str = ";".join(s.stock_code for s in top_board_stocks)
-        query = f"{codes_str} 同比季度收入增长率"
-
-        growth_data: dict[str, float] = {}
-        try:
-            result = await self._ifind.smart_stock_picking(query, "stock")
-            tables = result.get("tables", [])
-            if tables:
-                table = tables[0].get("table", {})
-                code_col = table.get("股票代码", [])
-                growth_col_name = None
-                growth_col_values = []
-                for col_name, col_values in table.items():
-                    if "收入" in col_name and "增长率" in col_name:
-                        growth_col_name = col_name
-                        growth_col_values = col_values
-                        break
-                    if "收入" in col_name and "同比" in col_name:
-                        growth_col_name = col_name
-                        growth_col_values = col_values
-                        break
-
-                if growth_col_name and code_col:
-                    logger.debug(f"Step 6: Found growth column '{growth_col_name}'")
-                    for i, code in enumerate(code_col):
-                        bare_code = code.split(".")[0] if isinstance(code, str) else str(code)
-                        if i < len(growth_col_values):
-                            val = growth_col_values[i]
-                            if val is not None and val != "--":
-                                try:
-                                    growth_data[bare_code] = float(val)
-                                except (ValueError, TypeError):
-                                    pass
-                else:
-                    logger.warning("Step 6: Growth column not found in iwencai result")
-
-        except Exception as e:
-            logger.error(f"Step 6: Failed to query growth rates: {e}")
+        # --- Query growth rates from fundamentals DB ---
+        stock_codes = [s.stock_code for s in top_board_stocks]
+        growth_data = await self._fundamentals_db.batch_get_revenue_growth(stock_codes)
 
         # --- Filter out stocks at limit-up at 9:40 ---
         # At limit-up the stock is sealed and unbuyable, skip directly.

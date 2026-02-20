@@ -47,6 +47,12 @@ class StockFundamentals:
     pb: float | None
     total_market_cap: float | None
     roe: float | None
+    annual_revenue_yoy: float | None  # 年度营收同比增长率 (%)
+    quarterly_revenue_yoy: float | None  # 季度营收同比增长率 (%)
+    annual_net_profit_yoy: float | None  # 年度净利润同比增长率 (%)
+    quarterly_net_profit_yoy: float | None  # 季度净利润同比增长率 (%)
+    report_date_annual: str | None  # 年报报告期
+    report_date_quarterly: str | None  # 季报报告期
 
     @property
     def is_st(self) -> bool:
@@ -149,12 +155,7 @@ class FundamentalsDB:
         """
         async with self._db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"""
-                SELECT stock_code, company_name, pe_ttm, ps_ttm, pb,
-                       total_market_cap, roe
-                FROM {self._schema}.stock_fundamentals
-                WHERE stock_code = $1
-                """,
+                f"SELECT * FROM {self._schema}.stock_fundamentals WHERE stock_code = $1",
                 stock_code,
             )
 
@@ -178,12 +179,7 @@ class FundamentalsDB:
 
         async with self._db_pool.acquire() as conn:
             rows = await conn.fetch(
-                f"""
-                SELECT stock_code, company_name, pe_ttm, ps_ttm, pb,
-                       total_market_cap, roe
-                FROM {self._schema}.stock_fundamentals
-                WHERE stock_code = ANY($1)
-                """,
+                f"SELECT * FROM {self._schema}.stock_fundamentals WHERE stock_code = ANY($1)",
                 stock_codes,
             )
 
@@ -228,6 +224,28 @@ class FundamentalsDB:
             )
 
         return {row["stock_code"]: float(row["pe_ttm"]) for row in rows}
+
+    async def batch_get_revenue_growth(self, stock_codes: list[str]) -> dict[str, float]:
+        """
+        Get quarterly revenue YoY growth (季度营收同比增长率) for multiple stocks.
+
+        Returns:
+            Dict mapping stock_code to quarterly_revenue_yoy % (only for stocks with valid data).
+        """
+        if not stock_codes:
+            return {}
+
+        async with self._db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT stock_code, quarterly_revenue_yoy
+                FROM {self._schema}.stock_fundamentals
+                WHERE stock_code = ANY($1) AND quarterly_revenue_yoy IS NOT NULL
+                """,
+                stock_codes,
+            )
+
+        return {row["stock_code"]: float(row["quarterly_revenue_yoy"]) for row in rows}
 
     async def is_st(self, stock_code: str) -> bool:
         """
@@ -294,6 +312,12 @@ class FundamentalsDB:
             pb=to_float(row["pb"]),
             total_market_cap=to_float(row["total_market_cap"]),
             roe=to_float(row["roe"]),
+            annual_revenue_yoy=to_float(row["annual_revenue_yoy"]),
+            quarterly_revenue_yoy=to_float(row["quarterly_revenue_yoy"]),
+            annual_net_profit_yoy=to_float(row["annual_net_profit_yoy"]),
+            quarterly_net_profit_yoy=to_float(row["quarterly_net_profit_yoy"]),
+            report_date_annual=row["report_date_annual"],
+            report_date_quarterly=row["report_date_quarterly"],
         )
 
 
