@@ -1323,9 +1323,9 @@ def create_momentum_router() -> APIRouter:
                 adapter = AkshareHistoricalAdapter(ak_cache)
                 ak_mapper = AkshareConceptMapper()
                 scanner = MomentumSectorScanner(
-                    ifind_client=adapter,
+                    ifind_client=adapter,  # type: ignore[arg-type]
                     fundamentals_db=fundamentals_db,
-                    concept_mapper=ak_mapper,
+                    concept_mapper=ak_mapper,  # type: ignore[arg-type]
                 )
 
                 date_key = trade_date.strftime("%Y-%m-%d")

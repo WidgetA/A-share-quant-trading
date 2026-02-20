@@ -61,11 +61,11 @@ def check_oss_available() -> str | None:
     """
     bucket = _get_oss_bucket()
     if bucket is None:
-        missing = [
-            name
-            for name in ("OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET", "OSS_ENDPOINT", "OSS_BUCKET_NAME")
-            if not os.environ.get(name)
-        ]
+        oss_vars = (
+            "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET",
+            "OSS_ENDPOINT", "OSS_BUCKET_NAME",
+        )
+        missing = [v for v in oss_vars if not os.environ.get(v)]
         return f"OSS 环境变量缺失: {', '.join(missing)}"
     try:
         # Lightweight call to verify credentials + bucket access
