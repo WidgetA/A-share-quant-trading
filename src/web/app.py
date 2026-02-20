@@ -163,12 +163,8 @@ def create_app(
 
         audit_result = run_audit()
         app.state.safety_audit = {
-            "critical_count": len(
-                [v for v in audit_result.violations if v.severity == "CRITICAL"]
-            ),
-            "warning_count": len(
-                [v for v in audit_result.violations if v.severity == "WARNING"]
-            ),
+            "critical_count": len([v for v in audit_result.violations if v.severity == "CRITICAL"]),
+            "warning_count": len([v for v in audit_result.violations if v.severity == "WARNING"]),
             "violations": [
                 {
                     "file": v.file,
