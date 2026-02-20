@@ -70,7 +70,10 @@ class LocalConceptMapper:
                 sectors = json.load(f)
             for item in sectors.get("concept", []):
                 self._valid_boards.add(item["name"])
-            logger.info(f"LocalConceptMapper: loaded {len(self._valid_boards)} board names from sectors.json")
+            logger.info(
+                "LocalConceptMapper: loaded %d board names from sectors.json",
+                len(self._valid_boards),
+            )
         else:
             logger.warning(f"LocalConceptMapper: sectors.json not found at {_SECTORS_PATH}")
 
@@ -95,8 +98,8 @@ class LocalConceptMapper:
 
         # Build reverse index: stock → boards (with junk filtering)
         reverse: dict[str, list[str]] = {}
-        for board_name, stocks in self._board_stocks.items():
-            for code, _name in stocks:
+        for board_name, members in self._board_stocks.items():
+            for code, _name in members:
                 if code not in reverse:
                     reverse[code] = []
                 reverse[code].append(board_name)
