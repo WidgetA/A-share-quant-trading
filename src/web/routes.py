@@ -1292,16 +1292,24 @@ def create_momentum_router() -> APIRouter:
                 yield sse({"type": "error", "message": download_error})
             else:
                 request.app.state.akshare_cache = existing
-                yield sse({"type": "progress", "phase": "oss_upload", "current": 0, "total": 1})
-                oss_save_err = await existing.save_to_oss()  # type: ignore[union-attr]
-                if oss_save_err:
-                    logger.warning(f"akshare OSS save failed: {oss_save_err}")
+                # Fire-and-forget OSS save — don't block SSE and won't be
+                # cancelled if the client disconnects
+                async def _bg_oss_save():
+                    try:
+                        err = await existing.save_to_oss()  # type: ignore[union-attr]
+                        if err:
+                            logger.warning(f"akshare OSS save failed: {err}")
+                        else:
+                            logger.info("akshare cache saved to OSS OK")
+                    except Exception as exc:
+                        logger.error(f"akshare OSS save exception: {exc}")
+
+                asyncio.create_task(_bg_oss_save())
                 yield sse(
                     {
                         "type": "complete",
                         "daily_count": len(existing._daily),  # type: ignore[union-attr]
                         "minute_count": len(existing._minute),  # type: ignore[union-attr]
-                        "oss_error": oss_save_err,
                     }
                 )
 

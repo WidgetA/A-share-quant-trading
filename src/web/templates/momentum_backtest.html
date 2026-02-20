@@ -384,26 +384,16 @@ async function startAkshareDownload() {
                     if (data.type === 'info') {
                         progressText.textContent = data.message;
                     } else if (data.type === 'progress') {
-                        const phaseLabel = data.phase === 'oss_upload' ? '正在上传 OSS 缓存' :
-                                           data.phase === 'daily' ? '日线' : '分钟线';
-                        if (data.phase === 'oss_upload') {
-                            progressText.textContent = phaseLabel + '...';
-                        } else {
-                            const pct = data.total > 0 ? Math.round(data.current / data.total * 100) : 0;
-                            progressBar.style.width = pct + '%';
-                            progressText.textContent = `${phaseLabel}: ${data.current}/${data.total} (${pct}%)`;
-                        }
+                        const phaseLabel = data.phase === 'daily' ? '日线' : '分钟线';
+                        const pct = data.total > 0 ? Math.round(data.current / data.total * 100) : 0;
+                        progressBar.style.width = pct + '%';
+                        progressText.textContent = `${phaseLabel}: ${data.current}/${data.total} (${pct}%)`;
                     } else if (data.type === 'complete') {
                         progressBar.style.width = '100%';
                         progressText.textContent = '下载完成!';
                         progress.querySelector('.loading-spinner').style.display = 'none';
-                        let readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟)`;
-                        if (data.oss_error) {
-                            readyText += ` ⚠ OSS缓存失败: ${data.oss_error}`;
-                            statusEl.style.color = '#d97706';
-                        } else {
-                            statusEl.style.color = '#059669';
-                        }
+                        const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟)`;
+                        statusEl.style.color = '#059669';
                         statusEl.textContent = readyText;
                         akshareReady = true;
                         btn.textContent = '已下载';

@@ -132,8 +132,19 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
-        # Akshare backtest cache (populated on demand by /api/momentum/akshare-prepare)
+        # Akshare backtest cache — try to pre-load from OSS on startup
         app.state.akshare_cache = None
+        try:
+            from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
+
+            oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
+            if oss_cache:
+                app.state.akshare_cache = oss_cache
+                logger.info("Akshare cache pre-loaded from OSS")
+            else:
+                logger.info("No akshare cache found in OSS, will download on demand")
+        except Exception as e:
+            logger.warning(f"Failed to pre-load akshare cache from OSS: {e}")
 
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own
