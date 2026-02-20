@@ -33,6 +33,7 @@ from src.data.sources.concept_mapper import ConceptMapper
 from src.strategy.filters.momentum_quality_filter import (
     MomentumQualityConfig,
     MomentumQualityFilter,
+    QualityAssessment,
 )
 from src.strategy.filters.reversal_factor_filter import (
     ReversalFactorConfig,
@@ -95,7 +96,7 @@ class SelectedStock:
 
 @dataclass
 class RecommendedStock:
-    """The top pick from largest board, scored by 开盘涨幅(高=好) - 营收增长率(低=好)."""
+    """The top pick from largest board, scored by Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)."""
 
     stock_code: str
     stock_name: str
@@ -120,7 +121,7 @@ class ScanResult:
     # Initial gainers that passed Step 1
     initial_gainers: list[str] = field(default_factory=list)
     scan_time: datetime = field(default_factory=datetime.now)
-    # Step 6: recommended stock (scored by 开盘涨幅↑ + 营收增长率↓ from largest board)
+    # Step 6: recommended stock (scored by 开盘涨幅↑ + 营收增长率↓ + 5日涨跌幅↑)
     recommended_stock: RecommendedStock | None = None
     # Price snapshots for selected stocks (for backfill/export use)
     all_snapshots: dict[str, PriceSnapshot] = field(default_factory=dict)
@@ -230,6 +231,7 @@ class MomentumSectorScanner:
 
         # Step 5.5: Momentum quality filter — remove fake breakouts
         # (declining trend + low turnover amplification)
+        quality_assessments: list[QualityAssessment] = []
         if selected:
             selected, quality_assessments = await self._quality_filter.filter_stocks(
                 selected, all_snapshots, trade_date
@@ -244,15 +246,25 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
 
-        # Step 6: Recommend — high opening gap + negative growth filter
+        # Step 6: Recommend — high opening gap + negative growth + recent trend
+        # Pass trend_pct from Step 5.5 to avoid extra API calls
+        trend_data = {
+            a.stock_code: a.trend_pct
+            for a in quality_assessments
+            if a.trend_pct is not None
+        }
         if selected:
-            result.recommended_stock = await self._step6_recommend(selected, all_snapshots)
+            result.recommended_stock = await self._step6_recommend(
+                selected, all_snapshots, trend_data
+            )
             if result.recommended_stock:
                 rec = result.recommended_stock
+                tr = trend_data.get(rec.stock_code)
+                tr_str = f", TR={tr:+.1f}%" if tr is not None else ""
                 logger.info(
                     f"Step 6: Recommended {rec.stock_code} "
                     f"{rec.stock_name} from board '{rec.board_name}' "
-                    f"(OG={rec.open_gain_pct:+.1f}%, GR={rec.growth_rate:+.1f}%)"
+                    f"(OG={rec.open_gain_pct:+.1f}%, GR={rec.growth_rate:+.1f}%{tr_str})"
                 )
             else:
                 logger.info("Step 6: No recommendation (scoring returned None)")
@@ -416,17 +428,16 @@ class MomentumSectorScanner:
         self,
         selected_stocks: list[SelectedStock],
         price_snapshots: dict[str, PriceSnapshot] | None = None,
+        trend_data: dict[str, float] | None = None,
     ) -> RecommendedStock | None:
         """
         Step 6: Score each stock and pick the highest-scoring one.
 
         Scoring formula (within the largest hot board):
-            score = 开盘涨幅标准化得分 - 营收增长率标准化得分
+            score = Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)
 
-        Rationale (from backtest on 2025-01~2025-11 data):
-            - 开盘涨幅越高 → 短期动量越强 → 次日延续性好
-            - 营收增长率越低 → 纯资金/题材驱动而非基本面定价 → 短线延续性更强
-            - 两者结合的打分在最大板块内选第1名: 日均+0.83%, 胜率49.5%
+        All three factors required — missing data → skip stock.
+        If no stock has complete data → no recommendation (don't trade).
         """
         if not selected_stocks:
             return None
@@ -512,60 +523,69 @@ class MomentumSectorScanner:
         top_board_stocks = non_limit_up
 
         # --- Score and pick ---
-        # Candidates: must have growth data to compute score
-        candidates = [s for s in top_board_stocks if s.stock_code in growth_data]
+        # ALL candidates must have growth + trend data. Any missing → don't trade.
+        _trend_data = trend_data or {}
+        missing = [
+            s.stock_code for s in top_board_stocks
+            if s.stock_code not in growth_data or s.stock_code not in _trend_data
+        ]
+        if missing:
+            logger.info(
+                f"Step 6: Incomplete data for {missing}, "
+                "no recommendation (数据不全不交易)"
+            )
+            return None
 
-        if not candidates:
-            # Fallback: no growth data at all, pick by 开盘涨幅 alone
-            if top_board_stocks:
-                logger.warning("Step 6: No growth data, falling back to highest 开盘涨幅")
-                candidates = top_board_stocks
-                growth_data = {s.stock_code: 0.0 for s in candidates}
-            else:
-                return None
+        candidates = top_board_stocks
 
         if len(candidates) == 1:
-            # Only one stock, no need to score
             best = candidates[0]
         else:
-            # Z-score standardization within this board's candidates:
-            #   开盘涨幅: higher = better (positive score)
-            #   营收增长率: lower = better (subtract from score)
+            # Z-score standardization:
+            #   开盘涨幅: higher = better (+)
+            #   营收增长率: lower = better (-)
+            #   5日涨跌幅: higher = better (+) — penalizes consecutive drops
             og_values = [s.open_gain_pct for s in candidates]
             gr_values = [growth_data[s.stock_code] for s in candidates]
+            tr_values = [_trend_data[s.stock_code] for s in candidates]
 
             og_mean = sum(og_values) / len(og_values)
             gr_mean = sum(gr_values) / len(gr_values)
+            tr_mean = sum(tr_values) / len(tr_values)
 
             og_std = (sum((v - og_mean) ** 2 for v in og_values) / len(og_values)) ** 0.5
             gr_std = (sum((v - gr_mean) ** 2 for v in gr_values) / len(gr_values)) ** 0.5
+            tr_std = (sum((v - tr_mean) ** 2 for v in tr_values) / len(tr_values)) ** 0.5
 
             # Avoid division by zero (all stocks have same value)
             og_std = og_std if og_std > 0 else 1.0
             gr_std = gr_std if gr_std > 0 else 1.0
+            tr_std = tr_std if tr_std > 0 else 1.0
 
             def score(s: SelectedStock) -> float:
                 og_z = (s.open_gain_pct - og_mean) / og_std
                 gr_z = (growth_data[s.stock_code] - gr_mean) / gr_std
-                return og_z - gr_z
+                tr_z = (_trend_data[s.stock_code] - tr_mean) / tr_std
+                return og_z - gr_z + tr_z
 
             best = max(candidates, key=score)
 
         best_code = best.stock_code
         best_growth = growth_data[best_code]
+        best_trend = _trend_data[best_code]
 
         # Log scoring details for top 3
         if len(candidates) > 1:
             scored = sorted(candidates, key=score, reverse=True)
             top3_info = ", ".join(
-                f"{s.stock_code}(开盘涨幅={s.open_gain_pct:+.1f}%,增长率={growth_data[s.stock_code]:+.1f}%,分={score(s):.2f})"
+                f"{s.stock_code}(OG={s.open_gain_pct:+.1f}%,GR={growth_data[s.stock_code]:+.1f}%,TR={_trend_data[s.stock_code]:+.1f}%,分={score(s):.2f})"
                 for s in scored[:3]
             )
             logger.info(f"Step 6: Top 3 scores: {top3_info}")
         else:
             logger.info(
                 f"Step 6: Single candidate {best_code} "
-                f"(开盘涨幅={best.open_gain_pct:+.1f}%, 增长率={best_growth:+.1f}%)"
+                f"(OG={best.open_gain_pct:+.1f}%, GR={best_growth:+.1f}%, TR={best_trend:+.1f}%)"
             )
 
         snap = price_snapshots.get(best_code) if price_snapshots else None

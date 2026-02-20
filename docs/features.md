@@ -31,6 +31,7 @@
 | 0.9.0 | 2026-02-06 | - | OA-001: Order assistant (real-time news dashboard) |
 | 0.10.0 | 2026-02-12 | - | STR-004: Momentum sector strategy (backtest + intraday alert) |
 | 0.10.1 | 2026-02-19 | - | STR-004: Remove gap-fade filter (ineffective in validation, precision ~50%) |
+| 0.10.2 | 2026-02-20 | - | STR-004: Sync docs with code (fix scoring formula, add Step 5.5/5.6/limit-up docs) |
 
 ---
 
@@ -626,13 +627,21 @@ strategy:
 
 **Strategy Flow**:
 1. **Pre-filter (iwencai)**: Get main board non-ST stocks with opening gain > -0.5% (broad candidate pool)
-2. **9:40 Filter**: Keep stocks where (9:40 price - open) / open > 0.56%
-3. **Reverse Concept Lookup**: For each qualified stock, find its concept boards via iwencai, filter junk boards
-4. **Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 2
-5. **Board Constituents**: Get ALL stocks in each hot board
-6. **Gain Filter**: Select constituents with 9:40 gain from open >0.56%
-7. **Recommend (推股)**: From the board with the most selected stocks, pick the one with highest earnings growth (同比季度收入增长率 via iwencai). Highlighted in UI + Feishu notification
-9. **Notification**: Send selection + recommendation via Feishu
+2. **Step 1 — 9:40 Filter**: Keep stocks where (9:40 price - open) / open > 0.56%, main board, non-ST
+3. **Step 2 — Reverse Concept Lookup**: For each qualified stock, find its concept boards via iwencai, filter junk boards
+4. **Step 3 — Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 1
+5. **Step 4 — Board Constituents**: Get ALL stocks in each hot board
+6. **Step 5 — Gain Filter**: Select constituents with 9:40 gain from open >0.56%, main board, non-ST
+7. **Step 5.5 — Momentum Quality Filter**: Remove "fake breakouts" — stocks in a declining trend (5-day) AND low turnover amplification (<1.3x vs 20-day avg). AND logic: both conditions must be true to filter out
+8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
+9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
+   - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
+   - Query 同比季度收入增长率 via iwencai
+   - Reuse 5日涨跌幅 (`trend_pct`) already computed in Step 5.5 (no extra API call; works with both iFinD and akshare data sources)
+   - Score: `Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)` — 开盘涨幅越高越好，营收增长率越低越好，近期趋势越强越好（过滤连跌后超跌反弹的票，如600337在2026-01-14连跌3天累计-20%后冲涨停炸板，次日-10%）
+   - **Data completeness requirement**: 板块内所有候选票必须同时具备营收增长率和5日涨跌幅数据。任何一只票缺数据 → 当天不推票、不交易（Trading Safety §12: 宁可不交易也不用残缺数据做决策）
+   - Pick the highest-scoring stock. Highlighted in UI + Feishu notification
+10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
 - Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)
@@ -640,7 +649,9 @@ strategy:
 - Concept boards: iFinD iwencai (`smart_stock_picking`)
 
 **Key Files**:
-- `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic
+- `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic (Step 1–6)
+- `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: fake breakout filter
+- `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
 - `src/data/sources/concept_mapper.py` — Stock ↔ concept board mapping
 - `src/data/database/fundamentals_db.py` — stock_fundamentals reader
 - `scripts/backtest_momentum.py` — Backtest script
@@ -670,7 +681,9 @@ strategy:
 - [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
 - [x] ConceptMapper: iwencai-based stock-to-board and board-to-stock lookups
-- [x] MomentumSectorScanner: 5-step pipeline + step 6 recommendation
+- [x] MomentumSectorScanner: Step 1–6 pipeline with recommendation scoring
+- [x] MomentumQualityFilter: Step 5.5 fake breakout filter (declining trend + low turnover)
+- [x] ReversalFactorFilter: Step 5.6 冲高回落 filter (early fade + price position)
 - [x] Feishu notification: `send_momentum_scan_result()` with recommendation
 - [x] Backtest script with `--notify` option
 - [x] Intraday monitoring script (polls 9:30-9:40)

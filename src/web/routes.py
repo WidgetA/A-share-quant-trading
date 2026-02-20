@@ -1911,7 +1911,7 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
-                    # Fetch board trend data (only available with iFinD)
+                    # Fetch board trend data (iFinD only — akshare has no board index)
                     board_data = {}
                     if board_name and data_source != "akshare":
                         try:
@@ -2223,11 +2223,18 @@ def create_momentum_router() -> APIRouter:
                         quality_config = MomentumQualityConfig(enabled=True)
                         quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
                         if l1:
-                            l2, _ = await quality_filter_inst.filter_stocks(
+                            l2, qa = await quality_filter_inst.filter_stocks(
                                 l1, price_snapshots, trade_date
                             )
                         else:
                             l2 = list(l1)
+                            qa = []
+
+                        # Build trend_data from quality assessments for Step 6 scoring
+                        trend_data_l = {
+                            a.stock_code: a.trend_pct
+                            for a in qa if a.trend_pct is not None
+                        }
 
                         # L3: reversal factor filter (冲高回落)
                         from src.strategy.filters.reversal_factor_filter import (
@@ -2247,7 +2254,7 @@ def create_momentum_router() -> APIRouter:
                         # L4: recommendation
                         l4 = []
                         if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots)
+                            rec = await scanner._step6_recommend(l3, price_snapshots, trend_data_l)
                             if rec:
                                 l4 = [
                                     SelectedStock(
@@ -2831,11 +2838,27 @@ def create_momentum_router() -> APIRouter:
                         quality_config = MomentumQualityConfig(enabled=body.quality_filter)
                         quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
                         if body.quality_filter and l1:
-                            l2, _ = await quality_filter_inst.filter_stocks(
+                            l2, qa2 = await quality_filter_inst.filter_stocks(
                                 l1, price_snapshots, trade_date
                             )
                         else:
                             l2 = list(l1)
+                            qa2 = []
+
+                        # Always fetch trend data for Step 6 scoring, even if quality filter is off
+                        if not qa2 and l1:
+                            qa2_data = await quality_filter_inst._fetch_historical_data(
+                                [s.stock_code for s in l1], trade_date
+                            )
+                            trend_data_l2 = {
+                                code: v["trend_pct"] for code, v in qa2_data.items()
+                                if v.get("trend_pct") is not None
+                            }
+                        else:
+                            trend_data_l2 = {
+                                a.stock_code: a.trend_pct
+                                for a in qa2 if a.trend_pct is not None
+                            }
 
                         # L3: reversal factor filter (冲高回落)
                         from src.strategy.filters.reversal_factor_filter import (
@@ -2856,7 +2879,7 @@ def create_momentum_router() -> APIRouter:
                         l4 = []
                         rec = None
                         if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots)
+                            rec = await scanner._step6_recommend(l3, price_snapshots, trend_data_l2)
                             if rec:
                                 l4 = [
                                     SelectedStock(
@@ -3507,15 +3530,19 @@ async def _call_llm_stock_analysis(
 
     system_prompt = (
         "你是一个A股量化交易分析师。请分析以下亏损交易的原因。\n\n"
-        "策略说明：动量板块策略 - 预筛开盘涨幅>-0.5%的主板股票，"
-        "9:40时筛选对比开盘涨幅>0.56%的股票，"
-        "找到有>=2只这样股票的【热门概念板块】，"
-        "从这些板块中选出PE合理且9:40 vs开盘>0.56%的股票，"
-        "推荐业绩增长最高的那只。买入价为9:40价格，次日开盘卖出。"
+        "策略说明：动量板块策略\n"
+        "1. 预筛开盘涨幅>-0.5%的沪深主板非ST股票\n"
+        "2. 9:40时筛选(9:40价-开盘价)/开盘价>0.56%的股票\n"
+        "3. 反查概念板块，找到有>=2只入选股的【热门概念板块】\n"
+        "4. 拉取热门板块全部成分股，再筛9:40 vs开盘>0.56%\n"
+        "5. 过滤假突破（下跌趋势+低换手）和冲高回落（从高点大幅回落）\n"
+        "6. 在最大板块中排除涨停股，按 Z(开盘涨幅)-Z(营收增长率) 打分，"
+        "选开盘涨幅高+营收增长率低的（纯资金/题材驱动，短线延续性更强）\n"
+        "7. 买入价为9:40价格，次日开盘卖出。"
     )
 
-    # Build board trend text
-    board_text = "板块走势数据不可用"
+    # Build board trend text (only when data available)
+    board_text = ""
     if board_data and "error" not in board_data:
         parts = []
         if board_data.get("open_gain") is not None:
@@ -3529,13 +3556,13 @@ async def _call_llm_stock_analysis(
         if board_data.get("min_gain") is not None:
             parts.append(f"盘中最低: {board_data['min_gain']:+.2f}%")
         if parts:
-            board_text = "\n".join(f"- {p}" for p in parts)
+            board_text = f"\n板块当日走势：\n" + "\n".join(f"- {p}" for p in parts)
 
     # Build stock day trend text
     stock_text = ""
     if stock_day_data and stock_day_data.get("prev_close"):
         stock_text = (
-            f"\n\n个股当日走势：\n"
+            f"\n个股当日走势：\n"
             f"- 开盘涨幅: {stock_day_data.get('open_gain', 0):+.2f}%\n"
             f"- 全天涨幅: {stock_day_data.get('day_gain', 0):+.2f}%\n"
             f"- 盘中最高: {stock_day_data.get('max_gain', 0):+.2f}%\n"
@@ -3552,10 +3579,10 @@ async def _call_llm_stock_analysis(
         f"- 卖出日期：{trade.get('sell_date', '')}，卖出价：{trade.get('sell_price', 0)}\n"
         f"- 亏损：{trade.get('profit', 0):.2f}元（{trade.get('return_pct', 0):+.2f}%）\n"
         f"- 该板块触发股票（9:40 vs 开盘>0.56%）：{trigger_text}\n"
-        f"\n板块当日走势：\n{board_text}"
+        f"{board_text}"
         f"{stock_text}\n\n"
         f"请分析这笔交易亏损的可能原因（2-3句话），重点关注：\n"
-        f"1. 板块是否冲高回落？\n"
+        f"1. 个股当日走势是否冲高回落？\n"
         f"2. 个股是否有特殊情况？\n"
         f"3. 选股逻辑在这个场景下的缺陷？"
     )
@@ -3609,11 +3636,15 @@ async def _call_llm_strategy_summary(analyses: list[dict]) -> str:
     system_prompt = (
         "你是一个A股量化交易策略分析师。请基于以下亏损交易的逐笔分析，"
         "总结该策略的问题和改进建议。\n\n"
-        "策略说明：动量板块策略 - 预筛开盘涨幅>-0.5%的主板股票，"
-        "9:40时筛选对比开盘涨幅>0.56%的股票，"
-        "找到有>=2只这样股票的【热门概念板块】，"
-        "从这些板块中选出PE合理且9:40 vs开盘>0.56%的股票，"
-        "推荐业绩增长最高的那只。买入价为9:40价格，次日开盘卖出。"
+        "策略说明：动量板块策略\n"
+        "1. 预筛开盘涨幅>-0.5%的沪深主板非ST股票\n"
+        "2. 9:40时筛选(9:40价-开盘价)/开盘价>0.56%的股票\n"
+        "3. 反查概念板块，找到有>=2只入选股的【热门概念板块】\n"
+        "4. 拉取热门板块全部成分股，再筛9:40 vs开盘>0.56%\n"
+        "5. 过滤假突破（下跌趋势+低换手）和冲高回落（从高点大幅回落）\n"
+        "6. 在最大板块中排除涨停股，按 Z(开盘涨幅)-Z(营收增长率) 打分，"
+        "选开盘涨幅高+营收增长率低的（纯资金/题材驱动，短线延续性更强）\n"
+        "7. 买入价为9:40价格，次日开盘卖出。"
     )
 
     user_prompt = (
