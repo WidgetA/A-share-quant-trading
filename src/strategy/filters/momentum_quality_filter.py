@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from src.data.clients.ifind_http_client import IFinDHttpClient
@@ -153,17 +153,23 @@ class MomentumQualityFilter:
                 f"({stock.stock_name}). Cannot assess momentum quality — halting."
             )
 
-        # Insufficient history (e.g. recent IPO): conservatively filter out.
-        # This is NOT a data error — the stock simply lacks enough trading days.
+        # Insufficient history: must verify it's a genuine new listing.
+        # New IPO → conservatively filter out (safe).
+        # Old stock with missing data → data problem → halt.
         if hist.get("trend_pct") is None:
-            logger.warning(
-                f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
-                f"insufficient history for trend — filtering out"
-            )
-            return QualityAssessment(
-                stock_code=stock.stock_code,
-                filtered_out=True,
-                reasons=["历史数据不足，无法评估趋势"],
+            if hist.get("is_new_listing"):
+                logger.info(
+                    f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
+                    f"is a recent IPO with insufficient history — filtering out"
+                )
+                return QualityAssessment(
+                    stock_code=stock.stock_code,
+                    filtered_out=True,
+                    reasons=["次新股，历史数据不足"],
+                )
+            raise RuntimeError(
+                f"QualityFilter: missing trend_pct for {stock.stock_code} "
+                f"({stock.stock_name}). Not a new listing — data may be corrupt. Halting."
             )
 
         reasons: list[str] = []
@@ -180,17 +186,21 @@ class MomentumQualityFilter:
         # Signal 2: Turnover amplification
         if trade_date is not None:
             # Backtest mode: use actual daily turnover
-            # Insufficient turnover history (IPO): conservatively filter out.
             if not hist.get("buy_day_turnover") or not hist.get("avg_daily_turnover"):
-                logger.warning(
-                    f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
-                    f"insufficient history for turnover — filtering out"
-                )
-                return QualityAssessment(
-                    stock_code=stock.stock_code,
-                    filtered_out=True,
-                    reasons=["历史数据不足，无法评估换手率"],
-                    trend_pct=trend_pct,
+                if hist.get("is_new_listing"):
+                    logger.info(
+                        f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
+                        f"is a recent IPO with insufficient turnover history — filtering out"
+                    )
+                    return QualityAssessment(
+                        stock_code=stock.stock_code,
+                        filtered_out=True,
+                        reasons=["次新股，换手率历史不足"],
+                        trend_pct=trend_pct,
+                    )
+                raise RuntimeError(
+                    f"QualityFilter: missing turnover data for {stock.stock_code} "
+                    f"({stock.stock_name}). Not a new listing — data may be corrupt. Halting."
                 )
             buy_turn = hist["buy_day_turnover"]
             avg_turn = hist["avg_daily_turnover"]
@@ -275,12 +285,22 @@ class MomentumQualityFilter:
                         continue
 
                     tbl = table_entry.get("table", {})
+                    time_vals = tbl.get("time", [])
                     close_vals = tbl.get("close", [])
                     turn_vals = tbl.get("turnoverRatio", [])
                     vol_vals = tbl.get("volume", [])
 
                     entry: dict = {}
                     lookback = self._config.turnover_lookback_days
+
+                    # Detect new listing: if the stock's first data date is
+                    # within 30 calendar days of ref_date, it's a recent IPO.
+                    # We requested ~50 calendar days of history — a stock listed
+                    # for 50+ days would have data near the start of that window.
+                    if time_vals:
+                        first_date = datetime.strptime(time_vals[0], "%Y-%m-%d").date()
+                        days_since_listing = (ref_date - first_date).days
+                        entry["is_new_listing"] = days_since_listing < 30
 
                     # Trend: compare last close (prev_close) vs close N days earlier
                     # + consecutive up days count (for Step 6 filtering)
