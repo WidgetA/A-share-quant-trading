@@ -172,10 +172,9 @@ class NewsAnalysisStrategy(BaseStrategy):
             self._position_manager.set_repository(trading_repo)
             await self._position_manager.load_from_db()
             logger.info("PositionManager connected to trading database")
-        except Exception as e:
-            logger.warning(
-                f"Failed to connect to trading database: {e}. Using file-based persistence."
-            )
+        except Exception:
+            logger.error("Failed to connect to trading database")
+            raise
 
         logger.info(f"NewsAnalysisStrategy loaded with config: {position_config}")
 
@@ -355,8 +354,9 @@ class NewsAnalysisStrategy(BaseStrategy):
         if not self._sector_mapper.is_loaded:
             try:
                 await self._sector_mapper.load_sector_data()
-            except Exception as e:
-                logger.warning(f"Failed to load sector data: {e}")
+            except Exception:
+                logger.error("Failed to load sector data")
+                raise
 
         # Get POSITIVE messages since last close (already analyzed by external project)
         # Using get_positive_messages_since to only fetch bullish/strong_bullish
@@ -547,8 +547,9 @@ class NewsAnalysisStrategy(BaseStrategy):
                     # Successfully bought one stock, stop looking for more
                     break
 
-                except Exception as e:
-                    logger.error(f"Failed to execute order for {stock_code}: {e}")
+                except Exception:
+                    logger.error(f"Failed to execute order for {stock_code}")
+                    raise
 
         # Clear pending orders after processing
         self._pending_premarket_orders.clear()
@@ -663,8 +664,9 @@ class NewsAnalysisStrategy(BaseStrategy):
                     # Successfully bought one stock, stop looking for more
                     break
 
-                except Exception as e:
-                    logger.error(f"Failed to allocate intraday slot: {e}")
+                except Exception:
+                    logger.error("Failed to allocate intraday slot")
+                    raise
 
     async def _handle_after_hours(self, context: StrategyContext) -> None:
         """Handle after-hours: record holdings for next day and save state."""

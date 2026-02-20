@@ -309,6 +309,8 @@ def create_router() -> APIRouter:
             "summary": manager.get_summary(),
         }
 
+    _register_safety_audit_endpoint(router)
+
     return router
 
 
@@ -4342,6 +4344,23 @@ async def _parse_iwencai_realtime(ifind_client, iwencai_result: dict) -> dict:
             logger.error(f"real_time_quotation batch failed: {e}")
 
     return snapshots
+
+
+# === SAFETY AUDIT ENDPOINT ===
+# Included in the main router (create_router) so it's always available.
+# The audit runs once at startup; this endpoint returns cached results.
+
+
+def _register_safety_audit_endpoint(router: APIRouter) -> None:
+    """Register the /api/safety-audit endpoint on the given router."""
+
+    @router.get("/api/safety-audit")
+    async def safety_audit(request: Request):
+        """Return trading safety audit results (computed at startup)."""
+        audit = getattr(request.app.state, "safety_audit", None)
+        if audit is None:
+            return {"critical_count": 0, "warning_count": 0, "violations": []}
+        return audit
 
 
 # === SETTINGS ENDPOINTS ===

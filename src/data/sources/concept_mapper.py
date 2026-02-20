@@ -110,12 +110,12 @@ class ConceptMapper:
             logger.debug(f"{bare_code}: {len(concepts)} concepts -> {len(filtered)} after filter")
             return filtered
 
-        except IFinDHttpError as e:
-            logger.error(f"Failed to get concepts for {bare_code}: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Unexpected error getting concepts for {bare_code}: {e}")
-            return []
+        except IFinDHttpError:
+            logger.error(f"Failed to get concepts for {bare_code}")
+            raise
+        except Exception:
+            logger.error(f"Unexpected error getting concepts for {bare_code}")
+            raise
 
     async def batch_get_stock_concepts(self, stock_codes: list[str]) -> dict[str, list[str]]:
         """
@@ -166,12 +166,12 @@ class ConceptMapper:
             logger.debug(f"Board '{board_name}': {len(stocks)} constituent stocks")
             return stocks
 
-        except IFinDHttpError as e:
-            logger.error(f"Failed to get stocks for board '{board_name}': {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Unexpected error getting stocks for board '{board_name}': {e}")
-            return []
+        except IFinDHttpError:
+            logger.error(f"Failed to get stocks for board '{board_name}'")
+            raise
+        except Exception:
+            logger.error(f"Unexpected error getting stocks for board '{board_name}'")
+            raise
 
     async def batch_get_board_stocks(
         self, board_names: list[str]

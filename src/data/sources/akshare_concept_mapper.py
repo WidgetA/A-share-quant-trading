@@ -63,9 +63,9 @@ class AkshareConceptMapper:
             self._stock_concepts_cache[bare] = filtered
             logger.debug(f"{bare}: {len(boards)} EM concepts -> {len(filtered)} after filter")
             return filtered
-        except Exception as e:
-            logger.error(f"Failed to get EM concepts for {bare}: {e}")
-            return []
+        except Exception:
+            logger.error(f"Failed to get EM concepts for {bare}")
+            raise
 
     async def batch_get_stock_concepts(self, stock_codes: list[str]) -> dict[str, list[str]]:
         """Batch reverse lookup with concurrency control."""
@@ -91,9 +91,9 @@ class AkshareConceptMapper:
             self._board_stocks_cache[board_name] = stocks
             logger.debug(f"EM Board '{board_name}': {len(stocks)} constituent stocks")
             return stocks
-        except Exception as e:
-            logger.error(f"Failed to get EM constituents for '{board_name}': {e}")
-            return []
+        except Exception:
+            logger.error(f"Failed to get EM constituents for '{board_name}'")
+            raise
 
     async def batch_get_board_stocks(
         self, board_names: list[str]

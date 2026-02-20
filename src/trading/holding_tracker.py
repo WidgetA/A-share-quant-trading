@@ -213,8 +213,9 @@ class HoldingTracker:
                     current_price = await price_fetcher(holding.stock_code)
                     if current_price and current_price > 0:
                         holding.calculate_pnl(current_price)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch price for {holding.stock_code}: {e}")
+                except Exception:
+                    logger.error(f"Failed to fetch price for {holding.stock_code}")
+                    raise
 
         return self._holdings
 

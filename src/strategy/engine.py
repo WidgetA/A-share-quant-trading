@@ -268,9 +268,9 @@ class StrategyEngine:
             logger.info(f"Loaded strategy: {strategy_name} from {file_path}")
             return strategy_name
 
-        except Exception as e:
-            logger.error(f"Failed to load strategy from {file_path}: {e}")
-            return None
+        except Exception:
+            logger.error(f"Failed to load strategy from {file_path}")
+            raise
 
     async def load_strategy_instance(
         self,
@@ -312,9 +312,9 @@ class StrategyEngine:
             logger.info(f"Loaded strategy instance: {strategy_name}")
             return strategy_name
 
-        except Exception as e:
-            logger.error(f"Failed to load strategy {strategy.strategy_name}: {e}")
-            return None
+        except Exception:
+            logger.error(f"Failed to load strategy {strategy.strategy_name}")
+            raise
 
     async def unload_strategy(self, strategy_name: str) -> bool:
         """
@@ -337,8 +337,9 @@ class StrategyEngine:
         info = self._strategies[strategy_name]
         try:
             await info.strategy.on_unload()
-        except Exception as e:
-            logger.error(f"Error in on_unload for {strategy_name}: {e}")
+        except Exception:
+            logger.error(f"Error in on_unload for {strategy_name}")
+            raise
 
         del self._strategies[strategy_name]
         self._notify_callbacks(strategy_name, "unloaded")
@@ -389,8 +390,9 @@ class StrategyEngine:
             try:
                 async for signal in info.strategy.generate_signals(context):
                     yield signal
-            except Exception as e:
-                logger.error(f"Error generating signals from {name}: {e}")
+            except Exception:
+                logger.error(f"Error generating signals from {name}")
+                raise
 
     async def generate_signals(
         self,
@@ -470,8 +472,9 @@ class StrategyEngine:
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error in file watcher: {e}")
+            except Exception:
+                logger.error("Error in file watcher")
+                raise
 
         logger.info("Stopped strategy file watcher")
 
@@ -562,9 +565,9 @@ class StrategyEngine:
             logger.warning(f"No strategy class found in {file_path}")
             return None
 
-        except Exception as e:
-            logger.error(f"Error loading {file_path}: {e}")
-            return None
+        except Exception:
+            logger.error(f"Error loading {file_path}")
+            raise
 
     def _calculate_file_hash(self, file_path: Path) -> str:
         """Calculate SHA256 hash of file content."""
@@ -576,5 +579,6 @@ class StrategyEngine:
         for callback in self._callbacks:
             try:
                 callback(strategy_name, event)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
+            except Exception:
+                logger.error(f"Callback error for {strategy_name}/{event}")
+                raise

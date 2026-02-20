@@ -162,12 +162,12 @@ class IFinDLimitUpSource:
             logger.debug(f"smart_stock_picking returned {len(result.get('tables', []))} tables")
             return result
 
-        except IFinDHttpError as e:
-            logger.error(f"iFinD HTTP API error: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching limit-up data: {e}")
-            return None
+        except IFinDHttpError:
+            logger.error("iFinD HTTP API error fetching limit-up data")
+            raise
+        except Exception:
+            logger.error("Error fetching limit-up data")
+            raise
 
     def _process_raw_data(
         self,
@@ -247,8 +247,9 @@ class IFinDLimitUpSource:
                         logger.error(f"Error processing row {i}: {e}")
                         continue
 
-        except Exception as e:
-            logger.error(f"Error processing raw data: {e}")
+        except Exception:
+            logger.error("Error processing raw data")
+            raise
 
         return stocks
 

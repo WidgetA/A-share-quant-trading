@@ -158,6 +158,36 @@ def create_app(
 
         asyncio.create_task(_bg_load_oss_cache())
 
+        # Run trading safety audit at startup
+        from scripts.audit_trading_safety import run_audit
+
+        audit_result = run_audit()
+        app.state.safety_audit = {
+            "critical_count": len(
+                [v for v in audit_result.violations if v.severity == "CRITICAL"]
+            ),
+            "warning_count": len(
+                [v for v in audit_result.violations if v.severity == "WARNING"]
+            ),
+            "violations": [
+                {
+                    "file": v.file,
+                    "line": v.line,
+                    "category": v.category,
+                    "detail": v.detail,
+                    "severity": v.severity,
+                }
+                for v in audit_result.violations
+            ],
+            "files_scanned": audit_result.files_scanned,
+        }
+        if audit_result.violations:
+            critical = app.state.safety_audit["critical_count"]
+            logger.warning(
+                f"Trading safety audit: {critical} CRITICAL violations found! "
+                f"Run 'uv run python scripts/audit_trading_safety.py' for details."
+            )
+
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own
         app.state.momentum_monitor_state = {

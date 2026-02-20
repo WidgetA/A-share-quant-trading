@@ -171,8 +171,9 @@ class SectorMapper:
                 if code and len(code) == 6 and name:
                     self._data.stock_names[code] = name
 
-        except Exception as e:
-            logger.warning(f"Failed to fetch all stock names: {e}")
+        except Exception:
+            logger.error("Failed to fetch all stock names")
+            raise
 
     def _fetch_industry_boards(self) -> list[dict[str, Any]]:
         """Fetch list of industry boards (sync, runs in thread pool)."""
@@ -191,9 +192,9 @@ class SectorMapper:
                 )
             return boards
 
-        except Exception as e:
-            logger.error(f"Failed to fetch industry boards: {e}")
-            return []
+        except Exception:
+            logger.error("Failed to fetch industry boards")
+            raise
 
     async def _fetch_all_board_stocks(self, boards: list[dict[str, Any]]) -> None:
         """Fetch stocks for all boards in parallel."""
@@ -235,8 +236,9 @@ class SectorMapper:
                         self._data.stock_names[code] = name
                     self._data.sector_to_stocks[board_name].append(code)
 
-        except Exception as e:
-            logger.warning(f"Failed to fetch stocks for board {board_name}: {e}")
+        except Exception:
+            logger.error(f"Failed to fetch stocks for board {board_name}")
+            raise
 
     def _fetch_board_stocks_sync(self, board_name: str) -> list[dict[str, str]]:
         """Fetch stocks for a board (sync, runs in thread pool)."""
@@ -254,9 +256,9 @@ class SectorMapper:
 
             return stocks
 
-        except Exception as e:
-            logger.debug(f"Failed to fetch stocks for {board_name}: {e}")
-            return []
+        except Exception:
+            logger.error(f"Failed to fetch stocks for {board_name}")
+            raise
 
     def get_sector(self, stock_code: str) -> str | None:
         """

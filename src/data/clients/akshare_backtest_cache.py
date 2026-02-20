@@ -242,9 +242,9 @@ class AkshareBacktestCache:
                 f"range [{cache._start_date} ~ {cache._end_date}]"
             )
             return cache
-        except Exception as e:
-            logger.error(f"Failed to load cache from OSS: {e}", exc_info=True)
-            return None
+        except Exception:
+            logger.error("Failed to load cache from OSS", exc_info=True)
+            raise
 
     async def download_prices(
         self,
@@ -326,8 +326,9 @@ class AkshareBacktestCache:
                         # Fix preClose: first day has 0, need to fetch one extra day
                         # We'll fix this after all downloads
                         self._daily[code] = code_data
-                except Exception as e:
-                    logger.debug(f"Daily download failed for {code}: {e}")
+                except Exception:
+                    logger.error(f"Daily download failed for {code}")
+                    raise
 
                 done_daily += 1
                 if progress_cb and done_daily % 50 == 0:
@@ -398,8 +399,9 @@ class AkshareBacktestCache:
 
                             if code_data:
                                 self._minute[code] = code_data
-                    except Exception as e:
-                        logger.debug(f"baostock minute failed for {code}: {e}")
+                    except Exception:
+                        logger.error(f"baostock minute failed for {code}")
+                        raise
 
                     done_minute[0] += 1
             finally:
@@ -552,9 +554,9 @@ class AkshareHistoricalAdapter:
             sd = datetime.strptime(start_date, "%Y-%m-%d").date()
             ed = datetime.strptime(end_date, "%Y-%m-%d").date()
             return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
-        except Exception as e:
-            logger.error(f"Failed to get trade dates: {e}")
-            return []
+        except Exception:
+            logger.error("Failed to get trade dates")
+            raise
 
 
 async def _maybe_await(result: Any) -> None:

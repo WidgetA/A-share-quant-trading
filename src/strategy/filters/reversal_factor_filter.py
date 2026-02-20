@@ -86,7 +86,7 @@ class ReversalFactorFilter:
     keep fading. This is the only factor that works for scanner-selected
     stocks (which are above open price at 9:40).
 
-    Fail-open: if high_price is 0 or unavailable, stock is NOT filtered.
+    Fail-fast: if snapshot or high_price unavailable, raises error to halt trading.
 
     Usage:
         f = ReversalFactorFilter()
@@ -194,11 +194,15 @@ class ReversalFactorFilter:
         early_fade = None
         price_position = None
 
-        if not snap or snap.high_price <= 0:
-            # No high_price data → fail-open (don't filter)
-            return ReversalAssessment(
-                stock_code=stock.stock_code,
-                filtered_out=False,
+        if not snap:
+            raise RuntimeError(
+                f"ReversalFilter: no snapshot data for {stock.stock_code} "
+                f"({stock.stock_name}). Cannot assess reversal risk — halting."
+            )
+        if snap.high_price <= 0:
+            raise RuntimeError(
+                f"ReversalFilter: high_price={snap.high_price} for {stock.stock_code} "
+                f"({stock.stock_name}). Invalid price data — halting."
             )
 
         # Factor 1: Early Fade

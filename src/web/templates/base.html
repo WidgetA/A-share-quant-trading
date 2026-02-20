@@ -28,5 +28,31 @@
     </footer>
 
     {% block scripts %}{% endblock %}
+    <script>
+    // Trading safety audit — show persistent red banner if CRITICAL violations exist
+    (async function() {
+        try {
+            const resp = await fetch('/api/safety-audit');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.critical_count > 0) {
+                const banner = document.createElement('div');
+                banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;' +
+                    'background:#d32f2f;color:#fff;padding:10px 20px;font-size:14px;' +
+                    'display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 8px rgba(0,0,0,0.3)';
+                banner.innerHTML =
+                    '<span>交易安全审计: <b>' + data.critical_count + ' 个严重问题</b> — ' +
+                    '代码中存在静默吞错/fail-open 模式，可能导致交易数据缺失时不报错继续交易。' +
+                    '运行 <code style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:3px">' +
+                    'uv run python scripts/audit_trading_safety.py</code> 查看详情</span>' +
+                    '<button onclick="this.parentElement.remove()" style="background:none;border:1px solid rgba(255,255,255,0.5);' +
+                    'color:#fff;padding:4px 12px;cursor:pointer;border-radius:4px;margin-left:16px;white-space:nowrap">关闭</button>';
+                document.body.prepend(banner);
+                // Push content down so banner doesn't overlap
+                document.body.style.paddingTop = banner.offsetHeight + 'px';
+            }
+        } catch(e) { /* audit endpoint unavailable, ignore */ }
+    })();
+    </script>
 </body>
 </html>

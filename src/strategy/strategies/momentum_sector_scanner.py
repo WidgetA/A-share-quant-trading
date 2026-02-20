@@ -677,8 +677,9 @@ class MomentumSectorScanner:
                                 low_price=low,
                             )
 
-            except Exception as e:
-                logger.error(f"Error fetching realtime prices for batch: {e}")
+            except Exception:
+                logger.error("Error fetching realtime prices for batch")
+                raise
 
         return result
 
@@ -724,8 +725,9 @@ class MomentumSectorScanner:
                                 latest_price=open_price,  # default; overwritten by 9:40 price below
                             )
 
-            except Exception as e:
-                logger.error(f"Error fetching historical prices for batch: {e}")
+            except Exception:
+                logger.error("Error fetching historical prices for batch")
+                raise
 
         # Fetch 9:40 price, volume, high, low for all stocks that got open/prevClose
         if result:
@@ -803,7 +805,8 @@ class MomentumSectorScanner:
                     if price > 0:
                         result[bare_code] = (price, cum_volume, max_high, min_low)
 
-            except Exception as e:
-                logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
+            except Exception:
+                logger.error("high_frequency 9:40 fetch failed for batch")
+                raise
 
         return result

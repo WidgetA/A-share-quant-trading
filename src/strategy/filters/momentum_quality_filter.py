@@ -74,7 +74,7 @@ class MomentumQualityFilter:
     - Low turnover amplification: buy-day activity < min_turnover_amp × average
 
     Both must be true to filter (AND logic reduces false kills).
-    Fail-open: if data unavailable, stock is NOT filtered.
+    Fail-fast: if historical data unavailable, raises error to halt trading.
 
     Usage:
         filter = MomentumQualityFilter(ifind_client)
@@ -142,42 +142,55 @@ class MomentumQualityFilter:
         hist: dict | None,
         trade_date: date | None,
     ) -> QualityAssessment:
-        """Assess a single stock's momentum quality using AND logic."""
+        """Assess a single stock's momentum quality using AND logic.
+
+        Raises RuntimeError if required data is missing (fail-fast).
+        """
+        # Trading safety: data must be available. No data = no trading.
+        if not hist:
+            raise RuntimeError(
+                f"QualityFilter: no historical data for {stock.stock_code} "
+                f"({stock.stock_name}). Cannot assess momentum quality — halting."
+            )
+
+        if hist.get("trend_pct") is None:
+            raise RuntimeError(
+                f"QualityFilter: missing trend_pct for {stock.stock_code} "
+                f"({stock.stock_name}). Insufficient price history — halting."
+            )
+
         reasons: list[str] = []
-        trend_pct: float | None = None
+        trend_pct: float = hist["trend_pct"]
         turnover_amp: float | None = None
         consecutive_up_days: int | None = None
 
-        trend_declining = False
-        amp_low = False
-
-        # Signal 1: Declining trend
-        if hist and hist.get("trend_pct") is not None:
-            trend_pct = hist["trend_pct"]
-            trend_declining = trend_pct < 0
+        trend_declining = trend_pct < 0
 
         # Extract consecutive up days (used in Step 6, not for filtering here)
-        if hist and hist.get("consecutive_up_days") is not None:
+        if hist.get("consecutive_up_days") is not None:
             consecutive_up_days = hist["consecutive_up_days"]
 
         # Signal 2: Turnover amplification
         if trade_date is not None:
             # Backtest mode: use actual daily turnover
-            if hist and hist.get("buy_day_turnover") and hist.get("avg_daily_turnover"):
-                buy_turn = hist["buy_day_turnover"]
-                avg_turn = hist["avg_daily_turnover"]
-                if avg_turn > 0:
-                    turnover_amp = buy_turn / avg_turn
-                    amp_low = turnover_amp < self._config.min_turnover_amp
+            if not hist.get("buy_day_turnover") or not hist.get("avg_daily_turnover"):
+                raise RuntimeError(
+                    f"QualityFilter: missing turnover data for {stock.stock_code} "
+                    f"({stock.stock_name}). Cannot assess volume — halting."
+                )
+            buy_turn = hist["buy_day_turnover"]
+            avg_turn = hist["avg_daily_turnover"]
+            if avg_turn > 0:
+                turnover_amp = buy_turn / avg_turn
         else:
             # Live mode: use early_volume / avg_daily_volume as proxy
-            if snap and snap.early_volume > 0 and hist and hist.get("avg_daily_volume"):
+            if snap and snap.early_volume > 0 and hist.get("avg_daily_volume"):
                 avg_vol = hist["avg_daily_volume"]
-                # Expected early volume proportion (~12.5% of daily)
                 expected_early = avg_vol * 0.125
                 if expected_early > 0:
                     turnover_amp = snap.early_volume / expected_early
-                    amp_low = turnover_amp < self._config.min_turnover_amp
+
+        amp_low = turnover_amp is not None and turnover_amp < self._config.min_turnover_amp
 
         # AND logic: both signals must trigger
         if trend_declining and amp_low:
@@ -315,7 +328,11 @@ class MomentumQualityFilter:
                     if entry:
                         result[bare_code] = entry
 
-            except Exception as e:
-                logger.warning(f"QualityFilter: historical fetch failed for batch: {e}")
+            except Exception:
+                logger.error(
+                    f"QualityFilter: historical fetch FAILED for batch "
+                    f"({len(batch)} stocks). Trading halted."
+                )
+                raise
 
         return result
