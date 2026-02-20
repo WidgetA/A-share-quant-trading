@@ -157,6 +157,11 @@ _ifind_token_override: str | None = None
 # Persistence file for iFinD refresh_token (survives container restarts)
 IFIND_TOKEN_FILE = PROJECT_ROOT / "data" / "ifind_token.txt"
 
+# Runtime override for Tavily API key (set via web UI)
+_tavily_key_override: str | None = None
+# Persistence file for Tavily API key (survives container restarts)
+TAVILY_KEY_FILE = PROJECT_ROOT / "data" / "tavily_key.txt"
+
 
 def load_secrets() -> Config:
     """
@@ -384,6 +389,86 @@ def get_ifind_token_source() -> str:
     try:
         secrets = load_secrets()
         if secrets.get_str("ifind.refresh_token"):
+            return "secrets_yaml"
+    except FileNotFoundError:
+        pass
+    return "not_configured"
+
+
+def get_tavily_api_key() -> str:
+    """
+    Get Tavily API key for web search.
+
+    Credentials are read in the following order:
+    1. Runtime override (set via web UI, in-memory)
+    2. Persisted file (data/tavily_key.txt, survives restarts)
+    3. Environment variable: TAVILY_API_KEY
+    4. secrets.yaml file: tavily.api_key
+
+    Returns:
+        Tavily API key string
+
+    Raises:
+        ValueError: If API key is not configured
+    """
+    import os
+
+    if _tavily_key_override:
+        return _tavily_key_override
+
+    if TAVILY_KEY_FILE.exists():
+        key = TAVILY_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+
+    env_key = os.environ.get("TAVILY_API_KEY", "")
+    if env_key:
+        return env_key
+
+    try:
+        secrets = load_secrets()
+        key = secrets.get_str("tavily.api_key")
+        if key:
+            return key
+    except FileNotFoundError:
+        pass
+
+    raise ValueError(
+        "Tavily API key not configured. "
+        "Set via web UI Settings page, TAVILY_API_KEY environment variable, "
+        "or configure tavily.api_key in config/secrets.yaml. "
+        "Get a free key at https://tavily.com"
+    )
+
+
+def set_tavily_api_key(key: str) -> None:
+    """Set Tavily API key at runtime and persist to disk."""
+    global _tavily_key_override
+    _tavily_key_override = key
+
+    TAVILY_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TAVILY_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("Tavily API key updated via web UI and persisted to disk")
+
+
+def get_tavily_key_source() -> str:
+    """
+    Return which source the current Tavily API key comes from.
+
+    Returns:
+        One of: "web_ui", "persisted_file", "env_var", "secrets_yaml", "not_configured"
+    """
+    import os
+
+    if _tavily_key_override:
+        return "web_ui"
+    if TAVILY_KEY_FILE.exists() and TAVILY_KEY_FILE.read_text(encoding="utf-8").strip():
+        return "persisted_file"
+    if os.environ.get("TAVILY_API_KEY", ""):
+        return "env_var"
+    try:
+        secrets = load_secrets()
+        if secrets.get_str("tavily.api_key"):
             return "secrets_yaml"
     except FileNotFoundError:
         pass

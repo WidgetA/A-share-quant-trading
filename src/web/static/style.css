@@ -1508,6 +1508,43 @@ footer {
     margin-bottom: 1.5rem;
 }
 
+/* Key status banner */
+.key-banner {
+    background: #fef3c7;
+    border: 1px solid #f59e0b;
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 1rem;
+}
+.key-banner.hidden { display: none; }
+.key-banner-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #92400e;
+}
+.key-banner-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: #f59e0b;
+    color: white;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.key-banner-link {
+    margin-left: auto;
+    color: #b45309;
+    font-weight: 600;
+    text-decoration: underline;
+    white-space: nowrap;
+}
+
 .momentum-section {
     margin-bottom: 1.5rem;
 }

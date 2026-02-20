@@ -6,6 +6,15 @@
 <div class="momentum-page">
     <h2>动量板块策略</h2>
 
+    <!-- Key Status Banner -->
+    <div id="key-status-banner" class="key-banner hidden">
+        <div class="key-banner-content">
+            <span class="key-banner-icon">!</span>
+            <span id="key-banner-text"></span>
+            <a href="/settings" class="key-banner-link">前往设置</a>
+        </div>
+    </div>
+
     <!-- Monitor Status -->
     <section class="momentum-section">
         <div class="monitor-card">
@@ -321,6 +330,21 @@
 
 {% block scripts %}
 <script>
+// === Key Status Check ===
+async function checkKeyStatus() {
+    try {
+        const resp = await fetch('/api/settings/keys-status');
+        const data = await resp.json();
+        if (!data.tavily.configured) {
+            const banner = document.getElementById('key-status-banner');
+            document.getElementById('key-banner-text').textContent =
+                'Tavily API Key 未配置，利空新闻检查功能不可用';
+            banner.classList.remove('hidden');
+        }
+    } catch (e) {}
+}
+checkKeyStatus();
+
 // === Combined Results Store (for loss analysis) ===
 let combinedResults = [];
 let akshareReady = false;

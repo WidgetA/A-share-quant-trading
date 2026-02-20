@@ -19,13 +19,17 @@
 # Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
 # Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
-# Step 6: recommend — score by (开盘涨幅↑, 营收增长率↓), pick top scorer from largest board
+# Step 6: recommend — filter consecutive-up ≥2d, score by Z(开盘涨幅)-Z(营收增长率),
+#          check #1 for negative news via Tavily+LLM, fall back to #2 if negative
 # Step 7: → ScanResult → Feishu notification
+
+from __future__ import annotations
 
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from src.data.clients.ifind_http_client import IFinDHttpClient
 from src.data.database.fundamentals_db import FundamentalsDB
@@ -40,6 +44,9 @@ from src.strategy.filters.reversal_factor_filter import (
     ReversalFactorFilter,
 )
 from src.strategy.filters.stock_filter import StockFilter, create_main_board_only_filter
+
+if TYPE_CHECKING:
+    from src.strategy.analyzers.negative_news_checker import NegativeNewsChecker
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +103,7 @@ class SelectedStock:
 
 @dataclass
 class RecommendedStock:
-    """The top pick from largest board, scored by Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)."""
+    """The top pick from largest board, scored by Z(开盘涨幅) - Z(营收增长率)."""
 
     stock_code: str
     stock_name: str
@@ -109,6 +116,8 @@ class RecommendedStock:
     open_price: float = 0.0  # Raw open price
     prev_close: float = 0.0  # Previous close price
     latest_price: float = 0.0  # 9:40 price (buy price for range backtest)
+    news_check_passed: bool | None = None  # None=not checked, True=clean, False=had negative
+    news_check_detail: str = ""  # LLM reasoning if checked
 
 
 @dataclass
@@ -121,7 +130,7 @@ class ScanResult:
     # Initial gainers that passed Step 1
     initial_gainers: list[str] = field(default_factory=list)
     scan_time: datetime = field(default_factory=datetime.now)
-    # Step 6: recommended stock (scored by 开盘涨幅↑ + 营收增长率↓ + 5日涨跌幅↑)
+    # Step 6: recommended stock (scored by 开盘涨幅↑ + 营收增长率↓)
     recommended_stock: RecommendedStock | None = None
     # Price snapshots for selected stocks (for backfill/export use)
     all_snapshots: dict[str, PriceSnapshot] = field(default_factory=dict)
@@ -163,6 +172,7 @@ class MomentumSectorScanner:
         stock_filter: StockFilter | None = None,
         momentum_quality_config: MomentumQualityConfig | None = None,
         reversal_factor_config: ReversalFactorConfig | None = None,
+        negative_news_checker: NegativeNewsChecker | None = None,
     ):
         self._ifind = ifind_client
         self._fundamentals_db = fundamentals_db
@@ -170,6 +180,7 @@ class MomentumSectorScanner:
         self._stock_filter = stock_filter or create_main_board_only_filter()
         self._quality_filter = MomentumQualityFilter(ifind_client, momentum_quality_config)
         self._reversal_filter = ReversalFactorFilter(reversal_factor_config)
+        self._news_checker = negative_news_checker
 
     async def scan(
         self,
@@ -246,23 +257,26 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
 
-        # Step 6: Recommend — high opening gap + negative growth + recent trend
-        # Pass trend_pct from Step 5.5 to avoid extra API calls
-        trend_data = {
-            a.stock_code: a.trend_pct for a in quality_assessments if a.trend_pct is not None
+        # Step 6: Recommend — high opening gap + negative growth
+        # Also filter out consecutive-up stocks using data from Step 5.5
+        consecutive_up_data = {
+            a.stock_code: a.consecutive_up_days
+            for a in quality_assessments
+            if a.consecutive_up_days is not None
         }
         if selected:
             result.recommended_stock = await self._step6_recommend(
-                selected, all_snapshots, trend_data
+                selected, all_snapshots, consecutive_up_data
             )
             if result.recommended_stock:
                 rec = result.recommended_stock
-                tr = trend_data.get(rec.stock_code)
-                tr_str = f", TR={tr:+.1f}%" if tr is not None else ""
+                news_str = ""
+                if rec.news_check_passed is not None:
+                    news_str = f", 舆情={'通过' if rec.news_check_passed else '有负面'}"
                 logger.info(
                     f"Step 6: Recommended {rec.stock_code} "
                     f"{rec.stock_name} from board '{rec.board_name}' "
-                    f"(OG={rec.open_gain_pct:+.1f}%, GR={rec.growth_rate:+.1f}%{tr_str})"
+                    f"(OG={rec.open_gain_pct:+.1f}%, GR={rec.growth_rate:+.1f}%{news_str})"
                 )
             else:
                 logger.info("Step 6: No recommendation (scoring returned None)")
@@ -426,21 +440,25 @@ class MomentumSectorScanner:
         self,
         selected_stocks: list[SelectedStock],
         price_snapshots: dict[str, PriceSnapshot] | None = None,
-        trend_data: dict[str, float] | None = None,
+        consecutive_up_data: dict[str, int] | None = None,
     ) -> RecommendedStock | None:
         """
         Step 6: Score each stock and pick the highest-scoring one.
 
-        Scoring formula (within the largest hot board):
-            score = Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)
+        Filters:
+            - Limit-up at 9:40 → unbuyable, skip
+            - Consecutive up days ≥ 2 → chasing momentum, skip
 
-        All three factors required — missing data → skip stock.
-        If no stock has complete data → no recommendation (don't trade).
+        Scoring formula (within the largest hot board):
+            score = Z(开盘涨幅) - Z(营收增长率)
+
+        Post-scoring: if news_checker is configured, check #1 for negative news.
+        If negative → fall back to #2 (no recursive check on #2).
         """
         if not selected_stocks:
             return None
 
-        # --- Find the largest hot board (same as before) ---
+        # --- Find the largest hot board ---
         board_groups: dict[str, list[SelectedStock]] = defaultdict(list)
         for stock in selected_stocks:
             board_groups[stock.board_name].append(stock)
@@ -460,14 +478,11 @@ class MomentumSectorScanner:
         growth_data = await self._fundamentals_db.batch_get_revenue_growth(stock_codes)
 
         # --- Filter out stocks at limit-up at 9:40 ---
-        # At limit-up the stock is sealed and unbuyable, skip directly.
-        # Only main board stocks reach here (创业板/科创板 already excluded in Step 1).
         LIMIT_UP_RATIO = 0.10  # Main board +10%
         non_limit_up: list[SelectedStock] = []
         for s in top_board_stocks:
             snap = price_snapshots.get(s.stock_code) if price_snapshots else None
             if snap and snap.prev_close > 0 and snap.latest_price > 0:
-                # Exchange rounds limit-up price to 2 decimals (四舍五入到分)
                 limit_up_price = round(snap.prev_close * (1 + LIMIT_UP_RATIO), 2)
                 if snap.latest_price >= limit_up_price:
                     logger.info(
@@ -484,13 +499,29 @@ class MomentumSectorScanner:
 
         top_board_stocks = non_limit_up
 
+        # --- Filter out stocks with ≥2 consecutive up days ---
+        _cup_data = consecutive_up_data or {}
+        non_consecutive: list[SelectedStock] = []
+        for s in top_board_stocks:
+            cup = _cup_data.get(s.stock_code)
+            if cup is not None and cup >= 2:
+                logger.info(
+                    f"Step 6: Skip {s.stock_code} ({s.stock_name}): "
+                    f"consecutive up {cup} days >= 2"
+                )
+                continue
+            non_consecutive.append(s)
+
+        if not non_consecutive:
+            logger.info("Step 6: All candidates had >= 2 consecutive up days, no recommendation")
+            return None
+
+        top_board_stocks = non_consecutive
+
         # --- Score and pick ---
-        # ALL candidates must have growth + trend data. Any missing → don't trade.
-        _trend_data = trend_data or {}
+        # All candidates must have growth data. Missing → don't trade.
         missing = [
-            s.stock_code
-            for s in top_board_stocks
-            if s.stock_code not in growth_data or s.stock_code not in _trend_data
+            s.stock_code for s in top_board_stocks if s.stock_code not in growth_data
         ]
         if missing:
             logger.info(
@@ -501,56 +532,77 @@ class MomentumSectorScanner:
         candidates = top_board_stocks
 
         if len(candidates) == 1:
-            best = candidates[0]
+            ranked = candidates
         else:
             # Z-score standardization:
             #   开盘涨幅: higher = better (+)
             #   营收增长率: lower = better (-)
-            #   5日涨跌幅: higher = better (+) — penalizes consecutive drops
             og_values = [s.open_gain_pct for s in candidates]
             gr_values = [growth_data[s.stock_code] for s in candidates]
-            tr_values = [_trend_data[s.stock_code] for s in candidates]
 
             og_mean = sum(og_values) / len(og_values)
             gr_mean = sum(gr_values) / len(gr_values)
-            tr_mean = sum(tr_values) / len(tr_values)
 
             og_std = (sum((v - og_mean) ** 2 for v in og_values) / len(og_values)) ** 0.5
             gr_std = (sum((v - gr_mean) ** 2 for v in gr_values) / len(gr_values)) ** 0.5
-            tr_std = (sum((v - tr_mean) ** 2 for v in tr_values) / len(tr_values)) ** 0.5
 
-            # Avoid division by zero (all stocks have same value)
             og_std = og_std if og_std > 0 else 1.0
             gr_std = gr_std if gr_std > 0 else 1.0
-            tr_std = tr_std if tr_std > 0 else 1.0
 
             def score(s: SelectedStock) -> float:
                 og_z = (s.open_gain_pct - og_mean) / og_std
                 gr_z = (growth_data[s.stock_code] - gr_mean) / gr_std
-                tr_z = (_trend_data[s.stock_code] - tr_mean) / tr_std
-                return og_z - gr_z + tr_z
+                return og_z - gr_z
 
-            best = max(candidates, key=score)
+            ranked = sorted(candidates, key=score, reverse=True)
 
-        best_code = best.stock_code
-        best_growth = growth_data[best_code]
-        best_trend = _trend_data[best_code]
+        best = ranked[0]
+        best_growth = growth_data[best.stock_code]
 
         # Log scoring details for top 3
-        if len(candidates) > 1:
-            scored = sorted(candidates, key=score, reverse=True)
+        if len(ranked) > 1:
             top3_info = ", ".join(
-                f"{s.stock_code}(OG={s.open_gain_pct:+.1f}%,GR={growth_data[s.stock_code]:+.1f}%,TR={_trend_data[s.stock_code]:+.1f}%,分={score(s):.2f})"
-                for s in scored[:3]
+                f"{s.stock_code}(OG={s.open_gain_pct:+.1f}%,"
+                f"GR={growth_data[s.stock_code]:+.1f}%,分={score(s):.2f})"
+                for s in ranked[:3]
             )
             logger.info(f"Step 6: Top 3 scores: {top3_info}")
         else:
             logger.info(
-                f"Step 6: Single candidate {best_code} "
-                f"(OG={best.open_gain_pct:+.1f}%, GR={best_growth:+.1f}%, TR={best_trend:+.1f}%)"
+                f"Step 6: Single candidate {best.stock_code} "
+                f"(OG={best.open_gain_pct:+.1f}%, GR={best_growth:+.1f}%)"
             )
 
-        snap = price_snapshots.get(best_code) if price_snapshots else None
+        # --- Negative news check on #1 (if checker configured) ---
+        news_check_passed: bool | None = None
+        news_check_detail = ""
+
+        if self._news_checker:
+            news_result = await self._news_checker.check(best.stock_code, best.stock_name)
+            if news_result.error:
+                logger.warning(
+                    f"Step 6: News check error for {best.stock_code}: {news_result.error}, "
+                    f"proceeding with recommendation (fail-open)"
+                )
+            elif news_result.has_negative_news:
+                news_check_passed = False
+                news_check_detail = news_result.reason
+                logger.info(
+                    f"Step 6: {best.stock_code} has negative news: {news_result.reason}"
+                )
+                if len(ranked) >= 2:
+                    best = ranked[1]
+                    best_growth = growth_data[best.stock_code]
+                    news_check_passed = None  # #2 not checked
+                    news_check_detail = f"顺延: {ranked[0].stock_code} 有负面"
+                    logger.info(f"Step 6: Falling back to #2: {best.stock_code} {best.stock_name}")
+                else:
+                    logger.info("Step 6: No fallback candidate, recommending #1 with warning")
+            else:
+                news_check_passed = True
+                news_check_detail = news_result.reason
+
+        snap = price_snapshots.get(best.stock_code) if price_snapshots else None
 
         return RecommendedStock(
             stock_code=best.stock_code,
@@ -564,6 +616,8 @@ class MomentumSectorScanner:
             open_price=snap.open_price if snap else 0.0,
             prev_close=snap.prev_close if snap else 0.0,
             latest_price=snap.latest_price if snap else 0.0,
+            news_check_passed=news_check_passed,
+            news_check_detail=news_check_detail,
         )
 
     async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:

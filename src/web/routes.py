@@ -4441,6 +4441,117 @@ def create_settings_router() -> APIRouter:
         except httpx.HTTPError as e:
             return {"success": False, "message": f"HTTP 请求失败: {e}"}
 
+    # === TAVILY API KEY SETTINGS ===
+
+    @router.get("/api/settings/tavily-key")
+    async def get_tavily_key_status():
+        """Get current Tavily API key status (masked)."""
+        from src.common.config import get_tavily_api_key, get_tavily_key_source
+
+        source = get_tavily_key_source()
+        source_labels = {
+            "web_ui": "Web UI (当前会话)",
+            "persisted_file": "Web UI (已持久化)",
+            "env_var": "环境变量",
+            "secrets_yaml": "secrets.yaml",
+            "not_configured": "未配置",
+        }
+
+        try:
+            key = get_tavily_api_key()
+            if len(key) > 16:
+                masked = key[:8] + "..." + key[-4:]
+            else:
+                masked = "***"
+            return {
+                "configured": True,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_key": masked,
+                "key_length": len(key),
+            }
+        except ValueError:
+            return {
+                "configured": False,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_key": "",
+                "key_length": 0,
+            }
+
+    @router.post("/api/settings/tavily-key")
+    async def update_tavily_key(body: TokenUpdateRequest):
+        """Save a new Tavily API key."""
+        from src.common.config import set_tavily_api_key
+
+        key = body.token.strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        set_tavily_api_key(key)
+        return {"success": True, "message": "Tavily API Key 已保存"}
+
+    @router.post("/api/settings/tavily-key/test")
+    async def test_tavily_key(body: TokenUpdateRequest):
+        """Test a Tavily API key by running a simple search."""
+        import httpx
+
+        key = body.token.strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": key,
+                        "query": "test",
+                        "max_results": 1,
+                        "search_depth": "basic",
+                    },
+                )
+                if resp.status_code == 200:
+                    return {"success": True, "message": "Tavily API Key 验证成功"}
+                elif resp.status_code == 401:
+                    return {"success": False, "message": "API Key 无效或已过期"}
+                else:
+                    return {
+                        "success": False,
+                        "message": f"验证失败: HTTP {resp.status_code}",
+                    }
+        except httpx.TimeoutException:
+            return {"success": False, "message": "请求超时，请检查网络连接"}
+        except httpx.HTTPError as e:
+            return {"success": False, "message": f"HTTP 请求失败: {e}"}
+
+    @router.get("/api/settings/keys-status")
+    async def get_all_keys_status():
+        """Get status of all API keys needed for live trading."""
+        from src.common.config import (
+            get_ifind_token_source,
+            get_tavily_key_source,
+            load_secrets,
+        )
+
+        ifind_ok = get_ifind_token_source() != "not_configured"
+        tavily_ok = get_tavily_key_source() != "not_configured"
+
+        # Check Silicon Flow from secrets.yaml
+        sf_ok = False
+        try:
+            secrets = load_secrets()
+            sf_ok = bool(secrets.get_str("siliconflow.api_key", ""))
+        except FileNotFoundError:
+            pass
+
+        return {
+            "ifind": {"configured": ifind_ok, "source": get_ifind_token_source()},
+            "tavily": {"configured": tavily_ok, "source": get_tavily_key_source()},
+            "siliconflow": {"configured": sf_ok},
+            "news_check_ready": tavily_ok and sf_ok,
+        }
+
     # === SCAN STOCKS BACKFILL (SSE) ===
 
     @router.post("/api/momentum/backfill")

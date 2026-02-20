@@ -62,6 +62,7 @@ class QualityAssessment:
     reasons: list[str] = field(default_factory=list)
     trend_pct: float | None = None  # N-day price change %
     turnover_amp: float | None = None  # buy-day turnover / avg turnover
+    consecutive_up_days: int | None = None  # consecutive days close > prev close
 
 
 class MomentumQualityFilter:
@@ -145,6 +146,7 @@ class MomentumQualityFilter:
         reasons: list[str] = []
         trend_pct: float | None = None
         turnover_amp: float | None = None
+        consecutive_up_days: int | None = None
 
         trend_declining = False
         amp_low = False
@@ -153,6 +155,10 @@ class MomentumQualityFilter:
         if hist and hist.get("trend_pct") is not None:
             trend_pct = hist["trend_pct"]
             trend_declining = trend_pct < 0
+
+        # Extract consecutive up days (used in Step 6, not for filtering here)
+        if hist and hist.get("consecutive_up_days") is not None:
+            consecutive_up_days = hist["consecutive_up_days"]
 
         # Signal 2: Turnover amplification
         if trade_date is not None:
@@ -186,6 +192,7 @@ class MomentumQualityFilter:
             reasons=reasons,
             trend_pct=trend_pct,
             turnover_amp=turnover_amp,
+            consecutive_up_days=consecutive_up_days,
         )
 
     async def _fetch_historical_context(
@@ -249,6 +256,7 @@ class MomentumQualityFilter:
                     lookback = self._config.turnover_lookback_days
 
                     # Trend: compare last close (prev_close) vs close N days earlier
+                    # + consecutive up days count (for Step 6 filtering)
                     if close_vals and len(close_vals) >= self._config.trend_lookback_days + 1:
                         closes = [float(c) for c in close_vals if c is not None]
                         if len(closes) >= self._config.trend_lookback_days + 1:
@@ -263,6 +271,17 @@ class MomentumQualityFilter:
 
                             if n_ago > 0:
                                 entry["trend_pct"] = (prev_close - n_ago) / n_ago * 100
+
+                            # Consecutive up days: count backward from most recent close
+                            # before trade_date (exclude trade_date itself in backtest)
+                            check = closes[:-1] if trade_date is not None else closes
+                            cup = 0
+                            for j in range(len(check) - 1, 0, -1):
+                                if check[j] > check[j - 1]:
+                                    cup += 1
+                                else:
+                                    break
+                            entry["consecutive_up_days"] = cup
 
                     # Turnover: avg over lookback, excluding trade_date itself
                     if turn_vals:

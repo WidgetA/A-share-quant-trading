@@ -31,10 +31,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.common.config import get_tavily_api_key, load_secrets
 from src.common.feishu_bot import FeishuBot
+from src.common.siliconflow_client import SiliconFlowClient, SiliconFlowConfig
+from src.common.tavily_client import TavilyClient
 from src.data.clients.ifind_http_client import IFinDHttpClient, IFinDHttpError
 from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 from src.data.sources.concept_mapper import ConceptMapper
+from src.strategy.analyzers.negative_news_checker import NegativeNewsChecker
 from src.strategy.strategies.momentum_sector_scanner import (
     MomentumSectorScanner,
     PriceSnapshot,
@@ -207,9 +211,31 @@ async def monitor(
     ifind_client = IFinDHttpClient()
     fundamentals_db = create_fundamentals_db_from_config()
 
+    # Build negative news checker if API keys are available
+    tavily_client: TavilyClient | None = None
+    sf_client: SiliconFlowClient | None = None
+    news_checker: NegativeNewsChecker | None = None
+    try:
+        tavily_key = get_tavily_api_key()
+        secrets = load_secrets()
+        sf_key = secrets.get_str("siliconflow.api_key", "")
+        if sf_key:
+            tavily_client = TavilyClient(api_key=tavily_key)
+            sf_client = SiliconFlowClient(SiliconFlowConfig(api_key=sf_key))
+            news_checker = NegativeNewsChecker(tavily_client, sf_client)
+            logger.info("Negative news checker configured (Tavily + Silicon Flow)")
+        else:
+            logger.warning("SiliconFlow API key missing, skipping news check")
+    except (ValueError, FileNotFoundError) as e:
+        logger.warning(f"News checker not available: {e}")
+
     try:
         await ifind_client.start()
         await fundamentals_db.connect()
+        if tavily_client:
+            await tavily_client.start()
+        if sf_client:
+            await sf_client.start()
         logger.info("Components initialized")
 
         # Wait for market open
@@ -256,6 +282,7 @@ async def monitor(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
+            negative_news_checker=news_checker,
         )
 
         result = await scanner.scan(accumulated)
@@ -300,6 +327,10 @@ async def monitor(
     finally:
         await fundamentals_db.close()
         await ifind_client.stop()
+        if tavily_client:
+            await tavily_client.stop()
+        if sf_client:
+            await sf_client.stop()
         logger.info("Monitoring stopped")
 
 
