@@ -55,6 +55,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY config/ ./config/
+COPY data/sectors.json data/board_constituents.json ./data/
 
 # Copy and install iFinD SDK
 COPY vendor/ ./vendor/
