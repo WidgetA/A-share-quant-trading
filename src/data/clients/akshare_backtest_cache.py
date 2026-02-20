@@ -1,16 +1,19 @@
 # === MODULE PURPOSE ===
-# Pre-downloads A-share daily + minute price data via akshare for backtesting.
+# Pre-downloads A-share daily + minute price data for backtesting.
 # Provides an adapter that mimics IFinDHttpClient interface so
 # MomentumSectorScanner can run without any code changes.
 
 # === DEPENDENCIES ===
-# - akshare: Free A-share data source (daily OHLCV, minute bars)
+# - akshare: Free A-share data source (daily OHLCV via East Money)
+# - baostock: Free A-share data source (5-min bars for 9:40 price)
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
 # - AkshareBacktestCache: Downloads and stores all price data in memory + OSS
 # - AkshareHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
-# - Pre-download strategy: ~3500 stocks × (daily + minute) ≈ 25-30 min
+# - Daily OHLCV: akshare (East Money), supports full history
+# - Minute bars: baostock (5-min frequency), supports full history
+#   (akshare minute API only returns ~5 recent trading days, unusable for backtest)
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
 
@@ -21,6 +24,7 @@ import io
 import logging
 import os
 import pickle
+import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
@@ -297,67 +301,77 @@ class AkshareBacktestCache:
         # day's close if available, otherwise we'll leave it (scanner checks prev_close > 0).
         # For backtesting purposes this means the first date might have fewer candidates.
 
-        # Phase 2: Minute data (09:30-09:40 for 9:40 price)
-        done_minute = 0
+        # Phase 2: Minute data via baostock 5-min bars (09:35 + 09:40 → 9:40 price)
+        # baostock uses a single TCP connection, so we run sequentially in one thread.
+        done_minute = [0]  # list for thread-safe mutation
 
-        async def _download_minute(code: str) -> None:
-            nonlocal done_minute
-            async with sem:
-                try:
-                    df = await asyncio.to_thread(
-                        ak.stock_zh_a_hist_min_em,
-                        symbol=code,
-                        start_date=start_str + " 09:30:00",
-                        end_date=end_str + " 09:40:00",
-                        period="1",
-                        adjust="qfq",
-                    )
-                    if df is not None and not df.empty:
-                        code_data: dict[str, tuple[float, float, float, float]] = {}
-                        # Group by date, extract 09:31~09:40 bars
-                        for _, row in df.iterrows():
-                            ts = row["时间"]
-                            if isinstance(ts, str):
-                                dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                            else:
-                                dt = pd.Timestamp(ts).to_pydatetime()
+        def _baostock_download_all() -> None:
+            import baostock as bs
 
-                            ds = dt.strftime("%Y-%m-%d")
-                            ts_time = dt.strftime("%H:%M")
+            lg = bs.login()
+            if lg.error_code != "0":
+                logger.error(f"baostock login failed: {lg.error_msg}")
+                return
 
-                            # Only keep bars between 09:31 and 09:40
-                            if ts_time < "09:31" or ts_time > "09:40":
-                                continue
+            try:
+                bs_start = start_date.strftime("%Y-%m-%d")
+                bs_end = end_date.strftime("%Y-%m-%d")
 
-                            close_val = float(row["收盘"])
-                            vol_val = float(row["成交量"])
-                            high_val = float(row["最高"])
-                            low_val = float(row["最低"])
+                for code in codes:
+                    prefix = "sh" if code.startswith("6") else "sz"
+                    try:
+                        rs = bs.query_history_k_data_plus(
+                            f"{prefix}.{code}",
+                            "date,time,high,low,close,volume",
+                            start_date=bs_start,
+                            end_date=bs_end,
+                            frequency="5",
+                            adjustflag="2",  # 前复权
+                        )
+                        if rs.error_code == "0":
+                            code_data: dict[str, tuple[float, float, float, float]] = {}
+                            while rs.next():
+                                row = rs.get_row_data()
+                                # time format: "20260120094000000"
+                                hhmm = row[1][8:12]
+                                if hhmm not in ("0935", "0940"):
+                                    continue
+                                ds = row[0]  # "2026-01-20"
+                                close_val = float(row[4])
+                                vol_val = float(row[5])
+                                high_val = float(row[2])
+                                low_val = float(row[3])
 
-                            if ds in code_data:
-                                prev = code_data[ds]
-                                code_data[ds] = (
-                                    close_val,  # latest close (overwrite with later bar)
-                                    prev[1] + vol_val,  # cumulative volume
-                                    max(prev[2], high_val),  # max high
-                                    min(prev[3], low_val) if prev[3] > 0 else low_val,  # min low
-                                )
-                            else:
-                                code_data[ds] = (close_val, vol_val, high_val, low_val)
+                                if ds in code_data:
+                                    prev = code_data[ds]
+                                    code_data[ds] = (
+                                        close_val,  # 09:40 close overwrites 09:35
+                                        prev[1] + vol_val,  # cumulative volume
+                                        max(prev[2], high_val),
+                                        min(prev[3], low_val) if prev[3] > 0 else low_val,
+                                    )
+                                else:
+                                    code_data[ds] = (close_val, vol_val, high_val, low_val)
 
-                        self._minute[code] = code_data
-                except Exception as e:
-                    logger.debug(f"Minute download failed for {code}: {e}")
+                            if code_data:
+                                self._minute[code] = code_data
+                    except Exception as e:
+                        logger.debug(f"baostock minute failed for {code}: {e}")
 
-                done_minute += 1
-                if progress_cb and done_minute % 50 == 0:
-                    await _maybe_await(progress_cb("minute", done_minute, total))
+                    done_minute[0] += 1
+            finally:
+                bs.logout()
 
-        tasks = [_download_minute(c) for c in codes]
-        await asyncio.gather(*tasks)
+        thread = threading.Thread(target=_baostock_download_all, daemon=True)
+        thread.start()
+        while thread.is_alive():
+            await asyncio.sleep(2)
+            if progress_cb:
+                await _maybe_await(progress_cb("minute", done_minute[0], total))
+        thread.join()
         if progress_cb:
             await _maybe_await(progress_cb("minute", total, total))
-        logger.info(f"Minute download complete: {len(self._minute)}/{total} stocks")
+        logger.info(f"Minute download complete (baostock): {len(self._minute)}/{total} stocks")
 
         self._is_ready = True
 

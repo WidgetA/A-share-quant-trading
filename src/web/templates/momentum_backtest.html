@@ -33,13 +33,13 @@
                 <label style="font-weight:600;margin-bottom:6px;display:block">数据源</label>
                 <div style="display:flex;gap:16px;align-items:center">
                     <label class="checkbox-label"><input type="radio" name="data_source" value="ifind" checked> iFinD</label>
-                    <label class="checkbox-label"><input type="radio" name="data_source" value="akshare"> akshare (免费)</label>
+                    <label class="checkbox-label"><input type="radio" name="data_source" value="akshare"> akshare + baostock (免费)</label>
                 </div>
             </div>
 
             <!-- Akshare Download Section (shown when akshare selected) -->
             <div id="akshare-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
-                <p style="margin:0 0 8px;font-size:13px;color:#0369a1">akshare 需要预下载全市场日线 + 分钟数据，首次约 25-30 分钟</p>
+                <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线数据来自 akshare (东财)，分钟数据来自 baostock，首次约 25-30 分钟</p>
                 <div style="display:flex;gap:8px;align-items:center">
                     <button type="button" class="btn btn-primary" id="akshare-download-btn" style="background:#0284c7" onclick="startAkshareDownload()">预下载数据</button>
                     <span id="akshare-status" style="font-size:13px;color:#64748b"></span>
