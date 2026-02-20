@@ -1292,6 +1292,7 @@ def create_momentum_router() -> APIRouter:
                 yield sse({"type": "error", "message": download_error})
             else:
                 request.app.state.akshare_cache = existing
+
                 # Fire-and-forget OSS save — don't block SSE and won't be
                 # cancelled if the client disconnects
                 async def _bg_oss_save():
