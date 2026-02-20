@@ -28,8 +28,11 @@ from src.strategy.filters.board_filter import filter_boards
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_SECTORS_PATH = _PROJECT_ROOT / "data" / "sectors.json"
-_CONSTITUENTS_PATH = _PROJECT_ROOT / "data" / "board_constituents.json"
+# Docker: /app/data is a volume mount, static files go to /app/bundled_data
+_BUNDLED_DIR = _PROJECT_ROOT / "bundled_data"
+_DATA_DIR = _BUNDLED_DIR if _BUNDLED_DIR.exists() else _PROJECT_ROOT / "data"
+_SECTORS_PATH = _DATA_DIR / "sectors.json"
+_CONSTITUENTS_PATH = _DATA_DIR / "board_constituents.json"
 
 
 class LocalConceptMapper:

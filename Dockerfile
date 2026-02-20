@@ -55,7 +55,8 @@ COPY --from=builder /app/.venv /app/.venv
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY config/ ./config/
-COPY data/sectors.json data/board_constituents.json ./data/
+# Static data files — placed outside /app/data which is a volume mount
+COPY data/sectors.json data/board_constituents.json ./bundled_data/
 
 # Copy and install iFinD SDK
 COPY vendor/ ./vendor/
