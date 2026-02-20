@@ -506,8 +506,7 @@ class MomentumSectorScanner:
             cup = _cup_data.get(s.stock_code)
             if cup is not None and cup >= 2:
                 logger.info(
-                    f"Step 6: Skip {s.stock_code} ({s.stock_name}): "
-                    f"consecutive up {cup} days >= 2"
+                    f"Step 6: Skip {s.stock_code} ({s.stock_name}): consecutive up {cup} days >= 2"
                 )
                 continue
             non_consecutive.append(s)
@@ -520,9 +519,7 @@ class MomentumSectorScanner:
 
         # --- Score and pick ---
         # All candidates must have growth data. Missing → don't trade.
-        missing = [
-            s.stock_code for s in top_board_stocks if s.stock_code not in growth_data
-        ]
+        missing = [s.stock_code for s in top_board_stocks if s.stock_code not in growth_data]
         if missing:
             logger.info(
                 f"Step 6: Incomplete data for {missing}, no recommendation (数据不全不交易)"
@@ -587,9 +584,7 @@ class MomentumSectorScanner:
             elif news_result.has_negative_news:
                 news_check_passed = False
                 news_check_detail = news_result.reason
-                logger.info(
-                    f"Step 6: {best.stock_code} has negative news: {news_result.reason}"
-                )
+                logger.info(f"Step 6: {best.stock_code} has negative news: {news_result.reason}")
                 if len(ranked) >= 2:
                     best = ranked[1]
                     best_growth = growth_data[best.stock_code]

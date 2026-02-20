@@ -117,8 +117,7 @@ class NegativeNewsChecker:
         )
 
         user_prompt = (
-            f"股票: {stock_code} {stock_name}\n"
-            f"近{self._search_days}天搜索结果:\n\n{snippets}"
+            f"股票: {stock_code} {stock_name}\n近{self._search_days}天搜索结果:\n\n{snippets}"
         )
 
         try:
