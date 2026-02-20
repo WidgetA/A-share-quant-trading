@@ -132,6 +132,9 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
+        # Akshare backtest cache (populated on demand by /api/momentum/akshare-prepare)
+        app.state.akshare_cache = None
+
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own
         app.state.momentum_monitor_state = {

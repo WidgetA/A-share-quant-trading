@@ -1092,6 +1092,7 @@ class MomentumBacktestRequest(BaseModel):
 
     trade_date: str  # YYYY-MM-DD format
     notify: bool = False  # Send Feishu notification
+    data_source: str = "ifind"  # "ifind" or "akshare"
 
 
 class MomentumRangeBacktestRequest(BaseModel):
@@ -1116,11 +1117,20 @@ class CombinedAnalysisRequest(BaseModel):
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
     quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
+    data_source: str = "ifind"  # "ifind" or "akshare"
+
+
+class AksharePrepareRequest(BaseModel):
+    """Request body for akshare data pre-download."""
+
+    start_date: str  # YYYY-MM-DD format
+    end_date: str  # YYYY-MM-DD format
 
 
 def create_momentum_router() -> APIRouter:
     """Create router for momentum backtest and intraday monitor endpoints."""
     import asyncio
+    import json
     from datetime import datetime
 
     router = APIRouter(tags=["momentum"])
@@ -1168,6 +1178,68 @@ def create_momentum_router() -> APIRouter:
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
+    @router.post("/api/momentum/akshare-prepare")
+    async def akshare_prepare(request: Request, body: AksharePrepareRequest):
+        """Pre-download akshare data as SSE stream."""
+        from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
+
+        try:
+            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误")
+
+        cache = AkshareBacktestCache()
+
+        async def generate():
+            def sse(data: dict) -> str:
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+            # Use a queue to bridge callback → SSE yield
+            progress_queue: asyncio.Queue = asyncio.Queue()
+
+            async def queue_progress(phase: str, current: int, total: int):
+                await progress_queue.put(
+                    {"type": "progress", "phase": phase, "current": current, "total": total}
+                )
+
+            # Start download in background task
+            download_error = None
+
+            async def do_download():
+                nonlocal download_error
+                try:
+                    await cache.download_prices(start_date, end_date, queue_progress)
+                    await progress_queue.put(None)  # Signal completion
+                except Exception as e:
+                    download_error = str(e)
+                    await progress_queue.put(None)
+
+            task = asyncio.create_task(do_download())
+
+            while True:
+                item = await progress_queue.get()
+                if item is None:
+                    break
+                yield sse(item)
+
+            await task
+
+            if download_error:
+                yield sse({"type": "error", "message": download_error})
+            else:
+                # Store cache in app state for backtest endpoints to use
+                request.app.state.akshare_cache = cache
+                yield sse(
+                    {
+                        "type": "complete",
+                        "daily_count": len(cache._daily),
+                        "minute_count": len(cache._minute),
+                    }
+                )
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
     @router.post("/api/momentum/backtest")
     async def run_backtest(request: Request, body: MomentumBacktestRequest) -> dict:
         """Run momentum sector strategy backtest for a specific date."""
@@ -1187,41 +1259,73 @@ def create_momentum_router() -> APIRouter:
                 detail=f"日期格式错误: {body.trade_date}，请使用 YYYY-MM-DD",
             )
 
-        ifind_client = _get_ifind_client(request)
         fundamentals_db = _get_fundamentals_db(request)
 
         try:
-            concept_mapper = ConceptMapper(ifind_client)
-            scanner = MomentumSectorScanner(
-                ifind_client=ifind_client,
-                fundamentals_db=fundamentals_db,
-                concept_mapper=concept_mapper,
-            )
+            if body.data_source == "akshare":
+                # --- Akshare path: read from pre-downloaded cache ---
+                from src.data.clients.akshare_backtest_cache import (
+                    AkshareHistoricalAdapter,
+                )
+                from src.data.sources.akshare_concept_mapper import (
+                    AkshareConceptMapper,
+                )
 
-            # Step 1: Use iwencai to get pre-filter candidates (gain > -0.5%)
-            date_str = trade_date.strftime("%Y%m%d")
-            query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
-            logger.info(f"Momentum backtest iwencai query: {query}")
+                ak_cache = getattr(request.app.state, "akshare_cache", None)
+                if not ak_cache or not ak_cache.is_ready:
+                    raise HTTPException(status_code=400, detail="请先预下载 akshare 数据")
 
-            try:
-                iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
-            except IFinDHttpError as e:
-                raise HTTPException(status_code=502, detail=f"iFinD查询失败: {e}")
+                adapter = AkshareHistoricalAdapter(ak_cache)
+                ak_mapper = AkshareConceptMapper()
+                scanner = MomentumSectorScanner(
+                    ifind_client=adapter,
+                    fundamentals_db=fundamentals_db,
+                    concept_mapper=ak_mapper,
+                )
 
-            # Parse iwencai response → fetch prices
-            price_snapshots, price_err = await _parse_iwencai_and_fetch_prices(
-                ifind_client, iwencai_result, trade_date
-            )
+                date_key = trade_date.strftime("%Y-%m-%d")
+                price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+                if not price_snapshots:
+                    return {
+                        "success": True,
+                        "trade_date": body.trade_date,
+                        "initial_gainers": 0,
+                        "hot_boards": {},
+                        "selected_stocks": [],
+                        "message": f"akshare缓存中无 {date_key} 的数据",
+                    }
+            else:
+                # --- iFinD path: original logic ---
+                ifind_client = _get_ifind_client(request)
+                concept_mapper = ConceptMapper(ifind_client)
+                scanner = MomentumSectorScanner(
+                    ifind_client=ifind_client,
+                    fundamentals_db=fundamentals_db,
+                    concept_mapper=concept_mapper,
+                )
 
-            if not price_snapshots:
-                return {
-                    "success": True,
-                    "trade_date": body.trade_date,
-                    "initial_gainers": 0,
-                    "hot_boards": {},
-                    "selected_stocks": [],
-                    "message": price_err or "未找到符合条件的股票",
-                }
+                date_str = trade_date.strftime("%Y%m%d")
+                query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
+                logger.info(f"Momentum backtest iwencai query: {query}")
+
+                try:
+                    iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
+                except IFinDHttpError as e:
+                    raise HTTPException(status_code=502, detail=f"iFinD查询失败: {e}")
+
+                price_snapshots, price_err = await _parse_iwencai_and_fetch_prices(
+                    ifind_client, iwencai_result, trade_date
+                )
+
+                if not price_snapshots:
+                    return {
+                        "success": True,
+                        "trade_date": body.trade_date,
+                        "initial_gainers": 0,
+                        "hot_boards": {},
+                        "selected_stocks": [],
+                        "message": price_err or "未找到符合条件的股票",
+                    }
 
             # Run scan (pass trade_date so constituent prices use history_quotes)
             result = await scanner.scan(price_snapshots, trade_date=trade_date)
@@ -2375,7 +2479,23 @@ def create_momentum_router() -> APIRouter:
             "L4: 最终推荐",
         ]
 
-        ifind_client = _get_ifind_client(request)
+        use_akshare = body.data_source == "akshare"
+        if use_akshare:
+            from src.data.clients.akshare_backtest_cache import (
+                AkshareHistoricalAdapter,
+            )
+            from src.data.sources.akshare_concept_mapper import AkshareConceptMapper
+
+            akshare_cache = getattr(request.app.state, "akshare_cache", None)
+            if not akshare_cache or not akshare_cache.is_ready:
+                raise HTTPException(status_code=400, detail="请先预下载 akshare 数据")
+            ifind_client = AkshareHistoricalAdapter(akshare_cache)
+            ak_concept_mapper = AkshareConceptMapper()
+        else:
+            ifind_client = _get_ifind_client(request)
+            akshare_cache = None
+            ak_concept_mapper = None
+
         fundamentals_db = _get_fundamentals_db(request)
 
         async def event_stream():
@@ -2426,7 +2546,10 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-                concept_mapper = ConceptMapper(ifind_client)
+                if use_akshare:
+                    concept_mapper = ak_concept_mapper
+                else:
+                    concept_mapper = ConceptMapper(ifind_client)
                 stock_filter = create_main_board_only_filter()
 
                 # Funnel accumulators
@@ -2454,9 +2577,19 @@ def create_momentum_router() -> APIRouter:
                     )
 
                     try:
-                        price_snapshots, price_err = await _parse_iwencai_and_fetch_prices_for_date(
-                            ifind_client, trade_date
-                        )
+                        if use_akshare:
+                            date_key = trade_date.strftime("%Y-%m-%d")
+                            price_snapshots = _build_snapshots_from_cache(akshare_cache, date_key)
+                            price_err = (
+                                "" if price_snapshots else f"akshare缓存中无 {date_key} 的数据"
+                            )
+                        else:
+                            (
+                                price_snapshots,
+                                price_err,
+                            ) = await _parse_iwencai_and_fetch_prices_for_date(
+                                ifind_client, trade_date
+                            )
                         if not price_snapshots:
                             skip_reason = price_err or "无价格数据"
                             day_results.append(
@@ -3693,6 +3826,52 @@ async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> 
     if stock_code in data and data[stock_code][0] > 0:
         return [(target_date, data[stock_code][0])]
     return []
+
+
+def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
+    """Build PriceSnapshot dict from AkshareBacktestCache for a given date.
+
+    Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
+    Local filtering: open_gain_pct > -0.5% (same as iwencai query).
+    """
+    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+
+    all_daily = akshare_cache.get_all_codes_with_daily(date_str)
+    snapshots: dict[str, PriceSnapshot] = {}
+
+    for code, day in all_daily.items():
+        open_price = day.get("open", 0)
+        prev_close = day.get("preClose", 0)
+        if prev_close <= 0 or open_price <= 0:
+            continue
+
+        # Pre-filter: open gain > -0.5% (same as iwencai query)
+        open_gain = (open_price - prev_close) / prev_close * 100
+        if open_gain < -0.5:
+            continue
+
+        # 9:40 price from minute cache
+        data_940 = akshare_cache.get_940_price(code, date_str)
+        if data_940:
+            latest_price, cum_vol, max_high, min_low = data_940
+        else:
+            latest_price = open_price
+            cum_vol = 0.0
+            max_high = 0.0
+            min_low = 0.0
+
+        snapshots[code] = PriceSnapshot(
+            stock_code=code,
+            stock_name="",
+            open_price=open_price,
+            prev_close=prev_close,
+            latest_price=latest_price if latest_price > 0 else open_price,
+            early_volume=cum_vol,
+            high_price=max_high,
+            low_price=min_low,
+        )
+
+    return snapshots
 
 
 async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> tuple[dict, str]:

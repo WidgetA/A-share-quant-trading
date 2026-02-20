@@ -28,6 +28,33 @@
                 <button class="backtest-tab" data-tab="combined">区间分析</button>
             </div>
 
+            <!-- Data Source Toggle (shared by both tabs) -->
+            <div class="form-group" style="margin-bottom:12px">
+                <label style="font-weight:600;margin-bottom:6px;display:block">数据源</label>
+                <div style="display:flex;gap:16px;align-items:center">
+                    <label class="checkbox-label"><input type="radio" name="data_source" value="ifind" checked> iFinD</label>
+                    <label class="checkbox-label"><input type="radio" name="data_source" value="akshare"> akshare (免费)</label>
+                </div>
+            </div>
+
+            <!-- Akshare Download Section (shown when akshare selected) -->
+            <div id="akshare-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
+                <p style="margin:0 0 8px;font-size:13px;color:#0369a1">akshare 需要预下载全市场日线 + 分钟数据，首次约 25-30 分钟</p>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <button type="button" class="btn btn-primary" id="akshare-download-btn" style="background:#0284c7" onclick="startAkshareDownload()">预下载数据</button>
+                    <span id="akshare-status" style="font-size:13px;color:#64748b"></span>
+                </div>
+                <div id="akshare-progress" style="display:none;margin-top:10px">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                        <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
+                        <span id="akshare-progress-text" style="font-size:12px">准备中...</span>
+                    </div>
+                    <div style="background:#e5e7eb;border-radius:4px;height:6px;overflow:hidden">
+                        <div id="akshare-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Single Day Backtest -->
             <div id="tab-single" class="tab-content">
                 <form id="backtest-form" class="sim-form">
@@ -110,7 +137,7 @@
     <section id="loading-section" class="momentum-section hidden">
         <div class="sim-card loading-card">
             <div class="loading-spinner"></div>
-            <p>回测运行中，正在查询 iFinD 数据...</p>
+            <p id="loading-text">回测运行中，正在查询数据...</p>
             <p class="loading-hint">Step 1: iwencai 查询初筛 → Step 2: 反查概念板块 → Step 3: 热门板块 → Step 4: 成分股 → Step 5: PE过滤 → Step 6: 推股</p>
         </div>
     </section>
@@ -282,6 +309,104 @@
 <script>
 // === Combined Results Store (for loss analysis) ===
 let combinedResults = [];
+let akshareReady = false;
+
+// === Data Source Toggle ===
+function getDataSource() {
+    const radio = document.querySelector('input[name="data_source"]:checked');
+    return radio ? radio.value : 'ifind';
+}
+
+document.querySelectorAll('input[name="data_source"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+        const section = document.getElementById('akshare-download-section');
+        section.style.display = getDataSource() === 'akshare' ? 'block' : 'none';
+    });
+});
+
+async function startAkshareDownload() {
+    const btn = document.getElementById('akshare-download-btn');
+    const progress = document.getElementById('akshare-progress');
+    const statusEl = document.getElementById('akshare-status');
+    const progressText = document.getElementById('akshare-progress-text');
+    const progressBar = document.getElementById('akshare-progress-bar');
+
+    // Get date range from whichever tab is active
+    let startDate, endDate;
+    const activeTab = document.querySelector('.backtest-tab.active');
+    if (activeTab && activeTab.dataset.tab === 'combined') {
+        startDate = document.getElementById('combined_start').value;
+        endDate = document.getElementById('combined_end').value;
+    } else {
+        startDate = document.getElementById('trade_date').value;
+        endDate = startDate;
+    }
+    if (!startDate) { alert('请先选择日期'); return; }
+    if (!endDate) endDate = startDate;
+
+    btn.disabled = true;
+    btn.textContent = '下载中...';
+    progress.style.display = 'block';
+    statusEl.textContent = '';
+    akshareReady = false;
+
+    try {
+        const resp = await fetch('/api/momentum/akshare-prepare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ start_date: startDate, end_date: endDate }),
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json();
+            statusEl.textContent = '下载失败: ' + (err.detail || resp.status);
+            btn.disabled = false;
+            btn.textContent = '重试下载';
+            return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const messages = buffer.split('\n\n');
+            buffer = messages.pop();
+
+            for (const msg of messages) {
+                const trimmed = msg.trim();
+                if (!trimmed.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(trimmed.substring(6));
+                    if (data.type === 'progress') {
+                        const pct = data.total > 0 ? Math.round(data.current / data.total * 100) : 0;
+                        progressBar.style.width = pct + '%';
+                        progressText.textContent = `${data.phase}: ${data.current}/${data.total} (${pct}%)`;
+                    } else if (data.type === 'complete') {
+                        progressBar.style.width = '100%';
+                        progressText.textContent = '下载完成!';
+                        progress.querySelector('.loading-spinner').style.display = 'none';
+                        statusEl.textContent = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟)`;
+                        statusEl.style.color = '#059669';
+                        akshareReady = true;
+                        btn.textContent = '已下载';
+                    } else if (data.type === 'error') {
+                        statusEl.textContent = '下载失败: ' + data.message;
+                        btn.disabled = false;
+                        btn.textContent = '重试下载';
+                    }
+                } catch (parseErr) {}
+            }
+        }
+    } catch (err) {
+        statusEl.textContent = '网络错误: ' + err.message;
+        btn.disabled = false;
+        btn.textContent = '重试下载';
+    }
+}
 
 // === Tab Switching ===
 document.querySelectorAll('.backtest-tab').forEach(tab => {
@@ -309,6 +434,10 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
     const notify = document.getElementById('notify').checked;
 
     if (!tradeDate) return;
+    if (getDataSource() === 'akshare' && !akshareReady) {
+        alert('请先点击"预下载数据"按钮下载 akshare 数据');
+        return;
+    }
 
     document.getElementById('loading-section').classList.remove('hidden');
     document.getElementById('results-section').classList.add('hidden');
@@ -319,7 +448,7 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
         const resp = await fetch('/api/momentum/backtest', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trade_date: tradeDate, notify: notify }),
+            body: JSON.stringify({ trade_date: tradeDate, notify: notify, data_source: getDataSource() }),
         });
 
         const data = await resp.json();
@@ -463,6 +592,10 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
     if (!startDate || !endDate) return;
     if (endDate <= startDate) { alert('结束日期必须晚于起始日期'); return; }
     if (initialCapital < 1000) { alert('起始资金不能低于 1000 元'); return; }
+    if (getDataSource() === 'akshare' && !akshareReady) {
+        alert('请先点击"预下载数据"按钮下载 akshare 数据');
+        return;
+    }
 
     // Reset UI
     combinedResults = [];
@@ -487,6 +620,7 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
                 start_date: startDate,
                 end_date: endDate,
                 initial_capital: initialCapital,
+                data_source: getDataSource(),
             }),
         });
 
