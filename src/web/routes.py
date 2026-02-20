@@ -1261,11 +1261,17 @@ def create_momentum_router() -> APIRouter:
             else:
                 # Store cache in app state for backtest endpoints to use
                 request.app.state.akshare_cache = cache
+                # Persist to OSS and report status
+                yield sse({"type": "progress", "phase": "oss_upload", "current": 0, "total": 1})
+                oss_err = await cache.save_to_oss()
+                if oss_err:
+                    logger.warning(f"akshare OSS save failed: {oss_err}")
                 yield sse(
                     {
                         "type": "complete",
                         "daily_count": len(cache._daily),
                         "minute_count": len(cache._minute),
+                        "oss_error": oss_err,
                     }
                 )
 

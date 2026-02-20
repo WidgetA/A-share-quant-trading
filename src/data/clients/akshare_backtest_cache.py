@@ -109,11 +109,14 @@ class AkshareBacktestCache:
             return False
         return self._start_date <= start_date and self._end_date >= end_date
 
-    def _save_to_oss(self) -> None:
-        """Persist cache to Alibaba Cloud OSS as pickle files."""
+    def _save_to_oss(self) -> str | None:
+        """Persist cache to Alibaba Cloud OSS as pickle files.
+
+        Returns None on success, or an error message string on failure.
+        """
         bucket = _get_oss_bucket()
         if bucket is None:
-            return
+            return "OSS 未配置（缺少环境变量）"
 
         meta = {
             "start_date": self._start_date,
@@ -128,11 +131,17 @@ class AkshareBacktestCache:
             ]:
                 buf = io.BytesIO()
                 pickle.dump(obj, buf, protocol=pickle.HIGHEST_PROTOCOL)
+                size_mb = buf.tell() / 1024 / 1024
+                logger.info(f"Uploading {name} to OSS ({size_mb:.1f} MB)...")
                 buf.seek(0)
                 bucket.put_object(f"{_OSS_PREFIX}{name}", buf)
+                logger.info(f"Uploaded {name} to OSS OK")
             logger.info(f"Cache saved to OSS: {len(self._daily)} daily, {len(self._minute)} minute")
+            return None
         except Exception as e:
-            logger.error(f"Failed to save cache to OSS: {e}")
+            msg = f"OSS 上传失败: {e}"
+            logger.error(msg)
+            return msg
 
     @classmethod
     def load_from_oss(cls) -> AkshareBacktestCache | None:
@@ -331,8 +340,9 @@ class AkshareBacktestCache:
 
         self._is_ready = True
 
-        # Persist to OSS for reuse across container redeployments
-        await asyncio.to_thread(self._save_to_oss)
+    async def save_to_oss(self) -> str | None:
+        """Save cache to OSS. Returns None on success, error message on failure."""
+        return await asyncio.to_thread(self._save_to_oss)
 
 
 class AkshareHistoricalAdapter:
