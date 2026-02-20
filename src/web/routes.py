@@ -1203,16 +1203,16 @@ def create_momentum_router() -> APIRouter:
                 "cached": True,
             }
 
-        # Try loading from disk cache
-        disk_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_disk)
-        if disk_cache and disk_cache.covers_range(start_date, end_date):
-            request.app.state.akshare_cache = disk_cache
+        # Try loading from OSS cache
+        oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
+        if oss_cache and oss_cache.covers_range(start_date, end_date):
+            request.app.state.akshare_cache = oss_cache
 
             async def cached_stream():
                 msg = {
                     "type": "complete",
-                    "daily_count": len(disk_cache._daily),
-                    "minute_count": len(disk_cache._minute),
+                    "daily_count": len(oss_cache._daily),
+                    "minute_count": len(oss_cache._minute),
                     "cached": True,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"

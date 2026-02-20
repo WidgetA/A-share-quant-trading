@@ -8,19 +8,20 @@
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
-# - AkshareBacktestCache: Downloads and stores all price data in memory + disk
+# - AkshareBacktestCache: Downloads and stores all price data in memory + OSS
 # - AkshareHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
 # - Pre-download strategy: ~3500 stocks × (daily + minute) ≈ 25-30 min
-# - Disk cache: data/cache/akshare_*.pkl — survives server restarts
+# - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import os
 import pickle
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -30,8 +31,23 @@ logger = logging.getLogger(__name__)
 # Akshare calls are synchronous; we limit concurrency to avoid hammering the API
 _DOWNLOAD_WORKERS = 8
 
-# Disk cache directory
-_CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cache"
+# OSS cache key prefix
+_OSS_PREFIX = "akshare-cache/"
+
+
+def _get_oss_bucket():
+    """Get OSS bucket instance from environment variables. Returns None if not configured."""
+    key_id = os.environ.get("OSS_ACCESS_KEY_ID")
+    key_secret = os.environ.get("OSS_ACCESS_KEY_SECRET")
+    endpoint = os.environ.get("OSS_ENDPOINT")
+    bucket_name = os.environ.get("OSS_BUCKET_NAME")
+    if not all([key_id, key_secret, endpoint, bucket_name]):
+        logger.warning("OSS not configured — cache persistence disabled")
+        return None
+    import oss2
+
+    auth = oss2.Auth(key_id, key_secret)
+    return oss2.Bucket(auth, endpoint, bucket_name)
 
 
 class AkshareBacktestCache:
@@ -39,11 +55,10 @@ class AkshareBacktestCache:
     Pre-downloads daily OHLCV and 09:30-09:40 minute bar data for all
     main-board A-share stocks, keyed by (stock_code, date).
 
-    Disk persistence:
-        After download, data is saved to data/cache/akshare_daily.pkl and
-        akshare_minute.pkl. On next request, if the cached range covers
-        the requested range, data is loaded from disk (~2s) instead of
-        re-downloading (~25 min).
+    OSS persistence:
+        After download, data is saved to Alibaba Cloud OSS as pickle files.
+        On next request, if the cached range covers the requested range,
+        data is loaded from OSS instead of re-downloading (~25 min).
 
     Usage:
         cache = AkshareBacktestCache()
@@ -94,59 +109,64 @@ class AkshareBacktestCache:
             return False
         return self._start_date <= start_date and self._end_date >= end_date
 
-    def _save_to_disk(self) -> None:
-        """Persist cache to disk as pickle files."""
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    def _save_to_oss(self) -> None:
+        """Persist cache to Alibaba Cloud OSS as pickle files."""
+        bucket = _get_oss_bucket()
+        if bucket is None:
+            return
+
         meta = {
             "start_date": self._start_date,
             "end_date": self._end_date,
             "stock_codes": self._stock_codes,
         }
         try:
-            with open(_CACHE_DIR / "akshare_meta.pkl", "wb") as f:
-                pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
-            with open(_CACHE_DIR / "akshare_daily.pkl", "wb") as f:
-                pickle.dump(self._daily, f, protocol=pickle.HIGHEST_PROTOCOL)
-            with open(_CACHE_DIR / "akshare_minute.pkl", "wb") as f:
-                pickle.dump(self._minute, f, protocol=pickle.HIGHEST_PROTOCOL)
-            logger.info(
-                f"Cache saved to disk: {len(self._daily)} daily, {len(self._minute)} minute"
-            )
+            for name, obj in [
+                ("meta.pkl", meta),
+                ("daily.pkl", self._daily),
+                ("minute.pkl", self._minute),
+            ]:
+                buf = io.BytesIO()
+                pickle.dump(obj, buf, protocol=pickle.HIGHEST_PROTOCOL)
+                buf.seek(0)
+                bucket.put_object(f"{_OSS_PREFIX}{name}", buf)
+            logger.info(f"Cache saved to OSS: {len(self._daily)} daily, {len(self._minute)} minute")
         except Exception as e:
-            logger.error(f"Failed to save cache to disk: {e}")
+            logger.error(f"Failed to save cache to OSS: {e}")
 
     @classmethod
-    def load_from_disk(cls) -> AkshareBacktestCache | None:
-        """Load cache from disk if available. Returns None if no cache found."""
-        meta_path = _CACHE_DIR / "akshare_meta.pkl"
-        daily_path = _CACHE_DIR / "akshare_daily.pkl"
-        minute_path = _CACHE_DIR / "akshare_minute.pkl"
-        if not (meta_path.exists() and daily_path.exists() and minute_path.exists()):
+    def load_from_oss(cls) -> AkshareBacktestCache | None:
+        """Load cache from OSS if available. Returns None if not found."""
+        bucket = _get_oss_bucket()
+        if bucket is None:
             return None
 
         try:
-            with open(meta_path, "rb") as f:
-                meta = pickle.load(f)  # noqa: S301
-            with open(daily_path, "rb") as f:
-                daily = pickle.load(f)  # noqa: S301
-            with open(minute_path, "rb") as f:
-                minute = pickle.load(f)  # noqa: S301
+            files = {}
+            for name in ("meta.pkl", "daily.pkl", "minute.pkl"):
+                key = f"{_OSS_PREFIX}{name}"
+                if not bucket.object_exists(key):
+                    logger.info(f"OSS cache key not found: {key}")
+                    return None
+                result = bucket.get_object(key)
+                files[name] = pickle.load(result)  # noqa: S301
 
+            meta = files["meta.pkl"]
             cache = cls()
             cache._start_date = meta["start_date"]
             cache._end_date = meta["end_date"]
             cache._stock_codes = meta["stock_codes"]
-            cache._daily = daily
-            cache._minute = minute
+            cache._daily = files["daily.pkl"]
+            cache._minute = files["minute.pkl"]
             cache._is_ready = True
             logger.info(
-                f"Cache loaded from disk: {len(daily)} daily, "
-                f"{len(minute)} minute, "
+                f"Cache loaded from OSS: {len(cache._daily)} daily, "
+                f"{len(cache._minute)} minute, "
                 f"range [{cache._start_date} ~ {cache._end_date}]"
             )
             return cache
         except Exception as e:
-            logger.error(f"Failed to load cache from disk: {e}")
+            logger.error(f"Failed to load cache from OSS: {e}")
             return None
 
     async def download_prices(
@@ -311,8 +331,8 @@ class AkshareBacktestCache:
 
         self._is_ready = True
 
-        # Persist to disk for reuse across restarts
-        await asyncio.to_thread(self._save_to_disk)
+        # Persist to OSS for reuse across container redeployments
+        await asyncio.to_thread(self._save_to_oss)
 
 
 class AkshareHistoricalAdapter:
