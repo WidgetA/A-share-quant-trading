@@ -4513,12 +4513,15 @@ def create_settings_router() -> APIRouter:
                 )
                 if resp.status_code == 200:
                     return {"success": True, "message": "Tavily API Key 验证成功"}
-                elif resp.status_code == 401:
-                    return {"success": False, "message": "API Key 无效或已过期"}
                 else:
+                    detail = ""
+                    try:
+                        detail = resp.text[:200]
+                    except Exception:
+                        pass
                     return {
                         "success": False,
-                        "message": f"验证失败: HTTP {resp.status_code}",
+                        "message": f"验证失败: HTTP {resp.status_code} — {detail}",
                     }
         except httpx.TimeoutException:
             return {"success": False, "message": "请求超时，请检查网络连接"}
