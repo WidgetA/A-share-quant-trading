@@ -381,7 +381,9 @@ async function startAkshareDownload() {
                 if (!trimmed.startsWith('data: ')) continue;
                 try {
                     const data = JSON.parse(trimmed.substring(6));
-                    if (data.type === 'progress') {
+                    if (data.type === 'info') {
+                        progressText.textContent = data.message;
+                    } else if (data.type === 'progress') {
                         const phaseLabel = data.phase === 'oss_upload' ? '正在上传 OSS 缓存' :
                                            data.phase === 'daily' ? '日线' : '分钟线';
                         if (data.phase === 'oss_upload') {

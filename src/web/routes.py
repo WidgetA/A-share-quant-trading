@@ -1180,10 +1180,10 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/akshare-prepare")
     async def akshare_prepare(request: Request, body: AksharePrepareRequest):
-        """Pre-download akshare data as SSE stream.
+        """Pre-download akshare data as SSE stream (incremental).
 
-        First checks disk cache — if it covers the requested range, loads
-        in ~2s instead of re-downloading (~25 min).
+        Loads existing cache from memory / OSS, calculates which date
+        ranges are missing, and only downloads the gaps.
         """
         from src.data.clients.akshare_backtest_cache import (
             AkshareBacktestCache,
@@ -1196,8 +1196,8 @@ def create_momentum_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
-        # Check if existing in-memory cache already covers the range
-        existing = getattr(request.app.state, "akshare_cache", None)
+        # 1) Try in-memory cache
+        existing: AkshareBacktestCache | None = getattr(request.app.state, "akshare_cache", None)
         if existing and existing.covers_range(start_date, end_date):
             return {
                 "type": "complete",
@@ -1206,35 +1206,52 @@ def create_momentum_router() -> APIRouter:
                 "cached": True,
             }
 
-        # Try loading from OSS cache
-        oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
-        if oss_cache and oss_cache.covers_range(start_date, end_date):
-            request.app.state.akshare_cache = oss_cache
+        # 2) Try OSS cache
+        if not existing:
+            existing = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
+        if existing and existing.covers_range(start_date, end_date):
+            request.app.state.akshare_cache = existing
 
             async def cached_stream():
                 msg = {
                     "type": "complete",
-                    "daily_count": len(oss_cache._daily),
-                    "minute_count": len(oss_cache._minute),
+                    "daily_count": len(existing._daily),  # type: ignore[union-attr]
+                    "minute_count": len(existing._minute),  # type: ignore[union-attr]
                     "cached": True,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
-        # Pre-flight: verify OSS is reachable BEFORE spending 25 min downloading
+        # 3) Pre-flight: verify OSS is reachable BEFORE downloading
         oss_err = await asyncio.to_thread(check_oss_available)
         if oss_err:
-            raise HTTPException(status_code=500, detail=f"OSS 不可用，请先修复再下载: {oss_err}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"OSS 不可用，请先修复再下载: {oss_err}",
+            )
 
-        # No usable cache — download fresh
-        cache = AkshareBacktestCache()
+        # 4) Calculate gaps to download (incremental)
+        if existing:
+            gaps = existing.missing_ranges(start_date, end_date)
+        else:
+            existing = AkshareBacktestCache()
+            gaps = [(start_date, end_date)]
+
+        if not gaps:
+            # Shouldn't happen (covers_range check above), but just in case
+            request.app.state.akshare_cache = existing
+            return {
+                "type": "complete",
+                "daily_count": len(existing._daily),
+                "minute_count": len(existing._minute),
+                "cached": True,
+            }
 
         async def generate():
             def sse(data: dict) -> str:
                 return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-            # Use a queue to bridge callback → SSE yield
             progress_queue: asyncio.Queue = asyncio.Queue()
 
             async def queue_progress(phase: str, current: int, total: int):
@@ -1242,14 +1259,21 @@ def create_momentum_router() -> APIRouter:
                     {"type": "progress", "phase": phase, "current": current, "total": total}
                 )
 
-            # Start download in background task
             download_error = None
 
             async def do_download():
                 nonlocal download_error
                 try:
-                    await cache.download_prices(start_date, end_date, queue_progress)
-                    await progress_queue.put(None)  # Signal completion
+                    for i, (gap_start, gap_end) in enumerate(gaps):
+                        label = f"{gap_start}~{gap_end}"
+                        await progress_queue.put(
+                            {"type": "info", "message": f"增量下载 {label} ({i + 1}/{len(gaps)})"}
+                        )
+                        gap_cache = AkshareBacktestCache()
+                        await gap_cache.download_prices(gap_start, gap_end, queue_progress)
+                        existing.merge_from(gap_cache)  # type: ignore[union-attr]
+                    existing._is_ready = True  # type: ignore[union-attr]
+                    await progress_queue.put(None)
                 except Exception as e:
                     download_error = str(e)
                     await progress_queue.put(None)
@@ -1267,19 +1291,17 @@ def create_momentum_router() -> APIRouter:
             if download_error:
                 yield sse({"type": "error", "message": download_error})
             else:
-                # Store cache in app state for backtest endpoints to use
-                request.app.state.akshare_cache = cache
-                # Persist to OSS and report status
+                request.app.state.akshare_cache = existing
                 yield sse({"type": "progress", "phase": "oss_upload", "current": 0, "total": 1})
-                oss_err = await cache.save_to_oss()
-                if oss_err:
-                    logger.warning(f"akshare OSS save failed: {oss_err}")
+                oss_save_err = await existing.save_to_oss()  # type: ignore[union-attr]
+                if oss_save_err:
+                    logger.warning(f"akshare OSS save failed: {oss_save_err}")
                 yield sse(
                     {
                         "type": "complete",
-                        "daily_count": len(cache._daily),
-                        "minute_count": len(cache._minute),
-                        "oss_error": oss_err,
+                        "daily_count": len(existing._daily),  # type: ignore[union-attr]
+                        "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                        "oss_error": oss_save_err,
                     }
                 )
 

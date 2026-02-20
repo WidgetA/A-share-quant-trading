@@ -130,6 +130,43 @@ class AkshareBacktestCache:
                 result[code] = day_data
         return result
 
+    def missing_ranges(self, start_date: date, end_date: date) -> list[tuple[date, date]]:
+        """Return date ranges not covered by this cache.
+
+        E.g. cache has 2/1-2/4, request 1/1-2/10 → [(1/1, 1/31), (2/5, 2/10)].
+        """
+        if not self._is_ready or not self._start_date or not self._end_date:
+            return [(start_date, end_date)]
+        gaps: list[tuple[date, date]] = []
+        if start_date < self._start_date:
+            gaps.append((start_date, self._start_date - timedelta(days=1)))
+        if end_date > self._end_date:
+            gaps.append((self._end_date + timedelta(days=1), end_date))
+        return gaps
+
+    def merge_from(self, other: AkshareBacktestCache) -> None:
+        """Merge data from another cache (e.g. a gap download) into this one."""
+        for code, dates in other._daily.items():
+            if code in self._daily:
+                self._daily[code].update(dates)
+            else:
+                self._daily[code] = dates
+        for code, dates in other._minute.items():
+            if code in self._minute:
+                self._minute[code].update(dates)
+            else:
+                self._minute[code] = dates
+        existing_codes = set(self._stock_codes)
+        for code in other._stock_codes:
+            if code not in existing_codes:
+                self._stock_codes.append(code)
+        if other._start_date:
+            if self._start_date is None or other._start_date < self._start_date:
+                self._start_date = other._start_date
+        if other._end_date:
+            if self._end_date is None or other._end_date > self._end_date:
+                self._end_date = other._end_date
+
     def covers_range(self, start_date: date, end_date: date) -> bool:
         """Check if cached data covers the requested date range."""
         if not self._is_ready or not self._start_date or not self._end_date:
