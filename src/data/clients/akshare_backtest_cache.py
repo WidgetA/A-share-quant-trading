@@ -50,6 +50,27 @@ def _get_oss_bucket():
     return oss2.Bucket(auth, endpoint, bucket_name)
 
 
+def check_oss_available() -> str | None:
+    """Pre-flight check: verify OSS is configured and reachable.
+
+    Returns None if OK, or an error message string.
+    """
+    bucket = _get_oss_bucket()
+    if bucket is None:
+        missing = [
+            name
+            for name in ("OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET", "OSS_ENDPOINT", "OSS_BUCKET_NAME")
+            if not os.environ.get(name)
+        ]
+        return f"OSS 环境变量缺失: {', '.join(missing)}"
+    try:
+        # Lightweight call to verify credentials + bucket access
+        bucket.get_bucket_info()
+        return None
+    except Exception as e:
+        return f"OSS 连接失败: {e}"
+
+
 class AkshareBacktestCache:
     """
     Pre-downloads daily OHLCV and 09:30-09:40 minute bar data for all

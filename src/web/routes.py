@@ -1185,7 +1185,10 @@ def create_momentum_router() -> APIRouter:
         First checks disk cache — if it covers the requested range, loads
         in ~2s instead of re-downloading (~25 min).
         """
-        from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
+        from src.data.clients.akshare_backtest_cache import (
+            AkshareBacktestCache,
+            check_oss_available,
+        )
 
         try:
             start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
@@ -1218,6 +1221,11 @@ def create_momentum_router() -> APIRouter:
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(cached_stream(), media_type="text/event-stream")
+
+        # Pre-flight: verify OSS is reachable BEFORE spending 25 min downloading
+        oss_err = await asyncio.to_thread(check_oss_available)
+        if oss_err:
+            raise HTTPException(status_code=500, detail=f"OSS 不可用，请先修复再下载: {oss_err}")
 
         # No usable cache — download fresh
         cache = AkshareBacktestCache()
