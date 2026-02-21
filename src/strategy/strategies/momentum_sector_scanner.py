@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING
@@ -106,11 +106,10 @@ class SelectedStock:
 class RecommendedStock:
     """The top pick across all candidates, ranked by composite score.
 
-    Composite = Z(gfo) + Z(amp) - cup_days*0.3 + Z(board_count)*0.5
+    Composite = Z(gfo) + Z(amp) - cup_days*0.3
     - gfo: gain_from_open — intraday momentum (9:40 price vs open)
     - amp: early_volume / avg_daily_volume (9:40 data, no hindsight)
-    - cup_days: consecutive up days — soft penalty
-    - board_count: how many candidates share same board — consensus bonus
+    - cup_days: consecutive up days — soft penalty (each day deducts 0.3 std)
     """
 
     stock_code: str
@@ -496,7 +495,7 @@ class MomentumSectorScanner:
 
         logger.info(
             f"Step 6: Scoring {len(selected_stocks)} candidates by "
-            f"Z(gfo) + Z(amp) - cup_penalty + board_bonus"
+            f"Z(gfo) + Z(amp) - cup_penalty"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -521,14 +520,10 @@ class MomentumSectorScanner:
 
         candidates_pool = non_limit_up
 
-        # --- Compute composite score ---
-        # Z(gain_from_open) + Z(turnover_amp) - cup_penalty + board_bonus
+        # --- Compute composite score: Z(gain_from_open) + Z(early_turnover_amp) - cup_penalty ---
         _cup_data = consecutive_up_data or {}
         _avg_vol_data = avg_daily_volume_data or {}
         _snapshots = price_snapshots or {}
-
-        # Count how many candidates each board contributed
-        board_counts = Counter(s.board_name for s in candidates_pool)
 
         # Collect raw values for Z-score computation
         # early_turnover_amp = early_volume / avg_daily_volume
@@ -536,7 +531,6 @@ class MomentumSectorScanner:
         gfo_values: list[float] = []
         amp_values: list[float] = []
         cup_values: list[int] = []
-        board_count_values: list[float] = []
         for s in candidates_pool:
             snap = _snapshots.get(s.stock_code)
             gfo = snap.gain_from_open_pct if snap else 0.0
@@ -546,23 +540,18 @@ class MomentumSectorScanner:
             gfo_values.append(gfo)
             amp_values.append(early_amp)
             cup_values.append(_cup_data.get(s.stock_code) or 0)
-            board_count_values.append(float(board_counts[s.board_name]))
 
         gfo_z = self._z_scores(gfo_values)
         amp_z = self._z_scores(amp_values)
-        board_z = self._z_scores(board_count_values)
 
         # Soft penalty for consecutive up days: each day deducts 0.3 std
         CUP_PENALTY_PER_DAY = 0.3
-        # Board strength bonus: more candidates in same board = stronger consensus
-        BOARD_BONUS_WEIGHT = 0.5
 
         # Build scored candidates
         scored: list[tuple[SelectedStock, float, float, float, float, int]] = []
         for i, s in enumerate(candidates_pool):
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
-            board_bonus = board_z[i] * BOARD_BONUS_WEIGHT
-            composite = gfo_z[i] + amp_z[i] - cup_penalty + board_bonus
+            composite = gfo_z[i] + amp_z[i] - cup_penalty
             scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i], cup_values[i]))
 
         # Sort by composite score descending
@@ -571,8 +560,7 @@ class MomentumSectorScanner:
         # Log top 3
         if len(scored) > 1:
             top3_info = ", ".join(
-                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d "
-                f"board={s.board_name}[{board_counts[s.board_name]}] score={sc:+.2f})"
+                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d score={sc:+.2f})"
                 for s, sc, gfo, amp, _, cup in scored[:3]
             )
             logger.info(f"Step 6: Top 3: {top3_info}")
@@ -580,8 +568,7 @@ class MomentumSectorScanner:
             s, sc, gfo, amp, _, cup = scored[0]
             logger.info(
                 f"Step 6: Single candidate {s.stock_code} "
-                f"(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d "
-                f"board={s.board_name}[{board_counts[s.board_name]}] score={sc:+.2f})"
+                f"(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d score={sc:+.2f})"
             )
 
         # Build ranked list (SelectedStock only) for news check fallback
