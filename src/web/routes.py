@@ -1234,12 +1234,28 @@ def create_momentum_router() -> APIRouter:
             return {"status": "loading"}
         if cache is None:
             return {"status": "empty"}
+        # Diagnostic: sample date keys from a random stock to help debug format issues
+        sample_dates: list[str] = []
+        sample_code = ""
+        for code, dates in cache._daily.items():
+            if dates:
+                sample_code = code
+                sorted_keys = sorted(dates.keys())
+                sample_dates = (
+                    sorted_keys[:3] + sorted_keys[-3:]
+                    if len(sorted_keys) > 6
+                    else sorted_keys
+                )
+                break
+
         return {
             "status": "ready",
             "start_date": str(cache._start_date) if cache._start_date else None,
             "end_date": str(cache._end_date) if cache._end_date else None,
             "daily_stocks": len(cache._daily),
             "minute_stocks": len(cache._minute),
+            "debug_sample_code": sample_code,
+            "debug_sample_dates": sample_dates,
         }
 
     @router.post("/api/momentum/akshare-prepare")
@@ -3998,6 +4014,23 @@ def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
 
     all_daily = akshare_cache.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
+
+    if not all_daily:
+        # Debug: log sample date keys to diagnose format mismatch
+        for code, dates in akshare_cache._daily.items():
+            if dates:
+                sample_keys = sorted(dates.keys())[:5]
+                logger.warning(
+                    f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
+                    f"but stock {code} has {len(dates)} dates, "
+                    f"sample keys: {sample_keys}"
+                )
+                break
+        else:
+            logger.warning(
+                f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
+                f"_daily has {len(akshare_cache._daily)} stocks but all date dicts are empty"
+            )
 
     for code, day in all_daily.items():
         open_price = day.get("open", 0)
