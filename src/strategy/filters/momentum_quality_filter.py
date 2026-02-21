@@ -63,6 +63,7 @@ class QualityAssessment:
     trend_pct: float | None = None  # N-day price change %
     turnover_amp: float | None = None  # buy-day turnover / avg turnover
     consecutive_up_days: int | None = None  # consecutive days close > prev close
+    avg_daily_volume: float | None = None  # avg daily volume (for Step 6 early_amp)
 
 
 class MomentumQualityFilter:
@@ -223,6 +224,9 @@ class MomentumQualityFilter:
                 f" AND 换手放大{turnover_amp:.1f}x<{self._config.min_turnover_amp}x"
             )
 
+        # Extract avg_daily_volume for Step 6 early_turnover_amp computation
+        avg_daily_volume = hist.get("avg_daily_volume")
+
         return QualityAssessment(
             stock_code=stock.stock_code,
             filtered_out=len(reasons) > 0,
@@ -230,6 +234,7 @@ class MomentumQualityFilter:
             trend_pct=trend_pct,
             turnover_amp=turnover_amp,
             consecutive_up_days=consecutive_up_days,
+            avg_daily_volume=avg_daily_volume,
         )
 
     async def _fetch_historical_context(

@@ -1540,6 +1540,9 @@ def create_momentum_router() -> APIRouter:
                     "board_name": rec.board_name,
                     "board_stock_count": rec.board_stock_count,
                     "open_gain_pct": round(rec.open_gain_pct, 2),
+                    "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
+                    "turnover_amp": round(rec.turnover_amp, 2),
+                    "composite_score": round(rec.composite_score, 2),
                     "pe_ttm": round(rec.pe_ttm, 2),
                     "board_avg_pe": round(rec.board_avg_pe, 2),
                     "open_price": round(rec.open_price, 2),
@@ -4365,6 +4368,9 @@ async def _run_intraday_monitor(state: dict) -> None:
                             "board_name": rec.board_name,
                             "board_stock_count": rec.board_stock_count,
                             "open_gain_pct": round(rec.open_gain_pct, 2),
+                            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
+                            "turnover_amp": round(rec.turnover_amp, 2),
+                            "composite_score": round(rec.composite_score, 2),
                         }
                         if rec
                         else None,

@@ -637,8 +637,8 @@ strategy:
 9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
    - Exclude stocks with ≥2 consecutive up days (chasing risk)
-   - Rank by 开盘涨幅 descending (highest wins) — 前面 Step 1~5.6 已做多层过滤，最终在好票里选涨势最猛的
-   - Pick the highest-ranked stock. Highlighted in UI + Feishu notification
+   - Composite score = Z(gain_from_open) + Z(turnover_amp) — 盘中涨幅(主力在买) + 换手放大(资金到位)
+   - Pick the highest-scored stock. Highlighted in UI + Feishu notification
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:

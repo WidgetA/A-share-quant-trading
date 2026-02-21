@@ -20,7 +20,7 @@
 # Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
 # Step 6: recommend — across ALL candidates, filter consecutive-up ≥2d,
-#          score by Z(开盘涨幅)-Z(营收增长率), check #1 for negative news, fall back to #2
+#          score by Z(gain_from_open) + Z(turnover_amp), check #1 for negative news, fall back to #2
 # Step 7: → ScanResult → Feishu notification
 
 from __future__ import annotations
@@ -104,19 +104,27 @@ class SelectedStock:
 
 @dataclass
 class RecommendedStock:
-    """The top pick across all candidates, ranked by 开盘涨幅 (highest wins)."""
+    """The top pick across all candidates, ranked by composite score.
+
+    Composite score = Z(gain_from_open) + Z(early_turnover_amp).
+    - gain_from_open: intraday momentum (9:40 price vs open)
+    - early_turnover_amp: early_volume / avg_daily_volume (9:40 data, no hindsight)
+    """
 
     stock_code: str
     stock_name: str
     board_name: str  # Which board it was recommended from
     board_stock_count: int  # How many selected stocks in that board
-    open_gain_pct: float
+    open_gain_pct: float  # (open - prev_close) / prev_close %, kept for display
     pe_ttm: float
     board_avg_pe: float
     growth_rate: float = 0.0  # Deprecated: kept for DB compat, no longer used in scoring
     open_price: float = 0.0  # Raw open price
     prev_close: float = 0.0  # Previous close price
     latest_price: float = 0.0  # 9:40 price (buy price for range backtest)
+    gain_from_open_pct: float = 0.0  # (9:40 - open) / open %, intraday momentum
+    turnover_amp: float = 0.0  # early_volume / avg_daily_volume, 9:40 capital intensity
+    composite_score: float = 0.0  # Z(gain_from_open) + Z(turnover_amp)
     news_check_passed: bool | None = None  # None=not checked, True=clean, False=had negative
     news_check_detail: str = ""  # LLM reasoning if checked
 
@@ -258,16 +266,21 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
 
-        # Step 6: Recommend — high opening gap + negative growth
+        # Step 6: Recommend — rank by composite score Z(gain_from_open) + Z(turnover_amp)
         # Also filter out consecutive-up stocks using data from Step 5.5
         consecutive_up_data = {
             a.stock_code: a.consecutive_up_days
             for a in quality_assessments
             if a.consecutive_up_days is not None
         }
+        avg_daily_volume_data = {
+            a.stock_code: a.avg_daily_volume
+            for a in quality_assessments
+            if a.avg_daily_volume is not None
+        }
         if selected:
             result.recommended_stock = await self._step6_recommend(
-                selected, all_snapshots, consecutive_up_data
+                selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
             )
             if result.recommended_stock:
                 rec = result.recommended_stock
@@ -437,14 +450,37 @@ class MomentumSectorScanner:
 
         return sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True), price_snapshots
 
+    @staticmethod
+    def _z_scores(values: list[float]) -> list[float]:
+        """Compute Z-scores for a list of values.
+
+        Returns 0.0 for all if std == 0 (all values equal).
+        """
+        n = len(values)
+        if n == 0:
+            return []
+        if n == 1:
+            return [0.0]
+        mean = sum(values) / n
+        variance = sum((v - mean) ** 2 for v in values) / n
+        std = variance**0.5
+        if std == 0:
+            return [0.0] * n
+        return [(v - mean) / std for v in values]
+
     async def _step6_recommend(
         self,
         selected_stocks: list[SelectedStock],
         price_snapshots: dict[str, PriceSnapshot] | None = None,
         consecutive_up_data: dict[str, int] | None = None,
+        avg_daily_volume_data: dict[str, float] | None = None,
     ) -> RecommendedStock | None:
         """
-        Step 6: Rank candidates by 开盘涨幅 (highest wins) and pick #1.
+        Step 6: Rank candidates by composite score and pick #1.
+
+        Composite score = Z(gain_from_open_pct) + Z(early_turnover_amp).
+        - gain_from_open: intraday momentum (9:40 price vs open)
+        - early_turnover_amp: early_volume / avg_daily_volume (9:40 data, no hindsight)
 
         Filters:
             - Limit-up at 9:40 → unbuyable, skip
@@ -456,7 +492,10 @@ class MomentumSectorScanner:
         if not selected_stocks:
             return None
 
-        logger.info(f"Step 6: Ranking {len(selected_stocks)} candidates by open_gain_pct")
+        logger.info(
+            f"Step 6: Scoring {len(selected_stocks)} candidates by "
+            f"Z(gain_from_open) + Z(turnover_amp)"
+        )
 
         # --- Filter out stocks at limit-up at 9:40 ---
         LIMIT_UP_RATIO = 0.10  # Main board +10%
@@ -496,19 +535,57 @@ class MomentumSectorScanner:
             logger.info("Step 6: All candidates had >= 2 consecutive up days, no recommendation")
             return None
 
-        # --- Rank by open_gain_pct descending ---
-        ranked = sorted(non_consecutive, key=lambda s: s.open_gain_pct, reverse=True)
+        # --- Compute composite score: Z(gain_from_open) + Z(early_turnover_amp) ---
+        _avg_vol_data = avg_daily_volume_data or {}
+        _snapshots = price_snapshots or {}
 
-        best = ranked[0]
+        # Collect raw values for Z-score computation
+        # early_turnover_amp = early_volume / avg_daily_volume
+        # Uses only 9:40 data — no full-day hindsight in backtest
+        gfo_values: list[float] = []
+        amp_values: list[float] = []
+        for s in non_consecutive:
+            snap = _snapshots.get(s.stock_code)
+            gfo = snap.gain_from_open_pct if snap else 0.0
+            avg_vol = _avg_vol_data.get(s.stock_code, 0.0)
+            early_vol = snap.early_volume if snap else 0.0
+            early_amp = (early_vol / avg_vol) if avg_vol > 0 else 0.0
+            gfo_values.append(gfo)
+            amp_values.append(early_amp)
+
+        gfo_z = self._z_scores(gfo_values)
+        amp_z = self._z_scores(amp_values)
+
+        # Build scored candidates
+        scored: list[tuple[SelectedStock, float, float, float, float]] = []
+        for i, s in enumerate(non_consecutive):
+            composite = gfo_z[i] + amp_z[i]
+            scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i]))
+
+        # Sort by composite score descending
+        scored.sort(key=lambda x: x[1], reverse=True)
 
         # Log top 3
-        if len(ranked) > 1:
-            top3_info = ", ".join(f"{s.stock_code}(OG={s.open_gain_pct:+.1f}%)" for s in ranked[:3])
+        if len(scored) > 1:
+            top3_info = ", ".join(
+                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x score={sc:+.2f})"
+                for s, sc, gfo, amp, _ in scored[:3]
+            )
             logger.info(f"Step 6: Top 3: {top3_info}")
         else:
+            s, sc, gfo, amp, _ = scored[0]
             logger.info(
-                f"Step 6: Single candidate {best.stock_code} (OG={best.open_gain_pct:+.1f}%)"
+                f"Step 6: Single candidate {s.stock_code} "
+                f"(GFO={gfo:+.2f}% amp={amp:.1f}x score={sc:+.2f})"
             )
+
+        # Build ranked list (SelectedStock only) for news check fallback
+        ranked = [item[0] for item in scored]
+        best_idx = 0
+        best = ranked[best_idx]
+        best_score = scored[best_idx][1]
+        best_gfo = scored[best_idx][2]
+        best_amp = scored[best_idx][3]
 
         # --- Negative news check on #1 (if checker configured) ---
         news_check_passed: bool | None = None
@@ -528,9 +605,13 @@ class MomentumSectorScanner:
                 news_check_detail = news_result.reason
                 logger.info(f"Step 6: {best.stock_code} has negative news: {news_result.reason}")
                 if len(ranked) >= 2:
+                    old_best = best
                     best = ranked[1]
+                    best_score = scored[1][1]
+                    best_gfo = scored[1][2]
+                    best_amp = scored[1][3]
                     news_check_passed = None  # #2 not checked
-                    news_check_detail = f"顺延: {ranked[0].stock_code} 有负面"
+                    news_check_detail = f"顺延: {old_best.stock_code} 有负面"
                     logger.info(f"Step 6: Falling back to #2: {best.stock_code} {best.stock_name}")
                 else:
                     logger.info("Step 6: No fallback candidate, recommending #1 with warning")
@@ -538,7 +619,7 @@ class MomentumSectorScanner:
                 news_check_passed = True
                 news_check_detail = news_result.reason
 
-        snap = price_snapshots.get(best.stock_code) if price_snapshots else None
+        snap = _snapshots.get(best.stock_code)
 
         return RecommendedStock(
             stock_code=best.stock_code,
@@ -551,6 +632,9 @@ class MomentumSectorScanner:
             open_price=snap.open_price if snap else 0.0,
             prev_close=snap.prev_close if snap else 0.0,
             latest_price=snap.latest_price if snap else 0.0,
+            gain_from_open_pct=best_gfo,
+            turnover_amp=best_amp,
+            composite_score=best_score,
             news_check_passed=news_check_passed,
             news_check_detail=news_check_detail,
         )

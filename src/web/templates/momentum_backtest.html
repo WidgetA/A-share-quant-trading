@@ -728,7 +728,7 @@ function renderResults(data) {
         recCard.classList.remove('hidden');
         document.getElementById('rec-code').textContent = rec.stock_code;
         document.getElementById('rec-name').textContent = rec.stock_name;
-        document.getElementById('rec-gain').textContent = `开盘涨幅: +${rec.open_gain_pct.toFixed(2)}%`;
+        document.getElementById('rec-gain').textContent = `盘中涨幅: +${rec.gain_from_open_pct.toFixed(2)}%  换手放大: ${rec.turnover_amp.toFixed(1)}x  综合得分: ${rec.composite_score >= 0 ? '+' : ''}${rec.composite_score.toFixed(2)}`;
         document.getElementById('rec-board').textContent = `板块: ${rec.board_name} (选出${rec.board_stock_count}只最多)`;
         const newsEl = document.getElementById('rec-news');
         if (rec.news_check_passed === true) {
