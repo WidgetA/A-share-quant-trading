@@ -2989,15 +2989,17 @@ def create_momentum_router() -> APIRouter:
                                 snap_r = price_snapshots.get(ra.stock_code)
                                 svr = ra.surge_volume_ratio
                                 rv = ra.relative_volume
-                                reversal_diag.append({
-                                    "code": ra.stock_code,
-                                    "ratio": round(svr, 4) if svr is not None else None,
-                                    "surge": round(ra.surge_pct, 4) if ra.surge_pct else None,
-                                    "rel_vol": round(rv, 4) if rv else None,
-                                    "early_vol": snap_r.early_volume if snap_r else None,
-                                    "avg_vol": avg_vol_data_l2.get(ra.stock_code),
-                                    "filtered": ra.filtered_out,
-                                })
+                                reversal_diag.append(
+                                    {
+                                        "code": ra.stock_code,
+                                        "ratio": round(svr, 4) if svr is not None else None,
+                                        "surge": round(ra.surge_pct, 4) if ra.surge_pct else None,
+                                        "rel_vol": round(rv, 4) if rv else None,
+                                        "early_vol": snap_r.early_volume if snap_r else None,
+                                        "avg_vol": avg_vol_data_l2.get(ra.stock_code),
+                                        "filtered": ra.filtered_out,
+                                    }
+                                )
                         else:
                             l3 = list(l2)
 
