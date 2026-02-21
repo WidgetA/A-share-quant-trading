@@ -491,10 +491,7 @@ class AkshareBacktestCache:
                                 "low": float(row["最低"]),
                                 "close": float(row["收盘"]),
                                 "preClose": prev_close,
-                                # akshare 成交量 is in 手 (lots of 100 shares);
-                                # baostock minute volume is in 股 (shares).
-                                # Convert to 股 here so all volume fields are consistent.
-                                "volume": float(row["成交量"]) * 100,
+                                "volume": float(row["成交量"]),  # 手 (lots)
                                 "amount": float(row["成交额"]),
                                 "turnoverRatio": float(row["换手率"]),
                             }
@@ -662,7 +659,12 @@ class AkshareHistoricalAdapter:
                     time_vals.append(ds)
                     for ind in indicators.split(","):
                         ind = ind.strip()
-                        indicator_data[ind].append(day.get(ind))
+                        val = day.get(ind)
+                        # akshare 成交量 is in 手 (lots of 100 shares);
+                        # convert to 股 (shares) to match baostock/iFinD units.
+                        if ind == "volume" and val is not None:
+                            val = val * 100
+                        indicator_data[ind].append(val)
                 d += timedelta(days=1)
 
             if time_vals:

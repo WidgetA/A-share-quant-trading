@@ -518,20 +518,20 @@ A 100x unit mismatch between daily volume (手) and minute volume (股) caused:
 
 #### Implementation
 
-The conversion is done at the **storage layer** in `akshare_backtest_cache.py`:
+The conversion is done at the **adapter read layer** in `AkshareHistoricalAdapter.history_quotes()`:
 
 ```python
 # akshare 成交量 is in 手 (lots of 100 shares);
-# baostock minute volume is in 股 (shares).
-# Convert to 股 here so all volume fields are consistent.
-"volume": float(row["成交量"]) * 100,
+# convert to 股 (shares) to match baostock/iFinD units.
+if ind == "volume" and val is not None:
+    val = val * 100
 ```
 
-All downstream code (quality filter, reversal filter, Step 6 scoring) receives volume in 股 via pass-through adapters. No conversion needed anywhere else.
+Raw cache stores original values (手). Conversion happens at read time so existing caches work without rebuilding.
 
 #### Rules
 
-1. **Never store volume in 手** — convert to 股 at the data ingestion layer
+1. **Convert volume at the adapter read layer** — not at storage, so raw data stays as-is from source
 2. **When adding a new data source**, check its volume unit documentation before integrating
 3. **Cross-verify**: For any stock, `early_volume (10min) / avg_daily_volume` should be ~0.05-0.30 (5-30% of daily in first 10 minutes). If >1.0, units are likely mismatched.
 
