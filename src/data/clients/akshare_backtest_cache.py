@@ -130,19 +130,93 @@ class AkshareBacktestCache:
                 result[code] = day_data
         return result
 
-    def missing_ranges(self, start_date: date, end_date: date) -> list[tuple[date, date]]:
-        """Return date ranges not covered by this cache.
+    def find_minute_gaps(self) -> list[tuple[date, date]]:
+        """Find date ranges where daily data exists but minute data is sparse/missing.
 
-        E.g. cache has 2/1-2/4, request 1/1-2/10 → [(1/1, 1/31), (2/5, 2/10)].
+        For each trading date, counts how many stocks have daily vs minute data.
+        A date is considered a "gap" if daily_count > 100 and minute_count < 50%
+        of daily_count.  Returns a sorted list of contiguous gap ranges.
+        """
+        daily_date_counts: dict[str, int] = {}
+        minute_date_counts: dict[str, int] = {}
+
+        for _code, dates in self._daily.items():
+            for ds in dates:
+                daily_date_counts[ds] = daily_date_counts.get(ds, 0) + 1
+        for _code, dates in self._minute.items():
+            for ds in dates:
+                minute_date_counts[ds] = minute_date_counts.get(ds, 0) + 1
+
+        gap_dates: list[date] = []
+        for ds, daily_count in daily_date_counts.items():
+            if daily_count <= 100:
+                continue
+            minute_count = minute_date_counts.get(ds, 0)
+            if minute_count < daily_count * 0.5:
+                try:
+                    gap_dates.append(datetime.strptime(ds, "%Y-%m-%d").date())
+                except ValueError:
+                    continue
+
+        if not gap_dates:
+            return []
+
+        # Group consecutive dates into ranges
+        gap_dates.sort()
+        ranges: list[tuple[date, date]] = []
+        range_start = gap_dates[0]
+        prev = gap_dates[0]
+        for d in gap_dates[1:]:
+            if (d - prev).days <= 3:  # Allow small weekday gaps (weekends)
+                prev = d
+            else:
+                ranges.append((range_start, prev))
+                range_start = d
+                prev = d
+        ranges.append((range_start, prev))
+        return ranges
+
+    def missing_ranges(self, start_date: date, end_date: date) -> list[tuple[date, date]]:
+        """Return date ranges not covered by this cache (boundary + internal gaps).
+
+        Checks both:
+        1. Head/tail boundary gaps (original logic)
+        2. Internal gaps where minute data is missing/sparse
+
+        E.g. cache has daily 9/1-2/10 but minute only 1/1-2/10:
+        request 9/1-2/10 → [(9/1, 12/31)] for the minute gap.
         """
         if not self._is_ready or not self._start_date or not self._end_date:
             return [(start_date, end_date)]
+
         gaps: list[tuple[date, date]] = []
+
+        # 1) Boundary gaps
         if start_date < self._start_date:
             gaps.append((start_date, self._start_date - timedelta(days=1)))
         if end_date > self._end_date:
             gaps.append((self._end_date + timedelta(days=1), end_date))
-        return gaps
+
+        # 2) Internal minute-data gaps (within cached range)
+        for gap_start, gap_end in self.find_minute_gaps():
+            # Only include gaps that overlap with the requested range
+            clipped_start = max(gap_start, start_date)
+            clipped_end = min(gap_end, end_date)
+            if clipped_start <= clipped_end:
+                gaps.append((clipped_start, clipped_end))
+
+        # Sort and merge overlapping ranges
+        if len(gaps) <= 1:
+            return gaps
+        gaps.sort()
+        merged: list[tuple[date, date]] = [gaps[0]]
+        for s, e in gaps[1:]:
+            prev_s, prev_e = merged[-1]
+            if s <= prev_e + timedelta(days=1):
+                merged[-1] = (prev_s, max(prev_e, e))
+            else:
+                merged.append((s, e))
+        return merged
 
     def copy(self) -> AkshareBacktestCache:
         """Create a shallow-enough copy safe for merge_from without mutating the original.
@@ -218,7 +292,7 @@ class AkshareBacktestCache:
                 if hi is None or last > hi:
                     hi = last
                 sampled += 1
-                if sampled >= 10:
+                if sampled >= 200:
                     break
             return lo, hi
 

@@ -362,6 +362,7 @@ checkKeyStatus();
 // === Combined Results Store (for loss analysis) ===
 let combinedResults = [];
 let akshareReady = false;
+let akshareMinuteGaps = [];    // [[start, end], ...] of minute-data gaps
 let akshareCacheStart = null;  // cached date range start (string YYYY-MM-DD)
 let akshareCacheEnd = null;    // cached date range end
 
@@ -409,11 +410,21 @@ async function checkAkshareCache() {
         if (data.status === 'ready') {
             akshareCacheStart = data.start_date;
             akshareCacheEnd = data.end_date;
-            const readyText = `已就绪 (${data.daily_stocks} 只日线, ${data.minute_stocks} 只分钟, ${data.start_date} ~ ${data.end_date})`;
+            akshareMinuteGaps = data.minute_gaps || [];
+            let readyText = `已就绪 (${data.daily_stocks} 只日线, ${data.minute_stocks} 只分钟, ${data.start_date} ~ ${data.end_date})`;
+            if (data.has_gaps) {
+                const gapStr = akshareMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
+                readyText += ` | 分钟数据缺失: ${gapStr}`;
+                statusEl.style.color = '#d97706';
+                btn.textContent = '增量下载';
+                btn.style.background = '#f59e0b';
+                akshareReady = false;
+            } else {
+                statusEl.style.color = '#059669';
+                akshareReady = true;
+                btn.textContent = '已缓存';
+            }
             statusEl.textContent = readyText;
-            statusEl.style.color = '#059669';
-            akshareReady = true;
-            btn.textContent = '已缓存';
             btn.disabled = false;
             const reBtn = document.getElementById('akshare-redownload-btn');
             if (reBtn) reBtn.style.display = '';
@@ -446,7 +457,10 @@ function checkAkshareCoverage() {
     }
     if (!startDate || !endDate) return;
 
-    const covered = startDate >= akshareCacheStart && endDate <= akshareCacheEnd;
+    const boundCovered = startDate >= akshareCacheStart && endDate <= akshareCacheEnd;
+    // Check if any minute gaps overlap with the requested range
+    const overlappingGaps = akshareMinuteGaps.filter(g => g[0] <= endDate && g[1] >= startDate);
+    const covered = boundCovered && overlappingGaps.length === 0;
     if (covered) {
         btn.textContent = '已缓存';
         btn.style.background = '';
@@ -458,7 +472,10 @@ function checkAkshareCoverage() {
         const parts = [];
         if (startDate < akshareCacheStart) parts.push(`${startDate} ~ ${akshareCacheStart}`);
         if (endDate > akshareCacheEnd) parts.push(`${akshareCacheEnd} ~ ${endDate}`);
-        statusEl.textContent = `缓存 ${akshareCacheStart} ~ ${akshareCacheEnd}，未覆盖: ${parts.join(', ')}`;
+        if (overlappingGaps.length > 0) {
+            parts.push('分钟缺失: ' + overlappingGaps.map(g => `${g[0]}~${g[1]}`).join(', '));
+        }
+        statusEl.textContent = `缓存 ${akshareCacheStart} ~ ${akshareCacheEnd}，未覆盖: ${parts.join('; ')}`;
         statusEl.style.color = '#d97706';
         akshareReady = false;
     }
@@ -561,6 +578,7 @@ async function startAkshareDownload(force = false) {
                         statusEl.style.color = '#059669';
                         statusEl.textContent = readyText;
                         akshareReady = true;
+                        akshareMinuteGaps = [];  // Fresh download — no gaps
                         btn.textContent = '已缓存';
                         btn.style.background = '';
                         if (reBtn) reBtn.style.display = '';
