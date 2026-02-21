@@ -1242,9 +1242,7 @@ def create_momentum_router() -> APIRouter:
                 sample_code = code
                 sorted_keys = sorted(dates.keys())
                 sample_dates = (
-                    sorted_keys[:3] + sorted_keys[-3:]
-                    if len(sorted_keys) > 6
-                    else sorted_keys
+                    sorted_keys[:3] + sorted_keys[-3:] if len(sorted_keys) > 6 else sorted_keys
                 )
                 break
 
