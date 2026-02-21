@@ -441,7 +441,10 @@ class AkshareBacktestCache:
                 return
 
             try:
-                bs_start = start_date.strftime("%Y-%m-%d")
+                # Use dl_start (not start_date) so minute data covers the same
+                # range as daily data. Without 9:40 prices, gain_from_open=0%
+                # and ALL stocks are filtered out → "无初筛股".
+                bs_start = dl_start.strftime("%Y-%m-%d")
                 bs_end = end_date.strftime("%Y-%m-%d")
 
                 for code in codes:
