@@ -494,8 +494,7 @@ class MomentumSectorScanner:
             return None
 
         logger.info(
-            f"Step 6: Scoring {len(selected_stocks)} candidates by "
-            f"Z(gfo) + Z(amp) - cup_penalty"
+            f"Step 6: Scoring {len(selected_stocks)} candidates by Z(gfo) + Z(amp) - cup_penalty"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
