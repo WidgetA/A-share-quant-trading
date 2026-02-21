@@ -19,8 +19,8 @@
 # Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
 # Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
-# Step 6: recommend — filter consecutive-up ≥2d, score by Z(开盘涨幅)-Z(营收增长率),
-#          check #1 for negative news via Tavily+LLM, fall back to #2 if negative
+# Step 6: recommend — across ALL candidates, filter consecutive-up ≥2d,
+#          score by Z(开盘涨幅)-Z(营收增长率), check #1 for negative news, fall back to #2
 # Step 7: → ScanResult → Feishu notification
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ class SelectedStock:
 
 @dataclass
 class RecommendedStock:
-    """The top pick from largest board, scored by Z(开盘涨幅) - Z(营收增长率)."""
+    """The top pick across all candidates, scored by Z(开盘涨幅) - Z(营收增长率)."""
 
     stock_code: str
     stock_name: str
@@ -450,7 +450,7 @@ class MomentumSectorScanner:
             - Limit-up at 9:40 → unbuyable, skip
             - Consecutive up days ≥ 2 → chasing momentum, skip
 
-        Scoring formula (within the largest hot board):
+        Scoring formula (across all selected stocks):
             score = Z(开盘涨幅) - Z(营收增长率)
 
         Post-scoring: if news_checker is configured, check #1 for negative news.
@@ -459,29 +459,16 @@ class MomentumSectorScanner:
         if not selected_stocks:
             return None
 
-        # --- Find the largest hot board ---
-        board_groups: dict[str, list[SelectedStock]] = defaultdict(list)
-        for stock in selected_stocks:
-            board_groups[stock.board_name].append(stock)
-
-        top_board = max(
-            board_groups.keys(),
-            key=lambda b: (
-                len(board_groups[b]),
-                sum(s.open_gain_pct for s in board_groups[b]) / len(board_groups[b]),
-            ),
-        )
-        top_board_stocks = board_groups[top_board]
-        logger.info(f"Step 6: Top board '{top_board}' has {len(top_board_stocks)} selected stocks")
+        logger.info(f"Step 6: Scoring across {len(selected_stocks)} candidates")
 
         # --- Query growth rates from fundamentals DB ---
-        stock_codes = [s.stock_code for s in top_board_stocks]
+        stock_codes = [s.stock_code for s in selected_stocks]
         growth_data = await self._fundamentals_db.batch_get_revenue_growth(stock_codes)
 
         # --- Filter out stocks at limit-up at 9:40 ---
         LIMIT_UP_RATIO = 0.10  # Main board +10%
         non_limit_up: list[SelectedStock] = []
-        for s in top_board_stocks:
+        for s in selected_stocks:
             snap = price_snapshots.get(s.stock_code) if price_snapshots else None
             if snap and snap.prev_close > 0 and snap.latest_price > 0:
                 limit_up_price = round(snap.prev_close * (1 + LIMIT_UP_RATIO), 2)
@@ -498,12 +485,12 @@ class MomentumSectorScanner:
             logger.info("Step 6: All candidates at limit-up, no recommendation")
             return None
 
-        top_board_stocks = non_limit_up
+        candidates_pool = non_limit_up
 
         # --- Filter out stocks with ≥2 consecutive up days ---
         _cup_data = consecutive_up_data or {}
         non_consecutive: list[SelectedStock] = []
-        for s in top_board_stocks:
+        for s in candidates_pool:
             cup = _cup_data.get(s.stock_code)
             if cup is not None and cup >= 2:
                 logger.info(
@@ -516,18 +503,18 @@ class MomentumSectorScanner:
             logger.info("Step 6: All candidates had >= 2 consecutive up days, no recommendation")
             return None
 
-        top_board_stocks = non_consecutive
+        candidates_pool = non_consecutive
 
         # --- Score and pick ---
         # All candidates must have growth data. Missing → don't trade.
-        missing = [s.stock_code for s in top_board_stocks if s.stock_code not in growth_data]
+        missing = [s.stock_code for s in candidates_pool if s.stock_code not in growth_data]
         if missing:
             logger.info(
                 f"Step 6: Incomplete data for {missing}, no recommendation (数据不全不交易)"
             )
             return None
 
-        candidates = top_board_stocks
+        candidates = candidates_pool
 
         if len(candidates) == 1:
             ranked = candidates
@@ -605,8 +592,8 @@ class MomentumSectorScanner:
         return RecommendedStock(
             stock_code=best.stock_code,
             stock_name=best.stock_name,
-            board_name=top_board,
-            board_stock_count=len(top_board_stocks),
+            board_name=best.board_name,
+            board_stock_count=len(candidates),
             growth_rate=best_growth,
             open_gain_pct=best.open_gain_pct,
             pe_ttm=best.pe_ttm,
