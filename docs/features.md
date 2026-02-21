@@ -636,11 +636,9 @@ strategy:
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
 9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
-   - Read 季度营收同比增长率 (`quarterly_revenue_yoy`) from PostgreSQL `stock_fundamentals` table
-   - Reuse 5日涨跌幅 (`trend_pct`) already computed in Step 5.5 (no extra API call; works with both iFinD and akshare data sources)
-   - Score: `Z(开盘涨幅) - Z(营收增长率) + Z(5日涨跌幅)` — 开盘涨幅越高越好，营收增长率越低越好，近期趋势越强越好（过滤连跌后超跌反弹的票，如600337在2026-01-14连跌3天累计-20%后冲涨停炸板，次日-10%）
-   - **Data completeness requirement**: 板块内所有候选票必须同时具备营收增长率和5日涨跌幅数据。任何一只票缺数据 → 当天不推票、不交易（Trading Safety §12: 宁可不交易也不用残缺数据做决策）
-   - Pick the highest-scoring stock. Highlighted in UI + Feishu notification
+   - Exclude stocks with ≥2 consecutive up days (chasing risk)
+   - Rank by 开盘涨幅 descending (highest wins) — 前面 Step 1~5.6 已做多层过滤，最终在好票里选涨势最猛的
+   - Pick the highest-ranked stock. Highlighted in UI + Feishu notification
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:

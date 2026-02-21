@@ -104,14 +104,14 @@ class SelectedStock:
 
 @dataclass
 class RecommendedStock:
-    """The top pick across all candidates, scored by Z(开盘涨幅) - Z(营收增长率)."""
+    """The top pick across all candidates, ranked by 开盘涨幅 (highest wins)."""
 
     stock_code: str
     stock_name: str
     board_name: str  # Which board it was recommended from
     board_stock_count: int  # How many selected stocks in that board
-    growth_rate: float  # 同比季度收入增长率 (%)
     open_gain_pct: float
+    growth_rate: float = 0.0  # Deprecated: kept for DB compat, no longer used in scoring
     pe_ttm: float
     board_avg_pe: float
     open_price: float = 0.0  # Raw open price
@@ -131,7 +131,7 @@ class ScanResult:
     # Initial gainers that passed Step 1
     initial_gainers: list[str] = field(default_factory=list)
     scan_time: datetime = field(default_factory=datetime.now)
-    # Step 6: recommended stock (scored by 开盘涨幅↑ + 营收增长率↓)
+    # Step 6: recommended stock (ranked by 开盘涨幅 descending)
     recommended_stock: RecommendedStock | None = None
     # Price snapshots for selected stocks (for backfill/export use)
     all_snapshots: dict[str, PriceSnapshot] = field(default_factory=dict)
@@ -277,7 +277,7 @@ class MomentumSectorScanner:
                 logger.info(
                     f"Step 6: Recommended {rec.stock_code} "
                     f"{rec.stock_name} from board '{rec.board_name}' "
-                    f"(OG={rec.open_gain_pct:+.1f}%, GR={rec.growth_rate:+.1f}%{news_str})"
+                    f"(OG={rec.open_gain_pct:+.1f}%{news_str})"
                 )
             else:
                 logger.info("Step 6: No recommendation (scoring returned None)")
@@ -444,26 +444,19 @@ class MomentumSectorScanner:
         consecutive_up_data: dict[str, int] | None = None,
     ) -> RecommendedStock | None:
         """
-        Step 6: Score each stock and pick the highest-scoring one.
+        Step 6: Rank candidates by 开盘涨幅 (highest wins) and pick #1.
 
         Filters:
             - Limit-up at 9:40 → unbuyable, skip
             - Consecutive up days ≥ 2 → chasing momentum, skip
 
-        Scoring formula (across all selected stocks):
-            score = Z(开盘涨幅) - Z(营收增长率)
-
-        Post-scoring: if news_checker is configured, check #1 for negative news.
+        Post-ranking: if news_checker is configured, check #1 for negative news.
         If negative → fall back to #2 (no recursive check on #2).
         """
         if not selected_stocks:
             return None
 
-        logger.info(f"Step 6: Scoring across {len(selected_stocks)} candidates")
-
-        # --- Query growth rates from fundamentals DB ---
-        stock_codes = [s.stock_code for s in selected_stocks]
-        growth_data = await self._fundamentals_db.batch_get_revenue_growth(stock_codes)
+        logger.info(f"Step 6: Ranking {len(selected_stocks)} candidates by open_gain_pct")
 
         # --- Filter out stocks at limit-up at 9:40 ---
         LIMIT_UP_RATIO = 0.10  # Main board +10%
@@ -503,59 +496,18 @@ class MomentumSectorScanner:
             logger.info("Step 6: All candidates had >= 2 consecutive up days, no recommendation")
             return None
 
-        candidates_pool = non_consecutive
-
-        # --- Score and pick ---
-        # All candidates must have growth data. Missing → don't trade.
-        missing = [s.stock_code for s in candidates_pool if s.stock_code not in growth_data]
-        if missing:
-            logger.info(
-                f"Step 6: Incomplete data for {missing}, no recommendation (数据不全不交易)"
-            )
-            return None
-
-        candidates = candidates_pool
-
-        if len(candidates) == 1:
-            ranked = candidates
-        else:
-            # Z-score standardization:
-            #   开盘涨幅: higher = better (+)
-            #   营收增长率: lower = better (-)
-            og_values = [s.open_gain_pct for s in candidates]
-            gr_values = [growth_data[s.stock_code] for s in candidates]
-
-            og_mean = sum(og_values) / len(og_values)
-            gr_mean = sum(gr_values) / len(gr_values)
-
-            og_std = (sum((v - og_mean) ** 2 for v in og_values) / len(og_values)) ** 0.5
-            gr_std = (sum((v - gr_mean) ** 2 for v in gr_values) / len(gr_values)) ** 0.5
-
-            og_std = og_std if og_std > 0 else 1.0
-            gr_std = gr_std if gr_std > 0 else 1.0
-
-            def score(s: SelectedStock) -> float:
-                og_z = (s.open_gain_pct - og_mean) / og_std
-                gr_z = (growth_data[s.stock_code] - gr_mean) / gr_std
-                return og_z - gr_z
-
-            ranked = sorted(candidates, key=score, reverse=True)
+        # --- Rank by open_gain_pct descending ---
+        ranked = sorted(non_consecutive, key=lambda s: s.open_gain_pct, reverse=True)
 
         best = ranked[0]
-        best_growth = growth_data[best.stock_code]
 
-        # Log scoring details for top 3
+        # Log top 3
         if len(ranked) > 1:
-            top3_info = ", ".join(
-                f"{s.stock_code}(OG={s.open_gain_pct:+.1f}%,"
-                f"GR={growth_data[s.stock_code]:+.1f}%,分={score(s):.2f})"
-                for s in ranked[:3]
-            )
-            logger.info(f"Step 6: Top 3 scores: {top3_info}")
+            top3_info = ", ".join(f"{s.stock_code}(OG={s.open_gain_pct:+.1f}%)" for s in ranked[:3])
+            logger.info(f"Step 6: Top 3: {top3_info}")
         else:
             logger.info(
-                f"Step 6: Single candidate {best.stock_code} "
-                f"(OG={best.open_gain_pct:+.1f}%, GR={best_growth:+.1f}%)"
+                f"Step 6: Single candidate {best.stock_code} (OG={best.open_gain_pct:+.1f}%)"
             )
 
         # --- Negative news check on #1 (if checker configured) ---
@@ -577,7 +529,6 @@ class MomentumSectorScanner:
                 logger.info(f"Step 6: {best.stock_code} has negative news: {news_result.reason}")
                 if len(ranked) >= 2:
                     best = ranked[1]
-                    best_growth = growth_data[best.stock_code]
                     news_check_passed = None  # #2 not checked
                     news_check_detail = f"顺延: {ranked[0].stock_code} 有负面"
                     logger.info(f"Step 6: Falling back to #2: {best.stock_code} {best.stock_name}")
@@ -593,8 +544,7 @@ class MomentumSectorScanner:
             stock_code=best.stock_code,
             stock_name=best.stock_name,
             board_name=best.board_name,
-            board_stock_count=len(candidates),
-            growth_rate=best_growth,
+            board_stock_count=len(non_consecutive),
             open_gain_pct=best.open_gain_pct,
             pe_ttm=best.pe_ttm,
             board_avg_pe=best.board_avg_pe,
