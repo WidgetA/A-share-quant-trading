@@ -1260,22 +1260,24 @@ def create_momentum_router() -> APIRouter:
                 detail=f"OSS 不可用，请先修复再下载: {oss_err}",
             )
 
-        # 4) Calculate gaps to download (incremental)
+        # 4) Calculate gaps to download (incremental).
+        # Work on a COPY so partial failures don't corrupt the live in-memory cache.
         if existing:
             gaps = existing.missing_ranges(start_date, end_date)
+            working = existing.copy()
         else:
-            existing = AkshareBacktestCache()
+            working = AkshareBacktestCache()
             gaps = [(start_date, end_date)]
 
         if not gaps:
             # Shouldn't happen (covers_range check above), but just in case
-            request.app.state.akshare_cache = existing
+            request.app.state.akshare_cache = working
 
             async def nogap_stream():
                 msg = {
                     "type": "complete",
-                    "daily_count": len(existing._daily),  # type: ignore[union-attr]
-                    "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                    "daily_count": len(working._daily),
+                    "minute_count": len(working._minute),
                     "cached": True,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
@@ -1305,8 +1307,8 @@ def create_momentum_router() -> APIRouter:
                         )
                         gap_cache = AkshareBacktestCache()
                         await gap_cache.download_prices(gap_start, gap_end, queue_progress)
-                        existing.merge_from(gap_cache)  # type: ignore[union-attr]
-                    existing._is_ready = True  # type: ignore[union-attr]
+                        working.merge_from(gap_cache)
+                    working._is_ready = True
                     await progress_queue.put(None)
                 except Exception as e:
                     download_error = str(e)
@@ -1325,13 +1327,14 @@ def create_momentum_router() -> APIRouter:
             if download_error:
                 yield sse({"type": "error", "message": download_error})
             else:
-                request.app.state.akshare_cache = existing
+                # Only assign to app.state on complete success (no partial mutation)
+                request.app.state.akshare_cache = working
 
                 # Fire-and-forget OSS save — don't block SSE and won't be
                 # cancelled if the client disconnects
                 async def _bg_oss_save():
                     try:
-                        err = await existing.save_to_oss()  # type: ignore[union-attr]
+                        err = await working.save_to_oss()
                         if err:
                             logger.warning(f"akshare OSS save failed: {err}")
                         else:
@@ -1343,8 +1346,8 @@ def create_momentum_router() -> APIRouter:
                 yield sse(
                     {
                         "type": "complete",
-                        "daily_count": len(existing._daily),  # type: ignore[union-attr]
-                        "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                        "daily_count": len(working._daily),
+                        "minute_count": len(working._minute),
                     }
                 )
 
@@ -1585,13 +1588,13 @@ def create_momentum_router() -> APIRouter:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
 
-                if len(trading_days) > 90:
-                    trading_days = trading_days[:90]
+                if len(trading_days) > 250:
+                    trading_days = trading_days[:250]
                     first, last = trading_days[0], trading_days[-1]
                     yield sse(
                         {
                             "type": "warning",
-                            "message": f"已截断至前 90 个交易日 ({first} ~ {last})",
+                            "message": f"已截断至前 250 个交易日 ({first} ~ {last})",
                         }
                     )
 
@@ -2079,13 +2082,14 @@ def create_momentum_router() -> APIRouter:
                     if d >= start_date and i + 1 < len(trading_days):
                         next_day_map[d] = trading_days[i + 1]
 
-                if len(days_in_range) > 60:
-                    days_in_range = days_in_range[:60]
+                if len(days_in_range) > 250:
+                    days_in_range = days_in_range[:250]
                     yield sse(
                         {
                             "type": "warning",
                             "message": (
-                                f"已截断至前 60 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})"
+                                "已截断至前 250 个交易日"
+                                f" ({days_in_range[0]} ~ {days_in_range[-1]})"
                             ),
                         }
                     )
@@ -2619,13 +2623,14 @@ def create_momentum_router() -> APIRouter:
                     if d >= start_date and i + 1 < len(trading_days_all):
                         next_day_map[d] = trading_days_all[i + 1]
 
-                if len(days_in_range) > 90:
-                    days_in_range = days_in_range[:90]
+                if len(days_in_range) > 250:
+                    days_in_range = days_in_range[:250]
                     yield sse(
                         {
                             "type": "warning",
                             "message": (
-                                f"已截断至前 90 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})"
+                                "已截断至前 250 个交易日"
+                                f" ({days_in_range[0]} ~ {days_in_range[-1]})"
                             ),
                         }
                     )

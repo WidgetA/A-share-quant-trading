@@ -144,6 +144,22 @@ class AkshareBacktestCache:
             gaps.append((self._end_date + timedelta(days=1), end_date))
         return gaps
 
+    def copy(self) -> AkshareBacktestCache:
+        """Create a shallow-enough copy safe for merge_from without mutating the original.
+
+        Copies outer dicts (code-level) and inner dicts (date-level) so that
+        merge_from().update() on the copy doesn't affect the original.
+        Leaf date entries (dicts of floats / tuples) are shared but never mutated.
+        """
+        clone = AkshareBacktestCache()
+        clone._daily = {code: dict(dates) for code, dates in self._daily.items()}
+        clone._minute = {code: dict(dates) for code, dates in self._minute.items()}
+        clone._stock_codes = list(self._stock_codes)
+        clone._start_date = self._start_date
+        clone._end_date = self._end_date
+        clone._is_ready = self._is_ready
+        return clone
+
     def merge_from(self, other: AkshareBacktestCache) -> None:
         """Merge data from another cache (e.g. a gap download) into this one."""
         for code, dates in other._daily.items():
