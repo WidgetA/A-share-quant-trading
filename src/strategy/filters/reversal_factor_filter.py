@@ -168,9 +168,7 @@ class ReversalFactorFilter:
 
         # --- Phase 2: Determine adaptive cutoff ---
         valid_ratios = [
-            a.surge_volume_ratio
-            for a in assessments
-            if a.surge_volume_ratio is not None
+            a.surge_volume_ratio for a in assessments if a.surge_volume_ratio is not None
         ]
 
         cutoff = self._config.min_ratio_floor
