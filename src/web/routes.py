@@ -2980,10 +2980,24 @@ def create_momentum_router() -> APIRouter:
 
                         reversal_config = ReversalFactorConfig(enabled=True)
                         reversal_filter_inst = ReversalFactorFilter(reversal_config)
+                        reversal_diag: list[dict] = []
                         if l2:
-                            l3, _ = await reversal_filter_inst.filter_stocks(
+                            l3, rev_assessments = await reversal_filter_inst.filter_stocks(
                                 l2, price_snapshots, avg_vol_data_l2, trade_date
                             )
+                            for ra in rev_assessments:
+                                snap_r = price_snapshots.get(ra.stock_code)
+                                svr = ra.surge_volume_ratio
+                                rv = ra.relative_volume
+                                reversal_diag.append({
+                                    "code": ra.stock_code,
+                                    "ratio": round(svr, 4) if svr is not None else None,
+                                    "surge": round(ra.surge_pct, 4) if ra.surge_pct else None,
+                                    "rel_vol": round(rv, 4) if rv else None,
+                                    "early_vol": snap_r.early_volume if snap_r else None,
+                                    "avg_vol": avg_vol_data_l2.get(ra.stock_code),
+                                    "filtered": ra.filtered_out,
+                                })
                         else:
                             l3 = list(l2)
 
@@ -3200,14 +3214,15 @@ def create_momentum_router() -> APIRouter:
                         day_results.append(day_backtest)
                         days_processed += 1
 
-                        yield sse(
-                            {
-                                "type": "day_result",
-                                "trade_date": str(trade_date),
-                                "backtest": day_backtest,
-                                "funnel": day_layers,
-                            }
-                        )
+                        sse_payload: dict = {
+                            "type": "day_result",
+                            "trade_date": str(trade_date),
+                            "backtest": day_backtest,
+                            "funnel": day_layers,
+                        }
+                        if reversal_diag:
+                            sse_payload["reversal_debug"] = reversal_diag
+                        yield sse(sse_payload)
                         await asyncio.sleep(0.05)
 
                     except Exception as e:

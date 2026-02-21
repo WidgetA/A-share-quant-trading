@@ -931,6 +931,14 @@ function handleCombinedEvent(data) {
             appendCombinedTradeRow(bt);
             // Funnel day row
             appendCombinedFunnelDayRow(data.trade_date, data.funnel);
+            // Reversal filter diagnostic
+            if (data.reversal_debug && data.reversal_debug.length > 0) {
+                console.log(`[${data.trade_date}] L3 缩量冲高诊断 (${data.reversal_debug.length}票):`,
+                    data.reversal_debug.map(d =>
+                        `${d.code} ratio=${d.ratio} surge=${d.surge} rel_vol=${d.rel_vol} early=${d.early_vol} avg=${d.avg_vol} ${d.filtered?'❌':''}`
+                    ).join('\n  ')
+                );
+            }
             break;
         }
 
