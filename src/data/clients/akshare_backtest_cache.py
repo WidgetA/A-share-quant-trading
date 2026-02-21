@@ -190,40 +190,57 @@ class AkshareBacktestCache:
         return self._start_date <= start_date and self._end_date >= end_date
 
     def _recalculate_date_range(self) -> None:
-        """Recompute _start_date/_end_date from actual data.
+        """Recompute _start_date/_end_date from actual data (daily AND minute).
 
-        Fixes metadata/data mismatch (e.g. OSS save interrupted between
-        daily.pkl and meta.pkl, or merge_from extending range without data).
-        Samples up to 10 stocks to find the true min/max date keys.
+        Uses the INTERSECTION of daily and minute ranges so that every date
+        in [_start_date, _end_date] has both daily OHLCV and 9:40 minute data.
+        Without this, incremental downloads can leave gaps in minute data that
+        cause gain_from_open=0% → "无初筛股" on every date.
         """
-        min_date: date | None = None
-        max_date: date | None = None
-        sampled = 0
-        for _code, dates in self._daily.items():
-            if not dates:
-                continue
-            keys = sorted(dates.keys())
-            try:
-                first = datetime.strptime(keys[0], "%Y-%m-%d").date()
-                last = datetime.strptime(keys[-1], "%Y-%m-%d").date()
-            except (ValueError, IndexError):
-                continue
-            if min_date is None or first < min_date:
-                min_date = first
-            if max_date is None or last > max_date:
-                max_date = last
-            sampled += 1
-            if sampled >= 10:
-                break
 
-        if min_date and max_date:
+        def _scan_range(
+            data: dict[str, dict],
+        ) -> tuple[date | None, date | None]:
+            lo: date | None = None
+            hi: date | None = None
+            sampled = 0
+            for _code, dates in data.items():
+                if not dates:
+                    continue
+                keys = sorted(dates.keys())
+                try:
+                    first = datetime.strptime(keys[0], "%Y-%m-%d").date()
+                    last = datetime.strptime(keys[-1], "%Y-%m-%d").date()
+                except (ValueError, IndexError):
+                    continue
+                if lo is None or first < lo:
+                    lo = first
+                if hi is None or last > hi:
+                    hi = last
+                sampled += 1
+                if sampled >= 10:
+                    break
+            return lo, hi
+
+        d_lo, d_hi = _scan_range(self._daily)
+        m_lo, m_hi = _scan_range(self._minute)  # type: ignore[arg-type]
+
+        if d_lo and d_hi:
+            # Use intersection of daily and minute ranges
+            if m_lo and m_hi:
+                new_start = max(d_lo, m_lo)
+                new_end = min(d_hi, m_hi)
+            else:
+                new_start, new_end = d_lo, d_hi
+
             old_start, old_end = self._start_date, self._end_date
-            self._start_date = min_date
-            self._end_date = max_date
-            if old_start != min_date or old_end != max_date:
+            self._start_date = new_start
+            self._end_date = new_end
+            if old_start != new_start or old_end != new_end:
                 logger.warning(
                     f"Date range recalculated: "
-                    f"[{old_start} ~ {old_end}] → [{min_date} ~ {max_date}]"
+                    f"[{old_start} ~ {old_end}] → [{new_start} ~ {new_end}]"
+                    f" (daily=[{d_lo}~{d_hi}], minute=[{m_lo}~{m_hi}])"
                 )
 
     def _has_turnover_ratio(self) -> bool:
