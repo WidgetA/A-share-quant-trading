@@ -165,6 +165,27 @@ class ReversalFactorFilter:
             else:
                 kept.append(stock)
 
+        # Diagnostic: log ratio distribution for all assessed stocks
+        valid = [a for a in assessments if a.surge_volume_ratio is not None]
+        if valid:
+            ratios = sorted([a.surge_volume_ratio for a in valid], reverse=True)
+            top5 = ", ".join(f"{r:.3f}" for r in ratios[:5])
+            no_data = len(assessments) - len(valid)
+            logger.info(
+                f"ReversalFilter: ratio distribution (n={len(valid)}, no_data={no_data}): "
+                f"max={ratios[0]:.3f} median={ratios[len(ratios)//2]:.3f} "
+                f"min={ratios[-1]:.3f} top5=[{top5}]"
+            )
+            # Log a few examples with raw values
+            for a in sorted(valid, key=lambda x: x.surge_volume_ratio or 0, reverse=True)[:3]:
+                s = price_snapshots.get(a.stock_code)
+                av = vol_data.get(a.stock_code)
+                logger.info(
+                    f"  {a.stock_code}: ratio={a.surge_volume_ratio:.3f} "
+                    f"surge={a.surge_pct:.3%} rel_vol={a.relative_volume:.4f} "
+                    f"early_vol={s.early_volume if s else '?'} avg_vol={av}"
+                )
+
         logger.info(
             f"ReversalFilter: {len(kept)}/{len(selected_stocks)} passed "
             f"({len(selected_stocks) - len(kept)} filtered)"
