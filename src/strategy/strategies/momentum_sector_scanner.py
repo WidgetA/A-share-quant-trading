@@ -20,7 +20,8 @@
 # Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
 # Step 6: recommend — across ALL candidates, filter consecutive-up ≥2d,
-#          score by Z(gain_from_open) + Z(turnover_amp), check #1 for negative news, fall back to #2
+#          score by -Z(gain_from_open) - Z(turnover_amp) (lower chase + lower surge = better),
+#          check #1 for negative news, fall back to #2
 # Step 7: → ScanResult → Feishu notification
 
 from __future__ import annotations
@@ -106,7 +107,8 @@ class SelectedStock:
 class RecommendedStock:
     """The top pick across all candidates, ranked by composite score.
 
-    Composite = Z(gfo) + Z(amp) - cup_days*0.3
+    Composite = -Z(gfo) - Z(amp) - cup_days*0.3
+    Lower chase (gfo) and lower volume surge (amp) rank higher.
     - gfo: gain_from_open — intraday momentum (9:40 price vs open)
     - amp: early_volume / avg_daily_volume (9:40 data, no hindsight)
     - cup_days: consecutive up days — soft penalty (each day deducts 0.3 std)
@@ -125,7 +127,7 @@ class RecommendedStock:
     latest_price: float = 0.0  # 9:40 price (buy price for range backtest)
     gain_from_open_pct: float = 0.0  # (9:40 - open) / open %, intraday momentum
     turnover_amp: float = 0.0  # early_volume / avg_daily_volume, 9:40 capital intensity
-    composite_score: float = 0.0  # Z(gain_from_open) + Z(turnover_amp)
+    composite_score: float = 0.0  # -Z(gain_from_open) - Z(turnover_amp)
     news_check_passed: bool | None = None  # None=not checked, True=clean, False=had negative
     news_check_detail: str = ""  # LLM reasoning if checked
 
@@ -478,7 +480,8 @@ class MomentumSectorScanner:
         """
         Step 6: Rank candidates by composite score and pick #1.
 
-        Composite score = Z(gain_from_open_pct) + Z(early_turnover_amp).
+        Composite score = -Z(gain_from_open_pct) - Z(early_turnover_amp).
+        Lower chase and lower volume surge rank higher.
         - gain_from_open: intraday momentum (9:40 price vs open)
         - early_turnover_amp: early_volume / avg_daily_volume (9:40 data, no hindsight)
 
@@ -493,7 +496,7 @@ class MomentumSectorScanner:
             return None
 
         logger.info(
-            f"Step 6: Scoring {len(selected_stocks)} candidates by Z(gfo) + Z(amp) - cup_penalty"
+            f"Step 6: Scoring {len(selected_stocks)} candidates by -Z(gfo) - Z(amp) - cup_penalty"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -518,7 +521,9 @@ class MomentumSectorScanner:
 
         candidates_pool = non_limit_up
 
-        # --- Compute composite score: Z(gain_from_open) + Z(early_turnover_amp) - cup_penalty ---
+        # --- Composite score: LOWER chase + LOWER volume surge = better ---
+        # Negate Z-scores so candidates with less gain-from-open and less
+        # volume amplification rank higher (avoid chasing overbought stocks).
         _cup_data = consecutive_up_data or {}
         _avg_vol_data = avg_daily_volume_data or {}
         _snapshots = price_snapshots or {}
@@ -549,7 +554,7 @@ class MomentumSectorScanner:
         scored: list[tuple[SelectedStock, float, float, float, float, int]] = []
         for i, s in enumerate(candidates_pool):
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
-            composite = gfo_z[i] + amp_z[i] - cup_penalty
+            composite = -gfo_z[i] - amp_z[i] - cup_penalty
             scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i], cup_values[i]))
 
         # Sort by composite score descending
