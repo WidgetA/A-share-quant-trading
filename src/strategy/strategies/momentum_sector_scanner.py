@@ -111,9 +111,9 @@ class RecommendedStock:
     board_name: str  # Which board it was recommended from
     board_stock_count: int  # How many selected stocks in that board
     open_gain_pct: float
-    growth_rate: float = 0.0  # Deprecated: kept for DB compat, no longer used in scoring
     pe_ttm: float
     board_avg_pe: float
+    growth_rate: float = 0.0  # Deprecated: kept for DB compat, no longer used in scoring
     open_price: float = 0.0  # Raw open price
     prev_close: float = 0.0  # Previous close price
     latest_price: float = 0.0  # 9:40 price (buy price for range backtest)
