@@ -137,7 +137,7 @@ def test_factor(universe: pd.DataFrame, factor_col: str, direction: str,
         return {"factor": factor_col, "direction": direction, "n": k, "skip": True}
 
     strategy_mean = overnight[mask].mean()
-    kept_mean = overnight[~mask].mean()
+    _kept_mean = overnight[~mask].mean()  # noqa: F841
 
     rng = np.random.default_rng(42)
     rand_means = np.array([

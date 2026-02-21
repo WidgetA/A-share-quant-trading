@@ -2765,13 +2765,16 @@ def create_momentum_router() -> APIRouter:
                         if use_akshare:
                             date_key = trade_date.strftime("%Y-%m-%d")
                             try:
-                                price_snapshots = _build_snapshots_from_cache(akshare_cache, date_key)
+                                price_snapshots = _build_snapshots_from_cache(
+                                    akshare_cache, date_key,
+                                )
                             except MinuteDataMissingError as e:
                                 price_snapshots = {}
                                 price_err = str(e)
                             else:
                                 price_err = (
-                                    "" if price_snapshots else f"akshare缓存中无 {date_key} 的日线数据"
+                                    "" if price_snapshots
+                                    else f"akshare缓存中无 {date_key} 的日线数据"
                                 )
                         else:
                             (

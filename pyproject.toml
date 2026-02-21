@@ -34,7 +34,7 @@ select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 # Scripts need sys.path manipulation before imports
-"scripts/*.py" = ["E402"]
+"scripts/*.py" = ["E402", "E501"]
 
 [tool.mypy]
 python_version = "3.11"

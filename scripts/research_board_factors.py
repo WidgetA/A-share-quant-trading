@@ -177,7 +177,7 @@ def download_all_data() -> dict:
     print(f"\n  成功加载 {len(all_data)} 个板块")
 
     # 2) Download constituent counts
-    print(f"  获取板块成分股数量...")
+    print("  获取板块成分股数量...")
     for i, (name, info) in enumerate(all_data.items()):
         pct = (i + 1) / len(all_data) * 100
         print(f"\r  [{i+1}/{len(all_data)}] ({pct:.0f}%)", end="", flush=True)
@@ -543,7 +543,7 @@ def analyze_factors(panel: pd.DataFrame, threshold: float = 1.0):
         s = pd.Series(returns)
         cum = (1 + s / 100).prod() - 1
         avg = s.mean()
-        med = s.median()
+        _med = s.median()  # noqa: F841
         wr = (s > 0).mean() * 100
         std = s.std()
         sharpe = avg / std * np.sqrt(250) if std > 0 else 0
@@ -661,9 +661,9 @@ def main():
     analyze_factors(panel, threshold=args.threshold)
 
     print(f"\n\n{'=' * 65}")
-    print(f"  分析完成")
+    print("  分析完成")
     print(f"  数据缓存: {CACHE_DIR}")
-    print(f"  改参数重跑: uv run python scripts/research_board_factors.py --skip-download -t 0.5")
+    print("  改参数重跑: uv run python scripts/research_board_factors.py --skip-download -t 0.5")
     print(f"{'=' * 65}")
 
 
