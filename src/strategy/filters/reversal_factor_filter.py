@@ -44,13 +44,19 @@ class ReversalFactorConfig:
 
     enabled: bool = True
 
-    # Surge Volume Ratio threshold.
-    # surge_volume_ratio = surge_pct / relative_volume
-    # where surge_pct = (high - open) / open
-    #       relative_volume = early_volume / avg_daily_volume
-    # Higher = more price move per unit volume = more suspicious.
-    # Stocks above this threshold are filtered out.
-    surge_volume_threshold: float = 0.5
+    # Adaptive percentile filtering: filter stocks whose surge_volume_ratio
+    # is above this percentile of the daily distribution.
+    # 80 = filter the top 20% most suspicious stocks.
+    filter_percentile: float = 80.0
+
+    # Minimum ratio floor — stocks below this ratio are never filtered,
+    # even if they fall above the percentile cutoff. Prevents filtering
+    # stocks that are genuinely fine on low-dispersion days.
+    min_ratio_floor: float = 0.08
+
+    # Minimum number of stocks with valid ratios required for percentile
+    # filtering. Below this count, only the floor is used.
+    min_sample_for_percentile: int = 5
 
 
 @dataclass
@@ -132,7 +138,11 @@ class ReversalFactorFilter:
         avg_daily_volume_data: dict[str, float] | None = None,
         trade_date: date | None = None,
     ) -> tuple[list[SelectedStock], list[ReversalAssessment]]:
-        """Filter stocks showing thin-volume surge.
+        """Filter stocks showing thin-volume surge using adaptive percentile cutoff.
+
+        Two-phase approach:
+        1. Compute surge_volume_ratio for all stocks.
+        2. Determine adaptive cutoff from percentile distribution, then filter.
 
         Args:
             selected_stocks: Stocks that passed quality filter (Step 5.5).
@@ -148,16 +158,46 @@ class ReversalFactorFilter:
 
         vol_data = avg_daily_volume_data or {}
 
-        kept: list[SelectedStock] = []
+        # --- Phase 1: Compute ratios for all stocks ---
         assessments: list[ReversalAssessment] = []
-
         for stock in selected_stocks:
             snap = price_snapshots.get(stock.stock_code)
             avg_vol = vol_data.get(stock.stock_code)
-            assessment = self._assess(stock, snap, avg_vol)
+            assessment = self._compute_ratio(stock, snap, avg_vol)
             assessments.append(assessment)
 
-            if assessment.filtered_out:
+        # --- Phase 2: Determine adaptive cutoff ---
+        valid_ratios = [
+            a.surge_volume_ratio
+            for a in assessments
+            if a.surge_volume_ratio is not None
+        ]
+
+        cutoff = self._config.min_ratio_floor
+        cutoff_source = "floor"
+
+        if len(valid_ratios) >= self._config.min_sample_for_percentile:
+            sorted_ratios = sorted(valid_ratios)
+            pct_idx = int(len(sorted_ratios) * self._config.filter_percentile / 100.0)
+            pct_idx = min(pct_idx, len(sorted_ratios) - 1)
+            pct_cutoff = sorted_ratios[pct_idx]
+            # Use the higher of percentile cutoff and floor
+            if pct_cutoff > cutoff:
+                cutoff = pct_cutoff
+                cutoff_source = f"P{self._config.filter_percentile:.0f}"
+
+        # --- Phase 3: Apply filter ---
+        kept: list[SelectedStock] = []
+        for stock, assessment in zip(selected_stocks, assessments):
+            ratio = assessment.surge_volume_ratio
+            if ratio is not None and ratio >= cutoff:
+                assessment.filtered_out = True
+                assessment.reasons.append(
+                    f"缩量冲高 ratio={ratio:.2f}≥{cutoff:.2f}"
+                    f" ({cutoff_source}阈值,"
+                    f" 冲高{assessment.surge_pct:.1%},"
+                    f" 相对量{assessment.relative_volume:.1%})"
+                )
                 logger.info(
                     f"ReversalFilter: FILTERED {stock.stock_code} {stock.stock_name} "
                     f"— {'; '.join(assessment.reasons)}"
@@ -165,7 +205,7 @@ class ReversalFactorFilter:
             else:
                 kept.append(stock)
 
-        # Diagnostic: log ratio distribution for all assessed stocks
+        # --- Diagnostics ---
         valid = [a for a in assessments if a.surge_volume_ratio is not None]
         if valid:
             ratios = sorted(
@@ -177,9 +217,9 @@ class ReversalFactorFilter:
             logger.info(
                 f"ReversalFilter: ratio distribution (n={len(valid)}, no_data={no_data}): "
                 f"max={ratios[0]:.3f} median={ratios[len(ratios) // 2]:.3f} "
-                f"min={ratios[-1]:.3f} top5=[{top5}]"
+                f"min={ratios[-1]:.3f} top5=[{top5}] "
+                f"cutoff={cutoff:.3f}({cutoff_source})"
             )
-            # Log a few examples with raw values
             for a in sorted(valid, key=lambda x: x.surge_volume_ratio or 0, reverse=True)[:3]:
                 s = price_snapshots.get(a.stock_code)
                 av = vol_data.get(a.stock_code)
@@ -191,17 +231,18 @@ class ReversalFactorFilter:
 
         logger.info(
             f"ReversalFilter: {len(kept)}/{len(selected_stocks)} passed "
-            f"({len(selected_stocks) - len(kept)} filtered)"
+            f"({len(selected_stocks) - len(kept)} filtered, "
+            f"cutoff={cutoff:.3f} via {cutoff_source})"
         )
         return kept, assessments
 
-    def _assess(
+    def _compute_ratio(
         self,
         stock: SelectedStock,
         snap: PriceSnapshot | None,
         avg_daily_volume: float | None,
     ) -> ReversalAssessment:
-        """Assess thin-volume surge risk."""
+        """Compute surge volume ratio for a single stock (no filtering decision)."""
         if not snap:
             raise RuntimeError(
                 f"ReversalFilter: no snapshot data for {stock.stock_code} "
@@ -213,32 +254,23 @@ class ReversalFactorFilter:
                 f"({stock.stock_name}). Invalid price data — halting."
             )
 
-        reasons: list[str] = []
         ratio = None
         surge_pct = 0.0
         relative_volume = 0.0
 
         # Skip if no avg_daily_volume available (stock not in quality filter results,
         # e.g. it was added in step 5 but wasn't in L1). Let it pass — we don't
-        # have enough data to judge, and fail-open is only dangerous for the
-        # trading path. In the scanner pipeline, missing avg_vol means the stock
-        # joined late; halting would be too aggressive.
+        # have enough data to judge. In the scanner pipeline, missing avg_vol means
+        # the stock joined late; halting would be too aggressive.
         if avg_daily_volume is not None and avg_daily_volume > 0:
             ratio, surge_pct, relative_volume = self.compute_surge_volume_ratio(
                 snap.open_price, snap.high_price, snap.early_volume, avg_daily_volume
             )
-            if ratio is not None and ratio >= self._config.surge_volume_threshold:
-                reasons.append(
-                    f"缩量冲高 ratio={ratio:.2f}≥{self._config.surge_volume_threshold:.2f}"
-                    f" (冲高{surge_pct:.1%}, 相对量{relative_volume:.1%})"
-                )
-
-        filtered = len(reasons) > 0
 
         return ReversalAssessment(
             stock_code=stock.stock_code,
-            filtered_out=filtered,
-            reasons=reasons if filtered else [],
+            filtered_out=False,  # Decided at batch level in filter_stocks()
+            reasons=[],
             surge_volume_ratio=ratio,
             surge_pct=surge_pct,
             relative_volume=relative_volume,
