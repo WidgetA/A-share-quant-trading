@@ -1246,12 +1246,18 @@ def create_momentum_router() -> APIRouter:
                 )
                 break
 
+        # Detect internal gaps (dates where minute data is missing/sparse)
+        minute_gaps = cache.find_minute_gaps()
+        gap_ranges = [[str(s), str(e)] for s, e in minute_gaps]
+
         return {
             "status": "ready",
             "start_date": str(cache._start_date) if cache._start_date else None,
             "end_date": str(cache._end_date) if cache._end_date else None,
             "daily_stocks": len(cache._daily),
             "minute_stocks": len(cache._minute),
+            "minute_gaps": gap_ranges,
+            "has_gaps": len(gap_ranges) > 0,
             "debug_sample_code": sample_code,
             "debug_sample_dates": sample_dates,
         }
@@ -1298,7 +1304,7 @@ def create_momentum_router() -> APIRouter:
             return StreamingResponse(mem_cached_stream(), media_type="text/event-stream")
 
         # 2) Try OSS cache (skipped when force=True)
-        if not existing:
+        if not existing and not body.force:
             existing = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
         if existing and existing.covers_range(start_date, end_date):
             request.app.state.akshare_cache = existing
