@@ -497,7 +497,45 @@ The UI provides a `data_source` radio toggle (`"ifind"` or `"akshare"`). All cod
 3. **Live trading uses iFinD** — the toggle only applies to backtesting. Real-time live trading always uses iFinD for accuracy and latency.
 4. **Non-trading data** (news, sector mapping, fundamentals) uses its own dedicated source regardless of toggle (PostgreSQL for fundamentals, local JSON for boards).
 
-### 15. asyncpg Timezone Handling (Critical)
+### 15. Volume Unit Convention (Critical)
+
+**Core Principle: ALL volume data in the system MUST be in 股 (shares), never in 手 (lots).**
+
+Different data sources use different volume units:
+
+| Data Source | Function | Native Unit | Conversion |
+|------------|----------|-------------|------------|
+| **akshare** | `stock_zh_a_hist()` | **手** (1手=100股) | ×100 at storage time |
+| **baostock** | `query_history_k_data_plus()` | **股** | None needed |
+| **iFinD** | `history_quotes` / `high_frequency` | **股** | None needed |
+
+#### Why This Matters
+
+A 100x unit mismatch between daily volume (手) and minute volume (股) caused:
+- `early_volume / avg_daily_volume` ratios to be 100x too large
+- Reversal filter's surge_volume_ratio to be 100x too small (never triggered)
+- Step 6 turnover_amp display values to be inflated (ranking unaffected due to Z-score)
+
+#### Implementation
+
+The conversion is done at the **storage layer** in `akshare_backtest_cache.py`:
+
+```python
+# akshare 成交量 is in 手 (lots of 100 shares);
+# baostock minute volume is in 股 (shares).
+# Convert to 股 here so all volume fields are consistent.
+"volume": float(row["成交量"]) * 100,
+```
+
+All downstream code (quality filter, reversal filter, Step 6 scoring) receives volume in 股 via pass-through adapters. No conversion needed anywhere else.
+
+#### Rules
+
+1. **Never store volume in 手** — convert to 股 at the data ingestion layer
+2. **When adding a new data source**, check its volume unit documentation before integrating
+3. **Cross-verify**: For any stock, `early_volume (10min) / avg_daily_volume` should be ~0.05-0.30 (5-30% of daily in first 10 minutes). If >1.0, units are likely mismatched.
+
+### 16. asyncpg Timezone Handling (Critical)
 
 **Core Principle: ALWAYS use timezone-aware datetimes when passing parameters to asyncpg queries.**
 
@@ -557,7 +595,7 @@ beijing_display = (utc_time + timedelta(hours=8)).replace(tzinfo=None)
 3. **Never assume system TZ**: Code must work correctly regardless of `TZ` environment variable
 4. **Test with TZ=Asia/Shanghai**: Always verify datetime handling in an environment matching production
 
-### 16. iFinD HTTP API Reference (Critical)
+### 17. iFinD HTTP API Reference (Critical)
 
 **Core Principle: Before writing ANY iFinD API call, ALWAYS consult the API manual first.**
 
