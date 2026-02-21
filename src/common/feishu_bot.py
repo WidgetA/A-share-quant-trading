@@ -327,9 +327,11 @@ Limit-up (skipped):
         # Recommendation section
         if recommended_stock:
             rec = recommended_stock
+            growth_sign = "+" if rec.growth_rate >= 0 else ""
             lines.append("")
             lines.append(f"⭐ 推荐: {rec.stock_code} {rec.stock_name}")
             lines.append(f"  板块: {rec.board_name} (选出{rec.board_stock_count}只，为最多板块)")
+            lines.append(f"  业绩增长率: {growth_sign}{rec.growth_rate:.1f}%")
             lines.append(f"  开盘涨幅: {rec.open_gain_pct:+.1f}%  PE: {rec.pe_ttm:.1f}")
         else:
             lines.append("")

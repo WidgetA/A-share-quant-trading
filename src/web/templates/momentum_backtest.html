@@ -728,6 +728,7 @@ function renderResults(data) {
         recCard.classList.remove('hidden');
         document.getElementById('rec-code').textContent = rec.stock_code;
         document.getElementById('rec-name').textContent = rec.stock_name;
+        document.getElementById('rec-growth').textContent = `业绩增长: ${rec.growth_rate >= 0 ? '+' : ''}${rec.growth_rate.toFixed(1)}%`;
         document.getElementById('rec-gain').textContent = `开盘涨幅: +${rec.open_gain_pct.toFixed(2)}%`;
         document.getElementById('rec-board').textContent = `板块: ${rec.board_name} (选出${rec.board_stock_count}只最多)`;
         const newsEl = document.getElementById('rec-news');
