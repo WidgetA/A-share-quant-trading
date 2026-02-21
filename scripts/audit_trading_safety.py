@@ -3,9 +3,16 @@
 交易安全审计脚本。
 
 扫描 strategy/trading/data 代码中违反交易安全原则的模式：
+
+== Level 1: 语法级别 ==
 1. except Exception 吞掉异常不 raise（静默降级）
 2. 数据获取失败返回空值而不是报错（fail-open）
-3. 缓存回退替代实时数据
+
+== Level 2: 业务逻辑级别 ==
+3. 价格/金额变量用 .get(key, 0.0) 提供默认值 — 缺数据时静默用零价格
+4. latest_price = open_price 回退 — API 拿不到实时价就用开盘价顶替
+5. 三元表达式中价格变量回退到 0.0 或其他价格变量
+6. PriceSnapshot 构造时用 open_price 作为 latest_price 的默认值
 
 原则：交易安全 > 程序健壮性。拿不到数据 → 报错停止，不许继续交易。
 
@@ -16,6 +23,7 @@
 
 import ast
 import io
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +51,21 @@ EXTENDED_DIRS = CRITICAL_DIRS + [
     "src/common",
 ]
 
+# 价格/金额相关的变量名关键词 — 这些变量不允许用默认值回退
+FINANCIAL_VAR_KEYWORDS = {
+    "price", "latest", "close", "open_price", "prev_close",
+    "high", "low", "volume", "amount", "sell_price", "buy_price",
+    "cash", "balance", "pnl", "cost", "turnover", "market_cap",
+    "cum_vol", "max_high", "min_low",
+}
+
+# .get() 调用中不允许用 0.0 默认值的 key 关键词
+FINANCIAL_KEY_KEYWORDS = {
+    "price", "close", "open", "high", "low", "volume", "amount",
+    "balance", "cash", "cost", "pnl", "sell", "buy", "latest",
+    "turnover", "market_cap", "prev",
+}
+
 
 @dataclass
 class Violation:
@@ -51,6 +74,7 @@ class Violation:
     category: str
     detail: str
     severity: str  # CRITICAL / WARNING
+    source_line: str = ""  # 违规代码行的原文
 
 
 @dataclass
@@ -59,38 +83,72 @@ class AuditResult:
     files_scanned: int = 0
 
 
-class TradingSafetyAuditor(ast.NodeVisitor):
-    """AST visitor that detects trading safety violations."""
+def _is_financial_name(name: str) -> bool:
+    """Check if a variable name looks like a financial/price variable."""
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in FINANCIAL_VAR_KEYWORDS)
 
-    def __init__(self, filepath: str):
+
+def _is_financial_key(key_str: str) -> bool:
+    """Check if a dict key string looks like a financial field."""
+    key_lower = key_str.lower()
+    return any(kw in key_lower for kw in FINANCIAL_KEY_KEYWORDS)
+
+
+def _is_zero_constant(node: ast.AST) -> bool:
+    """Check if node is a zero-ish constant (0, 0.0, None)."""
+    if isinstance(node, ast.Constant):
+        return node.value in (0, 0.0, None)
+    return False
+
+
+def _get_source_line(source_lines: list[str], lineno: int) -> str:
+    """Get source line by 1-based line number."""
+    if 1 <= lineno <= len(source_lines):
+        return source_lines[lineno - 1].strip()
+    return ""
+
+
+# ============================================================
+# Level 1: Exception handling auditor (original)
+# ============================================================
+
+class ExceptionAuditor(ast.NodeVisitor):
+    """AST visitor that detects exception handling safety violations."""
+
+    def __init__(self, filepath: str, source_lines: list[str]):
         self.filepath = filepath
+        self.source_lines = source_lines
         self.violations: list[Violation] = []
 
-    def _add(self, node: ast.AST, category: str, detail: str, severity: str = "CRITICAL"):
+    def _add(self, node: ast.AST, category: str, detail: str,
+             severity: str = "CRITICAL"):
+        lineno = getattr(node, "lineno", 0)
         self.violations.append(
             Violation(
                 file=self.filepath,
-                line=getattr(node, "lineno", 0),
+                line=lineno,
                 category=category,
                 detail=detail,
                 severity=severity,
+                source_line=_get_source_line(self.source_lines, lineno),
             )
         )
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler):
         """Check for broad exception catching without re-raise."""
-        # Is it catching Exception or bare except?
         is_broad = False
         if node.type is None:
-            is_broad = True  # bare except:
-        elif isinstance(node.type, ast.Name) and node.type.id in ("Exception", "BaseException"):
+            is_broad = True
+        elif isinstance(node.type, ast.Name) and node.type.id in (
+            "Exception", "BaseException"
+        ):
             is_broad = True
 
         if not is_broad:
             self.generic_visit(node)
             return
 
-        # Check if the except body contains a raise statement
         has_raise = False
         has_return_empty = False
         has_logger_only = False
@@ -113,13 +171,14 @@ class TradingSafetyAuditor(ast.NodeVisitor):
         if return_values:
             has_return_empty = True
 
-        # Count meaningful statements (excluding logger calls)
         body_stmts = node.body
         logger_calls = 0
         for stmt in body_stmts:
             if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
                 func = stmt.value.func
-                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if isinstance(func, ast.Attribute) and isinstance(
+                    func.value, ast.Name
+                ):
                     if func.value.id == "logger":
                         logger_calls += 1
 
@@ -128,7 +187,6 @@ class TradingSafetyAuditor(ast.NodeVisitor):
         ):
             has_logger_only = True
 
-        # Report violations
         if not has_raise and has_return_empty:
             self._add(
                 node,
@@ -140,7 +198,7 @@ class TradingSafetyAuditor(ast.NodeVisitor):
             self._add(
                 node,
                 "SWALLOWED_EXCEPTION",
-                "except Exception 只打日志不 raise — 错误被静默吞掉，调用方无法感知",
+                "except Exception 只打日志不 raise — 错误被静默吞掉",
             )
         elif not has_raise and is_broad:
             self._add(
@@ -152,14 +210,212 @@ class TradingSafetyAuditor(ast.NodeVisitor):
 
         self.generic_visit(node)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        """Check for functions that return empty defaults on failure paths."""
+
+# ============================================================
+# Level 2: Business logic fallback auditor
+# ============================================================
+
+class BusinessLogicAuditor(ast.NodeVisitor):
+    """AST visitor that detects business-logic-level silent degradation.
+
+    Catches patterns like:
+    - sell_price = prices.get(code, 0.0)   # 缺数据用零价格
+    - latest = val if val else open_price  # 回退到开盘价
+    - PriceSnapshot(latest_price=open_price)  # 用开盘价充当实时价
+    """
+
+    def __init__(self, filepath: str, source_lines: list[str]):
+        self.filepath = filepath
+        self.source_lines = source_lines
+        self.violations: list[Violation] = []
+
+    def _add(self, node: ast.AST, category: str, detail: str,
+             severity: str = "CRITICAL"):
+        lineno = getattr(node, "lineno", 0)
+        self.violations.append(
+            Violation(
+                file=self.filepath,
+                line=lineno,
+                category=category,
+                detail=detail,
+                severity=severity,
+                source_line=_get_source_line(self.source_lines, lineno),
+            )
+        )
+
+    def visit_Assign(self, node: ast.Assign):
+        """Check assignments for fallback patterns."""
+        # Pattern: var = dict.get(key, 0.0) where var is financial
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target_name = node.targets[0].id
+            if _is_financial_name(target_name):
+                self._check_dict_get_fallback(node, target_name, node.value)
+                self._check_ternary_fallback(node, target_name, node.value)
+
         self.generic_visit(node)
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        """Check async functions (same logic as sync)."""
+    def _check_dict_get_fallback(self, node: ast.AST, target: str,
+                                 value: ast.AST):
+        """Detect: price = d.get(key, 0.0)"""
+        if not isinstance(value, ast.Call):
+            return
+        func = value.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "get"):
+            return
+        if len(value.args) < 2:
+            return
+
+        default_arg = value.args[1]
+        if _is_zero_constant(default_arg):
+            # Check if the key is also financial
+            key_arg = value.args[0]
+            key_str = ""
+            if isinstance(key_arg, ast.Constant) and isinstance(
+                key_arg.value, str
+            ):
+                key_str = key_arg.value
+            elif isinstance(key_arg, ast.Attribute):
+                key_str = key_arg.attr
+
+            detail = (
+                f"`{target} = ...get(..., 0.0)` — "
+                f"缺数据时静默用 0.0 替代，应该报错或跳过"
+            )
+            if key_str and _is_financial_key(key_str):
+                self._add(node, "PRICE_FALLBACK_ZERO", detail)
+            elif _is_financial_name(target):
+                self._add(node, "PRICE_FALLBACK_ZERO", detail, severity="WARNING")
+
+    def _check_ternary_fallback(self, node: ast.AST, target: str,
+                                value: ast.AST):
+        """Detect: latest = x if x else open_price / 0.0"""
+        if not isinstance(value, ast.IfExp):
+            return
+
+        orelse = value.orelse
+
+        # Case 1: fallback to 0.0
+        if _is_zero_constant(orelse):
+            self._add(
+                node,
+                "TERNARY_FALLBACK_ZERO",
+                f"`{target} = ... if ... else 0.0` — "
+                f"缺数据时静默用 0.0，应该报错或跳过",
+                severity="WARNING",
+            )
+            return
+
+        # Case 2: fallback to another price variable (e.g., open_price)
+        if isinstance(orelse, ast.Name) and _is_financial_name(orelse.id):
+            # latest_price = x if x else open_price -> CRITICAL
+            self._add(
+                node,
+                "PRICE_FALLBACK_SUBSTITUTE",
+                f"`{target} = ... if ... else {orelse.id}` — "
+                f"数据缺失时用 {orelse.id} 替代 {target}，"
+                f"会导致涨幅计算为 0%，静默掩盖数据缺失",
+            )
+
+    def visit_Call(self, node: ast.Call):
+        """Check function calls for PriceSnapshot(latest_price=open_price)."""
+        func = node.func
+        func_name = ""
+        if isinstance(func, ast.Name):
+            func_name = func.id
+        elif isinstance(func, ast.Attribute):
+            func_name = func.attr
+
+        # Detect PriceSnapshot(latest_price=open_price) pattern
+        if func_name == "PriceSnapshot":
+            for kw in node.keywords:
+                if kw.arg == "latest_price" and isinstance(
+                    kw.value, ast.Name
+                ):
+                    val_name = kw.value.id
+                    if val_name == "open_price":
+                        self._add(
+                            node,
+                            "SNAPSHOT_PRICE_FALLBACK",
+                            f"PriceSnapshot(latest_price=open_price) — "
+                            f"用开盘价充当实时价，gain_from_open=0%，"
+                            f"静默掩盖 9:40 数据缺失",
+                        )
+
         self.generic_visit(node)
 
+
+# ============================================================
+# Level 3: Regex-based line scanning for patterns hard to catch via AST
+# ============================================================
+
+# Each rule: (pattern, category, detail_template, severity)
+# detail_template can use {match} for the matched text
+LINE_SCAN_RULES: list[tuple[re.Pattern, str, str, str]] = [
+    # sell_prices.get(xxx, 0.0) or buy_prices.get(xxx, 0.0)
+    (
+        re.compile(
+            r"(sell_price|buy_price)\w*\s*=\s*\w+\.get\(.+?,\s*0\.0\s*\)"
+        ),
+        "PRICE_FALLBACK_ZERO",
+        "卖出/买入价用 .get(key, 0.0) — 缺数据时以零价格成交，导致 P&L 严重失真",
+        "CRITICAL",
+    ),
+    # cash_balance = xxx.get("cash_balance", 0.0) or similar
+    (
+        re.compile(
+            r"cash_balance\s*=\s*.*\.get\(.*,\s*0\.0\s*\)"
+        ),
+        "BALANCE_FALLBACK_ZERO",
+        "现金余额用 .get(key, 0.0) — 状态丢失时静默归零，隐藏数据损坏",
+        "CRITICAL",
+    ),
+    # latest_price = open_price (direct assignment, not in if/else)
+    (
+        re.compile(
+            r"latest_price\s*=\s*open_price\s*(?:#.*)?$"
+        ),
+        "PRICE_SUBSTITUTION",
+        "latest_price = open_price — 用开盘价顶替实时价，涨幅被静默归零",
+        "CRITICAL",
+    ),
+    # max_high = 0.0 or min_low = 0.0 as initialization before conditional fill
+    (
+        re.compile(
+            r"(?:max_high|min_low)\s*=\s*0\.0\s*(?:#.*)?$"
+        ),
+        "HIGHLOW_INIT_ZERO",
+        "max_high/min_low 初始化为 0.0 — 如果后续条件分支未填充，"
+        "0.0 会被当作真实极值参与计算",
+        "WARNING",
+    ),
+]
+
+
+def scan_lines(filepath: str, source_lines: list[str]) -> list[Violation]:
+    """Scan source lines with regex rules."""
+    violations = []
+    for lineno_0, line in enumerate(source_lines):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for pattern, category, detail, severity in LINE_SCAN_RULES:
+            if pattern.search(stripped):
+                violations.append(
+                    Violation(
+                        file=filepath,
+                        line=lineno_0 + 1,
+                        category=category,
+                        detail=detail,
+                        severity=severity,
+                        source_line=stripped,
+                    )
+                )
+    return violations
+
+
+# ============================================================
+# Orchestration
+# ============================================================
 
 def audit_file(filepath: Path) -> list[Violation]:
     """Audit a single Python file for trading safety violations."""
@@ -170,9 +426,20 @@ def audit_file(filepath: Path) -> list[Violation]:
         return []
 
     rel_path = str(filepath.relative_to(PROJECT_ROOT)).replace("\\", "/")
-    auditor = TradingSafetyAuditor(rel_path)
-    auditor.visit(tree)
-    return auditor.violations
+    source_lines = source.splitlines()
+
+    # Level 1: Exception handling
+    exc_auditor = ExceptionAuditor(rel_path, source_lines)
+    exc_auditor.visit(tree)
+
+    # Level 2: Business logic fallbacks
+    biz_auditor = BusinessLogicAuditor(rel_path, source_lines)
+    biz_auditor.visit(tree)
+
+    # Level 3: Line-scan regex rules
+    line_violations = scan_lines(rel_path, source_lines)
+
+    return exc_auditor.violations + biz_auditor.violations + line_violations
 
 
 def run_audit(strict: bool = False) -> AuditResult:
@@ -210,6 +477,8 @@ def print_report(result: AuditResult):
         for v in critical:
             print(f"\n  [{v.category}] {v.file}:{v.line}")
             print(f"    {v.detail}")
+            if v.source_line:
+                print(f"    >>> {v.source_line}")
 
     if warnings:
         print(f"\n  ⚠️  警告 (WARNING): {len(warnings)}")
@@ -217,13 +486,14 @@ def print_report(result: AuditResult):
         for v in warnings:
             print(f"\n  [{v.category}] {v.file}:{v.line}")
             print(f"    {v.detail}")
+            if v.source_line:
+                print(f"    >>> {v.source_line}")
 
     if not result.violations:
-        print("\n  没有发现交易安全问题")
+        print("\n  ✅ 没有发现交易安全问题")
 
     print(f"\n{'=' * 70}")
 
-    # Exit code: 1 if any CRITICAL violations
     return 1 if critical else 0
 
 

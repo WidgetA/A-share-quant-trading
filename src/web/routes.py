@@ -1466,15 +1466,19 @@ def create_momentum_router() -> APIRouter:
                 )
 
                 date_key = trade_date.strftime("%Y-%m-%d")
-                price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+                try:
+                    price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+                except MinuteDataMissingError as e:
+                    return {
+                        "success": False,
+                        "trade_date": body.trade_date,
+                        "error": str(e),
+                    }
                 if not price_snapshots:
                     return {
-                        "success": True,
+                        "success": False,
                         "trade_date": body.trade_date,
-                        "initial_gainers": 0,
-                        "hot_boards": {},
-                        "selected_stocks": [],
-                        "message": f"akshare缓存中无 {date_key} 的数据",
+                        "error": f"akshare缓存中无 {date_key} 的日线数据",
                     }
             else:
                 # --- iFinD path: original logic ---
@@ -2760,10 +2764,15 @@ def create_momentum_router() -> APIRouter:
                     try:
                         if use_akshare:
                             date_key = trade_date.strftime("%Y-%m-%d")
-                            price_snapshots = _build_snapshots_from_cache(akshare_cache, date_key)
-                            price_err = (
-                                "" if price_snapshots else f"akshare缓存中无 {date_key} 的数据"
-                            )
+                            try:
+                                price_snapshots = _build_snapshots_from_cache(akshare_cache, date_key)
+                            except MinuteDataMissingError as e:
+                                price_snapshots = {}
+                                price_err = str(e)
+                            else:
+                                price_err = (
+                                    "" if price_snapshots else f"akshare缓存中无 {date_key} 的日线数据"
+                                )
                         else:
                             (
                                 price_snapshots,
@@ -4012,11 +4021,22 @@ async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> 
     return []
 
 
+class MinuteDataMissingError(Exception):
+    """Raised when minute data coverage is insufficient for reliable backtest."""
+
+    pass
+
+
 def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
     """Build PriceSnapshot dict from AkshareBacktestCache for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
+
+    Raises:
+        MinuteDataMissingError: if minute data coverage < 50% of daily candidates.
+            This prevents silent degradation where missing minute data causes
+            gain_from_open=0% for all stocks, producing unreliable results.
     """
     from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
 
@@ -4039,6 +4059,11 @@ def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
                 f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
                 f"_daily has {len(akshare_cache._daily)} stocks but all date dicts are empty"
             )
+        return snapshots
+
+    # Count daily candidates (pass pre-filter) vs those with minute data
+    daily_candidates = 0
+    minute_hits = 0
 
     for code, day in all_daily.items():
         open_price = day.get("open", 0)
@@ -4051,25 +4076,36 @@ def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
         if open_gain < -0.5:
             continue
 
-        # 9:40 price from minute cache
+        daily_candidates += 1
+
+        # 9:40 price from minute cache — NO fallback allowed
         data_940 = akshare_cache.get_940_price(code, date_str)
-        if data_940:
-            latest_price, cum_vol, max_high, min_low = data_940
-        else:
-            latest_price = open_price
-            cum_vol = 0.0
-            max_high = 0.0
-            min_low = 0.0
+        if not data_940:
+            continue
+
+        minute_hits += 1
+        latest_price, cum_vol, max_high, min_low = data_940
+
+        if latest_price <= 0:
+            continue
 
         snapshots[code] = PriceSnapshot(
             stock_code=code,
             stock_name="",
             open_price=open_price,
             prev_close=prev_close,
-            latest_price=latest_price if latest_price > 0 else open_price,
+            latest_price=latest_price,
             early_volume=cum_vol,
             high_price=max_high,
             low_price=min_low,
+        )
+
+    # Trading safety: halt if minute data is severely insufficient
+    if daily_candidates > 0 and minute_hits < daily_candidates * 0.5:
+        coverage_pct = round(minute_hits / daily_candidates * 100, 1)
+        raise MinuteDataMissingError(
+            f"{date_str} 分钟数据严重不足: 仅 {minute_hits}/{daily_candidates} 只股票有分钟数据 "
+            f"(覆盖率 {coverage_pct}%)。请先补充下载分钟数据，否则回测结果不可靠。"
         )
 
     return snapshots

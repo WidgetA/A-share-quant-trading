@@ -749,7 +749,10 @@ class MomentumSectorScanner:
             # Remove stocks that didn't get 9:40 data (latest_price still 0.0 sentinel)
             missing = [c for c, s in result.items() if s.latest_price <= 0]
             if missing:
-                logger.warning(f"Dropping {len(missing)} stocks without 9:40 price data: {missing[:10]}")
+                logger.warning(
+                    "Dropping %d stocks without 9:40 price: %s",
+                    len(missing), missing[:10],
+                )
                 for c in missing:
                     del result[c]
 

@@ -52,5 +52,6 @@ addopts = "-m 'not live'"
 
 [dependency-groups]
 dev = [
+    "playwright>=1.58.0",
     "types-pyyaml>=6.0.12.20250915",
 ]

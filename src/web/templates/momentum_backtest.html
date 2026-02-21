@@ -465,6 +465,7 @@ function checkAkshareCoverage() {
         btn.textContent = '已缓存';
         btn.style.background = '';
         statusEl.style.color = '#059669';
+        akshareReady = true;  // Selected range is fully covered — allow backtest
     } else {
         btn.textContent = '增量下载';
         btn.style.background = '#f59e0b';
@@ -575,13 +576,34 @@ async function startAkshareDownload(force = false) {
                         if (data.end_date) akshareCacheEnd = data.end_date;
                         const rangeStr = akshareCacheStart && akshareCacheEnd ? `, ${akshareCacheStart} ~ ${akshareCacheEnd}` : '';
                         const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟${rangeStr})`;
-                        statusEl.style.color = '#059669';
                         statusEl.textContent = readyText;
-                        akshareReady = true;
-                        akshareMinuteGaps = [];  // Fresh download — no gaps
-                        btn.textContent = '已缓存';
                         btn.style.background = '';
                         if (reBtn) reBtn.style.display = '';
+                        // Re-fetch status to check for remaining minute gaps
+                        // instead of optimistically assuming no gaps
+                        try {
+                            const statusResp = await fetch('/api/momentum/akshare-status');
+                            const statusData = await statusResp.json();
+                            if (statusData.has_gaps) {
+                                akshareMinuteGaps = statusData.minute_gaps || [];
+                                const gapStr = akshareMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
+                                statusEl.textContent = readyText + ` | 分钟数据缺失: ${gapStr}`;
+                                statusEl.style.color = '#d97706';
+                                btn.textContent = '增量下载';
+                                btn.style.background = '#f59e0b';
+                                akshareReady = false;
+                            } else {
+                                akshareMinuteGaps = [];
+                                statusEl.style.color = '#059669';
+                                akshareReady = true;
+                                btn.textContent = '已缓存';
+                            }
+                        } catch (_) {
+                            // Status check failed — be conservative, assume gaps remain
+                            akshareReady = false;
+                            statusEl.style.color = '#d97706';
+                            statusEl.textContent = readyText + ' | 无法确认分钟数据完整性';
+                        }
                     } else if (data.type === 'error') {
                         statusEl.textContent = '下载失败: ' + data.message;
                         btn.disabled = false;
@@ -645,6 +667,11 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
 
         if (!resp.ok) {
             showBacktestError(data.detail || '回测失败');
+            return;
+        }
+
+        if (data.success === false) {
+            showBacktestError(data.error || '回测失败（分钟数据不足）');
             return;
         }
 

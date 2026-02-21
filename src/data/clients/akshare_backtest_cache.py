@@ -143,8 +143,8 @@ class AkshareBacktestCache:
         for _code, dates in self._daily.items():
             for ds in dates:
                 daily_date_counts[ds] = daily_date_counts.get(ds, 0) + 1
-        for _code, dates in self._minute.items():
-            for ds in dates:
+        for _code, min_dates in self._minute.items():
+            for ds in min_dates:
                 minute_date_counts[ds] = minute_date_counts.get(ds, 0) + 1
 
         gap_dates: list[date] = []
