@@ -403,7 +403,10 @@ def scrape_all(
                     )
                 else:
                     failed.append(board_name)
-                    logger.warning(f"[{i}/{len(boards)}] {board_name} ({board_code}): FAILED (0 stocks)")
+                    logger.warning(
+                        f"[{i}/{len(boards)}] {board_name} ({board_code}): "
+                        "FAILED (0 stocks)"
+                    )
 
             except Exception as e:
                 err_msg = str(e)
