@@ -362,6 +362,8 @@ checkKeyStatus();
 // === Combined Results Store (for loss analysis) ===
 let combinedResults = [];
 let akshareReady = false;
+let akshareCacheStart = null;  // cached date range start (string YYYY-MM-DD)
+let akshareCacheEnd = null;    // cached date range end
 
 // === Data Source Toggle ===
 function getDataSource() {
@@ -405,7 +407,8 @@ async function checkAkshareCache() {
         downloadUI.style.display = 'block';
 
         if (data.status === 'ready') {
-            // Cache already loaded — check if it covers selected date range
+            akshareCacheStart = data.start_date;
+            akshareCacheEnd = data.end_date;
             const readyText = `已就绪 (${data.daily_stocks} 只日线, ${data.minute_stocks} 只分钟, ${data.start_date} ~ ${data.end_date})`;
             statusEl.textContent = readyText;
             statusEl.style.color = '#059669';
@@ -414,6 +417,7 @@ async function checkAkshareCache() {
             btn.disabled = false;
             const reBtn = document.getElementById('akshare-redownload-btn');
             if (reBtn) reBtn.style.display = '';
+            checkAkshareCoverage();
         }
     } catch (e) {
         // Ignore — user can still manually download
@@ -421,6 +425,54 @@ async function checkAkshareCache() {
         downloadUI.style.display = 'block';
     }
 }
+
+// Check if form dates are covered by cached range; update button accordingly
+function checkAkshareCoverage() {
+    if (!akshareCacheStart || !akshareCacheEnd) return;
+    if (getDataSource() !== 'akshare') return;
+
+    const btn = document.getElementById('akshare-download-btn');
+    const statusEl = document.getElementById('akshare-status');
+
+    // Get selected dates from active tab
+    let startDate, endDate;
+    const activeTab = document.querySelector('.backtest-tab.active');
+    if (activeTab && activeTab.dataset.tab === 'combined') {
+        startDate = document.getElementById('combined_start').value;
+        endDate = document.getElementById('combined_end').value;
+    } else {
+        startDate = document.getElementById('trade_date').value;
+        endDate = startDate;
+    }
+    if (!startDate || !endDate) return;
+
+    const covered = startDate >= akshareCacheStart && endDate <= akshareCacheEnd;
+    if (covered) {
+        btn.textContent = '已缓存';
+        btn.style.background = '';
+        statusEl.style.color = '#059669';
+    } else {
+        btn.textContent = '增量下载';
+        btn.style.background = '#f59e0b';
+        btn.disabled = false;
+        const parts = [];
+        if (startDate < akshareCacheStart) parts.push(`${startDate} ~ ${akshareCacheStart}`);
+        if (endDate > akshareCacheEnd) parts.push(`${akshareCacheEnd} ~ ${endDate}`);
+        statusEl.textContent = `缓存 ${akshareCacheStart} ~ ${akshareCacheEnd}，未覆盖: ${parts.join(', ')}`;
+        statusEl.style.color = '#d97706';
+        akshareReady = false;
+    }
+}
+
+// Listen to date changes to update cache coverage status
+['trade_date', 'combined_start', 'combined_end'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', checkAkshareCoverage);
+});
+// Also re-check when switching tabs
+document.querySelectorAll('.backtest-tab').forEach(tab => {
+    tab.addEventListener('click', () => setTimeout(checkAkshareCoverage, 50));
+});
 
 // Check on page load if akshare is selected
 if (getDataSource() === 'akshare') {
@@ -502,11 +554,15 @@ async function startAkshareDownload(force = false) {
                         progressBar.style.width = '100%';
                         progressText.textContent = '下载完成!';
                         progress.querySelector('.loading-spinner').style.display = 'none';
-                        const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟)`;
+                        if (data.start_date) akshareCacheStart = data.start_date;
+                        if (data.end_date) akshareCacheEnd = data.end_date;
+                        const rangeStr = akshareCacheStart && akshareCacheEnd ? `, ${akshareCacheStart} ~ ${akshareCacheEnd}` : '';
+                        const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟${rangeStr})`;
                         statusEl.style.color = '#059669';
                         statusEl.textContent = readyText;
                         akshareReady = true;
-                        btn.textContent = '已下载';
+                        btn.textContent = '已缓存';
+                        btn.style.background = '';
                         if (reBtn) reBtn.style.display = '';
                     } else if (data.type === 'error') {
                         statusEl.textContent = '下载失败: ' + data.message;

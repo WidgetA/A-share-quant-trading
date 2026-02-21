@@ -1392,6 +1392,8 @@ def create_momentum_router() -> APIRouter:
                         "type": "complete",
                         "daily_count": len(working._daily),
                         "minute_count": len(working._minute),
+                        "start_date": str(working._start_date) if working._start_date else None,
+                        "end_date": str(working._end_date) if working._end_date else None,
                     }
                 )
 
