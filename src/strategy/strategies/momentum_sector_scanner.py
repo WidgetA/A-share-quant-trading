@@ -596,9 +596,9 @@ class MomentumSectorScanner:
                 best.stock_code, best.stock_name, trade_date=self._trade_date
             )
             if news_result.error:
-                logger.warning(
-                    f"Step 6: News check error for {best.stock_code}: {news_result.error}, "
-                    f"proceeding with recommendation (fail-open)"
+                raise RuntimeError(
+                    f"Step 6: 负面新闻检查失败 {best.stock_code} ({best.stock_name}): "
+                    f"{news_result.error}。用户已启用新闻检查，不能跳过 — 停止推荐。"
                 )
             elif news_result.has_negative_news:
                 news_check_passed = False

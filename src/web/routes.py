@@ -1170,10 +1170,11 @@ def create_momentum_router() -> APIRouter:
         return db
 
     async def _create_news_checker():
-        """Create and start a NegativeNewsChecker if both API keys are available.
+        """Create and start a NegativeNewsChecker.
 
-        Returns None if keys are missing (graceful degradation for backtest).
-        Caller is responsible for calling _stop_news_checker() when done.
+        Raises RuntimeError if API keys are missing — caller MUST NOT
+        call this unless the user explicitly enabled news checking.
+        Trading safety: user opted in → missing keys = halt, not skip.
         """
         from src.common.config import get_tavily_api_key
         from src.common.siliconflow_client import SiliconFlowClient, SiliconFlowConfig
@@ -1182,14 +1183,18 @@ def create_momentum_router() -> APIRouter:
 
         try:
             tavily_key = get_tavily_api_key()
-        except (ValueError, FileNotFoundError):
-            logger.warning("News checker: Tavily API key not configured")
-            return None
+        except (ValueError, FileNotFoundError) as e:
+            raise RuntimeError(
+                "负面新闻检查已启用，但 Tavily API key 未配置。"
+                "请在 config 中设置 Tavily key，或取消勾选「启用负面新闻检查」。"
+            ) from e
 
         sf_key = _get_llm_api_key()
         if not sf_key:
-            logger.warning("News checker: SiliconFlow API key not configured")
-            return None
+            raise RuntimeError(
+                "负面新闻检查已启用，但 SiliconFlow API key 未配置。"
+                "请在 config 中设置 LLM key，或取消勾选「启用负面新闻检查」。"
+            )
 
         tavily = TavilyClient(api_key=tavily_key)
         sf = SiliconFlowClient(SiliconFlowConfig(api_key=sf_key))
@@ -1443,7 +1448,10 @@ def create_momentum_router() -> APIRouter:
             )
 
         fundamentals_db = _get_fundamentals_db(request)
-        news_checker = await _create_news_checker() if body.news_check else None
+        try:
+            news_checker = await _create_news_checker() if body.news_check else None
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         try:
             concept_mapper = LocalConceptMapper()
@@ -1639,7 +1647,10 @@ def create_momentum_router() -> APIRouter:
 
         ifind_client = _get_ifind_client(request)
         fundamentals_db = _get_fundamentals_db(request)
-        news_checker = await _create_news_checker() if body.news_check else None
+        try:
+            news_checker = await _create_news_checker() if body.news_check else None
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         async def event_stream():
             """SSE event generator for range backtest."""
@@ -2685,7 +2696,10 @@ def create_momentum_router() -> APIRouter:
             akshare_cache = None
 
         fundamentals_db = _get_fundamentals_db(request)
-        news_checker = await _create_news_checker() if body.news_check else None
+        try:
+            news_checker = await _create_news_checker() if body.news_check else None
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         async def event_stream():
             def sse(data: dict) -> str:
