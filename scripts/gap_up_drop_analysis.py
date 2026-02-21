@@ -129,12 +129,12 @@ def analyze(sample_size: int = 500) -> None:
     gap_up_total = len(gap_up_data)
     gap_up_drop = gap_up_data["close_below_prev"].sum()
 
-    print(f"\n全部高开中：")
+    print("\n全部高开中：")
     print(f"  高开 stock-day 数: {gap_up_total:,}")
     print(f"  高开后收绿:       {gap_up_drop:,} / {gap_up_total:,} = {gap_up_drop / gap_up_total * 100:.1f}%")
     print(f"  占全部 stock-day: {gap_up_drop:,} / {total_stock_days:,} = {gap_up_drop / total_stock_days * 100:.1f}%")
 
-    print(f"\n按高开幅度分档：")
+    print("\n按高开幅度分档：")
     bins = [(0, 1), (1, 2), (2, 3), (3, 5), (5, 100)]
     for lo, hi in bins:
         label = f"{lo}%-{hi}%" if hi < 100 else f"{lo}%+"
@@ -151,10 +151,10 @@ def analyze(sample_size: int = 500) -> None:
     print("=" * 70)
 
     gap_up_retreat = gap_up_data["close_below_open"].sum()
-    print(f"\n全部高开中：")
+    print("\n全部高开中：")
     print(f"  高开后收 < 开盘:  {gap_up_retreat:,} / {gap_up_total:,} = {gap_up_retreat / gap_up_total * 100:.1f}%")
 
-    print(f"\n按高开幅度分档：")
+    print("\n按高开幅度分档：")
     for lo, hi in bins:
         label = f"{lo}%-{hi}%" if hi < 100 else f"{lo}%+"
         subset = gap_up_data[(gap_up_data["gap_pct"] > lo) & (gap_up_data["gap_pct"] <= hi)]

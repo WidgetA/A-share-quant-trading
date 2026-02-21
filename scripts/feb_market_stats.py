@@ -3,9 +3,10 @@ Query February 2026 trading days: count up/down/flat stocks for A-share main boa
 Uses akshare for data.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import akshare as ak
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def get_stock_hist(code: str) -> pd.DataFrame:

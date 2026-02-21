@@ -202,7 +202,7 @@ def main():
     labels = list(all_results.keys())
 
     print(f"\n{'=' * 90}")
-    print(f"  汇总: 各组合在5个时段的表现")
+    print("  汇总: 各组合在5个时段的表现")
     print(f"{'=' * 90}")
 
     # Header
@@ -214,7 +214,7 @@ def main():
         header_p += f" {short:>12s}"
         header_f += f" {'':>12s}"
 
-    print(f"\n  策略次日收益 (过滤组):")
+    print("\n  策略次日收益 (过滤组):")
     print(f"  {'组合':<28s}", end="")
     for pn in period_names:
         print(f" {pn:>14s}", end="")
@@ -235,7 +235,7 @@ def main():
                     all_sig = False
         print(f" {'YES' if all_sig else 'no':>10s}")
 
-    print(f"\n  p-value:")
+    print("\n  p-value:")
     print(f"  {'组合':<28s}", end="")
     for pn in period_names:
         print(f" {pn:>14s}", end="")
@@ -255,7 +255,7 @@ def main():
                     all_sig = False
         print(f" {'YES' if all_sig else 'no':>10s}")
 
-    print(f"\n  误杀率 (过滤组中次日>0的比例):")
+    print("\n  误杀率 (过滤组中次日>0的比例):")
     print(f"  {'组合':<28s}", end="")
     for pn in period_names:
         print(f" {pn:>14s}", end="")
@@ -274,7 +274,7 @@ def main():
         avg_fk = sum(fks) / len(fks) if fks else float("nan")
         print(f" {avg_fk:>9.1%}")
 
-    print(f"\n  过滤数:")
+    print("\n  过滤数:")
     print(f"  {'组合':<28s}", end="")
     for pn in period_names:
         print(f" {pn:>14s}", end="")

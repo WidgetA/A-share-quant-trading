@@ -252,7 +252,7 @@ def run_test():
     n_false_pos = int(((df["filtered"]) & (~df["faded"])).sum())
     n_miss = int(((~df["filtered"]) & (df["faded"])).sum())
 
-    print(f"\n--- Summary (冲高回落 = high到close跌幅>3%) ---")
+    print("\n--- Summary (冲高回落 = high到close跌幅>3%) ---")
     print(f"Total gap-up days:    {n_total}")
     print(f"Actually faded:       {n_faded} ({n_faded/n_total*100:.0f}%)")
     print(f"Filter triggered:     {n_filtered}")
@@ -269,7 +269,7 @@ def run_test():
 
     filtered_fade = df[df["filtered"]]["fade%"]
     kept_fade = df[~df["filtered"]]["fade%"]
-    print(f"\n--- Fade% (high到close回落幅度) Comparison ---")
+    print("\n--- Fade% (high到close回落幅度) Comparison ---")
     if len(filtered_fade) > 0:
         print(f"Filtered stocks avg fade:  {filtered_fade.mean():.2f}% (n={len(filtered_fade)})")
     if len(kept_fade) > 0:

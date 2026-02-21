@@ -336,9 +336,9 @@ class BusinessLogicAuditor(ast.NodeVisitor):
                         self._add(
                             node,
                             "SNAPSHOT_PRICE_FALLBACK",
-                            f"PriceSnapshot(latest_price=open_price) — "
-                            f"用开盘价充当实时价，gain_from_open=0%，"
-                            f"静默掩盖 9:40 数据缺失",
+                            "PriceSnapshot(latest_price=open_price) — "
+                            "用开盘价充当实时价，gain_from_open=0%，"
+                            "静默掩盖 9:40 数据缺失",
                         )
 
         self.generic_visit(node)
