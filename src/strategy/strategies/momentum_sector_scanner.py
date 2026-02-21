@@ -494,7 +494,7 @@ class MomentumSectorScanner:
 
         logger.info(
             f"Step 6: Scoring {len(selected_stocks)} candidates by "
-            f"Z(gain_from_open) + Z(turnover_amp)"
+            f"Z(gain_from_open) + Z(turnover_amp) - cup_penalty"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -519,23 +519,8 @@ class MomentumSectorScanner:
 
         candidates_pool = non_limit_up
 
-        # --- Filter out stocks with ≥2 consecutive up days ---
+        # --- Compute composite score: Z(gain_from_open) + Z(early_turnover_amp) - cup_penalty ---
         _cup_data = consecutive_up_data or {}
-        non_consecutive: list[SelectedStock] = []
-        for s in candidates_pool:
-            cup = _cup_data.get(s.stock_code)
-            if cup is not None and cup >= 2:
-                logger.info(
-                    f"Step 6: Skip {s.stock_code} ({s.stock_name}): consecutive up {cup} days >= 2"
-                )
-                continue
-            non_consecutive.append(s)
-
-        if not non_consecutive:
-            logger.info("Step 6: All candidates had >= 2 consecutive up days, no recommendation")
-            return None
-
-        # --- Compute composite score: Z(gain_from_open) + Z(early_turnover_amp) ---
         _avg_vol_data = avg_daily_volume_data or {}
         _snapshots = price_snapshots or {}
 
@@ -544,7 +529,8 @@ class MomentumSectorScanner:
         # Uses only 9:40 data — no full-day hindsight in backtest
         gfo_values: list[float] = []
         amp_values: list[float] = []
-        for s in non_consecutive:
+        cup_values: list[int] = []
+        for s in candidates_pool:
             snap = _snapshots.get(s.stock_code)
             gfo = snap.gain_from_open_pct if snap else 0.0
             avg_vol = _avg_vol_data.get(s.stock_code, 0.0)
@@ -552,15 +538,20 @@ class MomentumSectorScanner:
             early_amp = (early_vol / avg_vol) if avg_vol > 0 else 0.0
             gfo_values.append(gfo)
             amp_values.append(early_amp)
+            cup_values.append(_cup_data.get(s.stock_code) or 0)
 
         gfo_z = self._z_scores(gfo_values)
         amp_z = self._z_scores(amp_values)
 
+        # Soft penalty for consecutive up days: each day deducts 0.3 std
+        CUP_PENALTY_PER_DAY = 0.3
+
         # Build scored candidates
-        scored: list[tuple[SelectedStock, float, float, float, float]] = []
-        for i, s in enumerate(non_consecutive):
-            composite = gfo_z[i] + amp_z[i]
-            scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i]))
+        scored: list[tuple[SelectedStock, float, float, float, float, int]] = []
+        for i, s in enumerate(candidates_pool):
+            cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
+            composite = gfo_z[i] + amp_z[i] - cup_penalty
+            scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i], cup_values[i]))
 
         # Sort by composite score descending
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -568,15 +559,15 @@ class MomentumSectorScanner:
         # Log top 3
         if len(scored) > 1:
             top3_info = ", ".join(
-                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x score={sc:+.2f})"
-                for s, sc, gfo, amp, _ in scored[:3]
+                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d score={sc:+.2f})"
+                for s, sc, gfo, amp, _, cup in scored[:3]
             )
             logger.info(f"Step 6: Top 3: {top3_info}")
         else:
-            s, sc, gfo, amp, _ = scored[0]
+            s, sc, gfo, amp, _, cup = scored[0]
             logger.info(
                 f"Step 6: Single candidate {s.stock_code} "
-                f"(GFO={gfo:+.2f}% amp={amp:.1f}x score={sc:+.2f})"
+                f"(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d score={sc:+.2f})"
             )
 
         # Build ranked list (SelectedStock only) for news check fallback
@@ -625,7 +616,7 @@ class MomentumSectorScanner:
             stock_code=best.stock_code,
             stock_name=best.stock_name,
             board_name=best.board_name,
-            board_stock_count=len(non_consecutive),
+            board_stock_count=len(candidates_pool),
             open_gain_pct=best.open_gain_pct,
             pe_ttm=best.pe_ttm,
             board_avg_pe=best.board_avg_pe,
