@@ -491,7 +491,10 @@ class AkshareBacktestCache:
                                 "low": float(row["最低"]),
                                 "close": float(row["收盘"]),
                                 "preClose": prev_close,
-                                "volume": float(row["成交量"]),
+                                # akshare 成交量 is in 手 (lots of 100 shares);
+                                # baostock minute volume is in 股 (shares).
+                                # Convert to 股 here so all volume fields are consistent.
+                                "volume": float(row["成交量"]) * 100,
                                 "amount": float(row["成交额"]),
                                 "turnoverRatio": float(row["换手率"]),
                             }
