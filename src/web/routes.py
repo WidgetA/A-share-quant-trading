@@ -1095,6 +1095,7 @@ class MomentumBacktestRequest(BaseModel):
     trade_date: str  # YYYY-MM-DD format
     notify: bool = False  # Send Feishu notification
     data_source: str = "ifind"  # "ifind" or "akshare"
+    news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
 class MomentumRangeBacktestRequest(BaseModel):
@@ -1103,6 +1104,7 @@ class MomentumRangeBacktestRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
+    news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
 class FunnelAnalysisRequest(BaseModel):
@@ -1120,6 +1122,7 @@ class CombinedAnalysisRequest(BaseModel):
     initial_capital: float  # Starting capital in yuan
     quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
     data_source: str = "ifind"  # "ifind" or "akshare"
+    news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
 class AksharePrepareRequest(BaseModel):
@@ -1165,6 +1168,47 @@ def create_momentum_router() -> APIRouter:
         if db is None:
             raise HTTPException(status_code=503, detail="基本面数据库未就绪")
         return db
+
+    async def _create_news_checker():
+        """Create and start a NegativeNewsChecker if both API keys are available.
+
+        Returns None if keys are missing (graceful degradation for backtest).
+        Caller is responsible for calling _stop_news_checker() when done.
+        """
+        from src.common.config import get_tavily_api_key
+        from src.common.siliconflow_client import SiliconFlowClient, SiliconFlowConfig
+        from src.common.tavily_client import TavilyClient
+        from src.strategy.analyzers.negative_news_checker import NegativeNewsChecker
+
+        try:
+            tavily_key = get_tavily_api_key()
+        except (ValueError, FileNotFoundError):
+            logger.warning("News checker: Tavily API key not configured")
+            return None
+
+        sf_key = _get_llm_api_key()
+        if not sf_key:
+            logger.warning("News checker: SiliconFlow API key not configured")
+            return None
+
+        tavily = TavilyClient(api_key=tavily_key)
+        sf = SiliconFlowClient(SiliconFlowConfig(api_key=sf_key))
+        await tavily.start()
+        await sf.start()
+        return NegativeNewsChecker(tavily, sf)
+
+    async def _stop_news_checker(checker) -> None:
+        """Stop the Tavily and SiliconFlow clients inside a NegativeNewsChecker."""
+        if checker is None:
+            return
+        try:
+            await checker._tavily.stop()
+        except Exception:
+            pass
+        try:
+            await checker._llm.stop()
+        except Exception:
+            pass
 
     @router.get("/momentum", response_class=HTMLResponse)
     async def momentum_page(request: Request):
@@ -1373,6 +1417,7 @@ def create_momentum_router() -> APIRouter:
             )
 
         fundamentals_db = _get_fundamentals_db(request)
+        news_checker = await _create_news_checker() if body.news_check else None
 
         try:
             concept_mapper = LocalConceptMapper()
@@ -1391,6 +1436,7 @@ def create_momentum_router() -> APIRouter:
                     ifind_client=adapter,  # type: ignore[arg-type]
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
+                    negative_news_checker=news_checker,
                 )
 
                 date_key = trade_date.strftime("%Y-%m-%d")
@@ -1411,6 +1457,7 @@ def create_momentum_router() -> APIRouter:
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
+                    negative_news_checker=news_checker,
                 )
 
                 date_str = trade_date.strftime("%Y%m%d")
@@ -1468,6 +1515,8 @@ def create_momentum_router() -> APIRouter:
                     "board_avg_pe": round(rec.board_avg_pe, 2),
                     "open_price": round(rec.open_price, 2),
                     "prev_close": round(rec.prev_close, 2),
+                    "news_check_passed": rec.news_check_passed,
+                    "news_check_detail": rec.news_check_detail,
                 }
                 if rec
                 else None,
@@ -1493,6 +1542,8 @@ def create_momentum_router() -> APIRouter:
         except Exception as e:
             logger.error(f"Momentum backtest error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
+        finally:
+            await _stop_news_checker(news_checker)
 
     @router.get("/api/momentum/monitor-status")
     async def get_monitor_status(request: Request) -> dict:
@@ -1556,6 +1607,7 @@ def create_momentum_router() -> APIRouter:
 
         ifind_client = _get_ifind_client(request)
         fundamentals_db = _get_fundamentals_db(request)
+        news_checker = await _create_news_checker() if body.news_check else None
 
         async def event_stream():
             """SSE event generator for range backtest."""
@@ -1569,6 +1621,7 @@ def create_momentum_router() -> APIRouter:
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
+                    negative_news_checker=news_checker,
                 )
 
                 # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
@@ -1826,6 +1879,9 @@ def create_momentum_router() -> APIRouter:
                             ).items()
                         },
                     }
+                    if rec.news_check_passed is not None:
+                        day_result["news_check_passed"] = rec.news_check_passed
+                        day_result["news_check_detail"] = rec.news_check_detail
                     day_results.append(day_result)
                     yield sse({"type": "day_result", **day_result})
                     await asyncio.sleep(0.05)
@@ -1865,6 +1921,8 @@ def create_momentum_router() -> APIRouter:
             except Exception as e:
                 logger.error(f"Range backtest error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"回测出错: {str(e)}"})
+            finally:
+                await _stop_news_checker(news_checker)
 
         return StreamingResponse(
             event_stream(),
@@ -2595,6 +2653,7 @@ def create_momentum_router() -> APIRouter:
             akshare_cache = None
 
         fundamentals_db = _get_fundamentals_db(request)
+        news_checker = await _create_news_checker() if body.news_check else None
 
         async def event_stream():
             def sse(data: dict) -> str:
@@ -2711,6 +2770,7 @@ def create_momentum_router() -> APIRouter:
                             fundamentals_db=fundamentals_db,
                             concept_mapper=concept_mapper,
                             stock_filter=stock_filter,
+                            negative_news_checker=news_checker,
                         )
                         scanner._trade_date = trade_date
 
@@ -3065,6 +3125,10 @@ def create_momentum_router() -> APIRouter:
                             day_backtest["skip_reason"] = "无推荐"
                             day_backtest["capital"] = round(capital, 2)
 
+                        if rec and rec.news_check_passed is not None:
+                            day_backtest["news_check_passed"] = rec.news_check_passed
+                            day_backtest["news_check_detail"] = rec.news_check_detail
+
                         day_results.append(day_backtest)
                         days_processed += 1
 
@@ -3277,6 +3341,8 @@ def create_momentum_router() -> APIRouter:
             except Exception as e:
                 logger.error(f"Combined analysis error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
+            finally:
+                await _stop_news_checker(news_checker)
 
         return StreamingResponse(
             event_stream(),

@@ -62,9 +62,24 @@ class NegativeNewsChecker:
         self._llm = siliconflow_client
         self._search_days = search_days
         self._max_results = max_search_results
+        self._cache: dict[str, NewsCheckResult] = {}
 
     async def check(self, stock_code: str, stock_name: str) -> NewsCheckResult:
-        """Check for negative news about a stock in recent days."""
+        """Check for negative news about a stock in recent days.
+
+        Results are cached by stock_code for the lifetime of this instance,
+        so the same stock is only checked once per backtest run.
+        """
+        if stock_code in self._cache:
+            logger.info(f"NewsCheck: Cache hit for {stock_code}")
+            return self._cache[stock_code]
+
+        result = await self._do_check(stock_code, stock_name)
+        self._cache[stock_code] = result
+        return result
+
+    async def _do_check(self, stock_code: str, stock_name: str) -> NewsCheckResult:
+        """Perform the actual Tavily search + LLM judgment (uncached)."""
         query = f"{stock_code} {stock_name} 负面 利空 风险"
         logger.info(f"NewsCheck: Searching '{query}' (last {self._search_days} days)")
 

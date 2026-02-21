@@ -92,6 +92,12 @@
                             <span>同时发送飞书通知</span>
                         </label>
                     </div>
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="news_check_single" name="news_check">
+                            <span>启用负面新闻检查 (Tavily + LLM)</span>
+                        </label>
+                    </div>
                     <button type="submit" class="btn btn-primary" id="backtest-btn">开始回测</button>
                 </form>
             </div>
@@ -113,6 +119,12 @@
                             <input type="number" id="combined_capital" name="combined_capital"
                                    value="100000" min="1000" step="1000" required>
                         </div>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="news_check_combined" name="news_check">
+                            <span>启用负面新闻检查 (Tavily + LLM)</span>
+                        </label>
                     </div>
                     <p class="form-hint">综合分析：逐日运行选股漏斗 + 资金模拟回测。9:40 买入推荐股，次日开盘卖出。最多 90 个交易日。含手续费。</p>
                     <button type="submit" class="btn btn-primary" id="combined-btn">开始区间分析</button>
@@ -193,6 +205,7 @@
                         <span class="recommend-detail" id="rec-growth"></span>
                         <span class="recommend-detail" id="rec-gain"></span>
                         <span class="recommend-detail" id="rec-board"></span>
+                        <span class="recommend-detail" id="rec-news" style="display:none"></span>
                     </div>
                 </div>
             </div>
@@ -534,6 +547,7 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
 
     const tradeDate = document.getElementById('trade_date').value;
     const notify = document.getElementById('notify').checked;
+    const newsCheck = document.getElementById('news_check_single').checked;
 
     if (!tradeDate) return;
     if (getDataSource() === 'akshare' && !akshareReady) {
@@ -544,13 +558,13 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
     document.getElementById('loading-section').classList.remove('hidden');
     document.getElementById('results-section').classList.add('hidden');
     document.getElementById('backtest-btn').disabled = true;
-    document.getElementById('backtest-btn').textContent = '运行中...';
+    document.getElementById('backtest-btn').textContent = newsCheck ? '运行中 (含新闻检查)...' : '运行中...';
 
     try {
         const resp = await fetch('/api/momentum/backtest', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trade_date: tradeDate, notify: notify, data_source: getDataSource() }),
+            body: JSON.stringify({ trade_date: tradeDate, notify: notify, data_source: getDataSource(), news_check: newsCheck }),
         });
 
         const data = await resp.json();
@@ -588,6 +602,7 @@ function showBacktestError(message) {
     document.getElementById('rec-growth').textContent = '';
     document.getElementById('rec-gain').textContent = '';
     document.getElementById('rec-board').textContent = '请检查服务端日志或重试';
+    document.getElementById('rec-news').style.display = 'none';
     document.getElementById('result-boards-container').innerHTML = '';
     document.getElementById('result-empty').classList.add('hidden');
 }
@@ -615,6 +630,22 @@ function renderResults(data) {
         document.getElementById('rec-growth').textContent = `业绩增长: ${rec.growth_rate >= 0 ? '+' : ''}${rec.growth_rate.toFixed(1)}%`;
         document.getElementById('rec-gain').textContent = `开盘涨幅: +${rec.open_gain_pct.toFixed(2)}%`;
         document.getElementById('rec-board').textContent = `板块: ${rec.board_name} (选出${rec.board_stock_count}只最多)`;
+        const newsEl = document.getElementById('rec-news');
+        if (rec.news_check_passed === true) {
+            newsEl.style.display = '';
+            newsEl.textContent = '舆情: 通过';
+            newsEl.style.color = '#16a34a';
+        } else if (rec.news_check_passed === false) {
+            newsEl.style.display = '';
+            newsEl.textContent = `舆情: 有负面 — ${rec.news_check_detail || ''}`;
+            newsEl.style.color = '#dc2626';
+        } else if (rec.news_check_passed === null && rec.news_check_detail) {
+            newsEl.style.display = '';
+            newsEl.textContent = `舆情: ${rec.news_check_detail}`;
+            newsEl.style.color = '#d97706';
+        } else {
+            newsEl.style.display = 'none';
+        }
     } else {
         recBadge.style.display = '';
         document.getElementById('result-recommend-name').textContent = '无';
@@ -624,6 +655,7 @@ function renderResults(data) {
         document.getElementById('rec-growth').textContent = '';
         document.getElementById('rec-gain').textContent = '';
         document.getElementById('rec-board').textContent = '池中无股票通过评分筛选';
+        document.getElementById('rec-news').style.display = 'none';
     }
 
     if (!data.selected_stocks || data.selected_stocks.length === 0) {
@@ -690,6 +722,7 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
     const startDate = document.getElementById('combined_start').value;
     const endDate = document.getElementById('combined_end').value;
     const initialCapital = parseFloat(document.getElementById('combined_capital').value);
+    const newsCheck = document.getElementById('news_check_combined').checked;
 
     if (!startDate || !endDate) return;
     if (endDate <= startDate) { alert('结束日期必须晚于起始日期'); return; }
@@ -712,7 +745,7 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
     document.getElementById('combined-loss-trigger').classList.add('hidden');
     document.getElementById('loss-analysis-section').classList.add('hidden');
     document.getElementById('combined-btn').disabled = true;
-    document.getElementById('combined-btn').textContent = '运行中...';
+    document.getElementById('combined-btn').textContent = newsCheck ? '运行中 (含新闻检查)...' : '运行中...';
 
     try {
         const resp = await fetch('/api/momentum/combined-analysis', {
@@ -723,6 +756,7 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
                 end_date: endDate,
                 initial_capital: initialCapital,
                 data_source: getDataSource(),
+                news_check: newsCheck,
             }),
         });
 
@@ -853,10 +887,14 @@ function appendCombinedTradeRow(d) {
         `;
     } else {
         const profitClass = d.profit > 0 ? 'range-profit-pos' : (d.profit < 0 ? 'range-profit-neg' : '');
+        let newsTag = '';
+        if (d.news_check_passed === true) newsTag = ' <span style="color:#16a34a;font-size:11px" title="舆情通过">&#10003;</span>';
+        else if (d.news_check_passed === false) newsTag = ' <span style="color:#dc2626;font-size:11px" title="' + (d.news_check_detail || '有负面') + '">&#10007;负面</span>';
+        else if (d.news_check_detail) newsTag = ' <span style="color:#d97706;font-size:11px" title="' + d.news_check_detail + '">&#8594;顺延</span>';
         tr.className = 'range-trade-row';
         tr.innerHTML = `
             <td>${d.trade_date}</td>
-            <td><span class="stock-code">${d.stock_code}</span> ${d.stock_name}</td>
+            <td><span class="stock-code">${d.stock_code}</span> ${d.stock_name}${newsTag}</td>
             <td>${d.board_name || '-'}</td>
             <td>${d.buy_price.toFixed(2)}</td>
             <td>${d.sell_date || '-'}</td>
