@@ -616,9 +616,20 @@ class PositionManager:
 
                 # Get exit price for this holding
                 if isinstance(exit_prices, dict):
-                    exit_price = exit_prices.get(holding.stock_code, 0)
+                    if holding.stock_code not in exit_prices:
+                        raise ValueError(
+                            f"Missing exit price for {holding.stock_code} in slot {slot_id} "
+                            f"— cannot release slot without complete P&L data"
+                        )
+                    exit_price = exit_prices[holding.stock_code]
                 else:
                     exit_price = exit_prices
+
+                if exit_price <= 0:
+                    raise ValueError(
+                        f"Invalid exit price {exit_price} for {holding.stock_code} "
+                        f"in slot {slot_id} — refusing to calculate P&L with zero/negative price"
+                    )
 
                 if exit_price > 0:
                     pnl = (exit_price - holding.entry_price) * holding.quantity

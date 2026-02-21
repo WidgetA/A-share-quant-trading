@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -660,9 +661,13 @@ class MomentumSectorScanner:
                     low_vals = table.get("low", [])
 
                     if open_vals and prev_vals and latest_vals:
-                        open_price = float(open_vals[0]) if open_vals[0] else 0.0
-                        prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
-                        latest = float(latest_vals[0]) if latest_vals[0] else open_price
+                        # Skip stock if any critical price field is missing
+                        if not open_vals[0] or not prev_vals[0] or not latest_vals[0]:
+                            logger.warning(f"Missing critical price data for {bare_code}, skipping")
+                            continue
+                        open_price = float(open_vals[0])
+                        prev_close = float(prev_vals[0])
+                        latest = float(latest_vals[0])
                         volume = float(vol_vals[0]) if vol_vals and vol_vals[0] else 0.0
                         high = float(high_vals[0]) if high_vals and high_vals[0] else 0.0
                         low = float(low_vals[0]) if low_vals and low_vals[0] else 0.0
@@ -724,7 +729,7 @@ class MomentumSectorScanner:
                                 stock_name="",
                                 open_price=open_price,
                                 prev_close=prev_close,
-                                latest_price=open_price,  # default; overwritten by 9:40 price below
+                                latest_price=0.0,  # sentinel — MUST be overwritten by 9:40 data
                             )
 
             except Exception:
@@ -740,6 +745,13 @@ class MomentumSectorScanner:
                     result[code].early_volume = volume
                     result[code].high_price = high
                     result[code].low_price = low
+
+            # Remove stocks that didn't get 9:40 data (latest_price still 0.0 sentinel)
+            missing = [c for c, s in result.items() if s.latest_price <= 0]
+            if missing:
+                logger.warning(f"Dropping {len(missing)} stocks without 9:40 price data: {missing[:10]}")
+                for c in missing:
+                    del result[c]
 
         return result
 
@@ -783,8 +795,8 @@ class MomentumSectorScanner:
 
                     price = 0.0
                     cum_volume = 0.0
-                    max_high = 0.0
-                    min_low = 0.0
+                    max_high = float("nan")
+                    min_low = float("nan")
 
                     if close_vals:
                         last_close = close_vals[-1]
@@ -805,6 +817,11 @@ class MomentumSectorScanner:
                             min_low = min(valid_lows)
 
                     if price > 0:
+                        # Use price as fallback for high/low if minute bars lacked those fields
+                        if math.isnan(max_high):
+                            max_high = price
+                        if math.isnan(min_low):
+                            min_low = price
                         result[bare_code] = (price, cum_volume, max_high, min_low)
 
             except Exception:
