@@ -575,7 +575,9 @@ class MomentumSectorScanner:
         news_check_detail = ""
 
         if self._news_checker:
-            news_result = await self._news_checker.check(best.stock_code, best.stock_name)
+            news_result = await self._news_checker.check(
+                best.stock_code, best.stock_name, trade_date=self._trade_date
+            )
             if news_result.error:
                 logger.warning(
                     f"Step 6: News check error for {best.stock_code}: {news_result.error}, "

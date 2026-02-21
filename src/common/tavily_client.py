@@ -65,6 +65,8 @@ class TavilyClient:
         max_results: int = 5,
         days: int = 3,
         search_depth: str = "basic",
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> TavilySearchResponse:
         """
         Search Tavily for recent web results.
@@ -72,8 +74,10 @@ class TavilyClient:
         Args:
             query: Search query string.
             max_results: Maximum number of results to return.
-            days: Limit results to last N days.
+            days: Limit results to last N days (ignored if start_date/end_date set).
             search_depth: "basic" or "advanced".
+            start_date: Filter results after this date (YYYY-MM-DD).
+            end_date: Filter results before this date (YYYY-MM-DD).
 
         Returns:
             TavilySearchResponse with results.
@@ -85,14 +89,18 @@ class TavilyClient:
         if not self._client:
             raise RuntimeError("TavilyClient not started. Call start() first.")
 
-        payload = {
+        payload: dict = {
             "api_key": self._api_key,
             "query": query,
             "max_results": max_results,
-            "days": days,
             "search_depth": search_depth,
             "include_answer": False,
         }
+        if start_date and end_date:
+            payload["start_date"] = start_date
+            payload["end_date"] = end_date
+        else:
+            payload["days"] = days
 
         resp = await self._client.post(TAVILY_SEARCH_URL, json=payload)
         resp.raise_for_status()

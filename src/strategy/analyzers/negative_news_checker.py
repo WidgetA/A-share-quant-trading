@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from src.common.siliconflow_client import SiliconFlowClient
 from src.common.tavily_client import TavilyClient
@@ -64,8 +65,16 @@ class NegativeNewsChecker:
         self._max_results = max_search_results
         self._cache: dict[str, NewsCheckResult] = {}
 
-    async def check(self, stock_code: str, stock_name: str) -> NewsCheckResult:
-        """Check for negative news about a stock in recent days.
+    async def check(
+        self, stock_code: str, stock_name: str, trade_date: date | None = None
+    ) -> NewsCheckResult:
+        """Check for negative news about a stock.
+
+        Args:
+            stock_code: 6-digit stock code.
+            stock_name: Stock name for search query.
+            trade_date: If provided, search news around this date (for backtesting).
+                        If None, search the last N days from today (live mode).
 
         Results are cached by stock_code for the lifetime of this instance,
         so the same stock is only checked once per backtest run.
@@ -74,14 +83,26 @@ class NegativeNewsChecker:
             logger.info(f"NewsCheck: Cache hit for {stock_code}")
             return self._cache[stock_code]
 
-        result = await self._do_check(stock_code, stock_name)
+        result = await self._do_check(stock_code, stock_name, trade_date)
         self._cache[stock_code] = result
         return result
 
-    async def _do_check(self, stock_code: str, stock_name: str) -> NewsCheckResult:
+    async def _do_check(
+        self, stock_code: str, stock_name: str, trade_date: date | None = None
+    ) -> NewsCheckResult:
         """Perform the actual Tavily search + LLM judgment (uncached)."""
         query = f"{stock_code} {stock_name} 负面 利空 风险"
-        logger.info(f"NewsCheck: Searching '{query}' (last {self._search_days} days)")
+
+        # Determine date range: around trade_date (backtest) or last N days (live)
+        start_date_str: str | None = None
+        end_date_str: str | None = None
+        if trade_date is not None:
+            search_start = trade_date - timedelta(days=self._search_days)
+            start_date_str = search_start.strftime("%Y-%m-%d")
+            end_date_str = trade_date.strftime("%Y-%m-%d")
+            logger.info(f"NewsCheck: Searching '{query}' ({start_date_str} ~ {end_date_str})")
+        else:
+            logger.info(f"NewsCheck: Searching '{query}' (last {self._search_days} days)")
 
         # Step 1: Tavily search
         try:
@@ -89,6 +110,8 @@ class NegativeNewsChecker:
                 query=query,
                 max_results=self._max_results,
                 days=self._search_days,
+                start_date=start_date_str,
+                end_date=end_date_str,
             )
         except Exception as e:
             logger.error(f"NewsCheck: Tavily search failed for {stock_code}: {e}")
