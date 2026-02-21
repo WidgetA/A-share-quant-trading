@@ -189,6 +189,43 @@ class AkshareBacktestCache:
             return False
         return self._start_date <= start_date and self._end_date >= end_date
 
+    def _recalculate_date_range(self) -> None:
+        """Recompute _start_date/_end_date from actual data.
+
+        Fixes metadata/data mismatch (e.g. OSS save interrupted between
+        daily.pkl and meta.pkl, or merge_from extending range without data).
+        Samples up to 10 stocks to find the true min/max date keys.
+        """
+        min_date: date | None = None
+        max_date: date | None = None
+        sampled = 0
+        for _code, dates in self._daily.items():
+            if not dates:
+                continue
+            keys = sorted(dates.keys())
+            try:
+                first = datetime.strptime(keys[0], "%Y-%m-%d").date()
+                last = datetime.strptime(keys[-1], "%Y-%m-%d").date()
+            except (ValueError, IndexError):
+                continue
+            if min_date is None or first < min_date:
+                min_date = first
+            if max_date is None or last > max_date:
+                max_date = last
+            sampled += 1
+            if sampled >= 10:
+                break
+
+        if min_date and max_date:
+            old_start, old_end = self._start_date, self._end_date
+            self._start_date = min_date
+            self._end_date = max_date
+            if old_start != min_date or old_end != max_date:
+                logger.warning(
+                    f"Date range recalculated: "
+                    f"[{old_start} ~ {old_end}] → [{min_date} ~ {max_date}]"
+                )
+
     def _has_turnover_ratio(self) -> bool:
         """Check if daily data includes turnoverRatio (vs old cache format)."""
         for _code, dates in self._daily.items():
@@ -211,10 +248,13 @@ class AkshareBacktestCache:
             "stock_codes": self._stock_codes,
         }
         try:
+            # Save data FIRST, meta LAST. If upload is interrupted between
+            # files, meta still points to the old range — next load will detect
+            # the gap and re-download instead of silently missing data.
             for name, obj in [
-                ("meta.pkl", meta),
                 ("daily.pkl", self._daily),
                 ("minute.pkl", self._minute),
+                ("meta.pkl", meta),
             ]:
                 buf = io.BytesIO()
                 pickle.dump(obj, buf, protocol=pickle.HIGHEST_PROTOCOL)
@@ -268,6 +308,10 @@ class AkshareBacktestCache:
                     "Discarding — will re-download."
                 )
                 return None
+
+            # Recalculate actual date range from data (don't trust meta.pkl —
+            # it may be out of sync if a previous OSS save was interrupted).
+            cache._recalculate_date_range()
 
             cache._is_ready = True
             logger.info(
@@ -457,6 +501,10 @@ class AkshareBacktestCache:
             await _maybe_await(progress_cb("minute", total, total))
         logger.info(f"Minute download complete (baostock): {len(self._minute)}/{total} stocks")
 
+        # Recalculate range from actual data so metadata matches reality.
+        # download_prices sets _start_date = user-requested start, but actual
+        # data starts from dl_start (60 days earlier). Fix it.
+        self._recalculate_date_range()
         self._is_ready = True
 
     async def save_to_oss(self) -> str | None:
