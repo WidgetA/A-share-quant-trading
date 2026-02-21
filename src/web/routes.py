@@ -2348,12 +2348,17 @@ def create_momentum_router() -> APIRouter:
                             l2 = list(l1)
                             qa = []
 
-                        # Build trend_data from quality assessments for Step 6 scoring
+                        # Build trend_data and avg_daily_volume from quality assessments
                         trend_data_l = {
                             a.stock_code: a.trend_pct for a in qa if a.trend_pct is not None
                         }
+                        avg_vol_data_l = {
+                            a.stock_code: a.avg_daily_volume
+                            for a in qa
+                            if a.avg_daily_volume is not None
+                        }
 
-                        # L3: reversal factor filter (冲高回落)
+                        # L3: reversal factor filter (缩量冲高)
                         from src.strategy.filters.reversal_factor_filter import (
                             ReversalFactorConfig,
                             ReversalFactorFilter,
@@ -2363,7 +2368,7 @@ def create_momentum_router() -> APIRouter:
                         reversal_filter_inst = ReversalFactorFilter(reversal_config)
                         if l2:
                             l3, _ = await reversal_filter_inst.filter_stocks(
-                                l2, price_snapshots, trade_date
+                                l2, price_snapshots, avg_vol_data_l, trade_date
                             )
                         else:
                             l3 = list(l2)
@@ -2960,7 +2965,14 @@ def create_momentum_router() -> APIRouter:
                                 a.stock_code: a.trend_pct for a in qa2 if a.trend_pct is not None
                             }
 
-                        # L3: reversal factor filter (冲高回落)
+                        # Build avg_daily_volume from quality assessments for L3 filter
+                        avg_vol_data_l2 = {
+                            a.stock_code: a.avg_daily_volume
+                            for a in qa2
+                            if a.avg_daily_volume is not None
+                        }
+
+                        # L3: reversal factor filter (缩量冲高)
                         from src.strategy.filters.reversal_factor_filter import (
                             ReversalFactorConfig,
                             ReversalFactorFilter,
@@ -2970,7 +2982,7 @@ def create_momentum_router() -> APIRouter:
                         reversal_filter_inst = ReversalFactorFilter(reversal_config)
                         if l2:
                             l3, _ = await reversal_filter_inst.filter_stocks(
-                                l2, price_snapshots, trade_date
+                                l2, price_snapshots, avg_vol_data_l2, trade_date
                             )
                         else:
                             l3 = list(l2)

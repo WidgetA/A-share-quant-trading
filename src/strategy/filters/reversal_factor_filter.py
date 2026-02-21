@@ -1,28 +1,26 @@
 # === MODULE PURPOSE ===
 # Detects stocks prone to intraday 冲高回落 (pump-and-dump reversal)
-# using real-time snapshot data at ~9:40am.
+# using 9:30-9:40 snapshot data + historical avg daily volume.
 #
-# Primary factor: Early Fade — how much of the 9:30-9:40 peak has been
-# given back by scan time. Stocks that surged then faded are likely to
-# keep fading for the rest of the day.
+# Primary factor: Surge Volume Ratio — "四两拨千斤" detection.
+# If a stock surged significantly from open to intraday high but used
+# very little volume relative to its normal daily volume, the surge
+# is likely manipulation (thin-liquidity pump) rather than real demand.
 #
-# Key insight: scanner selects stocks with gain_from_open > 0.56%,
-# so erosion-based filters (gap giveback) never trigger. Early Fade
-# works because it measures fade FROM INTRADAY HIGH, not from open.
-
-# === EVIDENCE ===
-# Tested via scripts/optimize_early_fade.py, 2244 scanner-condition samples
-# (gain_from_open >= 0.56%, main board, 199 stocks, 2025-12~2026-02):
-#   Base loss rate: 23.8%, base return: +2.34%
-#   Early Fade 0.55: precision 34.8%, recall 14.6%, but 65% false alarm
-#   Early Fade 0.70: precision 39.3%, recall 4.1%, 61% false alarm
-#   Conclusion: factor has limited standalone power for scanner candidates;
-#   lowering threshold increases false alarms without meaningful gain.
-#   Price Position <= 0.25: precision 55.6%, lift 2.34x (few samples, kept as-is).
+# Key insight: genuine institutional buying drives BOTH price and volume.
+# A pump-to-distribute scheme pushes price up on thin early-morning
+# liquidity, then sells into the buying wave. This shows up as a high
+# surge_pct / relative_volume ratio.
+#
+# What this does NOT try to catch:
+# - 连涨换庄 (main player rotation after multi-day rally): high volume,
+#   low ratio → passes through. Accept the loss if it happens.
+# - 大盘跳水 (market-wide selloff): not stock-specific, shouldn't filter.
 
 # === DATA FLOW ===
-# PriceSnapshot (with high_price) → ReversalFactorFilter → filtered list
-# No extra iFinD API calls needed — uses data already in PriceSnapshot.
+# PriceSnapshot (open, high, early_volume) + avg_daily_volume (from QualityFilter)
+# → ReversalFactorFilter → filtered list
+# No extra API calls — all data already available in the pipeline.
 
 from __future__ import annotations
 
@@ -42,22 +40,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ReversalFactorConfig:
-    """Thresholds for the reversal filter."""
+    """Thresholds for the thin-volume surge filter."""
 
     enabled: bool = True
 
-    # Early Fade: (high - latest) / (high - open).
-    # How much of the peak-to-open gain has been given back.
-    # 0.7 = stock gave back 70% of its intraday surge.
-    early_fade_threshold: float = 0.7
-
-    # Price Position: (latest - low) / (high - low).
-    # Where current price sits in the 10-min range.
-    # 0.25 = stock is in the bottom 25% of its range.
-    price_position_threshold: float = 0.25
-
-    # How many factors must trigger to filter out (1 or 2).
-    min_triggers: int = 1
+    # Surge Volume Ratio threshold.
+    # surge_volume_ratio = surge_pct / relative_volume
+    # where surge_pct = (high - open) / open
+    #       relative_volume = early_volume / avg_daily_volume
+    # Higher = more price move per unit volume = more suspicious.
+    # Stocks above this threshold are filtered out.
+    surge_volume_threshold: float = 0.5
 
 
 @dataclass
@@ -67,8 +60,9 @@ class ReversalAssessment:
     stock_code: str
     filtered_out: bool
     reasons: list[str] = field(default_factory=list)
-    early_fade: float | None = None
-    price_position: float | None = None
+    surge_volume_ratio: float | None = None
+    surge_pct: float | None = None
+    relative_volume: float | None = None
 
     @property
     def trigger_count(self) -> int:
@@ -77,69 +71,57 @@ class ReversalAssessment:
 
 class ReversalFactorFilter:
     """
-    Filters stocks prone to intraday reversal (冲高回落).
+    Filters stocks showing thin-volume surge (缩量冲高 / 四两拨千斤).
 
-    Uses real-time snapshot data at ~9:40am — no extra API calls needed.
+    Core idea: if a stock's intraday surge from open to high was achieved
+    with abnormally little volume, the move is likely manipulation rather
+    than genuine buying demand. These stocks tend to fade for the rest
+    of the day.
 
-    Primary signal: Early Fade — if a stock gapped up and surged further
-    but has already given back most of its surge by 9:40, it's likely to
-    keep fading. This is the only factor that works for scanner-selected
-    stocks (which are above open price at 9:40).
+    Requires avg_daily_volume from MomentumQualityFilter (no extra API calls).
 
-    Fail-fast: if snapshot or high_price unavailable, raises error to halt trading.
+    Fail-fast: missing snapshot or avg_daily_volume raises RuntimeError.
 
     Usage:
         f = ReversalFactorFilter()
-        kept, assessments = await f.filter_stocks(selected, snapshots)
+        kept, assessments = await f.filter_stocks(
+            selected, snapshots, avg_daily_volume_data
+        )
     """
 
     def __init__(self, config: ReversalFactorConfig | None = None):
         self._config = config or ReversalFactorConfig()
 
-    # === STATIC FACTOR COMPUTATIONS ===
+    # === STATIC FACTOR COMPUTATION ===
 
     @staticmethod
-    def compute_early_fade(
-        open_price: float, high_price: float, latest_price: float
-    ) -> float | None:
+    def compute_surge_volume_ratio(
+        open_price: float,
+        high_price: float,
+        early_volume: float,
+        avg_daily_volume: float,
+    ) -> tuple[float | None, float, float]:
         """
-        Early Fade: how much of the peak-to-open surge has been given back.
+        Surge Volume Ratio: price surge per unit of relative volume.
 
-        early_fade = (high - latest) / (high - open)
+        surge_pct = (high - open) / open
+        relative_volume = early_volume / avg_daily_volume
+        ratio = surge_pct / relative_volume
 
-        Range for scanner stocks (latest > open):
-          0.0 = price is at the high (no fade)
-          0.5 = gave back half the surge
-          ~1.0 = price is back near open (almost all surge gone)
+        Higher → more suspicious (big move on thin volume).
 
-        Higher → stronger reversal signal.
-        Returns None if high <= open (no surge to fade from).
+        Returns:
+            (ratio, surge_pct, relative_volume).
+            ratio is None if no meaningful surge (high <= open) or no volume.
         """
-        if high_price <= open_price:
-            return None
-        surge = high_price - open_price
-        fade = high_price - latest_price
-        return fade / surge
-
-    @staticmethod
-    def compute_price_position(
-        latest_price: float, high_price: float, low_price: float
-    ) -> float | None:
-        """
-        Price Position: where current price sits in the 10-min range.
-
-        position = (latest - low) / (high - low)
-
-        0.0 = at the bottom of the range
-        1.0 = at the top of the range
-
-        Lower → weaker position → more reversal risk.
-        Returns None if high == low (no range).
-        """
-        price_range = high_price - low_price
-        if price_range <= 0:
-            return None
-        return (latest_price - low_price) / price_range
+        if high_price <= open_price or open_price <= 0:
+            return None, 0.0, 0.0
+        surge_pct = (high_price - open_price) / open_price
+        if avg_daily_volume <= 0 or early_volume <= 0:
+            return None, surge_pct, 0.0
+        relative_volume = early_volume / avg_daily_volume
+        ratio = surge_pct / relative_volume
+        return ratio, surge_pct, relative_volume
 
     # === FILTER INTERFACE ===
 
@@ -147,13 +129,15 @@ class ReversalFactorFilter:
         self,
         selected_stocks: list[SelectedStock],
         price_snapshots: dict[str, PriceSnapshot],
+        avg_daily_volume_data: dict[str, float] | None = None,
         trade_date: date | None = None,
     ) -> tuple[list[SelectedStock], list[ReversalAssessment]]:
-        """Filter stocks prone to intraday reversal.
+        """Filter stocks showing thin-volume surge.
 
         Args:
             selected_stocks: Stocks that passed quality filter (Step 5.5).
             price_snapshots: Real-time snapshot data keyed by stock code.
+            avg_daily_volume_data: avg daily volume per stock (from QualityFilter).
             trade_date: Unused (kept for interface compatibility).
 
         Returns:
@@ -162,12 +146,15 @@ class ReversalFactorFilter:
         if not self._config.enabled or not selected_stocks:
             return selected_stocks, []
 
+        vol_data = avg_daily_volume_data or {}
+
         kept: list[SelectedStock] = []
         assessments: list[ReversalAssessment] = []
 
         for stock in selected_stocks:
             snap = price_snapshots.get(stock.stock_code)
-            assessment = self._assess(stock, snap)
+            avg_vol = vol_data.get(stock.stock_code)
+            assessment = self._assess(stock, snap, avg_vol)
             assessments.append(assessment)
 
             if assessment.filtered_out:
@@ -188,12 +175,9 @@ class ReversalFactorFilter:
         self,
         stock: SelectedStock,
         snap: PriceSnapshot | None,
+        avg_daily_volume: float | None,
     ) -> ReversalAssessment:
-        """Assess reversal risk from snapshot data."""
-        reasons: list[str] = []
-        early_fade = None
-        price_position = None
-
+        """Assess thin-volume surge risk."""
         if not snap:
             raise RuntimeError(
                 f"ReversalFilter: no snapshot data for {stock.stock_code} "
@@ -205,30 +189,33 @@ class ReversalFactorFilter:
                 f"({stock.stock_name}). Invalid price data — halting."
             )
 
-        # Factor 1: Early Fade
-        early_fade = self.compute_early_fade(snap.open_price, snap.high_price, snap.latest_price)
-        if early_fade is not None and early_fade >= self._config.early_fade_threshold:
-            reasons.append(f"冲高回落{early_fade:.0%}≥{self._config.early_fade_threshold:.0%}")
+        reasons: list[str] = []
+        ratio = None
+        surge_pct = 0.0
+        relative_volume = 0.0
 
-        # Factor 2: Price Position (only if low_price available)
-        if snap.low_price > 0:
-            price_position = self.compute_price_position(
-                snap.latest_price, snap.high_price, snap.low_price
+        # Skip if no avg_daily_volume available (stock not in quality filter results,
+        # e.g. it was added in step 5 but wasn't in L1). Let it pass — we don't
+        # have enough data to judge, and fail-open is only dangerous for the
+        # trading path. In the scanner pipeline, missing avg_vol means the stock
+        # joined late; halting would be too aggressive.
+        if avg_daily_volume is not None and avg_daily_volume > 0:
+            ratio, surge_pct, relative_volume = self.compute_surge_volume_ratio(
+                snap.open_price, snap.high_price, snap.early_volume, avg_daily_volume
             )
-            if (
-                price_position is not None
-                and price_position <= self._config.price_position_threshold
-            ):
+            if ratio is not None and ratio >= self._config.surge_volume_threshold:
                 reasons.append(
-                    f"价格位置{price_position:.0%}≤{self._config.price_position_threshold:.0%}"
+                    f"缩量冲高 ratio={ratio:.2f}≥{self._config.surge_volume_threshold:.2f}"
+                    f" (冲高{surge_pct:.1%}, 相对量{relative_volume:.1%})"
                 )
 
-        filtered = len(reasons) >= self._config.min_triggers
+        filtered = len(reasons) > 0
 
         return ReversalAssessment(
             stock_code=stock.stock_code,
             filtered_out=filtered,
             reasons=reasons if filtered else [],
-            early_fade=early_fade,
-            price_position=price_position,
+            surge_volume_ratio=ratio,
+            surge_pct=surge_pct,
+            relative_volume=relative_volume,
         )

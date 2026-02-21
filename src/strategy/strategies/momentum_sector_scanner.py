@@ -259,16 +259,8 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
 
-        # Step 5.6: Reversal factor filter — remove stocks showing 冲高回落 at 9:40
-        # (early fade from intraday high + weak price position)
-        if selected:
-            selected, reversal_assessments = await self._reversal_filter.filter_stocks(
-                selected, all_snapshots, trade_date
-            )
-            result.selected_stocks = selected
-
-        # Step 6: Recommend — rank by composite score Z(gain_from_open) + Z(turnover_amp)
-        # Also filter out consecutive-up stocks using data from Step 5.5
+        # Extract avg_daily_volume and consecutive_up from quality assessments
+        # (needed by both Step 5.6 reversal filter and Step 6 scoring)
         consecutive_up_data = {
             a.stock_code: a.consecutive_up_days
             for a in quality_assessments
@@ -279,6 +271,13 @@ class MomentumSectorScanner:
             for a in quality_assessments
             if a.avg_daily_volume is not None
         }
+
+        # Step 5.6: Reversal factor filter — remove thin-volume surges (缩量冲高)
+        if selected:
+            selected, reversal_assessments = await self._reversal_filter.filter_stocks(
+                selected, all_snapshots, avg_daily_volume_data, trade_date
+            )
+            result.selected_stocks = selected
         if selected:
             result.recommended_stock = await self._step6_recommend(
                 selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
