@@ -751,7 +751,8 @@ class MomentumSectorScanner:
             if missing:
                 logger.warning(
                     "Dropping %d stocks without 9:40 price: %s",
-                    len(missing), missing[:10],
+                    len(missing),
+                    missing[:10],
                 )
                 for c in missing:
                     del result[c]

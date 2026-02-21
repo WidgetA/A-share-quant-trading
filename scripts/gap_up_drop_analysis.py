@@ -83,9 +83,7 @@ def analyze(sample_size: int = 500) -> None:
             df["high"] = df["最高"]
             df["low"] = df["最低"]
 
-            all_rows.append(
-                df[["code", "日期", "open", "close", "high", "low", "prev_close"]]
-            )
+            all_rows.append(df[["code", "日期", "open", "close", "high", "low", "prev_close"]])
             success += 1
         else:
             fail += 1
@@ -115,11 +113,15 @@ def analyze(sample_size: int = 500) -> None:
     print("=" * 70)
 
     gap_up_count = data["gap_up"].sum()
-    print(f"高开（open > 昨收）: {gap_up_count:,} / {total_stock_days:,} = {gap_up_count / total_stock_days * 100:.1f}%")
+    print(
+        f"高开（open > 昨收）: {gap_up_count:,} / {total_stock_days:,} = {gap_up_count / total_stock_days * 100:.1f}%"
+    )
 
     for threshold in [1, 2, 3, 5]:
         cnt = (data["gap_pct"] > threshold).sum()
-        print(f"高开 > {threshold}%:  {cnt:,} / {total_stock_days:,} = {cnt / total_stock_days * 100:.1f}%")
+        print(
+            f"高开 > {threshold}%:  {cnt:,} / {total_stock_days:,} = {cnt / total_stock_days * 100:.1f}%"
+        )
 
     print("\n" + "=" * 70)
     print("二、高开下杀（高开后收盘 < 昨收，即高开收绿）")
@@ -131,8 +133,12 @@ def analyze(sample_size: int = 500) -> None:
 
     print("\n全部高开中：")
     print(f"  高开 stock-day 数: {gap_up_total:,}")
-    print(f"  高开后收绿:       {gap_up_drop:,} / {gap_up_total:,} = {gap_up_drop / gap_up_total * 100:.1f}%")
-    print(f"  占全部 stock-day: {gap_up_drop:,} / {total_stock_days:,} = {gap_up_drop / total_stock_days * 100:.1f}%")
+    print(
+        f"  高开后收绿:       {gap_up_drop:,} / {gap_up_total:,} = {gap_up_drop / gap_up_total * 100:.1f}%"
+    )
+    print(
+        f"  占全部 stock-day: {gap_up_drop:,} / {total_stock_days:,} = {gap_up_drop / total_stock_days * 100:.1f}%"
+    )
 
     print("\n按高开幅度分档：")
     bins = [(0, 1), (1, 2), (2, 3), (3, 5), (5, 100)]
@@ -144,7 +150,9 @@ def analyze(sample_size: int = 500) -> None:
         if len(subset) == 0:
             continue
         drop_cnt = subset["close_below_prev"].sum()
-        print(f"  高开 {label:>8s}: {drop_cnt:,} / {len(subset):,} = {drop_cnt / len(subset) * 100:.1f}% 收绿")
+        print(
+            f"  高开 {label:>8s}: {drop_cnt:,} / {len(subset):,} = {drop_cnt / len(subset) * 100:.1f}% 收绿"
+        )
 
     print("\n" + "=" * 70)
     print("三、高开后盘中回落（高开后收盘 < 开盘，即冲高回落）")
@@ -152,7 +160,9 @@ def analyze(sample_size: int = 500) -> None:
 
     gap_up_retreat = gap_up_data["close_below_open"].sum()
     print("\n全部高开中：")
-    print(f"  高开后收 < 开盘:  {gap_up_retreat:,} / {gap_up_total:,} = {gap_up_retreat / gap_up_total * 100:.1f}%")
+    print(
+        f"  高开后收 < 开盘:  {gap_up_retreat:,} / {gap_up_total:,} = {gap_up_retreat / gap_up_total * 100:.1f}%"
+    )
 
     print("\n按高开幅度分档：")
     for lo, hi in bins:
@@ -177,9 +187,7 @@ def analyze(sample_size: int = 500) -> None:
     # 高开后收绿的那些，最终跌了多少？
     bad_cases = gap_up_data[gap_up_data["close_below_prev"]].copy()
     bad_cases["final_drop"] = (
-        (bad_cases["close"] - bad_cases["prev_close"])
-        / bad_cases["prev_close"]
-        * 100
+        (bad_cases["close"] - bad_cases["prev_close"]) / bad_cases["prev_close"] * 100
     )
     if len(bad_cases) > 0:
         print(f"\n高开收绿的 {len(bad_cases):,} 个 stock-day 中：")

@@ -55,9 +55,7 @@ for i, code in enumerate(sample_codes):
         daily["date"] = pd.to_datetime(daily["date"]).dt.date
         daily["prev_close"] = daily["close"].shift(1)
         daily["next_open"] = daily["open"].shift(-1)
-        daily["avg_vol_20d"] = (
-            daily["volume"].shift(1).rolling(20, min_periods=5).mean()
-        )
+        daily["avg_vol_20d"] = daily["volume"].shift(1).rolling(20, min_periods=5).mean()
 
         minute["datetime"] = pd.to_datetime(minute["时间"])
         minute["date"] = minute["datetime"].dt.date
@@ -77,9 +75,7 @@ for i, code in enumerate(sample_codes):
                 continue
 
             day_min = minute[minute["date"] == d]
-            early = day_min[
-                (day_min["time"] >= dtime(9, 31)) & (day_min["time"] <= dtime(9, 40))
-            ]
+            early = day_min[(day_min["time"] >= dtime(9, 31)) & (day_min["time"] <= dtime(9, 40))]
             early_vol = early["成交量"].sum()
 
             overnight = (row["next_open"] - row["close"]) / row["close"] * 100
@@ -120,9 +116,7 @@ for date_str, day_df in days:
     full_turn_top = day_df["turnover_pct"] > day_df["turnover_pct"].quantile(0.85)
 
     # 早盘 top15%
-    early_vol_top = day_df["early_vol_ratio"] > day_df["early_vol_ratio"].quantile(
-        0.85
-    )
+    early_vol_top = day_df["early_vol_ratio"] > day_df["early_vol_ratio"].quantile(0.85)
     early_turn_top = day_df["early_vol"] > day_df["early_vol"].quantile(0.85)
 
     day_results.append(
@@ -155,19 +149,11 @@ print(f"汇总样本: {N}\n")
 
 print("=== 信号1: 量比 top15% ===")
 print(f"  一致率: {(fv == ev).mean():.1%}")
-print(
-    f"  都是top15%: {(fv & ev).sum()}, "
-    f"仅全天: {(fv & ~ev).sum()}, "
-    f"仅早盘: {(~fv & ev).sum()}"
-)
+print(f"  都是top15%: {(fv & ev).sum()}, 仅全天: {(fv & ~ev).sum()}, 仅早盘: {(~fv & ev).sum()}")
 
 print("\n=== 信号2: 换手 top15% ===")
 print(f"  一致率: {(ft == et).mean():.1%}")
-print(
-    f"  都是top15%: {(ft & et).sum()}, "
-    f"仅全天: {(ft & ~et).sum()}, "
-    f"仅早盘: {(~ft & et).sum()}"
-)
+print(f"  都是top15%: {(ft & et).sum()}, 仅全天: {(ft & ~et).sum()}, 仅早盘: {(~ft & et).sum()}")
 
 print("\n=== AND组合 ===")
 print(f"  一致率: {(fa == ea).mean():.1%}")
@@ -199,14 +185,9 @@ for label, m in groups:
     mr = ov[m].mean()
     fk = (ov[m] > 0).mean()
     if k >= 5:
-        rm = np.array(
-            [ov[rng.choice(N, size=k, replace=False)].mean() for _ in range(n_sim)]
-        )
+        rm = np.array([ov[rng.choice(N, size=k, replace=False)].mean() for _ in range(n_sim)])
         p = (rm <= mr).mean()
         sig = "***" if p < 0.01 else "**" if p < 0.05 else ""
-        print(
-            f"  {label:<16s}: n={k:>3d}, "
-            f"次日={mr:+.2f}%, 误杀={fk:.0%}, p={p:.3f} {sig}"
-        )
+        print(f"  {label:<16s}: n={k:>3d}, 次日={mr:+.2f}%, 误杀={fk:.0%}, p={p:.3f} {sig}")
     else:
         print(f"  {label:<16s}: n={k:>3d}, 次日={mr:+.2f}%, 误杀={fk:.0%}")

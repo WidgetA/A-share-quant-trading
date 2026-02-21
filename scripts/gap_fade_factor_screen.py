@@ -37,18 +37,41 @@ def fetch_all_data(codes: list[str], start: str, end: str) -> pd.DataFrame:
     for i, code in enumerate(codes):
         try:
             df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start, end_date=end, adjust="qfq",
+                symbol=code,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
             )
             if df is not None and len(df) > 10:
-                df = df.rename(columns={
-                    "日期": "date", "开盘": "open", "收盘": "close",
-                    "最高": "high", "最低": "low", "成交量": "volume",
-                    "换手率": "turnover_pct", "涨跌幅": "change_pct",
-                })
+                df = df.rename(
+                    columns={
+                        "日期": "date",
+                        "开盘": "open",
+                        "收盘": "close",
+                        "最高": "high",
+                        "最低": "low",
+                        "成交量": "volume",
+                        "换手率": "turnover_pct",
+                        "涨跌幅": "change_pct",
+                    }
+                )
                 df["code"] = code
-                dfs.append(df[["code", "date", "open", "close", "high", "low",
-                               "volume", "turnover_pct", "change_pct"]])
+                dfs.append(
+                    df[
+                        [
+                            "code",
+                            "date",
+                            "open",
+                            "close",
+                            "high",
+                            "low",
+                            "volume",
+                            "turnover_pct",
+                            "change_pct",
+                        ]
+                    ]
+                )
         except Exception:
             pass
         if (i + 1) % 50 == 0:
@@ -75,8 +98,12 @@ def prepare(data: pd.DataFrame) -> pd.DataFrame:
     g = data.groupby("code")
 
     # 1. 量比
-    data["avg_vol_20d"] = g["volume"].transform(lambda s: s.shift(1).rolling(20, min_periods=5).mean())
-    data["volume_ratio"] = np.where(data["avg_vol_20d"] > 0, data["volume"] / data["avg_vol_20d"], np.nan)
+    data["avg_vol_20d"] = g["volume"].transform(
+        lambda s: s.shift(1).rolling(20, min_periods=5).mean()
+    )
+    data["volume_ratio"] = np.where(
+        data["avg_vol_20d"] > 0, data["volume"] / data["avg_vol_20d"], np.nan
+    )
 
     # 2. 换手率 (直接用)
     # 3. 振幅
@@ -110,8 +137,9 @@ def prepare(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def test_factor(universe: pd.DataFrame, factor_col: str, direction: str,
-                quantile: float, n_sim: int = 10000) -> dict:
+def test_factor(
+    universe: pd.DataFrame, factor_col: str, direction: str, quantile: float, n_sim: int = 10000
+) -> dict:
     """
     测试单个因子：取最极端的quantile比例的票作为过滤组，vs 随机过滤同等数量。
 
@@ -140,10 +168,9 @@ def test_factor(universe: pd.DataFrame, factor_col: str, direction: str,
     _kept_mean = overnight[~mask].mean()  # noqa: F841
 
     rng = np.random.default_rng(42)
-    rand_means = np.array([
-        overnight[rng.choice(len(overnight), size=k, replace=False)].mean()
-        for _ in range(n_sim)
-    ])
+    rand_means = np.array(
+        [overnight[rng.choice(len(overnight), size=k, replace=False)].mean() for _ in range(n_sim)]
+    )
 
     p_value = (rand_means <= strategy_mean).mean()
 
@@ -185,19 +212,19 @@ def run_period(codes: list[str], start: str, end: str, period_name: str):
 
     # 测试所有因子, 取最极端15%
     factors = [
-        ("volume_ratio", "high"),   # 放量
-        ("volume_ratio", "low"),    # 缩量
-        ("turnover_pct", "high"),   # 高换手
-        ("turnover_pct", "low"),    # 低换手
-        ("amplitude", "high"),      # 大振幅
-        ("upper_shadow", "high"),   # 长上影线
-        ("prev_change", "high"),    # 前日大涨
-        ("prev_change", "low"),     # 前日大跌
-        ("prev_amplitude", "high"), # 前日大振幅
+        ("volume_ratio", "high"),  # 放量
+        ("volume_ratio", "low"),  # 缩量
+        ("turnover_pct", "high"),  # 高换手
+        ("turnover_pct", "low"),  # 低换手
+        ("amplitude", "high"),  # 大振幅
+        ("upper_shadow", "high"),  # 长上影线
+        ("prev_change", "high"),  # 前日大涨
+        ("prev_change", "low"),  # 前日大跌
+        ("prev_amplitude", "high"),  # 前日大振幅
         ("prev_turnover", "high"),  # 前日高换手
-        ("open_gap_pct", "high"),   # 大跳空
-        ("n3_gain", "high"),        # 3日连涨
-        ("n5_gain", "high"),        # 5日连涨
+        ("open_gap_pct", "high"),  # 大跳空
+        ("n3_gain", "high"),  # 3日连涨
+        ("n5_gain", "high"),  # 5日连涨
     ]
 
     results = []
@@ -209,12 +236,22 @@ def run_period(codes: list[str], start: str, end: str, period_name: str):
     # 按 p-value 排序
     results.sort(key=lambda x: x["p_value"])
 
-    print(f"\n  {'因子':<22s} {'方向':>4s} {'过滤数':>5s} {'阈值':>8s} "
-          f"{'策略次日':>8s} {'随机次日':>8s} {'p-value':>8s} {'策略误杀':>8s} {'随机误杀':>8s} {'结论'}")
+    print(
+        f"\n  {'因子':<22s} {'方向':>4s} {'过滤数':>5s} {'阈值':>8s} "
+        f"{'策略次日':>8s} {'随机次日':>8s} {'p-value':>8s} {'策略误杀':>8s} {'随机误杀':>8s} {'结论'}"
+    )
     print("  " + "-" * 110)
 
     for r in results:
-        sig = "***" if r["p_value"] < 0.01 else "**" if r["p_value"] < 0.05 else "*" if r["p_value"] < 0.10 else ""
+        sig = (
+            "***"
+            if r["p_value"] < 0.01
+            else "**"
+            if r["p_value"] < 0.05
+            else "*"
+            if r["p_value"] < 0.10
+            else ""
+        )
         dir_cn = "高" if r["direction"] == "high" else "低"
         print(
             f"  {r['factor']:<22s} {dir_cn:>4s} {r['k']:>5d} {r['threshold']:>8.2f} "

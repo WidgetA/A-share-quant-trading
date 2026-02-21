@@ -32,18 +32,41 @@ def fetch_all_data(codes: list[str], start: str, end: str) -> pd.DataFrame:
     for i, code in enumerate(codes):
         try:
             df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start, end_date=end, adjust="qfq",
+                symbol=code,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
             )
             if df is not None and len(df) > 10:
-                df = df.rename(columns={
-                    "日期": "date", "开盘": "open", "收盘": "close",
-                    "最高": "high", "最低": "low", "成交量": "volume",
-                    "换手率": "turnover_pct", "涨跌幅": "change_pct",
-                })
+                df = df.rename(
+                    columns={
+                        "日期": "date",
+                        "开盘": "open",
+                        "收盘": "close",
+                        "最高": "high",
+                        "最低": "low",
+                        "成交量": "volume",
+                        "换手率": "turnover_pct",
+                        "涨跌幅": "change_pct",
+                    }
+                )
                 df["code"] = code
-                dfs.append(df[["code", "date", "open", "close", "high", "low",
-                               "volume", "turnover_pct", "change_pct"]])
+                dfs.append(
+                    df[
+                        [
+                            "code",
+                            "date",
+                            "open",
+                            "close",
+                            "high",
+                            "low",
+                            "volume",
+                            "turnover_pct",
+                            "change_pct",
+                        ]
+                    ]
+                )
         except Exception:
             pass
         if (i + 1) % 50 == 0:
@@ -92,10 +115,9 @@ def permutation_test(overnight: np.ndarray, mask: np.ndarray, n_sim: int = 10000
     random_fk = (overnight > 0).mean()
 
     rng = np.random.default_rng(42)
-    rand_means = np.array([
-        overnight[rng.choice(len(overnight), size=k, replace=False)].mean()
-        for _ in range(n_sim)
-    ])
+    rand_means = np.array(
+        [overnight[rng.choice(len(overnight), size=k, replace=False)].mean() for _ in range(n_sim)]
+    )
 
     p_value = (rand_means <= strategy_mean).mean()
 
@@ -128,14 +150,14 @@ def build_masks(valid: pd.DataFrame) -> dict[str, np.ndarray]:
     any_high = tp_high | amp_high | us_high
 
     return {
-        "F: vol>2.0 (baseline)":          vr > 2.0,
-        "A: vol>2.0 AND amp":             (vr > 2.0) & amp_high,
-        "B: vol>2.0 AND turn":            (vr > 2.0) & tp_high,
-        "C: vol>2.0 AND (any)":           (vr > 2.0) & any_high,
-        "D: vol>2.5 AND amp":             (vr > 2.5) & amp_high,
-        "E: vol>3.0 AND amp":             (vr > 3.0) & amp_high,
-        "G: vol>2.0 AND shadow":          (vr > 2.0) & us_high,
-        "H: vol>2.5 AND turn":            (vr > 2.5) & tp_high,
+        "F: vol>2.0 (baseline)": vr > 2.0,
+        "A: vol>2.0 AND amp": (vr > 2.0) & amp_high,
+        "B: vol>2.0 AND turn": (vr > 2.0) & tp_high,
+        "C: vol>2.0 AND (any)": (vr > 2.0) & any_high,
+        "D: vol>2.5 AND amp": (vr > 2.5) & amp_high,
+        "E: vol>3.0 AND amp": (vr > 3.0) & amp_high,
+        "G: vol>2.0 AND shadow": (vr > 2.0) & us_high,
+        "H: vol>2.5 AND turn": (vr > 2.5) & tp_high,
     }
 
 
@@ -150,15 +172,19 @@ def run_period(codes: list[str], start: str, end: str, period_name: str) -> dict
         data = data[data["date"].isin(all_dates[-20:])].copy()
 
     universe = data[data["open_gap_pct"] >= 1.0].copy()
-    valid = universe.dropna(subset=["volume_ratio", "turnover_pct", "amplitude", "upper_shadow"]).copy()
+    valid = universe.dropna(
+        subset=["volume_ratio", "turnover_pct", "amplitude", "upper_shadow"]
+    ).copy()
 
     overnight = valid["overnight_return"].values
     n_total = len(valid)
     base_mean = overnight.mean()
     base_pos = (overnight > 0).mean()
 
-    print(f"  [{period_name}] 高开>=1%: {n_total}个, "
-          f"次日均值: {base_mean:+.3f}%, >0占比: {base_pos:.1%}")
+    print(
+        f"  [{period_name}] 高开>=1%: {n_total}个, "
+        f"次日均值: {base_mean:+.3f}%, >0占比: {base_pos:.1%}"
+    )
 
     masks = build_masks(valid)
     period_results = {}

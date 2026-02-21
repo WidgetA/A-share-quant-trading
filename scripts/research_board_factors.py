@@ -168,7 +168,7 @@ def download_all_data() -> dict:
     all_data: dict = {}
     for i, name in enumerate(board_names):
         pct = (i + 1) / total * 100
-        print(f"\r  [{i+1}/{total}] ({pct:.0f}%) {name:<20}", end="", flush=True)
+        print(f"\r  [{i + 1}/{total}] ({pct:.0f}%) {name:<20}", end="", flush=True)
 
         df = download_board_daily(name)
         if df is not None and len(df) > 10:
@@ -180,7 +180,7 @@ def download_all_data() -> dict:
     print("  获取板块成分股数量...")
     for i, (name, info) in enumerate(all_data.items()):
         pct = (i + 1) / len(all_data) * 100
-        print(f"\r  [{i+1}/{len(all_data)}] ({pct:.0f}%)", end="", flush=True)
+        print(f"\r  [{i + 1}/{len(all_data)}] ({pct:.0f}%)", end="", flush=True)
         info["cons_count"] = download_cons_count(name)
     print()
 
@@ -264,7 +264,17 @@ def build_panel(all_data: dict) -> pd.DataFrame:
             continue
 
         df["date"] = pd.to_datetime(df["date"])
-        for col in ["open", "high", "low", "close", "volume", "amount", "pct_change", "amplitude_raw", "turnover"]:
+        for col in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "pct_change",
+            "amplitude_raw",
+            "turnover",
+        ]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -393,7 +403,12 @@ def analyze_factors(panel: pd.DataFrame, threshold: float = 1.0):
         print("  (分位数计算失败, 数据不足)")
 
     hot["day_rank"] = hot.groupby("date")["daily_return"].rank(ascending=False, method="first")
-    for label, lo, hi in [("Top-1", 1, 1), ("Top-2~3", 2, 3), ("Top-4~10", 4, 10), ("11名之后", 11, 999)]:
+    for label, lo, hi in [
+        ("Top-1", 1, 1),
+        ("Top-2~3", 2, 3),
+        ("Top-4~10", 4, 10),
+        ("11名之后", 11, 999),
+    ]:
         sub = hot[(hot["day_rank"] >= lo) & (hot["day_rank"] <= hi)]
         print_group_stats(sub, label)
 
@@ -487,10 +502,18 @@ def analyze_factors(panel: pd.DataFrame, threshold: float = 1.0):
         med_intra = hot_gap["intraday_return"].median()
 
         groups = {
-            "高开+盘中强": hot_gap[(hot_gap["open_gap"] > med_gap) & (hot_gap["intraday_return"] > med_intra)],
-            "低开+盘中强": hot_gap[(hot_gap["open_gap"] <= med_gap) & (hot_gap["intraday_return"] > med_intra)],
-            "高开+盘中弱": hot_gap[(hot_gap["open_gap"] > med_gap) & (hot_gap["intraday_return"] <= med_intra)],
-            "低开+盘中弱": hot_gap[(hot_gap["open_gap"] <= med_gap) & (hot_gap["intraday_return"] <= med_intra)],
+            "高开+盘中强": hot_gap[
+                (hot_gap["open_gap"] > med_gap) & (hot_gap["intraday_return"] > med_intra)
+            ],
+            "低开+盘中强": hot_gap[
+                (hot_gap["open_gap"] <= med_gap) & (hot_gap["intraday_return"] > med_intra)
+            ],
+            "高开+盘中弱": hot_gap[
+                (hot_gap["open_gap"] > med_gap) & (hot_gap["intraday_return"] <= med_intra)
+            ],
+            "低开+盘中弱": hot_gap[
+                (hot_gap["open_gap"] <= med_gap) & (hot_gap["intraday_return"] <= med_intra)
+            ],
         }
         for label, sub in groups.items():
             print_group_stats(sub, label)
@@ -568,7 +591,11 @@ def analyze_factors(panel: pd.DataFrame, threshold: float = 1.0):
         med_vol = combo["vol_ratio"].median()
 
         print_group_stats(
-            combo[(combo["cons_count"] <= 50) & (combo["vol_ratio"] > med_vol) & (combo["daily_return"] > med_ret)],
+            combo[
+                (combo["cons_count"] <= 50)
+                & (combo["vol_ratio"] > med_vol)
+                & (combo["daily_return"] > med_ret)
+            ],
             "小板块+放量+高涨幅",
         )
         print_group_stats(
@@ -639,8 +666,12 @@ def _section(title: str, subtitle: str):
 
 def main():
     parser = argparse.ArgumentParser(description="板块选择因子有效性研究")
-    parser.add_argument("--threshold", "-t", type=float, default=1.0, help="热门板块日涨幅阈值(%%), 默认1.0")
-    parser.add_argument("--skip-download", action="store_true", help="跳过下载, 只跑分析(需已有缓存)")
+    parser.add_argument(
+        "--threshold", "-t", type=float, default=1.0, help="热门板块日涨幅阈值(%%), 默认1.0"
+    )
+    parser.add_argument(
+        "--skip-download", action="store_true", help="跳过下载, 只跑分析(需已有缓存)"
+    )
     args = parser.parse_args()
 
     if args.skip_download:

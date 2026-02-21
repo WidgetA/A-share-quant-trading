@@ -24,10 +24,7 @@ def get_volatile_stocks(n: int = 60) -> list[str]:
     print("Fetching stock list...")
     spot = ak.stock_zh_a_spot_em()
     # Main board only: 6xxxxx (SH) or 000xxx (SZ)
-    spot = spot[
-        spot["代码"].str.match(r"^(6\d{5}|000\d{3})$")
-        & (spot["涨跌幅"].notna())
-    ].copy()
+    spot = spot[spot["代码"].str.match(r"^(6\d{5}|000\d{3})$") & (spot["涨跌幅"].notna())].copy()
     # Sort by recent turnover (higher = more volatile/active)
     spot = spot.sort_values("换手率", ascending=False)
     codes = spot["代码"].head(n * 2).tolist()
@@ -39,16 +36,23 @@ def get_volatile_stocks(n: int = 60) -> list[str]:
 def fetch_daily(code: str) -> pd.DataFrame | None:
     try:
         df = ak.stock_zh_a_hist(
-            symbol=code, period="daily",
-            start_date=DAILY_START, end_date=DAILY_END, adjust=""
+            symbol=code, period="daily", start_date=DAILY_START, end_date=DAILY_END, adjust=""
         )
         if df is None or df.empty:
             return None
-        df = df.rename(columns={
-            "日期": "date", "开盘": "open", "收盘": "close",
-            "最高": "high", "最低": "low", "成交量": "volume",
-            "换手率": "turnover", "涨跌幅": "change_pct", "成交额": "amount",
-        })
+        df = df.rename(
+            columns={
+                "日期": "date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "换手率": "turnover",
+                "涨跌幅": "change_pct",
+                "成交额": "amount",
+            }
+        )
         df["date"] = pd.to_datetime(df["date"]).dt.date
         df = df.sort_values("date").reset_index(drop=True)
         df["prev_close"] = df["close"].shift(1)
@@ -65,11 +69,17 @@ def fetch_minute(code: str) -> pd.DataFrame | None:
         df = ak.stock_zh_a_hist_min_em(symbol=code, period="1", adjust="")
         if df is None or df.empty:
             return None
-        df = df.rename(columns={
-            "时间": "time", "开盘": "open", "收盘": "close",
-            "最高": "high", "最低": "low", "成交量": "volume",
-            "成交额": "amount",
-        })
+        df = df.rename(
+            columns={
+                "时间": "time",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "成交额": "amount",
+            }
+        )
         df["time"] = pd.to_datetime(df["time"])
         df["date"] = df["time"].dt.date
         df["hhmm"] = df["time"].dt.strftime("%H:%M")
@@ -85,11 +95,17 @@ def fetch_minute_5(code: str) -> pd.DataFrame | None:
         df = ak.stock_zh_a_hist_min_em(symbol=code, period="5", adjust="")
         if df is None or df.empty:
             return None
-        df = df.rename(columns={
-            "时间": "time", "开盘": "open", "收盘": "close",
-            "最高": "high", "最低": "low", "成交量": "volume",
-            "成交额": "amount",
-        })
+        df = df.rename(
+            columns={
+                "时间": "time",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "成交额": "amount",
+            }
+        )
         df["time"] = pd.to_datetime(df["time"])
         df["date"] = df["time"].dt.date
         df["hhmm"] = df["time"].dt.strftime("%H:%M")
@@ -126,7 +142,7 @@ def run_test():
     all_results = []
 
     for i, code in enumerate(stocks):
-        print(f"[{i+1}/{len(stocks)}] {code}", end="")
+        print(f"[{i + 1}/{len(stocks)}] {code}", end="")
         daily = fetch_daily(code)
         if daily is None or len(daily) < LOOKBACK + 5:
             print(" — skip (no daily)")
@@ -181,8 +197,14 @@ def run_test():
             if len(hist_dates) < 5:
                 continue
 
-            hist_vols = [early_data[dd]["early_vol"] for dd in hist_dates if early_data[dd]["early_vol"] > 0]
-            hist_amounts = [early_data[dd]["early_amount"] for dd in hist_dates if early_data[dd]["early_amount"] > 0]
+            hist_vols = [
+                early_data[dd]["early_vol"] for dd in hist_dates if early_data[dd]["early_vol"] > 0
+            ]
+            hist_amounts = [
+                early_data[dd]["early_amount"]
+                for dd in hist_dates
+                if early_data[dd]["early_amount"] > 0
+            ]
 
             if not hist_vols or not hist_amounts:
                 continue
@@ -212,17 +234,19 @@ def run_test():
             else:
                 tag = "-"
 
-            all_results.append({
-                "code": code,
-                "date": d,
-                "gap%": row["gap_pct"],
-                "vol_ratio": vol_ratio,
-                "amt_vs_p85": today_ea / p85_amount if p85_amount > 0 else 0,
-                "filtered": filtered,
-                "fade%": fade_pct,
-                "faded": faded,
-                "tag": tag,
-            })
+            all_results.append(
+                {
+                    "code": code,
+                    "date": d,
+                    "gap%": row["gap_pct"],
+                    "vol_ratio": vol_ratio,
+                    "amt_vs_p85": today_ea / p85_amount if p85_amount > 0 else 0,
+                    "filtered": filtered,
+                    "fade%": fade_pct,
+                    "faded": faded,
+                    "tag": tag,
+                }
+            )
 
         time.sleep(0.3)
 
@@ -232,18 +256,22 @@ def run_test():
         return
 
     df = pd.DataFrame(all_results)
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"RESULTS: {len(df)} gap-up stock-days across {df['code'].nunique()} stocks")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
-    print(f"\n{'Code':<8} {'Date':>12} {'Gap%':>6} {'VolR':>6} {'Amt/P85':>8} "
-          f"{'Filter':>7} {'Fade%':>7} {'Tag':>7}")
+    print(
+        f"\n{'Code':<8} {'Date':>12} {'Gap%':>6} {'VolR':>6} {'Amt/P85':>8} "
+        f"{'Filter':>7} {'Fade%':>7} {'Tag':>7}"
+    )
     print("-" * 70)
     for _, r in df.sort_values(["date", "code"]).iterrows():
-        print(f"{r['code']:<8} {str(r['date']):>12} {r['gap%']:>+5.1f}% "
-              f"{r['vol_ratio']:>5.1f}x {r['amt_vs_p85']:>7.2f}x "
-              f"{'YES' if r['filtered'] else 'no':>7} {r['fade%']:>6.1f}% "
-              f"{r['tag']:>7}")
+        print(
+            f"{r['code']:<8} {str(r['date']):>12} {r['gap%']:>+5.1f}% "
+            f"{r['vol_ratio']:>5.1f}x {r['amt_vs_p85']:>7.2f}x "
+            f"{'YES' if r['filtered'] else 'no':>7} {r['fade%']:>6.1f}% "
+            f"{r['tag']:>7}"
+        )
 
     n_total = len(df)
     n_faded = int(df["faded"].sum())
@@ -254,7 +282,7 @@ def run_test():
 
     print("\n--- Summary (冲高回落 = high到close跌幅>3%) ---")
     print(f"Total gap-up days:    {n_total}")
-    print(f"Actually faded:       {n_faded} ({n_faded/n_total*100:.0f}%)")
+    print(f"Actually faded:       {n_faded} ({n_faded / n_total * 100:.0f}%)")
     print(f"Filter triggered:     {n_filtered}")
     print(f"  Correct (OK):       {n_ok}")
     print(f"  False positive:     {n_false_pos}")

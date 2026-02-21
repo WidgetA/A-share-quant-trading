@@ -53,17 +53,47 @@ EXTENDED_DIRS = CRITICAL_DIRS + [
 
 # 价格/金额相关的变量名关键词 — 这些变量不允许用默认值回退
 FINANCIAL_VAR_KEYWORDS = {
-    "price", "latest", "close", "open_price", "prev_close",
-    "high", "low", "volume", "amount", "sell_price", "buy_price",
-    "cash", "balance", "pnl", "cost", "turnover", "market_cap",
-    "cum_vol", "max_high", "min_low",
+    "price",
+    "latest",
+    "close",
+    "open_price",
+    "prev_close",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "sell_price",
+    "buy_price",
+    "cash",
+    "balance",
+    "pnl",
+    "cost",
+    "turnover",
+    "market_cap",
+    "cum_vol",
+    "max_high",
+    "min_low",
 }
 
 # .get() 调用中不允许用 0.0 默认值的 key 关键词
 FINANCIAL_KEY_KEYWORDS = {
-    "price", "close", "open", "high", "low", "volume", "amount",
-    "balance", "cash", "cost", "pnl", "sell", "buy", "latest",
-    "turnover", "market_cap", "prev",
+    "price",
+    "close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "balance",
+    "cash",
+    "cost",
+    "pnl",
+    "sell",
+    "buy",
+    "latest",
+    "turnover",
+    "market_cap",
+    "prev",
 }
 
 
@@ -113,6 +143,7 @@ def _get_source_line(source_lines: list[str], lineno: int) -> str:
 # Level 1: Exception handling auditor (original)
 # ============================================================
 
+
 class ExceptionAuditor(ast.NodeVisitor):
     """AST visitor that detects exception handling safety violations."""
 
@@ -121,8 +152,7 @@ class ExceptionAuditor(ast.NodeVisitor):
         self.source_lines = source_lines
         self.violations: list[Violation] = []
 
-    def _add(self, node: ast.AST, category: str, detail: str,
-             severity: str = "CRITICAL"):
+    def _add(self, node: ast.AST, category: str, detail: str, severity: str = "CRITICAL"):
         lineno = getattr(node, "lineno", 0)
         self.violations.append(
             Violation(
@@ -140,9 +170,7 @@ class ExceptionAuditor(ast.NodeVisitor):
         is_broad = False
         if node.type is None:
             is_broad = True
-        elif isinstance(node.type, ast.Name) and node.type.id in (
-            "Exception", "BaseException"
-        ):
+        elif isinstance(node.type, ast.Name) and node.type.id in ("Exception", "BaseException"):
             is_broad = True
 
         if not is_broad:
@@ -176,9 +204,7 @@ class ExceptionAuditor(ast.NodeVisitor):
         for stmt in body_stmts:
             if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
                 func = stmt.value.func
-                if isinstance(func, ast.Attribute) and isinstance(
-                    func.value, ast.Name
-                ):
+                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
                     if func.value.id == "logger":
                         logger_calls += 1
 
@@ -215,6 +241,7 @@ class ExceptionAuditor(ast.NodeVisitor):
 # Level 2: Business logic fallback auditor
 # ============================================================
 
+
 class BusinessLogicAuditor(ast.NodeVisitor):
     """AST visitor that detects business-logic-level silent degradation.
 
@@ -229,8 +256,7 @@ class BusinessLogicAuditor(ast.NodeVisitor):
         self.source_lines = source_lines
         self.violations: list[Violation] = []
 
-    def _add(self, node: ast.AST, category: str, detail: str,
-             severity: str = "CRITICAL"):
+    def _add(self, node: ast.AST, category: str, detail: str, severity: str = "CRITICAL"):
         lineno = getattr(node, "lineno", 0)
         self.violations.append(
             Violation(
@@ -254,8 +280,7 @@ class BusinessLogicAuditor(ast.NodeVisitor):
 
         self.generic_visit(node)
 
-    def _check_dict_get_fallback(self, node: ast.AST, target: str,
-                                 value: ast.AST):
+    def _check_dict_get_fallback(self, node: ast.AST, target: str, value: ast.AST):
         """Detect: price = d.get(key, 0.0)"""
         if not isinstance(value, ast.Call):
             return
@@ -270,24 +295,18 @@ class BusinessLogicAuditor(ast.NodeVisitor):
             # Check if the key is also financial
             key_arg = value.args[0]
             key_str = ""
-            if isinstance(key_arg, ast.Constant) and isinstance(
-                key_arg.value, str
-            ):
+            if isinstance(key_arg, ast.Constant) and isinstance(key_arg.value, str):
                 key_str = key_arg.value
             elif isinstance(key_arg, ast.Attribute):
                 key_str = key_arg.attr
 
-            detail = (
-                f"`{target} = ...get(..., 0.0)` — "
-                f"缺数据时静默用 0.0 替代，应该报错或跳过"
-            )
+            detail = f"`{target} = ...get(..., 0.0)` — 缺数据时静默用 0.0 替代，应该报错或跳过"
             if key_str and _is_financial_key(key_str):
                 self._add(node, "PRICE_FALLBACK_ZERO", detail)
             elif _is_financial_name(target):
                 self._add(node, "PRICE_FALLBACK_ZERO", detail, severity="WARNING")
 
-    def _check_ternary_fallback(self, node: ast.AST, target: str,
-                                value: ast.AST):
+    def _check_ternary_fallback(self, node: ast.AST, target: str, value: ast.AST):
         """Detect: latest = x if x else open_price / 0.0"""
         if not isinstance(value, ast.IfExp):
             return
@@ -299,8 +318,7 @@ class BusinessLogicAuditor(ast.NodeVisitor):
             self._add(
                 node,
                 "TERNARY_FALLBACK_ZERO",
-                f"`{target} = ... if ... else 0.0` — "
-                f"缺数据时静默用 0.0，应该报错或跳过",
+                f"`{target} = ... if ... else 0.0` — 缺数据时静默用 0.0，应该报错或跳过",
                 severity="WARNING",
             )
             return
@@ -328,9 +346,7 @@ class BusinessLogicAuditor(ast.NodeVisitor):
         # Detect PriceSnapshot(latest_price=open_price) pattern
         if func_name == "PriceSnapshot":
             for kw in node.keywords:
-                if kw.arg == "latest_price" and isinstance(
-                    kw.value, ast.Name
-                ):
+                if kw.arg == "latest_price" and isinstance(kw.value, ast.Name):
                     val_name = kw.value.id
                     if val_name == "open_price":
                         self._add(
@@ -353,39 +369,30 @@ class BusinessLogicAuditor(ast.NodeVisitor):
 LINE_SCAN_RULES: list[tuple[re.Pattern, str, str, str]] = [
     # sell_prices.get(xxx, 0.0) or buy_prices.get(xxx, 0.0)
     (
-        re.compile(
-            r"(sell_price|buy_price)\w*\s*=\s*\w+\.get\(.+?,\s*0\.0\s*\)"
-        ),
+        re.compile(r"(sell_price|buy_price)\w*\s*=\s*\w+\.get\(.+?,\s*0\.0\s*\)"),
         "PRICE_FALLBACK_ZERO",
         "卖出/买入价用 .get(key, 0.0) — 缺数据时以零价格成交，导致 P&L 严重失真",
         "CRITICAL",
     ),
     # cash_balance = xxx.get("cash_balance", 0.0) or similar
     (
-        re.compile(
-            r"cash_balance\s*=\s*.*\.get\(.*,\s*0\.0\s*\)"
-        ),
+        re.compile(r"cash_balance\s*=\s*.*\.get\(.*,\s*0\.0\s*\)"),
         "BALANCE_FALLBACK_ZERO",
         "现金余额用 .get(key, 0.0) — 状态丢失时静默归零，隐藏数据损坏",
         "CRITICAL",
     ),
     # latest_price = open_price (direct assignment, not in if/else)
     (
-        re.compile(
-            r"latest_price\s*=\s*open_price\s*(?:#.*)?$"
-        ),
+        re.compile(r"latest_price\s*=\s*open_price\s*(?:#.*)?$"),
         "PRICE_SUBSTITUTION",
         "latest_price = open_price — 用开盘价顶替实时价，涨幅被静默归零",
         "CRITICAL",
     ),
     # max_high = 0.0 or min_low = 0.0 as initialization before conditional fill
     (
-        re.compile(
-            r"(?:max_high|min_low)\s*=\s*0\.0\s*(?:#.*)?$"
-        ),
+        re.compile(r"(?:max_high|min_low)\s*=\s*0\.0\s*(?:#.*)?$"),
         "HIGHLOW_INIT_ZERO",
-        "max_high/min_low 初始化为 0.0 — 如果后续条件分支未填充，"
-        "0.0 会被当作真实极值参与计算",
+        "max_high/min_low 初始化为 0.0 — 如果后续条件分支未填充，0.0 会被当作真实极值参与计算",
         "WARNING",
     ),
 ]
@@ -416,6 +423,7 @@ def scan_lines(filepath: str, source_lines: list[str]) -> list[Violation]:
 # ============================================================
 # Orchestration
 # ============================================================
+
 
 def audit_file(filepath: Path) -> list[Violation]:
     """Audit a single Python file for trading safety violations."""

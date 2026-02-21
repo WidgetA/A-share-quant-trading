@@ -13,8 +13,11 @@ def get_stock_hist(code: str) -> pd.DataFrame:
     """Get one stock's Feb daily data."""
     try:
         df = ak.stock_zh_a_hist(
-            symbol=code, period="daily",
-            start_date="20260201", end_date="20260218", adjust="",
+            symbol=code,
+            period="daily",
+            start_date="20260201",
+            end_date="20260218",
+            adjust="",
         )
         if df is not None and not df.empty:
             df = df[["日期", "涨跌幅"]].copy()
@@ -76,9 +79,9 @@ def main():
         ratio = f"{up}:{down}"
         print(
             f"{date_val!s:<14} {total_n:>6} "
-            f"{up:>6} ({up/total_n*100:4.1f}%) "
-            f"{down:>6} ({down/total_n*100:4.1f}%) "
-            f"{flat:>6} ({flat/total_n*100:4.1f}%)  "
+            f"{up:>6} ({up / total_n * 100:4.1f}%) "
+            f"{down:>6} ({down / total_n * 100:4.1f}%) "
+            f"{flat:>6} ({flat / total_n * 100:4.1f}%)  "
             f"{ratio}"
         )
 
