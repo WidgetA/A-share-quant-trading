@@ -1274,12 +1274,16 @@ def create_momentum_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
-        # Force re-download: clear existing cache so it downloads fresh
+        # Force re-download: clear everything and start from scratch.
+        # Don't load from OSS either — the whole point of force is to
+        # discard potentially corrupted/misaligned cached data.
         if body.force:
             request.app.state.akshare_cache = None
+            existing = None
+        else:
+            existing = getattr(request.app.state, "akshare_cache", None)
 
         # 1) Try in-memory cache
-        existing: AkshareBacktestCache | None = getattr(request.app.state, "akshare_cache", None)
         if existing and existing.covers_range(start_date, end_date):
 
             async def mem_cached_stream():
@@ -1293,7 +1297,7 @@ def create_momentum_router() -> APIRouter:
 
             return StreamingResponse(mem_cached_stream(), media_type="text/event-stream")
 
-        # 2) Try OSS cache
+        # 2) Try OSS cache (skipped when force=True)
         if not existing:
             existing = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
         if existing and existing.covers_range(start_date, end_date):
