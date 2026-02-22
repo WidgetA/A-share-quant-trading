@@ -1336,9 +1336,7 @@ def create_momentum_router() -> APIRouter:
 
         # 3) Pre-flight: verify OSS is reachable BEFORE downloading (15s timeout)
         try:
-            oss_err = await asyncio.wait_for(
-                asyncio.to_thread(check_oss_available), timeout=15
-            )
+            oss_err = await asyncio.wait_for(asyncio.to_thread(check_oss_available), timeout=15)
         except asyncio.TimeoutError:
             oss_err = "OSS 连接超时 (15s)"
         if oss_err:
