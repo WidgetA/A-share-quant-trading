@@ -1308,9 +1308,18 @@ def create_momentum_router() -> APIRouter:
 
             return StreamingResponse(mem_cached_stream(), media_type="text/event-stream")
 
-        # 2) Try OSS cache (skipped when force=True)
+        # 2) Try OSS cache (skipped when force=True, 60s timeout)
         if not existing and not body.force:
-            existing = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
+            try:
+                existing = await asyncio.wait_for(
+                    asyncio.to_thread(AkshareBacktestCache.load_from_oss), timeout=60
+                )
+            except asyncio.TimeoutError:
+                logger.warning("load_from_oss timed out (60s), will re-download")
+                existing = None
+            except Exception:
+                logger.warning("load_from_oss failed, will re-download", exc_info=True)
+                existing = None
         if existing and existing.covers_range(start_date, end_date):
             request.app.state.akshare_cache = existing
 
@@ -1325,8 +1334,13 @@ def create_momentum_router() -> APIRouter:
 
             return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
-        # 3) Pre-flight: verify OSS is reachable BEFORE downloading
-        oss_err = await asyncio.to_thread(check_oss_available)
+        # 3) Pre-flight: verify OSS is reachable BEFORE downloading (15s timeout)
+        try:
+            oss_err = await asyncio.wait_for(
+                asyncio.to_thread(check_oss_available), timeout=15
+            )
+        except asyncio.TimeoutError:
+            oss_err = "OSS 连接超时 (15s)"
         if oss_err:
             raise HTTPException(
                 status_code=500,

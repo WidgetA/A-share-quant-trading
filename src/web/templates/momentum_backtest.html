@@ -538,8 +538,9 @@ async function startAkshareDownload(force = false) {
         });
 
         if (!resp.ok) {
-            const err = await resp.json();
-            statusEl.textContent = '下载失败: ' + (err.detail || resp.status);
+            let detail = `HTTP ${resp.status}`;
+            try { const err = await resp.json(); detail = err.detail || detail; } catch (_) {}
+            statusEl.textContent = '下载失败: ' + detail;
             btn.disabled = false;
             btn.textContent = '重试下载';
             return;
