@@ -577,12 +577,18 @@ async function startAkshareDownload(force = false) {
                         const rangeStr = akshareCacheStart && akshareCacheEnd ? `, ${akshareCacheStart} ~ ${akshareCacheEnd}` : '';
                         const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟${rangeStr})`;
                         statusEl.textContent = readyText;
+                        statusEl.style.color = '#059669';
                         btn.style.background = '';
+                        btn.disabled = false;
+                        btn.textContent = '已缓存';
+                        akshareReady = true;
                         if (reBtn) reBtn.style.display = '';
                         // Re-fetch status to check for remaining minute gaps
-                        // instead of optimistically assuming no gaps
+                        // (non-blocking — button is already usable)
                         try {
-                            const statusResp = await fetch('/api/momentum/akshare-status');
+                            const ctrl = new AbortController();
+                            setTimeout(() => ctrl.abort(), 5000);
+                            const statusResp = await fetch('/api/momentum/akshare-status', { signal: ctrl.signal });
                             const statusData = await statusResp.json();
                             if (statusData.has_gaps) {
                                 akshareMinuteGaps = statusData.minute_gaps || [];
@@ -590,19 +596,12 @@ async function startAkshareDownload(force = false) {
                                 statusEl.textContent = readyText + ` | 分钟数据缺失: ${gapStr}`;
                                 statusEl.style.color = '#d97706';
                                 btn.textContent = '增量下载';
+                                btn.disabled = false;
                                 btn.style.background = '#f59e0b';
                                 akshareReady = false;
-                            } else {
-                                akshareMinuteGaps = [];
-                                statusEl.style.color = '#059669';
-                                akshareReady = true;
-                                btn.textContent = '已缓存';
                             }
                         } catch (_) {
-                            // Status check failed — be conservative, assume gaps remain
-                            akshareReady = false;
-                            statusEl.style.color = '#d97706';
-                            statusEl.textContent = readyText + ' | 无法确认分钟数据完整性';
+                            // Status check failed or timed out — already set as ready above
                         }
                     } else if (data.type === 'error') {
                         statusEl.textContent = '下载失败: ' + data.message;

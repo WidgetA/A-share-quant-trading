@@ -20,10 +20,11 @@
 from __future__ import annotations
 
 import asyncio
-import io
+import gzip
 import logging
 import os
 import pickle
+import tempfile
 import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
@@ -325,9 +326,11 @@ class AkshareBacktestCache:
         return False
 
     def _save_to_oss(self) -> str | None:
-        """Persist cache to Alibaba Cloud OSS as pickle files.
+        """Persist cache to Alibaba Cloud OSS as gzip-compressed pickle files.
 
         Returns None on success, or an error message string on failure.
+        Streams pickle → gzip → temp file to avoid holding full serialized
+        data in memory (3194 stocks can be hundreds of MB when pickled).
         """
         bucket = _get_oss_bucket()
         if bucket is None:
@@ -343,17 +346,23 @@ class AkshareBacktestCache:
             # files, meta still points to the old range — next load will detect
             # the gap and re-download instead of silently missing data.
             for name, obj in [
-                ("daily.pkl", self._daily),
-                ("minute.pkl", self._minute),
-                ("meta.pkl", meta),
+                ("daily.pkl.gz", self._daily),
+                ("minute.pkl.gz", self._minute),
+                ("meta.pkl.gz", meta),
             ]:
-                buf = io.BytesIO()
-                pickle.dump(obj, buf, protocol=pickle.HIGHEST_PROTOCOL)
-                size_mb = buf.tell() / 1024 / 1024
-                logger.info(f"Uploading {name} to OSS ({size_mb:.1f} MB)...")
-                buf.seek(0)
-                bucket.put_object(f"{_OSS_PREFIX}{name}", buf)
-                logger.info(f"Uploaded {name} to OSS OK")
+                # Stream: pickle → gzip → temp file (no full copy in RAM)
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pkl.gz")
+                try:
+                    with os.fdopen(tmp_fd, "wb") as raw_f:
+                        with gzip.GzipFile(fileobj=raw_f, mode="wb", compresslevel=1) as gz_f:
+                            pickle.dump(obj, gz_f, protocol=pickle.HIGHEST_PROTOCOL)
+                    size_mb = os.path.getsize(tmp_path) / 1024 / 1024
+                    logger.info(f"Uploading {name} to OSS ({size_mb:.1f} MB compressed)...")
+                    bucket.put_object_from_file(f"{_OSS_PREFIX}{name}", tmp_path)
+                    logger.info(f"Uploaded {name} to OSS OK")
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
             logger.info(f"Cache saved to OSS: {len(self._daily)} daily, {len(self._minute)} minute")
             return None
         except Exception as e:
@@ -363,7 +372,10 @@ class AkshareBacktestCache:
 
     @classmethod
     def load_from_oss(cls) -> AkshareBacktestCache | None:
-        """Load cache from OSS if available. Returns None if not found."""
+        """Load cache from OSS if available. Returns None if not found.
+
+        Tries .pkl.gz (gzipped) first, falls back to legacy .pkl format.
+        """
         bucket = _get_oss_bucket()
         if bucket is None:
             logger.warning("load_from_oss: _get_oss_bucket() returned None")
@@ -371,24 +383,43 @@ class AkshareBacktestCache:
 
         try:
             files = {}
-            for name in ("meta.pkl", "daily.pkl", "minute.pkl"):
-                key = f"{_OSS_PREFIX}{name}"
-                if not bucket.object_exists(key):
-                    logger.warning(f"load_from_oss: key not found: {key}")
+            base_names = ("meta", "daily", "minute")
+            for base in base_names:
+                gz_key = f"{_OSS_PREFIX}{base}.pkl.gz"
+                plain_key = f"{_OSS_PREFIX}{base}.pkl"
+                # Try gzipped first, fall back to legacy plain pickle
+                if bucket.object_exists(gz_key):
+                    key = gz_key
+                elif bucket.object_exists(plain_key):
+                    key = plain_key
+                else:
+                    logger.warning(f"load_from_oss: key not found: {gz_key} or {plain_key}")
                     return None
                 logger.info(f"load_from_oss: downloading {key}...")
-                result = bucket.get_object(key)
-                data = result.read()
-                logger.info(f"load_from_oss: {key} downloaded ({len(data)} bytes)")
-                files[name] = pickle.loads(data)  # noqa: S301
+                # Stream to temp file to avoid holding full compressed+decompressed in RAM
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=os.path.splitext(key)[1])
+                try:
+                    os.close(tmp_fd)
+                    bucket.get_object_to_file(key, tmp_path)
+                    size_mb = os.path.getsize(tmp_path) / 1024 / 1024
+                    logger.info(f"load_from_oss: {key} downloaded ({size_mb:.1f} MB)")
+                    if key.endswith(".gz"):
+                        with gzip.open(tmp_path, "rb") as gz_f:
+                            files[base] = pickle.load(gz_f)  # noqa: S301
+                    else:
+                        with open(tmp_path, "rb") as f:
+                            files[base] = pickle.load(f)  # noqa: S301
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
 
-            meta = files["meta.pkl"]
+            meta = files["meta"]
             cache = cls()
             cache._start_date = meta["start_date"]
             cache._end_date = meta["end_date"]
             cache._stock_codes = meta["stock_codes"]
-            cache._daily = files["daily.pkl"]
-            cache._minute = files["minute.pkl"]
+            cache._daily = files["daily"]
+            cache._minute = files["minute"]
 
             # Validate cache format: turnoverRatio must exist in daily data.
             # Old caches saved before the turnoverRatio fix lack this field,

@@ -1407,11 +1407,13 @@ def create_momentum_router() -> APIRouter:
                 # cancelled if the client disconnects
                 async def _bg_oss_save():
                     try:
-                        err = await working.save_to_oss()
+                        err = await asyncio.wait_for(working.save_to_oss(), timeout=120)
                         if err:
                             logger.warning(f"akshare OSS save failed: {err}")
                         else:
                             logger.info("akshare cache saved to OSS OK")
+                    except asyncio.TimeoutError:
+                        logger.error("akshare OSS save timed out (120s)")
                     except Exception as exc:
                         logger.error(f"akshare OSS save exception: {exc}")
 
