@@ -356,8 +356,7 @@ def _handlebar_backtest(ContextInfo):
 
         if _bt_state["holding"] is not None:
             print(
-                "[BT %s] Already holding %s, skip scan"
-                % (bar_date, _bt_state["holding"]["code"])
+                "[BT %s] Already holding %s, skip scan" % (bar_date, _bt_state["holding"]["code"])
             )
             return
 
@@ -382,10 +381,7 @@ def _handlebar_backtest(ContextInfo):
         price = rec.get("latest_price", 0)
         score = rec.get("composite_score", 0)
 
-        print(
-            "[BT %s] BUY %s %s @ %.2f (score=%.4f)"
-            % (bar_date, code, name, price, score)
-        )
+        print("[BT %s] BUY %s %s @ %.2f (score=%.4f)" % (bar_date, code, name, price, score))
 
         if _execute_buy(rec, ContextInfo):
             _bt_state["holding"] = {
