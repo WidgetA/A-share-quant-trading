@@ -312,22 +312,28 @@ def _handlebar_live(ContextInfo):
 def _handlebar_backtest(ContextInfo):
     """Backtest mode: call server for each day's recommendation, simulate T+1.
 
-    Supports both daily and minute bar frequencies:
-      - Daily bars (bar_time="00:00"): sell + buy on the same bar
-      - Minute bars: sell at ~09:30, buy at ~09:40
+    REQUIRES 1-minute bar frequency. Daily bars are ignored to prevent
+    incorrect simulation (no intraday price info → wrong fill prices).
+
+    Trading pattern:
+      - 09:25~09:35 bar: SELL yesterday's holding (T+1 at open)
+      - 09:36~09:50 bar: BUY today's recommendation from server scan
     """
     bar_date, bar_time = _get_bar_datetime(ContextInfo)
 
     if bar_date is None or bar_time is None:
         return
 
-    # Daily bar (00:00) → treat as both sell and buy time
-    is_daily = bar_time == "00:00"
-    is_sell_time = is_daily or "09:25" <= bar_time <= "09:35"
-    is_buy_time = is_daily or "09:36" <= bar_time <= "09:50"
+    # Reject non-minute bars (daily bar_time="00:00" has no intraday info)
+    if bar_time == "00:00":
+        _bt_state.setdefault("_daily_warned", False)
+        if not _bt_state["_daily_warned"]:
+            print("[BT ERROR] Daily bars detected — switch to 1-minute frequency!")
+            _bt_state["_daily_warned"] = True
+        return
 
-    # === SELL: T+1 sell yesterday's holding ===
-    if is_sell_time and _bt_state["holding"] is not None:
+    # === SELL window: 09:25~09:35 (T+1 at open) ===
+    if "09:25" <= bar_time <= "09:35" and _bt_state["holding"] is not None:
         holding = _bt_state["holding"]
         if holding["buy_date"] != bar_date:
             code = holding["code"]
@@ -344,8 +350,8 @@ def _handlebar_backtest(ContextInfo):
                 print("[BT %s] No position for %s (vol=%d)" % (bar_date, code, volume))
             _bt_state["holding"] = None
 
-    # === BUY: scan for today's recommendation ===
-    if is_buy_time and bar_date not in _bt_state["scanned_dates"]:
+    # === BUY window: 09:36~09:50 (scan for today's recommendation) ===
+    if "09:36" <= bar_time <= "09:50" and bar_date not in _bt_state["scanned_dates"]:
         _bt_state["scanned_dates"][bar_date] = True
 
         if _bt_state["holding"] is not None:
