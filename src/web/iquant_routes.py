@@ -547,8 +547,20 @@ def create_iquant_router() -> APIRouter:
         await _ensure_resources()
 
         if body.data_source == "akshare":
-            # Get akshare cache from main app state
+            # Wait for OSS background load if still in progress (up to 90s)
             ak_cache = getattr(request.app.state, "akshare_cache", None)
+            if not ak_cache and getattr(request.app.state, "akshare_cache_loading", False):
+                logger.info("backtest-scan: akshare cache loading from OSS, waiting...")
+                for _ in range(90):
+                    await asyncio.sleep(1)
+                    ak_cache = getattr(request.app.state, "akshare_cache", None)
+                    if ak_cache:
+                        break
+                    if not getattr(request.app.state, "akshare_cache_loading", False):
+                        break  # loading finished (but may have failed)
+                if ak_cache:
+                    logger.info("backtest-scan: akshare cache ready after waiting")
+
             if not ak_cache:
                 raise HTTPException(
                     status_code=503,

@@ -396,6 +396,9 @@ def _handlebar_backtest(ContextInfo):
 
 def init(ContextInfo):
     """Called once when script is loaded in iQuant."""
+    # Bind trading account for passorder() — required in backtest mode
+    ContextInfo.set_account("test")
+
     print("=" * 50)
     print("  iQuant Momentum Strategy")
     print("  Server: %s" % API_BASE)
