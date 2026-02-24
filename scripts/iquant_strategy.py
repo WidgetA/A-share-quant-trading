@@ -122,7 +122,9 @@ def _execute_buy(signal, ContextInfo):
     # Calculate volume: round down to nearest 100 shares (1 lot)
     volume = int(BUY_AMOUNT / price / 100) * 100
     if volume < 100:
-        print("[BUY] Price %.2f too high for BUY_AMOUNT=%d, skipping %s" % (price, BUY_AMOUNT, code))
+        print(
+            "[BUY] Price %.2f too high for BUY_AMOUNT=%d, skipping %s" % (price, BUY_AMOUNT, code)
+        )
         return False
 
     try:
