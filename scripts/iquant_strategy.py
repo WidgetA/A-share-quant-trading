@@ -1,37 +1,42 @@
 # encoding: gbk
 """
-iQuant strategy script — polling-based signal executor.
+iQuant strategy script — live polling + backtest support.
 
 This script runs inside the iQuant (THS) environment on a Windows server.
-It polls the remote strategy server for trading signals, then executes
-them locally via passorder().
+It supports two modes:
 
-Architecture:
+  Live mode:  Polls the remote server for trading signals (buy/sell),
+              executes them locally via passorder().
+  Backtest:   Detects historical bar replay via ContextInfo.get_bar_timetag(),
+              calls the server's /backtest-scan endpoint for each day's
+              recommendation, and simulates T+1 buy/sell via passorder().
+
+Architecture (Live):
     Server (Alibaba Cloud)                     iQuant (Windows)
-    ┌──────────────────────┐                   ┌──────────────────┐
-    │ 09:30 push SELL      │  GET /pending-    │ handlebar() 每分钟│
-    │ 09:40 push BUY       │──  signals  ──►   │  poll → execute  │
-    │                      │                   │  → ack           │
-    │ Signal queue (memory)│  POST /ack-signal │                  │
-    │                      │◄──────────────────│ passorder()      │
-    └──────────────────────┘                   └──────────────────┘
+    +----------------------+                   +------------------+
+    | 09:30 push SELL      |  GET /pending-    | handlebar() 1min |
+    | 09:40 push BUY       |--  signals  --->  |  poll -> execute |
+    |                      |                   |  -> ack          |
+    | Signal queue (memory)|  POST /ack-signal |                  |
+    |                      |<------------------|  passorder()     |
+    +----------------------+                   +------------------+
+
+Architecture (Backtest):
+    Server                                     iQuant (Backtest)
+    +----------------------+                   +------------------+
+    | POST /backtest-scan  |<--- date ---------|  09:40 bar:      |
+    |  -> MomentumScanner  |                   |   call server    |
+    |  -> recommendation   |--- rec ---------->|   buy rec stock  |
+    +----------------------+                   |  09:30 bar:      |
+                                               |   sell T+1       |
+                                               +------------------+
 
 Lifecycle:
     init(ContextInfo)      -- called once at script load
     handlebar(ContextInfo) -- called every bar (1-min frequency)
 
-Workflow:
-    Every bar:
-      1. Poll GET /pending-signals
-      2. For each signal: passorder() (buy or sell)
-      3. POST /ack-signal to confirm execution
-
-Network:
-    Uses urllib only (available in iQuant Python env).
-    requests library may not be available.
-
 Configuration:
-    Edit API_BASE and API_KEY below before deploying.
+    Edit API_BASE, API_KEY, BUY_AMOUNT below before deploying.
 """
 
 import json
@@ -41,12 +46,22 @@ import urllib.request
 # === CONFIGURATION (edit before deploying) ===
 API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "your-api-key-here"
-BUY_AMOUNT = 50000  # yuan per position — volume calculated locally from this
+BUY_AMOUNT = 50000  # yuan per position
+
+# Backtest-specific config
+BT_DATA_SOURCE = "akshare"  # "akshare" (recommended) or "ifind"
 
 # === INTERNAL STATE (persists across handlebar calls) ===
 _state = {
     "server_ok": False,
     "last_poll_time": "",
+    "mode": None,  # "live" or "backtest", detected on first handlebar
+}
+
+# Backtest state (separate from live)
+_bt_state = {
+    "holding": None,  # {code, name, buy_date} or None
+    "scanned_dates": {},  # date_str -> True (avoid re-scan)
 }
 
 
@@ -88,14 +103,53 @@ def _api_call(endpoint, method="GET", body=None):
         raise Exception("URL error: %s" % e.reason)
 
 
+# === BAR TIME HELPERS ===
+
+
+def _get_bar_datetime(ContextInfo):
+    """Extract bar date and time from QMT ContextInfo.
+
+    In backtest mode, QMT replays historical bars. The bar's actual
+    date/time comes from get_bar_timetag(), not datetime.now().
+
+    Returns:
+        (date_str, time_str): e.g., ("2026-02-20", "09:40")
+        Returns (None, None) if bar time cannot be determined.
+    """
+    from datetime import datetime
+
+    try:
+        timetag = ContextInfo.get_bar_timetag(ContextInfo.barpos)
+        # timetag is milliseconds since epoch
+        bar_dt = datetime.fromtimestamp(timetag / 1000)
+        return (bar_dt.strftime("%Y-%m-%d"), bar_dt.strftime("%H:%M"))
+    except Exception:
+        return (None, None)
+
+
+def _detect_mode(ContextInfo):
+    """Detect live vs backtest mode.
+
+    If the bar date differs from today's real date, QMT is replaying
+    historical bars (backtest mode).
+    """
+    from datetime import datetime
+
+    bar_date, _ = _get_bar_datetime(ContextInfo)
+    if bar_date is None:
+        return "live"  # can't determine bar time -> assume live
+    today = datetime.now().strftime("%Y-%m-%d")
+    return "backtest" if bar_date != today else "live"
+
+
 def _get_time_str():
-    """Get current time as HH:MM string."""
+    """Get current real time as HH:MM string (for live mode)."""
     from datetime import datetime
 
     return datetime.now().strftime("%H:%M")
 
 
-# === ORDER EXECUTION ===
+# === ORDER EXECUTION (shared by live and backtest) ===
 
 
 def _execute_buy(signal, ContextInfo):
@@ -103,10 +157,6 @@ def _execute_buy(signal, ContextInfo):
 
     Volume is calculated locally from BUY_AMOUNT and the signal's
     latest_price. Server only provides stock_code + direction.
-
-    Args:
-        signal: dict with stock_code, stock_name, latest_price
-        ContextInfo: iQuant context object
 
     Returns:
         True if order placed, False otherwise
@@ -149,15 +199,14 @@ def _get_position_volume(code, ContextInfo):
     Uses iQuant get_trade_detail_data() to read real position.
 
     Returns:
-        int: sellable volume (可用余额), or 0 if no position found
+        int: sellable volume, or 0 if no position found
     """
     try:
         account = ContextInfo.accID
         positions = get_trade_detail_data(account, "POSITION", "STOCK")  # noqa: F821
         for pos in positions:
-            # pos.m_strInstrumentID is the stock code
             if hasattr(pos, "m_strInstrumentID") and pos.m_strInstrumentID == code:
-                return int(pos.m_nCanUseVolume)  # 可用余额
+                return int(pos.m_nCanUseVolume)
     except Exception as e:
         print("[SELL] Failed to query position for %s: %s" % (code, e))
     return 0
@@ -166,12 +215,7 @@ def _get_position_volume(code, ContextInfo):
 def _execute_sell(signal, ContextInfo):
     """Execute a SELL signal via passorder().
 
-    Queries actual sellable volume from broker — server only sends
-    stock_code + direction, no volume.
-
-    Args:
-        signal: dict with stock_code, stock_name
-        ContextInfo: iQuant context object
+    Queries actual sellable volume from broker.
 
     Returns:
         True if order placed, False otherwise
@@ -187,7 +231,6 @@ def _execute_sell(signal, ContextInfo):
     try:
         account = ContextInfo.accID
         # opType: 24=sell stock
-        # prType: 11=best 5 levels immediate (market price variant)
         passorder(24, 1101, account, code, 11, -1, volume, "", 1, "", ContextInfo)  # noqa: F821
         print("[SELL] ORDER PLACED: %s %s x%d" % (code, name, volume))
         return True
@@ -197,18 +240,152 @@ def _execute_sell(signal, ContextInfo):
 
 
 def _ack_signal(signal_id):
-    """Acknowledge a signal after execution.
-
-    Tells the server the signal has been executed so it won't be
-    returned again on next poll.
-    """
+    """Acknowledge a signal after execution (live mode only)."""
     try:
         _api_call("/ack-signal", method="POST", body={"signal_id": signal_id})
     except Exception as e:
-        # Ack failure is non-fatal — worst case, signal appears again next poll
-        # and passorder() might place a duplicate. But that's better than
-        # failing to ack and never clearing the signal.
         print("[WARN] Failed to ack signal %s: %s" % (signal_id, e))
+
+
+# === LIVE MODE ===
+
+
+def _handlebar_live(ContextInfo):
+    """Live mode: poll server for signals, execute via passorder().
+
+    Same logic as original handlebar().
+    """
+    time_str = _get_time_str()
+
+    # Only active during trading hours (09:25 ~ 15:05)
+    if time_str < "09:25" or time_str > "15:05":
+        return
+
+    # If server was unreachable at init, retry ping
+    if not _state["server_ok"]:
+        try:
+            _api_call("/ping")
+            _state["server_ok"] = True
+            print("[%s] Server reconnected" % time_str)
+        except Exception:
+            return
+
+    # Poll for pending signals
+    try:
+        result = _api_call("/pending-signals")
+    except Exception as e:
+        print("[%s] Poll failed: %s" % (time_str, e))
+        return
+
+    signals = result.get("signals", [])
+    if not signals:
+        return
+
+    print("[%s] Received %d signal(s)" % (time_str, len(signals)))
+
+    for signal in signals:
+        sig_type = signal.get("type", "")
+        sig_id = signal.get("id", "")
+        code = signal.get("stock_code", "")
+
+        print(
+            "[%s] Processing: %s %s %s (id=%s)"
+            % (time_str, sig_type.upper(), code, signal.get("stock_name", ""), sig_id)
+        )
+
+        executed = False
+        if sig_type == "buy":
+            executed = _execute_buy(signal, ContextInfo)
+        elif sig_type == "sell":
+            executed = _execute_sell(signal, ContextInfo)
+        else:
+            print("[%s] Unknown signal type: %s" % (time_str, sig_type))
+            executed = True
+
+        if executed:
+            _ack_signal(sig_id)
+
+
+# === BACKTEST MODE ===
+
+
+def _handlebar_backtest(ContextInfo):
+    """Backtest mode: call server for each day's recommendation, simulate T+1.
+
+    Trading pattern (mirrors the live strategy):
+      - 09:30 bar: SELL yesterday's holding (T+1 at market open)
+      - 09:40 bar: BUY today's recommendation from server scan
+      - Other bars: no action
+    """
+    bar_date, bar_time = _get_bar_datetime(ContextInfo)
+    if bar_date is None or bar_time is None:
+        return
+
+    # === SELL at 09:30 (T+1: sell yesterday's buy at today's open) ===
+    if bar_time == "09:30" and _bt_state["holding"] is not None:
+        holding = _bt_state["holding"]
+        # Only sell if holding is from a previous date (T+1 rule)
+        if holding["buy_date"] != bar_date:
+            code = holding["code"]
+            name = holding.get("name", "")
+            volume = _get_position_volume(code, ContextInfo)
+            if volume >= 100:
+                try:
+                    account = ContextInfo.accID
+                    passorder(24, 1101, account, code, 11, -1, volume, "", 1, "", ContextInfo)  # noqa: F821
+                    print("[BT %s 09:30] SELL %s %s x%d" % (bar_date, code, name, volume))
+                except Exception as e:
+                    print("[BT %s 09:30] SELL FAILED %s: %s" % (bar_date, code, e))
+            else:
+                print("[BT %s 09:30] No position for %s (vol=%d)" % (bar_date, code, volume))
+            _bt_state["holding"] = None
+
+    # === BUY at 09:40 (scan for today's recommendation) ===
+    if bar_time == "09:40" and bar_date not in _bt_state["scanned_dates"]:
+        _bt_state["scanned_dates"][bar_date] = True
+
+        # Only buy if no current holding
+        if _bt_state["holding"] is not None:
+            print(
+                "[BT %s 09:40] Already holding %s, skip scan"
+                % (bar_date, _bt_state["holding"]["code"])
+            )
+            return
+
+        # Call server for backtest scan
+        try:
+            result = _api_call(
+                "/backtest-scan",
+                method="POST",
+                body={"trade_date": bar_date, "data_source": BT_DATA_SOURCE},
+            )
+        except Exception as e:
+            print("[BT %s 09:40] Scan failed: %s" % (bar_date, e))
+            return
+
+        rec = result.get("recommendation")
+        if not rec:
+            reason = result.get("reason", "no recommendation")
+            print("[BT %s 09:40] No recommendation: %s" % (bar_date, reason))
+            return
+
+        code = rec["stock_code"]
+        name = rec.get("stock_name", "")
+        price = rec.get("latest_price", 0)
+        score = rec.get("composite_score", 0)
+
+        print(
+            "[BT %s 09:40] Recommendation: %s %s @ %.2f (score=%.4f)"
+            % (bar_date, code, name, price, score)
+        )
+
+        # Execute buy
+        if _execute_buy(rec, ContextInfo):
+            _bt_state["holding"] = {
+                "code": code,
+                "name": name,
+                "buy_date": bar_date,
+            }
 
 
 # === IQUANT LIFECYCLE ===
@@ -217,7 +394,7 @@ def _ack_signal(signal_id):
 def init(ContextInfo):
     """Called once when script is loaded in iQuant."""
     print("=" * 50)
-    print("  iQuant Momentum Strategy (Polling Mode)")
+    print("  iQuant Momentum Strategy")
     print("  Server: %s" % API_BASE)
     print("=" * 50)
 
@@ -241,58 +418,14 @@ def init(ContextInfo):
 def handlebar(ContextInfo):
     """Called every bar (1-minute frequency).
 
-    Simple loop:
-      1. Poll /pending-signals for new signals
-      2. Execute each signal via passorder()
-      3. Ack each executed signal
+    Dispatches to live mode or backtest mode based on bar timetag.
     """
-    time_str = _get_time_str()
+    # Detect mode on first call
+    if _state["mode"] is None:
+        _state["mode"] = _detect_mode(ContextInfo)
+        print("[MODE] Detected: %s" % _state["mode"])
 
-    # Only active during trading hours (09:25 ~ 15:05)
-    if time_str < "09:25" or time_str > "15:05":
-        return
-
-    # If server was unreachable at init, retry ping
-    if not _state["server_ok"]:
-        try:
-            _api_call("/ping")
-            _state["server_ok"] = True
-            print("[%s] Server reconnected" % time_str)
-        except Exception:
-            return  # still unreachable, skip this bar
-
-    # Poll for pending signals
-    try:
-        result = _api_call("/pending-signals")
-    except Exception as e:
-        print("[%s] Poll failed: %s" % (time_str, e))
-        return
-
-    signals = result.get("signals", [])
-    if not signals:
-        return  # nothing to do
-
-    print("[%s] Received %d signal(s)" % (time_str, len(signals)))
-
-    for signal in signals:
-        sig_type = signal.get("type", "")
-        sig_id = signal.get("id", "")
-        code = signal.get("stock_code", "")
-
-        print(
-            "[%s] Processing: %s %s %s (id=%s)"
-            % (time_str, sig_type.upper(), code, signal.get("stock_name", ""), sig_id)
-        )
-
-        executed = False
-        if sig_type == "buy":
-            executed = _execute_buy(signal, ContextInfo)
-        elif sig_type == "sell":
-            executed = _execute_sell(signal, ContextInfo)
-        else:
-            print("[%s] Unknown signal type: %s" % (time_str, sig_type))
-            # Ack unknown signals to clear them from queue
-            executed = True
-
-        if executed:
-            _ack_signal(sig_id)
+    if _state["mode"] == "backtest":
+        _handlebar_backtest(ContextInfo)
+    else:
+        _handlebar_live(ContextInfo)

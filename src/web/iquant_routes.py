@@ -25,7 +25,7 @@ from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
@@ -66,6 +66,13 @@ class QuoteRequest(BaseModel):
     """Request body for /api/iquant/quote."""
 
     stock_codes: list[str]
+
+
+class BacktestScanRequest(BaseModel):
+    """Request body for /api/iquant/backtest-scan."""
+
+    trade_date: str  # YYYY-MM-DD
+    data_source: str = "akshare"  # "akshare" or "ifind"
 
 
 # --- Feishu notification helpers ---
@@ -511,5 +518,84 @@ def create_iquant_router() -> APIRouter:
             logger.error(f"iQuant quote failed: {error_detail}")
             await _notify_feishu_error("行情获取失败", error_detail)
             raise HTTPException(status_code=500, detail=error_detail)
+
+    @router.post("/backtest-scan")
+    async def backtest_scan(
+        request: Request,
+        body: BacktestScanRequest,
+        api_key: str = Depends(_verify_api_key),
+    ) -> dict:
+        """Run momentum scan for a specific historical date.
+
+        Used by iQuant script in backtest mode. Reuses the main app's
+        akshare cache to build PriceSnapshot, then runs MomentumSectorScanner.
+
+        Requires akshare cache to be pre-loaded via the web UI.
+        """
+        from src.data.clients.akshare_backtest_cache import AkshareHistoricalAdapter
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
+        from src.web.routes import MinuteDataMissingError, _build_snapshots_from_cache
+
+        # Parse date
+        try:
+            trade_date = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date: {body.trade_date}")
+
+        # Ensure iQuant resources (fundamentals_db, etc.)
+        await _ensure_resources()
+
+        if body.data_source == "akshare":
+            # Get akshare cache from main app state
+            ak_cache = getattr(request.app.state, "akshare_cache", None)
+            if not ak_cache:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Akshare 缓存未加载。请先在 web 页面的回测页下载数据。",
+                )
+
+            # Build snapshots from cache
+            date_key = trade_date.strftime("%Y-%m-%d")
+            try:
+                price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+            except MinuteDataMissingError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+            if not price_snapshots:
+                return {"recommendation": None, "reason": f"No data for {date_key}"}
+
+            adapter = AkshareHistoricalAdapter(ak_cache)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported data_source: {body.data_source}. Use 'akshare'.",
+            )
+
+        # Run scanner
+        concept_mapper = LocalConceptMapper()
+        scanner = MomentumSectorScanner(
+            ifind_client=adapter,  # type: ignore[arg-type]
+            fundamentals_db=_state["fundamentals_db"],
+            concept_mapper=concept_mapper,
+        )
+
+        scan_result = await scanner.scan(price_snapshots, trade_date=trade_date)
+        rec = scan_result.recommended_stock
+
+        if not rec:
+            return {"recommendation": None, "reason": "No recommendation for this date"}
+
+        return {
+            "recommendation": {
+                "stock_code": rec.stock_code,
+                "stock_name": rec.stock_name,
+                "board_name": rec.board_name,
+                "latest_price": round(rec.latest_price, 4),
+                "open_price": round(rec.open_price, 4),
+                "prev_close": round(rec.prev_close, 4),
+                "composite_score": round(rec.composite_score, 4),
+            }
+        }
 
     return router
