@@ -98,6 +98,46 @@ class SinaRealtimeClient:
             await self._client.aclose()
             self._client = None
 
+    async def get_exchange_time(self) -> tuple[str, str] | None:
+        """Probe Sina for the exchange's current date and time.
+
+        Fetches sz000001 (平安银行) and reads the date/time fields
+        embedded in the response (last 3rd / 2nd comma-separated fields).
+        These come from the exchange, independent of local clock.
+
+        Returns:
+            (date_str, time_str) e.g. ("2026-02-24", "09:42:15"),
+            or None if the probe fails.
+        """
+        if not self._client:
+            return None
+
+        try:
+            resp = await self._client.get(f"{self.BASE_URL}/list=sz000001")
+            resp.raise_for_status()
+            text = resp.content.decode("gbk", errors="replace")
+        except httpx.HTTPError:
+            return None
+
+        match = _SINA_LINE_RE.search(text)
+        if not match or not match.group(2):
+            return None
+
+        fields = match.group(2).split(",")
+        if len(fields) < 3:
+            return None
+
+        try:
+            date_str = fields[-3]  # "2026-02-24"
+            time_str = fields[-2]  # "09:42:15"
+            # Validate format
+            parts = time_str.split(":")
+            if len(parts) != 3:
+                return None
+            return (date_str, time_str)
+        except (ValueError, IndexError):
+            return None
+
     async def batch_get_quotes(self, stock_codes: list[str]) -> dict[str, SinaQuote]:
         """
         Fetch real-time quotes for multiple stocks.

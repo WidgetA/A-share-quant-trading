@@ -280,12 +280,17 @@ def create_iquant_router() -> APIRouter:
         09:30 → SELL signals for yesterday's holdings (T+1 at open)
         09:40 → BUY signal from momentum scan
 
+        Timing uses **exchange time from Sina** (not local clock).
+        This avoids local clock drift and automatically handles holidays
+        (Sina returns last trading day's date when market is closed).
+
         Note: Signals carry stock_code + direction only.
         Position sizing (volume) is determined by iQuant client
         based on actual account funds.
         """
-        SELL_TIME = time(9, 30)
-        SCAN_TIME = time(9, 40)
+        # Exchange-time windows for each operation
+        SELL_WINDOW = (time(9, 25), time(9, 45))
+        SCAN_WINDOW = (time(9, 35), time(10, 0))
 
         logger.info("iQuant signal scheduler started")
 
@@ -294,18 +299,33 @@ def create_iquant_router() -> APIRouter:
 
         try:
             while True:
-                now = datetime.now(BEIJING_TZ)
-                today_str = now.strftime("%Y-%m-%d")
-                current_time = now.time()
-
-                # Skip weekends
-                if now.weekday() >= 5:
-                    await asyncio.sleep(60)
+                # --- Get authoritative exchange time from Sina ---
+                sina_client = _state.get("sina_client")
+                if not sina_client:
+                    await asyncio.sleep(30)
                     continue
 
-                # --- 09:30: Push SELL signals for yesterday's holdings ---
-                if current_time >= SELL_TIME and sell_done_date != today_str and _state["holdings"]:
-                    sell_done_date = today_str
+                exchange = await sina_client.get_exchange_time()
+                if not exchange:
+                    # Sina unreachable — wait and retry
+                    await asyncio.sleep(30)
+                    continue
+
+                ex_date, ex_time_str = exchange
+                try:
+                    h, m, _s = ex_time_str.split(":")
+                    ex_time = time(int(h), int(m))
+                except (ValueError, IndexError):
+                    await asyncio.sleep(30)
+                    continue
+
+                # --- SELL: window 09:25~09:45 (exchange time) ---
+                if (
+                    sell_done_date != ex_date
+                    and SELL_WINDOW[0] <= ex_time <= SELL_WINDOW[1]
+                    and _state["holdings"]
+                ):
+                    sell_done_date = ex_date
                     for holding in _state["holdings"]:
                         _push_signal(
                             {
@@ -318,15 +338,24 @@ def create_iquant_router() -> APIRouter:
                         await _notify_feishu_signal(_state["pending_signals"][-1])
                     logger.info(f"iQuant: pushed {len(_state['holdings'])} SELL signals")
 
-                # --- 09:40: Run scan, push BUY signal ---
-                if current_time >= SCAN_TIME and scan_done_date != today_str:
-                    scan_done_date = today_str
+                # SELL deadline (exchange time)
+                if sell_done_date != ex_date and ex_time > SELL_WINDOW[1]:
+                    sell_done_date = ex_date
+                    logger.info(
+                        f"iQuant: past SELL window (exchange {ex_date} {ex_time_str}), skipping"
+                    )
 
+                # --- SCAN: window 09:35~10:00 (exchange time) ---
+                if (
+                    scan_done_date != ex_date
+                    and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]
+                ):
                     # Ensure resources are ready (universe, clients)
                     if not _state["initialized"]:
                         await asyncio.sleep(10)
                         continue
 
+                    scan_done_date = ex_date
                     try:
                         rec = await _run_scan()
                         if rec:
@@ -349,8 +378,18 @@ def create_iquant_router() -> APIRouter:
                         logger.error(f"iQuant scan failed: {error_detail}")
                         await _notify_feishu_error("扫描失败", error_detail)
 
-                # Sleep 30s between checks
-                await asyncio.sleep(30)
+                # SCAN deadline (exchange time)
+                if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
+                    scan_done_date = ex_date
+                    logger.info(
+                        f"iQuant: past SCAN window (exchange {ex_date} {ex_time_str}), skipping"
+                    )
+
+                # Adaptive sleep: poll less when both operations are done for today
+                if sell_done_date == ex_date and scan_done_date == ex_date:
+                    await asyncio.sleep(120)
+                else:
+                    await asyncio.sleep(30)
 
         except asyncio.CancelledError:
             logger.info("iQuant signal scheduler stopped")
