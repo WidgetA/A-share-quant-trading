@@ -75,7 +75,7 @@ class SinaRealtimeClient:
     """
 
     BASE_URL = "https://hq.sinajs.cn"
-    BATCH_SIZE = 800  # Sina handles large batches; URL length is the limit
+    BATCH_SIZE = 400  # Keep URL under ~4 KB to avoid HTTP 431
     TIMEOUT = 15.0
     BATCH_DELAY = 0.1  # seconds between batches to avoid rate limiting
 
@@ -125,10 +125,11 @@ class SinaRealtimeClient:
             codes_param = ",".join(sina_codes)
 
             try:
-                resp = await self._client.get(
-                    self.BASE_URL,
-                    params={"list": codes_param},
-                )
+                # Build URL directly — Sina expects /list=code1,code2 with
+                # raw commas.  Using params= would URL-encode commas as %2C,
+                # tripling separator size and causing HTTP 431 for large lists.
+                url = f"{self.BASE_URL}/list={codes_param}"
+                resp = await self._client.get(url)
                 resp.raise_for_status()
             except httpx.HTTPError as e:
                 raise SinaRealtimeError(f"Sina HTTP request failed: {e}") from e

@@ -101,7 +101,6 @@ async def _notify_feishu_signal(signal: dict) -> None:
             lines.append(f"板块: {signal.get('board_name', '-')}")
             lines.append(f"价格: {signal.get('latest_price', '-')}")
             lines.append(f"评分: {signal.get('composite_score', '-')}")
-        lines.append(f"数量: {signal.get('volume', '-')}股")
         lines.append(f"时间: {signal.get('created_at', '')}")
 
         await bot.send_message("\n".join(lines))
@@ -126,7 +125,7 @@ def create_iquant_router() -> APIRouter:
         "initialized": False,
         "pending_signals": [],  # signals waiting for iQuant to execute
         "executed_signals": [],  # acked signals (history)
-        "holdings": [],  # [{code, name, volume, buy_price, buy_date}]
+        "holdings": [],  # [{code, name, buy_date}] — volume determined by iQuant
         "scheduler_task": None,
         "universe_cache": None,
     }
@@ -280,9 +279,11 @@ def create_iquant_router() -> APIRouter:
 
         09:30 → SELL signals for yesterday's holdings (T+1 at open)
         09:40 → BUY signal from momentum scan
-        """
-        BUY_AMOUNT = 50000  # yuan per position, TODO: make configurable
 
+        Note: Signals carry stock_code + direction only.
+        Position sizing (volume) is determined by iQuant client
+        based on actual account funds.
+        """
         SELL_TIME = time(9, 30)
         SCAN_TIME = time(9, 40)
 
@@ -311,7 +312,6 @@ def create_iquant_router() -> APIRouter:
                                 "type": "sell",
                                 "stock_code": holding["code"],
                                 "stock_name": holding.get("name", ""),
-                                "volume": holding["volume"],
                                 "reason": "T+1 次日开盘卖出",
                             }
                         )
@@ -330,26 +330,18 @@ def create_iquant_router() -> APIRouter:
                     try:
                         rec = await _run_scan()
                         if rec:
-                            price = rec["latest_price"]
-                            volume = int(BUY_AMOUNT / price / 100) * 100
-                            if volume >= 100:
-                                _push_signal(
-                                    {
-                                        "type": "buy",
-                                        "stock_code": rec["stock_code"],
-                                        "stock_name": rec["stock_name"],
-                                        "board_name": rec["board_name"],
-                                        "latest_price": price,
-                                        "volume": volume,
-                                        "composite_score": rec["composite_score"],
-                                        "reason": f"动量扫描推荐 (板块={rec['board_name']})",
-                                    }
-                                )
-                                await _notify_feishu_signal(_state["pending_signals"][-1])
-                            else:
-                                logger.info(
-                                    f"iQuant: price {price} too high for BUY_AMOUNT={BUY_AMOUNT}"
-                                )
+                            _push_signal(
+                                {
+                                    "type": "buy",
+                                    "stock_code": rec["stock_code"],
+                                    "stock_name": rec["stock_name"],
+                                    "board_name": rec["board_name"],
+                                    "latest_price": rec["latest_price"],
+                                    "composite_score": rec["composite_score"],
+                                    "reason": f"动量扫描推荐 (板块={rec['board_name']})",
+                                }
+                            )
+                            await _notify_feishu_signal(_state["pending_signals"][-1])
                         else:
                             logger.info("iQuant scan: no recommendation today")
                     except Exception as e:
@@ -413,14 +405,13 @@ def create_iquant_router() -> APIRouter:
         found["acked_at"] = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         _state["executed_signals"].append(found)
 
-        # Update holdings
+        # Update holdings (server tracks which codes were bought for T+1 sell;
+        # actual volume is managed by iQuant client)
         if found["type"] == "buy":
             _state["holdings"].append(
                 {
                     "code": found["stock_code"],
                     "name": found.get("stock_name", ""),
-                    "volume": found["volume"],
-                    "buy_price": found.get("latest_price", 0),
                     "buy_date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
                 }
             )

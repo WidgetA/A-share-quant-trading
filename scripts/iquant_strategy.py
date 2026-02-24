@@ -41,6 +41,7 @@ import urllib.request
 # === CONFIGURATION (edit before deploying) ===
 API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "your-api-key-here"
+BUY_AMOUNT = 50000  # yuan per position — volume calculated locally from this
 
 # === INTERNAL STATE (persists across handlebar calls) ===
 _state = {
@@ -100,20 +101,28 @@ def _get_time_str():
 def _execute_buy(signal, ContextInfo):
     """Execute a BUY signal via passorder().
 
+    Volume is calculated locally from BUY_AMOUNT and the signal's
+    latest_price. Server only provides stock_code + direction.
+
     Args:
-        signal: dict with stock_code, stock_name, volume, latest_price
+        signal: dict with stock_code, stock_name, latest_price
         ContextInfo: iQuant context object
 
     Returns:
         True if order placed, False otherwise
     """
     code = signal["stock_code"]
-    volume = signal.get("volume", 0)
     price = signal.get("latest_price", 0)
     name = signal.get("stock_name", "")
 
+    if price <= 0:
+        print("[BUY] Invalid price %.2f for %s, skipping" % (price, code))
+        return False
+
+    # Calculate volume: round down to nearest 100 shares (1 lot)
+    volume = int(BUY_AMOUNT / price / 100) * 100
     if volume < 100:
-        print("[BUY] Volume < 100 for %s, skipping" % code)
+        print("[BUY] Price %.2f too high for BUY_AMOUNT=%d, skipping %s" % (price, BUY_AMOUNT, code))
         return False
 
     try:
@@ -132,22 +141,45 @@ def _execute_buy(signal, ContextInfo):
         return False
 
 
+def _get_position_volume(code, ContextInfo):
+    """Query actual sellable volume for a stock from the broker.
+
+    Uses iQuant get_trade_detail_data() to read real position.
+
+    Returns:
+        int: sellable volume (可用余额), or 0 if no position found
+    """
+    try:
+        account = ContextInfo.accID
+        positions = get_trade_detail_data(account, "POSITION", "STOCK")  # noqa: F821
+        for pos in positions:
+            # pos.m_strInstrumentID is the stock code
+            if hasattr(pos, "m_strInstrumentID") and pos.m_strInstrumentID == code:
+                return int(pos.m_nCanUseVolume)  # 可用余额
+    except Exception as e:
+        print("[SELL] Failed to query position for %s: %s" % (code, e))
+    return 0
+
+
 def _execute_sell(signal, ContextInfo):
     """Execute a SELL signal via passorder().
 
+    Queries actual sellable volume from broker — server only sends
+    stock_code + direction, no volume.
+
     Args:
-        signal: dict with stock_code, stock_name, volume
+        signal: dict with stock_code, stock_name
         ContextInfo: iQuant context object
 
     Returns:
         True if order placed, False otherwise
     """
     code = signal["stock_code"]
-    volume = signal.get("volume", 0)
     name = signal.get("stock_name", "")
 
+    volume = _get_position_volume(code, ContextInfo)
     if volume < 100:
-        print("[SELL] Volume < 100 for %s, skipping" % code)
+        print("[SELL] No sellable position for %s (volume=%d), skipping" % (code, volume))
         return False
 
     try:
