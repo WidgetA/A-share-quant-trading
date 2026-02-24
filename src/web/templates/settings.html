@@ -36,6 +36,36 @@
         </div>
     </section>
 
+    <!-- iQuant API Key Section -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>iQuant API Key</h3>
+            <p class="settings-desc">用于 iQuant 脚本连接策略服务器的认证密钥。iQuant 脚本中的 API_KEY 需与此处一致。</p>
+
+            <!-- Current Status -->
+            <div class="token-status" id="iquantStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="iquantStatusValue">加载中...</span>
+            </div>
+
+            <!-- Key Input -->
+            <div class="form-group">
+                <label for="iquantInput">API Key</label>
+                <input type="text" id="iquantInput" class="token-input"
+                    placeholder="输入任意字符串作为密钥..." style="font-family: monospace;">
+            </div>
+
+            <!-- Actions -->
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="generateIquantKey()" id="iquantGenBtn">随机生成</button>
+                <button class="btn btn-primary" onclick="saveIquantKey()" id="iquantSaveBtn">保存</button>
+            </div>
+
+            <!-- Result Message -->
+            <div class="token-message hidden" id="iquantMessage"></div>
+        </div>
+    </section>
+
     <!-- Tavily API Key Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -159,6 +189,66 @@ async function saveToken() {
     }
 }
 
+// === iQuant API Key ===
+async function loadIquantStatus() {
+    try {
+        const resp = await fetch('/api/settings/iquant-key');
+        const data = await resp.json();
+        const el = document.getElementById('iquantStatusValue');
+        if (data.configured) {
+            el.textContent = `${data.source_label} | ${data.masked_key} (${data.key_length} 字符)`;
+            el.className = 'token-status-value configured';
+        } else {
+            el.textContent = '未配置';
+            el.className = 'token-status-value not-configured';
+        }
+    } catch (e) {
+        document.getElementById('iquantStatusValue').textContent = '加载失败';
+    }
+}
+
+function generateIquantKey() {
+    // Generate a random 32-char hex string
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    const key = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+    document.getElementById('iquantInput').value = key;
+    showMessage('iquantMessage', '已生成随机密钥，请保存后复制到 iQuant 脚本的 API_KEY 中', true);
+}
+
+async function saveIquantKey() {
+    const key = document.getElementById('iquantInput').value.trim();
+    if (!key) {
+        showMessage('iquantMessage', '请先输入或生成 API Key', false);
+        return;
+    }
+
+    const btn = document.getElementById('iquantSaveBtn');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    try {
+        const resp = await fetch('/api/settings/iquant-key', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: key})
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage('iquantMessage', data.message + '，请将此 Key 填入 iQuant 脚本的 API_KEY 变量', true);
+            loadIquantStatus();
+        } else {
+            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
+            showMessage('iquantMessage', errMsg, false);
+        }
+    } catch (e) {
+        showMessage('iquantMessage', '请求失败: ' + e.message, false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '保存';
+    }
+}
+
 // === Tavily API Key ===
 async function loadTavilyStatus() {
     try {
@@ -239,8 +329,9 @@ async function saveTavilyKey() {
     }
 }
 
-// Load both on page load
+// Load all on page load
 loadTokenStatus();
+loadIquantStatus();
 loadTavilyStatus();
 </script>
 {% endblock %}

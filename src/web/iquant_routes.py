@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import traceback
 import uuid
 from datetime import datetime, time
@@ -37,14 +36,18 @@ BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 # --- Authentication ---
 
 _API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
-_IQUANT_API_KEY_ENV = "IQUANT_API_KEY"
 
 
 def _verify_api_key(api_key: str = Depends(_API_KEY_HEADER)) -> str:
     """Verify the API key from X-API-Key header."""
-    expected = os.environ.get(_IQUANT_API_KEY_ENV)
-    if not expected:
-        raise HTTPException(status_code=500, detail="IQUANT_API_KEY not configured on server")
+    from src.common.config import get_iquant_api_key
+
+    try:
+        expected = get_iquant_api_key()
+    except ValueError:
+        raise HTTPException(
+            status_code=500, detail="IQUANT_API_KEY not configured — set via Settings page"
+        )
     if api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return api_key

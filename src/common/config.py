@@ -162,6 +162,11 @@ _tavily_key_override: str | None = None
 # Persistence file for Tavily API key (survives container restarts)
 TAVILY_KEY_FILE = PROJECT_ROOT / "data" / "tavily_key.txt"
 
+# Runtime override for iQuant API key (set via web UI)
+_iquant_key_override: str | None = None
+# Persistence file for iQuant API key (survives container restarts)
+IQUANT_KEY_FILE = PROJECT_ROOT / "data" / "iquant_api_key.txt"
+
 
 def load_secrets() -> Config:
     """
@@ -472,6 +477,57 @@ def get_tavily_key_source() -> str:
             return "secrets_yaml"
     except FileNotFoundError:
         pass
+    return "not_configured"
+
+
+# === iQuant API Key ===
+
+
+def get_iquant_api_key() -> str:
+    """Get iQuant API key for authenticating iQuant script requests.
+
+    Priority: runtime override > persisted file > env var > not configured.
+    """
+    import os
+
+    if _iquant_key_override:
+        return _iquant_key_override
+
+    if IQUANT_KEY_FILE.exists():
+        key = IQUANT_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+
+    env_key = os.environ.get("IQUANT_API_KEY", "")
+    if env_key:
+        return env_key
+
+    raise ValueError(
+        "iQuant API key not configured. "
+        "Set via web UI Settings page or IQUANT_API_KEY environment variable."
+    )
+
+
+def set_iquant_api_key(key: str) -> None:
+    """Set iQuant API key at runtime and persist to disk."""
+    global _iquant_key_override
+    _iquant_key_override = key
+
+    IQUANT_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    IQUANT_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("iQuant API key updated via web UI and persisted to disk")
+
+
+def get_iquant_key_source() -> str:
+    """Return which source the current iQuant API key comes from."""
+    import os
+
+    if _iquant_key_override:
+        return "web_ui"
+    if IQUANT_KEY_FILE.exists() and IQUANT_KEY_FILE.read_text(encoding="utf-8").strip():
+        return "persisted_file"
+    if os.environ.get("IQUANT_API_KEY", ""):
+        return "env_var"
     return "not_configured"
 
 

@@ -4769,17 +4769,68 @@ def create_settings_router() -> APIRouter:
         except httpx.HTTPError as e:
             return {"success": False, "message": f"HTTP 请求失败: {e}"}
 
+    # === IQUANT API KEY SETTINGS ===
+
+    @router.get("/api/settings/iquant-key")
+    async def get_iquant_key_status():
+        """Get current iQuant API key status (masked)."""
+        from src.common.config import get_iquant_api_key, get_iquant_key_source
+
+        source = get_iquant_key_source()
+        source_labels = {
+            "web_ui": "Web UI (当前会话)",
+            "persisted_file": "Web UI (已持久化)",
+            "env_var": "环境变量",
+            "not_configured": "未配置",
+        }
+
+        try:
+            key = get_iquant_api_key()
+            if len(key) > 16:
+                masked = key[:4] + "..." + key[-4:]
+            else:
+                masked = "***"
+            return {
+                "configured": True,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_key": masked,
+                "key_length": len(key),
+            }
+        except ValueError:
+            return {
+                "configured": False,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_key": "",
+                "key_length": 0,
+            }
+
+    @router.post("/api/settings/iquant-key")
+    async def update_iquant_key(body: TokenUpdateRequest):
+        """Save a new iQuant API key."""
+        from src.common.config import set_iquant_api_key
+
+        key = body.token.strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        set_iquant_api_key(key)
+        return {"success": True, "message": "iQuant API Key 已保存"}
+
     @router.get("/api/settings/keys-status")
     async def get_all_keys_status():
         """Get status of all API keys needed for live trading."""
         from src.common.config import (
             get_ifind_token_source,
+            get_iquant_key_source,
             get_tavily_key_source,
             load_secrets,
         )
 
         ifind_ok = get_ifind_token_source() != "not_configured"
         tavily_ok = get_tavily_key_source() != "not_configured"
+        iquant_ok = get_iquant_key_source() != "not_configured"
 
         # Check Silicon Flow from secrets.yaml
         sf_ok = False
@@ -4793,6 +4844,7 @@ def create_settings_router() -> APIRouter:
             "ifind": {"configured": ifind_ok, "source": get_ifind_token_source()},
             "tavily": {"configured": tavily_ok, "source": get_tavily_key_source()},
             "siliconflow": {"configured": sf_ok},
+            "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
             "news_check_ready": tavily_ok and sf_ok,
         }
 
