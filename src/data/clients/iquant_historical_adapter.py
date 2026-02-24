@@ -112,7 +112,7 @@ class IQuantHistoricalAdapter:
 
         tables: list[dict[str, Any]] = []
         for full_code, result in zip(code_list, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error(f"akshare fetch failed for {full_code}: {result}")
                 raise result  # fail-fast: propagate first error
             if result is not None:
