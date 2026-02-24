@@ -346,10 +346,7 @@ def create_iquant_router() -> APIRouter:
                     )
 
                 # --- SCAN: window 09:35~10:00 (exchange time) ---
-                if (
-                    scan_done_date != ex_date
-                    and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]
-                ):
+                if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
                     # Ensure resources are ready (universe, clients)
                     if not _state["initialized"]:
                         await asyncio.sleep(10)
