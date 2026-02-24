@@ -62,6 +62,7 @@ _state = {
 _bt_state = {
     "holding": None,  # {code, name, buy_date} or None
     "scanned_dates": {},  # date_str -> True (avoid re-scan)
+    "_seen_dates": {},  # for debug: first bar log per date
 }
 
 
@@ -313,16 +314,33 @@ def _handlebar_backtest(ContextInfo):
     """Backtest mode: call server for each day's recommendation, simulate T+1.
 
     Trading pattern (mirrors the live strategy):
-      - 09:30 bar: SELL yesterday's holding (T+1 at market open)
-      - 09:40 bar: BUY today's recommendation from server scan
+      - ~09:30 bar: SELL yesterday's holding (T+1 at market open)
+      - ~09:40 bar: BUY today's recommendation from server scan
       - Other bars: no action
+
+    Uses time windows instead of exact match because QMT bar timetags
+    may represent bar close time (e.g., 09:31 instead of 09:30).
     """
     bar_date, bar_time = _get_bar_datetime(ContextInfo)
+
+    # DEBUG: print every call for the first 10 bars so we can see what's happening
+    _bt_state["_dbg_count"] = _bt_state.get("_dbg_count", 0) + 1
+    if _bt_state["_dbg_count"] <= 10:
+        print(
+            "[BT DEBUG #%d] bar_date=%s bar_time=%s barpos=%s"
+            % (
+                _bt_state["_dbg_count"],
+                bar_date,
+                bar_time,
+                getattr(ContextInfo, "barpos", "N/A"),
+            )
+        )
+
     if bar_date is None or bar_time is None:
         return
 
-    # === SELL at 09:30 (T+1: sell yesterday's buy at today's open) ===
-    if bar_time == "09:30" and _bt_state["holding"] is not None:
+    # === SELL window: 09:25~09:35 (T+1: sell yesterday's buy at open) ===
+    if "09:25" <= bar_time <= "09:35" and _bt_state["holding"] is not None:
         holding = _bt_state["holding"]
         # Only sell if holding is from a previous date (T+1 rule)
         if holding["buy_date"] != bar_date:
@@ -340,8 +358,8 @@ def _handlebar_backtest(ContextInfo):
                 print("[BT %s 09:30] No position for %s (vol=%d)" % (bar_date, code, volume))
             _bt_state["holding"] = None
 
-    # === BUY at 09:40 (scan for today's recommendation) ===
-    if bar_time == "09:40" and bar_date not in _bt_state["scanned_dates"]:
+    # === BUY window: 09:36~09:50 (scan for today's recommendation) ===
+    if "09:36" <= bar_time <= "09:50" and bar_date not in _bt_state["scanned_dates"]:
         _bt_state["scanned_dates"][bar_date] = True
 
         # Only buy if no current holding
