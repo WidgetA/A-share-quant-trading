@@ -62,7 +62,6 @@ _state = {
 _bt_state = {
     "holding": None,  # {code, name, buy_date} or None
     "scanned_dates": {},  # date_str -> True (avoid re-scan)
-    "_seen_dates": {},  # for debug: first bar log per date
 }
 
 
@@ -313,36 +312,23 @@ def _handlebar_live(ContextInfo):
 def _handlebar_backtest(ContextInfo):
     """Backtest mode: call server for each day's recommendation, simulate T+1.
 
-    Trading pattern (mirrors the live strategy):
-      - ~09:30 bar: SELL yesterday's holding (T+1 at market open)
-      - ~09:40 bar: BUY today's recommendation from server scan
-      - Other bars: no action
-
-    Uses time windows instead of exact match because QMT bar timetags
-    may represent bar close time (e.g., 09:31 instead of 09:30).
+    Supports both daily and minute bar frequencies:
+      - Daily bars (bar_time="00:00"): sell + buy on the same bar
+      - Minute bars: sell at ~09:30, buy at ~09:40
     """
     bar_date, bar_time = _get_bar_datetime(ContextInfo)
-
-    # DEBUG: print every call for the first 10 bars so we can see what's happening
-    _bt_state["_dbg_count"] = _bt_state.get("_dbg_count", 0) + 1
-    if _bt_state["_dbg_count"] <= 10:
-        print(
-            "[BT DEBUG #%d] bar_date=%s bar_time=%s barpos=%s"
-            % (
-                _bt_state["_dbg_count"],
-                bar_date,
-                bar_time,
-                getattr(ContextInfo, "barpos", "N/A"),
-            )
-        )
 
     if bar_date is None or bar_time is None:
         return
 
-    # === SELL window: 09:25~09:35 (T+1: sell yesterday's buy at open) ===
-    if "09:25" <= bar_time <= "09:35" and _bt_state["holding"] is not None:
+    # Daily bar (00:00) → treat as both sell and buy time
+    is_daily = bar_time == "00:00"
+    is_sell_time = is_daily or "09:25" <= bar_time <= "09:35"
+    is_buy_time = is_daily or "09:36" <= bar_time <= "09:50"
+
+    # === SELL: T+1 sell yesterday's holding ===
+    if is_sell_time and _bt_state["holding"] is not None:
         holding = _bt_state["holding"]
-        # Only sell if holding is from a previous date (T+1 rule)
         if holding["buy_date"] != bar_date:
             code = holding["code"]
             name = holding.get("name", "")
@@ -351,26 +337,24 @@ def _handlebar_backtest(ContextInfo):
                 try:
                     account = ContextInfo.accID
                     passorder(24, 1101, account, code, 11, -1, volume, "", 1, "", ContextInfo)  # noqa: F821
-                    print("[BT %s 09:30] SELL %s %s x%d" % (bar_date, code, name, volume))
+                    print("[BT %s] SELL %s %s x%d" % (bar_date, code, name, volume))
                 except Exception as e:
-                    print("[BT %s 09:30] SELL FAILED %s: %s" % (bar_date, code, e))
+                    print("[BT %s] SELL FAILED %s: %s" % (bar_date, code, e))
             else:
-                print("[BT %s 09:30] No position for %s (vol=%d)" % (bar_date, code, volume))
+                print("[BT %s] No position for %s (vol=%d)" % (bar_date, code, volume))
             _bt_state["holding"] = None
 
-    # === BUY window: 09:36~09:50 (scan for today's recommendation) ===
-    if "09:36" <= bar_time <= "09:50" and bar_date not in _bt_state["scanned_dates"]:
+    # === BUY: scan for today's recommendation ===
+    if is_buy_time and bar_date not in _bt_state["scanned_dates"]:
         _bt_state["scanned_dates"][bar_date] = True
 
-        # Only buy if no current holding
         if _bt_state["holding"] is not None:
             print(
-                "[BT %s 09:40] Already holding %s, skip scan"
+                "[BT %s] Already holding %s, skip scan"
                 % (bar_date, _bt_state["holding"]["code"])
             )
             return
 
-        # Call server for backtest scan
         try:
             result = _api_call(
                 "/backtest-scan",
@@ -378,13 +362,13 @@ def _handlebar_backtest(ContextInfo):
                 body={"trade_date": bar_date, "data_source": BT_DATA_SOURCE},
             )
         except Exception as e:
-            print("[BT %s 09:40] Scan failed: %s" % (bar_date, e))
+            print("[BT %s] Scan failed: %s" % (bar_date, e))
             return
 
         rec = result.get("recommendation")
         if not rec:
             reason = result.get("reason", "no recommendation")
-            print("[BT %s 09:40] No recommendation: %s" % (bar_date, reason))
+            print("[BT %s] No recommendation: %s" % (bar_date, reason))
             return
 
         code = rec["stock_code"]
@@ -393,11 +377,10 @@ def _handlebar_backtest(ContextInfo):
         score = rec.get("composite_score", 0)
 
         print(
-            "[BT %s 09:40] Recommendation: %s %s @ %.2f (score=%.4f)"
+            "[BT %s] BUY %s %s @ %.2f (score=%.4f)"
             % (bar_date, code, name, price, score)
         )
 
-        # Execute buy
         if _execute_buy(rec, ContextInfo):
             _bt_state["holding"] = {
                 "code": code,
