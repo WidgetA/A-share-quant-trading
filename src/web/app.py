@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
+from src.web.iquant_routes import create_iquant_router
 from src.web.routes import (
     create_momentum_router,
     create_order_assistant_router,
@@ -96,6 +97,11 @@ def create_app(
     # Add settings router
     settings_router = create_settings_router()
     app.include_router(settings_router)
+
+    # Add iQuant API router (isolated from main system, lazily initialized)
+    iquant_router = create_iquant_router()
+    app.include_router(iquant_router)
+    app.state.iquant_router = iquant_router  # for shutdown cleanup
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():
@@ -224,6 +230,11 @@ def create_app(
         if fundamentals_db:
             await fundamentals_db.close()
             logger.info("Shared fundamentals DB closed")
+
+        # Cleanup iQuant isolated resources
+        iquant_rtr = getattr(app.state, "iquant_router", None)
+        if iquant_rtr and hasattr(iquant_rtr, "_iquant_cleanup"):
+            await iquant_rtr._iquant_cleanup()
 
     return app
 
