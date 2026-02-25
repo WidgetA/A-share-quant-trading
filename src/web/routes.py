@@ -4364,20 +4364,10 @@ async def _execute_monitor_scan(state: dict) -> dict | None:
             logger.error("Monitor: fundamentals DB not available")
             return None
 
-        # Get universe (main-board codes) via akshare
+        # Get universe (main-board codes) from local PostgreSQL — no external API call
         stock_filter = create_main_board_only_filter()
-        import asyncio as _aio
-
-        import akshare as ak
-
-        df = await _aio.to_thread(ak.stock_info_a_code_name)
-        universe = [
-            row["code"]
-            for _, row in df.iterrows()
-            if isinstance(row["code"], str)
-            and len(row["code"]) == 6
-            and stock_filter.is_allowed(row["code"])
-        ]
+        all_codes = await fundamentals_db.get_all_stock_codes()
+        universe = [c for c in all_codes if stock_filter.is_allowed(c)]
         logger.info(f"Monitor (sina): universe has {len(universe)} codes")
 
         sina = SinaRealtimeClient()

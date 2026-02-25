@@ -25,8 +25,13 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Concurrency limit for parallel akshare downloads
-_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(8)
+# Concurrency limit for parallel akshare downloads.
+# Keep low (4) to avoid triggering East Money rate limits / connection resets.
+_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(4)
+
+# Retry config for transient network errors (ConnectionError, RemoteDisconnected)
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0  # seconds, doubles each retry
 
 # akshare column name → iFinD indicator name mapping
 _AKSHARE_TO_IFIND: dict[str, str] = {
@@ -127,24 +132,42 @@ class IQuantHistoricalAdapter:
         start_date: str,
         end_date: str,
     ) -> dict[str, Any] | None:
-        """Fetch daily data for a single stock via akshare."""
+        """Fetch daily data for a single stock via akshare (with retry)."""
         import akshare as ak
 
         bare = full_code.split(".")[0]
 
         async with _DOWNLOAD_SEMAPHORE:
-            try:
-                df = await asyncio.to_thread(
-                    ak.stock_zh_a_hist,
-                    symbol=bare,
-                    period="daily",
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
-                    adjust="qfq",
-                )
-            except Exception:
-                logger.error(f"akshare stock_zh_a_hist failed for {bare}")
-                raise  # fail-fast
+            last_exc: BaseException | None = None
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    df = await asyncio.to_thread(
+                        ak.stock_zh_a_hist,
+                        symbol=bare,
+                        period="daily",
+                        start_date=start_date.replace("-", ""),
+                        end_date=end_date.replace("-", ""),
+                        adjust="qfq",
+                    )
+                    break  # success
+                except (ConnectionError, OSError) as e:
+                    last_exc = e
+                    if attempt < _MAX_RETRIES:
+                        wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"akshare {bare} attempt {attempt}/{_MAX_RETRIES} failed "
+                            f"({type(e).__name__}), retrying in {wait:.0f}s"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        logger.error(
+                            f"akshare stock_zh_a_hist failed for {bare} "
+                            f"after {_MAX_RETRIES} attempts: {e}"
+                        )
+                        raise
+                except Exception:
+                    logger.error(f"akshare stock_zh_a_hist failed for {bare}")
+                    raise  # non-retryable error, fail-fast
 
         if df is None or df.empty:
             return None
@@ -238,15 +261,30 @@ class IQuantHistoricalAdapter:
         start_date: str,
         end_date: str,
     ) -> list[str]:
-        """Get trading dates via akshare."""
+        """Get trading dates via akshare (with retry)."""
         import akshare as ak
 
-        try:
-            df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
-            all_dates = df["trade_date"].dt.date
-            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
-            ed = datetime.strptime(end_date, "%Y-%m-%d").date()
-            return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
-        except Exception:
-            logger.error("Failed to get trade dates from akshare")
-            raise
+        last_exc: BaseException | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
+                all_dates = df["trade_date"].dt.date
+                sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+                ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+                return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
+            except (ConnectionError, OSError) as e:
+                last_exc = e
+                if attempt < _MAX_RETRIES:
+                    wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"akshare trade_dates attempt {attempt}/{_MAX_RETRIES} "
+                        f"failed ({type(e).__name__}), retrying in {wait:.0f}s"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"Failed to get trade dates after {_MAX_RETRIES} attempts")
+                    raise
+            except Exception:
+                logger.error("Failed to get trade dates from akshare")
+                raise
+        raise last_exc  # unreachable but satisfies type checker
