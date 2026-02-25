@@ -4366,8 +4366,9 @@ async def _execute_monitor_scan(state: dict) -> dict | None:
 
         # Get universe (main-board codes) via akshare
         stock_filter = create_main_board_only_filter()
-        import akshare as ak
         import asyncio as _aio
+
+        import akshare as ak
 
         df = await _aio.to_thread(ak.stock_info_a_code_name)
         universe = [
