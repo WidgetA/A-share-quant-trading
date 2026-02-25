@@ -1616,6 +1616,8 @@ def create_momentum_router() -> APIRouter:
         if monitor_state["running"]:
             return {"success": True, "message": "监控已在运行中"}
 
+        # Store app_state ref so background task can access OSS cache
+        monitor_state["_app_state"] = request.app.state
         task = asyncio.create_task(_run_intraday_monitor(monitor_state))
         monitor_state["task"] = task
         return {"success": True, "message": "监控已启动"}
@@ -1635,8 +1637,10 @@ def create_momentum_router() -> APIRouter:
     async def trigger_monitor_scan(request: Request) -> dict:
         """Manually trigger a momentum scan right now (any time of day)."""
         monitor_state = _get_monitor_state(request)
+        # Pass OSS cache for historical lookback (avoids unreliable akshare API)
+        akshare_cache = getattr(request.app.state, "akshare_cache", None)
         try:
-            result = await _execute_monitor_scan(monitor_state)
+            result = await _execute_monitor_scan(monitor_state, akshare_cache=akshare_cache)
             if result:
                 return {"success": True, "result": result}
             return {"success": False, "message": "扫描完成但无结果（无合格股票或数据源不可用）"}
@@ -4324,7 +4328,7 @@ async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
     return await scanner.scan(price_snapshots, trade_date=trade_date)
 
 
-async def _execute_monitor_scan(state: dict) -> dict | None:
+async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict | None:
     """
     Execute a single momentum scan using the configured data source.
 
@@ -4391,7 +4395,7 @@ async def _execute_monitor_scan(state: dict) -> dict | None:
                     low_price=q.low_price,
                 )
 
-            adapter = IQuantHistoricalAdapter(sina)
+            adapter = IQuantHistoricalAdapter(sina, cache=akshare_cache)
             concept_mapper = LocalConceptMapper()
             scanner = MomentumSectorScanner(
                 ifind_client=adapter,  # type: ignore[arg-type]
@@ -4549,7 +4553,9 @@ async def _run_intraday_monitor(state: dict) -> None:
             # 9:40-9:50 window — run scan once
             logger.info("Monitor: entering scan window")
             try:
-                await _execute_monitor_scan(state)
+                app_state = state.get("_app_state")
+                akshare_cache = getattr(app_state, "akshare_cache", None) if app_state else None
+                await _execute_monitor_scan(state, akshare_cache=akshare_cache)
             except Exception as e:
                 logger.error(f"Monitor scan error: {e}", exc_info=True)
                 # Notify Feishu about the error

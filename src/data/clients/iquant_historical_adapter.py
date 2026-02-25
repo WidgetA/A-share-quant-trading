@@ -1,18 +1,20 @@
 # === MODULE PURPOSE ===
-# On-the-fly historical data adapter for the iQuant subsystem.
-# Downloads historical data from akshare per-request (not from shared OSS cache).
+# Historical data adapter for the monitor/live scan subsystem.
+# Provides historical lookback data for MomentumQualityFilter.
 # Duck-types IFinDHttpClient so MomentumSectorScanner works unchanged.
 
 # === DEPENDENCIES ===
-# - akshare: Free A-share daily OHLCV data (from East Money)
+# - AkshareBacktestCache (OSS): Primary source — pre-downloaded, zero network calls
+# - akshare: Fallback only — on-the-fly download if no OSS cache available
 # - SinaRealtimeClient: Delegates real_time_quotation to Sina Finance
-# - No shared resources — fully isolated from the main online system
 
 # === KEY CONCEPTS ===
-# - On-the-fly: each history_quotes call downloads data via akshare
-# - Concurrency: uses asyncio.gather + semaphore for parallel downloads
-# - Volume: akshare returns 手 (lots); converted to 股 (shares) at read time
-# - Fail-fast: download errors raise immediately (trading safety)
+# - OSS cache first: If AkshareBacktestCache is provided, history_quotes reads
+#   from the in-memory cache (loaded from Alibaba Cloud OSS at startup).
+#   This avoids all akshare/East Money API calls, which are unreliable from cloud.
+# - Fallback: If no cache, downloads per-stock via akshare (with retry).
+# - Volume: akshare returns 手 (lots); converted to 股 (shares) at read time.
+# - Fail-fast: download errors raise immediately (trading safety).
 
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Concurrency limit for parallel akshare downloads.
+# Concurrency limit for parallel akshare downloads (fallback only).
 # Keep low (4) to avoid triggering East Money rate limits / connection resets.
 _DOWNLOAD_SEMAPHORE = asyncio.Semaphore(4)
 
@@ -54,31 +56,41 @@ _IFIND_TO_AKSHARE: dict[str, str] = {v: k for k, v in _AKSHARE_TO_IFIND.items() 
 
 class IQuantHistoricalAdapter:
     """
-    Duck-types IFinDHttpClient for iQuant live mode.
+    Duck-types IFinDHttpClient for monitor/live scan mode.
 
-    Unlike AkshareHistoricalAdapter (which reads from a pre-downloaded cache),
-    this adapter fetches data on-the-fly from akshare for each request.
-    Appropriate for live mode where we only need lookback data for
-    ~10-30 candidate stocks (not 3000+).
+    Data sources (in priority order):
+        1. OSS cache (AkshareBacktestCache) — zero network calls, instant
+        2. akshare on-the-fly download — fallback with retry
 
     Methods implemented:
-        - history_quotes(): Fetches daily OHLCV via akshare stock_zh_a_hist
-        - real_time_quotation(): Delegates to SinaRealtimeClient.as_ifind_format()
+        - history_quotes(): From OSS cache or akshare fallback
+        - real_time_quotation(): Delegates to SinaRealtimeClient
         - high_frequency(): Returns empty (live mode uses real_time_quotation)
 
     Volume convention: akshare returns 手 (lots); converted to 股 (shares).
     """
 
-    def __init__(self, sina_client: Any) -> None:
+    def __init__(self, sina_client: Any, cache: Any = None) -> None:
         """
         Args:
             sina_client: SinaRealtimeClient instance for real-time data delegation.
+            cache: Optional AkshareBacktestCache for history lookback (avoids akshare API).
         """
         from src.data.clients.sina_realtime import SinaRealtimeClient
 
         if not isinstance(sina_client, SinaRealtimeClient):
             raise TypeError("sina_client must be a SinaRealtimeClient instance")
         self._sina = sina_client
+
+        # Build a cache-backed adapter for history_quotes if cache is available
+        self._cached_adapter: Any = None
+        if cache is not None and getattr(cache, "is_ready", False):
+            from src.data.clients.akshare_backtest_cache import AkshareHistoricalAdapter
+
+            self._cached_adapter = AkshareHistoricalAdapter(cache)
+            logger.info("IQuantHistoricalAdapter: using OSS cache for history_quotes")
+        else:
+            logger.info("IQuantHistoricalAdapter: no OSS cache, will use akshare on-the-fly")
 
     @property
     def is_connected(self) -> bool:
@@ -98,13 +110,28 @@ class IQuantHistoricalAdapter:
         end_date: str,
         function_para: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Fetch historical daily data via akshare on-the-fly.
+        """Fetch historical daily data.
 
-        For each stock code, calls akshare.stock_zh_a_hist() concurrently.
-        Returns data in iFinD cmd_history_quotation response format.
-
-        Volume is converted from 手 to 股 (×100) at read time.
+        Primary: reads from OSS cache (zero network calls).
+        Fallback: downloads on-the-fly from akshare (with retry).
         """
+        # Use OSS cache if available — no network call
+        if self._cached_adapter is not None:
+            return await self._cached_adapter.history_quotes(
+                codes, indicators, start_date, end_date, function_para
+            )
+
+        # Fallback: on-the-fly akshare download
+        return await self._history_quotes_akshare(codes, indicators, start_date, end_date)
+
+    async def _history_quotes_akshare(
+        self,
+        codes: str,
+        indicators: str,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, Any]:
+        """Fallback: fetch historical daily data via akshare on-the-fly."""
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         indicator_list = [ind.strip() for ind in indicators.split(",")]
 
