@@ -4368,9 +4368,15 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
             logger.error("Monitor: fundamentals DB not available")
             return None
 
-        # Get universe (main-board codes) from local PostgreSQL — no external API call
+        # Get universe: prefer OSS cache (complete, zero query), fallback to PG
         stock_filter = create_main_board_only_filter()
-        all_codes = await fundamentals_db.get_all_stock_codes()
+        cache_ready = akshare_cache and getattr(akshare_cache, "is_ready", False)
+        if cache_ready and akshare_cache.stock_codes:
+            all_codes = akshare_cache.stock_codes
+            logger.info(f"Monitor (sina): universe from OSS cache ({len(all_codes)} codes)")
+        else:
+            all_codes = await fundamentals_db.get_all_stock_codes()
+            logger.info(f"Monitor (sina): universe from PG ({len(all_codes)} codes)")
         universe = [c for c in all_codes if stock_filter.is_allowed(c)]
         logger.info(f"Monitor (sina): universe has {len(universe)} codes")
 
