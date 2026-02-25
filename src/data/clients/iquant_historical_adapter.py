@@ -113,16 +113,34 @@ class IQuantHistoricalAdapter:
         """Fetch historical daily data.
 
         Primary: reads from OSS cache (zero network calls).
-        Fallback: downloads on-the-fly from akshare (with retry).
+        Fallback: downloads on-the-fly from akshare (with retry) for cache misses.
         """
-        # Use OSS cache if available — no network call
-        if self._cached_adapter is not None:
-            return await self._cached_adapter.history_quotes(
-                codes, indicators, start_date, end_date, function_para
-            )
+        if self._cached_adapter is None:
+            # No cache at all — download everything via akshare
+            return await self._history_quotes_akshare(codes, indicators, start_date, end_date)
 
-        # Fallback: on-the-fly akshare download
-        return await self._history_quotes_akshare(codes, indicators, start_date, end_date)
+        # Try OSS cache first
+        result = await self._cached_adapter.history_quotes(
+            codes, indicators, start_date, end_date, function_para
+        )
+
+        # Check which codes are missing from cache (no table entry)
+        cached_codes = {t["thscode"] for t in result.get("tables", [])}
+        all_codes = [c.strip() for c in codes.split(",") if c.strip()]
+        missing = [c for c in all_codes if c not in cached_codes]
+
+        if missing:
+            logger.info(
+                f"OSS cache miss for {len(missing)} stock(s): "
+                f"{', '.join(missing[:5])}{'...' if len(missing) > 5 else ''} "
+                f"— falling back to akshare on-the-fly"
+            )
+            fallback = await self._history_quotes_akshare(
+                ",".join(missing), indicators, start_date, end_date
+            )
+            result["tables"].extend(fallback.get("tables", []))
+
+        return result
 
     async def _history_quotes_akshare(
         self,
