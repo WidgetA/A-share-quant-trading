@@ -25,6 +25,7 @@ import httpx
 if TYPE_CHECKING:
     from src.strategy.strategies.momentum_sector_scanner import (
         RecommendedStock,
+        ScanResult,
         SelectedStock,
     )
 
@@ -339,5 +340,71 @@ Limit-up (skipped):
         else:
             lines.append("")
             lines.append("⭐ 推荐: 无 (今日无符合条件的推荐标的)")
+
+        return await self.send_message("\n".join(lines))
+
+    async def send_daily_pick_report(
+        self,
+        scan_result: ScanResult,
+        elapsed_seconds: float,
+        scan_time: datetime | None = None,
+    ) -> bool:
+        """
+        Send comprehensive daily momentum pick report.
+
+        Includes: recommendation, top 5 by score, hot boards, timing.
+        """
+        now = scan_time or datetime.now(BEIJING_TZ)
+        time_str = now.strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"📊 每日动量选股报告 ({time_str})",
+            f"⏱️ 计算用时: {elapsed_seconds:.1f}秒",
+            (
+                f"初筛: {len(scan_result.initial_gainers)}只 | "
+                f"入选: {len(scan_result.selected_stocks)}只 | "
+                f"热门板块: {len(scan_result.hot_boards)}个"
+            ),
+        ]
+
+        rec = scan_result.recommended_stock
+        if rec:
+            lines.append("")
+            lines.append(f"⭐ 今日推荐买入: {rec.stock_code} {rec.stock_name}")
+            lines.append(
+                f"板块: {rec.board_name} | 得分: {rec.composite_score:+.2f} | "
+                f"盘中涨: {rec.gain_from_open_pct:+.2f}%"
+            )
+            lines.append(
+                f"换手放大: {rec.turnover_amp:.1f}x | "
+                f"开盘涨: {rec.open_gain_pct:+.1f}% | "
+                f"现价: {rec.latest_price:.2f}"
+            )
+        else:
+            lines.append("")
+            lines.append("⭐ 今日无推荐标的")
+
+        # Top 5 scored candidates
+        scored = scan_result.scored_candidates
+        if scored:
+            lines.append("")
+            lines.append("📈 得分前5名:")
+            for i, c in enumerate(scored[:5]):
+                lines.append(
+                    f"{i + 1}. {c.stock_code} {c.stock_name}  "
+                    f"{c.composite_score:+.2f}  {c.board_name}  "
+                    f"涨{c.gain_from_open_pct:+.2f}%"
+                )
+
+        # Hot boards summary
+        if scan_result.hot_boards:
+            lines.append("")
+            sorted_boards = sorted(
+                scan_result.hot_boards.items(), key=lambda x: -len(x[1])
+            )
+            board_parts = [
+                f"{name}({len(codes)}只)" for name, codes in sorted_boards[:8]
+            ]
+            lines.append(f"🔥 热门板块: {' | '.join(board_parts)}")
 
         return await self.send_message("\n".join(lines))

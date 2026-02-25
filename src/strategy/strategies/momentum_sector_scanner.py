@@ -133,6 +133,20 @@ class RecommendedStock:
 
 
 @dataclass
+class ScoredCandidate:
+    """A candidate with its composite score from Step 6 ranking."""
+
+    stock_code: str
+    stock_name: str
+    board_name: str
+    composite_score: float
+    gain_from_open_pct: float
+    turnover_amp: float
+    consecutive_up_days: int
+    latest_price: float
+
+
+@dataclass
 class ScanResult:
     """Complete result of a momentum sector scan."""
 
@@ -146,6 +160,8 @@ class ScanResult:
     recommended_stock: RecommendedStock | None = None
     # Price snapshots for selected stocks (for backfill/export use)
     all_snapshots: dict[str, PriceSnapshot] = field(default_factory=dict)
+    # Step 6: all scored candidates sorted by composite score descending
+    scored_candidates: list[ScoredCandidate] = field(default_factory=list)
 
     @property
     def has_results(self) -> bool:
@@ -281,8 +297,10 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
         if selected:
-            result.recommended_stock = await self._step6_recommend(
-                selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
+            result.recommended_stock, result.scored_candidates = (
+                await self._step6_recommend(
+                    selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
+                )
             )
             if result.recommended_stock:
                 rec = result.recommended_stock
@@ -476,7 +494,7 @@ class MomentumSectorScanner:
         price_snapshots: dict[str, PriceSnapshot] | None = None,
         consecutive_up_data: dict[str, int] | None = None,
         avg_daily_volume_data: dict[str, float] | None = None,
-    ) -> RecommendedStock | None:
+    ) -> tuple[RecommendedStock | None, list[ScoredCandidate]]:
         """
         Step 6: Rank candidates by composite score and pick #1.
 
@@ -493,7 +511,7 @@ class MomentumSectorScanner:
         If negative → fall back to #2 (no recursive check on #2).
         """
         if not selected_stocks:
-            return None
+            return None, []
 
         logger.info(
             f"Step 6: Scoring {len(selected_stocks)} candidates by -Z(gfo) - Z(amp) - cup_penalty"
@@ -517,7 +535,7 @@ class MomentumSectorScanner:
 
         if not non_limit_up:
             logger.info("Step 6: All candidates at limit-up, no recommendation")
-            return None
+            return None, []
 
         candidates_pool = non_limit_up
 
@@ -559,6 +577,25 @@ class MomentumSectorScanner:
 
         # Sort by composite score descending
         scored.sort(key=lambda x: x[1], reverse=True)
+
+        # Build scored_candidates for top-N reporting
+        all_scored_candidates = [
+            ScoredCandidate(
+                stock_code=s.stock_code,
+                stock_name=s.stock_name,
+                board_name=s.board_name,
+                composite_score=sc,
+                gain_from_open_pct=gfo,
+                turnover_amp=amp,
+                consecutive_up_days=cup,
+                latest_price=(
+                    _snapshots[s.stock_code].latest_price
+                    if s.stock_code in _snapshots
+                    else 0.0
+                ),
+            )
+            for s, sc, gfo, amp, _, cup in scored
+        ]
 
         # Log top 3
         if len(scored) > 1:
@@ -616,7 +653,7 @@ class MomentumSectorScanner:
 
         snap = _snapshots.get(best.stock_code)
 
-        return RecommendedStock(
+        recommended = RecommendedStock(
             stock_code=best.stock_code,
             stock_name=best.stock_name,
             board_name=best.board_name,
@@ -633,6 +670,7 @@ class MomentumSectorScanner:
             news_check_passed=news_check_passed,
             news_check_detail=news_check_detail,
         )
+        return recommended, all_scored_candidates
 
     async def _fetch_constituent_prices(self, stock_codes: list[str]) -> dict[str, PriceSnapshot]:
         """

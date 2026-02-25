@@ -531,6 +531,40 @@ def get_iquant_key_source() -> str:
     return "not_configured"
 
 
+# === Monitor Data Source ===
+
+_monitor_ds_override: str | None = None
+MONITOR_DS_FILE = PROJECT_ROOT / "data" / "monitor_data_source.txt"
+
+
+def get_monitor_data_source() -> str:
+    """Get intraday monitor data source: 'ifind' or 'sina'.
+
+    Priority: runtime override > persisted file > default ('sina').
+    """
+    if _monitor_ds_override:
+        return _monitor_ds_override
+
+    if MONITOR_DS_FILE.exists():
+        val = MONITOR_DS_FILE.read_text(encoding="utf-8").strip()
+        if val in ("ifind", "sina"):
+            return val
+
+    return "sina"  # Default to free data source
+
+
+def set_monitor_data_source(source: str) -> None:
+    """Set monitor data source and persist to disk."""
+    global _monitor_ds_override
+    if source not in ("ifind", "sina"):
+        raise ValueError(f"Invalid data source: {source}. Must be 'ifind' or 'sina'.")
+    _monitor_ds_override = source
+
+    MONITOR_DS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MONITOR_DS_FILE.write_text(source, encoding="utf-8")
+    logger.info(f"Monitor data source set to '{source}' and persisted")
+
+
 def load_config(config_path: str | Path) -> Config:
     """
     Load configuration from a YAML file.

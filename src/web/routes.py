@@ -1631,6 +1631,38 @@ def create_momentum_router() -> APIRouter:
         monitor_state["task"] = None
         return {"success": True, "message": "监控已停止"}
 
+    @router.post("/api/momentum/monitor/trigger")
+    async def trigger_monitor_scan(request: Request) -> dict:
+        """Manually trigger a momentum scan right now (any time of day)."""
+        monitor_state = _get_monitor_state(request)
+        try:
+            result = await _execute_monitor_scan(monitor_state)
+            if result:
+                return {"success": True, "result": result}
+            return {"success": False, "message": "扫描完成但无结果（无合格股票或数据源不可用）"}
+        except Exception as e:
+            logger.error(f"Manual trigger scan error: {e}", exc_info=True)
+            return {"success": False, "message": f"扫描出错: {type(e).__name__}: {e}"}
+
+    @router.get("/api/momentum/monitor/config")
+    async def get_monitor_config() -> dict:
+        """Get current monitor data source config."""
+        from src.common.config import get_monitor_data_source
+
+        return {"data_source": get_monitor_data_source()}
+
+    @router.post("/api/momentum/monitor/config")
+    async def set_monitor_config(request: Request) -> dict:
+        """Update monitor data source config."""
+        from src.common.config import set_monitor_data_source
+
+        body = await request.json()
+        source = body.get("data_source", "")
+        if source not in ("ifind", "sina"):
+            raise HTTPException(status_code=400, detail="data_source must be 'ifind' or 'sina'")
+        set_monitor_data_source(source)
+        return {"success": True, "data_source": source}
+
     @router.post("/api/momentum/range-backtest")
     async def run_range_backtest(request: Request, body: MomentumRangeBacktestRequest):
         """[DEPRECATED] Use /api/momentum/combined-analysis instead.
@@ -4292,19 +4324,22 @@ async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
     return await scanner.scan(price_snapshots, trade_date=trade_date)
 
 
-async def _run_intraday_monitor(state: dict) -> None:
+async def _execute_monitor_scan(state: dict) -> dict | None:
     """
-    Background task: intraday momentum monitor.
+    Execute a single momentum scan using the configured data source.
 
-    Runs every trading day 9:30-9:40, polls for stocks with gain > -0.5%,
-    then runs the full strategy scan (9:40 vs open >0.56%) and sends Feishu notification.
+    Supports two data source modes:
+    - 'sina': Sina batch quotes (free) + IQuantHistoricalAdapter (akshare for lookback)
+    - 'ifind': iFinD iwencai polling + iFinD historical data
 
-    Uses shared iFinD client and fundamentals DB from app.state (passed via state dict).
+    Returns result_entry dict on success, None on failure.
+    Both the auto-scheduler and the manual trigger button call this.
     """
-    import asyncio
-    from datetime import datetime, time, timedelta
+    import time as time_module
+    from datetime import datetime
     from zoneinfo import ZoneInfo
 
+    from src.common.config import get_monitor_data_source
     from src.common.feishu_bot import FeishuBot
     from src.data.sources.local_concept_mapper import LocalConceptMapper
     from src.strategy.strategies.momentum_sector_scanner import (
@@ -4313,9 +4348,182 @@ async def _run_intraday_monitor(state: dict) -> None:
     )
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    POLL_INTERVAL = 30  # seconds
-    MONITOR_START = time(9, 30)
-    MONITOR_END = time(9, 40)
+    data_source = get_monitor_data_source()
+    logger.info(f"Monitor scan starting (data_source={data_source})")
+
+    start_time = time_module.monotonic()
+
+    if data_source == "sina":
+        # --- Sina path: batch fetch all main-board stocks ---
+        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
+        from src.data.clients.sina_realtime import SinaRealtimeClient
+        from src.strategy.filters.stock_filter import create_main_board_only_filter
+
+        fundamentals_db = state.get("fundamentals_db")
+        if not fundamentals_db:
+            logger.error("Monitor: fundamentals DB not available")
+            return None
+
+        # Get universe (main-board codes) via akshare
+        stock_filter = create_main_board_only_filter()
+        import akshare as ak
+        import asyncio as _aio
+
+        df = await _aio.to_thread(ak.stock_info_a_code_name)
+        universe = [
+            row["code"]
+            for _, row in df.iterrows()
+            if isinstance(row["code"], str)
+            and len(row["code"]) == 6
+            and stock_filter.is_allowed(row["code"])
+        ]
+        logger.info(f"Monitor (sina): universe has {len(universe)} codes")
+
+        sina = SinaRealtimeClient()
+        await sina.start()
+        try:
+            quotes = await sina.batch_get_quotes(universe)
+            logger.info(f"Monitor (sina): got {len(quotes)} quotes")
+
+            price_snapshots: dict[str, PriceSnapshot] = {}
+            for code, q in quotes.items():
+                if not q.is_trading:
+                    continue
+                price_snapshots[code] = PriceSnapshot(
+                    stock_code=code,
+                    stock_name=q.stock_name,
+                    open_price=q.open_price,
+                    prev_close=q.prev_close,
+                    latest_price=q.latest_price,
+                    early_volume=q.volume,
+                    high_price=q.high_price,
+                    low_price=q.low_price,
+                )
+
+            adapter = IQuantHistoricalAdapter(sina)
+            concept_mapper = LocalConceptMapper()
+            scanner = MomentumSectorScanner(
+                ifind_client=adapter,  # type: ignore[arg-type]
+                fundamentals_db=fundamentals_db,
+                concept_mapper=concept_mapper,
+                stock_filter=stock_filter,
+            )
+            scan_result = await scanner.scan(price_snapshots, trade_date=None)
+        finally:
+            await sina.stop()
+
+    else:
+        # --- iFinD path: original logic (iwencai pre-filter + iFinD history) ---
+        ifind_client = state.get("ifind_client")
+        fundamentals_db = state.get("fundamentals_db")
+
+        if not ifind_client or not fundamentals_db:
+            logger.error("Monitor: iFinD client or fundamentals DB not available")
+            return None
+
+        concept_mapper = LocalConceptMapper()
+
+        result = await ifind_client.smart_stock_picking(
+            "涨幅大于-0.5%的沪深主板非ST股票", "stock"
+        )
+        snapshots = await _parse_iwencai_realtime(ifind_client, result)
+        if not snapshots:
+            logger.info("Monitor (ifind): no pre-filtered stocks found")
+            return None
+
+        scanner = MomentumSectorScanner(
+            ifind_client=ifind_client,
+            fundamentals_db=fundamentals_db,
+            concept_mapper=concept_mapper,
+        )
+        scan_result = await scanner.scan(snapshots, trade_date=None)
+
+    elapsed = time_module.monotonic() - start_time
+    scan_time = datetime.now(beijing_tz)
+
+    # Build result entry for state storage
+    rec = scan_result.recommended_stock
+    result_entry = {
+        "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
+        "initial_gainers": len(scan_result.initial_gainers),
+        "hot_boards": len(scan_result.hot_boards),
+        "selected_count": len(scan_result.selected_stocks),
+        "elapsed_seconds": round(elapsed, 1),
+        "data_source": data_source,
+        "selected_stocks": [
+            {
+                "stock_code": s.stock_code,
+                "stock_name": s.stock_name,
+                "board_name": s.board_name,
+                "open_gain_pct": round(s.open_gain_pct, 2),
+                "pe_ttm": round(s.pe_ttm, 2),
+                "board_avg_pe": round(s.board_avg_pe, 2),
+            }
+            for s in scan_result.selected_stocks
+        ],
+        "scored_top5": [
+            {
+                "stock_code": c.stock_code,
+                "stock_name": c.stock_name,
+                "board_name": c.board_name,
+                "composite_score": round(c.composite_score, 2),
+                "gain_from_open_pct": round(c.gain_from_open_pct, 2),
+            }
+            for c in scan_result.scored_candidates[:5]
+        ],
+        "recommended_stock": {
+            "stock_code": rec.stock_code,
+            "stock_name": rec.stock_name,
+            "board_name": rec.board_name,
+            "board_stock_count": rec.board_stock_count,
+            "open_gain_pct": round(rec.open_gain_pct, 2),
+            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
+            "turnover_amp": round(rec.turnover_amp, 2),
+            "composite_score": round(rec.composite_score, 2),
+        }
+        if rec
+        else None,
+    }
+
+    state["last_result"] = result_entry
+    state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
+    state["today_results"].append(result_entry)
+
+    # Send Feishu notification
+    bot = FeishuBot()
+    if bot.is_configured():
+        await bot.send_daily_pick_report(
+            scan_result=scan_result,
+            elapsed_seconds=elapsed,
+            scan_time=scan_time,
+        )
+        logger.info("Monitor: Feishu daily pick report sent")
+    else:
+        logger.warning(
+            "Monitor: Feishu bot NOT configured — set FEISHU_APP_ID, "
+            "FEISHU_APP_SECRET, FEISHU_CHAT_ID environment variables"
+        )
+
+    logger.info(
+        f"Monitor scan complete: {len(scan_result.selected_stocks)} selected, "
+        f"{elapsed:.1f}s elapsed (source={data_source})"
+    )
+    return result_entry
+
+
+async def _run_intraday_monitor(state: dict) -> None:
+    """
+    Background task: intraday momentum monitor.
+
+    Runs every trading day at ~9:40, executes momentum scan, sends Feishu notification.
+    Supports dual data source: 'sina' (free) or 'ifind' (paid).
+    """
+    import asyncio
+    from datetime import datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    beijing_tz = ZoneInfo("Asia/Shanghai")
+    SCAN_TIME = time(9, 40)
 
     state["running"] = True
     logger.info("Intraday momentum monitor started")
@@ -4327,23 +4535,21 @@ async def _run_intraday_monitor(state: dict) -> None:
 
             # Only run on weekdays
             if now.weekday() >= 5:
-                # Weekend — sleep until Monday
                 await asyncio.sleep(3600)
                 continue
 
-            # Before monitoring window — wait
-            if current_time < MONITOR_START:
-                delta = datetime.combine(now.date(), MONITOR_START) - datetime.combine(
+            # Before scan time — wait
+            if current_time < SCAN_TIME:
+                delta = datetime.combine(now.date(), SCAN_TIME) - datetime.combine(
                     now.date(), current_time
                 )
                 wait_secs = max(delta.total_seconds(), 10)
-                logger.debug(f"Monitor waiting {wait_secs:.0f}s until {MONITOR_START}")
+                logger.debug(f"Monitor waiting {wait_secs:.0f}s until {SCAN_TIME}")
                 await asyncio.sleep(min(wait_secs, 60))
                 continue
 
-            # After monitoring window — wait for tomorrow
+            # After scan window — wait for tomorrow
             if current_time > time(9, 50):
-                # Sleep until next day 9:25
                 tomorrow = now + timedelta(days=1)
                 target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
                 wait_secs = (target - now).total_seconds()
@@ -4351,111 +4557,24 @@ async def _run_intraday_monitor(state: dict) -> None:
                 await asyncio.sleep(min(wait_secs, 3600))
                 continue
 
-            # We're in the monitoring window (9:30-9:40)
-            logger.info("Monitor entering active polling window")
-            accumulated: dict[str, PriceSnapshot] = {}
-            poll_count = 0
-
-            ifind_client = state.get("ifind_client")
-            fundamentals_db = state.get("fundamentals_db")
-
-            if not ifind_client or not fundamentals_db:
-                logger.error("Monitor: shared iFinD client or fundamentals DB not available")
-                await asyncio.sleep(60)
-                continue
-
+            # 9:40-9:50 window — run scan once
+            logger.info("Monitor: entering scan window")
             try:
-                while state["running"]:
-                    current_time = datetime.now(beijing_tz).time()
-                    if current_time >= MONITOR_END:
-                        break
+                await _execute_monitor_scan(state)
+            except Exception as e:
+                logger.error(f"Monitor scan error: {e}", exc_info=True)
+                # Notify Feishu about the error
+                try:
+                    from src.common.feishu_bot import FeishuBot
 
-                    poll_count += 1
-                    logger.info(f"Monitor poll #{poll_count}")
-
-                    try:
-                        result = await ifind_client.smart_stock_picking(
-                            "涨幅大于-0.5%的沪深主板非ST股票", "stock"
-                        )
-                        snapshots = await _parse_iwencai_realtime(ifind_client, result)
-                        accumulated.update(snapshots)
-                        logger.info(
-                            f"Poll #{poll_count}: {len(snapshots)} pre-filtered stocks "
-                            f"(accumulated: {len(accumulated)})"
-                        )
-                    except Exception as e:
-                        logger.error(f"Monitor poll error: {e}")
-
-                    await asyncio.sleep(POLL_INTERVAL)
-
-                # Run full strategy scan
-                if accumulated:
-                    logger.info(f"Running strategy scan on {len(accumulated)} accumulated stocks")
-                    concept_mapper = LocalConceptMapper()
-                    scanner = MomentumSectorScanner(
-                        ifind_client=ifind_client,
-                        fundamentals_db=fundamentals_db,
-                        concept_mapper=concept_mapper,
-                    )
-
-                    scan_result = await scanner.scan(accumulated)
-                    scan_time = datetime.now(beijing_tz)
-
-                    # Store result
-                    rec = scan_result.recommended_stock
-                    result_entry = {
-                        "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
-                        "initial_gainers": len(scan_result.initial_gainers),
-                        "hot_boards": len(scan_result.hot_boards),
-                        "selected_count": len(scan_result.selected_stocks),
-                        "selected_stocks": [
-                            {
-                                "stock_code": s.stock_code,
-                                "stock_name": s.stock_name,
-                                "board_name": s.board_name,
-                                "open_gain_pct": round(s.open_gain_pct, 2),
-                                "pe_ttm": round(s.pe_ttm, 2),
-                                "board_avg_pe": round(s.board_avg_pe, 2),
-                            }
-                            for s in scan_result.selected_stocks
-                        ],
-                        "recommended_stock": {
-                            "stock_code": rec.stock_code,
-                            "stock_name": rec.stock_name,
-                            "board_name": rec.board_name,
-                            "board_stock_count": rec.board_stock_count,
-                            "open_gain_pct": round(rec.open_gain_pct, 2),
-                            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
-                            "turnover_amp": round(rec.turnover_amp, 2),
-                            "composite_score": round(rec.composite_score, 2),
-                        }
-                        if rec
-                        else None,
-                    }
-                    state["last_result"] = result_entry
-                    state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
-                    state["today_results"].append(result_entry)
-
-                    # Send Feishu notification
                     bot = FeishuBot()
                     if bot.is_configured():
-                        await bot.send_momentum_scan_result(
-                            selected_stocks=scan_result.selected_stocks,
-                            hot_boards=scan_result.hot_boards,
-                            initial_gainer_count=len(scan_result.initial_gainers),
-                            scan_time=scan_time,
-                            recommended_stock=scan_result.recommended_stock,
+                        await bot.send_alert(
+                            "盘中监控扫描失败",
+                            f"{type(e).__name__}: {e}",
                         )
-                        logger.info("Monitor: Feishu notification sent")
-
-                    logger.info(
-                        f"Monitor scan complete: {len(scan_result.selected_stocks)} stocks selected"
-                    )
-                else:
-                    logger.info("Monitor: no pre-filtered stocks found during window")
-
-            except Exception as e:
-                logger.error(f"Monitor active window error: {e}", exc_info=True)
+                except Exception:
+                    pass
 
             # After scan, wait until next day
             tomorrow = now + timedelta(days=1)

@@ -24,7 +24,16 @@
                     {{ '运行中' if monitor_running else '已停止' }}
                 </span>
             </div>
-            <p class="monitor-desc">每个交易日 9:30-9:40 自动追踪涨幅 >5% 主板非ST股票，选股后飞书通知</p>
+            <p class="monitor-desc">每个交易日 9:40 自动运行动量选股，结果推送飞书</p>
+            <div style="display:flex;gap:16px;align-items:center;margin:8px 0">
+                <label style="font-weight:600;white-space:nowrap">监控数据源</label>
+                <label class="checkbox-label"><input type="radio" name="monitor_ds" value="sina" checked> 新浪+akshare (免费)</label>
+                <label class="checkbox-label"><input type="radio" name="monitor_ds" value="ifind"> iFinD</label>
+            </div>
+            <div style="display:flex;gap:8px;margin:8px 0">
+                <button type="button" id="monitor-trigger-btn" class="btn btn-primary" style="background:#0284c7" onclick="triggerMonitorScan()">手动扫描</button>
+                <span id="monitor-trigger-status" style="color:#666;font-size:13px;line-height:32px"></span>
+            </div>
             <div id="monitor-last-result"></div>
         </div>
     </section>
@@ -1190,6 +1199,57 @@ async function refreshMonitorStatus() {
 }
 
 refreshMonitorStatus();
+
+// === Monitor Data Source Config ===
+(async function loadMonitorConfig() {
+    try {
+        const resp = await fetch('/api/momentum/monitor/config');
+        const data = await resp.json();
+        const radio = document.querySelector(`input[name="monitor_ds"][value="${data.data_source}"]`);
+        if (radio) radio.checked = true;
+    } catch (e) {}
+})();
+
+document.querySelectorAll('input[name="monitor_ds"]').forEach(radio => {
+    radio.addEventListener('change', async () => {
+        const val = document.querySelector('input[name="monitor_ds"]:checked').value;
+        try {
+            await fetch('/api/momentum/monitor/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ data_source: val }),
+            });
+        } catch (e) {}
+    });
+});
+
+// === Manual Trigger ===
+async function triggerMonitorScan() {
+    const btn = document.getElementById('monitor-trigger-btn');
+    const statusEl = document.getElementById('monitor-trigger-status');
+    btn.disabled = true;
+    btn.textContent = '扫描中...';
+    statusEl.textContent = '';
+    try {
+        const resp = await fetch('/api/momentum/monitor/trigger', { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            const r = data.result;
+            statusEl.textContent = `完成 (${r.elapsed_seconds}s) | 选出${r.selected_count}只 | ${r.data_source}`;
+            statusEl.style.color = '#16a34a';
+            refreshMonitorStatus();
+        } else {
+            statusEl.textContent = data.message || '无结果';
+            statusEl.style.color = '#dc2626';
+        }
+    } catch (e) {
+        statusEl.textContent = '请求失败: ' + e.message;
+        statusEl.style.color = '#dc2626';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '手动扫描';
+    }
+}
 setInterval(refreshMonitorStatus, 30000);
 
 // === Loss Analysis (combined) ===
