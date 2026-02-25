@@ -138,7 +138,6 @@ class IQuantHistoricalAdapter:
         bare = full_code.split(".")[0]
 
         async with _DOWNLOAD_SEMAPHORE:
-            last_exc: BaseException | None = None
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     df = await asyncio.to_thread(
@@ -151,7 +150,6 @@ class IQuantHistoricalAdapter:
                     )
                     break  # success
                 except (ConnectionError, OSError) as e:
-                    last_exc = e
                     if attempt < _MAX_RETRIES:
                         wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
                         logger.warning(
