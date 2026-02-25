@@ -297,10 +297,8 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
         if selected:
-            result.recommended_stock, result.scored_candidates = (
-                await self._step6_recommend(
-                    selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
-                )
+            result.recommended_stock, result.scored_candidates = await self._step6_recommend(
+                selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
             )
             if result.recommended_stock:
                 rec = result.recommended_stock
@@ -589,9 +587,7 @@ class MomentumSectorScanner:
                 turnover_amp=amp,
                 consecutive_up_days=cup,
                 latest_price=(
-                    _snapshots[s.stock_code].latest_price
-                    if s.stock_code in _snapshots
-                    else 0.0
+                    _snapshots[s.stock_code].latest_price if s.stock_code in _snapshots else 0.0
                 ),
             )
             for s, sc, gfo, amp, _, cup in scored

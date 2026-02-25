@@ -399,12 +399,8 @@ Limit-up (skipped):
         # Hot boards summary
         if scan_result.hot_boards:
             lines.append("")
-            sorted_boards = sorted(
-                scan_result.hot_boards.items(), key=lambda x: -len(x[1])
-            )
-            board_parts = [
-                f"{name}({len(codes)}只)" for name, codes in sorted_boards[:8]
-            ]
+            sorted_boards = sorted(scan_result.hot_boards.items(), key=lambda x: -len(x[1]))
+            board_parts = [f"{name}({len(codes)}只)" for name, codes in sorted_boards[:8]]
             lines.append(f"🔥 热门板块: {' | '.join(board_parts)}")
 
         return await self.send_message("\n".join(lines))

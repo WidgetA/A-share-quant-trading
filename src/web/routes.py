@@ -4424,9 +4424,7 @@ async def _execute_monitor_scan(state: dict) -> dict | None:
 
         concept_mapper = LocalConceptMapper()
 
-        result = await ifind_client.smart_stock_picking(
-            "涨幅大于-0.5%的沪深主板非ST股票", "stock"
-        )
+        result = await ifind_client.smart_stock_picking("涨幅大于-0.5%的沪深主板非ST股票", "stock")
         snapshots = await _parse_iwencai_realtime(ifind_client, result)
         if not snapshots:
             logger.info("Monitor (ifind): no pre-filtered stocks found")
