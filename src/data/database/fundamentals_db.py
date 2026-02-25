@@ -278,9 +278,7 @@ class FundamentalsDB:
             List of all stock codes (bare 6-digit, e.g., ["000001", "600519"]).
         """
         async with self._db_pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT stock_code FROM {self._schema}.stock_fundamentals"
-            )
+            rows = await conn.fetch(f"SELECT stock_code FROM {self._schema}.stock_fundamentals")
         return [row["stock_code"] for row in rows]
 
     async def batch_filter_st(self, stock_codes: list[str]) -> list[str]:

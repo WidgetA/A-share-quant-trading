@@ -262,7 +262,6 @@ class IQuantHistoricalAdapter:
         """Get trading dates via akshare (with retry)."""
         import akshare as ak
 
-        last_exc: BaseException | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
@@ -271,7 +270,6 @@ class IQuantHistoricalAdapter:
                 ed = datetime.strptime(end_date, "%Y-%m-%d").date()
                 return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
             except (ConnectionError, OSError) as e:
-                last_exc = e
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
                     logger.warning(
@@ -285,4 +283,4 @@ class IQuantHistoricalAdapter:
             except Exception:
                 logger.error("Failed to get trade dates from akshare")
                 raise
-        raise last_exc  # unreachable but satisfies type checker
+        raise RuntimeError("unreachable")  # all paths raise or return above
