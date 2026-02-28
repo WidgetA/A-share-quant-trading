@@ -559,8 +559,7 @@ class AkshareBacktestCache:
 
             lg = bs.login()
             if lg.error_code != "0":
-                logger.error(f"baostock login failed: {lg.error_msg}")
-                return
+                raise RuntimeError(f"baostock login failed: {lg.error_msg}")
 
             try:
                 # Use dl_start (not start_date) so minute data covers the same
@@ -615,13 +614,26 @@ class AkshareBacktestCache:
             finally:
                 bs.logout()
 
-        thread = threading.Thread(target=_baostock_download_all, daemon=True)
+        thread_exc: list[BaseException] = []  # capture thread exceptions
+
+        def _baostock_thread_wrapper() -> None:
+            try:
+                _baostock_download_all()
+            except BaseException as exc:
+                thread_exc.append(exc)
+
+        thread = threading.Thread(target=_baostock_thread_wrapper, daemon=True)
         thread.start()
         while thread.is_alive():
             await asyncio.sleep(2)
             if progress_cb:
                 await _maybe_await(progress_cb("minute", done_minute[0], total))
         thread.join()
+
+        # Re-raise thread exception so callers know minute download failed
+        if thread_exc:
+            raise thread_exc[0]
+
         if progress_cb:
             await _maybe_await(progress_cb("minute", total, total))
         logger.info(f"Minute download complete (baostock): {len(self._minute)}/{total} stocks")
