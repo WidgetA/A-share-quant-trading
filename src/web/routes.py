@@ -4366,6 +4366,13 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
         from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.strategy.filters.stock_filter import create_main_board_only_filter
 
+        # Quick weekday check — A-share market only opens Mon-Fri
+        now_bj = datetime.now(beijing_tz)
+        if now_bj.weekday() >= 5:  # Saturday=5, Sunday=6
+            day_name = "周六" if now_bj.weekday() == 5 else "周日"
+            logger.warning(f"Monitor (tushare): 今天是{day_name}，A股不开市")
+            raise RuntimeError(f"今天是{day_name}，A股不开市，无法扫描")
+
         fundamentals_db = state.get("fundamentals_db")
         if not fundamentals_db:
             logger.error("Monitor: fundamentals DB not available")
@@ -4433,6 +4440,15 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
             if skipped_no_prev:
                 logger.warning(
                     f"Monitor (tushare): skipped {skipped_no_prev} stocks (no preClose in cache)"
+                )
+
+            if not price_snapshots:
+                not_trading = sum(1 for q in quotes.values() if not q.is_trading)
+                raise RuntimeError(
+                    f"盘中扫描数据异常：构建快照为空。"
+                    f"quotes={len(quotes)}, 停牌/无数据={not_trading}, "
+                    f"缺prev_close={skipped_no_prev}, prev_daily={len(prev_daily)}。"
+                    f"请检查Tushare数据和OSS缓存是否正常。"
                 )
 
             adapter = IQuantHistoricalAdapter(tushare, cache=akshare_cache)
