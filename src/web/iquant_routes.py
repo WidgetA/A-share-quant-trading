@@ -1,7 +1,7 @@
 # === MODULE PURPOSE ===
 # API endpoints for iQuant scripts running on a Windows server.
 # Fully isolated from the main online system — creates own DB pool,
-# own Sina client, own historical adapter. No shared app.state resources.
+# own Tushare client, own historical adapter. No shared app.state resources.
 #
 # === ARCHITECTURE ===
 # Push-based: server runs background tasks that produce signals at the right time.
@@ -144,21 +144,23 @@ def create_iquant_router() -> APIRouter:
         if _state["initialized"]:
             return _state
 
+        from src.common.config import get_tushare_token
         from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
-        from src.data.clients.sina_realtime import SinaRealtimeClient
+        from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.stock_filter import create_main_board_only_filter
 
-        sina = SinaRealtimeClient()
-        await sina.start()
-        _state["sina_client"] = sina
+        tushare_token = get_tushare_token()
+        tushare = TushareRealtimeClient(token=tushare_token)
+        await tushare.start()
+        _state["realtime_client"] = tushare
 
         fdb = create_fundamentals_db_from_config()
         await fdb.connect()
         _state["fundamentals_db"] = fdb
 
-        _state["historical_adapter"] = IQuantHistoricalAdapter(sina)
+        _state["historical_adapter"] = IQuantHistoricalAdapter(tushare)
         _state["concept_mapper"] = LocalConceptMapper()
         _state["stock_filter"] = create_main_board_only_filter()
 
@@ -174,9 +176,9 @@ def create_iquant_router() -> APIRouter:
         task = _state.get("scheduler_task")
         if task and not task.done():
             task.cancel()
-        sina = _state.get("sina_client")
-        if sina:
-            await sina.stop()
+        rt_client = _state.get("realtime_client")
+        if rt_client:
+            await rt_client.stop()
         fdb = _state.get("fundamentals_db")
         if fdb:
             await fdb.close()
@@ -221,7 +223,9 @@ def create_iquant_router() -> APIRouter:
     # --- Core scan logic ---
 
     async def _run_scan() -> dict | None:
-        """Run momentum scan via Sina + scanner. Returns recommendation dict or None."""
+        """Run momentum scan via Tushare + scanner. Returns recommendation dict or None."""
+        from datetime import timedelta
+
         from src.strategy.strategies.momentum_sector_scanner import (
             MomentumSectorScanner,
             PriceSnapshot,
@@ -231,27 +235,50 @@ def create_iquant_router() -> APIRouter:
         if not universe:
             raise RuntimeError("Universe is empty")
 
-        sina_client = _state["sina_client"]
-        quotes = await sina_client.batch_get_quotes(universe)
-        logger.info(f"iQuant scan: Sina returned {len(quotes)} quotes")
+        rt_client = _state["realtime_client"]
+        quotes = await rt_client.batch_get_quotes(universe)
+        logger.info(f"iQuant scan: Tushare returned {len(quotes)} quotes")
 
         if not quotes:
             return None
 
+        # Fetch prev_close from Tushare daily API (try last few trading days)
+        today = datetime.now(BEIJING_TZ).date()
+        prev_closes: dict[str, float] = {}
+        for days_back in range(1, 8):
+            prev_date = today - timedelta(days=days_back)
+            prev_date_str = prev_date.strftime("%Y%m%d")
+            try:
+                prev_closes = await rt_client.fetch_prev_closes(prev_date_str)
+                if prev_closes:
+                    logger.info(f"iQuant: preClose from Tushare daily date={prev_date_str}")
+                    break
+            except Exception as e:
+                logger.warning(f"iQuant: failed to fetch daily for {prev_date_str}: {e}")
+                continue
+
         price_snapshots: dict[str, PriceSnapshot] = {}
+        skipped = 0
         for code, quote in quotes.items():
             if not quote.is_trading:
                 continue
+            prev_close = prev_closes.get(code, 0.0)
+            if prev_close <= 0:
+                skipped += 1
+                continue
             price_snapshots[code] = PriceSnapshot(
                 stock_code=code,
-                stock_name=quote.stock_name,
+                stock_name="",
                 open_price=quote.open_price,
-                prev_close=quote.prev_close,
+                prev_close=prev_close,
                 latest_price=quote.latest_price,
                 early_volume=quote.volume,
                 high_price=quote.high_price,
                 low_price=quote.low_price,
             )
+
+        if skipped:
+            logger.warning(f"iQuant scan: skipped {skipped} stocks (no prev_close)")
 
         scanner = MomentumSectorScanner(
             ifind_client=_state["historical_adapter"],  # type: ignore[arg-type]
@@ -306,25 +333,11 @@ def create_iquant_router() -> APIRouter:
 
         try:
             while True:
-                # --- Get authoritative exchange time from Sina ---
-                sina_client = _state.get("sina_client")
-                if not sina_client:
-                    await asyncio.sleep(30)
-                    continue
-
-                exchange = await sina_client.get_exchange_time()
-                if not exchange:
-                    # Sina unreachable — wait and retry
-                    await asyncio.sleep(30)
-                    continue
-
-                ex_date, ex_time_str = exchange
-                try:
-                    h, m, _s = ex_time_str.split(":")
-                    ex_time = time(int(h), int(m))
-                except (ValueError, IndexError):
-                    await asyncio.sleep(30)
-                    continue
+                # --- Get exchange time from local clock (Beijing TZ) ---
+                now_bj = datetime.now(BEIJING_TZ)
+                ex_date = now_bj.strftime("%Y-%m-%d")
+                ex_time = now_bj.time().replace(second=0, microsecond=0)
+                ex_time_str = now_bj.strftime("%H:%M:%S")
 
                 # --- SELL: window 09:25~09:45 (exchange time) ---
                 if (
@@ -488,22 +501,22 @@ def create_iquant_router() -> APIRouter:
         body: QuoteRequest,
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
-        """Get Sina real-time quotes for specific stocks."""
+        """Get Tushare real-time quotes for specific stocks."""
         await _ensure_resources()
 
         if not body.stock_codes:
             raise HTTPException(status_code=400, detail="stock_codes is required")
 
         try:
-            sina_client = _state["sina_client"]
-            quotes = await sina_client.batch_get_quotes(body.stock_codes)
+            rt_client = _state["realtime_client"]
+            quotes = await rt_client.batch_get_quotes(body.stock_codes)
             return {
                 "success": True,
                 "quotes": {
                     code: {
-                        "name": q.stock_name,
+                        "name": "",
                         "open": q.open_price,
-                        "prev_close": q.prev_close,
+                        "prev_close": 0.0,  # Not available from rt_min
                         "latest": q.latest_price,
                         "high": q.high_price,
                         "low": q.low_price,

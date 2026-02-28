@@ -480,6 +480,84 @@ def get_tavily_key_source() -> str:
     return "not_configured"
 
 
+# === Tushare Token ===
+
+# Runtime override for Tushare Pro token (set via web UI)
+_tushare_token_override: str | None = None
+# Persistence file for Tushare Pro token (survives container restarts)
+TUSHARE_TOKEN_FILE = PROJECT_ROOT / "data" / "tushare_token.txt"
+
+
+def get_tushare_token() -> str:
+    """Get Tushare Pro API token.
+
+    Priority: runtime override > persisted file > env var > secrets.yaml.
+
+    Returns:
+        Tushare Pro token string
+
+    Raises:
+        ValueError: If token is not configured
+    """
+    import os
+
+    if _tushare_token_override:
+        return _tushare_token_override
+
+    if TUSHARE_TOKEN_FILE.exists():
+        token = TUSHARE_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+
+    env_token = os.environ.get("TUSHARE_TOKEN", "")
+    if env_token:
+        return env_token
+
+    try:
+        secrets = load_secrets()
+        token = secrets.get_str("tushare.token")
+        if token:
+            return token
+    except FileNotFoundError:
+        pass
+
+    raise ValueError(
+        "Tushare Pro token not configured. "
+        "Set via web UI Settings page, TUSHARE_TOKEN environment variable, "
+        "or configure tushare.token in config/secrets.yaml. "
+        "Get your token at https://tushare.pro"
+    )
+
+
+def set_tushare_token(token: str) -> None:
+    """Set Tushare Pro token at runtime and persist to disk."""
+    global _tushare_token_override
+    _tushare_token_override = token
+
+    TUSHARE_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TUSHARE_TOKEN_FILE.write_text(token, encoding="utf-8")
+    logger.info("Tushare Pro token updated via web UI and persisted to disk")
+
+
+def get_tushare_token_source() -> str:
+    """Return which source the current Tushare Pro token comes from."""
+    import os
+
+    if _tushare_token_override:
+        return "web_ui"
+    if TUSHARE_TOKEN_FILE.exists() and TUSHARE_TOKEN_FILE.read_text(encoding="utf-8").strip():
+        return "persisted_file"
+    if os.environ.get("TUSHARE_TOKEN", ""):
+        return "env_var"
+    try:
+        secrets = load_secrets()
+        if secrets.get_str("tushare.token"):
+            return "secrets_yaml"
+    except FileNotFoundError:
+        pass
+    return "not_configured"
+
+
 # === iQuant API Key ===
 
 
@@ -538,26 +616,31 @@ MONITOR_DS_FILE = PROJECT_ROOT / "data" / "monitor_data_source.txt"
 
 
 def get_monitor_data_source() -> str:
-    """Get intraday monitor data source: 'ifind' or 'sina'.
+    """Get intraday monitor data source: 'ifind' or 'tushare'.
 
-    Priority: runtime override > persisted file > default ('sina').
+    Priority: runtime override > persisted file > default ('tushare').
+    Legacy value 'sina' is treated as 'tushare' (Sina API defunct).
     """
     if _monitor_ds_override:
-        return _monitor_ds_override
-
-    if MONITOR_DS_FILE.exists():
+        val = _monitor_ds_override
+    elif MONITOR_DS_FILE.exists():
         val = MONITOR_DS_FILE.read_text(encoding="utf-8").strip()
-        if val in ("ifind", "sina"):
-            return val
+    else:
+        val = "tushare"
 
-    return "sina"  # Default to free data source
+    # Backward compat: "sina" → "tushare" (Sina free API removed)
+    if val == "sina":
+        return "tushare"
+    if val in ("ifind", "tushare"):
+        return val
+    return "tushare"
 
 
 def set_monitor_data_source(source: str) -> None:
     """Set monitor data source and persist to disk."""
     global _monitor_ds_override
-    if source not in ("ifind", "sina"):
-        raise ValueError(f"Invalid data source: {source}. Must be 'ifind' or 'sina'.")
+    if source not in ("ifind", "tushare"):
+        raise ValueError(f"Invalid data source: {source}. Must be 'ifind' or 'tushare'.")
     _monitor_ds_override = source
 
     MONITOR_DS_FILE.parent.mkdir(parents=True, exist_ok=True)

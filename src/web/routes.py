@@ -1662,8 +1662,8 @@ def create_momentum_router() -> APIRouter:
 
         body = await request.json()
         source = body.get("data_source", "")
-        if source not in ("ifind", "sina"):
-            raise HTTPException(status_code=400, detail="data_source must be 'ifind' or 'sina'")
+        if source not in ("ifind", "tushare"):
+            raise HTTPException(status_code=400, detail="data_source must be 'ifind' or 'tushare'")
         set_monitor_data_source(source)
         return {"success": True, "data_source": source}
 
@@ -4357,10 +4357,13 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
 
     start_time = time_module.monotonic()
 
-    if data_source == "sina":
-        # --- Sina path: batch fetch all main-board stocks ---
+    if data_source == "tushare":
+        # --- Tushare path: batch fetch all main-board stocks ---
+        from datetime import timedelta
+
+        from src.common.config import get_tushare_token
         from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
-        from src.data.clients.sina_realtime import SinaRealtimeClient
+        from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.strategy.filters.stock_filter import create_main_board_only_filter
 
         fundamentals_db = state.get("fundamentals_db")
@@ -4373,35 +4376,68 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
         cache_ready = akshare_cache and getattr(akshare_cache, "is_ready", False)
         if cache_ready and akshare_cache.stock_codes:
             all_codes = akshare_cache.stock_codes
-            logger.info(f"Monitor (sina): universe from OSS cache ({len(all_codes)} codes)")
+            logger.info(f"Monitor (tushare): universe from OSS cache ({len(all_codes)} codes)")
         else:
             all_codes = await fundamentals_db.get_all_stock_codes()
-            logger.info(f"Monitor (sina): universe from PG ({len(all_codes)} codes)")
+            logger.info(f"Monitor (tushare): universe from PG ({len(all_codes)} codes)")
         universe = [c for c in all_codes if stock_filter.is_allowed(c)]
-        logger.info(f"Monitor (sina): universe has {len(universe)} codes")
+        logger.info(f"Monitor (tushare): universe has {len(universe)} codes")
 
-        sina = SinaRealtimeClient()
-        await sina.start()
+        tushare_token = get_tushare_token()
+        tushare = TushareRealtimeClient(token=tushare_token)
+        await tushare.start()
         try:
-            quotes = await sina.batch_get_quotes(universe)
-            logger.info(f"Monitor (sina): got {len(quotes)} quotes")
+            quotes = await tushare.batch_get_quotes(universe)
+            logger.info(f"Monitor (tushare): got {len(quotes)} quotes")
+
+            # Supplement preClose from OSS cache (rt_min doesn't provide it)
+            if not (akshare_cache and getattr(akshare_cache, "is_ready", False)):
+                raise RuntimeError(
+                    "OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。"
+                )
+
+            # Find prev trading day's close in cache (try last 7 days)
+            today = datetime.now(beijing_tz).date()
+            prev_daily: dict[str, dict[str, float]] = {}
+            for days_back in range(1, 8):
+                prev_date = today - timedelta(days=days_back)
+                prev_date_str = prev_date.strftime("%Y-%m-%d")
+                prev_daily = akshare_cache.get_all_codes_with_daily(prev_date_str)
+                if prev_daily:
+                    logger.info(
+                        f"Monitor (tushare): preClose from cache date {prev_date_str} "
+                        f"({len(prev_daily)} stocks)"
+                    )
+                    break
 
             price_snapshots: dict[str, PriceSnapshot] = {}
+            skipped_no_prev = 0
             for code, q in quotes.items():
                 if not q.is_trading:
                     continue
+                # Get preClose from cache
+                cached_day = prev_daily.get(code)
+                prev_close = cached_day["close"] if cached_day else 0.0
+                if prev_close <= 0:
+                    skipped_no_prev += 1
+                    continue
                 price_snapshots[code] = PriceSnapshot(
                     stock_code=code,
-                    stock_name=q.stock_name,
+                    stock_name="",
                     open_price=q.open_price,
-                    prev_close=q.prev_close,
+                    prev_close=prev_close,
                     latest_price=q.latest_price,
                     early_volume=q.volume,
                     high_price=q.high_price,
                     low_price=q.low_price,
                 )
 
-            adapter = IQuantHistoricalAdapter(sina, cache=akshare_cache)
+            if skipped_no_prev:
+                logger.warning(
+                    f"Monitor (tushare): skipped {skipped_no_prev} stocks (no preClose in cache)"
+                )
+
+            adapter = IQuantHistoricalAdapter(tushare, cache=akshare_cache)
             concept_mapper = LocalConceptMapper()
             scanner = MomentumSectorScanner(
                 ifind_client=adapter,  # type: ignore[arg-type]
@@ -4411,7 +4447,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
             )
             scan_result = await scanner.scan(price_snapshots, trade_date=None)
         finally:
-            await sina.stop()
+            await tushare.stop()
 
     else:
         # --- iFinD path: original logic (iwencai pre-filter + iFinD history) ---
@@ -4796,6 +4832,97 @@ def create_settings_router() -> APIRouter:
                     return {
                         "success": False,
                         "message": f"Token 验证失败: {err_msg} (错误码: {error_code})",
+                    }
+        except httpx.TimeoutException:
+            return {"success": False, "message": "请求超时，请检查网络连接"}
+        except httpx.HTTPError as e:
+            return {"success": False, "message": f"HTTP 请求失败: {e}"}
+
+    # === TUSHARE TOKEN SETTINGS ===
+
+    @router.get("/api/settings/tushare-token")
+    async def get_tushare_token_status():
+        """Get current Tushare Pro token status (masked)."""
+        from src.common.config import get_tushare_token, get_tushare_token_source
+
+        source = get_tushare_token_source()
+        source_labels = {
+            "web_ui": "Web UI (当前会话)",
+            "persisted_file": "Web UI (已持久化)",
+            "env_var": "环境变量",
+            "secrets_yaml": "secrets.yaml",
+            "not_configured": "未配置",
+        }
+
+        try:
+            token = get_tushare_token()
+            if len(token) > 20:
+                masked = token[:8] + "..." + token[-8:]
+            else:
+                masked = "***"
+            return {
+                "configured": True,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_token": masked,
+                "token_length": len(token),
+            }
+        except ValueError:
+            return {
+                "configured": False,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_token": "",
+                "token_length": 0,
+            }
+
+    @router.post("/api/settings/tushare-token")
+    async def update_tushare_token(body: TokenUpdateRequest):
+        """Save a new Tushare Pro token."""
+        from src.common.config import set_tushare_token
+
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        set_tushare_token(token)
+        return {"success": True, "message": "Token 已保存，新的 API 调用将使用此 token"}
+
+    @router.post("/api/settings/tushare-token/test")
+    async def test_tushare_token(body: TokenUpdateRequest):
+        """Test a Tushare Pro token by calling a simple API."""
+        import httpx
+
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    "http://api.tushare.pro",
+                    json={
+                        "api_name": "trade_cal",
+                        "token": token,
+                        "params": {"exchange": "SSE", "is_open": "1"},
+                        "fields": "cal_date",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                code = data.get("code", -1)
+                if code == 0:
+                    items = data.get("data", {}).get("items", [])
+                    return {
+                        "success": True,
+                        "message": f"Token 验证成功，获取到 {len(items)} 条交易日历数据",
+                    }
+                else:
+                    msg = data.get("msg", "未知错误")
+                    return {
+                        "success": False,
+                        "message": f"Token 验证失败: {msg} (错误码: {code})",
                     }
         except httpx.TimeoutException:
             return {"success": False, "message": "请求超时，请检查网络连接"}

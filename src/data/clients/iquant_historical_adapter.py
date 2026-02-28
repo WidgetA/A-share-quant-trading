@@ -6,7 +6,8 @@
 # === DEPENDENCIES ===
 # - AkshareBacktestCache (OSS): Primary source — pre-downloaded, zero network calls
 # - akshare: Fallback only — on-the-fly download if no OSS cache available
-# - SinaRealtimeClient: Delegates real_time_quotation to Sina Finance
+# - Realtime client: Duck-typed (TushareRealtimeClient or SinaRealtimeClient)
+#   Must implement as_ifind_format(stock_codes, indicators) -> dict
 
 # === KEY CONCEPTS ===
 # - OSS cache first: If AkshareBacktestCache is provided, history_quotes reads
@@ -64,23 +65,26 @@ class IQuantHistoricalAdapter:
 
     Methods implemented:
         - history_quotes(): From OSS cache or akshare fallback
-        - real_time_quotation(): Delegates to SinaRealtimeClient
+        - real_time_quotation(): Delegates to realtime client (Tushare/Sina)
         - high_frequency(): Returns empty (live mode uses real_time_quotation)
 
     Volume convention: akshare returns 手 (lots); converted to 股 (shares).
     """
 
-    def __init__(self, sina_client: Any, cache: Any = None) -> None:
+    def __init__(self, realtime_client: Any, cache: Any = None) -> None:
         """
         Args:
-            sina_client: SinaRealtimeClient instance for real-time data delegation.
+            realtime_client: Duck-typed realtime client for real-time data delegation.
+                Must implement as_ifind_format(stock_codes, indicators) -> dict.
+                Typically TushareRealtimeClient or SinaRealtimeClient.
             cache: Optional AkshareBacktestCache for history lookback (avoids akshare API).
         """
-        from src.data.clients.sina_realtime import SinaRealtimeClient
-
-        if not isinstance(sina_client, SinaRealtimeClient):
-            raise TypeError("sina_client must be a SinaRealtimeClient instance")
-        self._sina = sina_client
+        if not hasattr(realtime_client, "as_ifind_format"):
+            raise TypeError(
+                "realtime_client must implement as_ifind_format(). "
+                "Use TushareRealtimeClient or SinaRealtimeClient."
+            )
+        self._realtime = realtime_client
 
         # Build a cache-backed adapter for history_quotes if cache is available
         self._cached_adapter: Any = None
@@ -94,7 +98,8 @@ class IQuantHistoricalAdapter:
 
     @property
     def is_connected(self) -> bool:
-        return self._sina._client is not None
+        client = getattr(self._realtime, "_client", None)
+        return client is not None
 
     async def start(self) -> None:
         pass  # Sina client is managed externally
@@ -116,8 +121,10 @@ class IQuantHistoricalAdapter:
         Fallback: downloads on-the-fly from akshare (with retry) for cache misses.
         """
         if self._cached_adapter is None:
-            # No cache at all — download everything via akshare
-            return await self._history_quotes_akshare(codes, indicators, start_date, end_date)
+            raise RuntimeError(
+                "OSS cache not available — cannot fetch historical data. "
+                "Load the cache before scanning."
+            )
 
         # Try OSS cache first
         result = await self._cached_adapter.history_quotes(
@@ -130,15 +137,11 @@ class IQuantHistoricalAdapter:
         missing = [c for c in all_codes if c not in cached_codes]
 
         if missing:
-            logger.info(
+            logger.warning(
                 f"OSS cache miss for {len(missing)} stock(s): "
                 f"{', '.join(missing[:5])}{'...' if len(missing) > 5 else ''} "
-                f"— falling back to akshare on-the-fly"
+                f"— skipped (akshare fallback disabled)"
             )
-            fallback = await self._history_quotes_akshare(
-                ",".join(missing), indicators, start_date, end_date
-            )
-            result["tables"].extend(fallback.get("tables", []))
 
         return result
 
@@ -275,9 +278,9 @@ class IQuantHistoricalAdapter:
         codes: str,
         indicators: str,
     ) -> dict[str, Any]:
-        """Delegate to SinaRealtimeClient."""
+        """Delegate to realtime client (Tushare or Sina)."""
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
-        return await self._sina.as_ifind_format(code_list, indicators)
+        return await self._realtime.as_ifind_format(code_list, indicators)
 
     async def high_frequency(
         self,
