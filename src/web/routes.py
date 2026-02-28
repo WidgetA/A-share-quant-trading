@@ -4392,9 +4392,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
 
             # Supplement preClose from OSS cache (rt_min doesn't provide it)
             if not (akshare_cache and getattr(akshare_cache, "is_ready", False)):
-                raise RuntimeError(
-                    "OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。"
-                )
+                raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
 
             # Find prev trading day's close in cache (try last 7 days)
             today = datetime.now(beijing_tz).date()

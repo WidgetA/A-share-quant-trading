@@ -141,9 +141,7 @@ class TushareRealtimeClient:
 
         return all_quotes
 
-    async def as_ifind_format(
-        self, stock_codes: list[str], indicators: str
-    ) -> dict[str, Any]:
+    async def as_ifind_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
         """
         Fetch quotes and return in iFinD real_time_quotation response format.
 
@@ -247,9 +245,7 @@ class TushareRealtimeClient:
                 code = data.get("code")
                 if code != 0:
                     msg = data.get("msg", "unknown error")
-                    raise TushareRealtimeError(
-                        f"Tushare API error: code={code}, msg={msg}"
-                    )
+                    raise TushareRealtimeError(f"Tushare API error: code={code}, msg={msg}")
                 return data
 
             except TushareRealtimeError:
@@ -265,8 +261,7 @@ class TushareRealtimeClient:
                     await asyncio.sleep(wait)
                 else:
                     raise TushareRealtimeError(
-                        f"Tushare API request failed after {self.MAX_RETRIES} "
-                        f"attempts: {e}"
+                        f"Tushare API request failed after {self.MAX_RETRIES} attempts: {e}"
                     ) from e
 
         raise TushareRealtimeError("unreachable")  # all paths raise or return above
@@ -311,18 +306,10 @@ class TushareRealtimeClient:
             try:
                 first_open = rows[0][idx["open"]]
                 last_close = rows[-1][idx["close"]]
-                max_high = max(
-                    r[idx["high"]] for r in rows if r[idx["high"]] is not None
-                )
-                min_low = min(
-                    r[idx["low"]] for r in rows if r[idx["low"]] is not None
-                )
-                total_vol = sum(
-                    r[idx["vol"]] for r in rows if r[idx["vol"]] is not None
-                )
-                total_amount = sum(
-                    r[idx["amount"]] for r in rows if r[idx["amount"]] is not None
-                )
+                max_high = max(r[idx["high"]] for r in rows if r[idx["high"]] is not None)
+                min_low = min(r[idx["low"]] for r in rows if r[idx["low"]] is not None)
+                total_vol = sum(r[idx["vol"]] for r in rows if r[idx["vol"]] is not None)
+                total_amount = sum(r[idx["amount"]] for r in rows if r[idx["amount"]] is not None)
 
                 if first_open and last_close:
                     quotes[bare] = TushareQuote(
