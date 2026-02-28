@@ -4896,14 +4896,15 @@ def create_settings_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="Token 不能为空")
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                # Use rt_min with a single liquid stock to verify token + rt_min permission
                 response = await client.post(
                     "http://api.tushare.pro",
                     json={
-                        "api_name": "trade_cal",
+                        "api_name": "rt_min",
                         "token": token,
-                        "params": {"exchange": "SSE", "is_open": "1"},
-                        "fields": "cal_date",
+                        "params": {"ts_code": "000001.SZ", "freq": "1MIN"},
+                        "fields": "ts_code,trade_time,close",
                     },
                 )
                 response.raise_for_status()
@@ -4914,7 +4915,7 @@ def create_settings_router() -> APIRouter:
                     items = data.get("data", {}).get("items", [])
                     return {
                         "success": True,
-                        "message": f"Token 验证成功，获取到 {len(items)} 条交易日历数据",
+                        "message": f"Token 验证成功 (rt_min)，获取到 {len(items)} 条分钟数据",
                     }
                 else:
                     msg = data.get("msg", "未知错误")
