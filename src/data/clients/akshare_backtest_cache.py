@@ -33,9 +33,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Akshare calls are synchronous; limit concurrency to avoid triggering
+# Akshare calls are synchronous; serial execution to avoid triggering
 # East Money's rate-limiter (RemoteDisconnected errors at higher values).
-_DOWNLOAD_WORKERS = 3
+_DOWNLOAD_WORKERS = 1
 
 # OSS cache key prefix
 _OSS_PREFIX = "akshare-cache/"
@@ -501,7 +501,7 @@ class AkshareBacktestCache:
             async with sem:
                 try:
                     # Retry on transient connection errors (rate-limit / server drop)
-                    max_retries = 3
+                    max_retries = 5
                     df = None
                     for attempt in range(max_retries):
                         try:
@@ -516,7 +516,7 @@ class AkshareBacktestCache:
                             break
                         except (ConnectionError, OSError) as retry_err:
                             if attempt < max_retries - 1:
-                                wait = 2**attempt  # 1s, 2s
+                                wait = 3 * 2**attempt  # 3s, 6s, 12s, 24s
                                 logger.warning(
                                     f"Daily {code} attempt {attempt + 1} failed: {retry_err}, "
                                     f"retrying in {wait}s..."
