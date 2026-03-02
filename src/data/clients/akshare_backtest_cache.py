@@ -556,8 +556,8 @@ class AkshareBacktestCache:
                 if progress_cb and done_daily % 50 == 0:
                     await _maybe_await(progress_cb("daily", done_daily, total))
 
-        tasks = [_download_daily(c) for c in codes]
-        await asyncio.gather(*tasks)
+        for c in codes:
+            await _download_daily(c)
         if progress_cb:
             await _maybe_await(progress_cb("daily", total, total))
         logger.info(f"Daily download complete: {len(self._daily)}/{total} stocks")

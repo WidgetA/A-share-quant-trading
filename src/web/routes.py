@@ -1401,11 +1401,16 @@ def create_momentum_router() -> APIRouter:
 
             task = asyncio.create_task(do_download())
 
-            while True:
-                item = await progress_queue.get()
-                if item is None:
-                    break
-                yield sse(item)
+            try:
+                while True:
+                    item = await progress_queue.get()
+                    if item is None:
+                        break
+                    yield sse(item)
+            except (asyncio.CancelledError, GeneratorExit):
+                task.cancel()
+                logger.warning("akshare download cancelled (client disconnected)")
+                return
 
             await task
 
