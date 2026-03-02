@@ -516,9 +516,9 @@ class AkshareBacktestCache:
                             break
                         except (ConnectionError, OSError) as retry_err:
                             if attempt < max_retries - 1:
-                                wait = 2 ** attempt  # 1s, 2s
+                                wait = 2**attempt  # 1s, 2s
                                 logger.warning(
-                                    f"Daily {code} attempt {attempt+1} failed: {retry_err}, "
+                                    f"Daily {code} attempt {attempt + 1} failed: {retry_err}, "
                                     f"retrying in {wait}s..."
                                 )
                                 await asyncio.sleep(wait)
