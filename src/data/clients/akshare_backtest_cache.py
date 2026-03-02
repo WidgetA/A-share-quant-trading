@@ -33,8 +33,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Akshare calls are synchronous; we limit concurrency to avoid hammering the API
-_DOWNLOAD_WORKERS = 8
+# Akshare calls are synchronous; limit concurrency to avoid triggering
+# East Money's rate-limiter (RemoteDisconnected errors at higher values).
+_DOWNLOAD_WORKERS = 3
 
 # OSS cache key prefix
 _OSS_PREFIX = "akshare-cache/"
@@ -499,14 +500,30 @@ class AkshareBacktestCache:
             nonlocal done_daily
             async with sem:
                 try:
-                    df = await asyncio.to_thread(
-                        ak.stock_zh_a_hist,
-                        symbol=code,
-                        period="daily",
-                        start_date=start_str,
-                        end_date=end_str,
-                        adjust="qfq",
-                    )
+                    # Retry on transient connection errors (rate-limit / server drop)
+                    max_retries = 3
+                    df = None
+                    for attempt in range(max_retries):
+                        try:
+                            df = await asyncio.to_thread(
+                                ak.stock_zh_a_hist,
+                                symbol=code,
+                                period="daily",
+                                start_date=start_str,
+                                end_date=end_str,
+                                adjust="qfq",
+                            )
+                            break
+                        except (ConnectionError, OSError) as retry_err:
+                            if attempt < max_retries - 1:
+                                wait = 2 ** attempt  # 1s, 2s
+                                logger.warning(
+                                    f"Daily {code} attempt {attempt+1} failed: {retry_err}, "
+                                    f"retrying in {wait}s..."
+                                )
+                                await asyncio.sleep(wait)
+                            else:
+                                raise
                     if df is not None and not df.empty:
                         code_data: dict[str, dict[str, float]] = {}
                         prev_close = 0.0
