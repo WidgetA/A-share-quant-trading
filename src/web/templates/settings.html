@@ -66,6 +66,36 @@
         </div>
     </section>
 
+    <!-- Tsanghi (沧海数据) Token Section -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>沧海数据 Token</h3>
+            <p class="settings-desc">用于免费回测日线数据源。注册获取 token：<a href="https://tsanghi.com" target="_blank">tsanghi.com</a></p>
+
+            <!-- Current Status -->
+            <div class="token-status" id="tsanghiStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="tsanghiStatusValue">加载中...</span>
+            </div>
+
+            <!-- Token Input -->
+            <div class="form-group">
+                <label for="tsanghiInput">Token</label>
+                <input type="text" id="tsanghiInput" class="token-input"
+                    placeholder="粘贴沧海数据 token..." style="font-family: monospace;">
+            </div>
+
+            <!-- Actions -->
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testTsanghiToken()" id="tsanghiTestBtn">验证 Token</button>
+                <button class="btn btn-primary" onclick="saveTsanghiToken()" id="tsanghiSaveBtn">保存</button>
+            </div>
+
+            <!-- Result Message -->
+            <div class="token-message hidden" id="tsanghiMessage"></div>
+        </div>
+    </section>
+
     <!-- iQuant API Key Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -299,6 +329,86 @@ async function saveTushareToken() {
     }
 }
 
+// === Tsanghi (沧海数据) Token ===
+async function loadTsanghiStatus() {
+    try {
+        const resp = await fetch('/api/settings/tsanghi-token');
+        const data = await resp.json();
+        const el = document.getElementById('tsanghiStatusValue');
+        if (data.configured) {
+            el.textContent = `${data.source_label} | ${data.masked_token} (${data.token_length} 字符)`;
+            el.className = 'token-status-value configured';
+        } else {
+            el.textContent = '未配置';
+            el.className = 'token-status-value not-configured';
+        }
+    } catch (e) {
+        document.getElementById('tsanghiStatusValue').textContent = '加载失败';
+    }
+}
+
+async function testTsanghiToken() {
+    const token = document.getElementById('tsanghiInput').value.trim();
+    if (!token) {
+        showMessage('tsanghiMessage', '请先输入 Token', false);
+        return;
+    }
+
+    const btn = document.getElementById('tsanghiTestBtn');
+    btn.disabled = true;
+    btn.textContent = '验证中...';
+    showMessage('tsanghiMessage', '', true);
+
+    try {
+        const resp = await fetch('/api/settings/tsanghi-token/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: token})
+        });
+        const data = await resp.json();
+        showMessage('tsanghiMessage', data.message || data.detail || '未知响应', data.success);
+    } catch (e) {
+        showMessage('tsanghiMessage', '请求失败: ' + (e.message || e), false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '验证 Token';
+    }
+}
+
+async function saveTsanghiToken() {
+    const token = document.getElementById('tsanghiInput').value.trim();
+    if (!token) {
+        showMessage('tsanghiMessage', '请先输入 Token', false);
+        return;
+    }
+
+    const btn = document.getElementById('tsanghiSaveBtn');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    try {
+        const resp = await fetch('/api/settings/tsanghi-token', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: token})
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage('tsanghiMessage', data.message, true);
+            document.getElementById('tsanghiInput').value = '';
+            loadTsanghiStatus();
+        } else {
+            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
+            showMessage('tsanghiMessage', errMsg, false);
+        }
+    } catch (e) {
+        showMessage('tsanghiMessage', '请求失败: ' + e.message, false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '保存';
+    }
+}
+
 // === iQuant API Key ===
 async function loadIquantStatus() {
     try {
@@ -442,6 +552,7 @@ async function saveTavilyKey() {
 // Load all on page load
 loadTokenStatus();
 loadTushareStatus();
+loadTsanghiStatus();
 loadIquantStatus();
 loadTavilyStatus();
 </script>

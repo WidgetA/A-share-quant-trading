@@ -79,13 +79,14 @@ Rules:
 | Toggle Value | Source | Adapter |
 |-------------|--------|---------|
 | `"ifind"` | THS iFinD HTTP API | `IFinDHttpClient` |
-| `"akshare"` | akshare + baostock (pre-downloaded cache) | `AkshareHistoricalAdapter` |
+| `"akshare"` | tsanghi 沧海数据 (日线) + baostock (分钟线) | `AkshareHistoricalAdapter` |
 
 Rules:
 1. **One source per session** — no mixing sources within a single backtest/scan
 2. **Adapter parity** — `AkshareHistoricalAdapter` must support same indicator set as `IFinDHttpClient`
 3. **Live trading always uses iFinD** — toggle only affects backtesting
 4. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
+5. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
 
 ## 9. Volume Unit Convention (CRITICAL)
 
@@ -93,7 +94,7 @@ Rules:
 
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
-| **akshare** `stock_zh_a_hist()` | **手** (1手=100股) | ×100 at read time in `AkshareHistoricalAdapter` |
+| **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `AkshareHistoricalAdapter` |
 | **baostock** `query_history_k_data_plus()` | **股** | None |
 | **iFinD** | **股** | None |
 

@@ -642,7 +642,8 @@ strategy:
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest): iFinD `history_quotes` + `high_frequency` (9:40 price)
+- Price (backtest, iFinD): iFinD `history_quotes` + `high_frequency` (9:40 price)
+- Price (backtest, free): tsanghi 沧海数据 (日线) + baostock (5min bars for 9:40 price)
 - Price (live): iFinD `real_time_quotation`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)

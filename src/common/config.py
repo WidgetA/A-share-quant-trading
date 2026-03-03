@@ -167,6 +167,11 @@ _iquant_key_override: str | None = None
 # Persistence file for iQuant API key (survives container restarts)
 IQUANT_KEY_FILE = PROJECT_ROOT / "data" / "iquant_api_key.txt"
 
+# Runtime override for Tsanghi (沧海数据) token (set via web UI)
+_tsanghi_token_override: str | None = None
+# Persistence file for Tsanghi token (survives container restarts)
+TSANGHI_TOKEN_FILE = PROJECT_ROOT / "data" / "tsanghi_token.txt"
+
 
 def load_secrets() -> Config:
     """
@@ -606,6 +611,79 @@ def get_iquant_key_source() -> str:
         return "persisted_file"
     if os.environ.get("IQUANT_API_KEY", ""):
         return "env_var"
+    return "not_configured"
+
+
+# === Tsanghi (沧海数据) Token ===
+
+
+def get_tsanghi_token() -> str:
+    """Get Tsanghi (沧海数据) API token for free backtest daily data.
+
+    Priority: runtime override > persisted file > env var > secrets.yaml.
+
+    Returns:
+        Tsanghi token string
+
+    Raises:
+        ValueError: If token is not configured
+    """
+    import os
+
+    if _tsanghi_token_override:
+        return _tsanghi_token_override
+
+    if TSANGHI_TOKEN_FILE.exists():
+        token = TSANGHI_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+
+    env_token = os.environ.get("TSANGHI_TOKEN", "")
+    if env_token:
+        return env_token
+
+    try:
+        secrets = load_secrets()
+        token = secrets.get_str("tsanghi.token")
+        if token:
+            return token
+    except FileNotFoundError:
+        pass
+
+    raise ValueError(
+        "Tsanghi token not configured. "
+        "Set via web UI Settings page, TSANGHI_TOKEN environment variable, "
+        "or configure tsanghi.token in config/secrets.yaml. "
+        "Register at https://tsanghi.com to get a free token."
+    )
+
+
+def set_tsanghi_token(token: str) -> None:
+    """Set Tsanghi token at runtime and persist to disk."""
+    global _tsanghi_token_override
+    _tsanghi_token_override = token
+
+    TSANGHI_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TSANGHI_TOKEN_FILE.write_text(token, encoding="utf-8")
+    logger.info("Tsanghi token updated via web UI and persisted to disk")
+
+
+def get_tsanghi_token_source() -> str:
+    """Return which source the current Tsanghi token comes from."""
+    import os
+
+    if _tsanghi_token_override:
+        return "web_ui"
+    if TSANGHI_TOKEN_FILE.exists() and TSANGHI_TOKEN_FILE.read_text(encoding="utf-8").strip():
+        return "persisted_file"
+    if os.environ.get("TSANGHI_TOKEN", ""):
+        return "env_var"
+    try:
+        secrets = load_secrets()
+        if secrets.get_str("tsanghi.token"):
+            return "secrets_yaml"
+    except FileNotFoundError:
+        pass
     return "not_configured"
 
 

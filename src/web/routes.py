@@ -5085,6 +5085,93 @@ def create_settings_router() -> APIRouter:
         set_iquant_api_key(key)
         return {"success": True, "message": "iQuant API Key 已保存"}
 
+    # === TSANGHI (沧海数据) TOKEN SETTINGS ===
+
+    @router.get("/api/settings/tsanghi-token")
+    async def get_tsanghi_token_status():
+        """Get current Tsanghi token status (masked)."""
+        from src.common.config import get_tsanghi_token, get_tsanghi_token_source
+
+        source = get_tsanghi_token_source()
+        source_labels = {
+            "web_ui": "Web UI (当前会话)",
+            "persisted_file": "Web UI (已持久化)",
+            "env_var": "环境变量",
+            "secrets_yaml": "secrets.yaml",
+            "not_configured": "未配置",
+        }
+
+        try:
+            token = get_tsanghi_token()
+            if len(token) > 20:
+                masked = token[:8] + "..." + token[-8:]
+            else:
+                masked = "***"
+            return {
+                "configured": True,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_token": masked,
+                "token_length": len(token),
+            }
+        except ValueError:
+            return {
+                "configured": False,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_token": "",
+                "token_length": 0,
+            }
+
+    @router.post("/api/settings/tsanghi-token")
+    async def update_tsanghi_token(body: TokenUpdateRequest):
+        """Save a new Tsanghi token."""
+        from src.common.config import set_tsanghi_token
+
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        set_tsanghi_token(token)
+        return {"success": True, "message": "Token 已保存，回测数据将使用此 token"}
+
+    @router.post("/api/settings/tsanghi-token/test")
+    async def test_tsanghi_token(body: TokenUpdateRequest):
+        """Test a Tsanghi token by fetching one stock's daily data."""
+        import httpx
+
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        try:
+            url = "https://tsanghi.com/api/fin/stock/XSHG/daily"
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    url,
+                    params={"token": token, "ticker": "600519", "order": 2},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+                code = data.get("code")
+                if code == 200 and data.get("data"):
+                    count = len(data["data"])
+                    return {
+                        "success": True,
+                        "message": f"Token 验证成功，获取到 {count} 条日线数据",
+                    }
+                else:
+                    msg = data.get("msg", "未知错误")
+                    return {
+                        "success": False,
+                        "message": f"Token 验证失败: {msg} (code={code})",
+                    }
+        except httpx.TimeoutException:
+            return {"success": False, "message": "请求超时，请检查网络连接"}
+        except httpx.HTTPError as e:
+            return {"success": False, "message": f"HTTP 请求失败: {e}"}
+
     @router.get("/api/settings/keys-status")
     async def get_all_keys_status():
         """Get status of all API keys needed for live trading."""
@@ -5092,12 +5179,14 @@ def create_settings_router() -> APIRouter:
             get_ifind_token_source,
             get_iquant_key_source,
             get_tavily_key_source,
+            get_tsanghi_token_source,
             load_secrets,
         )
 
         ifind_ok = get_ifind_token_source() != "not_configured"
         tavily_ok = get_tavily_key_source() != "not_configured"
         iquant_ok = get_iquant_key_source() != "not_configured"
+        tsanghi_ok = get_tsanghi_token_source() != "not_configured"
 
         # Check Silicon Flow from secrets.yaml
         sf_ok = False
@@ -5112,6 +5201,7 @@ def create_settings_router() -> APIRouter:
             "tavily": {"configured": tavily_ok, "source": get_tavily_key_source()},
             "siliconflow": {"configured": sf_ok},
             "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
+            "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
             "news_check_ready": tavily_ok and sf_ok,
         }
 

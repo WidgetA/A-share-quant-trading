@@ -4,14 +4,15 @@
 # MomentumSectorScanner can run without any code changes.
 
 # === DEPENDENCIES ===
-# - baostock: Free A-share data source (daily OHLCV + 5-min bars)
+# - tsanghi (沧海数据): REST API for daily OHLCV (replaces akshare/baostock daily)
+# - baostock: Free A-share data source (5-min bars only, for 9:40 price)
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
 # - AkshareBacktestCache: Downloads and stores all price data in memory + OSS
 # - AkshareHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
-# - Daily OHLCV: baostock (daily frequency), supports full history
-# - Minute bars: baostock (5-min frequency), supports full history
+# - Daily OHLCV: tsanghi /daily/latest (batch per-date, fast)
+# - Minute bars: baostock (5-min frequency), for 9:40 snapshot only
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
 # - Volume stored in 手 (lots) for backward compatibility with old OSS caches
@@ -447,10 +448,10 @@ class AkshareBacktestCache:
         progress_cb: Callable[[str, int, int], Any] | None = None,
     ) -> None:
         """
-        Download daily + minute data for all main-board stocks via baostock.
+        Download daily + minute data for all main-board stocks.
 
-        Both daily OHLCV and 5-min bars are fetched in a single baostock session
-        (one login, one sequential loop, one logout).
+        Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
+        Phase 2 — 5-min bars via baostock (per-stock, for 9:40 snapshot only).
 
         Args:
             start_date: First trading date (inclusive).
@@ -469,13 +470,145 @@ class AkshareBacktestCache:
         if progress_cb:
             await _maybe_await(progress_cb("init", 0, 0))
 
-        # All work runs in one thread (baostock uses a single TCP connection).
-        done = [0]  # list for thread-safe mutation from thread
-        total_holder = [0]
-        result_codes: list[list[str]] = [[]]
+        # --- Phase 1: Daily OHLCV from tsanghi ---
+        await self._download_daily_tsanghi(dl_start, end_date, progress_cb)
+
+        # Derive preClose from previous trading day's close for each stock.
+        self._compute_pre_close()
+
+        # --- Phase 2: Minute data from baostock (9:35 + 9:40 bars) ---
+        codes = list(self._daily.keys())
+        self._stock_codes = codes
+        if codes:
+            await self._download_minute_baostock(
+                codes, dl_start, end_date, progress_cb
+            )
+
+        total = len(self._stock_codes)
+        if progress_cb:
+            await _maybe_await(progress_cb("download", total, total))
+        logger.info(
+            f"Download complete: {len(self._daily)} daily (tsanghi), "
+            f"{len(self._minute)} minute (baostock) out of {total} stocks"
+        )
+
+        # Recalculate range from actual data so metadata matches reality.
+        self._recalculate_date_range()
+        self._is_ready = True
+
+    async def _download_daily_tsanghi(
+        self,
+        dl_start: date,
+        end_date: date,
+        progress_cb: Callable[[str, int, int], Any] | None = None,
+    ) -> None:
+        """Download daily OHLCV from tsanghi /daily/latest (batch per-date).
+
+        Each trading day requires 2 API calls (XSHG + XSHE). For a 90-day
+        backtest with 60-day lookback, that's ~150 trading days × 2 = ~300 calls.
+        """
+        from src.data.clients.tsanghi_client import TsanghiClient
+
+        client = TsanghiClient()
+        await client.start()
+
+        try:
+            # Enumerate calendar dates and call API for each
+            total_days = (end_date - dl_start).days + 1
+            trading_days_found = 0
+            current = dl_start
+
+            while current <= end_date:
+                date_str = current.strftime("%Y-%m-%d")
+                day_has_data = False
+
+                for exchange in ("XSHG", "XSHE"):
+                    try:
+                        records = await client.daily_latest(exchange, date_str)
+                    except RuntimeError as e:
+                        # Non-trading day or API error for this date — skip
+                        logger.debug(f"tsanghi daily_latest({exchange}, {date_str}): {e}")
+                        continue
+
+                    if not records:
+                        continue
+
+                    day_has_data = True
+                    for rec in records:
+                        ticker = str(rec.get("ticker", ""))
+                        if not ticker or len(ticker) != 6:
+                            continue
+                        # Filter to main-board: 60xxxx (SH) and 00xxxx (SZ)
+                        if not (ticker.startswith("60") or ticker.startswith("00")):
+                            continue
+
+                        rec_date = rec.get("date", date_str)
+                        # Normalize date format (remove time component if present)
+                        if " " in rec_date:
+                            rec_date = rec_date.split(" ")[0]
+
+                        o = rec.get("open")
+                        c = rec.get("close")
+                        if o is None or c is None:
+                            continue  # skip suspended stocks
+
+                        if ticker not in self._daily:
+                            self._daily[ticker] = {}
+
+                        self._daily[ticker][rec_date] = {
+                            "open": float(o),
+                            "high": float(rec.get("high", o)),
+                            "low": float(rec.get("low", o)),
+                            "close": float(c),
+                            "preClose": 0.0,  # filled in _compute_pre_close()
+                            # tsanghi volume is in 手; store as-is for OSS compat
+                            "volume": float(rec.get("volume", 0)),
+                            "amount": 0.0,  # not available from tsanghi
+                            # turnoverRatio not available from tsanghi;
+                            # set to None so quality filter skips turnover check
+                            # while _has_turnover_ratio() still returns True (key exists).
+                            "turnoverRatio": None,
+                        }
+
+                if day_has_data:
+                    trading_days_found += 1
+
+                if progress_cb:
+                    elapsed = (current - dl_start).days + 1
+                    await _maybe_await(progress_cb("daily", elapsed, total_days))
+
+                current += timedelta(days=1)
+
+            logger.info(
+                f"tsanghi daily download: {len(self._daily)} stocks, "
+                f"{trading_days_found} trading days in [{dl_start} ~ {end_date}]"
+            )
+        finally:
+            await client.stop()
+
+    def _compute_pre_close(self) -> None:
+        """Fill preClose for each stock from previous trading day's close."""
+        for code, dates in self._daily.items():
+            sorted_dates = sorted(dates.keys())
+            for i, ds in enumerate(sorted_dates):
+                if i > 0:
+                    prev_ds = sorted_dates[i - 1]
+                    dates[ds]["preClose"] = dates[prev_ds]["close"]
+                # else: first day — preClose stays 0.0
+
+    async def _download_minute_baostock(
+        self,
+        codes: list[str],
+        dl_start: date,
+        end_date: date,
+        progress_cb: Callable[[str, int, int], Any] | None = None,
+    ) -> None:
+        """Download 5-min bars (09:35 + 09:40) from baostock for 9:40 snapshot."""
+        done = [0]
+        total = len(codes)
         thread_exc: list[BaseException] = []
 
-        def _baostock_download_all() -> None:
+        def _baostock_minute_download() -> None:
             import baostock as bs
 
             lg = bs.login()
@@ -483,31 +616,6 @@ class AkshareBacktestCache:
                 raise RuntimeError(f"baostock login failed: {lg.error_msg}")
 
             try:
-                # --- Stock universe via baostock ---
-                # Try end_date first; fall back up to 7 days for non-trading days.
-                codes: list[str] = []
-                probe_date = end_date
-                for _ in range(7):
-                    rs = bs.query_all_stock(day=probe_date.strftime("%Y-%m-%d"))
-                    while rs.next():
-                        row = rs.get_row_data()
-                        if not row or "." not in row[0]:
-                            continue
-                        # row[0] = "sh.600000" or "sz.000001"
-                        bare = row[0].split(".")[1]
-                        if len(bare) == 6 and (bare.startswith("60") or bare.startswith("00")):
-                            codes.append(bare)
-                    if codes:
-                        break
-                    probe_date -= timedelta(days=1)
-
-                result_codes[0] = codes
-                total_holder[0] = len(codes)
-                logger.info(
-                    f"Downloading data for {len(codes)} main-board stocks "
-                    f"[{start_date} ~ {end_date}]"
-                )
-
                 bs_start = dl_start.strftime("%Y-%m-%d")
                 bs_end = end_date.strftime("%Y-%m-%d")
 
@@ -516,42 +624,6 @@ class AkshareBacktestCache:
                     bs_code = f"{prefix}.{code}"
 
                     try:
-                        # --- Daily OHLCV ---
-                        rs = bs.query_history_k_data_plus(
-                            bs_code,
-                            "date,open,high,low,close,preclose,volume,amount,turn",
-                            start_date=bs_start,
-                            end_date=bs_end,
-                            frequency="d",
-                            adjustflag="2",  # 前复权
-                        )
-                        if rs.error_code == "0":
-                            daily_data: dict[str, dict[str, float]] = {}
-                            while rs.next():
-                                row = rs.get_row_data()
-                                if len(row) < 9:
-                                    continue
-                                ds = row[0]  # "2025-01-20"
-                                # Skip suspended days (empty price fields)
-                                if not row[1] or not row[4]:
-                                    continue
-                                vol_gu = float(row[6]) if row[6] else 0.0
-                                daily_data[ds] = {
-                                    "open": float(row[1]),
-                                    "high": float(row[2]),
-                                    "low": float(row[3]),
-                                    "close": float(row[4]),
-                                    "preClose": float(row[5]) if row[5] else 0.0,
-                                    # Store as 手 for backward compat with old OSS caches
-                                    # (adapter does ×100 at read time)
-                                    "volume": vol_gu / 100,
-                                    "amount": float(row[7]) if row[7] else 0.0,
-                                    "turnoverRatio": float(row[8]) if row[8] else 0.0,
-                                }
-                            if daily_data:
-                                self._daily[code] = daily_data
-
-                        # --- 5-min bars (09:35 + 09:40 → 9:40 snapshot) ---
                         rs = bs.query_history_k_data_plus(
                             bs_code,
                             "date,time,high,low,close,volume",
@@ -591,7 +663,7 @@ class AkshareBacktestCache:
                                 self._minute[code] = min_data
 
                     except Exception:
-                        logger.error(f"Download failed for {code}")
+                        logger.error(f"Minute download failed for {code}")
                         raise
 
                     done[0] += 1
@@ -600,7 +672,7 @@ class AkshareBacktestCache:
 
         def _thread_wrapper() -> None:
             try:
-                _baostock_download_all()
+                _baostock_minute_download()
             except BaseException as exc:
                 thread_exc.append(exc)
 
@@ -609,29 +681,11 @@ class AkshareBacktestCache:
         while thread.is_alive():
             await asyncio.sleep(2)
             if progress_cb:
-                t = total_holder[0] if total_holder[0] > 0 else 0
-                await _maybe_await(progress_cb("download", done[0], t))
+                await _maybe_await(progress_cb("minute", done[0], total))
         thread.join()
 
-        # Re-raise thread exception so callers know download failed
         if thread_exc:
             raise thread_exc[0]
-
-        self._stock_codes = result_codes[0]
-        total = len(self._stock_codes)
-
-        if progress_cb:
-            await _maybe_await(progress_cb("download", total, total))
-        logger.info(
-            f"Download complete (baostock): {len(self._daily)} daily, "
-            f"{len(self._minute)} minute out of {total} stocks"
-        )
-
-        # Recalculate range from actual data so metadata matches reality.
-        # download_prices sets _start_date = user-requested start, but actual
-        # data starts from dl_start (60 days earlier). Fix it.
-        self._recalculate_date_range()
-        self._is_ready = True
 
     async def save_to_oss(self) -> str | None:
         """Save cache to OSS. Returns None on success, error message on failure."""
