@@ -91,8 +91,9 @@ class AkshareBacktestCache:
     """
 
     def __init__(self) -> None:
-        # daily[code][date_str] = {open, high, low, close, preClose, volume, amount}
-        self._daily: dict[str, dict[str, dict[str, float]]] = {}
+        # daily[code][date_str] = {open, high, low, close, preClose, volume, amount, turnoverRatio}
+        # turnoverRatio may be None when sourced from tsanghi (which doesn't provide it)
+        self._daily: dict[str, dict[str, dict[str, float | None]]] = {}
         # minute[code][date_str] = (close_at_940, cum_volume, max_high, min_low)
         self._minute: dict[str, dict[str, tuple[float, float, float, float]]] = {}
         # All stock codes (bare 6-digit) that were downloaded
@@ -109,7 +110,7 @@ class AkshareBacktestCache:
     def stock_codes(self) -> list[str]:
         return self._stock_codes
 
-    def get_daily(self, code: str, date_str: str) -> dict[str, float] | None:
+    def get_daily(self, code: str, date_str: str) -> dict[str, float | None] | None:
         """Get daily OHLCV for a stock on a date. date_str is YYYY-MM-DD."""
         return self._daily.get(code, {}).get(date_str)
 
@@ -117,9 +118,9 @@ class AkshareBacktestCache:
         """Get 9:40 price data: (close, cum_volume, max_high, min_low)."""
         return self._minute.get(code, {}).get(date_str)
 
-    def get_all_codes_with_daily(self, date_str: str) -> dict[str, dict[str, float]]:
+    def get_all_codes_with_daily(self, date_str: str) -> dict[str, dict[str, float | None]]:
         """Get daily data for ALL stocks on a specific date."""
-        result: dict[str, dict[str, float]] = {}
+        result: dict[str, dict[str, float | None]] = {}
         for code, dates in self._daily.items():
             day_data = dates.get(date_str)
             if day_data:
