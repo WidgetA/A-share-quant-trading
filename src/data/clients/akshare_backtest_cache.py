@@ -4,18 +4,17 @@
 # MomentumSectorScanner can run without any code changes.
 
 # === DEPENDENCIES ===
-# - akshare: Free A-share data source (daily OHLCV via East Money)
-# - baostock: Free A-share data source (5-min bars for 9:40 price)
+# - baostock: Free A-share data source (daily OHLCV + 5-min bars)
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
 # - AkshareBacktestCache: Downloads and stores all price data in memory + OSS
 # - AkshareHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
-# - Daily OHLCV: akshare (East Money), supports full history
+# - Daily OHLCV: baostock (daily frequency), supports full history
 # - Minute bars: baostock (5-min frequency), supports full history
-#   (akshare minute API only returns ~5 recent trading days, unusable for backtest)
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
+# - Volume stored in 手 (lots) for backward compatibility with old OSS caches
 
 from __future__ import annotations
 
@@ -29,13 +28,7 @@ import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
-import pandas as pd
-
 logger = logging.getLogger(__name__)
-
-# Akshare calls are synchronous; serial execution to avoid triggering
-# East Money's rate-limiter (RemoteDisconnected errors at higher values).
-_DOWNLOAD_WORKERS = 1
 
 # OSS cache key prefix
 _OSS_PREFIX = "akshare-cache/"
@@ -454,16 +447,16 @@ class AkshareBacktestCache:
         progress_cb: Callable[[str, int, int], Any] | None = None,
     ) -> None:
         """
-        Download daily + minute data for all main-board stocks.
+        Download daily + minute data for all main-board stocks via baostock.
+
+        Both daily OHLCV and 5-min bars are fetched in a single baostock session
+        (one login, one sequential loop, one logout).
 
         Args:
             start_date: First trading date (inclusive).
             end_date: Last trading date (inclusive).
             progress_cb: Optional callback(phase, current, total) for progress updates.
-                phase is "daily" or "minute".
         """
-        import akshare as ak
-
         self._start_date = start_date
         self._end_date = end_date
         # Download extra history before start_date:
@@ -472,104 +465,15 @@ class AkshareBacktestCache:
         # - Trend lookback needs 5 additional trading days
         # Use 60 calendar days to safely cover all lookback requirements.
         dl_start = start_date - timedelta(days=60)
-        start_str = dl_start.strftime("%Y%m%d")
-        end_str = end_date.strftime("%Y%m%d")
 
-        # Get all A-share stock codes
         if progress_cb:
             await _maybe_await(progress_cb("init", 0, 0))
 
-        all_stocks_df = await asyncio.to_thread(ak.stock_info_a_code_name)
-        # Filter main board only (60xxxx SH, 00xxxx SZ)
-        codes = [
-            row["code"]
-            for _, row in all_stocks_df.iterrows()
-            if isinstance(row["code"], str)
-            and len(row["code"]) == 6
-            and (row["code"].startswith("60") or row["code"].startswith("00"))
-        ]
-        self._stock_codes = codes
-        total = len(codes)
-        logger.info(f"Downloading data for {total} main-board stocks [{start_date} ~ {end_date}]")
-
-        # Phase 1: Daily OHLCV
-        sem = asyncio.Semaphore(_DOWNLOAD_WORKERS)
-        done_daily = 0
-
-        async def _download_daily(code: str) -> None:
-            nonlocal done_daily
-            async with sem:
-                try:
-                    # Retry on transient connection errors (rate-limit / server drop)
-                    max_retries = 5
-                    df = None
-                    for attempt in range(max_retries):
-                        try:
-                            df = await asyncio.to_thread(
-                                ak.stock_zh_a_hist,
-                                symbol=code,
-                                period="daily",
-                                start_date=start_str,
-                                end_date=end_str,
-                                adjust="qfq",
-                            )
-                            break
-                        except (ConnectionError, OSError) as retry_err:
-                            if attempt < max_retries - 1:
-                                wait = 3 * 2**attempt  # 3s, 6s, 12s, 24s
-                                logger.warning(
-                                    f"Daily {code} attempt {attempt + 1} failed: {retry_err}, "
-                                    f"retrying in {wait}s..."
-                                )
-                                await asyncio.sleep(wait)
-                            else:
-                                raise
-                    if df is not None and not df.empty:
-                        code_data: dict[str, dict[str, float]] = {}
-                        prev_close = 0.0
-                        for _, row in df.iterrows():
-                            d = row["日期"]
-                            if isinstance(d, str):
-                                ds = d
-                            else:
-                                ds = pd.Timestamp(d).strftime("%Y-%m-%d")
-                            code_data[ds] = {
-                                "open": float(row["开盘"]),
-                                "high": float(row["最高"]),
-                                "low": float(row["最低"]),
-                                "close": float(row["收盘"]),
-                                "preClose": prev_close,
-                                "volume": float(row["成交量"]),  # 手 (lots)
-                                "amount": float(row["成交额"]),
-                                "turnoverRatio": float(row["换手率"]),
-                            }
-                            prev_close = float(row["收盘"])
-
-                        # Fix preClose: first day has 0, need to fetch one extra day
-                        # We'll fix this after all downloads
-                        self._daily[code] = code_data
-                except Exception:
-                    logger.error(f"Daily download failed for {code}")
-                    raise
-
-                done_daily += 1
-                if progress_cb and done_daily % 50 == 0:
-                    await _maybe_await(progress_cb("daily", done_daily, total))
-
-        for c in codes:
-            await _download_daily(c)
-        if progress_cb:
-            await _maybe_await(progress_cb("daily", total, total))
-        logger.info(f"Daily download complete: {len(self._daily)}/{total} stocks")
-
-        # Fix preClose for first date in each stock's data
-        # preClose of first row is 0, which is wrong. We set it from the previous
-        # day's close if available, otherwise we'll leave it (scanner checks prev_close > 0).
-        # For backtesting purposes this means the first date might have fewer candidates.
-
-        # Phase 2: Minute data via baostock 5-min bars (09:35 + 09:40 → 9:40 price)
-        # baostock uses a single TCP connection, so we run sequentially in one thread.
-        done_minute = [0]  # list for thread-safe mutation
+        # All work runs in one thread (baostock uses a single TCP connection).
+        done = [0]  # list for thread-safe mutation from thread
+        total_holder = [0]
+        result_codes: list[list[str]] = [[]]
+        thread_exc: list[BaseException] = []
 
         def _baostock_download_all() -> None:
             import baostock as bs
@@ -579,17 +483,75 @@ class AkshareBacktestCache:
                 raise RuntimeError(f"baostock login failed: {lg.error_msg}")
 
             try:
-                # Use dl_start (not start_date) so minute data covers the same
-                # range as daily data. Without 9:40 prices, gain_from_open=0%
-                # and ALL stocks are filtered out → "无初筛股".
+                # --- Stock universe via baostock ---
+                # Try end_date first; fall back up to 7 days for non-trading days.
+                codes: list[str] = []
+                probe_date = end_date
+                for _ in range(7):
+                    rs = bs.query_all_stock(day=probe_date.strftime("%Y-%m-%d"))
+                    while rs.next():
+                        row = rs.get_row_data()
+                        # row[0] = "sh.600000" or "sz.000001"
+                        bare = row[0].split(".")[1]
+                        if len(bare) == 6 and (
+                            bare.startswith("60") or bare.startswith("00")
+                        ):
+                            codes.append(bare)
+                    if codes:
+                        break
+                    probe_date -= timedelta(days=1)
+
+                result_codes[0] = codes
+                total_holder[0] = len(codes)
+                logger.info(
+                    f"Downloading data for {len(codes)} main-board stocks "
+                    f"[{start_date} ~ {end_date}]"
+                )
+
                 bs_start = dl_start.strftime("%Y-%m-%d")
                 bs_end = end_date.strftime("%Y-%m-%d")
 
                 for code in codes:
                     prefix = "sh" if code.startswith("6") else "sz"
+                    bs_code = f"{prefix}.{code}"
+
                     try:
+                        # --- Daily OHLCV ---
                         rs = bs.query_history_k_data_plus(
-                            f"{prefix}.{code}",
+                            bs_code,
+                            "date,open,high,low,close,preclose,volume,amount,turn",
+                            start_date=bs_start,
+                            end_date=bs_end,
+                            frequency="d",
+                            adjustflag="2",  # 前复权
+                        )
+                        if rs.error_code == "0":
+                            daily_data: dict[str, dict[str, float]] = {}
+                            while rs.next():
+                                row = rs.get_row_data()
+                                ds = row[0]  # "2025-01-20"
+                                # Skip suspended days (empty price fields)
+                                if not row[1] or not row[4]:
+                                    continue
+                                vol_gu = float(row[6]) if row[6] else 0.0
+                                daily_data[ds] = {
+                                    "open": float(row[1]),
+                                    "high": float(row[2]),
+                                    "low": float(row[3]),
+                                    "close": float(row[4]),
+                                    "preClose": float(row[5]) if row[5] else 0.0,
+                                    # Store as 手 for backward compat with old OSS caches
+                                    # (adapter does ×100 at read time)
+                                    "volume": vol_gu / 100,
+                                    "amount": float(row[7]) if row[7] else 0.0,
+                                    "turnoverRatio": float(row[8]) if row[8] else 0.0,
+                                }
+                            if daily_data:
+                                self._daily[code] = daily_data
+
+                        # --- 5-min bars (09:35 + 09:40 → 9:40 snapshot) ---
+                        rs = bs.query_history_k_data_plus(
+                            bs_code,
                             "date,time,high,low,close,volume",
                             start_date=bs_start,
                             end_date=bs_end,
@@ -597,7 +559,7 @@ class AkshareBacktestCache:
                             adjustflag="2",  # 前复权
                         )
                         if rs.error_code == "0":
-                            code_data: dict[str, tuple[float, float, float, float]] = {}
+                            min_data: dict[str, tuple[float, float, float, float]] = {}
                             while rs.next():
                                 row = rs.get_row_data()
                                 # time format: "20260120094000000"
@@ -610,50 +572,56 @@ class AkshareBacktestCache:
                                 high_val = float(row[2])
                                 low_val = float(row[3])
 
-                                if ds in code_data:
-                                    prev = code_data[ds]
-                                    code_data[ds] = (
+                                if ds in min_data:
+                                    prev = min_data[ds]
+                                    min_data[ds] = (
                                         close_val,  # 09:40 close overwrites 09:35
                                         prev[1] + vol_val,  # cumulative volume
                                         max(prev[2], high_val),
                                         min(prev[3], low_val) if prev[3] > 0 else low_val,
                                     )
                                 else:
-                                    code_data[ds] = (close_val, vol_val, high_val, low_val)
+                                    min_data[ds] = (close_val, vol_val, high_val, low_val)
 
-                            if code_data:
-                                self._minute[code] = code_data
+                            if min_data:
+                                self._minute[code] = min_data
+
                     except Exception:
-                        logger.error(f"baostock minute failed for {code}")
+                        logger.error(f"Download failed for {code}")
                         raise
 
-                    done_minute[0] += 1
+                    done[0] += 1
             finally:
                 bs.logout()
 
-        thread_exc: list[BaseException] = []  # capture thread exceptions
-
-        def _baostock_thread_wrapper() -> None:
+        def _thread_wrapper() -> None:
             try:
                 _baostock_download_all()
             except BaseException as exc:
                 thread_exc.append(exc)
 
-        thread = threading.Thread(target=_baostock_thread_wrapper, daemon=True)
+        thread = threading.Thread(target=_thread_wrapper, daemon=True)
         thread.start()
         while thread.is_alive():
             await asyncio.sleep(2)
             if progress_cb:
-                await _maybe_await(progress_cb("minute", done_minute[0], total))
+                t = total_holder[0] if total_holder[0] > 0 else 0
+                await _maybe_await(progress_cb("download", done[0], t))
         thread.join()
 
-        # Re-raise thread exception so callers know minute download failed
+        # Re-raise thread exception so callers know download failed
         if thread_exc:
             raise thread_exc[0]
 
+        self._stock_codes = result_codes[0]
+        total = len(self._stock_codes)
+
         if progress_cb:
-            await _maybe_await(progress_cb("minute", total, total))
-        logger.info(f"Minute download complete (baostock): {len(self._minute)}/{total} stocks")
+            await _maybe_await(progress_cb("download", total, total))
+        logger.info(
+            f"Download complete (baostock): {len(self._daily)} daily, "
+            f"{len(self._minute)} minute out of {total} stocks"
+        )
 
         # Recalculate range from actual data so metadata matches reality.
         # download_prices sets _start_date = user-requested start, but actual
@@ -720,8 +688,8 @@ class AkshareHistoricalAdapter:
                     for ind in indicators.split(","):
                         ind = ind.strip()
                         val = day.get(ind)
-                        # akshare 成交量 is in 手 (lots of 100 shares);
-                        # convert to 股 (shares) to match baostock/iFinD units.
+                        # Cache stores volume in 手 (lots of 100 shares);
+                        # convert to 股 (shares) to match iFinD units.
                         if ind == "volume" and val is not None:
                             val = val * 100
                         indicator_data[ind].append(val)
@@ -791,15 +759,28 @@ class AkshareHistoricalAdapter:
         start_date: str,
         end_date: str,
     ) -> list[str]:
-        """Get trading dates via akshare."""
-        import akshare as ak
+        """Get trading dates via baostock."""
+
+        def _query() -> list[str]:
+            import baostock as bs
+
+            lg = bs.login()
+            if lg.error_code != "0":
+                raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+            try:
+                rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
+                dates: list[str] = []
+                while rs.next():
+                    row = rs.get_row_data()
+                    # row[0] = calendar_date, row[1] = is_trading_day ("1"/"0")
+                    if row[1] == "1":
+                        dates.append(row[0])
+                return dates
+            finally:
+                bs.logout()
 
         try:
-            df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
-            all_dates = df["trade_date"].dt.date
-            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
-            ed = datetime.strptime(end_date, "%Y-%m-%d").date()
-            return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
+            return await asyncio.to_thread(_query)
         except Exception:
             logger.error("Failed to get trade dates")
             raise
