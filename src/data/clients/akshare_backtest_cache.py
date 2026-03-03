@@ -481,9 +481,7 @@ class AkshareBacktestCache:
         codes = list(self._daily.keys())
         self._stock_codes = codes
         if codes:
-            await self._download_minute_baostock(
-                codes, dl_start, end_date, progress_cb
-            )
+            await self._download_minute_baostock(codes, dl_start, end_date, progress_cb)
 
         total = len(self._stock_codes)
         if progress_cb:

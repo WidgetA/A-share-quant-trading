@@ -87,9 +87,7 @@ class TsanghiClient:
                 code = body.get("code")
                 if code != 200:
                     msg = body.get("msg", "unknown error")
-                    raise RuntimeError(
-                        f"Tsanghi API error: {msg} (code={code})"
-                    )
+                    raise RuntimeError(f"Tsanghi API error: {msg} (code={code})")
 
                 data = body.get("data")
                 if data is None:
@@ -99,7 +97,7 @@ class TsanghiClient:
             except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
                 last_error = exc
                 if attempt < _MAX_RETRIES:
-                    wait = 2 ** attempt
+                    wait = 2**attempt
                     logger.warning(
                         f"Tsanghi request failed (attempt {attempt}/{_MAX_RETRIES}), "
                         f"retrying in {wait}s: {exc}"
@@ -108,9 +106,7 @@ class TsanghiClient:
                 else:
                     break
 
-        raise RuntimeError(
-            f"Tsanghi API request failed after {_MAX_RETRIES} retries: {last_error}"
-        )
+        raise RuntimeError(f"Tsanghi API request failed after {_MAX_RETRIES} retries: {last_error}")
 
     async def daily(
         self,
