@@ -491,6 +491,8 @@ class AkshareBacktestCache:
                     rs = bs.query_all_stock(day=probe_date.strftime("%Y-%m-%d"))
                     while rs.next():
                         row = rs.get_row_data()
+                        if not row or "." not in row[0]:
+                            continue
                         # row[0] = "sh.600000" or "sz.000001"
                         bare = row[0].split(".")[1]
                         if len(bare) == 6 and (bare.startswith("60") or bare.startswith("00")):
@@ -527,6 +529,8 @@ class AkshareBacktestCache:
                             daily_data: dict[str, dict[str, float]] = {}
                             while rs.next():
                                 row = rs.get_row_data()
+                                if len(row) < 9:
+                                    continue
                                 ds = row[0]  # "2025-01-20"
                                 # Skip suspended days (empty price fields)
                                 if not row[1] or not row[4]:
@@ -560,6 +564,8 @@ class AkshareBacktestCache:
                             min_data: dict[str, tuple[float, float, float, float]] = {}
                             while rs.next():
                                 row = rs.get_row_data()
+                                if len(row) < 6:
+                                    continue
                                 # time format: "20260120094000000"
                                 hhmm = row[1][8:12]
                                 if hhmm not in ("0935", "0940"):
