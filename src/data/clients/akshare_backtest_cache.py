@@ -493,9 +493,7 @@ class AkshareBacktestCache:
                         row = rs.get_row_data()
                         # row[0] = "sh.600000" or "sz.000001"
                         bare = row[0].split(".")[1]
-                        if len(bare) == 6 and (
-                            bare.startswith("60") or bare.startswith("00")
-                        ):
+                        if len(bare) == 6 and (bare.startswith("60") or bare.startswith("00")):
                             codes.append(bare)
                     if codes:
                         break
