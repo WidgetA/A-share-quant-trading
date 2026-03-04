@@ -4613,7 +4613,6 @@ async def _run_intraday_monitor(state: dict) -> None:
 
             # 9:40-9:50 window — run scan once
             logger.info("Monitor: entering scan window")
-            scan_ok = False
             try:
                 app_state = state.get("_app_state")
                 akshare_cache = getattr(app_state, "akshare_cache", None) if app_state else None
@@ -4632,8 +4631,6 @@ async def _run_intraday_monitor(state: dict) -> None:
                             )
                     except Exception:
                         pass
-                else:
-                    scan_ok = True
             except Exception as e:
                 logger.error(f"Monitor scan error: {e}", exc_info=True)
                 # Notify Feishu about the error
