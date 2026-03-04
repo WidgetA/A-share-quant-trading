@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -2593,6 +2594,20 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
+                # Build L0 pool stats per day for reference
+                l0_pool_stats_by_day: dict[str, dict] = {}
+                l0_by_day: dict[str, list[dict]] = defaultdict(list)
+                for item in all_layer_detail[LAYER_NAMES[0]]:
+                    l0_by_day[item["trade_date"]].append(item)
+                for day_str, items in l0_by_day.items():
+                    total = len(items)
+                    pos = sum(1 for it in items if it["return_pct"] > 0)
+                    l0_pool_stats_by_day[day_str] = {
+                        "total": total,
+                        "positive": pos,
+                        "pct": round(pos / total * 100, 1) if total else 0.0,
+                    }
+
                 # Filtered-out best stocks per layer transition (by day)
                 filtered_out_best = []
                 transitions = [
@@ -2602,8 +2617,6 @@ def create_momentum_router() -> APIRouter:
                     (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
-                    from collections import defaultdict
-
                     prev_by_day: dict[str, list[dict]] = defaultdict(list)
                     curr_codes_by_day: dict[str, set[str]] = defaultdict(set)
                     for item in all_layer_detail[prev_n]:
@@ -2619,6 +2632,7 @@ def create_momentum_router() -> APIRouter:
                         curr_codes = curr_codes_by_day.get(day_str, set())
                         day_filtered = [it for it in items if it["stock_code"] not in curr_codes]
                         all_filtered.extend(day_filtered)
+                        pool_s = l0_pool_stats_by_day.get(day_str, {"total": 0, "positive": 0, "pct": 0})
                         if not day_filtered:
                             daily_data.append(
                                 {
@@ -2626,6 +2640,10 @@ def create_momentum_router() -> APIRouter:
                                     "filtered_count": 0,
                                     "avg_return": 0,
                                     "positive_count": 0,
+                                    "positive_pct": 0,
+                                    "pool_total": pool_s["total"],
+                                    "pool_positive_count": pool_s["positive"],
+                                    "pool_positive_pct": pool_s["pct"],
                                     "top_stocks": [],
                                 }
                             )
@@ -2633,6 +2651,7 @@ def create_momentum_router() -> APIRouter:
                         d_rets = [f["return_pct"] for f in day_filtered]
                         d_avg = sum(d_rets) / len(d_rets)
                         d_pos = sum(1 for r in d_rets if r > 0)
+                        d_pos_pct = round(d_pos / len(day_filtered) * 100, 1)
                         d_top3 = sorted(
                             day_filtered,
                             key=lambda x: x["return_pct"],
@@ -2644,6 +2663,10 @@ def create_momentum_router() -> APIRouter:
                                 "filtered_count": len(day_filtered),
                                 "avg_return": round(d_avg, 2),
                                 "positive_count": d_pos,
+                                "positive_pct": d_pos_pct,
+                                "pool_total": pool_s["total"],
+                                "pool_positive_count": pool_s["positive"],
+                                "pool_positive_pct": pool_s["pct"],
                                 "top_stocks": d_top3,
                             }
                         )
@@ -2656,6 +2679,10 @@ def create_momentum_router() -> APIRouter:
                                 "total_filtered": 0,
                                 "avg_return": 0,
                                 "positive_count": 0,
+                                "positive_pct": 0,
+                                "pool_total": 0,
+                                "pool_positive_count": 0,
+                                "pool_positive_pct": 0,
                                 "days": daily_data,
                             }
                         )
@@ -2663,12 +2690,21 @@ def create_momentum_router() -> APIRouter:
                         rets = [f["return_pct"] for f in all_filtered]
                         avg_r = sum(rets) / len(rets)
                         pos_count = sum(1 for r in rets if r > 0)
+                        pos_pct = round(pos_count / len(all_filtered) * 100, 1)
+                        # Sum pool stats across all days
+                        total_pool = sum(l0_pool_stats_by_day.get(d["trade_date"], {}).get("total", 0) for d in daily_data)
+                        total_pool_pos = sum(l0_pool_stats_by_day.get(d["trade_date"], {}).get("positive", 0) for d in daily_data)
+                        avg_pool_pct = round(total_pool_pos / total_pool * 100, 1) if total_pool else 0
                         filtered_out_best.append(
                             {
                                 "label": label,
                                 "total_filtered": len(all_filtered),
                                 "avg_return": round(avg_r, 2),
                                 "positive_count": pos_count,
+                                "positive_pct": pos_pct,
+                                "pool_total": total_pool,
+                                "pool_positive_count": total_pool_pos,
+                                "pool_positive_pct": avg_pool_pct,
                                 "days": daily_data,
                             }
                         )
@@ -3366,6 +3402,20 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
+                # Build L0 pool stats per day for reference
+                l0_pool_stats_by_day: dict[str, dict] = {}
+                l0_by_day: dict[str, list[dict]] = defaultdict(list)
+                for item in all_layer_detail[LAYER_NAMES[0]]:
+                    l0_by_day[item["trade_date"]].append(item)
+                for day_str, items in l0_by_day.items():
+                    total = len(items)
+                    pos = sum(1 for it in items if it["return_pct"] > 0)
+                    l0_pool_stats_by_day[day_str] = {
+                        "total": total,
+                        "positive": pos,
+                        "pct": round(pos / total * 100, 1) if total else 0.0,
+                    }
+
                 # Filtered-out best stocks
                 filtered_out_best = []
                 transitions = [
@@ -3375,8 +3425,6 @@ def create_momentum_router() -> APIRouter:
                     (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
                 ]
                 for prev_n, curr_n, label in transitions:
-                    from collections import defaultdict
-
                     prev_by_day: dict[str, list[dict]] = defaultdict(list)
                     curr_codes_by_day: dict[str, set[str]] = defaultdict(set)
                     for item in all_layer_detail[prev_n]:
@@ -3391,6 +3439,7 @@ def create_momentum_router() -> APIRouter:
                         curr_codes = curr_codes_by_day.get(day_str, set())
                         day_filtered = [it for it in items if it["stock_code"] not in curr_codes]
                         all_filtered.extend(day_filtered)
+                        pool_s = l0_pool_stats_by_day.get(day_str, {"total": 0, "positive": 0, "pct": 0})
                         if not day_filtered:
                             daily_data.append(
                                 {
@@ -3398,6 +3447,10 @@ def create_momentum_router() -> APIRouter:
                                     "filtered_count": 0,
                                     "avg_return": 0,
                                     "positive_count": 0,
+                                    "positive_pct": 0,
+                                    "pool_total": pool_s["total"],
+                                    "pool_positive_count": pool_s["positive"],
+                                    "pool_positive_pct": pool_s["pct"],
                                     "top_stocks": [],
                                 }
                             )
@@ -3405,6 +3458,7 @@ def create_momentum_router() -> APIRouter:
                         d_rets = [f["return_pct"] for f in day_filtered]
                         d_avg = sum(d_rets) / len(d_rets)
                         d_pos = sum(1 for r in d_rets if r > 0)
+                        d_pos_pct = round(d_pos / len(day_filtered) * 100, 1)
                         d_top3 = sorted(
                             day_filtered,
                             key=lambda x: x["return_pct"],
@@ -3416,6 +3470,10 @@ def create_momentum_router() -> APIRouter:
                                 "filtered_count": len(day_filtered),
                                 "avg_return": round(d_avg, 2),
                                 "positive_count": d_pos,
+                                "positive_pct": d_pos_pct,
+                                "pool_total": pool_s["total"],
+                                "pool_positive_count": pool_s["positive"],
+                                "pool_positive_pct": pool_s["pct"],
                                 "top_stocks": d_top3,
                             }
                         )
@@ -3427,6 +3485,10 @@ def create_momentum_router() -> APIRouter:
                                 "total_filtered": 0,
                                 "avg_return": 0,
                                 "positive_count": 0,
+                                "positive_pct": 0,
+                                "pool_total": 0,
+                                "pool_positive_count": 0,
+                                "pool_positive_pct": 0,
                                 "days": daily_data,
                             }
                         )
@@ -3434,12 +3496,20 @@ def create_momentum_router() -> APIRouter:
                         rets = [f["return_pct"] for f in all_filtered]
                         avg_r = sum(rets) / len(rets)
                         pos_count = sum(1 for r in rets if r > 0)
+                        pos_pct = round(pos_count / len(all_filtered) * 100, 1)
+                        total_pool = sum(l0_pool_stats_by_day.get(d["trade_date"], {}).get("total", 0) for d in daily_data)
+                        total_pool_pos = sum(l0_pool_stats_by_day.get(d["trade_date"], {}).get("positive", 0) for d in daily_data)
+                        avg_pool_pct = round(total_pool_pos / total_pool * 100, 1) if total_pool else 0
                         filtered_out_best.append(
                             {
                                 "label": label,
                                 "total_filtered": len(all_filtered),
                                 "avg_return": round(avg_r, 2),
                                 "positive_count": pos_count,
+                                "positive_pct": pos_pct,
+                                "pool_total": total_pool,
+                                "pool_positive_count": total_pool_pos,
+                                "pool_positive_pct": avg_pool_pct,
                                 "days": daily_data,
                             }
                         )
