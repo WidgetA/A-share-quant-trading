@@ -3005,27 +3005,34 @@ def create_momentum_router() -> APIRouter:
                             l2 = list(l1)
                             qa2 = []
 
-                        # Always fetch trend data for Step 6 scoring, even if quality filter is off
+                        # Always fetch historical data for Step 6 scoring,
+                        # even if quality filter is off
                         if not qa2 and l1:
                             qa2_data = await quality_filter_inst._fetch_historical_context(
                                 [s.stock_code for s in l1], trade_date
                             )
-                            trend_data_l2 = {
-                                code: v["trend_pct"]
+                            cup_data_l2: dict[str, int] = {
+                                code: v["consecutive_up_days"]
                                 for code, v in qa2_data.items()
-                                if v.get("trend_pct") is not None
+                                if v.get("consecutive_up_days") is not None
+                            }
+                            avg_vol_data_l2: dict[str, float] = {
+                                code: v["avg_daily_volume"]
+                                for code, v in qa2_data.items()
+                                if v.get("avg_daily_volume") is not None
+                                and v["avg_daily_volume"] > 0
                             }
                         else:
-                            trend_data_l2 = {
-                                a.stock_code: a.trend_pct for a in qa2 if a.trend_pct is not None
+                            cup_data_l2 = {
+                                a.stock_code: a.consecutive_up_days
+                                for a in qa2
+                                if a.consecutive_up_days is not None
                             }
-
-                        # Build avg_daily_volume from quality assessments for L3 filter
-                        avg_vol_data_l2 = {
-                            a.stock_code: a.avg_daily_volume
-                            for a in qa2
-                            if a.avg_daily_volume is not None
-                        }
+                            avg_vol_data_l2 = {
+                                a.stock_code: a.avg_daily_volume
+                                for a in qa2
+                                if a.avg_daily_volume is not None
+                            }
 
                         # L3: reversal factor filter (缩量冲高)
                         from src.strategy.filters.reversal_factor_filter import (
@@ -3062,7 +3069,9 @@ def create_momentum_router() -> APIRouter:
                         l4 = []
                         rec = None
                         if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots, trend_data_l2)
+                            rec, _scored = await scanner._step6_recommend(
+                                l3, price_snapshots, cup_data_l2, avg_vol_data_l2
+                            )
                             if rec:
                                 l4 = [
                                     SelectedStock(
