@@ -1474,10 +1474,9 @@ function renderFilteredOutBest(filteredOutBest) {
         html += `<span class="filtered-label">${layer.label}</span>`;
         html += `: 共筛掉 <strong>${layer.total_filtered}</strong> 只,`;
         html += ` 平均收益 <span class="${avgCls}">${layer.avg_return >= 0 ? '+' : ''}${layer.avg_return.toFixed(2)}%</span>,`;
-        html += ` 其中 ${layer.positive_count} 只盈利`;
+        html += ` 其中 ${layer.positive_count} 只盈利 (<strong>${layer.positive_pct}%</strong>)`;
         if (layer.total_filtered > 0) {
-            html += ` (<strong>${layer.positive_pct}%</strong>`;
-            html += `, 票池 ${layer.pool_total}只中${layer.pool_positive_count}只盈利 ${layer.pool_positive_pct}%)`;
+            html += `<br><span style="color:#888;font-size:0.93em">对照：同期票池 ${layer.pool_total} 只中 ${layer.pool_positive_count} 只盈利 (${layer.pool_positive_pct}%)</span>`;
         }
 
         html += `<div id="filtered-layer-${i}-content"></div>`;
@@ -1519,9 +1518,8 @@ function _renderFilteredDay(layerIdx) {
         const dAvgCls = day.avg_return > 0 ? 'range-profit-pos' : (day.avg_return < 0 ? 'range-profit-neg' : '');
         html += `<div class="filtered-day-stats">筛掉 ${day.filtered_count} 只,`;
         html += ` 平均收益 <span class="${dAvgCls}">${day.avg_return >= 0 ? '+' : ''}${day.avg_return.toFixed(2)}%</span>,`;
-        html += ` 其中 ${day.positive_count} 只盈利`;
-        html += ` (<strong>${day.positive_pct}%</strong>`;
-        html += `, 票池 ${day.pool_total}只中${day.pool_positive_count}只盈利 ${day.pool_positive_pct}%)</div>`;
+        html += ` 其中 ${day.positive_count} 只盈利 (<strong>${day.positive_pct}%</strong>)`;
+        html += `<br><span style="color:#888;font-size:0.93em">对照：当日票池 ${day.pool_total} 只中 ${day.pool_positive_count} 只盈利 (${day.pool_positive_pct}%)</span></div>`;
 
         if (day.top_stocks && day.top_stocks.length > 0) {
             const showGrowth = layer.label.includes('最终推荐');
