@@ -187,20 +187,55 @@ def analyze(df: pd.DataFrame) -> str:
                 continue
 
             p(f"  ---- 均量窗口 = {window} 日 ----")
-            p(f"  {amp_col} 统计: mean={sdf[amp_col].mean():.2f}x  "
-              f"median={sdf[amp_col].median():.2f}x  "
-              f"std={sdf[amp_col].std():.2f}")
+            p(
+                f"  {amp_col} 统计: mean={sdf[amp_col].mean():.2f}x  "
+                f"median={sdf[amp_col].median():.2f}x  "
+                f"std={sdf[amp_col].std():.2f}"
+            )
             p()
 
             # --- Binning ---
-            bins = [0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1,
-                    1.3, 1.6, 2.0, 3.0, float("inf")]
-            labels = ["<0.2", "0.2~0.3", "0.3~0.4", "0.4~0.5", "0.5~0.6",
-                      "0.6~0.7", "0.7~0.8", "0.8~0.9", "0.9~1.0", "1.0~1.1",
-                      "1.1~1.3", "1.3~1.6", "1.6~2.0", "2.0~3.0", "≥3.0"]
+            bins = [
+                0,
+                0.2,
+                0.3,
+                0.4,
+                0.5,
+                0.6,
+                0.7,
+                0.8,
+                0.9,
+                1.0,
+                1.1,
+                1.3,
+                1.6,
+                2.0,
+                3.0,
+                float("inf"),
+            ]
+            labels = [
+                "<0.2",
+                "0.2~0.3",
+                "0.3~0.4",
+                "0.4~0.5",
+                "0.5~0.6",
+                "0.6~0.7",
+                "0.7~0.8",
+                "0.8~0.9",
+                "0.9~1.0",
+                "1.0~1.1",
+                "1.1~1.3",
+                "1.3~1.6",
+                "1.6~2.0",
+                "2.0~3.0",
+                "≥3.0",
+            ]
 
             sdf[f"bin_{window}"] = pd.cut(
-                sdf[amp_col], bins=bins, labels=labels, right=False,
+                sdf[amp_col],
+                bins=bins,
+                labels=labels,
+                right=False,
             )
             hdr = f"  {'区间':<10} {'N':>7} {'avgEOD%':>9} {'avgNxt%':>9} {'wrEOD':>7} {'wrNxt':>7}"
             p(hdr)
@@ -214,16 +249,17 @@ def analyze(df: pd.DataFrame) -> str:
                 an = s["return_to_next"].mean() * 100
                 we = (s["return_to_eod"] > 0).mean() * 100
                 wn = (s["return_to_next"] > 0).mean() * 100
-                p(f"  {lb:<10} {len(s):>7,} {ae:>+8.2f}% {an:>+8.2f}% "
-                  f"{we:>6.1f}% {wn:>6.1f}%")
+                p(f"  {lb:<10} {len(s):>7,} {ae:>+8.2f}% {an:>+8.2f}% {we:>6.1f}% {wn:>6.1f}%")
             p()
 
             # --- Parameter sweep (lower bound) ---
             p("  参数扫描: amp < threshold → 过滤")
-            sh = (f"  {'阈值':>5} {'过滤N':>7} {'过滤%':>6} "
-                  f"{'过滤EOD':>8} {'保留EOD':>8} {'liftEOD':>8} "
-                  f"{'过滤Nxt':>8} {'保留Nxt':>8} {'liftNxt':>8} "
-                  f"{'wrEOD_f':>7} {'wrEOD_k':>7}")
+            sh = (
+                f"  {'阈值':>5} {'过滤N':>7} {'过滤%':>6} "
+                f"{'过滤EOD':>8} {'保留EOD':>8} {'liftEOD':>8} "
+                f"{'过滤Nxt':>8} {'保留Nxt':>8} {'liftNxt':>8} "
+                f"{'wrEOD_f':>7} {'wrEOD_k':>7}"
+            )
             p(sh)
             p("  " + "-" * (len(sh) - 2))
 
@@ -255,10 +291,12 @@ def analyze(df: pd.DataFrame) -> str:
                     best_lift_nxt = lt_nxt
                     best_t_nxt = float(t)
 
-                p(f"  {t:>5.1f}x {nf:>7,} {pf:>5.1f}% "
-                  f"{af_eod:>+7.2f}% {ak_eod:>+7.2f}% {lt_eod:>+7.3f}% "
-                  f"{af_nxt:>+7.2f}% {ak_nxt:>+7.2f}% {lt_nxt:>+7.3f}% "
-                  f"{wf:>6.1f}% {wk:>6.1f}%")
+                p(
+                    f"  {t:>5.1f}x {nf:>7,} {pf:>5.1f}% "
+                    f"{af_eod:>+7.2f}% {ak_eod:>+7.2f}% {lt_eod:>+7.3f}% "
+                    f"{af_nxt:>+7.2f}% {ak_nxt:>+7.2f}% {lt_nxt:>+7.3f}% "
+                    f"{wf:>6.1f}% {wk:>6.1f}%"
+                )
 
             p()
             p(f"  ★ EOD最大lift: 阈值={best_t_eod:.1f}x  lift={best_lift_eod:+.3f}%")
@@ -272,8 +310,10 @@ def analyze(df: pd.DataFrame) -> str:
     p("=" * 80)
     p()
 
-    summary_hdr = (f"  {'子集':<20} {'窗口':>4} {'bestEOD':>8} {'liftEOD':>9} "
-                   f"{'bestNxt':>8} {'liftNxt':>9} {'过滤%EOD':>8}")
+    summary_hdr = (
+        f"  {'子集':<20} {'窗口':>4} {'bestEOD':>8} {'liftEOD':>9} "
+        f"{'bestNxt':>8} {'liftNxt':>9} {'过滤%EOD':>8}"
+    )
     p(summary_hdr)
     p("  " + "-" * (len(summary_hdr) - 2))
 
@@ -304,8 +344,10 @@ def analyze(df: pd.DataFrame) -> str:
                     best_l_nxt = lt_nxt
                     best_t_nxt = float(t)
 
-            p(f"  {subset_name:<20} {window:>4}d {best_t_eod:>7.1f}x {best_l_eod:>+8.3f}% "
-              f"{best_t_nxt:>7.1f}x {best_l_nxt:>+8.3f}% {best_pct:>7.1f}%")
+            p(
+                f"  {subset_name:<20} {window:>4}d {best_t_eod:>7.1f}x {best_l_eod:>+8.3f}% "
+                f"{best_t_nxt:>7.1f}x {best_l_nxt:>+8.3f}% {best_pct:>7.1f}%"
+            )
 
     p()
 
@@ -355,10 +397,14 @@ def analyze(df: pd.DataFrame) -> str:
         bn = np.array(boot_nxt)
 
         p(f"  均量窗口 = {window}d:")
-        p(f"    EOD:  mean={be.mean():.2f}x  median={np.median(be):.2f}x  "
-          f"5th={np.percentile(be, 5):.2f}x  95th={np.percentile(be, 95):.2f}x")
-        p(f"    Next: mean={bn.mean():.2f}x  median={np.median(bn):.2f}x  "
-          f"5th={np.percentile(bn, 5):.2f}x  95th={np.percentile(bn, 95):.2f}x")
+        p(
+            f"    EOD:  mean={be.mean():.2f}x  median={np.median(be):.2f}x  "
+            f"5th={np.percentile(be, 5):.2f}x  95th={np.percentile(be, 95):.2f}x"
+        )
+        p(
+            f"    Next: mean={bn.mean():.2f}x  median={np.median(bn):.2f}x  "
+            f"5th={np.percentile(bn, 5):.2f}x  95th={np.percentile(bn, 95):.2f}x"
+        )
 
         # Compact histogram
         hb = np.arange(0.15, 1.25, 0.1)
@@ -385,8 +431,7 @@ def analyze(df: pd.DataFrame) -> str:
 def main() -> None:
     if not CACHE_FILE.exists():
         logger.error(
-            f"Cache not found: {CACHE_FILE}\n"
-            "Run experiment_turnover_amp.py first to download data."
+            f"Cache not found: {CACHE_FILE}\nRun experiment_turnover_amp.py first to download data."
         )
         sys.exit(1)
 
