@@ -632,7 +632,7 @@ strategy:
 4. **Step 3 — Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 1
 5. **Step 4 — Board Constituents**: Get ALL stocks in each hot board from local `data/board_constituents.json`
 6. **Step 5 — Gain Filter**: Select constituents with 9:40 gain from open >0.56%, main board, non-ST
-7. **Step 5.5 — Momentum Quality Filter**: Remove 冲高回落 risk — stocks with extreme early volume surge (turnover_amp > 3.0x). Turnover amp = early_volume (9:40 cumulative) / (avg_daily_volume × 0.125). Based on 9-month study (571K obs): >3x → avg return negative, win rate 42.9%. Also computes trend_pct, consecutive_up_days, avg_daily_volume for Step 6
+7. **Step 5.5 — Momentum Quality Filter**: Remove stocks with abnormal early volume. Upper bound: turnover_amp > 3.0x (冲高回落 risk, based on 9-month study: >3x → avg return negative, win rate 42.9%). Lower bound: turnover_amp < 0.4x (缩量弱势, based on fine-grained sweep across 5/7/15/20d windows: Bootstrap median 0.42~0.47x, kept-group return +0.020% improvement). Turnover amp = early_volume (9:40 cumulative) / (avg_daily_volume × 0.125). Also computes trend_pct, consecutive_up_days, avg_daily_volume for Step 6
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
 9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
@@ -684,7 +684,7 @@ strategy:
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
 - [x] LocalConceptMapper: local JSON-based stock-to-board and board-to-stock lookups (replaced iwencai ConceptMapper)
 - [x] MomentumSectorScanner: Step 1–6 pipeline with recommendation scoring
-- [x] MomentumQualityFilter: Step 5.5 冲高回落 filter (turnover_amp > 3x upper bound)
+- [x] MomentumQualityFilter: Step 5.5 volume filter (turnover_amp > 3x upper bound + < 0.4x lower bound)
 - [x] ReversalFactorFilter: Step 5.6 冲高回落 filter (early fade + price position)
 - [x] Feishu notification: `send_momentum_scan_result()` with recommendation
 - [x] Backtest script with `--notify` option

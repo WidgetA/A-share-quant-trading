@@ -1,14 +1,22 @@
 # === MODULE PURPOSE ===
-# Post-selection filter to remove stocks with extreme early volume surge.
-# Catches "冲高回落": stocks whose 10-min volume is far above their own
-# historical average — indicating speculative frenzy that fades by EOD.
+# Post-selection filter to remove stocks with abnormal early volume.
+# Two signals:
+# 1. Upper bound (冲高回落): 10-min volume far above historical average
+#    → speculative frenzy that fades by EOD.
+# 2. Lower bound (缩量弱势): 10-min volume far below historical average
+#    → no institutional interest, weak follow-through.
 
-# === KEY SIGNAL ===
-# Turnover amplification upper bound: turnover_amp > max_turnover_amp → filter.
-# Empirical basis: 9-month full-market study (571K observations, 3196 stocks,
-# 2025-06 ~ 2026-02). Stocks with 10-min volume > 3× own 20-day average
-# had avg return -0.03% and win rate 42.9% (vs +0.16% / 49.5% for normal).
-# Pattern: early volume explosion = short-term speculators, not sustained buying.
+# === KEY SIGNALS ===
+# Upper bound: turnover_amp > max_turnover_amp (3.0x) → filter.
+#   Empirical: 9-month study (571K obs, 3196 stocks, 2025-06 ~ 2026-02).
+#   >3x → avg return -0.03%, win rate 42.9% (vs +0.16% / 49.5% normal).
+#
+# Lower bound: turnover_amp < min_turnover_amp (0.4x) → filter.
+#   Empirical: fine-grained sweep (0.10~0.50, step 0.01) across 4 volume
+#   windows (5/7/15/20d). Bootstrap (N=3000) on declining-trend subset:
+#   20d median = 0.45x, 90% CI [0.38, 0.50]. Kept-group return +0.632%
+#   vs baseline +0.612% (+0.020% improvement). Filtered stocks earned less
+#   across all windows.
 
 # === DATA FLOW ===
 # MomentumSectorScanner Step 5 → MomentumQualityFilter → Step 6
@@ -48,6 +56,12 @@ class MomentumQualityConfig:
     # Based on 9-month study: >3x → avg return negative, win rate 42.9%.
     max_turnover_amp: float = 3.0
 
+    # Lower bound for turnover amplification on buy day.
+    # Stocks with amp below this threshold are filtered out (缩量弱势).
+    # Based on fine-grained sweep (0.10~0.50, step 0.01): Bootstrap median
+    # 0.42~0.47x across 5/7/15/20d windows. Conservative 0.4x chosen.
+    min_turnover_amp: float = 0.4
+
     # Number of trading days for average turnover calculation.
     turnover_lookback_days: int = 20
 
@@ -67,9 +81,11 @@ class QualityAssessment:
 
 class MomentumQualityFilter:
     """
-    Filters out stocks with extreme early volume surge (冲高回落 risk).
+    Filters out stocks with abnormal early volume (too high or too low).
 
-    Single signal: turnover_amp > max_turnover_amp → filter out.
+    Two signals:
+    - turnover_amp > max_turnover_amp (3.0x) → 冲高回落 risk, filter out.
+    - turnover_amp < min_turnover_amp (0.4x) → 缩量弱势, filter out.
     Also computes trend_pct, consecutive_up_days, avg_daily_volume for Step 6.
     Fail-fast: if historical data unavailable, raises error to halt trading.
 
@@ -208,6 +224,12 @@ class MomentumQualityFilter:
         if turnover_amp is not None and turnover_amp > self._config.max_turnover_amp:
             reasons.append(
                 f"换手放大{turnover_amp:.1f}x>{self._config.max_turnover_amp}x (冲高回落风险)"
+            )
+
+        # Filter: extremely low early volume → 缩量弱势, no institutional interest
+        if turnover_amp is not None and turnover_amp < self._config.min_turnover_amp:
+            reasons.append(
+                f"早盘缩量{turnover_amp:.2f}x<{self._config.min_turnover_amp}x (缩量弱势)"
             )
 
         # Extract avg_daily_volume for Step 6 early_turnover_amp computation.
