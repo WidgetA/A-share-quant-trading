@@ -187,8 +187,7 @@ class SinaRealtimeClient:
                         await asyncio.sleep(wait)
                     else:
                         raise SinaRealtimeError(
-                            f"Sina HTTP request failed after {self.MAX_RETRIES} "
-                            f"attempts: {e}"
+                            f"Sina HTTP request failed after {self.MAX_RETRIES} attempts: {e}"
                         ) from e
 
             # Sina returns GBK-encoded content
