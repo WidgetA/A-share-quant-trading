@@ -1,15 +1,14 @@
 # === MODULE PURPOSE ===
-# Post-selection filter to remove stocks with weak momentum signals.
-# Catches "fake breakouts": stocks in a declining trend that briefly spike
-# at 9:40 but lack volume confirmation — the spike is not sustained.
+# Post-selection filter to remove stocks with extreme early volume surge.
+# Catches "冲高回落": stocks whose 10-min volume is far above their own
+# historical average — indicating speculative frenzy that fades by EOD.
 
 # === KEY SIGNAL ===
-# AND combination: declining trend AND low turnover amplification.
-# Empirical basis: analysis of 8 trades showed losing trades (000029, 000802)
-# had both declining pre-buy trend and turnover amp ~1.1x, while profitable
-# trades had stable/rising trend and turnover amp 1.5-2.7x.
-# AND logic prevents false kills on breakout-from-dip stocks (declining trend
-# but high turnover amp = real buying interest).
+# Turnover amplification upper bound: turnover_amp > max_turnover_amp → filter.
+# Empirical basis: 9-month full-market study (571K observations, 3196 stocks,
+# 2025-06 ~ 2026-02). Stocks with 10-min volume > 3× own 20-day average
+# had avg return -0.03% and win rate 42.9% (vs +0.16% / 49.5% for normal).
+# Pattern: early volume explosion = short-term speculators, not sustained buying.
 
 # === DATA FLOW ===
 # MomentumSectorScanner Step 5 → MomentumQualityFilter → Step 6
@@ -38,15 +37,16 @@ class MomentumQualityConfig:
 
     enabled: bool = True
 
-    # Signal 1: Recent trend direction.
-    # Number of trading days to check for declining trend.
+    # Trend lookback: number of trading days for trend_pct computation.
     # Compares prev_close vs close from N days ago.
+    # (trend_pct is passed to Step 6, not used for filtering here.)
     trend_lookback_days: int = 5
 
-    # Signal 2: Turnover amplification on buy day.
-    # early_volume (9:40 cumulative) / (avg_daily_volume × 0.125).
-    # Uses only 9:40 data — no full-day hindsight, consistent in backtest and live.
-    min_turnover_amp: float = 1.3
+    # Upper bound for turnover amplification on buy day.
+    # turnover_amp = early_volume (9:40 cumulative) / (avg_daily_volume × 0.125).
+    # Stocks with amp above this threshold are filtered out (冲高回落 risk).
+    # Based on 9-month study: >3x → avg return negative, win rate 42.9%.
+    max_turnover_amp: float = 3.0
 
     # Number of trading days for average turnover calculation.
     turnover_lookback_days: int = 20
@@ -67,13 +67,10 @@ class QualityAssessment:
 
 class MomentumQualityFilter:
     """
-    Filters out stocks with weak momentum quality.
+    Filters out stocks with extreme early volume surge (冲高回落 risk).
 
-    Uses AND combination of two signals:
-    - Declining trend: prev_close vs close N days ago is negative
-    - Low turnover amplification: buy-day activity < min_turnover_amp × average
-
-    Both must be true to filter (AND logic reduces false kills).
+    Single signal: turnover_amp > max_turnover_amp → filter out.
+    Also computes trend_pct, consecutive_up_days, avg_daily_volume for Step 6.
     Fail-fast: if historical data unavailable, raises error to halt trading.
 
     Usage:
@@ -141,7 +138,7 @@ class MomentumQualityFilter:
         snap: PriceSnapshot | None,
         hist: dict | None,
     ) -> QualityAssessment:
-        """Assess a single stock's momentum quality using AND logic.
+        """Assess a single stock: filter if turnover_amp exceeds upper bound.
 
         Raises RuntimeError if required data is missing (fail-fast).
         """
@@ -176,13 +173,11 @@ class MomentumQualityFilter:
         turnover_amp: float | None = None
         consecutive_up_days: int | None = None
 
-        trend_declining = trend_pct < 0
-
         # Extract consecutive up days (used in Step 6, not for filtering here)
         if hist.get("consecutive_up_days") is not None:
             consecutive_up_days = hist["consecutive_up_days"]
 
-        # Signal 2: Turnover amplification (unified for backtest and live).
+        # Turnover amplification (unified for backtest and live).
         # Uses only 9:40 data — no full-day hindsight.
         # turnover_amp = early_volume / (avg_daily_volume × 0.125)
         # 0.125 = expected fraction of daily volume traded by 9:40.
@@ -209,13 +204,10 @@ class MomentumQualityFilter:
             if expected_early > 0:
                 turnover_amp = snap.early_volume / expected_early
 
-        amp_low = turnover_amp is not None and turnover_amp < self._config.min_turnover_amp
-
-        # AND logic: both signals must trigger
-        if trend_declining and amp_low:
+        # Filter: extreme early volume surge → 冲高回落 risk
+        if turnover_amp is not None and turnover_amp > self._config.max_turnover_amp:
             reasons.append(
-                f"趋势{trend_pct:+.1f}%<0"
-                f" AND 换手放大{turnover_amp:.1f}x<{self._config.min_turnover_amp}x"
+                f"换手放大{turnover_amp:.1f}x>{self._config.max_turnover_amp}x (冲高回落风险)"
             )
 
         # Extract avg_daily_volume for Step 6 early_turnover_amp computation.
