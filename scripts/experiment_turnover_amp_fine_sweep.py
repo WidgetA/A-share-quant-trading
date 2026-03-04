@@ -364,7 +364,7 @@ def analyze(df: pd.DataFrame) -> str:
         mx = max(counts) if max(counts) > 0 else 1
         top_bins = sorted(range(len(counts)), key=lambda i: -counts[i])[:8]
         top_bins.sort()
-        p(f"    TOP分布:")
+        p("    TOP分布:")
         for i in top_bins:
             if counts[i] > 0:
                 bar = "█" * int(counts[i] / mx * 25)
