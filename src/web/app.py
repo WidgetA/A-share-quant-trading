@@ -200,6 +200,7 @@ def create_app(
             "task": None,
             "ifind_client": app.state.ifind_client,
             "fundamentals_db": app.state.fundamentals_db,
+            "_app_state": app.state,  # needed for akshare_cache access
         }
         task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
         app.state.momentum_monitor_state["task"] = task

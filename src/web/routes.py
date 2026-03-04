@@ -4613,10 +4613,27 @@ async def _run_intraday_monitor(state: dict) -> None:
 
             # 9:40-9:50 window — run scan once
             logger.info("Monitor: entering scan window")
+            scan_ok = False
             try:
                 app_state = state.get("_app_state")
                 akshare_cache = getattr(app_state, "akshare_cache", None) if app_state else None
-                await _execute_monitor_scan(state, akshare_cache=akshare_cache)
+                result = await _execute_monitor_scan(state, akshare_cache=akshare_cache)
+                if result is None:
+                    # Silent failure (return None) — notify so user knows
+                    logger.warning("Monitor scan returned None (no result)")
+                    try:
+                        from src.common.feishu_bot import FeishuBot
+
+                        bot = FeishuBot()
+                        if bot.is_configured():
+                            await bot.send_alert(
+                                "盘中监控扫描无结果",
+                                "扫描完成但未产生结果（数据源不可用或无合格股票）",
+                            )
+                    except Exception:
+                        pass
+                else:
+                    scan_ok = True
             except Exception as e:
                 logger.error(f"Monitor scan error: {e}", exc_info=True)
                 # Notify Feishu about the error
