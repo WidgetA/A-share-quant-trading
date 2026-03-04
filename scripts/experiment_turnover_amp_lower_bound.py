@@ -219,7 +219,7 @@ def analyze(df: pd.DataFrame) -> str:
             p()
 
             # --- Parameter sweep (lower bound) ---
-            p(f"  参数扫描: amp < threshold → 过滤")
+            p("  参数扫描: amp < threshold → 过滤")
             sh = (f"  {'阈值':>5} {'过滤N':>7} {'过滤%':>6} "
                   f"{'过滤EOD':>8} {'保留EOD':>8} {'liftEOD':>8} "
                   f"{'过滤Nxt':>8} {'保留Nxt':>8} {'liftNxt':>8} "
@@ -366,12 +366,12 @@ def analyze(df: pd.DataFrame) -> str:
         counts_n, _ = np.histogram(bn, bins=hb)
         mx_e = max(counts_e) if max(counts_e) > 0 else 1
         mx_n = max(counts_n) if max(counts_n) > 0 else 1
-        p(f"    EOD分布:")
+        p("    EOD分布:")
         for i in range(len(hb) - 1):
             if counts_e[i] > 0:
                 bar = "█" * int(counts_e[i] / mx_e * 30)
                 p(f"      {hb[i]:>4.1f}x: {bar} ({counts_e[i]})")
-        p(f"    Next分布:")
+        p("    Next分布:")
         for i in range(len(hb) - 1):
             if counts_n[i] > 0:
                 bar = "█" * int(counts_n[i] / mx_n * 30)
