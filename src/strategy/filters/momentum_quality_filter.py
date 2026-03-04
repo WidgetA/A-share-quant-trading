@@ -44,9 +44,8 @@ class MomentumQualityConfig:
     trend_lookback_days: int = 5
 
     # Signal 2: Turnover amplification on buy day.
-    # buy_day_turnover / avg_daily_turnover must exceed this threshold.
-    # In backtest mode: uses actual daily turnover from history_quotes.
-    # In live mode: uses early_volume / avg_daily_volume as proxy.
+    # early_volume (9:40 cumulative) / (avg_daily_volume × 0.125).
+    # Uses only 9:40 data — no full-day hindsight, consistent in backtest and live.
     min_turnover_amp: float = 1.3
 
     # Number of trading days for average turnover calculation.
@@ -119,7 +118,7 @@ class MomentumQualityFilter:
         for stock in selected_stocks:
             snap = price_snapshots.get(stock.stock_code)
             hist = historical.get(stock.stock_code)
-            result = self._assess(stock, snap, hist, trade_date)
+            result = self._assess(stock, snap, hist)
             assessments.append(result)
 
             if result.filtered_out:
@@ -141,7 +140,6 @@ class MomentumQualityFilter:
         stock: SelectedStock,
         snap: PriceSnapshot | None,
         hist: dict | None,
-        trade_date: date | None,
     ) -> QualityAssessment:
         """Assess a single stock's momentum quality using AND logic.
 
@@ -184,36 +182,32 @@ class MomentumQualityFilter:
         if hist.get("consecutive_up_days") is not None:
             consecutive_up_days = hist["consecutive_up_days"]
 
-        # Signal 2: Turnover amplification
-        if trade_date is not None:
-            # Backtest mode: use actual daily turnover
-            if not hist.get("buy_day_turnover") or not hist.get("avg_daily_turnover"):
-                if hist.get("is_new_listing"):
-                    logger.info(
-                        f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
-                        f"is a recent IPO with insufficient turnover history — filtering out"
-                    )
-                    return QualityAssessment(
-                        stock_code=stock.stock_code,
-                        filtered_out=True,
-                        reasons=["次新股，换手率历史不足"],
-                        trend_pct=trend_pct,
-                    )
-                raise RuntimeError(
-                    f"QualityFilter: missing turnover data for {stock.stock_code} "
-                    f"({stock.stock_name}). Not a new listing — data may be corrupt. Halting."
+        # Signal 2: Turnover amplification (unified for backtest and live).
+        # Uses only 9:40 data — no full-day hindsight.
+        # turnover_amp = early_volume / (avg_daily_volume × 0.125)
+        # 0.125 = expected fraction of daily volume traded by 9:40.
+        if not snap or snap.early_volume <= 0:
+            if hist.get("is_new_listing"):
+                logger.info(
+                    f"QualityFilter: {stock.stock_code} ({stock.stock_name}) "
+                    f"is a recent IPO with no early volume data — filtering out"
                 )
-            buy_turn = hist["buy_day_turnover"]
-            avg_turn = hist["avg_daily_turnover"]
-            if avg_turn > 0:
-                turnover_amp = buy_turn / avg_turn
-        else:
-            # Live mode: use early_volume / avg_daily_volume as proxy
-            if snap and snap.early_volume > 0 and hist.get("avg_daily_volume"):
-                avg_vol = hist["avg_daily_volume"]
-                expected_early = avg_vol * 0.125
-                if expected_early > 0:
-                    turnover_amp = snap.early_volume / expected_early
+                return QualityAssessment(
+                    stock_code=stock.stock_code,
+                    filtered_out=True,
+                    reasons=["次新股，无早盘成交量数据"],
+                    trend_pct=trend_pct,
+                )
+            raise RuntimeError(
+                f"QualityFilter: missing early_volume for {stock.stock_code} "
+                f"({stock.stock_name}). Cannot compute turnover_amp — halting."
+            )
+
+        avg_vol = hist.get("avg_daily_volume")
+        if avg_vol and avg_vol > 0:
+            expected_early = avg_vol * 0.125
+            if expected_early > 0:
+                turnover_amp = snap.early_volume / expected_early
 
         amp_low = turnover_amp is not None and turnover_amp < self._config.min_turnover_amp
 
@@ -224,8 +218,13 @@ class MomentumQualityFilter:
                 f" AND 换手放大{turnover_amp:.1f}x<{self._config.min_turnover_amp}x"
             )
 
-        # Extract avg_daily_volume for Step 6 early_turnover_amp computation
+        # Extract avg_daily_volume for Step 6 early_turnover_amp computation.
         avg_daily_volume = hist.get("avg_daily_volume")
+        if avg_daily_volume is None or avg_daily_volume <= 0:
+            raise RuntimeError(
+                f"QualityFilter: missing avg_daily_volume for {stock.stock_code} "
+                f"({stock.stock_name}). Cannot score turnover — halting."
+            )
 
         return QualityAssessment(
             stock_code=stock.stock_code,
@@ -243,13 +242,13 @@ class MomentumQualityFilter:
         trade_date: date | None = None,
     ) -> dict[str, dict]:
         """
-        Fetch historical close prices and turnover for trend + amplification.
+        Fetch historical close prices and volume for trend + amplification baseline.
 
         Returns dict: stock_code → {
             "trend_pct": float | None,         # N-day price change %
-            "buy_day_turnover": float | None,   # trade_date turnover (backtest only)
-            "avg_daily_turnover": float | None,  # avg turnover over lookback
-            "avg_daily_volume": float | None,    # avg volume (for live mode proxy)
+            "avg_daily_volume": float | None,   # avg daily volume (for turnover_amp baseline)
+            "consecutive_up_days": int | None,  # consecutive close > prev_close days
+            "is_new_listing": bool,
         }
         """
         if not stock_codes:
@@ -261,12 +260,10 @@ class MomentumQualityFilter:
         calendar_buffer = max_lookback * 2 + 10
         start = ref_date - timedelta(days=calendar_buffer)
 
-        # For backtest: fetch up to trade_date itself (to get buy-day turnover)
-        # For live: fetch up to previous day
-        if trade_date is not None:
-            end = ref_date
-        else:
-            end = ref_date - timedelta(days=1)
+        # Fetch up to previous day — trade_date's data is not needed.
+        # Trend and volume baseline use only pre-trade-date history.
+        # Buy-day turnover comes from PriceSnapshot.early_volume (minute data).
+        end = ref_date - timedelta(days=1)
 
         result: dict[str, dict] = {}
         batch_size = 50
@@ -278,7 +275,7 @@ class MomentumQualityFilter:
             try:
                 data = await self._ifind.history_quotes(
                     codes=codes_str,
-                    indicators="close,turnoverRatio,volume",
+                    indicators="close,volume",
                     start_date=start.strftime("%Y-%m-%d"),
                     end_date=end.strftime("%Y-%m-%d"),
                 )
@@ -292,7 +289,6 @@ class MomentumQualityFilter:
                     tbl = table_entry.get("table", {})
                     time_vals = tbl.get("time", [])
                     close_vals = tbl.get("close", [])
-                    turn_vals = tbl.get("turnoverRatio", [])
                     vol_vals = tbl.get("volume", [])
 
                     entry: dict = {}
@@ -300,73 +296,40 @@ class MomentumQualityFilter:
 
                     # Detect new listing: if the stock's first data date is
                     # within 30 calendar days of ref_date, it's a recent IPO.
-                    # We requested ~50 calendar days of history — a stock listed
-                    # for 50+ days would have data near the start of that window.
                     if time_vals:
                         first_date = datetime.strptime(time_vals[0], "%Y-%m-%d").date()
                         days_since_listing = (ref_date - first_date).days
                         entry["is_new_listing"] = days_since_listing < 30
 
                     # Trend: compare last close (prev_close) vs close N days earlier
-                    # + consecutive up days count (for Step 6 filtering)
-                    # Backtest needs lookback+2 elements (trade_date + prev_close + N-ago)
-                    min_trend_len = self._config.trend_lookback_days + (
-                        2 if trade_date is not None else 1
-                    )
+                    # + consecutive up days count (for Step 6 filtering).
+                    # Data ends at day before trade_date (no future data).
+                    min_trend_len = self._config.trend_lookback_days + 1
                     if close_vals and len(close_vals) >= min_trend_len:
                         closes = [float(c) for c in close_vals if c is not None]
                         if len(closes) >= min_trend_len:
-                            if trade_date is not None:
-                                # Backtest: prev_close = second-to-last, N-ago = further back
-                                prev_close = closes[-2]  # day before trade_date
-                                n_ago = closes[-(self._config.trend_lookback_days + 2)]
-                            else:
-                                # Live: last close = yesterday, N-ago = further back
-                                prev_close = closes[-1]
-                                n_ago = closes[-(self._config.trend_lookback_days + 1)]
+                            prev_close = closes[-1]
+                            n_ago = closes[-(self._config.trend_lookback_days + 1)]
 
                             if n_ago > 0:
                                 entry["trend_pct"] = (prev_close - n_ago) / n_ago * 100
 
-                            # Consecutive up days: count backward from most recent close
-                            # before trade_date (exclude trade_date itself in backtest)
-                            check = closes[:-1] if trade_date is not None else closes
+                            # Consecutive up days: count backward
                             cup = 0
-                            for j in range(len(check) - 1, 0, -1):
-                                if check[j] > check[j - 1]:
+                            for j in range(len(closes) - 1, 0, -1):
+                                if closes[j] > closes[j - 1]:
                                     cup += 1
                                 else:
                                     break
                             entry["consecutive_up_days"] = cup
 
-                    # Turnover: avg over lookback, excluding trade_date itself
-                    if turn_vals:
-                        turnovers = [float(t) for t in turn_vals if t is not None and float(t) >= 0]
-                        if turnovers:
-                            if trade_date is not None and len(turnovers) >= 2:
-                                # Last value is trade_date's turnover (buy-day)
-                                entry["buy_day_turnover"] = turnovers[-1]
-                                # Average from previous days
-                                prev_turnovers = turnovers[:-1][-lookback:]
-                                if prev_turnovers:
-                                    entry["avg_daily_turnover"] = sum(prev_turnovers) / len(
-                                        prev_turnovers
-                                    )
-                            else:
-                                recent = turnovers[-lookback:]
-                                if recent:
-                                    entry["avg_daily_turnover"] = sum(recent) / len(recent)
-
-                    # Volume: avg for live mode proxy
+                    # Volume: avg daily volume over lookback (turnover_amp baseline)
                     if vol_vals:
                         volumes = [float(v) for v in vol_vals if v is not None and float(v) > 0]
                         if volumes:
-                            if trade_date is not None:
-                                prev_volumes = volumes[:-1][-lookback:]
-                            else:
-                                prev_volumes = volumes[-lookback:]
-                            if prev_volumes:
-                                entry["avg_daily_volume"] = sum(prev_volumes) / len(prev_volumes)
+                            recent = volumes[-lookback:]
+                            if recent:
+                                entry["avg_daily_volume"] = sum(recent) / len(recent)
 
                     if entry:
                         result[bare_code] = entry

@@ -3007,7 +3007,7 @@ def create_momentum_router() -> APIRouter:
 
                         # Always fetch trend data for Step 6 scoring, even if quality filter is off
                         if not qa2 and l1:
-                            qa2_data = await quality_filter_inst._fetch_historical_data(
+                            qa2_data = await quality_filter_inst._fetch_historical_context(
                                 [s.stock_code for s in l1], trade_date
                             )
                             trend_data_l2 = {

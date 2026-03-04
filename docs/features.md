@@ -632,7 +632,7 @@ strategy:
 4. **Step 3 — Hot Board Detection**: Find boards containing ≥2 qualified stocks from step 1
 5. **Step 4 — Board Constituents**: Get ALL stocks in each hot board from local `data/board_constituents.json`
 6. **Step 5 — Gain Filter**: Select constituents with 9:40 gain from open >0.56%, main board, non-ST
-7. **Step 5.5 — Momentum Quality Filter**: Remove "fake breakouts" — stocks in a declining trend (5-day) AND low turnover amplification (<1.3x vs 20-day avg). AND logic: both conditions must be true to filter out
+7. **Step 5.5 — Momentum Quality Filter**: Remove "fake breakouts" — stocks in a declining trend (5-day) AND low turnover amplification (<1.3x vs 20-day avg). AND logic: both conditions must be true to filter out. Turnover amp = early_volume (9:40 cumulative) / (avg_daily_volume × 0.125). Uses only 9:40 data — no full-day hindsight in backtest. No turnoverRatio dependency (works with both iFinD and tsanghi)
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
 9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)

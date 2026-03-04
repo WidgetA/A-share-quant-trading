@@ -77,7 +77,9 @@ class SinaRealtimeClient:
     BASE_URL = "https://hq.sinajs.cn"
     BATCH_SIZE = 400  # Keep URL under ~4 KB to avoid HTTP 431
     TIMEOUT = 15.0
-    BATCH_DELAY = 0.1  # seconds between batches to avoid rate limiting
+    BATCH_DELAY = 0.3  # seconds between batches to avoid rate limiting
+    MAX_RETRIES = 3
+    RETRY_BACKOFF = 1.0  # base seconds; doubles each attempt
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
@@ -164,15 +166,30 @@ class SinaRealtimeClient:
             sina_codes = [self._code_to_sina(c) for c in batch]
             codes_param = ",".join(sina_codes)
 
-            try:
-                # Build URL directly — Sina expects /list=code1,code2 with
-                # raw commas.  Using params= would URL-encode commas as %2C,
-                # tripling separator size and causing HTTP 431 for large lists.
-                url = f"{self.BASE_URL}/list={codes_param}"
-                resp = await self._client.get(url)
-                resp.raise_for_status()
-            except httpx.HTTPError as e:
-                raise SinaRealtimeError(f"Sina HTTP request failed: {e}") from e
+            # Build URL directly — Sina expects /list=code1,code2 with
+            # raw commas.  Using params= would URL-encode commas as %2C,
+            # tripling separator size and causing HTTP 431 for large lists.
+            url = f"{self.BASE_URL}/list={codes_param}"
+
+            for attempt in range(1, self.MAX_RETRIES + 1):
+                try:
+                    resp = await self._client.get(url)
+                    resp.raise_for_status()
+                    break  # success
+                except (httpx.HTTPError, ConnectionError, OSError) as e:
+                    if attempt < self.MAX_RETRIES:
+                        wait = self.RETRY_BACKOFF * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"Sina batch {i // self.BATCH_SIZE + 1} attempt "
+                            f"{attempt}/{self.MAX_RETRIES} failed: {e}; "
+                            f"retrying in {wait:.1f}s"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        raise SinaRealtimeError(
+                            f"Sina HTTP request failed after {self.MAX_RETRIES} "
+                            f"attempts: {e}"
+                        ) from e
 
             # Sina returns GBK-encoded content
             text = resp.content.decode("gbk", errors="replace")

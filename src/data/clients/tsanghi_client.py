@@ -137,6 +137,28 @@ class TsanghiClient:
             params["end_date"] = end_date
         return await self._get(url, params)
 
+    async def shares(
+        self,
+        exchange: str,
+        ticker: str,
+    ) -> dict | None:
+        """Fetch shares outstanding / float for a single stock.
+
+        Args:
+            exchange: "XSHG" or "XSHE"
+            ticker: Bare stock code, e.g. "600519"
+
+        Returns:
+            Dict with keys: ticker, shares_outstanding, shares_float.
+            Returns None if no data available.
+        """
+        url = f"{self.BASE_URL}/{exchange}/shares"
+        params: dict[str, Any] = {"ticker": ticker}
+        data = await self._get(url, params)
+        if data:
+            return data[0]
+        return None
+
     async def daily_latest(
         self,
         exchange: str,

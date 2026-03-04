@@ -553,9 +553,14 @@ class MomentumSectorScanner:
         for s in candidates_pool:
             snap = _snapshots.get(s.stock_code)
             gfo = snap.gain_from_open_pct if snap else 0.0
-            avg_vol = _avg_vol_data.get(s.stock_code, 0.0)
+            avg_vol = _avg_vol_data.get(s.stock_code)
+            if not avg_vol or avg_vol <= 0:
+                raise RuntimeError(
+                    f"Step 6: missing avg_daily_volume for {s.stock_code} "
+                    f"({s.stock_name}). Cannot compute turnover_amp — halting."
+                )
             early_vol = snap.early_volume if snap else 0.0
-            early_amp = (early_vol / avg_vol) if avg_vol > 0 else 0.0
+            early_amp = early_vol / avg_vol
             gfo_values.append(gfo)
             amp_values.append(early_amp)
             cup_values.append(_cup_data.get(s.stock_code) or 0)

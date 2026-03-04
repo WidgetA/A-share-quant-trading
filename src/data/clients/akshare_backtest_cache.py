@@ -314,11 +314,11 @@ class AkshareBacktestCache:
                     f" (daily=[{d_lo}~{d_hi}], minute=[{m_lo}~{m_hi}])"
                 )
 
-    def _has_turnover_ratio(self) -> bool:
-        """Check if daily data includes turnoverRatio (vs old cache format)."""
+    def _has_valid_format(self) -> bool:
+        """Check if daily data has required fields (close, volume)."""
         for _code, dates in self._daily.items():
             for _ds, day in dates.items():
-                return "turnoverRatio" in day
+                return "close" in day and "volume" in day
         return False
 
     def _save_to_oss(self) -> str | None:
@@ -417,12 +417,10 @@ class AkshareBacktestCache:
             cache._daily = files["daily"]
             cache._minute = files["minute"]
 
-            # Validate cache format: turnoverRatio must exist in daily data.
-            # Old caches saved before the turnoverRatio fix lack this field,
-            # causing QualityFilter to halt on every stock.
-            if not cache._has_turnover_ratio():
+            # Validate cache format: must have required fields (close, volume).
+            if not cache._has_valid_format():
                 logger.warning(
-                    "OSS cache is STALE: daily data missing turnoverRatio field. "
+                    "OSS cache is STALE: daily data missing required fields. "
                     "Discarding — will re-download."
                 )
                 return None
