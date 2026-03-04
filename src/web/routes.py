@@ -2691,25 +2691,17 @@ def create_momentum_router() -> APIRouter:
                         rets = [f["return_pct"] for f in all_filtered]
                         avg_r = sum(rets) / len(rets)
                         pos_count = sum(1 for r in rets if r > 0)
-                        pos_pct = round(
-                            pos_count / len(all_filtered) * 100, 1
-                        )
+                        pos_pct = round(pos_count / len(all_filtered) * 100, 1)
                         total_pool = sum(
-                            l0_pool_stats_by_day.get(
-                                d["trade_date"], {}
-                            ).get("total", 0)
+                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("total", 0)
                             for d in daily_data
                         )
                         total_pool_pos = sum(
-                            l0_pool_stats_by_day.get(
-                                d["trade_date"], {}
-                            ).get("positive", 0)
+                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("positive", 0)
                             for d in daily_data
                         )
                         avg_pool_pct = (
-                            round(total_pool_pos / total_pool * 100, 1)
-                            if total_pool
-                            else 0
+                            round(total_pool_pos / total_pool * 100, 1) if total_pool else 0
                         )
                         filtered_out_best.append(
                             {
@@ -3513,25 +3505,17 @@ def create_momentum_router() -> APIRouter:
                         rets = [f["return_pct"] for f in all_filtered]
                         avg_r = sum(rets) / len(rets)
                         pos_count = sum(1 for r in rets if r > 0)
-                        pos_pct = round(
-                            pos_count / len(all_filtered) * 100, 1
-                        )
+                        pos_pct = round(pos_count / len(all_filtered) * 100, 1)
                         total_pool = sum(
-                            l0_pool_stats_by_day.get(
-                                d["trade_date"], {}
-                            ).get("total", 0)
+                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("total", 0)
                             for d in daily_data
                         )
                         total_pool_pos = sum(
-                            l0_pool_stats_by_day.get(
-                                d["trade_date"], {}
-                            ).get("positive", 0)
+                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("positive", 0)
                             for d in daily_data
                         )
                         avg_pool_pct = (
-                            round(total_pool_pos / total_pool * 100, 1)
-                            if total_pool
-                            else 0
+                            round(total_pool_pos / total_pool * 100, 1) if total_pool else 0
                         )
                         filtered_out_best.append(
                             {
