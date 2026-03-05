@@ -183,6 +183,40 @@ JUNK_BOARDS: set[str] = {
     "摘帽",
 }
 
+# Boards that ARE real technology/industry themes but have too many constituents
+# (≥400 stocks) to produce meaningful "hot board" signals — the ≥2 gainer
+# threshold is trivially met every day for these boards.
+# Kept as a separate constant so we can study alternative handling later
+# (e.g. higher gainer ratio threshold instead of outright exclusion).
+BROAD_CONCEPT_BOARDS: set[str] = {
+    # ---- 真概念但成分股过多（≥400），信号被稀释 ----
+    "机器人概念",       # 1166
+    "人工智能",         # 1053
+    "新能源汽车",       # 1012
+    "芯片概念",         # 849
+    "储能",             # 807
+    "军工",             # 595
+    "光伏概念",         # 578
+    "数据中心",         # 576
+    "锂电池概念",       # 571
+    "低空经济",         # 474
+    "消费电子概念",     # 472
+    "商业航天",         # 468
+    "AI应用",           # 463
+    "物联网",           # 458
+    "无人机",           # 448
+    "工业互联网",       # 423
+    "人形机器人",       # 418
+    "AI智能体",         # 416
+    "风电",             # 413
+    "医疗器械概念",     # 400
+    # ---- 政策标签/地区概念，成分股过多 ----
+    "专精特新",         # 1160
+    "数字经济",         # 503
+    "粤港澳大湾区",    # 472
+    "智慧城市",         # 417
+}
+
 # Regex patterns that catch time-variant junk boards (e.g. "2026中报预增")
 _SEASONAL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\d{4}(中报|三季报|年报|一季报)(预增|预减|扭亏|预亏|续盈)$"),
@@ -191,9 +225,12 @@ _SEASONAL_PATTERNS: list[re.Pattern[str]] = [
 
 def is_junk_board(board_name: str) -> bool:
     """
-    Check whether a board name is a "junk" board with no actionable theme.
+    Check whether a board name should be filtered out.
 
-    Uses both exact set lookup and regex patterns (for seasonal entries).
+    Covers three categories:
+    - JUNK_BOARDS: no actionable theme (index, fund holdings, etc.)
+    - BROAD_CONCEPT_BOARDS: real themes but too many constituents (≥400)
+    - Seasonal patterns: time-variant report categories
 
     Args:
         board_name: Board/concept name to check.
@@ -201,7 +238,7 @@ def is_junk_board(board_name: str) -> bool:
     Returns:
         True if the board should be filtered out.
     """
-    if board_name in JUNK_BOARDS:
+    if board_name in JUNK_BOARDS or board_name in BROAD_CONCEPT_BOARDS:
         return True
 
     for pattern in _SEASONAL_PATTERNS:
