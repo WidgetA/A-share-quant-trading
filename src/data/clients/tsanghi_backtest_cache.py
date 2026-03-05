@@ -4,13 +4,13 @@
 # MomentumSectorScanner can run without any code changes.
 
 # === DEPENDENCIES ===
-# - tsanghi (沧海数据): REST API for daily OHLCV (replaces akshare/baostock daily)
+# - tsanghi (沧海数据): REST API for daily OHLCV
 # - baostock: Free A-share data source (5-min bars only, for 9:40 price)
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
-# - AkshareBacktestCache: Downloads and stores all price data in memory + OSS
-# - AkshareHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
+# - TsanghiBacktestCache: Downloads and stores all price data in memory + OSS
+# - TsanghiHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
 # - Daily OHLCV: tsanghi /daily/latest (batch per-date, fast)
 # - Minute bars: baostock (5-min frequency), for 9:40 snapshot only
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
@@ -73,7 +73,7 @@ def check_oss_available() -> str | None:
         return f"OSS 连接失败: {e}"
 
 
-class AkshareBacktestCache:
+class TsanghiBacktestCache:
     """
     Pre-downloads daily OHLCV and 09:30-09:40 minute bar data for all
     main-board A-share stocks, keyed by (stock_code, date).
@@ -84,7 +84,7 @@ class AkshareBacktestCache:
         data is loaded from OSS instead of re-downloading (~25 min).
 
     Usage:
-        cache = AkshareBacktestCache()
+        cache = TsanghiBacktestCache()
         await cache.download_prices(start_date, end_date, progress_cb)
         snap = cache.get_daily(code, trade_date)
         p940 = cache.get_940_price(code, trade_date)
@@ -215,14 +215,14 @@ class AkshareBacktestCache:
                 merged.append((s, e))
         return merged
 
-    def copy(self) -> AkshareBacktestCache:
+    def copy(self) -> TsanghiBacktestCache:
         """Create a shallow-enough copy safe for merge_from without mutating the original.
 
         Copies outer dicts (code-level) and inner dicts (date-level) so that
         merge_from().update() on the copy doesn't affect the original.
         Leaf date entries (dicts of floats / tuples) are shared but never mutated.
         """
-        clone = AkshareBacktestCache()
+        clone = TsanghiBacktestCache()
         clone._daily = {code: dict(dates) for code, dates in self._daily.items()}
         clone._minute = {code: dict(dates) for code, dates in self._minute.items()}
         clone._stock_codes = list(self._stock_codes)
@@ -231,7 +231,7 @@ class AkshareBacktestCache:
         clone._is_ready = self._is_ready
         return clone
 
-    def merge_from(self, other: AkshareBacktestCache) -> None:
+    def merge_from(self, other: TsanghiBacktestCache) -> None:
         """Merge data from another cache (e.g. a gap download) into this one."""
         for code, dates in other._daily.items():
             if code in self._daily:
@@ -367,7 +367,7 @@ class AkshareBacktestCache:
             return msg
 
     @classmethod
-    def load_from_oss(cls) -> AkshareBacktestCache | None:
+    def load_from_oss(cls) -> TsanghiBacktestCache | None:
         """Load cache from OSS if available. Returns None if not found.
 
         Tries .pkl.gz (gzipped) first, falls back to legacy .pkl format.
@@ -689,15 +689,15 @@ class AkshareBacktestCache:
         return await asyncio.to_thread(self._save_to_oss)
 
 
-class AkshareHistoricalAdapter:
+class TsanghiHistoricalAdapter:
     """
     Duck-types IFinDHttpClient for backtest use.
 
-    Reads from AkshareBacktestCache and returns data in iFinD response format
+    Reads from TsanghiBacktestCache and returns data in iFinD response format
     so MomentumSectorScanner works without modification.
     """
 
-    def __init__(self, cache: AkshareBacktestCache) -> None:
+    def __init__(self, cache: TsanghiBacktestCache) -> None:
         self._cache = cache
 
     @property

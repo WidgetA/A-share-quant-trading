@@ -4,17 +4,17 @@
 # Duck-types IFinDHttpClient so MomentumSectorScanner works unchanged.
 
 # === DEPENDENCIES ===
-# - AkshareBacktestCache (OSS): Primary source — pre-downloaded, zero network calls
+# - TsanghiBacktestCache (OSS): Primary source — pre-downloaded, zero network calls
 # - akshare: Fallback only — on-the-fly download if no OSS cache available
 # - Realtime client: Duck-typed (TushareRealtimeClient or SinaRealtimeClient)
 #   Must implement as_ifind_format(stock_codes, indicators) -> dict
 
 # === KEY CONCEPTS ===
-# - OSS cache first: If AkshareBacktestCache is provided, history_quotes reads
+# - OSS cache first: If TsanghiBacktestCache is provided, history_quotes reads
 #   from the in-memory cache (loaded from Alibaba Cloud OSS at startup).
 #   This avoids all akshare/East Money API calls, which are unreliable from cloud.
 # - Fallback: If no cache, downloads per-stock via akshare (with retry).
-# - Volume: akshare returns 手 (lots); converted to 股 (shares) at read time.
+# - Volume: OSS cache stores 股 (shares); akshare fallback also returns 股.
 # - Fail-fast: download errors raise immediately (trading safety).
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Concurrency limit for parallel akshare downloads (fallback only).
+# Concurrency limit for parallel tsanghi downloads (fallback only).
 # Keep low (4) to avoid triggering East Money rate limits / connection resets.
 _DOWNLOAD_SEMAPHORE = asyncio.Semaphore(4)
 
@@ -60,7 +60,7 @@ class IQuantHistoricalAdapter:
     Duck-types IFinDHttpClient for monitor/live scan mode.
 
     Data sources (in priority order):
-        1. OSS cache (AkshareBacktestCache) — zero network calls, instant
+        1. OSS cache (TsanghiBacktestCache) — zero network calls, instant
         2. akshare on-the-fly download — fallback with retry
 
     Methods implemented:
@@ -77,7 +77,7 @@ class IQuantHistoricalAdapter:
             realtime_client: Duck-typed realtime client for real-time data delegation.
                 Must implement as_ifind_format(stock_codes, indicators) -> dict.
                 Typically TushareRealtimeClient or SinaRealtimeClient.
-            cache: Optional AkshareBacktestCache for history lookback (avoids akshare API).
+            cache: Optional TsanghiBacktestCache for history lookback (avoids akshare API).
         """
         if not hasattr(realtime_client, "as_ifind_format"):
             raise TypeError(
@@ -89,9 +89,9 @@ class IQuantHistoricalAdapter:
         # Build a cache-backed adapter for history_quotes if cache is available
         self._cached_adapter: Any = None
         if cache is not None and getattr(cache, "is_ready", False):
-            from src.data.clients.akshare_backtest_cache import AkshareHistoricalAdapter
+            from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
 
-            self._cached_adapter = AkshareHistoricalAdapter(cache)
+            self._cached_adapter = TsanghiHistoricalAdapter(cache)
             logger.info("IQuantHistoricalAdapter: using OSS cache for history_quotes")
         else:
             logger.info("IQuantHistoricalAdapter: no OSS cache, will use akshare on-the-fly")

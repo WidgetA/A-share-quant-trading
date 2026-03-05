@@ -1,7 +1,7 @@
 # === MODULE PURPOSE ===
 # REST API client for Tsanghi (沧海数据) financial data service.
 # Provides historical daily OHLCV data for A-share stocks.
-# Used as the free data source for backtesting (replaces akshare daily download).
+# Used as the free data source for backtesting.
 
 # === KEY CONCEPTS ===
 # - Exchange codes: XSHG (Shanghai), XSHE (Shenzhen)

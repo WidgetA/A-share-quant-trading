@@ -101,7 +101,7 @@ def handlebar(ContextInfo):
 
         scan_count = len(_bt["scanned"])
         try:
-            result = _api_call("/backtest-scan", "POST", {"trade_date": bar_date, "data_source": "akshare"})
+            result = _api_call("/backtest-scan", "POST", {"trade_date": bar_date, "data_source": "tsanghi"})
         except Exception as e:
             _bt["fails"] += 1
             if scan_count <= 20:

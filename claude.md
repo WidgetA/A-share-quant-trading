@@ -79,11 +79,11 @@ Rules:
 | Toggle Value | Source | Adapter |
 |-------------|--------|---------|
 | `"ifind"` | THS iFinD HTTP API | `IFinDHttpClient` |
-| `"akshare"` | tsanghi 沧海数据 (日线) + baostock (分钟线) | `AkshareHistoricalAdapter` |
+| `"tsanghi"` | 沧海数据 (日线) + baostock (分钟线) | `TsanghiHistoricalAdapter` |
 
 Rules:
 1. **One source per session** — no mixing sources within a single backtest/scan
-2. **Adapter parity** — `AkshareHistoricalAdapter` must support same indicator set as `IFinDHttpClient`
+2. **Adapter parity** — `TsanghiHistoricalAdapter` must support same indicator set as `IFinDHttpClient`
 3. **Live trading always uses iFinD** — toggle only affects backtesting
 4. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
 5. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`

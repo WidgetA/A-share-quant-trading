@@ -27,7 +27,7 @@
             <p class="monitor-desc">每个交易日 9:40 自动运行动量选股，结果推送飞书</p>
             <div style="display:flex;gap:16px;align-items:center;margin:8px 0">
                 <label style="font-weight:600;white-space:nowrap">监控数据源</label>
-                <label class="checkbox-label"><input type="radio" name="monitor_ds" value="tushare" checked> Tushare+akshare</label>
+                <label class="checkbox-label"><input type="radio" name="monitor_ds" value="tushare" checked> 沧海+baostock</label>
                 <label class="checkbox-label"><input type="radio" name="monitor_ds" value="ifind"> iFinD</label>
             </div>
             <div style="display:flex;gap:8px;margin:8px 0">
@@ -51,14 +51,14 @@
                 <label style="font-weight:600;margin-bottom:6px;display:block">数据源</label>
                 <div style="display:flex;gap:16px;align-items:center">
                     <label class="checkbox-label"><input type="radio" name="data_source" value="ifind" checked> iFinD</label>
-                    <label class="checkbox-label"><input type="radio" name="data_source" value="akshare"> 沧海数据 + baostock (免费)</label>
+                    <label class="checkbox-label"><input type="radio" name="data_source" value="tsanghi"> 沧海数据 + baostock (免费)</label>
                 </div>
             </div>
 
-            <!-- Akshare Download Section (shown when akshare selected) -->
-            <div id="akshare-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
+            <!-- Tsanghi Download Section (shown when akshare selected) -->
+            <div id="tsanghi-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
                 <!-- Loading from OSS indicator (shown during startup cache load) -->
-                <div id="akshare-oss-loading" style="display:none;margin-bottom:8px">
+                <div id="tsanghi-oss-loading" style="display:none;margin-bottom:8px">
                     <div style="display:flex;align-items:center;gap:8px">
                         <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
                         <span style="font-size:13px;color:#0369a1">正在从缓存加载数据...</span>
@@ -69,20 +69,20 @@
                     <style>@keyframes pulse-bar{0%,100%{opacity:.3}50%{opacity:1}}</style>
                 </div>
                 <!-- Normal download UI -->
-                <div id="akshare-download-ui">
+                <div id="tsanghi-download-ui">
                     <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线数据来自沧海数据 (tsanghi)，分钟数据来自 baostock</p>
                     <div style="display:flex;gap:8px;align-items:center">
-                        <button type="button" class="btn btn-primary" id="akshare-download-btn" style="background:#0284c7" onclick="startAkshareDownload()">预下载数据</button>
-                        <button type="button" id="akshare-redownload-btn" style="display:none;background:transparent;border:1px solid #94a3b8;color:#64748b;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer" onclick="startAkshareDownload(true)">重新下载</button>
-                        <span id="akshare-status" style="font-size:13px;color:#64748b"></span>
+                        <button type="button" class="btn btn-primary" id="tsanghi-download-btn" style="background:#0284c7" onclick="startTsanghiDownload()">预下载数据</button>
+                        <button type="button" id="tsanghi-redownload-btn" style="display:none;background:transparent;border:1px solid #94a3b8;color:#64748b;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer" onclick="startTsanghiDownload(true)">重新下载</button>
+                        <span id="tsanghi-status" style="font-size:13px;color:#64748b"></span>
                     </div>
-                    <div id="akshare-progress" style="display:none;margin-top:10px">
+                    <div id="tsanghi-progress" style="display:none;margin-top:10px">
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
                             <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
-                            <span id="akshare-progress-text" style="font-size:12px">准备中...</span>
+                            <span id="tsanghi-progress-text" style="font-size:12px">准备中...</span>
                         </div>
                         <div style="background:#e5e7eb;border-radius:4px;height:6px;overflow:hidden">
-                            <div id="akshare-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
+                            <div id="tsanghi-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
                         </div>
                     </div>
                 </div>
@@ -370,10 +370,10 @@ checkKeyStatus();
 
 // === Combined Results Store (for loss analysis) ===
 let combinedResults = [];
-let akshareReady = false;
-let akshareMinuteGaps = [];    // [[start, end], ...] of minute-data gaps
-let akshareCacheStart = null;  // cached date range start (string YYYY-MM-DD)
-let akshareCacheEnd = null;    // cached date range end
+let tsanghiReady = false;
+let tsanghiMinuteGaps = [];    // [[start, end], ...] of minute-data gaps
+let tsanghiCacheStart = null;  // cached date range start (string YYYY-MM-DD)
+let tsanghiCacheEnd = null;    // cached date range end
 
 // === Data Source Toggle ===
 function getDataSource() {
@@ -383,10 +383,10 @@ function getDataSource() {
 
 document.querySelectorAll('input[name="data_source"]').forEach(radio => {
     radio.addEventListener('change', () => {
-        const section = document.getElementById('akshare-download-section');
-        if (getDataSource() === 'akshare') {
+        const section = document.getElementById('tsanghi-download-section');
+        if (getDataSource() === 'tsanghi') {
             section.style.display = 'block';
-            checkAkshareCache();
+            checkTsanghiCache();
         } else {
             section.style.display = 'none';
         }
@@ -394,14 +394,14 @@ document.querySelectorAll('input[name="data_source"]').forEach(radio => {
 });
 
 // Auto-check cache status on page load and when switching to akshare
-async function checkAkshareCache() {
-    const ossLoading = document.getElementById('akshare-oss-loading');
-    const downloadUI = document.getElementById('akshare-download-ui');
-    const statusEl = document.getElementById('akshare-status');
-    const btn = document.getElementById('akshare-download-btn');
+async function checkTsanghiCache() {
+    const ossLoading = document.getElementById('tsanghi-oss-loading');
+    const downloadUI = document.getElementById('tsanghi-download-ui');
+    const statusEl = document.getElementById('tsanghi-status');
+    const btn = document.getElementById('tsanghi-download-btn');
 
     try {
-        const resp = await fetch('/api/momentum/akshare-cache-status');
+        const resp = await fetch('/api/momentum/tsanghi-cache-status');
         const data = await resp.json();
 
         if (data.status === 'loading') {
@@ -409,7 +409,7 @@ async function checkAkshareCache() {
             ossLoading.style.display = 'block';
             downloadUI.style.display = 'none';
             // Poll until loaded
-            setTimeout(checkAkshareCache, 1500);
+            setTimeout(checkTsanghiCache, 1500);
             return;
         }
 
@@ -417,27 +417,27 @@ async function checkAkshareCache() {
         downloadUI.style.display = 'block';
 
         if (data.status === 'ready') {
-            akshareCacheStart = data.start_date;
-            akshareCacheEnd = data.end_date;
-            akshareMinuteGaps = data.minute_gaps || [];
+            tsanghiCacheStart = data.start_date;
+            tsanghiCacheEnd = data.end_date;
+            tsanghiMinuteGaps = data.minute_gaps || [];
             let readyText = `已就绪 (${data.daily_stocks} 只日线, ${data.minute_stocks} 只分钟, ${data.start_date} ~ ${data.end_date})`;
             if (data.has_gaps) {
-                const gapStr = akshareMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
+                const gapStr = tsanghiMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
                 readyText += ` | 分钟数据缺失: ${gapStr}`;
                 statusEl.style.color = '#d97706';
                 btn.textContent = '增量下载';
                 btn.style.background = '#f59e0b';
-                akshareReady = false;
+                tsanghiReady = false;
             } else {
                 statusEl.style.color = '#059669';
-                akshareReady = true;
+                tsanghiReady = true;
                 btn.textContent = '已缓存';
             }
             statusEl.textContent = readyText;
             btn.disabled = false;
-            const reBtn = document.getElementById('akshare-redownload-btn');
+            const reBtn = document.getElementById('tsanghi-redownload-btn');
             if (reBtn) reBtn.style.display = '';
-            checkAkshareCoverage();
+            checkTsanghiCoverage();
         }
     } catch (e) {
         // Ignore — user can still manually download
@@ -447,12 +447,12 @@ async function checkAkshareCache() {
 }
 
 // Check if form dates are covered by cached range; update button accordingly
-function checkAkshareCoverage() {
-    if (!akshareCacheStart || !akshareCacheEnd) return;
-    if (getDataSource() !== 'akshare') return;
+function checkTsanghiCoverage() {
+    if (!tsanghiCacheStart || !tsanghiCacheEnd) return;
+    if (getDataSource() !== 'tsanghi') return;
 
-    const btn = document.getElementById('akshare-download-btn');
-    const statusEl = document.getElementById('akshare-status');
+    const btn = document.getElementById('tsanghi-download-btn');
+    const statusEl = document.getElementById('tsanghi-status');
 
     // Get selected dates from active tab
     let startDate, endDate;
@@ -466,54 +466,54 @@ function checkAkshareCoverage() {
     }
     if (!startDate || !endDate) return;
 
-    const boundCovered = startDate >= akshareCacheStart && endDate <= akshareCacheEnd;
+    const boundCovered = startDate >= tsanghiCacheStart && endDate <= tsanghiCacheEnd;
     // Check if any minute gaps overlap with the requested range
-    const overlappingGaps = akshareMinuteGaps.filter(g => g[0] <= endDate && g[1] >= startDate);
+    const overlappingGaps = tsanghiMinuteGaps.filter(g => g[0] <= endDate && g[1] >= startDate);
     const covered = boundCovered && overlappingGaps.length === 0;
     if (covered) {
         btn.textContent = '已缓存';
         btn.style.background = '';
         statusEl.style.color = '#059669';
-        akshareReady = true;  // Selected range is fully covered — allow backtest
+        tsanghiReady = true;  // Selected range is fully covered — allow backtest
     } else {
         btn.textContent = '增量下载';
         btn.style.background = '#f59e0b';
         btn.disabled = false;
         const parts = [];
-        if (startDate < akshareCacheStart) parts.push(`${startDate} ~ ${akshareCacheStart}`);
-        if (endDate > akshareCacheEnd) parts.push(`${akshareCacheEnd} ~ ${endDate}`);
+        if (startDate < tsanghiCacheStart) parts.push(`${startDate} ~ ${tsanghiCacheStart}`);
+        if (endDate > tsanghiCacheEnd) parts.push(`${tsanghiCacheEnd} ~ ${endDate}`);
         if (overlappingGaps.length > 0) {
             parts.push('分钟缺失: ' + overlappingGaps.map(g => `${g[0]}~${g[1]}`).join(', '));
         }
-        statusEl.textContent = `缓存 ${akshareCacheStart} ~ ${akshareCacheEnd}，未覆盖: ${parts.join('; ')}`;
+        statusEl.textContent = `缓存 ${tsanghiCacheStart} ~ ${tsanghiCacheEnd}，未覆盖: ${parts.join('; ')}`;
         statusEl.style.color = '#d97706';
-        akshareReady = false;
+        tsanghiReady = false;
     }
 }
 
 // Listen to date changes to update cache coverage status
 ['trade_date', 'combined_start', 'combined_end'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener('change', checkAkshareCoverage);
+    if (el) el.addEventListener('change', checkTsanghiCoverage);
 });
 // Also re-check when switching tabs
 document.querySelectorAll('.backtest-tab').forEach(tab => {
-    tab.addEventListener('click', () => setTimeout(checkAkshareCoverage, 50));
+    tab.addEventListener('click', () => setTimeout(checkTsanghiCoverage, 50));
 });
 
 // Check on page load if akshare is selected
-if (getDataSource() === 'akshare') {
-    document.getElementById('akshare-download-section').style.display = 'block';
-    checkAkshareCache();
+if (getDataSource() === 'tsanghi') {
+    document.getElementById('tsanghi-download-section').style.display = 'block';
+    checkTsanghiCache();
 }
 
-async function startAkshareDownload(force = false) {
-    const btn = document.getElementById('akshare-download-btn');
-    const reBtn = document.getElementById('akshare-redownload-btn');
-    const progress = document.getElementById('akshare-progress');
-    const statusEl = document.getElementById('akshare-status');
-    const progressText = document.getElementById('akshare-progress-text');
-    const progressBar = document.getElementById('akshare-progress-bar');
+async function startTsanghiDownload(force = false) {
+    const btn = document.getElementById('tsanghi-download-btn');
+    const reBtn = document.getElementById('tsanghi-redownload-btn');
+    const progress = document.getElementById('tsanghi-progress');
+    const statusEl = document.getElementById('tsanghi-status');
+    const progressText = document.getElementById('tsanghi-progress-text');
+    const progressBar = document.getElementById('tsanghi-progress-bar');
 
     // Get date range from whichever tab is active
     let startDate, endDate;
@@ -537,10 +537,10 @@ async function startAkshareDownload(force = false) {
     const spinner = progress.querySelector('.loading-spinner');
     if (spinner) spinner.style.display = '';
     statusEl.textContent = '';
-    akshareReady = false;
+    tsanghiReady = false;
 
     try {
-        const resp = await fetch('/api/momentum/akshare-prepare', {
+        const resp = await fetch('/api/momentum/tsanghi-prepare', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ start_date: startDate, end_date: endDate, force }),
@@ -582,33 +582,33 @@ async function startAkshareDownload(force = false) {
                         progressBar.style.width = '100%';
                         progressText.textContent = '下载完成!';
                         progress.querySelector('.loading-spinner').style.display = 'none';
-                        if (data.start_date) akshareCacheStart = data.start_date;
-                        if (data.end_date) akshareCacheEnd = data.end_date;
-                        const rangeStr = akshareCacheStart && akshareCacheEnd ? `, ${akshareCacheStart} ~ ${akshareCacheEnd}` : '';
+                        if (data.start_date) tsanghiCacheStart = data.start_date;
+                        if (data.end_date) tsanghiCacheEnd = data.end_date;
+                        const rangeStr = tsanghiCacheStart && tsanghiCacheEnd ? `, ${tsanghiCacheStart} ~ ${tsanghiCacheEnd}` : '';
                         const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟${rangeStr})`;
                         statusEl.textContent = readyText;
                         statusEl.style.color = '#059669';
                         btn.style.background = '';
                         btn.disabled = false;
                         btn.textContent = '已缓存';
-                        akshareReady = true;
+                        tsanghiReady = true;
                         if (reBtn) reBtn.style.display = '';
                         // Re-fetch status to check for remaining minute gaps
                         // (non-blocking — button is already usable)
                         try {
                             const ctrl = new AbortController();
                             setTimeout(() => ctrl.abort(), 5000);
-                            const statusResp = await fetch('/api/momentum/akshare-status', { signal: ctrl.signal });
+                            const statusResp = await fetch('/api/momentum/tsanghi-status', { signal: ctrl.signal });
                             const statusData = await statusResp.json();
                             if (statusData.has_gaps) {
-                                akshareMinuteGaps = statusData.minute_gaps || [];
-                                const gapStr = akshareMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
+                                tsanghiMinuteGaps = statusData.minute_gaps || [];
+                                const gapStr = tsanghiMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
                                 statusEl.textContent = readyText + ` | 分钟数据缺失: ${gapStr}`;
                                 statusEl.style.color = '#d97706';
                                 btn.textContent = '增量下载';
                                 btn.disabled = false;
                                 btn.style.background = '#f59e0b';
-                                akshareReady = false;
+                                tsanghiReady = false;
                             }
                         } catch (_) {
                             // Status check failed or timed out — already set as ready above
@@ -655,8 +655,8 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
     const newsCheck = document.getElementById('news_check_single').checked;
 
     if (!tradeDate) return;
-    if (getDataSource() === 'akshare' && !akshareReady) {
-        alert('请先点击"预下载数据"按钮下载 akshare 数据');
+    if (getDataSource() === 'tsanghi' && !tsanghiReady) {
+        alert('请先点击"预下载数据"按钮下载 沧海数据');
         return;
     }
 
@@ -836,8 +836,8 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
     if (!startDate || !endDate) return;
     if (endDate <= startDate) { alert('结束日期必须晚于起始日期'); return; }
     if (initialCapital < 1000) { alert('起始资金不能低于 1000 元'); return; }
-    if (getDataSource() === 'akshare' && !akshareReady) {
-        alert('请先点击"预下载数据"按钮下载 akshare 数据');
+    if (getDataSource() === 'tsanghi' && !tsanghiReady) {
+        alert('请先点击"预下载数据"按钮下载 沧海数据');
         return;
     }
 

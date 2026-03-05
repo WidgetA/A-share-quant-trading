@@ -1095,7 +1095,7 @@ class MomentumBacktestRequest(BaseModel):
 
     trade_date: str  # YYYY-MM-DD format
     notify: bool = False  # Send Feishu notification
-    data_source: str = "ifind"  # "ifind" or "akshare"
+    data_source: str = "ifind"  # "ifind" or "tsanghi"
     news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
@@ -1122,12 +1122,12 @@ class CombinedAnalysisRequest(BaseModel):
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
     quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
-    data_source: str = "ifind"  # "ifind" or "akshare"
+    data_source: str = "ifind"  # "ifind" or "tsanghi"
     news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
-class AksharePrepareRequest(BaseModel):
-    """Request body for akshare data pre-download."""
+class TsanghiPrepareRequest(BaseModel):
+    """Request body for tsanghi data pre-download."""
 
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
@@ -1239,11 +1239,11 @@ def create_momentum_router() -> APIRouter:
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
-    @router.get("/api/momentum/akshare-cache-status")
-    async def akshare_cache_status(request: Request):
-        """Return akshare cache state for frontend polling."""
-        loading = getattr(request.app.state, "akshare_cache_loading", False)
-        cache = getattr(request.app.state, "akshare_cache", None)
+    @router.get("/api/momentum/tsanghi-cache-status")
+    async def tsanghi_cache_status(request: Request):
+        """Return tsanghi cache state for frontend polling."""
+        loading = getattr(request.app.state, "tsanghi_cache_loading", False)
+        cache = getattr(request.app.state, "tsanghi_cache", None)
         if loading and cache is None:
             return {"status": "loading"}
         if cache is None:
@@ -1276,15 +1276,15 @@ def create_momentum_router() -> APIRouter:
             "debug_sample_dates": sample_dates,
         }
 
-    @router.post("/api/momentum/akshare-prepare")
-    async def akshare_prepare(request: Request, body: AksharePrepareRequest):
-        """Pre-download akshare data as SSE stream (incremental).
+    @router.post("/api/momentum/tsanghi-prepare")
+    async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
+        """Pre-download tsanghi data as SSE stream (incremental).
 
         Loads existing cache from memory / OSS, calculates which date
         ranges are missing, and only downloads the gaps.
         """
-        from src.data.clients.akshare_backtest_cache import (
-            AkshareBacktestCache,
+        from src.data.clients.tsanghi_backtest_cache import (
+            TsanghiBacktestCache,
             check_oss_available,
         )
 
@@ -1298,10 +1298,10 @@ def create_momentum_router() -> APIRouter:
         # Don't load from OSS either — the whole point of force is to
         # discard potentially corrupted/misaligned cached data.
         if body.force:
-            request.app.state.akshare_cache = None
+            request.app.state.tsanghi_cache = None
             existing = None
         else:
-            existing = getattr(request.app.state, "akshare_cache", None)
+            existing = getattr(request.app.state, "tsanghi_cache", None)
 
         # 1) Try in-memory cache
         if existing and existing.covers_range(start_date, end_date):
@@ -1321,7 +1321,7 @@ def create_momentum_router() -> APIRouter:
         if not existing and not body.force:
             try:
                 existing = await asyncio.wait_for(
-                    asyncio.to_thread(AkshareBacktestCache.load_from_oss), timeout=60
+                    asyncio.to_thread(TsanghiBacktestCache.load_from_oss), timeout=60
                 )
             except asyncio.TimeoutError:
                 logger.warning("load_from_oss timed out (60s), will re-download")
@@ -1330,7 +1330,7 @@ def create_momentum_router() -> APIRouter:
                 logger.warning("load_from_oss failed, will re-download", exc_info=True)
                 existing = None
         if existing and existing.covers_range(start_date, end_date):
-            request.app.state.akshare_cache = existing
+            request.app.state.tsanghi_cache = existing
 
             async def cached_stream():
                 msg = {
@@ -1360,12 +1360,12 @@ def create_momentum_router() -> APIRouter:
             gaps = existing.missing_ranges(start_date, end_date)
             working = existing.copy()
         else:
-            working = AkshareBacktestCache()
+            working = TsanghiBacktestCache()
             gaps = [(start_date, end_date)]
 
         if not gaps:
             # Shouldn't happen (covers_range check above), but just in case
-            request.app.state.akshare_cache = working
+            request.app.state.tsanghi_cache = working
 
             async def nogap_stream():
                 msg = {
@@ -1399,7 +1399,7 @@ def create_momentum_router() -> APIRouter:
                         await progress_queue.put(
                             {"type": "info", "message": f"增量下载 {label} ({i + 1}/{len(gaps)})"}
                         )
-                        gap_cache = AkshareBacktestCache()
+                        gap_cache = TsanghiBacktestCache()
                         await gap_cache.download_prices(gap_start, gap_end, queue_progress)
                         working.merge_from(gap_cache)
                     working._is_ready = True
@@ -1418,7 +1418,7 @@ def create_momentum_router() -> APIRouter:
                     yield sse(item)
             except (asyncio.CancelledError, GeneratorExit):
                 task.cancel()
-                logger.warning("akshare download cancelled (client disconnected)")
+                logger.warning("tsanghi download cancelled (client disconnected)")
                 return
 
             await task
@@ -1427,7 +1427,7 @@ def create_momentum_router() -> APIRouter:
                 yield sse({"type": "error", "message": download_error})
             else:
                 # Only assign to app.state on complete success (no partial mutation)
-                request.app.state.akshare_cache = working
+                request.app.state.tsanghi_cache = working
 
                 # Fire-and-forget OSS save — don't block SSE and won't be
                 # cancelled if the client disconnects
@@ -1435,13 +1435,13 @@ def create_momentum_router() -> APIRouter:
                     try:
                         err = await asyncio.wait_for(working.save_to_oss(), timeout=120)
                         if err:
-                            logger.warning(f"akshare OSS save failed: {err}")
+                            logger.warning(f"tsanghi OSS save failed: {err}")
                         else:
-                            logger.info("akshare cache saved to OSS OK")
+                            logger.info("tsanghi cache saved to OSS OK")
                     except asyncio.TimeoutError:
-                        logger.error("akshare OSS save timed out (120s)")
+                        logger.error("tsanghi OSS save timed out (120s)")
                     except Exception as exc:
-                        logger.error(f"akshare OSS save exception: {exc}")
+                        logger.error(f"tsanghi OSS save exception: {exc}")
 
                 asyncio.create_task(_bg_oss_save())
                 yield sse(
@@ -1483,17 +1483,17 @@ def create_momentum_router() -> APIRouter:
 
         try:
             concept_mapper = LocalConceptMapper()
-            if body.data_source == "akshare":
-                # --- Akshare path: read from pre-downloaded cache ---
-                from src.data.clients.akshare_backtest_cache import (
-                    AkshareHistoricalAdapter,
+            if body.data_source == "tsanghi":
+                # --- Tsanghi path: read from pre-downloaded cache ---
+                from src.data.clients.tsanghi_backtest_cache import (
+                    TsanghiHistoricalAdapter,
                 )
 
-                ak_cache = getattr(request.app.state, "akshare_cache", None)
+                ak_cache = getattr(request.app.state, "tsanghi_cache", None)
                 if not ak_cache or not ak_cache.is_ready:
-                    raise HTTPException(status_code=400, detail="请先预下载 akshare 数据")
+                    raise HTTPException(status_code=400, detail="请先预下载沧海数据")
 
-                adapter = AkshareHistoricalAdapter(ak_cache)
+                adapter = TsanghiHistoricalAdapter(ak_cache)
                 scanner = MomentumSectorScanner(
                     ifind_client=adapter,  # type: ignore[arg-type]
                     fundamentals_db=fundamentals_db,
@@ -1515,7 +1515,7 @@ def create_momentum_router() -> APIRouter:
                     return {
                         "success": False,
                         "trade_date": body.trade_date,
-                        "error": f"akshare缓存中无 {date_key} 的日线数据",
+                        "error": f"沧海缓存中无 {date_key} 的日线数据",
                     }
             else:
                 # --- iFinD path: original logic ---
@@ -1653,10 +1653,10 @@ def create_momentum_router() -> APIRouter:
     async def trigger_monitor_scan(request: Request) -> dict:
         """Manually trigger a momentum scan right now (any time of day)."""
         monitor_state = _get_monitor_state(request)
-        # Pass OSS cache for historical lookback (avoids unreliable akshare API)
-        akshare_cache = getattr(request.app.state, "akshare_cache", None)
+        # Pass OSS cache for historical lookback (avoids unreliable API)
+        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
         try:
-            result = await _execute_monitor_scan(monitor_state, akshare_cache=akshare_cache)
+            result = await _execute_monitor_scan(monitor_state, tsanghi_cache=tsanghi_cache)
             if result:
                 return {"success": True, "result": result}
             return {"success": False, "message": "扫描完成但无结果（无合格股票或数据源不可用）"}
@@ -1738,7 +1738,7 @@ def create_momentum_router() -> APIRouter:
                 # Include extra days beyond end_date for T+1 sell price lookups.
                 from datetime import timedelta as _td
 
-                trading_days_all = _get_trading_calendar_akshare(
+                trading_days_all = _get_trading_calendar(
                     start_date, end_date + _td(days=10)
                 )
                 trading_days = [d for d in trading_days_all if start_date <= d <= end_date]
@@ -2052,14 +2052,14 @@ def create_momentum_router() -> APIRouter:
         losing_trades = body.get("losing_trades", [])
         data_source = body.get("data_source", "ifind")
 
-        if data_source == "akshare":
-            from src.data.clients.akshare_backtest_cache import (
-                AkshareHistoricalAdapter,
+        if data_source == "tsanghi":
+            from src.data.clients.tsanghi_backtest_cache import (
+                TsanghiHistoricalAdapter,
             )
 
-            ak_cache = getattr(request.app.state, "akshare_cache", None)
+            ak_cache = getattr(request.app.state, "tsanghi_cache", None)
             if ak_cache and ak_cache.is_ready:
-                quote_client = AkshareHistoricalAdapter(ak_cache)
+                quote_client = TsanghiHistoricalAdapter(ak_cache)
             else:
                 quote_client = _get_ifind_client(request)
         else:
@@ -2095,9 +2095,9 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
-                    # Fetch board trend data (iFinD only — akshare has no board index)
+                    # Fetch board trend data (iFinD only — tsanghi has no board index)
                     board_data = {}
-                    if board_name and data_source != "akshare":
+                    if board_name and data_source != "tsanghi":
                         try:
                             board_data = await _fetch_board_trend(
                                 quote_client, board_name, trade_date_str
@@ -2230,7 +2230,7 @@ def create_momentum_router() -> APIRouter:
                 # Get trading calendar (include extra days for T+1)
                 from datetime import timedelta
 
-                trading_days = _get_trading_calendar_akshare(
+                trading_days = _get_trading_calendar(
                     start_date, end_date + timedelta(days=10)
                 )
                 if not trading_days:
@@ -2838,19 +2838,19 @@ def create_momentum_router() -> APIRouter:
         ]
 
         concept_mapper = LocalConceptMapper()
-        use_akshare = body.data_source == "akshare"
-        if use_akshare:
-            from src.data.clients.akshare_backtest_cache import (
-                AkshareHistoricalAdapter,
+        use_tsanghi = body.data_source == "tsanghi"
+        if use_tsanghi:
+            from src.data.clients.tsanghi_backtest_cache import (
+                TsanghiHistoricalAdapter,
             )
 
-            akshare_cache = getattr(request.app.state, "akshare_cache", None)
-            if not akshare_cache or not akshare_cache.is_ready:
-                raise HTTPException(status_code=400, detail="请先预下载 akshare 数据")
-            ifind_client = AkshareHistoricalAdapter(akshare_cache)
+            tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
+            if not tsanghi_cache or not tsanghi_cache.is_ready:
+                raise HTTPException(status_code=400, detail="请先预下载沧海数据")
+            ifind_client = TsanghiHistoricalAdapter(tsanghi_cache)
         else:
             ifind_client = _get_ifind_client(request)
-            akshare_cache = None
+            tsanghi_cache = None
 
         fundamentals_db = _get_fundamentals_db(request)
         try:
@@ -2865,7 +2865,7 @@ def create_momentum_router() -> APIRouter:
             try:
                 from datetime import timedelta
 
-                trading_days_all = _get_trading_calendar_akshare(
+                trading_days_all = _get_trading_calendar(
                     start_date, end_date + timedelta(days=10)
                 )
                 if not trading_days_all:
@@ -2935,11 +2935,11 @@ def create_momentum_router() -> APIRouter:
                     )
 
                     try:
-                        if use_akshare:
+                        if use_tsanghi:
                             date_key = trade_date.strftime("%Y-%m-%d")
                             try:
                                 price_snapshots = _build_snapshots_from_cache(
-                                    akshare_cache,
+                                    tsanghi_cache,
                                     date_key,
                                 )
                             except MinuteDataMissingError as e:
@@ -2949,7 +2949,7 @@ def create_momentum_router() -> APIRouter:
                                 price_err = (
                                     ""
                                     if price_snapshots
-                                    else f"akshare缓存中无 {date_key} 的日线数据"
+                                    else f"沧海缓存中无 {date_key} 的日线数据"
                                 )
                         else:
                             (
@@ -4164,7 +4164,7 @@ async def _parse_iwencai_and_fetch_prices(
     return snapshots, ""
 
 
-def _get_trading_calendar_akshare(start_date, end_date) -> list:
+def _get_trading_calendar(start_date, end_date) -> list:
     """Get trading days via AKShare (tool_trade_date_hist_sina).
 
     Returns list of datetime.date in [start_date, end_date).
@@ -4332,8 +4332,8 @@ class MinuteDataMissingError(Exception):
     pass
 
 
-def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
-    """Build PriceSnapshot dict from AkshareBacktestCache for a given date.
+def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
+    """Build PriceSnapshot dict from TsanghiBacktestCache for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
@@ -4345,12 +4345,12 @@ def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
     """
     from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
 
-    all_daily = akshare_cache.get_all_codes_with_daily(date_str)
+    all_daily = tsanghi_cache.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
 
     if not all_daily:
         # Debug: log sample date keys to diagnose format mismatch
-        for code, dates in akshare_cache._daily.items():
+        for code, dates in tsanghi_cache._daily.items():
             if dates:
                 sample_keys = sorted(dates.keys())[:5]
                 logger.warning(
@@ -4362,7 +4362,7 @@ def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
         else:
             logger.warning(
                 f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
-                f"_daily has {len(akshare_cache._daily)} stocks but all date dicts are empty"
+                f"_daily has {len(tsanghi_cache._daily)} stocks but all date dicts are empty"
             )
         return snapshots
 
@@ -4384,7 +4384,7 @@ def _build_snapshots_from_cache(akshare_cache, date_str: str) -> dict:
         daily_candidates += 1
 
         # 9:40 price from minute cache — NO fallback allowed
-        data_940 = akshare_cache.get_940_price(code, date_str)
+        data_940 = tsanghi_cache.get_940_price(code, date_str)
         if not data_940:
             continue
 
@@ -4533,12 +4533,12 @@ async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
     return await scanner.scan(price_snapshots, trade_date=trade_date)
 
 
-async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict | None:
+async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict | None:
     """
     Execute a single momentum scan using the configured data source.
 
     Supports two data source modes:
-    - 'sina': Sina batch quotes (free) + IQuantHistoricalAdapter (akshare for lookback)
+    - 'sina': Sina batch quotes (free) + IQuantHistoricalAdapter (tsanghi for lookback)
     - 'ifind': iFinD iwencai polling + iFinD historical data
 
     Returns result_entry dict on success, None on failure.
@@ -4585,9 +4585,9 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
 
         # Get universe: prefer OSS cache (complete, zero query), fallback to PG
         stock_filter = create_main_board_only_filter()
-        cache_ready = akshare_cache and getattr(akshare_cache, "is_ready", False)
-        if cache_ready and akshare_cache.stock_codes:
-            all_codes = akshare_cache.stock_codes
+        cache_ready = tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)
+        if cache_ready and tsanghi_cache.stock_codes:
+            all_codes = tsanghi_cache.stock_codes
             logger.info(f"Monitor (tushare): universe from OSS cache ({len(all_codes)} codes)")
         else:
             all_codes = await fundamentals_db.get_all_stock_codes()
@@ -4603,7 +4603,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
             logger.info(f"Monitor (tushare): got {len(quotes)} quotes")
 
             # Supplement preClose from OSS cache (rt_min doesn't provide it)
-            if not (akshare_cache and getattr(akshare_cache, "is_ready", False)):
+            if not (tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)):
                 raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
 
             # Find prev trading day's close in cache (try last 7 days)
@@ -4612,7 +4612,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
             for days_back in range(1, 8):
                 prev_date = today - timedelta(days=days_back)
                 prev_date_str = prev_date.strftime("%Y-%m-%d")
-                prev_daily = akshare_cache.get_all_codes_with_daily(prev_date_str)
+                prev_daily = tsanghi_cache.get_all_codes_with_daily(prev_date_str)
                 if prev_daily:
                     logger.info(
                         f"Monitor (tushare): preClose from cache date {prev_date_str} "
@@ -4656,7 +4656,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
                     f"请检查Tushare数据和OSS缓存是否正常。"
                 )
 
-            adapter = IQuantHistoricalAdapter(tushare, cache=akshare_cache)
+            adapter = IQuantHistoricalAdapter(tushare, cache=tsanghi_cache)
             concept_mapper = LocalConceptMapper()
             scanner = MomentumSectorScanner(
                 ifind_client=adapter,  # type: ignore[arg-type]
@@ -4817,8 +4817,8 @@ async def _run_intraday_monitor(state: dict) -> None:
             logger.info("Monitor: entering scan window")
             try:
                 app_state = state.get("_app_state")
-                akshare_cache = getattr(app_state, "akshare_cache", None) if app_state else None
-                result = await _execute_monitor_scan(state, akshare_cache=akshare_cache)
+                tsanghi_cache = getattr(app_state, "tsanghi_cache", None) if app_state else None
+                result = await _execute_monitor_scan(state, tsanghi_cache=tsanghi_cache)
                 if result is None:
                     # Silent failure (return None) — notify so user knows
                     logger.warning("Monitor scan returned None (no result)")
@@ -5592,7 +5592,7 @@ def create_settings_router() -> APIRouter:
 
                 # Trading calendar
                 yield sse({"type": "status", "message": "获取交易日历..."})
-                full_cal = _get_trading_calendar_akshare(start_date, end_date + timedelta(days=10))
+                full_cal = _get_trading_calendar(start_date, end_date + timedelta(days=10))
                 trading_days = [d for d in full_cal if start_date <= d <= end_date]
 
                 if not trading_days:

@@ -72,7 +72,7 @@ class BacktestScanRequest(BaseModel):
     """Request body for /api/iquant/backtest-scan."""
 
     trade_date: str  # YYYY-MM-DD
-    data_source: str = "akshare"  # "akshare" or "ifind"
+    data_source: str = "tsanghi"  # "tsanghi" or "ifind"
 
 
 # --- Feishu notification helpers ---
@@ -551,11 +551,11 @@ def create_iquant_router() -> APIRouter:
         """Run momentum scan for a specific historical date.
 
         Used by iQuant script in backtest mode. Reuses the main app's
-        akshare cache to build PriceSnapshot, then runs MomentumSectorScanner.
+        tsanghi cache to build PriceSnapshot, then runs MomentumSectorScanner.
 
-        Requires akshare cache to be pre-loaded via the web UI.
+        Requires tsanghi cache to be pre-loaded via the web UI.
         """
-        from src.data.clients.akshare_backtest_cache import AkshareHistoricalAdapter
+        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
         from src.web.routes import MinuteDataMissingError, _build_snapshots_from_cache
@@ -569,25 +569,25 @@ def create_iquant_router() -> APIRouter:
         # Ensure iQuant resources (fundamentals_db, etc.)
         await _ensure_resources()
 
-        if body.data_source == "akshare":
+        if body.data_source == "tsanghi":
             # Wait for OSS background load if still in progress (up to 90s)
-            ak_cache = getattr(request.app.state, "akshare_cache", None)
-            if not ak_cache and getattr(request.app.state, "akshare_cache_loading", False):
-                logger.info("backtest-scan: akshare cache loading from OSS, waiting...")
+            ak_cache = getattr(request.app.state, "tsanghi_cache", None)
+            if not ak_cache and getattr(request.app.state, "tsanghi_cache_loading", False):
+                logger.info("backtest-scan: tsanghi cache loading from OSS, waiting...")
                 for _ in range(90):
                     await asyncio.sleep(1)
-                    ak_cache = getattr(request.app.state, "akshare_cache", None)
+                    ak_cache = getattr(request.app.state, "tsanghi_cache", None)
                     if ak_cache:
                         break
-                    if not getattr(request.app.state, "akshare_cache_loading", False):
+                    if not getattr(request.app.state, "tsanghi_cache_loading", False):
                         break  # loading finished (but may have failed)
                 if ak_cache:
-                    logger.info("backtest-scan: akshare cache ready after waiting")
+                    logger.info("backtest-scan: tsanghi cache ready after waiting")
 
             if not ak_cache:
                 raise HTTPException(
                     status_code=503,
-                    detail="Akshare 缓存未加载。请先在 web 页面的回测页下载数据。",
+                    detail="沧海缓存未加载。请先在 web 页面的回测页下载数据。",
                 )
 
             # Build snapshots from cache
@@ -600,11 +600,11 @@ def create_iquant_router() -> APIRouter:
             if not price_snapshots:
                 return {"recommendation": None, "reason": f"No data for {date_key}"}
 
-            adapter = AkshareHistoricalAdapter(ak_cache)
+            adapter = TsanghiHistoricalAdapter(ak_cache)
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported data_source: {body.data_source}. Use 'akshare'.",
+                detail=f"Unsupported data_source: {body.data_source}. Use 'tsanghi'.",
             )
 
         # Run scanner

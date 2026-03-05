@@ -138,29 +138,29 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
-        # Akshare backtest cache — load from OSS in background (non-blocking)
-        app.state.akshare_cache = None
-        app.state.akshare_cache_loading = True  # frontend polls this
+        # Tsanghi backtest cache — load from OSS in background (non-blocking)
+        app.state.tsanghi_cache = None
+        app.state.tsanghi_cache_loading = True  # frontend polls this
 
         async def _bg_load_oss_cache():
             try:
-                from src.data.clients.akshare_backtest_cache import AkshareBacktestCache
+                from src.data.clients.tsanghi_backtest_cache import TsanghiBacktestCache
 
-                logger.info("Loading akshare cache from OSS (background)...")
-                oss_cache = await asyncio.to_thread(AkshareBacktestCache.load_from_oss)
+                logger.info("Loading tsanghi cache from OSS (background)...")
+                oss_cache = await asyncio.to_thread(TsanghiBacktestCache.load_from_oss)
                 if oss_cache:
-                    app.state.akshare_cache = oss_cache
+                    app.state.tsanghi_cache = oss_cache
                     logger.info(
-                        f"Akshare cache pre-loaded from OSS: "
+                        f"Tsanghi cache pre-loaded from OSS: "
                         f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
                         f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
                     )
                 else:
                     logger.warning("load_from_oss returned None — check OSS config/logs")
             except Exception as e:
-                logger.warning(f"Failed to pre-load akshare cache from OSS: {e}")
+                logger.warning(f"Failed to pre-load tsanghi cache from OSS: {e}")
             finally:
-                app.state.akshare_cache_loading = False
+                app.state.tsanghi_cache_loading = False
 
         asyncio.create_task(_bg_load_oss_cache())
 
@@ -200,7 +200,7 @@ def create_app(
             "task": None,
             "ifind_client": app.state.ifind_client,
             "fundamentals_db": app.state.fundamentals_db,
-            "_app_state": app.state,  # needed for akshare_cache access
+            "_app_state": app.state,  # needed for tsanghi_cache access
         }
         task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
         app.state.momentum_monitor_state["task"] = task
