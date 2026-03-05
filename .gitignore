@@ -74,6 +74,7 @@ Thumbs.db
 /data/*
 !/data/sectors.json
 !/data/board_constituents.json
+!/data/board_relevance_cache.json
 *.csv
 *.parquet
 *.db
