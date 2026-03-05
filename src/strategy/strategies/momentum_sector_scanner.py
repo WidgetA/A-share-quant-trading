@@ -267,7 +267,7 @@ class MomentumSectorScanner:
         logger.info(f"Step 4: {total_constituents} total constituent stocks across hot boards")
 
         # Step 5: Select constituents with gain from open > threshold
-        selected, all_snapshots = await self._step5_select_constituents(
+        selected, all_snapshots, stock_all_boards = await self._step5_select_constituents(
             board_constituents, price_snapshots
         )
         result.selected_stocks = selected
@@ -304,11 +304,42 @@ class MomentumSectorScanner:
             result.selected_stocks = selected
 
         # Step 5.7: Board relevance filter — LLM judges stock-board relevance
+        # Expand each stock to ALL its hot boards, filter, then pick best board.
         if selected and self._board_relevance_filter:
-            selected, _relevance_results = await self._board_relevance_filter.filter_stocks(
-                selected
+            # Build expanded list: one entry per stock-board pair
+            expanded: list[SelectedStock] = []
+            for s in selected:
+                for board in stock_all_boards.get(s.stock_code, [s.board_name]):
+                    expanded.append(
+                        SelectedStock(
+                            stock_code=s.stock_code,
+                            stock_name=s.stock_name,
+                            board_name=board,
+                            open_gain_pct=s.open_gain_pct,
+                            pe_ttm=s.pe_ttm,
+                            board_avg_pe=s.board_avg_pe,
+                        )
+                    )
+
+            kept_expanded, relevance_results = (
+                await self._board_relevance_filter.filter_stocks(expanded)
+            )
+
+            # Pick best board per stock: 高 > 中, tie-break by hottest board
+            relevance_lookup = {
+                (r.stock_code, r.board_name): r.level for r in relevance_results
+            }
+            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
+            selected = self._pick_best_boards(
+                selected, kept_expanded, relevance_lookup, hot_board_sizes
             )
             result.selected_stocks = selected
+        elif selected:
+            # No filter configured — pick hottest board per stock as best guess
+            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
+            for s in selected:
+                boards = stock_all_boards.get(s.stock_code, [s.board_name])
+                s.board_name = max(boards, key=lambda b: hot_board_sizes.get(b, 0))
 
         if selected:
             result.recommended_stock, result.scored_candidates = await self._step6_recommend(
@@ -472,15 +503,81 @@ class MomentumSectorScanner:
                     )
                 )
 
+        # Collect all hot boards per stock (before dedup, for Step 5.7)
+        stock_all_boards: dict[str, list[str]] = defaultdict(list)
+        for stock in selected:
+            if stock.board_name not in stock_all_boards[stock.stock_code]:
+                stock_all_boards[stock.stock_code].append(stock.board_name)
+
         # Deduplicate: a stock may appear in multiple hot boards.
-        # Keep the entry with highest open_gain_pct.
+        # Keep one entry per stock (board_name will be corrected after Step 5.7).
         seen: dict[str, SelectedStock] = {}
         for stock in selected:
-            existing = seen.get(stock.stock_code)
-            if existing is None or stock.open_gain_pct > existing.open_gain_pct:
+            if stock.stock_code not in seen:
                 seen[stock.stock_code] = stock
 
-        return sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True), price_snapshots
+        deduped = sorted(seen.values(), key=lambda s: s.open_gain_pct, reverse=True)
+        return deduped, price_snapshots, dict(stock_all_boards)
+
+    @staticmethod
+    def _pick_best_boards(
+        original_selected: list[SelectedStock],
+        kept_expanded: list[SelectedStock],
+        relevance_lookup: dict[tuple[str, str], str],
+        hot_board_sizes: dict[str, int],
+    ) -> list[SelectedStock]:
+        """After board relevance filtering, pick the best board per stock.
+
+        For each stock that survived filtering, choose the board with:
+        1. Highest relevance (高 > 中)
+        2. Tie-break: hottest board (most initial gainers)
+
+        Stocks where ALL boards were filtered out (all "低") are removed.
+        """
+        LEVEL_ORDER = {"高": 2, "中": 1}
+
+        # Collect surviving boards per stock from kept_expanded
+        stock_boards: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for entry in kept_expanded:
+            level = relevance_lookup.get((entry.stock_code, entry.board_name), "中")
+            stock_boards[entry.stock_code].append((entry.board_name, level))
+
+        # Pick best board per stock
+        best_board_map: dict[str, str] = {}
+        for code, boards_levels in stock_boards.items():
+            best = max(
+                boards_levels,
+                key=lambda bl: (LEVEL_ORDER.get(bl[1], 0), hot_board_sizes.get(bl[0], 0)),
+            )
+            best_board_map[code] = best[0]
+
+        # Rebuild selected list with corrected board_name
+        result: list[SelectedStock] = []
+        for s in original_selected:
+            best_board = best_board_map.get(s.stock_code)
+            if best_board is None:
+                # All boards filtered as "低" — stock removed
+                logger.info(
+                    f"Step 5.7: Removed {s.stock_code} ({s.stock_name}): "
+                    f"all boards irrelevant"
+                )
+                continue
+            result.append(
+                SelectedStock(
+                    stock_code=s.stock_code,
+                    stock_name=s.stock_name,
+                    board_name=best_board,
+                    open_gain_pct=s.open_gain_pct,
+                    pe_ttm=s.pe_ttm,
+                    board_avg_pe=s.board_avg_pe,
+                )
+            )
+
+        logger.info(
+            f"Step 5.7: {len(result)}/{len(original_selected)} stocks kept "
+            f"after board relevance filter"
+        )
+        return result
 
     @staticmethod
     def _z_scores(values: list[float]) -> list[float]:

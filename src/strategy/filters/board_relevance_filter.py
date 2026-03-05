@@ -178,14 +178,15 @@ class BoardRelevanceFilter:
         if cache_updated:
             self._save_cache()
 
-        # Build lookup: stock_code → level
-        relevance_map = {r.stock_code: r.level for r in all_results}
+        # Build lookup: (stock_code, board_name) → level
+        # A stock may appear with different boards and have different relevance levels.
+        relevance_map = {(r.stock_code, r.board_name): r.level for r in all_results}
 
         # Filter: keep 高 and 中, remove 低
         kept = []
         removed = []
         for s in stocks:
-            level = relevance_map.get(s.stock_code, "中")  # default keep
+            level = relevance_map.get((s.stock_code, s.board_name), "中")  # default keep
             if level == "低":
                 removed.append(s)
             else:
