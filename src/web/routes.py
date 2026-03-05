@@ -2388,6 +2388,12 @@ def create_momentum_router() -> APIRouter:
                                 if snap.gain_from_open_pct >= threshold:
                                     l1.append(ss)
 
+                        # Collect all boards per stock before dedup
+                        stock_all_boards: dict[str, list[str]] = defaultdict(list)
+                        for s in l1:
+                            if s.board_name not in stock_all_boards[s.stock_code]:
+                                stock_all_boards[s.stock_code].append(s.board_name)
+
                         # Deduplicate
                         def _dedup(stocks):
                             seen = {}
@@ -2440,6 +2446,41 @@ def create_momentum_router() -> APIRouter:
                             )
                         else:
                             l3 = list(l2)
+
+                        # Step 5.7: Board relevance filter + best board selection
+                        if scanner._board_relevance_filter and l3:
+                            expanded: list[SelectedStock] = []
+                            for s in l3:
+                                for bn in stock_all_boards.get(s.stock_code, [s.board_name]):
+                                    expanded.append(
+                                        SelectedStock(
+                                            stock_code=s.stock_code,
+                                            stock_name=s.stock_name,
+                                            board_name=bn,
+                                            open_gain_pct=s.open_gain_pct,
+                                            pe_ttm=s.pe_ttm,
+                                            board_avg_pe=s.board_avg_pe,
+                                        )
+                                    )
+                            kept, rel_results = await scanner._board_relevance_filter.filter_stocks(
+                                expanded
+                            )
+                            rel_lookup = {
+                                (r.stock_code, r.board_name): r.level for r in rel_results
+                            }
+                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
+                            l3 = MomentumSectorScanner._pick_best_boards(
+                                l3, kept, rel_lookup, hot_board_sizes
+                            )
+                        elif l3:
+                            # No filter — pick hottest board as best guess
+                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
+                            for s in l3:
+                                boards = stock_all_boards.get(s.stock_code, [s.board_name])
+                                s.board_name = max(
+                                    boards,
+                                    key=lambda b: hot_board_sizes.get(b, 0),
+                                )
 
                         # L4: recommendation
                         l4 = []
@@ -3040,6 +3081,12 @@ def create_momentum_router() -> APIRouter:
                                 if snap.gain_from_open_pct >= threshold:
                                     l1.append(ss)
 
+                        # Collect all boards per stock before dedup
+                        stock_all_boards: dict[str, list[str]] = defaultdict(list)
+                        for s in l1:
+                            if s.board_name not in stock_all_boards[s.stock_code]:
+                                stock_all_boards[s.stock_code].append(s.board_name)
+
                         def _dedup(stocks):
                             seen = {}
                             for s in stocks:
@@ -3121,6 +3168,41 @@ def create_momentum_router() -> APIRouter:
                                 )
                         else:
                             l3 = list(l2)
+
+                        # Step 5.7: Board relevance filter + best board selection
+                        if scanner._board_relevance_filter and l3:
+                            expanded: list[SelectedStock] = []
+                            for s in l3:
+                                for bn in stock_all_boards.get(s.stock_code, [s.board_name]):
+                                    expanded.append(
+                                        SelectedStock(
+                                            stock_code=s.stock_code,
+                                            stock_name=s.stock_name,
+                                            board_name=bn,
+                                            open_gain_pct=s.open_gain_pct,
+                                            pe_ttm=s.pe_ttm,
+                                            board_avg_pe=s.board_avg_pe,
+                                        )
+                                    )
+                            kept, rel_results = await scanner._board_relevance_filter.filter_stocks(
+                                expanded
+                            )
+                            rel_lookup = {
+                                (r.stock_code, r.board_name): r.level for r in rel_results
+                            }
+                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
+                            l3 = MomentumSectorScanner._pick_best_boards(
+                                l3, kept, rel_lookup, hot_board_sizes
+                            )
+                        elif l3:
+                            # No filter — pick hottest board as best guess
+                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
+                            for s in l3:
+                                boards = stock_all_boards.get(s.stock_code, [s.board_name])
+                                s.board_name = max(
+                                    boards,
+                                    key=lambda b: hot_board_sizes.get(b, 0),
+                                )
 
                         # L4: recommendation
                         l4 = []
