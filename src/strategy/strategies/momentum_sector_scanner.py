@@ -438,7 +438,7 @@ class MomentumSectorScanner:
         self,
         board_constituents: dict[str, list[tuple[str, str]]],
         price_snapshots: dict[str, PriceSnapshot],
-    ) -> tuple[list[SelectedStock], dict[str, PriceSnapshot]]:
+    ) -> tuple[list[SelectedStock], dict[str, PriceSnapshot], dict[str, list[str]]]:
         """
         Step 5: From all constituent stocks, select those with:
         - Main board only (same filter as Step 1)
