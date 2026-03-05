@@ -1738,9 +1738,7 @@ def create_momentum_router() -> APIRouter:
                 # Include extra days beyond end_date for T+1 sell price lookups.
                 from datetime import timedelta as _td
 
-                trading_days_all = _get_trading_calendar(
-                    start_date, end_date + _td(days=10)
-                )
+                trading_days_all = _get_trading_calendar(start_date, end_date + _td(days=10))
                 trading_days = [d for d in trading_days_all if start_date <= d <= end_date]
                 # Build T+1 map from the full list (needed for selling on T+1)
                 _next_day_map: dict = {}
@@ -2230,9 +2228,7 @@ def create_momentum_router() -> APIRouter:
                 # Get trading calendar (include extra days for T+1)
                 from datetime import timedelta
 
-                trading_days = _get_trading_calendar(
-                    start_date, end_date + timedelta(days=10)
-                )
+                trading_days = _get_trading_calendar(start_date, end_date + timedelta(days=10))
                 if not trading_days:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
@@ -2865,9 +2861,7 @@ def create_momentum_router() -> APIRouter:
             try:
                 from datetime import timedelta
 
-                trading_days_all = _get_trading_calendar(
-                    start_date, end_date + timedelta(days=10)
-                )
+                trading_days_all = _get_trading_calendar(start_date, end_date + timedelta(days=10))
                 if not trading_days_all:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
@@ -2947,9 +2941,7 @@ def create_momentum_router() -> APIRouter:
                                 price_err = str(e)
                             else:
                                 price_err = (
-                                    ""
-                                    if price_snapshots
-                                    else f"沧海缓存中无 {date_key} 的日线数据"
+                                    "" if price_snapshots else f"沧海缓存中无 {date_key} 的日线数据"
                                 )
                         else:
                             (
