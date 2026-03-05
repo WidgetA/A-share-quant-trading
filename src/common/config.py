@@ -687,6 +687,82 @@ def get_tsanghi_token_source() -> str:
     return "not_configured"
 
 
+# === Aliyun DashScope API Key ===
+
+_aliyun_key_override: str | None = None
+ALIYUN_KEY_FILE = PROJECT_ROOT / "data" / "aliyun_api_key.txt"
+
+
+def get_aliyun_api_key() -> str:
+    """Get Aliyun DashScope API key for LLM calls.
+
+    Priority: runtime override > persisted file > env var > secrets.yaml.
+
+    Returns:
+        Aliyun API key string
+
+    Raises:
+        ValueError: If key is not configured
+    """
+    import os
+
+    if _aliyun_key_override:
+        return _aliyun_key_override
+
+    if ALIYUN_KEY_FILE.exists():
+        key = ALIYUN_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+
+    env_key = os.environ.get("ALIYUN_API_KEY", "")
+    if env_key:
+        return env_key
+
+    try:
+        secrets = load_secrets()
+        key = secrets.get_str("aliyun.api_key", "")
+        if key:
+            return key
+    except FileNotFoundError:
+        pass
+
+    raise ValueError(
+        "Aliyun DashScope API key not configured. "
+        "Set via web UI Settings page, ALIYUN_API_KEY environment variable, "
+        "or configure aliyun.api_key in config/secrets.yaml."
+    )
+
+
+def set_aliyun_api_key(key: str) -> None:
+    """Set Aliyun API key at runtime and persist to disk."""
+    global _aliyun_key_override
+    _aliyun_key_override = key
+
+    ALIYUN_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ALIYUN_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("Aliyun API key updated via web UI and persisted to disk")
+
+
+def get_aliyun_api_key_source() -> str:
+    """Return which source the current Aliyun API key comes from."""
+    import os
+
+    if _aliyun_key_override:
+        return "web_ui"
+    if ALIYUN_KEY_FILE.exists():
+        if ALIYUN_KEY_FILE.read_text(encoding="utf-8").strip():
+            return "persisted_file"
+    if os.environ.get("ALIYUN_API_KEY", ""):
+        return "env_var"
+    try:
+        secrets = load_secrets()
+        if secrets.get_str("aliyun.api_key", ""):
+            return "secrets_yaml"
+    except FileNotFoundError:
+        pass
+    return "not_configured"
+
+
 # === Monitor Data Source ===
 
 _monitor_ds_override: str | None = None

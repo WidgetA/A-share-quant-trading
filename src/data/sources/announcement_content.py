@@ -369,18 +369,23 @@ def create_content_fetcher_from_config() -> AnnouncementContentFetcher:
     Returns:
         Configured AnnouncementContentFetcher instance.
     """
-    from src.common.config import load_secrets
+    from src.common.config import get_aliyun_api_key, load_secrets
 
-    secrets = load_secrets()
-    aliyun_config = secrets.get_dict("aliyun", {})
+    api_key = get_aliyun_api_key()  # raises ValueError if missing
 
-    api_key = aliyun_config.get("api_key")
-    if not api_key:
-        raise ValueError("Aliyun API key not found in secrets.yaml")
+    # Read optional model/base_url overrides from secrets.yaml
+    try:
+        secrets = load_secrets()
+        aliyun_config = secrets.get_dict("aliyun", {})
+    except FileNotFoundError:
+        aliyun_config = {}
 
     config = AliyunConfig(
         api_key=api_key,
-        base_url=aliyun_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        base_url=aliyun_config.get(
+            "base_url",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
         model=aliyun_config.get("model", "qwen-vl-max-latest"),
     )
 

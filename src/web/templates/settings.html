@@ -96,6 +96,36 @@
         </div>
     </section>
 
+    <!-- Aliyun DashScope API Key Section -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>阿里云 DashScope API Key</h3>
+            <p class="settings-desc">用于板块相关度 LLM 过滤 (Step 5.7) 和公告内容提取。模型: qwen-plus</p>
+
+            <!-- Current Status -->
+            <div class="token-status" id="aliyunStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="aliyunStatusValue">加载中...</span>
+            </div>
+
+            <!-- Key Input -->
+            <div class="form-group">
+                <label for="aliyunInput">API Key</label>
+                <input type="text" id="aliyunInput" class="token-input"
+                    placeholder="粘贴阿里云 DashScope API Key (sk-...)..." style="font-family: monospace;">
+            </div>
+
+            <!-- Actions -->
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testAliyunKey()" id="aliyunTestBtn">验证 Key</button>
+                <button class="btn btn-primary" onclick="saveAliyunKey()" id="aliyunSaveBtn">保存</button>
+            </div>
+
+            <!-- Result Message -->
+            <div class="token-message hidden" id="aliyunMessage"></div>
+        </div>
+    </section>
+
     <!-- iQuant API Key Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -409,6 +439,86 @@ async function saveTsanghiToken() {
     }
 }
 
+// === Aliyun DashScope API Key ===
+async function loadAliyunStatus() {
+    try {
+        const resp = await fetch('/api/settings/aliyun-key');
+        const data = await resp.json();
+        const el = document.getElementById('aliyunStatusValue');
+        if (data.configured) {
+            el.textContent = `${data.source_label} | ${data.masked_token} (${data.token_length} 字符)`;
+            el.className = 'token-status-value configured';
+        } else {
+            el.textContent = '未配置';
+            el.className = 'token-status-value not-configured';
+        }
+    } catch (e) {
+        document.getElementById('aliyunStatusValue').textContent = '加载失败';
+    }
+}
+
+async function testAliyunKey() {
+    const token = document.getElementById('aliyunInput').value.trim();
+    if (!token) {
+        showMessage('aliyunMessage', '请先输入 API Key', false);
+        return;
+    }
+
+    const btn = document.getElementById('aliyunTestBtn');
+    btn.disabled = true;
+    btn.textContent = '验证中...';
+    showMessage('aliyunMessage', '', true);
+
+    try {
+        const resp = await fetch('/api/settings/aliyun-key/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: token})
+        });
+        const data = await resp.json();
+        showMessage('aliyunMessage', data.message || data.detail || '未知响应', data.success);
+    } catch (e) {
+        showMessage('aliyunMessage', '请求失败: ' + (e.message || e), false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '验证 Key';
+    }
+}
+
+async function saveAliyunKey() {
+    const token = document.getElementById('aliyunInput').value.trim();
+    if (!token) {
+        showMessage('aliyunMessage', '请先输入 API Key', false);
+        return;
+    }
+
+    const btn = document.getElementById('aliyunSaveBtn');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    try {
+        const resp = await fetch('/api/settings/aliyun-key', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: token})
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage('aliyunMessage', data.message, true);
+            document.getElementById('aliyunInput').value = '';
+            loadAliyunStatus();
+        } else {
+            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
+            showMessage('aliyunMessage', errMsg, false);
+        }
+    } catch (e) {
+        showMessage('aliyunMessage', '请求失败: ' + e.message, false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '保存';
+    }
+}
+
 // === iQuant API Key ===
 async function loadIquantStatus() {
     try {
@@ -553,6 +663,7 @@ async function saveTavilyKey() {
 loadTokenStatus();
 loadTushareStatus();
 loadTsanghiStatus();
+loadAliyunStatus();
 loadIquantStatus();
 loadTavilyStatus();
 </script>

@@ -316,24 +316,13 @@ class BoardRelevanceFilter:
 def create_board_relevance_filter(
     cache_path: str = DEFAULT_CACHE_PATH,
 ) -> BoardRelevanceFilter:
-    """Create BoardRelevanceFilter from secrets config.
+    """Create BoardRelevanceFilter using Aliyun API key.
 
     Raises:
-        RuntimeError: If Aliyun API key is not configured.
+        ValueError: If Aliyun API key is not configured.
     """
-    from src.common.config import load_secrets
+    from src.common.config import get_aliyun_api_key
 
-    try:
-        secrets = load_secrets()
-        api_key = secrets.get_str("aliyun.api_key", "")
-    except Exception:
-        api_key = ""
-
-    if not api_key:
-        raise RuntimeError(
-            "板块相关度过滤需要阿里云 DashScope API key。"
-            "请在 config/secrets.yaml 中配置 aliyun.api_key。"
-        )
-
+    api_key = get_aliyun_api_key()  # raises ValueError if missing
     config = DashScopeConfig(api_key=api_key)
     return BoardRelevanceFilter(config, cache_path=cache_path)
