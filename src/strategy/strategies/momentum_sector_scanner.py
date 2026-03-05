@@ -321,14 +321,12 @@ class MomentumSectorScanner:
                         )
                     )
 
-            kept_expanded, relevance_results = (
-                await self._board_relevance_filter.filter_stocks(expanded)
+            kept_expanded, relevance_results = await self._board_relevance_filter.filter_stocks(
+                expanded
             )
 
             # Pick best board per stock: 高 > 中, tie-break by hottest board
-            relevance_lookup = {
-                (r.stock_code, r.board_name): r.level for r in relevance_results
-            }
+            relevance_lookup = {(r.stock_code, r.board_name): r.level for r in relevance_results}
             hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
             selected = self._pick_best_boards(
                 selected, kept_expanded, relevance_lookup, hot_board_sizes
@@ -558,8 +556,7 @@ class MomentumSectorScanner:
             if best_board is None:
                 # All boards filtered as "低" — stock removed
                 logger.info(
-                    f"Step 5.7: Removed {s.stock_code} ({s.stock_name}): "
-                    f"all boards irrelevant"
+                    f"Step 5.7: Removed {s.stock_code} ({s.stock_name}): all boards irrelevant"
                 )
                 continue
             result.append(
