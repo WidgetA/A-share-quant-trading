@@ -15,7 +15,7 @@
 # - Minute bars: baostock (5-min frequency), for 9:40 snapshot only
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
-# - Volume stored in 股 (shares) — tsanghi natively returns 股, no conversion needed
+# - Volume stored in 手 (lots) — tsanghi natively returns 手; adapter converts ×100 at read time
 
 from __future__ import annotations
 
@@ -425,6 +425,10 @@ class TsanghiBacktestCache:
                 )
                 return None
 
+            # Ensure preClose is filled — defensive against old caches
+            # that were saved before _compute_pre_close() existed.
+            cache._compute_pre_close()
+
             # Recalculate actual date range from data (don't trust meta.pkl —
             # it may be out of sync if a previous OSS save was interrupted).
             cache._recalculate_date_range()
@@ -558,7 +562,8 @@ class TsanghiBacktestCache:
                             "low": float(rec.get("low", o)),
                             "close": float(c),
                             "preClose": 0.0,  # filled in _compute_pre_close()
-                            # tsanghi volume is in 股 (shares); no conversion needed
+                            # tsanghi volume is in 手 (lots); stored as-is,
+                            # adapter converts ×100 at read time.
                             "volume": float(rec.get("volume", 0)),
                             "amount": 0.0,  # not available from tsanghi
                             # turnoverRatio not available from tsanghi;
@@ -743,8 +748,10 @@ class TsanghiHistoricalAdapter:
                     for ind in indicators.split(","):
                         ind = ind.strip()
                         val = day.get(ind)
-                        # tsanghi volume is already in 股 (shares),
-                        # same unit as iFinD — no conversion needed.
+                        # tsanghi volume is in 手 (lots); convert to 股 (shares)
+                        # at read time so callers get the same unit as iFinD.
+                        if ind == "volume" and val is not None:
+                            val = val * 100
                         indicator_data[ind].append(val)
                 d += timedelta(days=1)
 

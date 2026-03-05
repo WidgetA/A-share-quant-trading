@@ -94,11 +94,11 @@ Rules:
 
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
-| **tsanghi** `/daily/latest` | **股** | None |
+| **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
 | **baostock** `query_history_k_data_plus()` | **股** | None |
 | **iFinD** | **股** | None |
 
-- All three sources natively return 股, no conversion needed anywhere.
+- Conversion at **adapter read layer**, not storage (raw cache keeps original values).
 - **Cross-verify**: `early_volume(10min) / avg_daily_volume` should be ~0.05-0.30. If >1.0, units are wrong.
 
 ## 10. iFinD HTTP API Reference (CRITICAL)
