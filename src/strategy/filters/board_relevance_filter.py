@@ -98,14 +98,30 @@ class BoardRelevanceFilter:
         return f"{board_name}::{stock_code}"
 
     def _load_cache(self) -> None:
-        """Load persistent cache from disk."""
-        if self._cache_path.exists():
-            try:
-                self._cache = json.loads(self._cache_path.read_text(encoding="utf-8"))
-                logger.info(f"BoardRelevanceFilter: loaded {len(self._cache)} cached entries")
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"BoardRelevanceFilter: cache load failed: {e}")
-                self._cache = {}
+        """Load persistent cache from disk.
+
+        Checks both the configured path and the bundled_data fallback
+        (Docker images bundle static files in /app/bundled_data/).
+        """
+        # Try configured path first, then bundled_data fallback
+        candidates = [self._cache_path]
+        bundled = Path("bundled_data") / self._cache_path.name
+        if bundled != self._cache_path:
+            candidates.append(bundled)
+
+        for path in candidates:
+            if path.exists():
+                try:
+                    self._cache = json.loads(path.read_text(encoding="utf-8"))
+                    logger.info(
+                        f"BoardRelevanceFilter: loaded {len(self._cache)}"
+                        f" cached entries from {path}"
+                    )
+                    return
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(f"BoardRelevanceFilter: cache load failed ({path}): {e}")
+
+        self._cache = {}
 
     def _save_cache(self) -> None:
         """Persist cache to disk."""
