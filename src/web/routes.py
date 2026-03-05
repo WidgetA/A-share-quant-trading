@@ -1203,6 +1203,22 @@ def create_momentum_router() -> APIRouter:
         await sf.start()
         return NegativeNewsChecker(tavily, sf)
 
+    def _create_board_relevance_filter():
+        """Create BoardRelevanceFilter if Aliyun API key is configured.
+
+        Returns None silently if key is missing (filter is optional,
+        defaults to enabled when key is available).
+        """
+        try:
+            from src.strategy.filters.board_relevance_filter import (
+                create_board_relevance_filter,
+            )
+
+            return create_board_relevance_filter()
+        except (RuntimeError, Exception) as e:
+            logger.info(f"Board relevance filter disabled: {e}")
+            return None
+
     async def _stop_news_checker(checker) -> None:
         """Stop the Tavily and SiliconFlow clients inside a NegativeNewsChecker."""
         if checker is None:
@@ -1491,6 +1507,7 @@ def create_momentum_router() -> APIRouter:
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
                     negative_news_checker=news_checker,
+                    board_relevance_filter=_create_board_relevance_filter(),
                 )
 
                 date_key = trade_date.strftime("%Y-%m-%d")
@@ -1516,6 +1533,7 @@ def create_momentum_router() -> APIRouter:
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
                     negative_news_checker=news_checker,
+                    board_relevance_filter=_create_board_relevance_filter(),
                 )
 
                 date_str = trade_date.strftime("%Y%m%d")
@@ -1721,6 +1739,7 @@ def create_momentum_router() -> APIRouter:
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
                     negative_news_checker=news_checker,
+                    board_relevance_filter=_create_board_relevance_filter(),
                 )
 
                 # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
@@ -2306,6 +2325,7 @@ def create_momentum_router() -> APIRouter:
                             fundamentals_db=fundamentals_db,
                             concept_mapper=concept_mapper,
                             stock_filter=stock_filter,
+                            board_relevance_filter=_create_board_relevance_filter(),
                         )
                         scanner._trade_date = trade_date
 
@@ -2931,6 +2951,7 @@ def create_momentum_router() -> APIRouter:
                             concept_mapper=concept_mapper,
                             stock_filter=stock_filter,
                             negative_news_checker=news_checker,
+                            board_relevance_filter=_create_board_relevance_filter(),
                         )
                         scanner._trade_date = trade_date
 
@@ -3776,6 +3797,23 @@ def _get_llm_api_key() -> str:
         return ""
 
 
+def _create_board_relevance_filter_global():
+    """Module-level factory for BoardRelevanceFilter.
+
+    Returns None silently if Aliyun key is missing (filter is optional).
+    Used by top-level functions outside create_momentum_router() scope.
+    """
+    try:
+        from src.strategy.filters.board_relevance_filter import (
+            create_board_relevance_filter,
+        )
+
+        return create_board_relevance_filter()
+    except Exception as e:
+        logger.info(f"Board relevance filter disabled: {e}")
+        return None
+
+
 async def _call_llm_stock_analysis(
     trade: dict, board_data: dict, stock_day_data: dict, trigger_codes: list[str]
 ) -> str:
@@ -4559,6 +4597,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
                 fundamentals_db=fundamentals_db,
                 concept_mapper=concept_mapper,
                 stock_filter=stock_filter,
+                board_relevance_filter=_create_board_relevance_filter_global(),
             )
             scan_result = await scanner.scan(price_snapshots, trade_date=None)
         finally:
@@ -4585,6 +4624,7 @@ async def _execute_monitor_scan(state: dict, akshare_cache: Any = None) -> dict 
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
+            board_relevance_filter=_create_board_relevance_filter_global(),
         )
         scan_result = await scanner.scan(snapshots, trade_date=None)
 
@@ -5372,6 +5412,7 @@ def create_settings_router() -> APIRouter:
                     ifind_client=ifind_client,
                     fundamentals_db=fundamentals_db,
                     concept_mapper=concept_mapper,
+                    board_relevance_filter=_create_board_relevance_filter_global(),
                 )
 
                 # Trading calendar

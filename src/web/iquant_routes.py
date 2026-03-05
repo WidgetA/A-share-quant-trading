@@ -115,6 +115,19 @@ async def _notify_feishu_signal(signal: dict) -> None:
         logger.warning("Failed to send Feishu signal notification", exc_info=True)
 
 
+def _get_board_relevance_filter():
+    """Create BoardRelevanceFilter if Aliyun API key is configured."""
+    try:
+        from src.strategy.filters.board_relevance_filter import (
+            create_board_relevance_filter,
+        )
+
+        return create_board_relevance_filter()
+    except Exception as e:
+        logger.info(f"Board relevance filter disabled: {e}")
+        return None
+
+
 # --- Router factory ---
 
 
@@ -285,6 +298,7 @@ def create_iquant_router() -> APIRouter:
             fundamentals_db=_state["fundamentals_db"],
             concept_mapper=_state["concept_mapper"],
             stock_filter=_state["stock_filter"],
+            board_relevance_filter=_get_board_relevance_filter(),
         )
 
         scan_result = await scanner.scan(price_snapshots, trade_date=None)
@@ -603,6 +617,7 @@ def create_iquant_router() -> APIRouter:
             ifind_client=adapter,  # type: ignore[arg-type]
             fundamentals_db=_state["fundamentals_db"],
             concept_mapper=concept_mapper,
+            board_relevance_filter=_get_board_relevance_filter(),
         )
 
         scan_result = await scanner.scan(price_snapshots, trade_date=trade_date)

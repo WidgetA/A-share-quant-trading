@@ -19,9 +19,11 @@
 # Step 5: constituents with 9:40 gain from open > 0.56% (main board only)
 # Step 5.5: momentum quality filter (declining trend + low turnover amp → fake breakout)
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
-# Step 6: recommend — across ALL candidates, filter consecutive-up ≥2d,
-#          score by -Z(gain_from_open) - Z(turnover_amp) (lower chase + lower surge = better),
-#          check #1 for negative news, fall back to #2
+# Step 5.7: board relevance filter (LLM judges stock-board business relevance)
+# Step 6: recommend — across ALL candidates, filter limit-up,
+#          score by +Z(gain_from_open) + Z(turnover_amp) - cup_penalty
+#          (higher momentum + higher volume = board leader),
+#          board leader bonus +0.5, negative news fallback
 # Step 7: → ScanResult → Feishu notification
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from src.strategy.filters.stock_filter import StockFilter, create_main_board_onl
 
 if TYPE_CHECKING:
     from src.strategy.analyzers.negative_news_checker import NegativeNewsChecker
+    from src.strategy.filters.board_relevance_filter import BoardRelevanceFilter
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +204,7 @@ class MomentumSectorScanner:
         momentum_quality_config: MomentumQualityConfig | None = None,
         reversal_factor_config: ReversalFactorConfig | None = None,
         negative_news_checker: NegativeNewsChecker | None = None,
+        board_relevance_filter: BoardRelevanceFilter | None = None,
     ):
         self._ifind = ifind_client
         self._fundamentals_db = fundamentals_db
@@ -209,6 +213,7 @@ class MomentumSectorScanner:
         self._quality_filter = MomentumQualityFilter(ifind_client, momentum_quality_config)
         self._reversal_filter = ReversalFactorFilter(reversal_factor_config)
         self._news_checker = negative_news_checker
+        self._board_relevance_filter = board_relevance_filter
 
     async def scan(
         self,
@@ -296,6 +301,14 @@ class MomentumSectorScanner:
                 selected, all_snapshots, avg_daily_volume_data, trade_date
             )
             result.selected_stocks = selected
+
+        # Step 5.7: Board relevance filter — LLM judges stock-board relevance
+        if selected and self._board_relevance_filter:
+            selected, _relevance_results = await self._board_relevance_filter.filter_stocks(
+                selected
+            )
+            result.selected_stocks = selected
+
         if selected:
             result.recommended_stock, result.scored_candidates = await self._step6_recommend(
                 selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
@@ -496,14 +509,16 @@ class MomentumSectorScanner:
         """
         Step 6: Rank candidates by composite score and pick #1.
 
-        Composite score = -Z(gain_from_open_pct) - Z(early_turnover_amp).
-        Lower chase and lower volume surge rank higher.
+        Composite score = +Z(gain_from_open_pct) + Z(early_turnover_amp)
+                          - cup_penalty + leader_bonus.
+        Higher momentum and higher volume rank higher (select board leaders).
         - gain_from_open: intraday momentum (9:40 price vs open)
-        - early_turnover_amp: early_volume / avg_daily_volume (9:40 data, no hindsight)
+        - early_turnover_amp: early_volume / avg_daily_volume (9:40 data)
+        - cup_penalty: consecutive up days × 0.3 (soft penalty)
+        - leader_bonus: +0.5 for highest-gfo stock within each board
 
         Filters:
             - Limit-up at 9:40 → unbuyable, skip
-            - Consecutive up days ≥ 2 → chasing momentum, skip
 
         Post-ranking: if news_checker is configured, check #1 for negative news.
         If negative → fall back to #2 (no recursive check on #2).
@@ -512,7 +527,8 @@ class MomentumSectorScanner:
             return None, []
 
         logger.info(
-            f"Step 6: Scoring {len(selected_stocks)} candidates by -Z(gfo) - Z(amp) - cup_penalty"
+            f"Step 6: Scoring {len(selected_stocks)} candidates "
+            f"by +Z(gfo) + Z(amp) - cup_penalty + leader_bonus"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -537,9 +553,9 @@ class MomentumSectorScanner:
 
         candidates_pool = non_limit_up
 
-        # --- Composite score: LOWER chase + LOWER volume surge = better ---
-        # Negate Z-scores so candidates with less gain-from-open and less
-        # volume amplification rank higher (avoid chasing overbought stocks).
+        # --- Composite score: HIGHER momentum + HIGHER volume = board leader ---
+        # Positive Z-scores so candidates with more gain-from-open and more
+        # volume amplification rank higher (select board leaders).
         _cup_data = consecutive_up_data or {}
         _avg_vol_data = avg_daily_volume_data or {}
         _snapshots = price_snapshots or {}
@@ -570,12 +586,25 @@ class MomentumSectorScanner:
 
         # Soft penalty for consecutive up days: each day deducts 0.3 std
         CUP_PENALTY_PER_DAY = 0.3
+        # Board leader bonus: highest-gfo stock per board gets +0.5
+        LEADER_BONUS = 0.5
+
+        # Identify board leaders: highest gain_from_open per board
+        board_leader_codes: set[str] = set()
+        board_gfo_map: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        for i, s in enumerate(candidates_pool):
+            board_gfo_map[s.board_name].append((s.stock_code, gfo_values[i]))
+        for board_name, stock_gfo_list in board_gfo_map.items():
+            if len(stock_gfo_list) >= 2:
+                leader_code = max(stock_gfo_list, key=lambda x: x[1])[0]
+                board_leader_codes.add(leader_code)
 
         # Build scored candidates
         scored: list[tuple[SelectedStock, float, float, float, float, int]] = []
         for i, s in enumerate(candidates_pool):
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
-            composite = -gfo_z[i] - amp_z[i] - cup_penalty
+            leader_bonus = LEADER_BONUS if s.stock_code in board_leader_codes else 0.0
+            composite = gfo_z[i] + amp_z[i] - cup_penalty + leader_bonus
             scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i], cup_values[i]))
 
         # Sort by composite score descending

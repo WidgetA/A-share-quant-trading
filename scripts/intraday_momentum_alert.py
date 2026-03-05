@@ -278,11 +278,23 @@ async def monitor(
         logger.info(f"Running strategy scan on {len(accumulated)} accumulated stocks...")
 
         concept_mapper = LocalConceptMapper()
+
+        # Board relevance filter (optional, enabled if Aliyun key configured)
+        try:
+            from src.strategy.filters.board_relevance_filter import (
+                create_board_relevance_filter,
+            )
+
+            relevance_filter = create_board_relevance_filter()
+        except Exception:
+            relevance_filter = None
+
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
             negative_news_checker=news_checker,
+            board_relevance_filter=relevance_filter,
         )
 
         result = await scanner.scan(accumulated)

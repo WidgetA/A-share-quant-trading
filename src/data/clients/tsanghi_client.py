@@ -159,6 +159,29 @@ class TsanghiClient:
             return data[0]
         return None
 
+    async def company_info(
+        self,
+        exchange: str,
+        ticker: str,
+    ) -> dict | None:
+        """Fetch company profile for a single stock.
+
+        Args:
+            exchange: "XSHG" or "XSHE"
+            ticker: Bare stock code, e.g. "600519"
+
+        Returns:
+            Dict with keys: ticker, name, company_name, description,
+            business_scope, gics_industry_name, etc.
+            Returns None if no data available.
+        """
+        url = f"{self.BASE_URL}/{exchange}/company/info"
+        params: dict[str, Any] = {"ticker": ticker}
+        data = await self._get(url, params)
+        if data:
+            return data[0] if isinstance(data, list) else data
+        return None
+
     async def daily_latest(
         self,
         exchange: str,

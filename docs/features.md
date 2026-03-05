@@ -32,6 +32,7 @@
 | 0.10.0 | 2026-02-12 | - | STR-004: Momentum sector strategy (backtest + intraday alert) |
 | 0.10.1 | 2026-02-19 | - | STR-004: Remove gap-fade filter (ineffective in validation, precision ~50%) |
 | 0.10.2 | 2026-02-20 | - | STR-004: Sync docs with code (fix scoring formula, add Step 5.5/5.6/limit-up docs) |
+| 0.10.3 | 2026-03-05 | - | STR-004: Add Step 5.7 LLM board relevance filter + flip scoring to +Z(gfo)+Z(amp) + board leader bonus |
 
 ---
 
@@ -634,10 +635,13 @@ strategy:
 6. **Step 5 — Gain Filter**: Select constituents with 9:40 gain from open >0.56%, main board, non-ST
 7. **Step 5.5 — Momentum Quality Filter**: Remove stocks with abnormal early volume. Upper bound: turnover_amp > 3.0x (冲高回落 risk, based on 9-month study: >3x → avg return negative, win rate 42.9%). Lower bound: turnover_amp < 0.4x (缩量弱势, based on fine-grained sweep across 5/7/15/20d windows: Bootstrap median 0.42~0.47x, kept-group return +0.020% improvement). Turnover amp = early_volume (9:40 cumulative) / (avg_daily_volume × 0.125). Also computes trend_pct, consecutive_up_days, avg_daily_volume for Step 6
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
-9. **Step 6 — Recommend (推股)**: From the board with the most selected stocks:
+9. **Step 5.7 — Board Relevance Filter (LLM)**: Use Aliyun DashScope (qwen-plus) to judge whether each stock's main business is truly related to its assigned board. Filter out "低" (low) relevance stocks. Results permanently cached in `data/board_relevance_cache.json`. **TODO**: 当前仅靠 LLM 知识判断，未提供经营范围数据；后续需接入公司经营范围数据源以提高准确度。
+10. **Step 6 — Recommend (推股)**: Across all candidates:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
-   - Exclude stocks with ≥2 consecutive up days (chasing risk)
-   - Composite score = -Z(gain_from_open) - Z(turnover_amp) — 追高少 + 量不夸张 = 排前面
+   - Composite score = +Z(gain_from_open) + Z(turnover_amp) - cup_penalty + leader_bonus
+   - 涨幅靠前 + 量能充足 = 板块龙头优先（翻转自旧公式，旧公式选最弱票导致连续亏损）
+   - Board leader bonus: 每个板块内 gain_from_open 最高的票加 +0.5
+   - Cup penalty: 连涨天数 × 0.3（软惩罚）
    - Pick the highest-scored stock. Highlighted in UI + Feishu notification
 10. **Notification**: Send selection + recommendation via Feishu
 
@@ -652,6 +656,7 @@ strategy:
 - `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic (Step 1–6)
 - `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: 冲高回落 filter (extreme volume surge)
 - `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
+- `src/strategy/filters/board_relevance_filter.py` — Step 5.7: LLM 板块相关度过滤
 - `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping (reads local JSON)
 - `data/sectors.json` — THS concept board name list (390 boards)
 - `data/board_constituents.json` — Board → constituent stocks mapping (pre-downloaded)
