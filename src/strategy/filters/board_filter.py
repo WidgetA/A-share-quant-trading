@@ -121,6 +121,7 @@ JUNK_BOARDS: set[str] = {
     "海峡两岸",
     "雄安新区",
     "新疆振兴",
+    "智慧城市",
     "乡村振兴",
     # ---- 企业概念（跟随特定公司，不是行业主题）----
     "苹果概念",
@@ -215,7 +216,6 @@ BROAD_CONCEPT_BOARDS: set[str] = {
     "专精特新",  # 1160
     "数字经济",  # 503
     "粤港澳大湾区",  # 472
-    "智慧城市",  # 417
 }
 
 # Regex patterns that catch time-variant junk boards (e.g. "2026中报预增")
