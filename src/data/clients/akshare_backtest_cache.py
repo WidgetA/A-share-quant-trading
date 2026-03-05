@@ -15,7 +15,7 @@
 # - Minute bars: baostock (5-min frequency), for 9:40 snapshot only
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
-# - Volume stored in 手 (lots) for backward compatibility with old OSS caches
+# - Volume stored in 股 (shares) — tsanghi natively returns 股, no conversion needed
 
 from __future__ import annotations
 
@@ -558,7 +558,7 @@ class AkshareBacktestCache:
                             "low": float(rec.get("low", o)),
                             "close": float(c),
                             "preClose": 0.0,  # filled in _compute_pre_close()
-                            # tsanghi volume is in 手; store as-is for OSS compat
+                            # tsanghi volume is in 股 (shares); no conversion needed
                             "volume": float(rec.get("volume", 0)),
                             "amount": 0.0,  # not available from tsanghi
                             # turnoverRatio not available from tsanghi;
@@ -743,10 +743,8 @@ class AkshareHistoricalAdapter:
                     for ind in indicators.split(","):
                         ind = ind.strip()
                         val = day.get(ind)
-                        # Cache stores volume in 手 (lots of 100 shares);
-                        # convert to 股 (shares) to match iFinD units.
-                        if ind == "volume" and val is not None:
-                            val = val * 100
+                        # tsanghi volume is already in 股 (shares),
+                        # same unit as iFinD — no conversion needed.
                         indicator_data[ind].append(val)
                 d += timedelta(days=1)
 

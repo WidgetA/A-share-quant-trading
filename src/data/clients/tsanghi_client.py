@@ -6,7 +6,7 @@
 # === KEY CONCEPTS ===
 # - Exchange codes: XSHG (Shanghai), XSHE (Shenzhen)
 # - Stock codes: bare digits (e.g. "600519"), no suffix
-# - Volume unit from API: 手 (lots). Caller must ×100 for 股 (shares).
+# - Volume unit from API: 股 (shares). No conversion needed.
 # - Token: obtained from https://tsanghi.com after registration
 
 import asyncio
@@ -127,7 +127,7 @@ class TsanghiClient:
 
         Returns:
             List of dicts with keys: ticker, date, open, high, low, close, volume.
-            Volume is in 手 (lots); caller should ×100 for 股 (shares).
+            Volume is in 股 (shares). No conversion needed.
         """
         url = f"{self.BASE_URL}/{exchange}/daily"
         params: dict[str, Any] = {"ticker": ticker, "order": order}
@@ -198,7 +198,7 @@ class TsanghiClient:
 
         Returns:
             List of dicts for all stocks on that date.
-            Volume is in 手 (lots); caller should ×100 for 股 (shares).
+            Volume is in 股 (shares). No conversion needed.
         """
         url = f"{self.BASE_URL}/{exchange}/daily/latest"
         params: dict[str, Any] = {}
