@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -146,8 +147,9 @@ class BoardRelevanceFilter:
         all_results: list[RelevanceResult] = []
         cache_updated = False
 
+        # Separate cached vs uncached per board
+        uncached_tasks: list[tuple[str, list]] = []
         for board_name, board_stocks in board_groups.items():
-            # Separate cached vs uncached
             uncached = []
             for s in board_stocks:
                 key = self._cache_key(board_name, s.stock_code)
@@ -164,16 +166,26 @@ class BoardRelevanceFilter:
                 else:
                     uncached.append(s)
 
-            if not uncached:
-                continue
+            if uncached:
+                uncached_tasks.append((board_name, uncached))
 
-            # Call LLM for uncached stocks
-            llm_results = await self._call_llm(board_name, uncached)
-            for r in llm_results:
-                all_results.append(r)
-                key = self._cache_key(r.board_name, r.stock_code)
-                self._cache[key] = {"level": r.level, "reason": r.reason}
-                cache_updated = True
+        # Call LLM for all uncached boards concurrently (max 5 parallel)
+        if uncached_tasks:
+            sem = asyncio.Semaphore(5)
+
+            async def _call_with_limit(bn: str, stks: list) -> list[RelevanceResult]:
+                async with sem:
+                    return await self._call_llm(bn, stks)
+
+            batch_results = await asyncio.gather(
+                *[_call_with_limit(bn, stks) for bn, stks in uncached_tasks]
+            )
+            for llm_results in batch_results:
+                for r in llm_results:
+                    all_results.append(r)
+                    key = self._cache_key(r.board_name, r.stock_code)
+                    self._cache[key] = {"level": r.level, "reason": r.reason}
+                    cache_updated = True
 
         if cache_updated:
             self._save_cache()
@@ -217,6 +229,9 @@ class BoardRelevanceFilter:
 
         logger.info(f"Step 5.7: Calling LLM for board '{board_name}' ({len(stocks)} stocks)")
 
+        # ~30 tokens per stock line (code | level | reason)
+        dynamic_max_tokens = max(self._config.max_tokens, len(stocks) * 35)
+
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout) as client:
                 resp = await client.post(
@@ -231,7 +246,7 @@ class BoardRelevanceFilter:
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user", "content": user_prompt},
                         ],
-                        "max_tokens": self._config.max_tokens,
+                        "max_tokens": dynamic_max_tokens,
                         "temperature": self._config.temperature,
                     },
                 )
