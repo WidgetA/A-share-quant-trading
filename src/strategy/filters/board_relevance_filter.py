@@ -1,8 +1,8 @@
 # === MODULE PURPOSE ===
 # LLM-based board relevance filter (Step 5.7).
 # Judges whether each candidate stock's main business is truly related
-# to its assigned concept board.  Filters out "低" (low) relevance stocks
-# that are peripheral / irrelevant to the board theme.
+# to its assigned concept board.  Only keeps "高" (high) relevance stocks;
+# filters out "中" (medium) and "低" (low) to avoid 蹭概念 stocks.
 
 # === DEPENDENCIES ===
 # - Aliyun DashScope API (OpenAI-compatible, qwen-plus model)
@@ -18,7 +18,7 @@
 # 当前仅靠 LLM 自身知识判断主营业务，未提供外部数据。
 # 已知风险：
 #   1. LLM 训练数据有截止日期，公司转型后判断可能过时
-#   2. 冷门小票 LLM 可能不认识（当前默认保留"中"，不会误杀但可能漏过）
+#   2. 冷门小票 LLM 可能不认识（当前默认保留"中"→被过滤，宁可漏选不蹭概念）
 # 后续优化：接入公司经营范围数据（如沧海数据 company/info 接口的
 #   business_scope 字段），在 prompt 中提供实际主营业务描述，
 #   而非依赖 LLM 内部知识。
@@ -147,7 +147,7 @@ class BoardRelevanceFilter:
 
         Returns:
             Tuple of (kept_stocks, all_relevance_results).
-            Stocks with level="低" are removed.
+            Only stocks with level="高" are kept; "中" and "低" are removed.
 
         Raises:
             RuntimeError: If LLM API call fails (trading safety: halt).
@@ -210,12 +210,12 @@ class BoardRelevanceFilter:
         # A stock may appear with different boards and have different relevance levels.
         relevance_map = {(r.stock_code, r.board_name): r.level for r in all_results}
 
-        # Filter: keep 高 and 中, remove 低
+        # Filter: keep only 高, remove 中 and 低
         kept = []
         removed = []
         for s in stocks:
             level = relevance_map.get((s.stock_code, s.board_name), "中")  # default keep
-            if level == "低":
+            if level != "高":
                 removed.append(s)
             else:
                 kept.append(s)
@@ -224,7 +224,9 @@ class BoardRelevanceFilter:
             removed_info = ", ".join(
                 f"{s.stock_code}({s.stock_name})[{s.board_name}]" for s in removed
             )
-            logger.info(f"Step 5.7: Filtered {len(removed)} low-relevance stocks: {removed_info}")
+            logger.info(
+                f"Step 5.7: Filtered {len(removed)} non-high-relevance stocks: {removed_info}"
+            )
 
         logger.info(f"Step 5.7: {len(kept)}/{len(stocks)} stocks kept after board relevance filter")
         return kept, all_results

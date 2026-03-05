@@ -227,10 +227,13 @@ def is_junk_board(board_name: str) -> bool:
     """
     Check whether a board name should be filtered out.
 
-    Covers three categories:
+    Covers two categories:
     - JUNK_BOARDS: no actionable theme (index, fund holdings, etc.)
-    - BROAD_CONCEPT_BOARDS: real themes but too many constituents (≥400)
     - Seasonal patterns: time-variant report categories
+
+    Note: BROAD_CONCEPT_BOARDS is defined but NOT filtered here.
+    These are real themes with many constituents — kept for future
+    ratio-based filtering in Step 3.
 
     Args:
         board_name: Board/concept name to check.
@@ -238,7 +241,7 @@ def is_junk_board(board_name: str) -> bool:
     Returns:
         True if the board should be filtered out.
     """
-    if board_name in JUNK_BOARDS or board_name in BROAD_CONCEPT_BOARDS:
+    if board_name in JUNK_BOARDS:
         return True
 
     for pattern in _SEASONAL_PATTERNS:
