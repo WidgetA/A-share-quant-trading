@@ -279,15 +279,12 @@ async def monitor(
 
         concept_mapper = LocalConceptMapper()
 
-        # Board relevance filter (optional, enabled if Aliyun key configured)
-        try:
-            from src.strategy.filters.board_relevance_filter import (
-                create_board_relevance_filter,
-            )
+        # Board relevance filter (required — trading safety: no silent degradation)
+        from src.strategy.filters.board_relevance_filter import (
+            create_board_relevance_filter,
+        )
 
-            relevance_filter = create_board_relevance_filter()
-        except Exception:
-            relevance_filter = None
+        relevance_filter = create_board_relevance_filter()
 
         scanner = MomentumSectorScanner(
             ifind_client=ifind_client,

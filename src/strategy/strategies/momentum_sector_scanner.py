@@ -204,6 +204,7 @@ class MomentumSectorScanner:
         momentum_quality_config: MomentumQualityConfig | None = None,
         reversal_factor_config: ReversalFactorConfig | None = None,
         negative_news_checker: NegativeNewsChecker | None = None,
+        # TODO: make required after full rollout
         board_relevance_filter: BoardRelevanceFilter | None = None,
     ):
         self._ifind = ifind_client

@@ -116,16 +116,12 @@ async def _notify_feishu_signal(signal: dict) -> None:
 
 
 def _get_board_relevance_filter():
-    """Create BoardRelevanceFilter if Aliyun API key is configured."""
-    try:
-        from src.strategy.filters.board_relevance_filter import (
-            create_board_relevance_filter,
-        )
+    """Create BoardRelevanceFilter. Raises on failure (trading safety)."""
+    from src.strategy.filters.board_relevance_filter import (
+        create_board_relevance_filter,
+    )
 
-        return create_board_relevance_filter()
-    except Exception as e:
-        logger.info(f"Board relevance filter disabled: {e}")
-        return None
+    return create_board_relevance_filter()
 
 
 # --- Router factory ---

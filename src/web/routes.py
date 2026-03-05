@@ -1204,20 +1204,12 @@ def create_momentum_router() -> APIRouter:
         return NegativeNewsChecker(tavily, sf)
 
     def _create_board_relevance_filter():
-        """Create BoardRelevanceFilter if Aliyun API key is configured.
+        """Create BoardRelevanceFilter. Raises on failure (trading safety)."""
+        from src.strategy.filters.board_relevance_filter import (
+            create_board_relevance_filter,
+        )
 
-        Returns None silently if key is missing (filter is optional,
-        defaults to enabled when key is available).
-        """
-        try:
-            from src.strategy.filters.board_relevance_filter import (
-                create_board_relevance_filter,
-            )
-
-            return create_board_relevance_filter()
-        except (RuntimeError, Exception) as e:
-            logger.info(f"Board relevance filter disabled: {e}")
-            return None
+        return create_board_relevance_filter()
 
     async def _stop_news_checker(checker) -> None:
         """Stop the Tavily and SiliconFlow clients inside a NegativeNewsChecker."""
@@ -3798,20 +3790,12 @@ def _get_llm_api_key() -> str:
 
 
 def _create_board_relevance_filter_global():
-    """Module-level factory for BoardRelevanceFilter.
+    """Module-level factory for BoardRelevanceFilter. Raises on failure."""
+    from src.strategy.filters.board_relevance_filter import (
+        create_board_relevance_filter,
+    )
 
-    Returns None silently if Aliyun key is missing (filter is optional).
-    Used by top-level functions outside create_momentum_router() scope.
-    """
-    try:
-        from src.strategy.filters.board_relevance_filter import (
-            create_board_relevance_filter,
-        )
-
-        return create_board_relevance_filter()
-    except Exception as e:
-        logger.info(f"Board relevance filter disabled: {e}")
-        return None
+    return create_board_relevance_filter()
 
 
 async def _call_llm_stock_analysis(
