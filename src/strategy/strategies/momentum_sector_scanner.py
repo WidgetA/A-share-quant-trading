@@ -21,7 +21,7 @@
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
 # Step 5.7: board relevance filter (LLM judges stock-board business relevance)
 # Step 6: recommend — across ALL candidates, filter limit-up,
-#          score by 2*min(Z(gfo), Z(amp)) - cup_penalty - trend_penalty
+#          score by Z(amp) - cup_penalty - trend_penalty
 #          (higher momentum + higher volume = board leader),
 #          board leader bonus +0.5, negative news fallback
 # Step 7: → ScanResult → Feishu notification
@@ -608,15 +608,12 @@ class MomentumSectorScanner:
         """
         Step 6: Rank candidates by composite score and pick #1.
 
-        Composite score = 2 * min(Z(gfo), Z(amp))
-                          - cup_penalty - trend_penalty + leader_bonus.
-        Uses min (barrel principle) so BOTH momentum and volume must be
-        high to score well — "量价齐飞".
-        - gain_from_open: intraday momentum (9:40 price vs open)
+        Composite score = Z(amp) - cup_penalty - trend_penalty.
+        Rank purely by early volume amplification — gfo is used only as
+        a filter (Step 1 threshold), not for ranking.
         - early_turnover_amp: early_volume / avg_daily_volume (9:40 data)
         - cup_penalty: consecutive up days × 0.3 (trend fatigue)
         - trend_penalty: max(0, 5d_trend_pct) × 0.05 (penalize recent rally)
-        - leader_bonus: +0.5 for highest-gfo stock within each board
 
         Filters:
             - Limit-up at 9:40 → unbuyable, skip
@@ -629,7 +626,7 @@ class MomentumSectorScanner:
 
         logger.info(
             f"Step 6: Scoring {len(selected_stocks)} candidates "
-            f"by 2*min(Z(gfo), Z(amp)) - cup_penalty - trend_penalty + leader_bonus"
+            f"by Z(amp) - cup_penalty - trend_penalty"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -685,33 +682,19 @@ class MomentumSectorScanner:
             cup_values.append(_cup_data.get(s.stock_code) or 0)
             trend_values.append(max(0.0, _trend_data.get(s.stock_code) or 0.0))
 
-        gfo_z = self._z_scores(gfo_values)
         amp_z = self._z_scores(amp_values)
 
         # Soft penalty for consecutive up days: each day deducts 0.3 std
         CUP_PENALTY_PER_DAY = 0.3
         # Soft penalty for recent rally: each 1% of 5d gain deducts 0.05 std
         TREND_PENALTY_FACTOR = 0.05
-        # Board leader bonus: highest-gfo stock per board gets +0.5
-        LEADER_BONUS = 0.5
 
-        # Identify board leaders: highest gain_from_open per board
-        board_leader_codes: set[str] = set()
-        board_gfo_map: dict[str, list[tuple[str, float]]] = defaultdict(list)
-        for i, s in enumerate(candidates_pool):
-            board_gfo_map[s.board_name].append((s.stock_code, gfo_values[i]))
-        for board_name, stock_gfo_list in board_gfo_map.items():
-            if len(stock_gfo_list) >= 2:
-                leader_code = max(stock_gfo_list, key=lambda x: x[1])[0]
-                board_leader_codes.add(leader_code)
-
-        # Build scored candidates
+        # Build scored candidates — rank by Z(amp) only
         scored: list[tuple[SelectedStock, float, float, float, int, float]] = []
         for i, s in enumerate(candidates_pool):
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
             trend_penalty = trend_values[i] * TREND_PENALTY_FACTOR
-            leader_bonus = LEADER_BONUS if s.stock_code in board_leader_codes else 0.0
-            composite = 2 * min(gfo_z[i], amp_z[i]) - cup_penalty - trend_penalty + leader_bonus
+            composite = amp_z[i] - cup_penalty - trend_penalty
             scored.append(
                 (s, composite, gfo_values[i], amp_values[i], cup_values[i], trend_values[i])
             )
