@@ -3137,9 +3137,7 @@ def create_momentum_router() -> APIRouter:
                                 if a.consecutive_up_days is not None
                             }
                             trend_data_l2 = {
-                                a.stock_code: a.trend_pct
-                                for a in qa2
-                                if a.trend_pct is not None
+                                a.stock_code: a.trend_pct for a in qa2 if a.trend_pct is not None
                             }
                             avg_vol_data_l2 = {
                                 a.stock_code: a.avg_daily_volume

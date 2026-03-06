@@ -292,9 +292,7 @@ class MomentumSectorScanner:
             if a.consecutive_up_days is not None
         }
         trend_pct_data = {
-            a.stock_code: a.trend_pct
-            for a in quality_assessments
-            if a.trend_pct is not None
+            a.stock_code: a.trend_pct for a in quality_assessments if a.trend_pct is not None
         }
         avg_daily_volume_data = {
             a.stock_code: a.avg_daily_volume
@@ -707,7 +705,7 @@ class MomentumSectorScanner:
                 board_leader_codes.add(leader_code)
 
         # Build scored candidates
-        scored: list[tuple[SelectedStock, float, float, float, float, int, float]] = []
+        scored: list[tuple[SelectedStock, float, float, float, int, float]] = []
         for i, s in enumerate(candidates_pool):
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
             trend_penalty = trend_values[i] * TREND_PENALTY_FACTOR
