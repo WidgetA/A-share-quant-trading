@@ -21,7 +21,7 @@
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
 # Step 5.7: board relevance filter (LLM judges stock-board business relevance)
 # Step 6: recommend — across ALL candidates, filter limit-up,
-#          score by +Z(gain_from_open) + Z(turnover_amp) - cup_penalty - trend_penalty
+#          score by 2*min(Z(gfo), Z(amp)) - cup_penalty - trend_penalty
 #          (higher momentum + higher volume = board leader),
 #          board leader bonus +0.5, negative news fallback
 # Step 7: → ScanResult → Feishu notification
@@ -608,9 +608,10 @@ class MomentumSectorScanner:
         """
         Step 6: Rank candidates by composite score and pick #1.
 
-        Composite score = +Z(gain_from_open_pct) + Z(early_turnover_amp)
+        Composite score = 2 * min(Z(gfo), Z(amp))
                           - cup_penalty - trend_penalty + leader_bonus.
-        Higher momentum and higher volume rank higher (select board leaders).
+        Uses min (barrel principle) so BOTH momentum and volume must be
+        high to score well — "量价齐飞".
         - gain_from_open: intraday momentum (9:40 price vs open)
         - early_turnover_amp: early_volume / avg_daily_volume (9:40 data)
         - cup_penalty: consecutive up days × 0.3 (trend fatigue)
@@ -628,7 +629,7 @@ class MomentumSectorScanner:
 
         logger.info(
             f"Step 6: Scoring {len(selected_stocks)} candidates "
-            f"by +Z(gfo) + Z(amp) - cup_penalty - trend_penalty + leader_bonus"
+            f"by 2*min(Z(gfo), Z(amp)) - cup_penalty - trend_penalty + leader_bonus"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -710,7 +711,7 @@ class MomentumSectorScanner:
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
             trend_penalty = trend_values[i] * TREND_PENALTY_FACTOR
             leader_bonus = LEADER_BONUS if s.stock_code in board_leader_codes else 0.0
-            composite = gfo_z[i] + amp_z[i] - cup_penalty - trend_penalty + leader_bonus
+            composite = 2 * min(gfo_z[i], amp_z[i]) - cup_penalty - trend_penalty + leader_bonus
             scored.append(
                 (s, composite, gfo_values[i], amp_values[i], cup_values[i], trend_values[i])
             )
