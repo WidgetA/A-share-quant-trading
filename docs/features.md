@@ -638,10 +638,11 @@ strategy:
 9. **Step 5.7 — Board Relevance Filter (LLM)**: Use Aliyun DashScope (qwen-plus) to judge whether each stock's main business is truly related to its assigned board. Filter out "低" (low) relevance stocks. Results permanently cached in `data/board_relevance_cache.json`. **TODO**: 当前仅靠 LLM 知识判断，未提供经营范围数据；后续需接入公司经营范围数据源以提高准确度。
 10. **Step 6 — Recommend (推股)**: Across all candidates:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
-   - Composite score = +Z(gain_from_open) + Z(turnover_amp) - cup_penalty + leader_bonus
+   - Composite score = +Z(gain_from_open) + Z(turnover_amp) - cup_penalty - trend_penalty + leader_bonus
    - 涨幅靠前 + 量能充足 = 板块龙头优先（翻转自旧公式，旧公式选最弱票导致连续亏损）
    - Board leader bonus: 每个板块内 gain_from_open 最高的票加 +0.5
-   - Cup penalty: 连涨天数 × 0.3（软惩罚）
+   - Cup penalty: 连涨天数 × 0.3（软惩罚，趋势疲劳）
+   - Trend penalty: max(0, 5日累计涨幅%) × 0.05（软惩罚，高位追涨风险）
    - Pick the highest-scored stock. Highlighted in UI + Feishu notification
 10. **Notification**: Send selection + recommendation via Feishu
 

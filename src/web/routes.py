@@ -2418,7 +2418,12 @@ def create_momentum_router() -> APIRouter:
                             l2 = list(l1)
                             qa = []
 
-                        # Build trend_data and avg_daily_volume from quality assessments
+                        # Build cup, trend, avg_vol from quality assessments
+                        cup_data_l = {
+                            a.stock_code: a.consecutive_up_days
+                            for a in qa
+                            if a.consecutive_up_days is not None
+                        }
                         trend_data_l = {
                             a.stock_code: a.trend_pct for a in qa if a.trend_pct is not None
                         }
@@ -2481,7 +2486,9 @@ def create_momentum_router() -> APIRouter:
                         # L4: recommendation
                         l4 = []
                         if l3:
-                            rec = await scanner._step6_recommend(l3, price_snapshots, trend_data_l)
+                            rec, _scored = await scanner._step6_recommend(
+                                l3, price_snapshots, cup_data_l, trend_data_l, avg_vol_data_l
+                            )
                             if rec:
                                 l4 = [
                                     SelectedStock(
@@ -3112,6 +3119,11 @@ def create_momentum_router() -> APIRouter:
                                 for code, v in qa2_data.items()
                                 if v.get("consecutive_up_days") is not None
                             }
+                            trend_data_l2: dict[str, float] = {
+                                code: v["trend_pct"]
+                                for code, v in qa2_data.items()
+                                if v.get("trend_pct") is not None
+                            }
                             avg_vol_data_l2: dict[str, float] = {
                                 code: v["avg_daily_volume"]
                                 for code, v in qa2_data.items()
@@ -3123,6 +3135,11 @@ def create_momentum_router() -> APIRouter:
                                 a.stock_code: a.consecutive_up_days
                                 for a in qa2
                                 if a.consecutive_up_days is not None
+                            }
+                            trend_data_l2 = {
+                                a.stock_code: a.trend_pct
+                                for a in qa2
+                                if a.trend_pct is not None
                             }
                             avg_vol_data_l2 = {
                                 a.stock_code: a.avg_daily_volume
@@ -3201,7 +3218,7 @@ def create_momentum_router() -> APIRouter:
                         rec = None
                         if l3:
                             rec, _scored = await scanner._step6_recommend(
-                                l3, price_snapshots, cup_data_l2, avg_vol_data_l2
+                                l3, price_snapshots, cup_data_l2, trend_data_l2, avg_vol_data_l2
                             )
                             if rec:
                                 l4 = [

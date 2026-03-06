@@ -21,7 +21,7 @@
 # Step 5.6: reversal factor filter (early fade from 9:40 high → 冲高回落 risk)
 # Step 5.7: board relevance filter (LLM judges stock-board business relevance)
 # Step 6: recommend — across ALL candidates, filter limit-up,
-#          score by +Z(gain_from_open) + Z(turnover_amp) - cup_penalty
+#          score by +Z(gain_from_open) + Z(turnover_amp) - cup_penalty - trend_penalty
 #          (higher momentum + higher volume = board leader),
 #          board leader bonus +0.5, negative news fallback
 # Step 7: → ScanResult → Feishu notification
@@ -146,6 +146,7 @@ class ScoredCandidate:
     gain_from_open_pct: float
     turnover_amp: float
     consecutive_up_days: int
+    trend_pct: float
     latest_price: float
 
 
@@ -283,12 +284,17 @@ class MomentumSectorScanner:
             )
             result.selected_stocks = selected
 
-        # Extract avg_daily_volume and consecutive_up from quality assessments
+        # Extract consecutive_up, trend_pct, avg_daily_volume from quality assessments
         # (needed by both Step 5.6 reversal filter and Step 6 scoring)
         consecutive_up_data = {
             a.stock_code: a.consecutive_up_days
             for a in quality_assessments
             if a.consecutive_up_days is not None
+        }
+        trend_pct_data = {
+            a.stock_code: a.trend_pct
+            for a in quality_assessments
+            if a.trend_pct is not None
         }
         avg_daily_volume_data = {
             a.stock_code: a.avg_daily_volume
@@ -341,7 +347,7 @@ class MomentumSectorScanner:
 
         if selected:
             result.recommended_stock, result.scored_candidates = await self._step6_recommend(
-                selected, all_snapshots, consecutive_up_data, avg_daily_volume_data
+                selected, all_snapshots, consecutive_up_data, trend_pct_data, avg_daily_volume_data
             )
             if result.recommended_stock:
                 rec = result.recommended_stock
@@ -598,17 +604,19 @@ class MomentumSectorScanner:
         selected_stocks: list[SelectedStock],
         price_snapshots: dict[str, PriceSnapshot] | None = None,
         consecutive_up_data: dict[str, int] | None = None,
+        trend_pct_data: dict[str, float] | None = None,
         avg_daily_volume_data: dict[str, float] | None = None,
     ) -> tuple[RecommendedStock | None, list[ScoredCandidate]]:
         """
         Step 6: Rank candidates by composite score and pick #1.
 
         Composite score = +Z(gain_from_open_pct) + Z(early_turnover_amp)
-                          - cup_penalty + leader_bonus.
+                          - cup_penalty - trend_penalty + leader_bonus.
         Higher momentum and higher volume rank higher (select board leaders).
         - gain_from_open: intraday momentum (9:40 price vs open)
         - early_turnover_amp: early_volume / avg_daily_volume (9:40 data)
-        - cup_penalty: consecutive up days × 0.3 (soft penalty)
+        - cup_penalty: consecutive up days × 0.3 (trend fatigue)
+        - trend_penalty: max(0, 5d_trend_pct) × 0.05 (penalize recent rally)
         - leader_bonus: +0.5 for highest-gfo stock within each board
 
         Filters:
@@ -622,7 +630,7 @@ class MomentumSectorScanner:
 
         logger.info(
             f"Step 6: Scoring {len(selected_stocks)} candidates "
-            f"by +Z(gfo) + Z(amp) - cup_penalty + leader_bonus"
+            f"by +Z(gfo) + Z(amp) - cup_penalty - trend_penalty + leader_bonus"
         )
 
         # --- Filter out stocks at limit-up at 9:40 ---
@@ -651,6 +659,7 @@ class MomentumSectorScanner:
         # Positive Z-scores so candidates with more gain-from-open and more
         # volume amplification rank higher (select board leaders).
         _cup_data = consecutive_up_data or {}
+        _trend_data = trend_pct_data or {}
         _avg_vol_data = avg_daily_volume_data or {}
         _snapshots = price_snapshots or {}
 
@@ -660,6 +669,7 @@ class MomentumSectorScanner:
         gfo_values: list[float] = []
         amp_values: list[float] = []
         cup_values: list[int] = []
+        trend_values: list[float] = []
         for s in candidates_pool:
             snap = _snapshots.get(s.stock_code)
             gfo = snap.gain_from_open_pct if snap else 0.0
@@ -674,12 +684,15 @@ class MomentumSectorScanner:
             gfo_values.append(gfo)
             amp_values.append(early_amp)
             cup_values.append(_cup_data.get(s.stock_code) or 0)
+            trend_values.append(max(0.0, _trend_data.get(s.stock_code) or 0.0))
 
         gfo_z = self._z_scores(gfo_values)
         amp_z = self._z_scores(amp_values)
 
         # Soft penalty for consecutive up days: each day deducts 0.3 std
         CUP_PENALTY_PER_DAY = 0.3
+        # Soft penalty for recent rally: each 1% of 5d gain deducts 0.05 std
+        TREND_PENALTY_FACTOR = 0.05
         # Board leader bonus: highest-gfo stock per board gets +0.5
         LEADER_BONUS = 0.5
 
@@ -694,12 +707,15 @@ class MomentumSectorScanner:
                 board_leader_codes.add(leader_code)
 
         # Build scored candidates
-        scored: list[tuple[SelectedStock, float, float, float, float, int]] = []
+        scored: list[tuple[SelectedStock, float, float, float, float, int, float]] = []
         for i, s in enumerate(candidates_pool):
             cup_penalty = cup_values[i] * CUP_PENALTY_PER_DAY
+            trend_penalty = trend_values[i] * TREND_PENALTY_FACTOR
             leader_bonus = LEADER_BONUS if s.stock_code in board_leader_codes else 0.0
-            composite = gfo_z[i] + amp_z[i] - cup_penalty + leader_bonus
-            scored.append((s, composite, gfo_values[i], amp_values[i], gfo_z[i], cup_values[i]))
+            composite = gfo_z[i] + amp_z[i] - cup_penalty - trend_penalty + leader_bonus
+            scored.append(
+                (s, composite, gfo_values[i], amp_values[i], cup_values[i], trend_values[i])
+            )
 
         # Sort by composite score descending
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -714,25 +730,27 @@ class MomentumSectorScanner:
                 gain_from_open_pct=gfo,
                 turnover_amp=amp,
                 consecutive_up_days=cup,
+                trend_pct=trend,
                 latest_price=(
                     _snapshots[s.stock_code].latest_price if s.stock_code in _snapshots else 0.0
                 ),
             )
-            for s, sc, gfo, amp, _, cup in scored
+            for s, sc, gfo, amp, cup, trend in scored
         ]
 
         # Log top 3
         if len(scored) > 1:
             top3_info = ", ".join(
-                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d score={sc:+.2f})"
-                for s, sc, gfo, amp, _, cup in scored[:3]
+                f"{s.stock_code}(GFO={gfo:+.2f}% amp={amp:.1f}x"
+                f" cup={cup}d trend={trend:+.1f}% score={sc:+.2f})"
+                for s, sc, gfo, amp, cup, trend in scored[:3]
             )
             logger.info(f"Step 6: Top 3: {top3_info}")
         else:
-            s, sc, gfo, amp, _, cup = scored[0]
+            s, sc, gfo, amp, cup, trend = scored[0]
             logger.info(
                 f"Step 6: Single candidate {s.stock_code} "
-                f"(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d score={sc:+.2f})"
+                f"(GFO={gfo:+.2f}% amp={amp:.1f}x cup={cup}d trend={trend:+.1f}% score={sc:+.2f})"
             )
 
         # Build ranked list (SelectedStock only) for news check fallback
