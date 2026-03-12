@@ -5853,7 +5853,7 @@ def create_trade_backtest_router() -> APIRouter:
     import io
     import statistics
 
-    from fastapi import UploadFile
+    from fastapi import File, UploadFile
 
     router = APIRouter(tags=["trade-backtest"])
 
@@ -5863,7 +5863,7 @@ def create_trade_backtest_router() -> APIRouter:
         return templates.TemplateResponse("trade_backtest.html", {"request": request})
 
     @router.post("/api/trade-backtest/analyze")
-    async def analyze_trades(csv_file: UploadFile):
+    async def analyze_trades(request: Request, csv_file: UploadFile = File(...)):
         content = await csv_file.read()
 
         # Try common encodings for Chinese Excel exports
@@ -5881,33 +5881,125 @@ def create_trade_backtest_router() -> APIRouter:
         if not reader.fieldnames:
             raise HTTPException(400, "CSV 文件为空或格式错误")
 
-        required = {"股票代码", "股票名称", "买入时间", "买入价", "卖出时间", "卖出价", "收益率(%)"}
-        missing = required - set(reader.fieldnames)
+        cols = set(reader.fieldnames)
+        required = {"股票代码", "买入时间", "卖出时间"}
+        missing = required - cols
         if missing:
             raise HTTPException(400, f"CSV 缺少必要列: {', '.join(missing)}")
 
-        # Parse trades — extract typed lists for mypy-safe computation
+        has_prices = "买入价" in cols and "卖出价" in cols
+        has_return = "收益率(%)" in cols
+
+        # Parse rows
+        rows_raw: list[dict[str, str]] = []
+        for i, row in enumerate(reader, 1):
+            code = row["股票代码"].strip()
+            if not code:
+                continue
+            rows_raw.append(row)
+
+        if not rows_raw:
+            raise HTTPException(400, "CSV 中没有交易记录")
+
+        # If prices not in CSV, fetch via iFinD
+        if not has_prices or not has_return:
+            ifind_client = getattr(request.app.state, "ifind_client", None)
+            if ifind_client is None:
+                raise HTTPException(
+                    400,
+                    "CSV 中缺少买入价/卖出价/收益率列，且 iFinD 客户端不可用，无法自动查询价格",
+                )
+            # Collect unique (code, date) pairs for batch fetch
+            price_queries: dict[str, set[str]] = defaultdict(set)
+            for row in rows_raw:
+                code = row["股票代码"].strip()
+                # Normalize code to iFinD format (e.g. 600519 → 600519.SH)
+                if "." not in code:
+                    suffix = "SH" if code.startswith(("6", "5")) else "SZ"
+                    ifind_code = f"{code}.{suffix}"
+                else:
+                    ifind_code = code
+                buy_date = row["买入时间"].strip()[:10]
+                sell_date = row["卖出时间"].strip()[:10]
+                price_queries[ifind_code].add(buy_date)
+                price_queries[ifind_code].add(sell_date)
+
+            # Batch fetch: group by stock, get open+close for date range
+            price_cache: dict[str, dict[str, dict[str, float]]] = {}
+            for ifind_code, dates in price_queries.items():
+                sorted_dates = sorted(dates)
+                try:
+                    result = await ifind_client.history_quotes(
+                        codes=ifind_code,
+                        indicators="open,close",
+                        start_date=sorted_dates[0],
+                        end_date=sorted_dates[-1],
+                    )
+                    tables = result.get("tables", [])
+                    if tables and tables[0].get("table"):
+                        tbl = tables[0]["table"]
+                        time_list = tbl.get("time", [])
+                        open_list = tbl.get("open", [])
+                        close_list = tbl.get("close", [])
+                        code_prices: dict[str, dict[str, float]] = {}
+                        for j, dt in enumerate(time_list):
+                            d = dt[:10]
+                            code_prices[d] = {
+                                "open": float(open_list[j]),
+                                "close": float(close_list[j]),
+                            }
+                        price_cache[ifind_code] = code_prices
+                except Exception as exc:
+                    logger.warning(f"Failed to fetch prices for {ifind_code}: {exc}")
+
+        # Build typed trade list
         trades: list[dict[str, Any]] = []
         returns: list[float] = []
         buy_times: list[str] = []
         sell_times: list[str] = []
         hold_days_list: list[float] = []
-        for i, row in enumerate(reader, 1):
+        for i, row in enumerate(rows_raw, 1):
             try:
-                ret = float(row["收益率(%)"])
+                code = row["股票代码"].strip()
                 buy_time = row["买入时间"].strip()
                 sell_time = row["卖出时间"].strip()
+                buy_date = buy_time[:10]
+                sell_date = sell_time[:10]
+
+                if has_prices and has_return:
+                    buy_price = float(row["买入价"])
+                    sell_price = float(row["卖出价"])
+                    ret = float(row["收益率(%)"])
+                else:
+                    # Look up from iFinD cache
+                    if "." not in code:
+                        suffix = "SH" if code.startswith(("6", "5")) else "SZ"
+                        ifind_code = f"{code}.{suffix}"
+                    else:
+                        ifind_code = code
+                    cp = price_cache.get(ifind_code, {})
+                    buy_day = cp.get(buy_date)
+                    sell_day = cp.get(sell_date)
+                    if not buy_day or not sell_day:
+                        raise HTTPException(
+                            400,
+                            f"第 {i} 行: 无法获取 {code} 在 {buy_date}/{sell_date} 的价格数据",
+                        )
+                    buy_price = buy_day["open"]
+                    sell_price = sell_day["close"]
+                    ret = round((sell_price - buy_price) / buy_price * 100, 2)
+
                 hd = int(row["持有天数"]) if row.get("持有天数") else None
                 trades.append(
                     {
                         "idx": i,
-                        "stock_code": row["股票代码"].strip(),
-                        "stock_name": row["股票名称"].strip(),
+                        "stock_code": code,
+                        "stock_name": row.get("股票名称", "").strip(),
                         "board": row.get("所属板块", "").strip(),
                         "buy_time": buy_time,
-                        "buy_price": float(row["买入价"]),
+                        "buy_price": buy_price,
                         "sell_time": sell_time,
-                        "sell_price": float(row["卖出价"]),
+                        "sell_price": sell_price,
                         "hold_days": hd,
                         "return_pct": ret,
                         "sell_reason": row.get("卖出原因", "").strip(),
@@ -5919,6 +6011,8 @@ def create_trade_backtest_router() -> APIRouter:
                 sell_times.append(sell_time)
                 if hd is not None:
                     hold_days_list.append(float(hd))
+            except HTTPException:
+                raise
             except (ValueError, KeyError) as exc:
                 raise HTTPException(400, f"第 {i} 行数据格式错误: {exc}")
 

@@ -12,7 +12,8 @@
             <input type="file" id="csv-file" accept=".csv" style="display:none">
             <p id="drop-text">点击选择或拖拽 CSV 文件到此处</p>
             <p style="color:#999;font-size:0.85em;margin-top:0.5rem">
-                必需列: 股票代码, 股票名称, 买入时间, 买入价, 卖出时间, 卖出价, 收益率(%)
+                必需列: 股票代码, 买入时间, 卖出时间<br>
+                可选列: 买入价, 卖出价, 收益率(%), 股票名称, 所属板块, 持有天数, 卖出原因
             </p>
         </div>
         <button type="submit" class="btn btn-primary" id="analyze-btn" disabled>开始分析</button>
