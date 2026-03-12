@@ -5943,12 +5943,25 @@ def create_trade_backtest_router() -> APIRouter:
                 ),
             }
 
-        # Build typed trade list — prices from tsanghi cache
+        # Initial capital from query param
+        import math
+
+        initial_capital = 100000.0
+        cap_param = request.query_params.get("initial_capital")
+        if cap_param:
+            initial_capital = float(cap_param)
+
+        # Build typed trade list — capital-based position sizing with fees
+        capital = initial_capital
         trades: list[dict[str, Any]] = []
         returns: list[float] = []
         buy_times: list[str] = []
         sell_times: list[str] = []
         hold_days_list: list[float] = []
+        total_commission = 0.0
+        total_stamp_tax = 0.0
+        capital_history: list[float] = [capital]
+
         for i, row in enumerate(rows_raw, 1):
             try:
                 code = row["股票代码"].strip()
@@ -5971,7 +5984,83 @@ def create_trade_backtest_router() -> APIRouter:
                     )
                 buy_price = float(buy_day["open"])  # type: ignore[arg-type]
                 sell_price = float(sell_day["close"])  # type: ignore[arg-type]
-                ret = round((sell_price - buy_price) / buy_price * 100, 2)
+
+                # Position sizing: how many lots can we buy?
+                lots = math.floor(capital / (buy_price * 100))
+                if lots <= 0:
+                    # Not enough capital — skip but still record
+                    trades.append(
+                        {
+                            "idx": i,
+                            "stock_code": code,
+                            "stock_name": row.get("股票名称", "").strip(),
+                            "board": row.get("所属板块", "").strip(),
+                            "buy_time": buy_time,
+                            "buy_price": buy_price,
+                            "sell_time": sell_time,
+                            "sell_price": sell_price,
+                            "hold_days": None,
+                            "return_pct": 0.0,
+                            "sell_reason": "资金不足",
+                            "lots": 0,
+                        }
+                    )
+                    returns.append(0.0)
+                    buy_times.append(buy_time)
+                    sell_times.append(sell_time)
+                    capital_history.append(capital)
+                    continue
+
+                # Buy cost: commission 0.3% (min 5 yuan) + transfer 0.001%
+                buy_amount = lots * 100 * buy_price
+                buy_comm = max(buy_amount * 0.003, 5.0)
+                buy_transfer = buy_amount * 0.00001
+                total_buy_cost = buy_amount + buy_comm + buy_transfer
+
+                # Reduce lots if cost exceeds capital
+                while total_buy_cost > capital and lots > 0:
+                    lots -= 1
+                    buy_amount = lots * 100 * buy_price
+                    buy_comm = max(buy_amount * 0.003, 5.0)
+                    buy_transfer = buy_amount * 0.00001
+                    total_buy_cost = buy_amount + buy_comm + buy_transfer
+
+                if lots <= 0:
+                    trades.append(
+                        {
+                            "idx": i,
+                            "stock_code": code,
+                            "stock_name": row.get("股票名称", "").strip(),
+                            "board": row.get("所属板块", "").strip(),
+                            "buy_time": buy_time,
+                            "buy_price": buy_price,
+                            "sell_time": sell_time,
+                            "sell_price": sell_price,
+                            "hold_days": None,
+                            "return_pct": 0.0,
+                            "sell_reason": "资金不足（含手续费）",
+                            "lots": 0,
+                        }
+                    )
+                    returns.append(0.0)
+                    buy_times.append(buy_time)
+                    sell_times.append(sell_time)
+                    capital_history.append(capital)
+                    continue
+
+                # Sell proceeds: commission + transfer + stamp tax 0.05%
+                sell_amount = lots * 100 * sell_price
+                sell_comm = max(sell_amount * 0.003, 5.0)
+                sell_transfer = sell_amount * 0.00001
+                sell_stamp = sell_amount * 0.0005
+                net_sell = sell_amount - sell_comm - sell_transfer - sell_stamp
+
+                # Update capital
+                trade_profit = net_sell - total_buy_cost
+                ret = round(trade_profit / total_buy_cost * 100, 2)
+                capital = capital - total_buy_cost + net_sell
+                total_commission += buy_comm + sell_comm
+                total_stamp_tax += sell_stamp
 
                 hd = int(row["持有天数"]) if row.get("持有天数") else None
                 trades.append(
@@ -5987,12 +6076,13 @@ def create_trade_backtest_router() -> APIRouter:
                         "hold_days": hd,
                         "return_pct": ret,
                         "sell_reason": row.get("卖出原因", "").strip(),
-                        "score": float(row["评分"]) if row.get("评分") else None,
+                        "lots": lots,
                     }
                 )
                 returns.append(ret)
                 buy_times.append(buy_time)
                 sell_times.append(sell_time)
+                capital_history.append(capital)
                 if hd is not None:
                     hold_days_list.append(float(hd))
             except HTTPException:
@@ -6007,11 +6097,9 @@ def create_trade_backtest_router() -> APIRouter:
         wins = [r for r in returns if r > 0]
         losses = [r for r in returns if r < 0]
 
-        # Equity curve (compounded)
-        equity = [1.0]
-        for r in returns:
-            equity.append(equity[-1] * (1 + r / 100))
-        cumulative_return_pct = (equity[-1] - 1) * 100
+        # Equity curve from capital history (normalized to 1.0)
+        equity = [c / initial_capital for c in capital_history]
+        cumulative_return_pct = (capital - initial_capital) / initial_capital * 100
 
         # Max drawdown
         peak = equity[0]
@@ -6036,9 +6124,11 @@ def create_trade_backtest_router() -> APIRouter:
             else:
                 streak = 0
 
-        # Profit factor
-        sum_w = sum(wins) if wins else 0.0
-        sum_l = abs(sum(losses)) if losses else 0.0
+        # Profit factor (based on actual yuan amounts)
+        profit_amounts = [r for r in returns if r > 0]
+        loss_amounts = [abs(r) for r in returns if r < 0]
+        sum_w = sum(profit_amounts) if profit_amounts else 0.0
+        sum_l = sum(loss_amounts) if loss_amounts else 0.0
         profit_factor = round(sum_w / sum_l, 2) if sum_l > 0 else float("inf")
 
         # Holding days
@@ -6061,6 +6151,10 @@ def create_trade_backtest_router() -> APIRouter:
             "profit_factor": profit_factor,
             "avg_holding_days": avg_hold,
             "date_range": f"{buy_times[0][:10]} ~ {sell_times[-1][:10]}",
+            "initial_capital": initial_capital,
+            "final_capital": round(capital, 2),
+            "total_commission": round(total_commission, 2),
+            "total_stamp_tax": round(total_stamp_tax, 2),
         }
 
         # Monthly breakdown
@@ -6087,7 +6181,7 @@ def create_trade_backtest_router() -> APIRouter:
 
         # Equity curve data points
         equity_curve: list[dict[str, Any]] = [
-            {"trade_idx": 0, "date": buy_times[0][:10], "equity": 1.0}
+            {"trade_idx": 0, "date": buy_times[0][:10], "equity": round(equity[0], 4)}
         ]
         for idx in range(total):
             equity_curve.append(

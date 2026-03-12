@@ -16,7 +16,12 @@
                 可选列: 买入价, 卖出价, 收益率(%), 股票名称, 所属板块, 持有天数, 卖出原因
             </p>
         </div>
-        <button type="submit" class="btn btn-primary" id="analyze-btn" disabled>开始分析</button>
+        <div style="margin-top:0.75rem;display:flex;align-items:center;gap:0.75rem">
+            <label for="initial-capital" style="white-space:nowrap">初始资金:</label>
+            <input type="number" id="initial-capital" value="100000" min="10000" step="10000"
+                   style="width:120px;padding:0.3rem 0.5rem;border:1px solid #ccc;border-radius:4px"> 元
+            <button type="submit" class="btn btn-primary" id="analyze-btn" disabled>开始分析</button>
+        </div>
     </form>
 </div>
 
@@ -74,7 +79,7 @@
             <table class="stock-table" id="trades-table">
                 <thead><tr>
                     <th>#</th><th>代码</th><th>名称</th><th>板块</th>
-                    <th>买入时间</th><th>买入价</th><th>卖出时间</th><th>卖出价</th>
+                    <th>买入时间</th><th>买入价</th><th>手数</th><th>卖出时间</th><th>卖出价</th>
                     <th>持有</th><th>收益率</th><th>卖出原因</th>
                 </tr></thead>
                 <tbody></tbody>
@@ -129,9 +134,10 @@
         analyzeBtn.disabled = true;
 
         const fileText = await fileInput.files[0].text();
+        const initialCapital = parseFloat(document.getElementById('initial-capital').value) || 100000;
 
         try {
-            const resp = await fetch('/api/trade-backtest/analyze', {
+            const resp = await fetch('/api/trade-backtest/analyze?initial_capital=' + initialCapital, {
                 method: 'POST',
                 headers: {'Content-Type': 'text/plain; charset=utf-8'},
                 body: fileText,
@@ -189,9 +195,9 @@
                 if (ok) {
                     status.textContent = '下载完成，正在重新分析...';
                     box.style.display = 'none';
-                    // Re-submit analysis with same CSV
+                    const cap = parseFloat(document.getElementById('initial-capital').value) || 100000;
                     document.getElementById('loading').style.display = 'block';
-                    const resp2 = await fetch('/api/trade-backtest/analyze', {
+                    const resp2 = await fetch('/api/trade-backtest/analyze?initial_capital=' + cap, {
                         method: 'POST',
                         headers: {'Content-Type': 'text/plain; charset=utf-8'},
                         body: csvText,
@@ -265,10 +271,13 @@
     function renderSummary(s) {
         const retClass = s.cumulative_return_pct >= 0 ? 'range-profit-pos' : 'range-profit-neg';
         const grid = document.getElementById('summary-grid');
+        const fmtMoney = v => v.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
         grid.innerHTML = [
+            stat('初始资金', fmtMoney(s.initial_capital) + ' 元'),
+            stat('期末资金', fmtMoney(s.final_capital) + ' 元', pctClass(s.final_capital - s.initial_capital)),
+            stat('累计收益率', fmtPct(s.cumulative_return_pct), retClass),
             stat('总交易次数', `${s.total_trades} (${s.win_count}胜 ${s.lose_count}负)`),
             stat('胜率', s.win_rate.toFixed(1) + '%'),
-            stat('累计收益率', fmtPct(s.cumulative_return_pct), retClass),
             stat('平均收益率', fmtPct(s.avg_return_pct), pctClass(s.avg_return_pct)),
             stat('最大单笔盈利', fmtPct(s.max_single_win_pct), 'range-profit-pos'),
             stat('最大单笔亏损', fmtPct(s.max_single_loss_pct), 'range-profit-neg'),
@@ -276,6 +285,8 @@
             stat('最大连亏', s.max_consecutive_losses + ' 次'),
             stat('最大回撤', s.max_drawdown_pct.toFixed(2) + '%', 'range-profit-neg'),
             stat('盈亏比', s.profit_factor === Infinity ? '∞' : s.profit_factor.toFixed(2)),
+            stat('总手续费', fmtMoney(s.total_commission) + ' 元'),
+            stat('总印花税', fmtMoney(s.total_stamp_tax) + ' 元'),
             stat('平均持有天数', s.avg_holding_days != null ? s.avg_holding_days + ' 天' : '-'),
             stat('交易区间', s.date_range),
         ].join('');
@@ -365,6 +376,7 @@
                 <td>${t.board}</td>
                 <td>${t.buy_time}</td>
                 <td>${t.buy_price.toFixed(2)}</td>
+                <td>${t.lots}</td>
                 <td>${t.sell_time}</td>
                 <td>${t.sell_price.toFixed(2)}</td>
                 <td>${t.hold_days != null ? t.hold_days + '天' : '-'}</td>
