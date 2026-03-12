@@ -126,7 +126,11 @@
             const resp = await fetch('/api/trade-backtest/analyze', { method: 'POST', body: fd });
             const data = await resp.json();
             if (!resp.ok) {
-                showError(data.detail || '分析失败');
+                const detail = data.detail;
+                const msg = typeof detail === 'string' ? detail
+                    : Array.isArray(detail) ? detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+                    : JSON.stringify(detail);
+                showError(msg || '分析失败');
                 return;
             }
             renderResults(data);
