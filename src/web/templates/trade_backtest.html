@@ -120,11 +120,14 @@
         document.getElementById('loading').style.display = 'block';
         analyzeBtn.disabled = true;
 
-        const fd = new FormData();
-        fd.append('csv_file', fileInput.files[0]);
+        const fileText = await fileInput.files[0].text();
 
         try {
-            const resp = await fetch('/api/trade-backtest/analyze', { method: 'POST', body: fd });
+            const resp = await fetch('/api/trade-backtest/analyze', {
+                method: 'POST',
+                headers: {'Content-Type': 'text/plain; charset=utf-8'},
+                body: fileText,
+            });
             let data;
             const contentType = resp.headers.get('content-type') || '';
             if (contentType.includes('application/json')) {
