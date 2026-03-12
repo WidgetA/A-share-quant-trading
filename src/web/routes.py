@@ -5913,6 +5913,34 @@ def create_trade_backtest_router() -> APIRouter:
         if tsanghi_cache is None:
             raise HTTPException(503, "沧海缓存尚未加载完成，请稍后再试")
 
+        # Collect all dates from CSV and check cache coverage
+        all_dates: list[str] = []
+        for row in rows_raw:
+            all_dates.append(row["买入时间"].strip()[:10])
+            all_dates.append(row["卖出时间"].strip()[:10])
+        all_dates.sort()
+        csv_start = datetime.strptime(all_dates[0], "%Y-%m-%d").date()
+        csv_end = datetime.strptime(all_dates[-1], "%Y-%m-%d").date()
+
+        if not tsanghi_cache.covers_range(csv_start, csv_end):
+            cache_start = str(tsanghi_cache._start_date) if tsanghi_cache._start_date else "无"
+            cache_end = str(tsanghi_cache._end_date) if tsanghi_cache._end_date else "无"
+            gaps = tsanghi_cache.missing_ranges(csv_start, csv_end)
+            gap_strs = [f"{s}~{e}" for s, e in gaps] if gaps else [f"{csv_start}~{csv_end}"]
+            return {
+                "needs_cache_update": True,
+                "csv_start": str(csv_start),
+                "csv_end": str(csv_end),
+                "cache_start": cache_start,
+                "cache_end": cache_end,
+                "missing_ranges": gap_strs,
+                "message": (
+                    f"CSV 交易区间 {csv_start}~{csv_end}，"
+                    f"缓存覆盖 {cache_start}~{cache_end}，"
+                    f"需要增量下载: {', '.join(gap_strs)}"
+                ),
+            }
+
         # Build typed trade list — prices from tsanghi cache
         trades: list[dict[str, Any]] = []
         returns: list[float] = []
