@@ -125,7 +125,15 @@
 
         try {
             const resp = await fetch('/api/trade-backtest/analyze', { method: 'POST', body: fd });
-            const data = await resp.json();
+            let data;
+            const contentType = resp.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                data = await resp.json();
+            } else {
+                const txt = await resp.text();
+                showError(`服务器错误 (${resp.status}): ${txt.substring(0, 200)}`);
+                return;
+            }
             if (!resp.ok) {
                 const detail = data.detail;
                 const msg = typeof detail === 'string' ? detail
