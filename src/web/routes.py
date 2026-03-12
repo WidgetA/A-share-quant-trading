@@ -5919,8 +5919,10 @@ def create_trade_backtest_router() -> APIRouter:
             all_dates.append(row["买入时间"].strip()[:10])
             all_dates.append(row["卖出时间"].strip()[:10])
         all_dates.sort()
-        csv_start = datetime.strptime(all_dates[0], "%Y-%m-%d").date()
-        csv_end = datetime.strptime(all_dates[-1], "%Y-%m-%d").date()
+        from datetime import date
+
+        csv_start = date.fromisoformat(all_dates[0])
+        csv_end = date.fromisoformat(all_dates[-1])
 
         if not tsanghi_cache.covers_range(csv_start, csv_end):
             cache_start = str(tsanghi_cache._start_date) if tsanghi_cache._start_date else "无"
