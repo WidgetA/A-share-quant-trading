@@ -5862,8 +5862,70 @@ def create_trade_backtest_router() -> APIRouter:
         templates = request.app.state.templates
         return templates.TemplateResponse("trade_backtest.html", {"request": request})
 
+    def _fetch_prices_baostock(
+        rows: list[dict[str, str]],
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        """Fetch daily open/close via baostock for all (stock, date) pairs.
+
+        Returns: {bs_code: {date_str: {"open": float, "close": float}}}
+        """
+        import threading
+
+        import baostock as bs
+
+        # Collect unique (code, date_range) queries
+        code_dates: dict[str, set[str]] = defaultdict(set)
+        for row in rows:
+            code = row["股票代码"].strip()
+            # Convert to baostock format: 600519 → sh.600519
+            if "." not in code:
+                prefix = "sh" if code.startswith(("6", "5")) else "sz"
+                bs_code = f"{prefix}.{code}"
+            else:
+                bs_code = code
+            code_dates[bs_code].add(row["买入时间"].strip()[:10])
+            code_dates[bs_code].add(row["卖出时间"].strip()[:10])
+
+        result: dict[str, dict[str, dict[str, float]]] = {}
+        exc_holder: list[BaseException] = []
+
+        def _download() -> None:
+            lg = bs.login()
+            if lg.error_code != "0":
+                exc_holder.append(RuntimeError(f"baostock login failed: {lg.error_msg}"))
+                return
+            try:
+                for bs_code, dates in code_dates.items():
+                    sorted_d = sorted(dates)
+                    rs = bs.query_history_k_data_plus(
+                        bs_code,
+                        "date,open,close",
+                        start_date=sorted_d[0],
+                        end_date=sorted_d[-1],
+                        frequency="d",
+                        adjustflag="2",  # 前复权
+                    )
+                    prices: dict[str, dict[str, float]] = {}
+                    while rs.next():
+                        row_data = rs.get_row_data()
+                        if row_data[1] and row_data[2]:
+                            prices[row_data[0]] = {
+                                "open": float(row_data[1]),
+                                "close": float(row_data[2]),
+                            }
+                    result[bs_code] = prices
+            finally:
+                bs.logout()
+
+        t = threading.Thread(target=_download, daemon=True)
+        t.start()
+        t.join(timeout=120)
+        if exc_holder:
+            raise exc_holder[0]
+        return result
+
     @router.post("/api/trade-backtest/analyze")
-    async def analyze_trades(request: Request, csv_file: UploadFile = File(...)):
+    async def analyze_trades(csv_file: UploadFile = File(...)):
         content = await csv_file.read()
 
         # Try common encodings for Chinese Excel exports
@@ -5887,12 +5949,9 @@ def create_trade_backtest_router() -> APIRouter:
         if missing:
             raise HTTPException(400, f"CSV 缺少必要列: {', '.join(missing)}")
 
-        has_prices = "买入价" in cols and "卖出价" in cols
-        has_return = "收益率(%)" in cols
-
         # Parse rows
         rows_raw: list[dict[str, str]] = []
-        for i, row in enumerate(reader, 1):
+        for row in reader:
             code = row["股票代码"].strip()
             if not code:
                 continue
@@ -5901,56 +5960,13 @@ def create_trade_backtest_router() -> APIRouter:
         if not rows_raw:
             raise HTTPException(400, "CSV 中没有交易记录")
 
-        # If prices not in CSV, fetch via iFinD
-        if not has_prices or not has_return:
-            ifind_client = getattr(request.app.state, "ifind_client", None)
-            if ifind_client is None:
-                raise HTTPException(
-                    400,
-                    "CSV 中缺少买入价/卖出价/收益率列，且 iFinD 客户端不可用，无法自动查询价格",
-                )
-            # Collect unique (code, date) pairs for batch fetch
-            price_queries: dict[str, set[str]] = defaultdict(set)
-            for row in rows_raw:
-                code = row["股票代码"].strip()
-                # Normalize code to iFinD format (e.g. 600519 → 600519.SH)
-                if "." not in code:
-                    suffix = "SH" if code.startswith(("6", "5")) else "SZ"
-                    ifind_code = f"{code}.{suffix}"
-                else:
-                    ifind_code = code
-                buy_date = row["买入时间"].strip()[:10]
-                sell_date = row["卖出时间"].strip()[:10]
-                price_queries[ifind_code].add(buy_date)
-                price_queries[ifind_code].add(sell_date)
+        # Always fetch prices from baostock (ignore CSV prices)
+        import asyncio
 
-            # Batch fetch: group by stock, get open+close for date range
-            price_cache: dict[str, dict[str, dict[str, float]]] = {}
-            for ifind_code, dates in price_queries.items():
-                sorted_dates = sorted(dates)
-                try:
-                    result = await ifind_client.history_quotes(
-                        codes=ifind_code,
-                        indicators="open,close",
-                        start_date=sorted_dates[0],
-                        end_date=sorted_dates[-1],
-                    )
-                    tables = result.get("tables", [])
-                    if tables and tables[0].get("table"):
-                        tbl = tables[0]["table"]
-                        time_list = tbl.get("time", [])
-                        open_list = tbl.get("open", [])
-                        close_list = tbl.get("close", [])
-                        code_prices: dict[str, dict[str, float]] = {}
-                        for j, dt in enumerate(time_list):
-                            d = dt[:10]
-                            code_prices[d] = {
-                                "open": float(open_list[j]),
-                                "close": float(close_list[j]),
-                            }
-                        price_cache[ifind_code] = code_prices
-                except Exception as exc:
-                    logger.warning(f"Failed to fetch prices for {ifind_code}: {exc}")
+        try:
+            price_cache = await asyncio.to_thread(_fetch_prices_baostock, rows_raw)
+        except Exception as exc:
+            raise HTTPException(500, f"baostock 查询价格失败: {exc}")
 
         # Build typed trade list
         trades: list[dict[str, Any]] = []
@@ -5966,28 +5982,23 @@ def create_trade_backtest_router() -> APIRouter:
                 buy_date = buy_time[:10]
                 sell_date = sell_time[:10]
 
-                if has_prices and has_return:
-                    buy_price = float(row["买入价"])
-                    sell_price = float(row["卖出价"])
-                    ret = float(row["收益率(%)"])
+                # Look up from baostock cache
+                if "." not in code:
+                    prefix = "sh" if code.startswith(("6", "5")) else "sz"
+                    bs_code = f"{prefix}.{code}"
                 else:
-                    # Look up from iFinD cache
-                    if "." not in code:
-                        suffix = "SH" if code.startswith(("6", "5")) else "SZ"
-                        ifind_code = f"{code}.{suffix}"
-                    else:
-                        ifind_code = code
-                    cp = price_cache.get(ifind_code, {})
-                    buy_day = cp.get(buy_date)
-                    sell_day = cp.get(sell_date)
-                    if not buy_day or not sell_day:
-                        raise HTTPException(
-                            400,
-                            f"第 {i} 行: 无法获取 {code} 在 {buy_date}/{sell_date} 的价格数据",
-                        )
-                    buy_price = buy_day["open"]
-                    sell_price = sell_day["close"]
-                    ret = round((sell_price - buy_price) / buy_price * 100, 2)
+                    bs_code = code
+                cp = price_cache.get(bs_code, {})
+                buy_day = cp.get(buy_date)
+                sell_day = cp.get(sell_date)
+                if not buy_day or not sell_day:
+                    raise HTTPException(
+                        400,
+                        f"第 {i} 行: 无法获取 {code} 在 {buy_date}/{sell_date} 的价格数据",
+                    )
+                buy_price = buy_day["open"]
+                sell_price = sell_day["close"]
+                ret = round((sell_price - buy_price) / buy_price * 100, 2)
 
                 hd = int(row["持有天数"]) if row.get("持有天数") else None
                 trades.append(
