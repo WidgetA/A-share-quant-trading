@@ -5864,6 +5864,17 @@ def create_trade_backtest_router() -> APIRouter:
 
     @router.post("/api/trade-backtest/analyze")
     async def analyze_trades(request: Request, csv_file: UploadFile = File(...)):
+        import traceback as _tb
+
+        try:
+            return await _analyze_trades_impl(request, csv_file)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"trade-backtest analyze error: {exc}\n{_tb.format_exc()}")
+            raise HTTPException(500, f"分析失败: {exc}")
+
+    async def _analyze_trades_impl(request: Request, csv_file: UploadFile) -> dict[str, Any]:
         content = await csv_file.read()
 
         # Try common encodings for Chinese Excel exports
