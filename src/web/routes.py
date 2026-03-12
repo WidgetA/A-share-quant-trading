@@ -5886,32 +5886,45 @@ def create_trade_backtest_router() -> APIRouter:
         if missing:
             raise HTTPException(400, f"CSV 缺少必要列: {', '.join(missing)}")
 
-        # Parse trades
-        trades = []
+        # Parse trades — extract typed lists for mypy-safe computation
+        trades: list[dict[str, Any]] = []
+        returns: list[float] = []
+        buy_times: list[str] = []
+        sell_times: list[str] = []
+        hold_days_list: list[float] = []
         for i, row in enumerate(reader, 1):
             try:
-                t = {
-                    "idx": i,
-                    "stock_code": row["股票代码"].strip(),
-                    "stock_name": row["股票名称"].strip(),
-                    "board": row.get("所属板块", "").strip(),
-                    "buy_time": row["买入时间"].strip(),
-                    "buy_price": float(row["买入价"]),
-                    "sell_time": row["卖出时间"].strip(),
-                    "sell_price": float(row["卖出价"]),
-                    "hold_days": int(row["持有天数"]) if row.get("持有天数") else None,
-                    "return_pct": float(row["收益率(%)"]),
-                    "sell_reason": row.get("卖出原因", "").strip(),
-                    "score": float(row["评分"]) if row.get("评分") else None,
-                }
-                trades.append(t)
-            except (ValueError, KeyError) as e:
-                raise HTTPException(400, f"第 {i} 行数据格式错误: {e}")
+                ret = float(row["收益率(%)"])
+                buy_time = row["买入时间"].strip()
+                sell_time = row["卖出时间"].strip()
+                hd = int(row["持有天数"]) if row.get("持有天数") else None
+                trades.append(
+                    {
+                        "idx": i,
+                        "stock_code": row["股票代码"].strip(),
+                        "stock_name": row["股票名称"].strip(),
+                        "board": row.get("所属板块", "").strip(),
+                        "buy_time": buy_time,
+                        "buy_price": float(row["买入价"]),
+                        "sell_time": sell_time,
+                        "sell_price": float(row["卖出价"]),
+                        "hold_days": hd,
+                        "return_pct": ret,
+                        "sell_reason": row.get("卖出原因", "").strip(),
+                        "score": float(row["评分"]) if row.get("评分") else None,
+                    }
+                )
+                returns.append(ret)
+                buy_times.append(buy_time)
+                sell_times.append(sell_time)
+                if hd is not None:
+                    hold_days_list.append(float(hd))
+            except (ValueError, KeyError) as exc:
+                raise HTTPException(400, f"第 {i} 行数据格式错误: {exc}")
 
         if not trades:
             raise HTTPException(400, "CSV 中没有交易记录")
 
-        returns = [t["return_pct"] for t in trades]
         total = len(trades)
         wins = [r for r in returns if r > 0]
         losses = [r for r in returns if r < 0]
@@ -5925,10 +5938,10 @@ def create_trade_backtest_router() -> APIRouter:
         # Max drawdown
         peak = equity[0]
         max_dd = 0.0
-        for e in equity:
-            if e > peak:
-                peak = e
-            dd = (peak - e) / peak * 100
+        for eq in equity:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak * 100
             if dd > max_dd:
                 max_dd = dd
 
@@ -5951,7 +5964,6 @@ def create_trade_backtest_router() -> APIRouter:
         profit_factor = round(sum_w / sum_l, 2) if sum_l > 0 else float("inf")
 
         # Holding days
-        hold_days_list = [t["hold_days"] for t in trades if t["hold_days"] is not None]
         avg_hold = round(statistics.mean(hold_days_list), 1) if hold_days_list else None
 
         summary = {
@@ -5970,14 +5982,14 @@ def create_trade_backtest_router() -> APIRouter:
             "max_drawdown_pct": round(max_dd, 2),
             "profit_factor": profit_factor,
             "avg_holding_days": avg_hold,
-            "date_range": f"{trades[0]['buy_time'][:10]} ~ {trades[-1]['sell_time'][:10]}",
+            "date_range": f"{buy_times[0][:10]} ~ {sell_times[-1][:10]}",
         }
 
         # Monthly breakdown
         monthly: dict[str, list[float]] = defaultdict(list)
-        for t in trades:
-            month = t["buy_time"][:7]
-            monthly[month].append(t["return_pct"])
+        for idx, ret in enumerate(returns):
+            month = buy_times[idx][:7]
+            monthly[month].append(ret)
 
         monthly_returns = []
         for month in sorted(monthly.keys()):
@@ -5986,22 +5998,27 @@ def create_trade_backtest_router() -> APIRouter:
             for r in rets:
                 compound *= 1 + r / 100
             w = [r for r in rets if r > 0]
-            monthly_returns.append({
-                "month": month,
-                "trades": len(rets),
-                "return_pct": round((compound - 1) * 100, 2),
-                "win_rate": round(len(w) / len(rets) * 100, 1),
-            })
+            monthly_returns.append(
+                {
+                    "month": month,
+                    "trades": len(rets),
+                    "return_pct": round((compound - 1) * 100, 2),
+                    "win_rate": round(len(w) / len(rets) * 100, 1),
+                }
+            )
 
         # Equity curve data points
-        equity_curve = []
-        equity_curve.append({"trade_idx": 0, "date": trades[0]["buy_time"][:10], "equity": 1.0})
-        for i, t in enumerate(trades):
-            equity_curve.append({
-                "trade_idx": i + 1,
-                "date": t["sell_time"][:10],
-                "equity": round(equity[i + 1], 4),
-            })
+        equity_curve: list[dict[str, Any]] = [
+            {"trade_idx": 0, "date": buy_times[0][:10], "equity": 1.0}
+        ]
+        for idx in range(total):
+            equity_curve.append(
+                {
+                    "trade_idx": idx + 1,
+                    "date": sell_times[idx][:10],
+                    "equity": round(equity[idx + 1], 4),
+                }
+            )
 
         return {
             "success": True,
