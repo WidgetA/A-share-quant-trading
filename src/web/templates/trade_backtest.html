@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block title %}交易回测 - A-Share Trading{% endblock %}
+
+{% block content %}
+<h2>交易记录回测</h2>
+
+<!-- Upload Section -->
+<div class="sim-card">
+    <h3>上传 CSV 交易记录</h3>
+    <form id="upload-form">
+        <div class="upload-drop-zone" id="drop-zone">
+            <input type="file" id="csv-file" accept=".csv" style="display:none">
+            <p id="drop-text">点击选择或拖拽 CSV 文件到此处</p>
+            <p style="color:#999;font-size:0.85em;margin-top:0.5rem">
+                必需列: 股票代码, 股票名称, 买入时间, 买入价, 卖出时间, 卖出价, 收益率(%)
+            </p>
+        </div>
+        <button type="submit" class="btn btn-primary" id="analyze-btn" disabled>开始分析</button>
+    </form>
+</div>
+
+<!-- Error -->
+<div id="error-box" class="sim-card" style="display:none;border-left:4px solid #d32f2f">
+    <p id="error-msg" style="color:#d32f2f;margin:0"></p>
+</div>
+
+<!-- Loading -->
+<div id="loading" style="display:none;text-align:center;padding:2rem">
+    <p>正在分析交易记录...</p>
+</div>
+
+<!-- Results -->
+<div id="results" style="display:none">
+
+    <!-- Summary Grid -->
+    <div class="sim-card">
+        <h3>统计概览</h3>
+        <div class="range-summary-grid" id="summary-grid"></div>
+    </div>
+
+    <!-- Equity Curve -->
+    <div class="sim-card">
+        <h3>净值曲线</h3>
+        <div class="equity-chart-wrap">
+            <svg id="equity-svg" viewBox="0 0 750 280" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+    </div>
+
+    <!-- Monthly Returns -->
+    <div class="sim-card">
+        <h3>月度收益</h3>
+        <div class="range-table-wrap">
+            <table class="stock-table" id="monthly-table">
+                <thead><tr>
+                    <th>月份</th><th>交易次数</th><th>月收益率</th><th>月胜率</th>
+                </tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Trade Details -->
+    <details class="sim-card">
+        <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0">交易明细 (<span id="trade-count"></span> 笔)</summary>
+        <div class="range-table-wrap" style="margin-top:0.5rem">
+            <table class="stock-table" id="trades-table">
+                <thead><tr>
+                    <th>#</th><th>代码</th><th>名称</th><th>板块</th>
+                    <th>买入时间</th><th>买入价</th><th>卖出时间</th><th>卖出价</th>
+                    <th>持有</th><th>收益率</th><th>卖出原因</th>
+                </tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </details>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('csv-file');
+    const dropText = document.getElementById('drop-text');
+    const analyzeBtn = document.getElementById('analyze-btn');
+    const form = document.getElementById('upload-form');
+
+    // Click to select
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    // Drag & drop
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        if (e.dataTransfer.files.length && e.dataTransfer.files[0].name.endsWith('.csv')) {
+            fileInput.files = e.dataTransfer.files;
+            onFileSelected(e.dataTransfer.files[0]);
+        }
+    });
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) onFileSelected(fileInput.files[0]);
+    });
+
+    function onFileSelected(file) {
+        dropText.textContent = file.name;
+        dropZone.classList.add('has-file');
+        analyzeBtn.disabled = false;
+    }
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!fileInput.files.length) return;
+
+        document.getElementById('error-box').style.display = 'none';
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('loading').style.display = 'block';
+        analyzeBtn.disabled = true;
+
+        const fd = new FormData();
+        fd.append('csv_file', fileInput.files[0]);
+
+        try {
+            const resp = await fetch('/api/trade-backtest/analyze', { method: 'POST', body: fd });
+            const data = await resp.json();
+            if (!resp.ok) {
+                showError(data.detail || '分析失败');
+                return;
+            }
+            renderResults(data);
+        } catch (err) {
+            showError('请求失败: ' + err.message);
+        } finally {
+            document.getElementById('loading').style.display = 'none';
+            analyzeBtn.disabled = false;
+        }
+    });
+
+    function showError(msg) {
+        document.getElementById('error-msg').textContent = msg;
+        document.getElementById('error-box').style.display = 'block';
+    }
+
+    function renderResults(data) {
+        renderSummary(data.summary);
+        renderEquityCurve(data.equity_curve);
+        renderMonthly(data.monthly_returns);
+        renderTrades(data.trades);
+        document.getElementById('results').style.display = 'block';
+    }
+
+    function renderSummary(s) {
+        const retClass = s.cumulative_return_pct >= 0 ? 'range-profit-pos' : 'range-profit-neg';
+        const grid = document.getElementById('summary-grid');
+        grid.innerHTML = [
+            stat('总交易次数', `${s.total_trades} (${s.win_count}胜 ${s.lose_count}负)`),
+            stat('胜率', s.win_rate.toFixed(1) + '%'),
+            stat('累计收益率', fmtPct(s.cumulative_return_pct), retClass),
+            stat('平均收益率', fmtPct(s.avg_return_pct), pctClass(s.avg_return_pct)),
+            stat('最大单笔盈利', fmtPct(s.max_single_win_pct), 'range-profit-pos'),
+            stat('最大单笔亏损', fmtPct(s.max_single_loss_pct), 'range-profit-neg'),
+            stat('最大连胜', s.max_consecutive_wins + ' 次'),
+            stat('最大连亏', s.max_consecutive_losses + ' 次'),
+            stat('最大回撤', s.max_drawdown_pct.toFixed(2) + '%', 'range-profit-neg'),
+            stat('盈亏比', s.profit_factor === Infinity ? '∞' : s.profit_factor.toFixed(2)),
+            stat('平均持有天数', s.avg_holding_days != null ? s.avg_holding_days + ' 天' : '-'),
+            stat('交易区间', s.date_range),
+        ].join('');
+    }
+
+    function stat(label, value, cls) {
+        return `<div class="range-stat"><span class="range-stat-label">${label}</span>` +
+               `<span class="range-stat-value ${cls || ''}">${value}</span></div>`;
+    }
+
+    function fmtPct(v) { return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'; }
+    function pctClass(v) { return v > 0 ? 'range-profit-pos' : v < 0 ? 'range-profit-neg' : ''; }
+
+    function renderEquityCurve(curve) {
+        const svg = document.getElementById('equity-svg');
+        const W = 750, H = 280, PL = 50, PR = 20, PT = 20, PB = 40;
+        const n = curve.length;
+        const eqs = curve.map(p => p.equity);
+        const minE = Math.min(...eqs) * 0.98;
+        const maxE = Math.max(...eqs) * 1.02;
+
+        const sx = i => PL + (i / (n - 1)) * (W - PL - PR);
+        const sy = e => PT + (1 - (e - minE) / (maxE - minE)) * (H - PT - PB);
+
+        let html = `<rect width="${W}" height="${H}" fill="#fafafa" rx="6"/>`;
+
+        // Grid lines & Y labels
+        const steps = 5;
+        for (let i = 0; i <= steps; i++) {
+            const e = minE + (maxE - minE) * i / steps;
+            const y = sy(e);
+            html += `<line x1="${PL}" y1="${y}" x2="${W-PR}" y2="${y}" stroke="#e0e0e0" stroke-width="0.5"/>`;
+            html += `<text x="${PL-5}" y="${y+4}" text-anchor="end" font-size="11" fill="#888">${e.toFixed(2)}</text>`;
+        }
+
+        // Baseline at 1.0
+        if (minE < 1.0 && maxE > 1.0) {
+            const y1 = sy(1.0);
+            html += `<line x1="${PL}" y1="${y1}" x2="${W-PR}" y2="${y1}" stroke="#999" stroke-width="1" stroke-dasharray="4,3"/>`;
+        }
+
+        // X-axis month labels
+        const months = new Set();
+        curve.forEach((p, i) => {
+            const m = p.date.substring(0, 7);
+            if (!months.has(m)) {
+                months.add(m);
+                html += `<text x="${sx(i)}" y="${H-8}" text-anchor="middle" font-size="10" fill="#888">${m.substring(2)}</text>`;
+            }
+        });
+
+        // Equity line
+        const pts = curve.map((p, i) => `${sx(i).toFixed(1)},${sy(p.equity).toFixed(1)}`).join(' ');
+        const finalColor = curve[curve.length-1].equity >= 1.0 ? '#c62828' : '#2e7d32';
+        html += `<polyline points="${pts}" fill="none" stroke="${finalColor}" stroke-width="1.5" stroke-linejoin="round"/>`;
+
+        // Fill area under curve
+        const firstX = sx(0).toFixed(1), lastX = sx(n-1).toFixed(1);
+        const baseY = sy(1.0).toFixed(1);
+        html += `<polyline points="${firstX},${baseY} ${pts} ${lastX},${baseY}" fill="${finalColor}" fill-opacity="0.08" stroke="none"/>`;
+
+        svg.innerHTML = html;
+    }
+
+    function renderMonthly(months) {
+        const tbody = document.querySelector('#monthly-table tbody');
+        tbody.innerHTML = months.map(m => {
+            const rc = pctClass(m.return_pct);
+            return `<tr>
+                <td>${m.month}</td>
+                <td>${m.trades}</td>
+                <td class="${rc}">${fmtPct(m.return_pct)}</td>
+                <td>${m.win_rate.toFixed(1)}%</td>
+            </tr>`;
+        }).join('');
+    }
+
+    function renderTrades(trades) {
+        document.getElementById('trade-count').textContent = trades.length;
+        const tbody = document.querySelector('#trades-table tbody');
+        tbody.innerHTML = trades.map(t => {
+            const rc = pctClass(t.return_pct);
+            return `<tr>
+                <td>${t.idx}</td>
+                <td class="stock-code">${t.stock_code}</td>
+                <td>${t.stock_name}</td>
+                <td>${t.board}</td>
+                <td>${t.buy_time}</td>
+                <td>${t.buy_price.toFixed(2)}</td>
+                <td>${t.sell_time}</td>
+                <td>${t.sell_price.toFixed(2)}</td>
+                <td>${t.hold_days != null ? t.hold_days + '天' : '-'}</td>
+                <td class="${rc}">${fmtPct(t.return_pct)}</td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.sell_reason}">${t.sell_reason}</td>
+            </tr>`;
+        }).join('');
+    }
+})();
+</script>
+{% endblock %}

@@ -2487,3 +2487,37 @@ footer {
     font-size: 0.85rem;
     white-space: nowrap;
 }
+
+/* === Trade Backtest (CSV upload) === */
+
+.upload-drop-zone {
+    border: 2px dashed #ccc;
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    margin-bottom: 1rem;
+}
+
+.upload-drop-zone:hover,
+.upload-drop-zone.drag-over {
+    border-color: #4CAF50;
+    background: #f0faf0;
+}
+
+.upload-drop-zone.has-file {
+    border-color: #4CAF50;
+    border-style: solid;
+}
+
+.equity-chart-wrap {
+    text-align: center;
+    overflow-x: auto;
+}
+
+.equity-chart-wrap svg {
+    width: 100%;
+    max-width: 750px;
+    height: auto;
+}

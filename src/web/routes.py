@@ -5840,3 +5840,175 @@ def create_settings_router() -> APIRouter:
         )
 
     return router
+
+
+# ---------------------------------------------------------------------------
+# Trade Backtest Router — CSV upload → aggregate stats + equity curve
+# ---------------------------------------------------------------------------
+
+
+def create_trade_backtest_router() -> APIRouter:
+    """Router for CSV trade record analysis."""
+    import csv
+    import io
+    import statistics
+
+    from fastapi import UploadFile
+
+    router = APIRouter(tags=["trade-backtest"])
+
+    @router.get("/trade-backtest", response_class=HTMLResponse)
+    async def trade_backtest_page(request: Request):
+        templates = request.app.state.templates
+        return templates.TemplateResponse("trade_backtest.html", {"request": request})
+
+    @router.post("/api/trade-backtest/analyze")
+    async def analyze_trades(csv_file: UploadFile):
+        content = await csv_file.read()
+
+        # Try common encodings for Chinese Excel exports
+        text = None
+        for encoding in ("utf-8-sig", "gbk", "gb2312"):
+            try:
+                text = content.decode(encoding)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        if text is None:
+            raise HTTPException(400, "无法解码 CSV 文件，请使用 UTF-8 或 GBK 编码")
+
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            raise HTTPException(400, "CSV 文件为空或格式错误")
+
+        required = {"股票代码", "股票名称", "买入时间", "买入价", "卖出时间", "卖出价", "收益率(%)"}
+        missing = required - set(reader.fieldnames)
+        if missing:
+            raise HTTPException(400, f"CSV 缺少必要列: {', '.join(missing)}")
+
+        # Parse trades
+        trades = []
+        for i, row in enumerate(reader, 1):
+            try:
+                t = {
+                    "idx": i,
+                    "stock_code": row["股票代码"].strip(),
+                    "stock_name": row["股票名称"].strip(),
+                    "board": row.get("所属板块", "").strip(),
+                    "buy_time": row["买入时间"].strip(),
+                    "buy_price": float(row["买入价"]),
+                    "sell_time": row["卖出时间"].strip(),
+                    "sell_price": float(row["卖出价"]),
+                    "hold_days": int(row["持有天数"]) if row.get("持有天数") else None,
+                    "return_pct": float(row["收益率(%)"]),
+                    "sell_reason": row.get("卖出原因", "").strip(),
+                    "score": float(row["评分"]) if row.get("评分") else None,
+                }
+                trades.append(t)
+            except (ValueError, KeyError) as e:
+                raise HTTPException(400, f"第 {i} 行数据格式错误: {e}")
+
+        if not trades:
+            raise HTTPException(400, "CSV 中没有交易记录")
+
+        returns = [t["return_pct"] for t in trades]
+        total = len(trades)
+        wins = [r for r in returns if r > 0]
+        losses = [r for r in returns if r < 0]
+
+        # Equity curve (compounded)
+        equity = [1.0]
+        for r in returns:
+            equity.append(equity[-1] * (1 + r / 100))
+        cumulative_return_pct = (equity[-1] - 1) * 100
+
+        # Max drawdown
+        peak = equity[0]
+        max_dd = 0.0
+        for e in equity:
+            if e > peak:
+                peak = e
+            dd = (peak - e) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+
+        # Consecutive wins/losses
+        max_cw = max_cl = 0
+        streak = 0
+        for r in returns:
+            if r > 0:
+                streak = streak + 1 if streak > 0 else 1
+                max_cw = max(max_cw, streak)
+            elif r < 0:
+                streak = streak - 1 if streak < 0 else -1
+                max_cl = max(max_cl, abs(streak))
+            else:
+                streak = 0
+
+        # Profit factor
+        sum_w = sum(wins) if wins else 0.0
+        sum_l = abs(sum(losses)) if losses else 0.0
+        profit_factor = round(sum_w / sum_l, 2) if sum_l > 0 else float("inf")
+
+        # Holding days
+        hold_days_list = [t["hold_days"] for t in trades if t["hold_days"] is not None]
+        avg_hold = round(statistics.mean(hold_days_list), 1) if hold_days_list else None
+
+        summary = {
+            "total_trades": total,
+            "win_count": len(wins),
+            "lose_count": len(losses),
+            "flat_count": total - len(wins) - len(losses),
+            "win_rate": round(len(wins) / total * 100, 2),
+            "avg_return_pct": round(statistics.mean(returns), 2),
+            "median_return_pct": round(statistics.median(returns), 2),
+            "cumulative_return_pct": round(cumulative_return_pct, 2),
+            "max_single_win_pct": round(max(returns), 2) if returns else 0,
+            "max_single_loss_pct": round(min(returns), 2) if returns else 0,
+            "max_consecutive_wins": max_cw,
+            "max_consecutive_losses": max_cl,
+            "max_drawdown_pct": round(max_dd, 2),
+            "profit_factor": profit_factor,
+            "avg_holding_days": avg_hold,
+            "date_range": f"{trades[0]['buy_time'][:10]} ~ {trades[-1]['sell_time'][:10]}",
+        }
+
+        # Monthly breakdown
+        monthly: dict[str, list[float]] = defaultdict(list)
+        for t in trades:
+            month = t["buy_time"][:7]
+            monthly[month].append(t["return_pct"])
+
+        monthly_returns = []
+        for month in sorted(monthly.keys()):
+            rets = monthly[month]
+            compound = 1.0
+            for r in rets:
+                compound *= 1 + r / 100
+            w = [r for r in rets if r > 0]
+            monthly_returns.append({
+                "month": month,
+                "trades": len(rets),
+                "return_pct": round((compound - 1) * 100, 2),
+                "win_rate": round(len(w) / len(rets) * 100, 1),
+            })
+
+        # Equity curve data points
+        equity_curve = []
+        equity_curve.append({"trade_idx": 0, "date": trades[0]["buy_time"][:10], "equity": 1.0})
+        for i, t in enumerate(trades):
+            equity_curve.append({
+                "trade_idx": i + 1,
+                "date": t["sell_time"][:10],
+                "equity": round(equity[i + 1], 4),
+            })
+
+        return {
+            "success": True,
+            "summary": summary,
+            "monthly_returns": monthly_returns,
+            "equity_curve": equity_curve,
+            "trades": trades,
+        }
+
+    return router

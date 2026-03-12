@@ -26,6 +26,7 @@ from src.web.routes import (
     create_router,
     create_settings_router,
     create_simulation_router,
+    create_trade_backtest_router,
 )
 
 if TYPE_CHECKING:
@@ -97,6 +98,10 @@ def create_app(
     # Add settings router
     settings_router = create_settings_router()
     app.include_router(settings_router)
+
+    # Add trade backtest router (CSV upload → stats)
+    trade_bt_router = create_trade_backtest_router()
+    app.include_router(trade_bt_router)
 
     # Add iQuant API router (isolated from main system, lazily initialized)
     iquant_router = create_iquant_router()
