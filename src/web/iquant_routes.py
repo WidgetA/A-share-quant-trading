@@ -671,9 +671,7 @@ def create_iquant_router() -> APIRouter:
                 f"added to holdings ({len(_state['holdings'])} total)"
             )
         elif found["type"] == "sell":
-            _state["holdings"] = [
-                h for h in _state["holdings"] if h["code"] != found["stock_code"]
-            ]
+            _state["holdings"] = [h for h in _state["holdings"] if h["code"] != found["stock_code"]]
             _save_holdings(_state["holdings"])
             logger.info(
                 f"V15: SELL acked {found['stock_code']}, "
