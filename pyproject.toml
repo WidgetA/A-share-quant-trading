@@ -30,7 +30,7 @@ dev = [
 line-length = 100
 target-version = "py311"
 # iQuant strategy scripts have platform-specific format requirements (#encoding:gbk, etc.)
-extend-exclude = ["scripts/iquant_strategy.py"]
+extend-exclude = ["scripts/iquant_strategy.py", "scripts/iquant_live.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]

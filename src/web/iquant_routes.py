@@ -733,7 +733,7 @@ def create_iquant_router() -> APIRouter:
         return {
             "success": True,
             "signal": _state["pending_signals"][-1],
-            "message": f"Signal pushed. iQuant will pick it up on next /pending-signals poll.",
+            "message": "Signal pushed. iQuant will pick it up on next /pending-signals poll.",
         }
 
     @router.get("/universe")
