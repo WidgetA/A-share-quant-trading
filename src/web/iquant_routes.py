@@ -9,7 +9,7 @@
 #
 # === V15 STRATEGY ===
 # Signal flow (T+2 adaptive sell):
-#   09:25-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
+#   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
 #   09:38-10:00  → SCAN: if no holdings, run V15 7-layer funnel → BUY signal
 #   14:50-14:58  → SELL: push SELL signals for marked holdings
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
@@ -486,13 +486,13 @@ def create_iquant_router() -> APIRouter:
         """V15 background scheduler: T+2 adaptive sell.
 
         Three timing windows:
-        1. GAP_CHECK (09:25-09:35): Check holdings for gap-down or T+2 sell
+        1. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
         2. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
         3. SELL (14:50-14:58): Push SELL signals for marked holdings
 
         Timing uses Beijing TZ (local clock).
         """
-        GAP_CHECK_WINDOW = (time(9, 25), time(9, 35))
+        GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
         SCAN_WINDOW = (time(9, 38), time(10, 0))
         SELL_WINDOW = (time(14, 50), time(14, 58))
 
@@ -679,6 +679,80 @@ def create_iquant_router() -> APIRouter:
             )
 
         return {"success": True, "signal": found}
+
+    @router.post("/report-status")
+    async def report_status(
+        request: Request,
+        api_key: str = Depends(_verify_api_key),
+    ) -> dict:
+        """Receive iQuant startup status (balance) and notify via Feishu."""
+        body = await request.json()
+        cash = body.get("available_cash", 0)
+        _state["available_cash"] = cash
+        now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+        msg = (
+            f"[V15] iQuant脚本已启动\n"
+            f"可用资金: {cash:,.2f}\n"
+            f"持仓数: {len(_state['holdings'])}\n"
+            f"时间: {now_str}"
+        )
+        logger.info(f"iQuant report-status: cash={cash:.2f}")
+
+        try:
+            from src.common.feishu_bot import FeishuBot
+
+            bot = FeishuBot()
+            if bot.is_configured():
+                await bot.send_message(msg)
+        except Exception:
+            logger.warning("Failed to send Feishu startup notification", exc_info=True)
+
+        return {"success": True, "message": msg}
+
+    @router.post("/report-trade")
+    async def report_trade(
+        request: Request,
+        api_key: str = Depends(_verify_api_key),
+    ) -> dict:
+        """Receive trade execution from iQuant and notify via Feishu."""
+        body = await request.json()
+        msg = body.get("message", "")
+        stock_name = body.get("stock_name", "")
+        reason = body.get("reason", "")
+        now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
+
+        text = f"[V15] 下单已执行\n{msg}"
+        if stock_name:
+            text += f"\n名称: {stock_name}"
+        if reason:
+            text += f"\n原因: {reason}"
+        text += f"\n时间: {now_str}"
+
+        logger.info(f"iQuant report-trade: {msg}")
+
+        try:
+            from src.common.feishu_bot import FeishuBot
+
+            bot = FeishuBot()
+            if bot.is_configured():
+                await bot.send_message(text)
+        except Exception:
+            logger.warning("Failed to send Feishu trade notification", exc_info=True)
+
+        return {"success": True}
+
+    @router.post("/report-error")
+    async def report_error(
+        request: Request,
+        api_key: str = Depends(_verify_api_key),
+    ) -> dict:
+        """Receive error from iQuant script and notify via Feishu."""
+        body = await request.json()
+        error_msg = body.get("error", "unknown")
+        logger.error(f"iQuant report-error: {error_msg}")
+        await _notify_feishu_error("iQuant执行异常", error_msg)
+        return {"success": True}
 
     @router.get("/holdings")
     async def holdings(api_key: str = Depends(_verify_api_key)) -> dict:

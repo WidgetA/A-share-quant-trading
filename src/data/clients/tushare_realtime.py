@@ -76,9 +76,9 @@ class TushareRealtimeClient:
     """
 
     API_URL = "http://api.tushare.pro"
-    BATCH_SIZE = 300  # max codes per request (user's subscription limit)
+    BATCH_SIZE = 80  # keep total rows < 1000 (rt_min returns N bars per stock)
     TIMEOUT = 30.0
-    BATCH_DELAY = 0.3  # seconds between batches
+    MAX_CONCURRENCY = 40  # parallel requests (tushare supports 500 concurrency)
     MAX_RETRIES = 3
     RETRY_BACKOFF = 1.0  # base seconds; doubles each attempt
 
@@ -120,24 +120,26 @@ class TushareRealtimeClient:
             return {}
 
         all_quotes: dict[str, TushareQuote] = {}
+        sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
 
-        for i in range(0, len(stock_codes), self.BATCH_SIZE):
-            batch = stock_codes[i : i + self.BATCH_SIZE]
+        async def _fetch_batch(batch: list[str]) -> dict[str, TushareQuote]:
             ts_codes = [self._to_ts_code(c) for c in batch]
             ts_code_str = ",".join(ts_codes)
+            async with sem:
+                data = await self._api_call(
+                    "rt_min",
+                    {"ts_code": ts_code_str, "freq": "1MIN"},
+                    fields="ts_code,time,open,close,high,low,vol,amount",
+                )
+            return self._aggregate_minute_bars(data)
 
-            data = await self._api_call(
-                "rt_min",
-                {"ts_code": ts_code_str, "freq": "1MIN"},
-                fields="ts_code,time,open,close,high,low,vol,amount",
-            )
-
-            batch_quotes = self._aggregate_minute_bars(data)
+        batches = [
+            stock_codes[i : i + self.BATCH_SIZE]
+            for i in range(0, len(stock_codes), self.BATCH_SIZE)
+        ]
+        results = await asyncio.gather(*[_fetch_batch(b) for b in batches])
+        for batch_quotes in results:
             all_quotes.update(batch_quotes)
-
-            # Delay between batches to stay within rate limits
-            if i + self.BATCH_SIZE < len(stock_codes):
-                await asyncio.sleep(self.BATCH_DELAY)
 
         return all_quotes
 
