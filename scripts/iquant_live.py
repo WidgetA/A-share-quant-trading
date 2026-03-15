@@ -22,7 +22,7 @@ import urllib.request
 API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "20f4b05bed1fe28e3c808dabaa5fa37f"
 
-_state = {"last_poll_ts": 0, "reported": False}
+_state = {"last_poll_ts": 0, "reported": False, "fields_printed": False, "init_notified": False}
 
 
 def _api_call(endpoint, method="GET", body=None):
@@ -42,11 +42,19 @@ def _iquant_code(code):
 
 
 def _get_available_cash(ContextInfo):
-    """查询可用资金。"""
+    """查询可用资金。柜台未连接时返回 0。"""
     try:
         acct = get_trade_detail_data(ContextInfo.accID, 'account', 'stock')
         if acct:
-            return acct[0].m_dAvailable
+            obj = acct[0]
+            # 首次成功时打印字段名, 方便排查
+            if not _state["fields_printed"]:
+                _state["fields_printed"] = True
+                attrs = [a for a in dir(obj) if a.startswith('m_')]
+                print("[ACCT] fields: %s" % attrs)
+            return obj.m_dAvailable
+        else:
+            print("[ACCT] empty — 柜台可能未连接")
     except Exception as e:
         print("[ACCT ERR] %s" % e)
     return 0
@@ -84,17 +92,6 @@ def _report_error(msg):
         _api_call("/report-error", "POST", {"error": msg})
     except Exception as e:
         print("[REPORT ERR] %s" % e)
-
-
-def _report_status(ContextInfo):
-    """查余额并报告服务端 (触发飞书通知)。"""
-    cash = _get_available_cash(ContextInfo)
-    print("[STATUS] available_cash=%.2f" % cash)
-    try:
-        _api_call("/report-status", "POST", {"available_cash": cash})
-        print("[STATUS] reported to server")
-    except Exception as e:
-        print("[STATUS ERR] %s" % e)
 
 
 def _execute_signal(ContextInfo, signal):
@@ -180,10 +177,40 @@ def init(ContextInfo):
 def handlebar(ContextInfo):
     now = time.time()
 
-    # 首次 handlebar: 查余额并报告服务端
+    # 首次 handlebar: 推飞书说脚本已启动
+    if not _state["init_notified"]:
+        _state["init_notified"] = True
+        cash = _get_available_cash(ContextInfo)
+        if cash > 0:
+            _state["reported"] = True
+            try:
+                _api_call("/report-status", "POST", {"available_cash": cash})
+                print("[STATUS] startup reported, cash=%.2f" % cash)
+            except Exception as e:
+                print("[STATUS ERR] %s" % e)
+        else:
+            try:
+                _api_call("/report-trade", "POST", {
+                    "message": "iQuant脚本已启动，当前券商柜台未连接（非交易时段或柜台尚未开启），余额暂时无法查询。柜台连通后将自动推送余额。",
+                    "stock_code": "", "stock_name": "", "reason": "",
+                })
+                print("[STATUS] startup notified (no cash yet)")
+            except Exception as e:
+                print("[STATUS NOTIFY ERR] %s" % e)
+
+    # 余额未上报时, 每60s重试查余额
     if not _state["reported"]:
-        _state["reported"] = True
-        _report_status(ContextInfo)
+        if now - _state.get("last_status_ts", 0) >= 60:
+            _state["last_status_ts"] = now
+            cash = _get_available_cash(ContextInfo)
+            if cash > 0:
+                _state["reported"] = True
+                print("[STATUS] available_cash=%.2f — reporting" % cash)
+                try:
+                    _api_call("/report-status", "POST", {"available_cash": cash})
+                    print("[STATUS] reported to server")
+                except Exception as e:
+                    print("[STATUS ERR] %s" % e)
 
     # 节流: 每30秒最多轮询一次
     if now - _state.get("last_poll_ts", 0) < 30:
