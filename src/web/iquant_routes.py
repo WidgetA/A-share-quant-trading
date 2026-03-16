@@ -292,9 +292,10 @@ def create_iquant_router() -> APIRouter:
 
     async def _cleanup_resources() -> None:
         """Cleanup on shutdown."""
-        task = _state.get("scheduler_task")
-        if task and not task.done():
-            task.cancel()
+        for key in ("scheduler_task", "monitoring_task"):
+            task = _state.get(key)
+            if task and not task.done():
+                task.cancel()
         rt_client = _state.get("realtime_client")
         if rt_client:
             await rt_client.stop()
@@ -646,45 +647,29 @@ def create_iquant_router() -> APIRouter:
         except Exception:
             logger.warning("Failed to send readiness report", exc_info=True)
 
-    # --- V15 Background scheduler ---
+    # --- Monitoring scheduler (independent, no trading resources needed) ---
 
-    async def _signal_scheduler() -> None:
-        """V15 background scheduler: T+2 adaptive sell + monitoring.
+    async def _monitoring_scheduler() -> None:
+        """Lightweight monitoring loop — runs from server startup.
 
-        Trading windows:
-        1. READINESS (09:30): Daily readiness report via Feishu
-        2. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
-        3. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
-        4. SELL (14:50-14:58): Push SELL signals for marked holdings
-
-        Continuous monitoring (every 30s during trading hours):
-        - Signal timeout: alert if pending signal not acked within 5 minutes
-        - Heartbeat: alert if iQuant stops polling for 3 minutes
+        Does NOT need Tushare, DB, or any trading resources.
+        Checks heartbeat, signal timeout/expiry, readiness report.
         """
-        GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
-        SCAN_WINDOW = (time(9, 38), time(10, 0))
-        SELL_WINDOW = (time(14, 50), time(14, 58))
-        READINESS_TIME = time(9, 30)
-
-        logger.info("V15 signal scheduler started")
-
-        gap_done_date = ""
-        scan_done_date = ""
-        sell_done_date = ""
         readiness_done_date = ""
         heartbeat_alert_date = ""
+
+        logger.info("V15 monitoring scheduler started")
 
         try:
             while True:
                 now_bj = datetime.now(BEIJING_TZ)
                 ex_date = now_bj.strftime("%Y-%m-%d")
                 ex_time = now_bj.time().replace(second=0, microsecond=0)
-                today_date = now_bj.date()
 
                 # --- READINESS REPORT: 09:30 ---
                 if (
                     readiness_done_date != ex_date
-                    and ex_time >= READINESS_TIME
+                    and ex_time >= time(9, 30)
                     and ex_time <= time(9, 35)
                 ):
                     readiness_done_date = ex_date
@@ -692,6 +677,53 @@ def create_iquant_router() -> APIRouter:
 
                 if readiness_done_date != ex_date and ex_time > time(9, 35):
                     readiness_done_date = ex_date
+
+                # --- CONTINUOUS MONITORING ---
+                await _expire_stale_signals(now_bj)
+                await _check_signal_timeout(now_bj)
+                heartbeat_alert_date = await _check_heartbeat(now_bj, heartbeat_alert_date)
+
+                await asyncio.sleep(30)
+
+        except asyncio.CancelledError:
+            logger.info("V15 monitoring scheduler stopped")
+
+    def _start_monitoring() -> None:
+        """Start the monitoring scheduler. Safe to call at any time."""
+        if _state.get("monitoring_task") and not _state["monitoring_task"].done():
+            return  # already running
+        _state["monitoring_task"] = asyncio.create_task(_monitoring_scheduler())
+
+    router._start_monitoring = _start_monitoring  # type: ignore[attr-defined]
+
+    # --- V15 Background scheduler (trading operations only) ---
+
+    async def _signal_scheduler() -> None:
+        """V15 trading scheduler: T+2 adaptive sell.
+
+        Trading windows:
+        1. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
+        2. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
+        3. SELL (14:50-14:58): Push SELL signals for marked holdings
+
+        Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
+        """
+        GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
+        SCAN_WINDOW = (time(9, 38), time(10, 0))
+        SELL_WINDOW = (time(14, 50), time(14, 58))
+
+        logger.info("V15 signal scheduler started")
+
+        gap_done_date = ""
+        scan_done_date = ""
+        sell_done_date = ""
+
+        try:
+            while True:
+                now_bj = datetime.now(BEIJING_TZ)
+                ex_date = now_bj.strftime("%Y-%m-%d")
+                ex_time = now_bj.time().replace(second=0, microsecond=0)
+                today_date = now_bj.date()
 
                 # --- GAP CHECK: 09:31-09:35 ---
                 if (
@@ -783,11 +815,6 @@ def create_iquant_router() -> APIRouter:
                 # Sell deadline
                 if sell_done_date != ex_date and ex_time > SELL_WINDOW[1]:
                     sell_done_date = ex_date
-
-                # --- CONTINUOUS MONITORING (every loop iteration) ---
-                await _expire_stale_signals(now_bj)
-                await _check_signal_timeout(now_bj)
-                heartbeat_alert_date = await _check_heartbeat(now_bj, heartbeat_alert_date)
 
                 # Adaptive sleep
                 all_done = (

@@ -199,14 +199,12 @@ def create_app(
                 f"Run 'uv run python scripts/audit_trading_safety.py' for details."
             )
 
-        # Auto-start iQuant V15 scheduler (must not depend on QMT polling)
+        # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
+        # This is independent of trading resources — must always run.
         iquant_rtr = getattr(app.state, "iquant_router", None)
-        if iquant_rtr and hasattr(iquant_rtr, "_iquant_init"):
-            try:
-                await iquant_rtr._iquant_init()
-                logger.info("iQuant V15 scheduler auto-started at startup")
-            except Exception as e:
-                logger.error(f"Failed to auto-start iQuant scheduler: {e}")
+        if iquant_rtr and hasattr(iquant_rtr, "_start_monitoring"):
+            iquant_rtr._start_monitoring()
+            logger.info("iQuant V15 monitoring scheduler started")
 
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own
