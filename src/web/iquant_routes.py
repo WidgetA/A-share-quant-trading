@@ -108,6 +108,34 @@ async def _notify_feishu_error(title: str, detail: str) -> None:
         logger.warning("Failed to send Feishu error notification", exc_info=True)
 
 
+async def _notify_feishu_ack(signal: dict) -> None:
+    """Send execution confirmation to Feishu. Best-effort, never raises."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if not bot.is_configured():
+            return
+
+        direction = "买入" if signal["type"] == "buy" else "卖出"
+        pushed = signal.get("created_at", "?")
+        acked = signal.get("acked_at", "?")
+        lines = [
+            f"[V15] {direction}已执行",
+            f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
+        ]
+        if signal["type"] == "buy":
+            lines.append(f"价格: {signal.get('latest_price', '-')}")
+            lines.append(f"板块: {signal.get('board_name', '-')}")
+        if signal["type"] == "sell":
+            lines.append(f"原因: {signal.get('reason', '-')}")
+        lines.append(f"推送→执行: {pushed} → {acked}")
+
+        await bot.send_message("\n".join(lines))
+    except Exception:
+        logger.warning("Failed to send Feishu ack notification", exc_info=True)
+
+
 async def _notify_feishu_signal(signal: dict) -> None:
     """Send signal notification to Feishu. Best-effort, never raises."""
     try:
@@ -208,6 +236,8 @@ def create_iquant_router() -> APIRouter:
         "scheduler_task": None,
         "universe_cache": None,
         "tsanghi_cache": None,  # injected from app.py after OSS load
+        # --- Monitoring ---
+        "last_poll_time": None,  # datetime: last time iQuant polled /pending-signals
     }
 
     # --- Resource management ---
@@ -296,8 +326,10 @@ def create_iquant_router() -> APIRouter:
 
     def _push_signal(signal: dict) -> None:
         """Add a signal to the pending queue."""
+        now = datetime.now(BEIJING_TZ)
         signal.setdefault("id", str(uuid.uuid4())[:8])
-        signal.setdefault("created_at", datetime.now(BEIJING_TZ).strftime("%H:%M:%S"))
+        signal.setdefault("created_at", now.strftime("%H:%M:%S"))
+        signal["pushed_at"] = now  # datetime for timeout tracking (not serialized)
         _state["pending_signals"].append(signal)
         logger.info(
             f"V15 signal pushed: {signal['type']} {signal['stock_code']} (id={signal['id']})"
@@ -480,27 +512,168 @@ def create_iquant_router() -> APIRouter:
 
         _save_holdings(_state["holdings"])
 
+    # --- Monitoring helpers ---
+
+    SIGNAL_TIMEOUT_MINUTES = 5  # alert if signal not acked within this time
+    SIGNAL_EXPIRY_MINUTES = 10  # auto-expire signal after this time (no execution)
+    HEARTBEAT_TIMEOUT_MINUTES = 3  # alert if iQuant stops polling for this long
+    TRADING_HOURS = (time(9, 30), time(15, 0))
+
+    async def _check_signal_timeout(now_bj: datetime) -> None:
+        """Alert if any pending signal has not been acked within SIGNAL_TIMEOUT_MINUTES."""
+        for sig in _state["pending_signals"]:
+            pushed_at = sig.get("pushed_at")
+            if not pushed_at:
+                continue
+            age_minutes = (now_bj - pushed_at).total_seconds() / 60
+            # Only alert once per signal (mark it)
+            if age_minutes >= SIGNAL_TIMEOUT_MINUTES and not sig.get("_timeout_alerted"):
+                sig["_timeout_alerted"] = True
+                direction = "买入" if sig["type"] == "buy" else "卖出"
+                detail = (
+                    f"{direction}信号未执行!\n"
+                    f"股票: {sig['stock_code']} {sig.get('stock_name', '')}\n"
+                    f"推送时间: {sig.get('created_at', '')}\n"
+                    f"已等待: {age_minutes:.0f}分钟\n"
+                    f"可能原因: iQuant/QMT掉线或未运行"
+                )
+                logger.error(f"V15 signal timeout: {sig['stock_code']} ({age_minutes:.0f}min)")
+                await _notify_feishu_error("信号超时未执行", detail)
+
+    async def _expire_stale_signals(now_bj: datetime) -> None:
+        """Remove signals older than SIGNAL_EXPIRY_MINUTES. Alert + discard."""
+        still_pending: list[dict] = []
+        for sig in _state["pending_signals"]:
+            pushed_at = sig.get("pushed_at")
+            if not pushed_at:
+                still_pending.append(sig)
+                continue
+            age_minutes = (now_bj - pushed_at).total_seconds() / 60
+            if age_minutes >= SIGNAL_EXPIRY_MINUTES:
+                direction = "买入" if sig["type"] == "buy" else "卖出"
+                detail = (
+                    f"{direction}信号已过期作废!\n"
+                    f"股票: {sig['stock_code']} {sig.get('stock_name', '')}\n"
+                    f"推送时间: {sig.get('created_at', '')}\n"
+                    f"过期时长: {age_minutes:.0f}分钟\n"
+                    f"信号已自动移除，如需交易请手动下单"
+                )
+                logger.error(
+                    f"V15 signal expired: {sig['stock_code']} "
+                    f"({age_minutes:.0f}min), removed"
+                )
+                await _notify_feishu_error("信号过期作废", detail)
+            else:
+                still_pending.append(sig)
+        _state["pending_signals"] = still_pending
+
+    async def _check_heartbeat(now_bj: datetime, alert_sent_date: str) -> str:
+        """Alert if iQuant has not polled during trading hours. Returns updated alert date."""
+        ex_date = now_bj.strftime("%Y-%m-%d")
+        ex_time = now_bj.time()
+
+        # Only check during trading hours
+        if not (TRADING_HOURS[0] <= ex_time <= TRADING_HOURS[1]):
+            return alert_sent_date
+
+        # Don't re-alert same day
+        if alert_sent_date == ex_date:
+            return alert_sent_date
+
+        last_poll = _state.get("last_poll_time")
+
+        if last_poll is None:
+            # Never polled today — alert after 09:33 (give 3min for startup)
+            if ex_time >= time(9, 33):
+                logger.error("V15 heartbeat: iQuant has NEVER polled today")
+                await _notify_feishu_error(
+                    "iQuant未连接",
+                    "iQuant脚本今天从未连接服务器\n"
+                    "请检查QMT是否已启动并运行iquant_live.py",
+                )
+                return ex_date
+        else:
+            gap_minutes = (now_bj - last_poll).total_seconds() / 60
+            if gap_minutes >= HEARTBEAT_TIMEOUT_MINUTES:
+                last_str = last_poll.strftime("%H:%M:%S")
+                logger.error(
+                    f"V15 heartbeat: iQuant offline {gap_minutes:.0f}min (last={last_str})"
+                )
+                await _notify_feishu_error(
+                    "iQuant掉线",
+                    f"iQuant已失联 {gap_minutes:.0f} 分钟\n"
+                    f"最后心跳: {last_str}\n"
+                    f"请检查QMT是否正常运行",
+                )
+                return ex_date
+
+        return alert_sent_date
+
+    async def _send_readiness_report(now_bj: datetime) -> None:
+        """Send daily readiness report at 09:30."""
+        holdings = _state["holdings"]
+        last_poll = _state.get("last_poll_time")
+        poll_status = "未连接"
+        if last_poll:
+            gap = (now_bj - last_poll).total_seconds()
+            if gap < 120:
+                poll_status = f"在线 (最近{gap:.0f}秒前)"
+            else:
+                poll_status = f"离线 ({gap / 60:.0f}分钟未响应)"
+
+        lines = [
+            "[V15] 每日就绪报告",
+            f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
+            f"iQuant状态: {poll_status}",
+            f"当前持仓: {len(holdings)}只",
+        ]
+        if holdings:
+            for h in holdings:
+                buy_date = h.get("buy_date", "?")
+                lines.append(f"  - {h['code']} {h.get('name', '')} (买入: {buy_date})")
+            lines.append("今日将跳过扫描(持仓中)")
+        else:
+            lines.append("今日将执行V15扫描(09:38-10:00)")
+
+        msg = "\n".join(lines)
+        logger.info("V15 readiness report sent")
+
+        try:
+            from src.common.feishu_bot import FeishuBot
+
+            bot = FeishuBot()
+            if bot.is_configured():
+                await bot.send_message(msg)
+        except Exception:
+            logger.warning("Failed to send readiness report", exc_info=True)
+
     # --- V15 Background scheduler ---
 
     async def _signal_scheduler() -> None:
-        """V15 background scheduler: T+2 adaptive sell.
+        """V15 background scheduler: T+2 adaptive sell + monitoring.
 
-        Three timing windows:
-        1. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
-        2. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
-        3. SELL (14:50-14:58): Push SELL signals for marked holdings
+        Trading windows:
+        1. READINESS (09:30): Daily readiness report via Feishu
+        2. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
+        3. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
+        4. SELL (14:50-14:58): Push SELL signals for marked holdings
 
-        Timing uses Beijing TZ (local clock).
+        Continuous monitoring (every 30s during trading hours):
+        - Signal timeout: alert if pending signal not acked within 5 minutes
+        - Heartbeat: alert if iQuant stops polling for 3 minutes
         """
         GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
         SCAN_WINDOW = (time(9, 38), time(10, 0))
         SELL_WINDOW = (time(14, 50), time(14, 58))
+        READINESS_TIME = time(9, 30)
 
         logger.info("V15 signal scheduler started")
 
         gap_done_date = ""
         scan_done_date = ""
         sell_done_date = ""
+        readiness_done_date = ""
+        heartbeat_alert_date = ""
 
         try:
             while True:
@@ -509,7 +682,19 @@ def create_iquant_router() -> APIRouter:
                 ex_time = now_bj.time().replace(second=0, microsecond=0)
                 today_date = now_bj.date()
 
-                # --- GAP CHECK: 09:25-09:35 ---
+                # --- READINESS REPORT: 09:30 ---
+                if (
+                    readiness_done_date != ex_date
+                    and ex_time >= READINESS_TIME
+                    and ex_time <= time(9, 35)
+                ):
+                    readiness_done_date = ex_date
+                    await _send_readiness_report(now_bj)
+
+                if readiness_done_date != ex_date and ex_time > time(9, 35):
+                    readiness_done_date = ex_date
+
+                # --- GAP CHECK: 09:31-09:35 ---
                 if (
                     gap_done_date != ex_date
                     and GAP_CHECK_WINDOW[0] <= ex_time <= GAP_CHECK_WINDOW[1]
@@ -561,6 +746,10 @@ def create_iquant_router() -> APIRouter:
                                 await _notify_feishu_signal(_state["pending_signals"][-1])
                             else:
                                 logger.info("V15 scan: no recommendation today")
+                                await _notify_feishu_error(
+                                    "V15扫描结果",
+                                    "今日V15扫描完成，无符合条件的推荐股票",
+                                )
                         except Exception as e:
                             error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                             logger.error(f"V15 scan failed: {error_detail}")
@@ -596,6 +785,11 @@ def create_iquant_router() -> APIRouter:
                 if sell_done_date != ex_date and ex_time > SELL_WINDOW[1]:
                     sell_done_date = ex_date
 
+                # --- CONTINUOUS MONITORING (every loop iteration) ---
+                await _expire_stale_signals(now_bj)
+                await _check_signal_timeout(now_bj)
+                heartbeat_alert_date = await _check_heartbeat(now_bj, heartbeat_alert_date)
+
                 # Adaptive sleep
                 all_done = (
                     gap_done_date == ex_date
@@ -625,10 +819,21 @@ def create_iquant_router() -> APIRouter:
 
     @router.get("/pending-signals")
     async def pending_signals(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Return all pending (unacknowledged) signals."""
+        """Return all pending (unacknowledged) signals.
+
+        Safety: filters out expired signals so QMT never executes stale orders.
+        """
+        now = datetime.now(BEIJING_TZ)
+        _state["last_poll_time"] = now
+        expiry_seconds = SIGNAL_EXPIRY_MINUTES * 60
+        active = [
+            s for s in _state["pending_signals"]
+            if not s.get("pushed_at")
+            or (now - s["pushed_at"]).total_seconds() < expiry_seconds
+        ]
         return {
-            "signals": _state["pending_signals"],
-            "count": len(_state["pending_signals"]),
+            "signals": active,
+            "count": len(active),
         }
 
     @router.post("/ack-signal")
@@ -670,13 +875,17 @@ def create_iquant_router() -> APIRouter:
                 f"V15: BUY acked {found['stock_code']} @ {found.get('latest_price', '?')}, "
                 f"added to holdings ({len(_state['holdings'])} total)"
             )
+            await _notify_feishu_ack(found)
         elif found["type"] == "sell":
-            _state["holdings"] = [h for h in _state["holdings"] if h["code"] != found["stock_code"]]
+            _state["holdings"] = [
+                h for h in _state["holdings"] if h["code"] != found["stock_code"]
+            ]
             _save_holdings(_state["holdings"])
             logger.info(
                 f"V15: SELL acked {found['stock_code']}, "
                 f"removed from holdings ({len(_state['holdings'])} remaining)"
             )
+            await _notify_feishu_ack(found)
 
         return {"success": True, "signal": found}
 

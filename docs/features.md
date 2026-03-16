@@ -701,6 +701,113 @@ strategy:
 
 ---
 
+### [STR-005] V15 Live Trading Interface (iQuant API)
+
+**Status**: In Progress
+
+**Description**: Live trading interface for V15 momentum board scanning strategy, deployed as a set of HTTP API endpoints (iQuant API). QMT polls these endpoints for buy/sell signals and acknowledges execution. Uses T+2 adaptive sell with T+1 early exit on large gap-down.
+
+**Strategy: V15 Seven-Layer Parametric Funnel + V3 Regression Scoring**
+
+| Layer | Name | Logic |
+|-------|------|-------|
+| L1 | Gain Filter | gain_from_open ≥ 0.2578%, main board + SME (00/60), non-ST, price ≥ ¥12 |
+| L2 | Board Lookup | Reverse concept lookup via LocalConceptMapper |
+| L3 | Hot Boards | Boards with ≥2 L1-qualifying stocks, exclude blacklist (物联网/医疗器械概念/特高压/冷链物流/特钢概念/三胎概念) |
+| L4 | Constituent Expansion | All stocks in hot boards, re-apply L1 gain + price + ST filters |
+| L5 | Volume Filter | turnover_amp = early_vol/(avg_vol×0.125), keep [0.498, 6.0] |
+| L6 | Reversal Filter | ReversalFactorFilter(percentile=95, floor=0.15, min_sample=10) |
+| L6.5 | Limit-Up Filter | open ≥ limit_price OR price_940 ≥ limit_price → remove |
+| L6.6 | Upper Shadow Filter | (high - max(open, price_940))/open > 3% → remove (gain≥9.5% exempt) |
+| L7 | V3 Score | Linear regression, pick highest-scored stock |
+
+**V3 Scoring Model**:
+
+| Factor | Computation | Coefficient |
+|--------|-------------|-------------|
+| intercept | — | +0.0106 |
+| trend_10d | (close[-1]-close[-11])/close[-11] | -0.1034 |
+| avg_daily_return_20d | mean(daily returns over 20d) | +1.0699 |
+| intraday_range_940 | (high_940-low_940)/open | -0.3293 |
+| consecutive_up_days | consecutive close > prev_close | +0.0089 |
+| avg_market_open_gain | market-wide avg (open-prev_close)/prev_close | +0.4792 |
+| trend_consistency | avg_daily_return / (volatility + 0.001) | +0.002 |
+
+**T+2 Adaptive Sell**:
+- **T+1 gap check** (09:25-09:35): if gap = (open - entry_price) / entry_price < -3% → mark early exit, sell at 14:50-14:58
+- **T+2** (default): mark sell at gap check, sell at 14:50-14:58
+- **Multi-day outage**: any holding with trading_days ≥ 2 since buy → sell
+
+**Three-Window Scheduler**:
+
+| Window | Time | Action |
+|--------|------|--------|
+| GAP_CHECK | 09:25-09:35 | Check holdings: T+1 gap → early exit; T+2 → mark sell |
+| SCAN | 09:38-10:00 | If no holdings → run V15 scan → push BUY signal |
+| SELL | 14:50-14:58 | Push SELL signal for all marked holdings |
+
+**Signal Flow**:
+1. Server pushes signal to `_state["pending_signals"]`
+2. QMT polls `GET /api/iquant/pending-signals` → receives signal
+3. QMT executes order, then `POST /api/iquant/ack-signal` with signal_id
+4. BUY ack: record entry_price, save holdings to disk
+5. SELL ack: remove from holdings, save to disk
+
+**Holdings Persistence** (trading safety):
+- Written to `data/v15_holdings.json` after every mutation
+- Loaded on startup from file (survives service restart)
+- File corruption → raise RuntimeError (fail-fast, no silent degradation)
+- Structure: `{code, name, buy_date, entry_price, marked_sell_today, early_exit}`
+
+**Data Sources**:
+- Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
+- Historical data: OSS cache (`TsanghiBacktestCache`) via `IQuantHistoricalAdapter`
+- Board data: `LocalConceptMapper` (local JSON files)
+- Fundamentals (ST filter): PostgreSQL `stock_fundamentals` table
+- Trade calendar: akshare `tool_trade_date_hist_sina()` (cached in memory)
+
+**Monitoring & Alerting** (Feishu notifications):
+
+| Alert | Trigger | Content |
+|-------|---------|---------|
+| 每日就绪报告 | 09:30 | iQuant连接状态、持仓数、今日计划(扫描/跳过) |
+| 买入/卖出信号推送 | Signal pushed | 股票代码、价格、板块、V3评分 |
+| 信号执行确认 | Signal acked | 股票代码、价格、推送→执行时间差 |
+| 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
+| iQuant未连接 | 09:33 无心跳 | 提示检查QMT是否启动 |
+| iQuant掉线 | Poll间隔 > 3min | 最后心跳时间、失联时长 |
+| 扫描无推荐 | Scan returns None | 通知今日无符合条件股票 |
+| 扫描/跳空失败 | Exception | 完整错误堆栈 |
+
+**Key Files**:
+- `src/strategy/strategies/v15_scanner.py` — V15 7-layer funnel + V3 regression scoring
+- `src/web/iquant_routes.py` — iQuant API router with T+2 scheduler + monitoring
+- `src/web/app.py` — OSS cache injection into iQuant router
+- `src/data/clients/iquant_historical_adapter.py` — Historical data adapter (duck-types IFinDHttpClient)
+- `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
+
+**Differences from STR-004**:
+- Pure parametric (no LLM board relevance filter)
+- V3 regression scoring (not Z-score composite)
+- T+2 adaptive sell (not T+1 sell at open)
+- 7-layer funnel with tighter thresholds (gain 0.2578% vs 0.56%, price ≥ ¥12, turnover [0.498, 6.0])
+- Includes L6.5 limit-up filter + L6.6 upper shadow filter (not in STR-004)
+- Includes SME (002) stocks (STR-004 excludes them)
+- Single position only (STR-004's backtest also holds 1 stock but uses different position management)
+
+**Checklist**:
+- [x] V15Scanner: 7-layer funnel + V3 scoring
+- [x] iQuant routes: T+2 adaptive scheduler with three windows
+- [x] Holdings persistence to JSON file
+- [x] Trade calendar via akshare
+- [x] OSS cache injection from app.py
+- [x] Feishu notification with V15 prefix
+- [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
+- [ ] Unit tests
+- [ ] Production deployment verification
+
+---
+
 ## Module: Trading
 
 ### [TRD-000] Trading Data Persistence
