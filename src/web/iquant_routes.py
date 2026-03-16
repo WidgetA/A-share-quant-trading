@@ -251,17 +251,42 @@ def create_iquant_router() -> APIRouter:
         from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
         from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.data.database.v15_scan_db import create_v15_scan_db_from_config
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
         tushare_token = get_tushare_token()
         tushare = TushareRealtimeClient(token=tushare_token)
-        await tushare.start()
+        try:
+            await tushare.start()
+        except Exception as e:
+            await _notify_feishu_error(
+                "Tushare连接失败",
+                f"Tushare实时行情客户端启动失败\n错误: {e}\n"
+                f"V15交易功能不可用，请检查Tushare token和网络",
+            )
+            raise
         _state["realtime_client"] = tushare
 
         fdb = create_fundamentals_db_from_config()
-        await fdb.connect()
+        try:
+            await fdb.connect()
+        except Exception as e:
+            await _notify_feishu_error(
+                "数据库连接失败",
+                f"PostgreSQL基本面数据库连接失败\n错误: {e}\nV15交易功能不可用，请检查数据库配置",
+            )
+            raise
         _state["fundamentals_db"] = fdb
+
+        # V15 scan history DB (non-critical — log and continue on failure)
+        try:
+            v15db = create_v15_scan_db_from_config()
+            await v15db.connect()
+            _state["v15_scan_db"] = v15db
+        except Exception as e:
+            logger.warning(f"V15ScanDB init failed (scan history disabled): {e}")
+            _state["v15_scan_db"] = None
 
         # Build historical adapter with OSS cache if available
         cache = _state.get("tsanghi_cache")
@@ -281,7 +306,14 @@ def create_iquant_router() -> APIRouter:
         _state["holdings"] = _load_holdings()
 
         # Pre-load trade calendar
-        await _get_trade_calendar()
+        try:
+            await _get_trade_calendar()
+        except Exception as e:
+            await _notify_feishu_error(
+                "交易日历加载失败",
+                f"无法加载交易日历(Tushare)\n错误: {e}\n跳空检测将无法判断交易日",
+            )
+            raise
 
         # Start V15 background scheduler
         _state["scheduler_task"] = asyncio.create_task(_signal_scheduler())
@@ -423,6 +455,17 @@ def create_iquant_router() -> APIRouter:
         )
 
         scan_result = await scanner.scan(price_snapshots)
+        today = datetime.now(BEIJING_TZ).date()
+
+        # Persist top-5 scored stocks (non-critical, never blocks trading)
+        if scan_result.all_scored and _state.get("v15_scan_db"):
+            try:
+                await _state["v15_scan_db"].save_top_n(
+                    today, scan_result.all_scored, scan_result.final_candidates
+                )
+            except Exception as e:
+                logger.warning(f"V15ScanDB save failed: {e}")
+
         rec = scan_result.recommended
         if not rec:
             return None
@@ -687,6 +730,13 @@ def create_iquant_router() -> APIRouter:
 
         except asyncio.CancelledError:
             logger.info("V15 monitoring scheduler stopped")
+        except Exception as e:
+            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            logger.critical(f"V15 monitoring scheduler CRASHED: {error_detail}")
+            await _notify_feishu_error(
+                "V15监控调度器崩溃",
+                f"监控调度器意外退出!\n{error_detail}\n心跳检测/信号超时/就绪报告将全部停止",
+            )
 
     def _start_monitoring() -> None:
         """Start the monitoring scheduler. Safe to call at any time."""
@@ -826,6 +876,13 @@ def create_iquant_router() -> APIRouter:
 
         except asyncio.CancelledError:
             logger.info("V15 signal scheduler stopped")
+        except Exception as e:
+            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            logger.critical(f"V15 signal scheduler CRASHED: {error_detail}")
+            await _notify_feishu_error(
+                "V15交易调度器崩溃",
+                f"信号调度器意外退出!\n{error_detail}\nV15今日将无法自动交易，请立即检查",
+            )
 
     # --- Endpoints ---
 
