@@ -559,8 +559,7 @@ def create_iquant_router() -> APIRouter:
                     f"信号已自动移除，如需交易请手动下单"
                 )
                 logger.error(
-                    f"V15 signal expired: {sig['stock_code']} "
-                    f"({age_minutes:.0f}min), removed"
+                    f"V15 signal expired: {sig['stock_code']} ({age_minutes:.0f}min), removed"
                 )
                 await _notify_feishu_error("信号过期作废", detail)
             else:
@@ -588,8 +587,7 @@ def create_iquant_router() -> APIRouter:
                 logger.error("V15 heartbeat: iQuant has NEVER polled today")
                 await _notify_feishu_error(
                     "iQuant未连接",
-                    "iQuant脚本今天从未连接服务器\n"
-                    "请检查QMT是否已启动并运行iquant_live.py",
+                    "iQuant脚本今天从未连接服务器\n请检查QMT是否已启动并运行iquant_live.py",
                 )
                 return ex_date
         else:
@@ -827,9 +825,9 @@ def create_iquant_router() -> APIRouter:
         _state["last_poll_time"] = now
         expiry_seconds = SIGNAL_EXPIRY_MINUTES * 60
         active = [
-            s for s in _state["pending_signals"]
-            if not s.get("pushed_at")
-            or (now - s["pushed_at"]).total_seconds() < expiry_seconds
+            s
+            for s in _state["pending_signals"]
+            if not s.get("pushed_at") or (now - s["pushed_at"]).total_seconds() < expiry_seconds
         ]
         return {
             "signals": active,
@@ -877,9 +875,7 @@ def create_iquant_router() -> APIRouter:
             )
             await _notify_feishu_ack(found)
         elif found["type"] == "sell":
-            _state["holdings"] = [
-                h for h in _state["holdings"] if h["code"] != found["stock_code"]
-            ]
+            _state["holdings"] = [h for h in _state["holdings"] if h["code"] != found["stock_code"]]
             _save_holdings(_state["holdings"])
             logger.info(
                 f"V15: SELL acked {found['stock_code']}, "
