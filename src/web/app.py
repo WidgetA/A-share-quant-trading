@@ -160,6 +160,10 @@ def create_app(
                         f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
                         f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
                     )
+                    # Inject cache into iQuant router for V15 historical data
+                    iquant_rtr = getattr(app.state, "iquant_router", None)
+                    if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
+                        iquant_rtr._inject_cache(oss_cache)
                 else:
                     logger.warning("load_from_oss returned None — check OSS config/logs")
             except Exception as e:
@@ -194,6 +198,15 @@ def create_app(
                 f"Trading safety audit: {critical} CRITICAL violations found! "
                 f"Run 'uv run python scripts/audit_trading_safety.py' for details."
             )
+
+        # Auto-start iQuant V15 scheduler (must not depend on QMT polling)
+        iquant_rtr = getattr(app.state, "iquant_router", None)
+        if iquant_rtr and hasattr(iquant_rtr, "_iquant_init"):
+            try:
+                await iquant_rtr._iquant_init()
+                logger.info("iQuant V15 scheduler auto-started at startup")
+            except Exception as e:
+                logger.error(f"Failed to auto-start iQuant scheduler: {e}")
 
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own

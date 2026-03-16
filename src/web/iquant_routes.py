@@ -305,6 +305,7 @@ def create_iquant_router() -> APIRouter:
         logger.info("V15 iQuant resources cleaned up")
 
     router._iquant_cleanup = _cleanup_resources  # type: ignore[attr-defined]
+    router._iquant_init = _ensure_resources  # type: ignore[attr-defined]
 
     # --- Cache injection (called from app.py after OSS load) ---
 
