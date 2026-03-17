@@ -479,7 +479,7 @@ def create_iquant_router() -> APIRouter:
                 open_price=quote.open_price,
                 prev_close=prev_closes.get(code, 0.0),
                 latest_price=quote.latest_price,
-                early_volume=quote.volume,
+                early_volume=quote.early_volume,
                 high_price=quote.high_price,
                 low_price=quote.low_price,
             )

@@ -42,8 +42,9 @@ class TushareQuote:
     latest_price: float
     high_price: float
     low_price: float
-    volume: float  # in shares (股), cumulative
+    volume: float  # in shares (股), cumulative for full day
     amount: float  # in yuan, cumulative
+    early_volume: float = 0.0  # 9:30-9:40 volume only (shares)
 
     @property
     def is_trading(self) -> bool:
@@ -297,6 +298,7 @@ class TushareRealtimeClient:
 
         # Group rows by ts_code
         by_code: dict[str, list[list]] = {}
+        has_time = "time" in idx
         for row in items:
             ts_code = row[idx["ts_code"]]
             by_code.setdefault(ts_code, []).append(row)
@@ -313,6 +315,21 @@ class TushareRealtimeClient:
                 total_vol = sum(r[idx["vol"]] for r in rows if r[idx["vol"]] is not None)
                 total_amount = sum(r[idx["amount"]] for r in rows if r[idx["amount"]] is not None)
 
+                # early_volume: only bars with time <= 09:40
+                early_vol = 0.0
+                if has_time:
+                    for r in rows:
+                        t = str(r[idx["time"]])
+                        # time formats: "09:40:00", "09:40", "093000" etc.
+                        hhmm = t.replace(":", "")[:4]
+                        if hhmm <= "0940":
+                            v = r[idx["vol"]]
+                            if v is not None:
+                                early_vol += v
+                # If no time field, all volume is treated as early (9:40 scan)
+                if early_vol == 0.0:
+                    early_vol = total_vol
+
                 if first_open and last_close:
                     quotes[bare] = TushareQuote(
                         stock_code=bare,
@@ -322,6 +339,7 @@ class TushareRealtimeClient:
                         low_price=float(min_low) if min_low else 0.0,
                         volume=float(total_vol),
                         amount=float(total_amount),
+                        early_volume=float(early_vol),
                     )
             except (ValueError, TypeError, IndexError) as e:
                 logger.warning(f"Failed to aggregate Tushare bars for {ts_code}: {e}")
