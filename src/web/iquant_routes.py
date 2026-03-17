@@ -1156,21 +1156,21 @@ def create_iquant_router() -> APIRouter:
         """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
         await _ensure_resources()
 
-        # Diagnostic: sample one stock's raw quote data
+        # Diagnostic: raw rt_min bars for 600519
         rt_client = _state["realtime_client"]
-        diag_quotes = await rt_client.batch_get_quotes(["600519"])
-        diag: dict = {}
-        if diag_quotes:
-            q = next(iter(diag_quotes.values()))
-            diag = {
-                "sample_code": q.stock_code,
-                "early_close": q.early_close,
-                "latest_price": q.latest_price,
-                "early_volume": q.early_volume,
-                "total_volume": q.volume,
-                "early_high": q.early_high,
-                "high_price": q.high_price,
-            }
+        raw_data = await rt_client._api_call(
+            "rt_min",
+            {"ts_code": "600519.SH", "freq": "1MIN"},
+            fields="ts_code,time,open,close,high,low,vol,amount",
+        )
+        raw_items = raw_data.get("data", {}).get("items", [])
+        raw_fields = raw_data.get("data", {}).get("fields", [])
+        diag: dict = {
+            "fields": raw_fields,
+            "bar_count": len(raw_items),
+            "first_3_bars": raw_items[:3],
+            "last_3_bars": raw_items[-3:] if len(raw_items) > 3 else [],
+        }
 
         try:
             rec = await _run_v15_scan()
