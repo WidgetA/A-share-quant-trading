@@ -44,7 +44,11 @@ class TushareQuote:
     low_price: float
     volume: float  # in shares (股), cumulative for full day
     amount: float  # in yuan, cumulative
-    early_volume: float = 0.0  # 9:30-9:40 volume only (shares)
+    # 9:30-9:40 snapshot (for V15 scan — same result regardless of call time)
+    early_close: float = 0.0  # 09:40 bar close (= 9:40 price)
+    early_high: float = 0.0
+    early_low: float = 0.0
+    early_volume: float = 0.0  # shares
 
     @property
     def is_trading(self) -> bool:
@@ -315,20 +319,29 @@ class TushareRealtimeClient:
                 total_vol = sum(r[idx["vol"]] for r in rows if r[idx["vol"]] is not None)
                 total_amount = sum(r[idx["amount"]] for r in rows if r[idx["amount"]] is not None)
 
-                # early_volume: only bars with time <= 09:40
-                early_vol = 0.0
+                # 9:30-9:40 snapshot: filter bars with time <= 09:40
+                early_bars = []
                 if has_time:
                     for r in rows:
                         t = str(r[idx["time"]])
-                        # time formats: "09:40:00", "09:40", "093000" etc.
                         hhmm = t.replace(":", "")[:4]
                         if hhmm <= "0940":
-                            v = r[idx["vol"]]
-                            if v is not None:
-                                early_vol += v
-                # If no time field, all volume is treated as early (9:40 scan)
-                if early_vol == 0.0:
-                    early_vol = total_vol
+                            early_bars.append(r)
+
+                if early_bars:
+                    e_close = float(early_bars[-1][idx["close"]])
+                    hi = idx["high"]
+                    lo = idx["low"]
+                    vo = idx["vol"]
+                    e_high = float(max(r[hi] for r in early_bars if r[hi] is not None))
+                    e_low = float(min(r[lo] for r in early_bars if r[lo] is not None))
+                    e_vol = float(sum(r[vo] for r in early_bars if r[vo] is not None))
+                else:
+                    # No time field or no early bars → use full-day values
+                    e_close = float(last_close)
+                    e_high = float(max_high) if max_high else 0.0
+                    e_low = float(min_low) if min_low else 0.0
+                    e_vol = float(total_vol)
 
                 if first_open and last_close:
                     quotes[bare] = TushareQuote(
@@ -339,7 +352,10 @@ class TushareRealtimeClient:
                         low_price=float(min_low) if min_low else 0.0,
                         volume=float(total_vol),
                         amount=float(total_amount),
-                        early_volume=float(early_vol),
+                        early_close=e_close,
+                        early_high=e_high,
+                        early_low=e_low,
+                        early_volume=e_vol,
                     )
             except (ValueError, TypeError, IndexError) as e:
                 logger.warning(f"Failed to aggregate Tushare bars for {ts_code}: {e}")

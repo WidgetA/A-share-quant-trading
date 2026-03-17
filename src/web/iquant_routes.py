@@ -478,10 +478,10 @@ def create_iquant_router() -> APIRouter:
                 stock_name="",
                 open_price=quote.open_price,
                 prev_close=prev_closes.get(code, 0.0),
-                latest_price=quote.latest_price,
+                latest_price=quote.early_close,
                 early_volume=quote.early_volume,
-                high_price=quote.high_price,
-                low_price=quote.low_price,
+                high_price=quote.early_high,
+                low_price=quote.early_low,
             )
 
         scanner = V15Scanner(
