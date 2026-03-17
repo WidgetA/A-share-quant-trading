@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         ScanResult,
         SelectedStock,
     )
+    from src.strategy.strategies.v15_scanner import V15ScanResult
 
 from src.common.config import get_feishu_config
 
@@ -340,6 +341,53 @@ Limit-up (skipped):
         else:
             lines.append("")
             lines.append("⭐ 推荐: 无 (今日无符合条件的推荐标的)")
+
+        return await self.send_message("\n".join(lines))
+
+    async def send_v15_top5_report(
+        self,
+        scan_result: V15ScanResult,
+        scan_time: datetime | None = None,
+    ) -> bool:
+        """Send V15 scanner top-5 scored candidates to Feishu."""
+        now = scan_time or datetime.now(BEIJING_TZ)
+        time_str = now.strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"[V15] 每日扫描报告 ({time_str})",
+            (
+                f"初筛: {scan_result.initial_gainers_count}只 | "
+                f"热门板块: {scan_result.hot_board_count}个 | "
+                f"L5: {scan_result.l5_count} | L6: {scan_result.l6_count} | "
+                f"最终: {scan_result.final_candidates}只"
+            ),
+        ]
+
+        rec = scan_result.recommended
+        if rec:
+            lines.append("")
+            lines.append(f"推荐: {rec.stock_code} {rec.stock_name}")
+            lines.append(
+                f"  板块: {rec.board_name} | V3: {rec.v3_score:+.4f} | "
+                f"盘中涨: {rec.gain_from_open_pct:+.2f}% | "
+                f"换手放大: {rec.turnover_amp:.2f}x"
+            )
+        else:
+            lines.append("")
+            lines.append("推荐: 无")
+
+        scored = scan_result.all_scored
+        if scored:
+            lines.append("")
+            lines.append("评分前5:")
+            for i, s in enumerate(scored[:5]):
+                lines.append(
+                    f"{i + 1}. {s.stock_code} {s.stock_name}  "
+                    f"V3={s.v3_score:+.4f}  {s.board_name}  "
+                    f"涨{s.gain_from_open_pct:+.2f}%  "
+                    f"换手{s.turnover_amp:.2f}x  "
+                    f"连涨{s.consecutive_up_days}天"
+                )
 
         return await self.send_message("\n".join(lines))
 

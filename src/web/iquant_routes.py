@@ -136,6 +136,18 @@ async def _notify_feishu_ack(signal: dict) -> None:
         logger.warning("Failed to send Feishu ack notification", exc_info=True)
 
 
+async def _notify_feishu_v15_top5(scan_result) -> None:
+    """Send V15 top-5 scored report to Feishu. Best-effort, never raises."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if bot.is_configured():
+            await bot.send_v15_top5_report(scan_result)
+    except Exception:
+        logger.warning("Failed to send Feishu V15 top-5 report", exc_info=True)
+
+
 async def _notify_feishu_signal(signal: dict) -> None:
     """Send signal notification to Feishu. Best-effort, never raises."""
     try:
@@ -465,6 +477,9 @@ def create_iquant_router() -> APIRouter:
                 )
             except Exception as e:
                 logger.warning(f"V15ScanDB save failed: {e}")
+
+        # Push top-5 report to Feishu (non-critical)
+        await _notify_feishu_v15_top5(scan_result)
 
         rec = scan_result.recommended
         if not rec:
