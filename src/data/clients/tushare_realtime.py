@@ -324,9 +324,18 @@ class TushareRealtimeClient:
                 if has_time:
                     for r in rows:
                         t = str(r[idx["time"]])
+                        # Handle various formats:
+                        #   "09:31:00", "09:31", "093100",
+                        #   "2026-03-17 09:31:00" (take part after space)
+                        if " " in t:
+                            t = t.split(" ")[-1]
                         hhmm = t.replace(":", "")[:4]
                         if hhmm <= "0940":
                             early_bars.append(r)
+
+                if not early_bars and has_time and rows:
+                    sample_t = str(rows[0][idx["time"]])
+                    logger.warning(f"No early bars for {ts_code}, time format sample: '{sample_t}'")
 
                 if early_bars:
                     e_close = float(early_bars[-1][idx["close"]])
