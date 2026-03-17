@@ -1,74 +1,37 @@
 # === MODULE PURPOSE ===
 # Historical data adapter for the monitor/live scan subsystem.
-# Provides historical lookback data for MomentumQualityFilter.
-# Duck-types IFinDHttpClient so MomentumSectorScanner works unchanged.
+# Duck-types IFinDHttpClient so V15Scanner / MomentumSectorScanner work unchanged.
 
-# === DEPENDENCIES ===
-# - TsanghiBacktestCache (OSS): Primary source — pre-downloaded, zero network calls
-# - akshare: Fallback only — on-the-fly download if no OSS cache available
-# - Realtime client: Duck-typed (TushareRealtimeClient or SinaRealtimeClient)
-#   Must implement as_ifind_format(stock_codes, indicators) -> dict
-
-# === KEY CONCEPTS ===
-# - OSS cache first: If TsanghiBacktestCache is provided, history_quotes reads
-#   from the in-memory cache (loaded from Alibaba Cloud OSS at startup).
-#   This avoids all akshare/East Money API calls, which are unreliable from cloud.
-# - Fallback: If no cache, downloads per-stock via akshare (with retry).
-# - Volume: OSS cache stores 股 (shares); akshare fallback also returns 股.
-# - Fail-fast: download errors raise immediately (trading safety).
+# === DATA FLOW ===
+# - history_quotes(): Downloads from tsanghi daily_latest API (per-date batch).
+#   Data is held in memory for the current trading day so repeated calls
+#   within one scan don't re-download.
+# - real_time_quotation(): Delegates to realtime client (Tushare/Sina).
+# - Volume: tsanghi returns 手 (lots); converted to 股 (shares) at read time.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-import pandas as pd
-
 logger = logging.getLogger(__name__)
-
-# Concurrency limit for parallel tsanghi downloads (fallback only).
-# Keep low (4) to avoid triggering East Money rate limits / connection resets.
-_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(4)
-
-# Retry config for transient network errors (ConnectionError, RemoteDisconnected)
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = 2.0  # seconds, doubles each retry
-
-# akshare column name → iFinD indicator name mapping
-_AKSHARE_TO_IFIND: dict[str, str] = {
-    "日期": "time",
-    "开盘": "open",
-    "收盘": "close",
-    "最高": "high",
-    "最低": "low",
-    "成交量": "volume",  # in 手, needs ×100
-    "成交额": "amount",
-    "换手率": "turnoverRatio",
-    "涨跌幅": "changeRatio",
-    "涨跌额": "change",
-    "振幅": "swing",
-}
-
-# Reverse: iFinD indicator name → akshare column name
-_IFIND_TO_AKSHARE: dict[str, str] = {v: k for k, v in _AKSHARE_TO_IFIND.items() if v != "time"}
 
 
 class IQuantHistoricalAdapter:
     """
     Duck-types IFinDHttpClient for monitor/live scan mode.
 
-    Data sources (in priority order):
-        1. OSS cache (TsanghiBacktestCache) — zero network calls, instant
-        2. akshare on-the-fly download — fallback with retry
+    Data source: tsanghi daily_latest API (per-date batch, 2 calls per date).
+    Data is held in memory for the current trading day so repeated calls
+    within one scan don't re-download. Cleared automatically on new day.
 
     Methods implemented:
-        - history_quotes(): From OSS cache or akshare fallback
+        - history_quotes(): From tsanghi daily_latest API
         - real_time_quotation(): Delegates to realtime client (Tushare/Sina)
         - high_frequency(): Returns empty (live mode uses real_time_quotation)
 
-    Volume convention: akshare returns 手 (lots); converted to 股 (shares).
+    Volume convention: tsanghi returns 手 (lots); converted to 股 (shares) at read time.
     """
 
     def __init__(self, realtime_client: Any, cache: Any = None) -> None:
@@ -77,7 +40,7 @@ class IQuantHistoricalAdapter:
             realtime_client: Duck-typed realtime client for real-time data delegation.
                 Must implement as_ifind_format(stock_codes, indicators) -> dict.
                 Typically TushareRealtimeClient or SinaRealtimeClient.
-            cache: Optional TsanghiBacktestCache for history lookback (avoids akshare API).
+            cache: Optional TsanghiBacktestCache (unused, kept for backward compat).
         """
         if not hasattr(realtime_client, "as_ifind_format"):
             raise TypeError(
@@ -86,15 +49,13 @@ class IQuantHistoricalAdapter:
             )
         self._realtime = realtime_client
 
-        # Build a cache-backed adapter for history_quotes if cache is available
-        self._cached_adapter: Any = None
-        if cache is not None and getattr(cache, "is_ready", False):
-            from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        # In-memory daily data downloaded from tsanghi API.
+        # Keyed by date_str -> {bare_code -> {close, volume, ...}}
+        # Populated on first history_quotes() call, reused within the same day.
+        self._daily_data: dict[str, dict[str, dict]] = {}
+        self._daily_data_loaded_date: str = ""  # YYYY-MM-DD of last load
 
-            self._cached_adapter = TsanghiHistoricalAdapter(cache)
-            logger.info("IQuantHistoricalAdapter: using OSS cache for history_quotes")
-        else:
-            logger.info("IQuantHistoricalAdapter: no OSS cache, will use akshare on-the-fly")
+        logger.info("IQuantHistoricalAdapter: using tsanghi API for history_quotes")
 
     @property
     def is_connected(self) -> bool:
@@ -115,163 +76,113 @@ class IQuantHistoricalAdapter:
         end_date: str,
         function_para: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Fetch historical daily data.
+        """Fetch historical daily data from tsanghi API (daily_latest).
 
-        Primary: reads from OSS cache (zero network calls).
-        Fallback: downloads on-the-fly from akshare (with retry) for cache misses.
+        Downloads all trading dates in [start_date, end_date] via
+        tsanghi daily_latest (2 calls per date: XSHG + XSHE).
+        Data is held in memory for the current trading day so repeated
+        calls within one scan don't re-download.
         """
-        if self._cached_adapter is None:
-            raise RuntimeError(
-                "OSS cache not available — cannot fetch historical data. "
-                "Load the cache before scanning."
-            )
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if self._daily_data_loaded_date != today_str:
+            # New day — clear stale in-memory data
+            self._daily_data.clear()
+            self._daily_data_loaded_date = today_str
 
-        # Try OSS cache first
-        result = await self._cached_adapter.history_quotes(
-            codes, indicators, start_date, end_date, function_para
-        )
+        # Download any missing dates
+        await self._ensure_daily_range(start_date, end_date)
 
-        # Check which codes are missing from cache (no table entry)
-        cached_codes = {t["thscode"] for t in result.get("tables", [])}
-        all_codes = [c.strip() for c in codes.split(",") if c.strip()]
-        missing = [c for c in all_codes if c not in cached_codes]
-
-        if missing:
-            logger.warning(
-                f"OSS cache miss for {len(missing)} stock(s): "
-                f"{', '.join(missing[:5])}{'...' if len(missing) > 5 else ''} "
-                f"— skipped (akshare fallback disabled)"
-            )
-
-        return result
-
-    async def _history_quotes_akshare(
-        self,
-        codes: str,
-        indicators: str,
-        start_date: str,
-        end_date: str,
-    ) -> dict[str, Any]:
-        """Fallback: fetch historical daily data via akshare on-the-fly."""
+        # Build iFinD-format response from in-memory data
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         indicator_list = [ind.strip() for ind in indicators.split(",")]
-
-        # Fetch all stocks concurrently with semaphore
-        tasks = [
-            self._fetch_single_stock(full_code, indicator_list, start_date, end_date)
-            for full_code in code_list
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
         tables: list[dict[str, Any]] = []
-        for full_code, result in zip(code_list, results):
-            if isinstance(result, BaseException):
-                logger.error(f"akshare fetch failed for {full_code}: {result}")
-                raise result  # fail-fast: propagate first error
-            if result is not None:
-                tables.append(result)
+
+        for full_code in code_list:
+            bare = full_code.split(".")[0]
+            time_vals: list[str] = []
+            indicator_data: dict[str, list] = {ind: [] for ind in indicator_list}
+
+            d = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+            while d <= end_d:
+                ds = d.strftime("%Y-%m-%d")
+                day = self._daily_data.get(ds, {}).get(bare)
+                if day:
+                    time_vals.append(ds)
+                    for ind in indicator_list:
+                        val = day.get(ind)
+                        # tsanghi volume is in 手; convert to 股 at read time
+                        if ind == "volume" and val is not None:
+                            val = val * 100
+                        indicator_data[ind].append(val)
+                d += timedelta(days=1)
+
+            if time_vals:
+                table = {"time": time_vals, **indicator_data}
+                tables.append({"thscode": full_code, "table": table})
 
         return {"errorcode": 0, "tables": tables}
 
-    async def _fetch_single_stock(
-        self,
-        full_code: str,
-        indicator_list: list[str],
-        start_date: str,
-        end_date: str,
-    ) -> dict[str, Any] | None:
-        """Fetch daily data for a single stock via akshare (with retry)."""
-        import akshare as ak
+    async def _ensure_daily_range(self, start_date: str, end_date: str) -> None:
+        """Download missing dates from tsanghi daily_latest API."""
+        from src.data.clients.tsanghi_client import TsanghiClient
 
-        bare = full_code.split(".")[0]
+        d = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
 
-        async with _DOWNLOAD_SEMAPHORE:
-            for attempt in range(1, _MAX_RETRIES + 1):
-                try:
-                    df = await asyncio.to_thread(
-                        ak.stock_zh_a_hist,
-                        symbol=bare,
-                        period="daily",
-                        start_date=start_date.replace("-", ""),
-                        end_date=end_date.replace("-", ""),
-                        adjust="qfq",
-                    )
-                    break  # success
-                except (ConnectionError, OSError) as e:
-                    if attempt < _MAX_RETRIES:
-                        wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
-                        logger.warning(
-                            f"akshare {bare} attempt {attempt}/{_MAX_RETRIES} failed "
-                            f"({type(e).__name__}), retrying in {wait:.0f}s"
-                        )
-                        await asyncio.sleep(wait)
-                    else:
-                        logger.error(
-                            f"akshare stock_zh_a_hist failed for {bare} "
-                            f"after {_MAX_RETRIES} attempts: {e}"
-                        )
-                        raise
-                except Exception:
-                    logger.error(f"akshare stock_zh_a_hist failed for {bare}")
-                    raise  # non-retryable error, fail-fast
+        dates_needed: list = []
+        while d <= end_d:
+            ds = d.strftime("%Y-%m-%d")
+            if ds not in self._daily_data:
+                dates_needed.append(d)
+            d += timedelta(days=1)
 
-        if df is None or df.empty:
-            return None
+        if not dates_needed:
+            return
 
-        # Build indicator arrays in iFinD format
-        time_vals: list[str] = []
-        indicator_data: dict[str, list] = {ind: [] for ind in indicator_list}
-        prev_close_val: float = 0.0
+        logger.info(
+            f"Downloading {len(dates_needed)} dates from tsanghi API "
+            f"({dates_needed[0]} ~ {dates_needed[-1]})"
+        )
 
-        for _, row in df.iterrows():
-            d = row["日期"]
-            ds = pd.Timestamp(d).strftime("%Y-%m-%d") if not isinstance(d, str) else d
-            time_vals.append(ds)
+        client = TsanghiClient()
+        await client.start()
+        try:
+            for i, day_date in enumerate(dates_needed):
+                ds = day_date.strftime("%Y-%m-%d")
+                day_data: dict[str, dict] = {}
 
-            for ind in indicator_list:
-                val = self._extract_indicator(ind, row, prev_close_val)
-                # Volume: convert 手→股
-                if ind == "volume" and val is not None:
-                    val = val * 100
-                indicator_data[ind].append(val)
+                for exchange in ("XSHG", "XSHE"):
+                    try:
+                        records = await client.daily_latest(exchange, ds)
+                    except RuntimeError:
+                        continue  # non-trading day
+                    for rec in (records or []):
+                        ticker = str(rec.get("ticker", ""))
+                        if not ticker or len(ticker) != 6:
+                            continue
+                        o = rec.get("open")
+                        c = rec.get("close")
+                        if o is None or c is None:
+                            continue
+                        day_data[ticker] = {
+                            "open": float(o),
+                            "high": float(rec.get("high", o)),
+                            "low": float(rec.get("low", o)),
+                            "close": float(c),
+                            "volume": float(rec.get("volume", 0)),
+                        }
 
-            # Track previous close for computing next row's preClose indicator.
-            # 0.0 sentinel means "unknown" — _extract_indicator returns None in that case.
-            prev_close_val = float(row["收盘"]) if pd.notna(row["收盘"]) else 0.0
+                # Store even if empty (marks date as checked, avoids re-fetch)
+                self._daily_data[ds] = day_data
 
-        if not time_vals:
-            return None
+                if (i + 1) % 20 == 0:
+                    logger.info(f"  tsanghi progress: {i + 1}/{len(dates_needed)}")
 
-        table = {"time": time_vals, **indicator_data}
-        return {"thscode": full_code, "table": table}
-
-    @staticmethod
-    def _extract_indicator(indicator: str, row: pd.Series, prev_close: float) -> float | None:
-        """Extract an iFinD-named indicator value from an akshare DataFrame row."""
-        ak_col = _IFIND_TO_AKSHARE.get(indicator)
-
-        if ak_col and ak_col in row.index:
-            val = row[ak_col]
-            return float(val) if pd.notna(val) else None
-
-        # Special cases
-        if indicator == "preClose":
-            # akshare doesn't have preClose directly; use previous row's close
-            return prev_close if prev_close > 0 else None
-
-        if indicator == "avgPrice":
-            # Approximate: amount / volume (in 手, before conversion)
-            vol = row.get("成交量")
-            amt = row.get("成交额")
-            if pd.notna(vol) and pd.notna(amt) and float(vol) > 0:
-                return float(amt) / (float(vol) * 100)  # amount / volume_in_shares
-            return None
-
-        if indicator in ("pe_ttm", "pe", "pb", "ps", "pcf"):
-            # Fundamental indicators not available from akshare daily API
-            return None
-
-        return None
+            trading_days = sum(1 for d in self._daily_data.values() if d)
+            logger.info(f"tsanghi daily data ready: {trading_days} trading days")
+        finally:
+            await client.stop()
 
     async def real_time_quotation(
         self,
@@ -307,28 +218,13 @@ class IQuantHistoricalAdapter:
         start_date: str,
         end_date: str,
     ) -> list[str]:
-        """Get trading dates via akshare (with retry)."""
+        """Get trading dates via akshare."""
+        import asyncio
+
         import akshare as ak
 
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
-                all_dates = df["trade_date"].dt.date
-                sd = datetime.strptime(start_date, "%Y-%m-%d").date()
-                ed = datetime.strptime(end_date, "%Y-%m-%d").date()
-                return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
-            except (ConnectionError, OSError) as e:
-                if attempt < _MAX_RETRIES:
-                    wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"akshare trade_dates attempt {attempt}/{_MAX_RETRIES} "
-                        f"failed ({type(e).__name__}), retrying in {wait:.0f}s"
-                    )
-                    await asyncio.sleep(wait)
-                else:
-                    logger.error(f"Failed to get trade dates after {_MAX_RETRIES} attempts")
-                    raise
-            except Exception:
-                logger.error("Failed to get trade dates from akshare")
-                raise
-        raise RuntimeError("unreachable")  # all paths raise or return above
+        df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
+        all_dates = df["trade_date"].dt.date
+        sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+        ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+        return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
