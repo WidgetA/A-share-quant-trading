@@ -186,9 +186,7 @@ class TushareRealtimeClient:
     # rt_min_daily: per-stock full-day bars, aggregated to early snapshot
     # ------------------------------------------------------------------
 
-    async def batch_get_early_quotes(
-        self, stock_codes: list[str]
-    ) -> dict[str, TushareQuote]:
+    async def batch_get_early_quotes(self, stock_codes: list[str]) -> dict[str, TushareQuote]:
         """
         Fetch 9:30-9:40 aggregated snapshot for multiple stocks via rt_min_daily.
 
@@ -235,15 +233,11 @@ class TushareRealtimeClient:
             if quote is not None:
                 all_quotes[bare_code] = quote
 
-        logger.info(
-            f"rt_min_daily: fetched {len(all_quotes)}/{len(stock_codes)} stocks"
-        )
+        logger.info(f"rt_min_daily: fetched {len(all_quotes)}/{len(stock_codes)} stocks")
         return all_quotes
 
     @staticmethod
-    def _parse_rt_min_daily(
-        bare_code: str, data: dict[str, Any]
-    ) -> TushareQuote | None:
+    def _parse_rt_min_daily(bare_code: str, data: dict[str, Any]) -> TushareQuote | None:
         """
         Parse rt_min_daily response (all bars for one stock) into TushareQuote.
 
@@ -271,18 +265,10 @@ class TushareRealtimeClient:
             if not first_open or not last_close:
                 return None
 
-            max_high = max(
-                r[idx["high"]] for r in items if r[idx["high"]] is not None
-            )
-            min_low = min(
-                r[idx["low"]] for r in items if r[idx["low"]] is not None
-            )
-            total_vol = sum(
-                r[idx["vol"]] for r in items if r[idx["vol"]] is not None
-            )
-            total_amount = sum(
-                r[idx["amount"]] for r in items if r[idx["amount"]] is not None
-            )
+            max_high = max(r[idx["high"]] for r in items if r[idx["high"]] is not None)
+            min_low = min(r[idx["low"]] for r in items if r[idx["low"]] is not None)
+            total_vol = sum(r[idx["vol"]] for r in items if r[idx["vol"]] is not None)
+            total_amount = sum(r[idx["amount"]] for r in items if r[idx["amount"]] is not None)
         except (ValueError, TypeError, IndexError) as e:
             logger.warning(f"Failed to aggregate rt_min_daily for {bare_code}: {e}")
             return None
@@ -301,15 +287,9 @@ class TushareRealtimeClient:
 
         if early_bars:
             e_close = float(early_bars[-1][idx["close"]])
-            e_high = float(
-                max(r[idx["high"]] for r in early_bars if r[idx["high"]] is not None)
-            )
-            e_low = float(
-                min(r[idx["low"]] for r in early_bars if r[idx["low"]] is not None)
-            )
-            e_vol = float(
-                sum(r[idx["vol"]] for r in early_bars if r[idx["vol"]] is not None)
-            )
+            e_high = float(max(r[idx["high"]] for r in early_bars if r[idx["high"]] is not None))
+            e_low = float(min(r[idx["low"]] for r in early_bars if r[idx["low"]] is not None))
+            e_vol = float(sum(r[idx["vol"]] for r in early_bars if r[idx["vol"]] is not None))
         else:
             # Called before 9:30 or no time field — use whatever we have
             e_close = float(last_close)
@@ -335,9 +315,7 @@ class TushareRealtimeClient:
     # iFinD format adapter (used by MomentumSectorScanner)
     # ------------------------------------------------------------------
 
-    async def as_ifind_format(
-        self, stock_codes: list[str], indicators: str
-    ) -> dict[str, Any]:
+    async def as_ifind_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
         """
         Fetch quotes and return in iFinD real_time_quotation response format.
 
@@ -403,8 +381,7 @@ class TushareRealtimeClient:
                 result[bare] = float(close)
 
         logger.info(
-            f"Tushare daily: fetched prev_close for {len(result)} stocks "
-            f"(date={trade_date})"
+            f"Tushare daily: fetched prev_close for {len(result)} stocks (date={trade_date})"
         )
         return result
 
@@ -440,9 +417,7 @@ class TushareRealtimeClient:
                 code = data.get("code")
                 if code != 0:
                     msg = data.get("msg", "unknown error")
-                    raise TushareRealtimeError(
-                        f"Tushare API error: code={code}, msg={msg}"
-                    )
+                    raise TushareRealtimeError(f"Tushare API error: code={code}, msg={msg}")
                 return data
 
             except TushareRealtimeError:
@@ -458,8 +433,7 @@ class TushareRealtimeClient:
                     await asyncio.sleep(wait)
                 else:
                     raise TushareRealtimeError(
-                        f"Tushare API request failed after "
-                        f"{self.MAX_RETRIES} attempts: {e}"
+                        f"Tushare API request failed after {self.MAX_RETRIES} attempts: {e}"
                     ) from e
 
         raise TushareRealtimeError("unreachable")  # all paths raise or return above
