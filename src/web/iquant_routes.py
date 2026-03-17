@@ -407,10 +407,10 @@ def create_iquant_router() -> APIRouter:
 
     # --- V15 scan logic ---
 
-    async def _run_v15_scan() -> dict | None:
+    async def _run_v15_scan() -> dict[str, Any] | None:
         """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None."""
         from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
-        from src.strategy.strategies.v15_scanner import V15Scanner
+        from src.strategy.strategies.v15_scanner import V15ScoredStock, V15Scanner
 
         universe = await _get_universe()
         if not universe:
@@ -453,9 +453,9 @@ def create_iquant_router() -> APIRouter:
             try:
                 for exchange in ("XSHG", "XSHE"):
                     records = await ts_client.daily_latest(exchange, prev_trade_date)
-                    for rec in records:
-                        ticker = str(rec.get("ticker", ""))
-                        close_val = rec.get("close")
+                    for row in records:
+                        ticker = str(row.get("ticker", ""))
+                        close_val = row.get("close")
                         if ticker and len(ticker) == 6 and close_val:
                             prev_closes[ticker] = float(close_val)
             finally:
@@ -505,7 +505,7 @@ def create_iquant_router() -> APIRouter:
         # Push top-5 report to Feishu (non-critical)
         await _notify_feishu_v15_top5(scan_result)
 
-        rec = scan_result.recommended
+        rec: V15ScoredStock | None = scan_result.recommended
         if not rec:
             return None
 
