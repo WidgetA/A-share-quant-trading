@@ -285,9 +285,7 @@ class V15Scanner:
                 f"amp={rec.turnover_amp:.2f}x"
             )
             if len(scored) > 1:
-                top3 = ", ".join(
-                    f"{s.stock_code}(score={s.v3_score:.4f})" for s in scored[:3]
-                )
+                top3 = ", ".join(f"{s.stock_code}(score={s.v3_score:.4f})" for s in scored[:3])
                 logger.info(f"L7: Top 3: {top3}")
         else:
             logger.info("L7: No recommendation")
@@ -367,8 +365,7 @@ class V15Scanner:
         if all_codes:
             non_st = set(await self._fdb.batch_filter_st(list(all_codes)))
             filtered = {
-                b: [(c, n) for c, n in stocks if c in non_st]
-                for b, stocks in filtered.items()
+                b: [(c, n) for c, n in stocks if c in non_st] for b, stocks in filtered.items()
             }
             all_codes &= non_st
 
@@ -464,8 +461,7 @@ class V15Scanner:
             limit_price = round(snap.prev_close * (1 + self.LIMIT_UP_RATIO), 2)
             if snap.open_price >= limit_price or snap.latest_price >= limit_price:
                 logger.info(
-                    f"L6.5: filtered {s.stock_code} ({s.stock_name}): "
-                    f"at limit-up {limit_price:.2f}"
+                    f"L6.5: filtered {s.stock_code} ({s.stock_name}): at limit-up {limit_price:.2f}"
                 )
                 continue
             kept.append(s)
@@ -572,9 +568,7 @@ class V15Scanner:
 
     # ── Helpers ──
 
-    def _compute_avg_market_open_gain(
-        self, snapshots: dict[str, PriceSnapshot]
-    ) -> float:
+    def _compute_avg_market_open_gain(self, snapshots: dict[str, PriceSnapshot]) -> float:
         """Average (open - prev_close) / prev_close across all universe stocks."""
         gains: list[float] = []
         for snap in snapshots.values():
@@ -616,9 +610,7 @@ class V15Scanner:
 
         for i in range(0, len(codes), batch_size):
             batch = codes[i : i + batch_size]
-            codes_str = ",".join(
-                f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-            )
+            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
             data = await self._hist.history_quotes(
                 codes=codes_str,
@@ -696,9 +688,7 @@ class V15Scanner:
 
         return result
 
-    async def _fetch_constituent_prices(
-        self, codes: list[str]
-    ) -> dict[str, PriceSnapshot]:
+    async def _fetch_constituent_prices(self, codes: list[str]) -> dict[str, PriceSnapshot]:
         """Fetch realtime prices for constituents not in initial snapshots."""
         from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
 
@@ -707,9 +697,7 @@ class V15Scanner:
 
         for i in range(0, len(codes), batch_size):
             batch = codes[i : i + batch_size]
-            codes_str = ",".join(
-                f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-            )
+            codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
             data = await self._hist.real_time_quotation(
                 codes=codes_str,
