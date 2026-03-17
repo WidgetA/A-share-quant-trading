@@ -216,7 +216,9 @@ async def _get_trade_calendar() -> list[date]:
     import akshare as ak
 
     df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
-    _trade_calendar_cache = sorted(df["trade_date"].dt.date)
+    _trade_calendar_cache = sorted(
+        datetime.strptime(str(d), "%Y-%m-%d").date() for d in df["trade_date"]
+    )
     logger.info(f"Trade calendar cached: {len(_trade_calendar_cache)} dates")
     return _trade_calendar_cache
 
