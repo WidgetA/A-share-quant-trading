@@ -821,12 +821,16 @@ def create_iquant_router() -> APIRouter:
 
                     scan_done_date = ex_date
 
-                    if _state["holdings"]:
-                        logger.info("V15: holdings exist, skipping scan")
-                    else:
-                        try:
-                            rec = await _run_v15_scan()
-                            if rec:
+                    # Always scan + push Feishu top-5 report, regardless of holdings
+                    try:
+                        rec = await _run_v15_scan()
+                        if rec:
+                            if _state["holdings"]:
+                                logger.info(
+                                    f"V15: scan recommends {rec['stock_code']}, "
+                                    f"but holdings exist — BUY signal suppressed"
+                                )
+                            else:
                                 _push_signal(
                                     {
                                         "type": "buy",
@@ -840,16 +844,16 @@ def create_iquant_router() -> APIRouter:
                                     }
                                 )
                                 await _notify_feishu_signal(_state["pending_signals"][-1])
-                            else:
-                                logger.info("V15 scan: no recommendation today")
-                                await _notify_feishu_error(
-                                    "V15扫描结果",
-                                    "今日V15扫描完成，无符合条件的推荐股票",
-                                )
-                        except Exception as e:
-                            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                            logger.error(f"V15 scan failed: {error_detail}")
-                            await _notify_feishu_error("V15扫描失败", error_detail)
+                        else:
+                            logger.info("V15 scan: no recommendation today")
+                            await _notify_feishu_error(
+                                "V15扫描结果",
+                                "今日V15扫描完成，无符合条件的推荐股票",
+                            )
+                    except Exception as e:
+                        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                        logger.error(f"V15 scan failed: {error_detail}")
+                        await _notify_feishu_error("V15扫描失败", error_detail)
 
                 # Scan deadline
                 if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
