@@ -468,6 +468,16 @@ def create_iquant_router() -> APIRouter:
             )
         logger.info(f"V15 scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
 
+        # Diagnostic: log sample quote to verify early vs full-day values
+        sample = next(iter(quotes.values()), None)
+        if sample:
+            logger.info(
+                f"V15 scan sample {sample.stock_code}: "
+                f"early_close={sample.early_close} vs latest={sample.latest_price}, "
+                f"early_vol={sample.early_volume} vs total_vol={sample.volume}, "
+                f"early_high={sample.early_high} vs high={sample.high_price}"
+            )
+
         # Build PriceSnapshot dict
         price_snapshots: dict[str, PriceSnapshot] = {}
         for code, quote in quotes.items():
@@ -1145,13 +1155,30 @@ def create_iquant_router() -> APIRouter:
     async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
         """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
         await _ensure_resources()
+
+        # Diagnostic: sample one stock's raw quote data
+        rt_client = _state["realtime_client"]
+        diag_quotes = await rt_client.batch_get_quotes(["600519"])
+        diag: dict = {}
+        if diag_quotes:
+            q = next(iter(diag_quotes.values()))
+            diag = {
+                "sample_code": q.stock_code,
+                "early_close": q.early_close,
+                "latest_price": q.latest_price,
+                "early_volume": q.early_volume,
+                "total_volume": q.volume,
+                "early_high": q.early_high,
+                "high_price": q.high_price,
+            }
+
         try:
             rec = await _run_v15_scan()
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
 
-        result: dict = {"success": True, "recommendation": None}
+        result: dict = {"success": True, "recommendation": None, "diag": diag}
         if rec:
             result["recommendation"] = rec
             if not _state["holdings"]:
