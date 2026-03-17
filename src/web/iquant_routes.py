@@ -24,7 +24,7 @@ import json
 import logging
 import traceback
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -423,44 +423,66 @@ def create_iquant_router() -> APIRouter:
         if not quotes:
             return None
 
-        # Fetch prev_close from Tushare daily API
-        today = datetime.now(BEIJING_TZ).date()
+        # Get prev_close (previous trading day's close).
+        # L6.5 limit-up check needs real prev_close — NEVER approximate with open_price
+        # because gap-up stocks would get wrong limit price.
         prev_closes: dict[str, float] = {}
-        for days_back in range(1, 8):
-            prev_date = today - timedelta(days=days_back)
-            prev_date_str = prev_date.strftime("%Y%m%d")
+        today = datetime.now(BEIJING_TZ).date()
+        calendar = await _get_trade_calendar()
+        prev_dates = [d for d in calendar if d < today]
+        if not prev_dates:
+            raise RuntimeError("V15 scan: no previous trading day found in calendar")
+        prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
+
+        # Source 1: OSS cache (instant, no API call)
+        cache = _state.get("tsanghi_cache")
+        if cache and cache.is_ready:
+            all_daily = cache.get_all_codes_with_daily(prev_trade_date)
+            for code, daily in all_daily.items():
+                close_val = daily.get("close")
+                if close_val and close_val > 0:
+                    prev_closes[code] = close_val
+
+        # Source 2: tsanghi API fallback (2 calls for XSHG+XSHE)
+        # Use API if cache coverage < 80% of live quotes (partial cache is dangerous)
+        if len(prev_closes) < len(quotes) * 0.8:
+            from src.data.clients.tsanghi_client import TsanghiClient
+
+            ts_client = TsanghiClient()
+            await ts_client.start()
             try:
-                prev_closes = await rt_client.fetch_prev_closes(prev_date_str)
-                if prev_closes:
-                    logger.info(f"V15: preClose from Tushare daily date={prev_date_str}")
-                    break
-            except Exception as e:
-                logger.warning(f"V15: failed to fetch daily for {prev_date_str}: {e}")
-                continue
+                for exchange in ("XSHG", "XSHE"):
+                    records = await ts_client.daily_latest(exchange, prev_trade_date)
+                    for rec in records:
+                        ticker = str(rec.get("ticker", ""))
+                        close_val = rec.get("close")
+                        if ticker and len(ticker) == 6 and close_val:
+                            prev_closes[ticker] = float(close_val)
+            finally:
+                await ts_client.stop()
+
+        if not prev_closes:
+            raise RuntimeError(
+                f"V15 scan: failed to get prev_close for {prev_trade_date} "
+                f"from both OSS cache and tsanghi API"
+            )
+        logger.info(f"V15 scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
 
         # Build PriceSnapshot dict
         price_snapshots: dict[str, PriceSnapshot] = {}
-        skipped = 0
         for code, quote in quotes.items():
             if not quote.is_trading:
-                continue
-            prev_close = prev_closes.get(code, 0.0)
-            if prev_close <= 0:
-                skipped += 1
                 continue
             price_snapshots[code] = PriceSnapshot(
                 stock_code=code,
                 stock_name="",
                 open_price=quote.open_price,
-                prev_close=prev_close,
+                prev_close=prev_closes.get(code, 0.0),
                 latest_price=quote.latest_price,
                 early_volume=quote.volume,
                 high_price=quote.high_price,
                 low_price=quote.low_price,
             )
-
-        if skipped:
-            logger.warning(f"V15 scan: skipped {skipped} stocks (no prev_close)")
 
         scanner = V15Scanner(
             historical_adapter=_state["historical_adapter"],
