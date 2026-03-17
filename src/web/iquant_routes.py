@@ -1092,6 +1092,15 @@ def create_iquant_router() -> APIRouter:
         """Return current holdings (for monitoring)."""
         return {"holdings": _state["holdings"]}
 
+    @router.delete("/holdings")
+    async def clear_holdings(api_key: str = Depends(_verify_api_key)) -> dict:
+        """Clear all holdings (admin use only)."""
+        count = len(_state["holdings"])
+        _state["holdings"] = []
+        _save_holdings(_state["holdings"])
+        logger.info(f"V15 holdings cleared ({count} items removed)")
+        return {"success": True, "cleared": count}
+
     @router.post("/manual-order")
     async def manual_order(
         body: ManualOrderRequest,
