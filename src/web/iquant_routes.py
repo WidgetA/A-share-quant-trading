@@ -1117,6 +1117,39 @@ def create_iquant_router() -> APIRouter:
             "message": "Signal pushed. iQuant will pick it up on next /pending-signals poll.",
         }
 
+    @router.post("/trigger-scan")
+    async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
+        """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
+        await _ensure_resources()
+        try:
+            rec = await _run_v15_scan()
+        except Exception as e:
+            error_detail = f"{type(e).__name__}: {e}"
+            raise HTTPException(status_code=500, detail=error_detail)
+
+        result: dict = {"success": True, "recommendation": None}
+        if rec:
+            result["recommendation"] = rec
+            if not _state["holdings"]:
+                _push_signal(
+                    {
+                        "type": "buy",
+                        "stock_code": rec["stock_code"],
+                        "stock_name": rec["stock_name"],
+                        "board_name": rec["board_name"],
+                        "latest_price": rec["latest_price"],
+                        "v3_score": rec["v3_score"],
+                        "reason": f"V15手动扫描 (板块={rec['board_name']}, "
+                        f"score={rec['v3_score']:.4f})",
+                    }
+                )
+                await _notify_feishu_signal(_state["pending_signals"][-1])
+                result["signal_pushed"] = True
+            else:
+                result["signal_pushed"] = False
+                result["reason"] = "holdings exist, BUY signal suppressed"
+        return result
+
     @router.get("/universe")
     async def universe(api_key: str = Depends(_verify_api_key)) -> dict:
         """Return all stock codes in V15 universe (cached)."""
