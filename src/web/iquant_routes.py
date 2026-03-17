@@ -417,8 +417,8 @@ def create_iquant_router() -> APIRouter:
             raise RuntimeError("Universe is empty")
 
         rt_client = _state["realtime_client"]
-        quotes = await rt_client.batch_get_quotes(universe)
-        logger.info(f"V15 scan: Tushare returned {len(quotes)} quotes")
+        quotes = await rt_client.batch_get_early_quotes(universe)
+        logger.info(f"V15 scan: Tushare rt_min_daily returned {len(quotes)} quotes")
 
         if not quotes:
             return None
@@ -467,16 +467,6 @@ def create_iquant_router() -> APIRouter:
                 f"from both OSS cache and tsanghi API"
             )
         logger.info(f"V15 scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
-
-        # Diagnostic: log sample quote to verify early vs full-day values
-        sample = next(iter(quotes.values()), None)
-        if sample:
-            logger.info(
-                f"V15 scan sample {sample.stock_code}: "
-                f"early_close={sample.early_close} vs latest={sample.latest_price}, "
-                f"early_vol={sample.early_volume} vs total_vol={sample.volume}, "
-                f"early_high={sample.early_high} vs high={sample.high_price}"
-            )
 
         # Build PriceSnapshot dict
         price_snapshots: dict[str, PriceSnapshot] = {}
@@ -1156,29 +1146,13 @@ def create_iquant_router() -> APIRouter:
         """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
         await _ensure_resources()
 
-        # Diagnostic: raw rt_min bars for 600519
-        rt_client = _state["realtime_client"]
-        raw_data = await rt_client._api_call(
-            "rt_min",
-            {"ts_code": "600519.SH", "freq": "1MIN"},
-            fields="ts_code,time,open,close,high,low,vol,amount",
-        )
-        raw_items = raw_data.get("data", {}).get("items", [])
-        raw_fields = raw_data.get("data", {}).get("fields", [])
-        diag: dict = {
-            "fields": raw_fields,
-            "bar_count": len(raw_items),
-            "first_3_bars": raw_items[:3],
-            "last_3_bars": raw_items[-3:] if len(raw_items) > 3 else [],
-        }
-
         try:
             rec = await _run_v15_scan()
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
 
-        result: dict = {"success": True, "recommendation": None, "diag": diag}
+        result: dict = {"success": True, "recommendation": None}
         if rec:
             result["recommendation"] = rec
             if not _state["holdings"]:
