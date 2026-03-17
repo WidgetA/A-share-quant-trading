@@ -157,7 +157,7 @@ class IQuantHistoricalAdapter:
                         records = await client.daily_latest(exchange, ds)
                     except RuntimeError:
                         continue  # non-trading day
-                    for rec in (records or []):
+                    for rec in records or []:
                         ticker = str(rec.get("ticker", ""))
                         if not ticker or len(ticker) != 6:
                             continue
