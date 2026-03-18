@@ -1057,6 +1057,37 @@ def create_momentum_router() -> APIRouter:
             logger.error(f"Manual scan trigger error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"扫描失败: {str(e)}")
 
+    # === Cache scheduler endpoints ===
+
+    @router.get("/api/cache/status")
+    async def cache_scheduler_status(request: Request) -> dict:
+        """Return cache scheduler status and coverage info."""
+        cache = getattr(request.app.state, "tsanghi_cache", None)
+        scheduler_task = getattr(request.app.state, "cache_scheduler_task", None)
+        return {
+            "cache_ready": cache is not None and cache.is_ready if cache else False,
+            "start_date": str(cache._start_date) if cache and cache._start_date else None,
+            "end_date": str(cache._end_date) if cache and cache._end_date else None,
+            "daily_stock_count": len(cache._daily) if cache else 0,
+            "minute_stock_count": len(cache._minute) if cache else 0,
+            "scheduler_running": scheduler_task is not None and not scheduler_task.done()
+            if scheduler_task
+            else False,
+        }
+
+    @router.post("/api/cache/trigger")
+    async def trigger_cache_fill(request: Request) -> dict:
+        """Manually trigger the cache gap-fill process."""
+        from src.data.services.cache_scheduler import CacheScheduler
+
+        cache = getattr(request.app.state, "tsanghi_cache", None)
+        if not cache:
+            raise HTTPException(503, "缓存未加载，请等待 OSS 缓存加载完成")
+
+        scheduler = CacheScheduler(request.app.state)
+        result = await scheduler.check_and_fill_gaps()
+        return {"success": True, **result}
+
     return router
 
 

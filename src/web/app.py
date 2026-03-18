@@ -185,6 +185,13 @@ def create_app(
             iquant_rtr._start_monitoring()
             logger.info("iQuant V15 monitoring scheduler started")
 
+        # Auto-start cache scheduler (3am daily gap-fill)
+        from src.data.services.cache_scheduler import CacheScheduler
+
+        cache_scheduler = CacheScheduler(app.state)
+        app.state.cache_scheduler_task = asyncio.create_task(cache_scheduler.run())
+        logger.info("Cache scheduler started (3am daily)")
+
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
             "running": False,
@@ -203,6 +210,12 @@ def create_app(
     async def shutdown():
         logger.info("Web UI stopped")
         store.stop_cleanup_task()
+
+        # Stop cache scheduler
+        cache_task = getattr(app.state, "cache_scheduler_task", None)
+        if cache_task and not cache_task.done():
+            cache_task.cancel()
+            logger.info("Cache scheduler stopped")
 
         # Stop momentum monitor
         monitor_state = getattr(app.state, "momentum_monitor_state", None)
