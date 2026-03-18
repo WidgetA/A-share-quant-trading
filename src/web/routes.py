@@ -490,7 +490,8 @@ def create_momentum_router() -> APIRouter:
                 from src.data.clients.tsanghi_backtest_cache import TsanghiBacktestCache
 
                 cache = existing or TsanghiBacktestCache()
-                yield f"data: {json.dumps({'type': 'status', 'message': '开始下载...'}, ensure_ascii=False)}\n\n"
+                msg = {"type": "status", "message": "开始下载..."}
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
                 progress_events: list[dict] = []
 
@@ -509,7 +510,8 @@ def create_momentum_router() -> APIRouter:
 
                 # Save to OSS if available
                 if check_oss_available():
-                    yield f"data: {json.dumps({'type': 'status', 'message': '保存到 OSS...'}, ensure_ascii=False)}\n\n"
+                    msg = {"type": "status", "message": "保存到 OSS..."}
+                    yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
                     await asyncio.to_thread(cache.save_to_oss)
 
                 request.app.state.tsanghi_cache = cache
@@ -530,7 +532,8 @@ def create_momentum_router() -> APIRouter:
 
             except Exception as e:
                 logger.error(f"Tsanghi download error: {e}", exc_info=True)
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)[:200]}, ensure_ascii=False)}\n\n"
+                err = {"type": "error", "message": str(e)[:200]}
+                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             download_stream(),
@@ -709,9 +712,7 @@ def create_momentum_router() -> APIRouter:
             try:
                 from datetime import timedelta
 
-                trading_days_all = _get_trading_calendar(
-                    start_date, end_date + timedelta(days=10)
-                )
+                trading_days_all = _get_trading_calendar(start_date, end_date + timedelta(days=10))
                 if not trading_days_all:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
@@ -734,7 +735,8 @@ def create_momentum_router() -> APIRouter:
                     yield sse(
                         {
                             "type": "warning",
-                            "message": f"已截断至前 250 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})",
+                            "message": f"已截断至前 250 个交易日"
+                            f" ({days_in_range[0]} ~ {days_in_range[-1]})",
                         }
                     )
 
@@ -769,9 +771,7 @@ def create_momentum_router() -> APIRouter:
                     try:
                         date_key = trade_date.strftime("%Y-%m-%d")
                         try:
-                            price_snapshots = _build_snapshots_from_cache(
-                                tsanghi_cache, date_key
-                            )
+                            price_snapshots = _build_snapshots_from_cache(tsanghi_cache, date_key)
                         except MinuteDataMissingError as e:
                             price_snapshots = {}
                             price_err = str(e)
@@ -804,9 +804,7 @@ def create_momentum_router() -> APIRouter:
                             fundamentals_db=fundamentals_db,
                             concept_mapper=concept_mapper,
                         )
-                        scan_result = await scanner.scan(
-                            price_snapshots, trade_date=trade_date
-                        )
+                        scan_result = await scanner.scan(price_snapshots, trade_date=trade_date)
 
                         rec = scan_result.recommended
 
@@ -832,9 +830,7 @@ def create_momentum_router() -> APIRouter:
 
                             # Get T+1 open from cache
                             next_date_key = next_trade_date.strftime("%Y-%m-%d")
-                            next_day_data = tsanghi_cache.get_daily(
-                                rec.stock_code, next_date_key
-                            )
+                            next_day_data = tsanghi_cache.get_daily(rec.stock_code, next_date_key)
                             sell_price_val = (
                                 float(next_day_data["open"])
                                 if next_day_data and next_day_data.get("open")
@@ -847,18 +843,14 @@ def create_momentum_router() -> APIRouter:
                                     buy_amount = lots * 100 * buy_price
                                     buy_commission = max(buy_amount * 0.003, 5.0)
                                     buy_transfer = buy_amount * 0.00001
-                                    total_buy_cost = (
-                                        buy_amount + buy_commission + buy_transfer
-                                    )
+                                    total_buy_cost = buy_amount + buy_commission + buy_transfer
 
                                     while total_buy_cost > capital and lots > 0:
                                         lots -= 1
                                         buy_amount = lots * 100 * buy_price
                                         buy_commission = max(buy_amount * 0.003, 5.0)
                                         buy_transfer = buy_amount * 0.00001
-                                        total_buy_cost = (
-                                            buy_amount + buy_commission + buy_transfer
-                                        )
+                                        total_buy_cost = buy_amount + buy_commission + buy_transfer
 
                                 if lots > 0:
                                     sell_amount = lots * 100 * sell_price_val
@@ -866,10 +858,7 @@ def create_momentum_router() -> APIRouter:
                                     sell_transfer = sell_amount * 0.00001
                                     sell_stamp = sell_amount * 0.0005
                                     net_sell = (
-                                        sell_amount
-                                        - sell_commission
-                                        - sell_transfer
-                                        - sell_stamp
+                                        sell_amount - sell_commission - sell_transfer - sell_stamp
                                     )
 
                                     capital_before = capital
@@ -964,9 +953,7 @@ def create_momentum_router() -> APIRouter:
                 trade_results = [d for d in day_results if d.get("has_trade")]
                 wins = [d for d in trade_results if d["profit"] > 0]
                 losses = [d for d in trade_results if d["profit"] < 0]
-                total_return_pct = (
-                    (capital - body.initial_capital) / body.initial_capital * 100
-                )
+                total_return_pct = (capital - body.initial_capital) / body.initial_capital * 100
 
                 backtest_summary = {
                     "initial_capital": body.initial_capital,
@@ -982,12 +969,8 @@ def create_momentum_router() -> APIRouter:
                         len(wins) / len(trade_results) * 100 if trade_results else 0,
                         1,
                     ),
-                    "max_win": round(
-                        max((d["profit"] for d in trade_results), default=0), 2
-                    ),
-                    "max_loss": round(
-                        min((d["profit"] for d in trade_results), default=0), 2
-                    ),
+                    "max_win": round(max((d["profit"] for d in trade_results), default=0), 2),
+                    "max_loss": round(min((d["profit"] for d in trade_results), default=0), 2),
                 }
 
                 yield sse(
@@ -1315,8 +1298,7 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
             prev_daily = tsanghi_cache.get_all_codes_with_daily(prev_date_str)
             if prev_daily:
                 logger.info(
-                    f"Monitor: preClose from cache date {prev_date_str} "
-                    f"({len(prev_daily)} stocks)"
+                    f"Monitor: preClose from cache date {prev_date_str} ({len(prev_daily)} stocks)"
                 )
                 break
 
@@ -1448,8 +1430,7 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
         )
 
     logger.info(
-        f"Monitor scan complete: {scan_result.final_candidates} candidates, "
-        f"{elapsed:.1f}s elapsed"
+        f"Monitor scan complete: {scan_result.final_candidates} candidates, {elapsed:.1f}s elapsed"
     )
     return result_entry
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class CacheScheduler:
                 wait_secs = (target - now).total_seconds()
                 logger.info(
                     f"CacheScheduler: next run at {target.strftime('%Y-%m-%d %H:%M')} "
-                    f"({wait_secs/3600:.1f}h from now)"
+                    f"({wait_secs / 3600:.1f}h from now)"
                 )
                 await asyncio.sleep(wait_secs)
 
