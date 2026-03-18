@@ -472,7 +472,7 @@ def create_momentum_router() -> APIRouter:
                 if check_oss_available():
                     msg = {"type": "status", "message": "保存到 OSS..."}
                     yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
-                    await asyncio.to_thread(cache.save_to_oss)
+                    await cache.save_to_oss()
 
                 request.app.state.tsanghi_cache = cache
                 request.app.state.tsanghi_cache_loading = False

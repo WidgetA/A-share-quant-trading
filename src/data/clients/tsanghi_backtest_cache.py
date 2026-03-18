@@ -42,8 +42,9 @@ class DailyBar(NamedTuple):
 
 logger = logging.getLogger(__name__)
 
-# OSS cache key prefix
-_OSS_PREFIX = "akshare-cache/"
+# OSS cache key prefix — configurable via env var for environment isolation
+# e.g. docker-compose prod: OSS_CACHE_PREFIX=akshare-cache-prod/
+_OSS_PREFIX = os.environ.get("OSS_CACHE_PREFIX", "akshare-cache/")
 
 
 def _get_oss_bucket():
@@ -409,6 +410,7 @@ class TsanghiBacktestCache:
     def load_from_oss(cls) -> TsanghiBacktestCache | None:
         """Load cache from OSS if available. Returns None if not found.
 
+        OSS prefix is controlled by OSS_CACHE_PREFIX env var.
         Tries .pkl.gz (gzipped) first, falls back to legacy .pkl format.
         Migrates old dict-format daily data to DailyBar NamedTuple.
         """
