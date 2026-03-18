@@ -112,6 +112,18 @@ def create_app(
         logger.info("Web UI started")
         store.start_cleanup_task()
 
+        # Send Feishu startup notification
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if bot.is_configured():
+            import os
+
+            await bot.send_startup_notification(
+                git_commit=os.environ.get("GIT_COMMIT"),
+                git_branch=os.environ.get("GIT_BRANCH"),
+            )
+
         # Shared fundamentals DB connection pool
         fundamentals_db = create_fundamentals_db_from_config()
         try:
@@ -209,6 +221,14 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown():
         logger.info("Web UI stopped")
+
+        # Send Feishu shutdown notification
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if bot.is_configured():
+            await bot.send_shutdown_notification()
+
         store.stop_cleanup_task()
 
         # Stop cache scheduler
