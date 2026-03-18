@@ -58,4 +58,4 @@ ENV INTERACTION_MODE=web
 EXPOSE 8000
 
 # Run the web service
-CMD ["python", "-m", "src.web.app"]
+CMD ["uvicorn", "src.web.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
