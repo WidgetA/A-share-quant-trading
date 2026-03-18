@@ -474,11 +474,7 @@ def create_momentum_router() -> APIRouter:
 
                 request.app.state.tsanghi_cache = cache
                 request.app.state.tsanghi_cache_loading = False
-
-                # Inject cache into iQuant router
-                iquant_rtr = getattr(request.app.state, "iquant_router", None)
-                if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
-                    iquant_rtr._inject_cache(cache)
+                # NOTE: do NOT inject into iQuant — trading cache is isolated
 
                 msg = {
                     "type": "complete",

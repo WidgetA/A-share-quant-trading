@@ -50,7 +50,7 @@ class CacheScheduler:
         self._app_state = app_state
 
     def _get_cache(self):
-        return getattr(self._app_state, "tsanghi_cache", None)
+        return getattr(self._app_state, "tsanghi_cache_trading", None)
 
     async def run(self) -> None:
         """Main loop: sleep until 3am, check gaps, download, save to OSS."""

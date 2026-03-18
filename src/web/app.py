@@ -129,8 +129,12 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
-        # Tsanghi backtest cache — load from OSS in background (non-blocking)
+        # Tsanghi backtest cache — two isolated instances:
+        #   tsanghi_cache         → dashboard (backtest, download, monitor)
+        #   tsanghi_cache_trading → iQuant live trading (V15 scan prev_close)
+        # Dashboard operations MUST NOT affect the trading cache.
         app.state.tsanghi_cache = None
+        app.state.tsanghi_cache_trading = None
         app.state.tsanghi_cache_loading = True  # frontend polls this
 
         async def _bg_load_oss_cache():
@@ -141,15 +145,16 @@ def create_app(
                 oss_cache = await asyncio.to_thread(TsanghiBacktestCache.load_from_oss)
                 if oss_cache:
                     app.state.tsanghi_cache = oss_cache
+                    app.state.tsanghi_cache_trading = oss_cache.copy()
                     logger.info(
                         f"Tsanghi cache pre-loaded from OSS: "
                         f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
                         f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
                     )
-                    # Inject cache into iQuant router for V15 historical data
+                    # Inject isolated trading copy into iQuant router
                     iquant_rtr = getattr(app.state, "iquant_router", None)
                     if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
-                        iquant_rtr._inject_cache(oss_cache)
+                        iquant_rtr._inject_cache(app.state.tsanghi_cache_trading)
                 else:
                     logger.warning("load_from_oss returned None — check OSS config/logs")
             except Exception as e:
