@@ -1206,23 +1206,6 @@ def _get_trading_calendar(start_date, end_date) -> list:
     return days
 
 
-def _get_llm_api_key() -> str:
-    """Get Silicon Flow API key from env var (Docker) or secrets.yaml (local)."""
-    import os
-
-    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
-    if api_key:
-        return api_key
-
-    try:
-        from src.common.config import load_secrets
-
-        secrets = load_secrets()
-        return secrets.get_str("siliconflow.api_key", "")
-    except Exception:
-        return ""
-
-
 def _create_board_relevance_filter_global():
     """Module-level factory for BoardRelevanceFilter. Raises on failure."""
     from src.strategy.filters.board_relevance_filter import (
@@ -1881,7 +1864,6 @@ def create_settings_router() -> APIRouter:
             get_aliyun_api_key_source,
             get_iquant_key_source,
             get_tsanghi_token_source,
-            load_secrets,
         )
 
         iquant_ok = get_iquant_key_source() != "not_configured"
@@ -1889,15 +1871,7 @@ def create_settings_router() -> APIRouter:
         aliyun_src = get_aliyun_api_key_source()
         aliyun_ok = aliyun_src != "not_configured"
 
-        sf_ok = False
-        try:
-            secrets = load_secrets()
-            sf_ok = bool(secrets.get_str("siliconflow.api_key", ""))
-        except FileNotFoundError:
-            pass
-
         return {
-            "siliconflow": {"configured": sf_ok},
             "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
             "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
             "aliyun": {"configured": aliyun_ok, "source": aliyun_src},
