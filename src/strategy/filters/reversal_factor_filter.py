@@ -30,7 +30,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.strategy.strategies.momentum_sector_scanner import (
+    from src.strategy.models import (
         PriceSnapshot,
         SelectedStock,
     )

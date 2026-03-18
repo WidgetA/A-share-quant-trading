@@ -409,7 +409,7 @@ def create_iquant_router() -> APIRouter:
 
     async def _run_v15_scan() -> dict[str, Any] | None:
         """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None."""
-        from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+        from src.strategy.models import PriceSnapshot
         from src.strategy.strategies.v15_scanner import V15Scanner, V15ScoredStock
 
         universe = await _get_universe()

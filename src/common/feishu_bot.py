@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 if TYPE_CHECKING:
-    from src.strategy.strategies.momentum_sector_scanner import (
+    from src.strategy.models import (
         RecommendedStock,
         ScanResult,
         SelectedStock,

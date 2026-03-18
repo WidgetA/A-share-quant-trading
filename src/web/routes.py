@@ -4056,7 +4056,7 @@ async def _parse_iwencai_and_fetch_prices(
         (snapshots_dict, error_reason) — error_reason is empty on success.
     """
     from src.data.clients.ifind_http_client import IFinDHttpError
-    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+    from src.strategy.models import PriceSnapshot
 
     tables = iwencai_result.get("tables", [])
     if not tables:
@@ -4350,7 +4350,7 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
             This prevents silent degradation where missing minute data causes
             gain_from_open=0% for all stocks, producing unreliable results.
     """
-    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+    from src.strategy.models import PriceSnapshot
 
     all_daily = tsanghi_cache.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
@@ -4875,7 +4875,7 @@ async def _run_intraday_monitor(state: dict) -> None:
 async def _parse_iwencai_realtime(ifind_client, iwencai_result: dict) -> dict:
     """Parse iwencai response and fetch real-time prices."""
     from src.data.clients.ifind_http_client import IFinDHttpError
-    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+    from src.strategy.models import PriceSnapshot
 
     tables = iwencai_result.get("tables", [])
     if not tables:

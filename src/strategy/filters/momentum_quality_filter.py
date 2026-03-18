@@ -28,10 +28,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from src.data.clients.ifind_http_client import IFinDHttpClient
-
 if TYPE_CHECKING:
-    from src.strategy.strategies.momentum_sector_scanner import (
+    from src.strategy.models import (
+        HistoricalDataProvider,
         PriceSnapshot,
         SelectedStock,
     )
@@ -96,7 +95,7 @@ class MomentumQualityFilter:
 
     def __init__(
         self,
-        ifind_client: IFinDHttpClient,
+        ifind_client: HistoricalDataProvider,
         config: MomentumQualityConfig | None = None,
     ):
         self._ifind = ifind_client

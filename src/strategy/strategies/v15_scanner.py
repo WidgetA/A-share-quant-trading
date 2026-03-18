@@ -37,9 +37,8 @@ from src.strategy.filters.reversal_factor_filter import (
 from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
 if TYPE_CHECKING:
-    from src.data.clients.ifind_http_client import IFinDHttpClient
     from src.data.database.fundamentals_db import FundamentalsDB
-    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+    from src.strategy.models import HistoricalDataProvider, PriceSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +142,7 @@ class V15Scanner:
 
     def __init__(
         self,
-        historical_adapter: IFinDHttpClient,
+        historical_adapter: HistoricalDataProvider,
         fundamentals_db: FundamentalsDB,
         concept_mapper: LocalConceptMapper | None = None,
         stock_filter: StockFilter | None = None,
@@ -229,7 +228,7 @@ class V15Scanner:
             c: h["avg_daily_volume"] for c, h in hist.items() if h.get("avg_daily_volume")
         }
         # ReversalFactorFilter expects SelectedStock, adapt _L4Stock
-        from src.strategy.strategies.momentum_sector_scanner import SelectedStock
+        from src.strategy.models import SelectedStock
 
         adapted = [
             SelectedStock(
@@ -690,7 +689,7 @@ class V15Scanner:
 
     async def _fetch_constituent_prices(self, codes: list[str]) -> dict[str, PriceSnapshot]:
         """Fetch realtime prices for constituents not in initial snapshots."""
-        from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
+        from src.strategy.models import PriceSnapshot
 
         result: dict[str, PriceSnapshot] = {}
         batch_size = 50
