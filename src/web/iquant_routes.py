@@ -785,6 +785,28 @@ def create_iquant_router() -> APIRouter:
 
     router._start_monitoring = _start_monitoring  # type: ignore[attr-defined]
 
+    def _get_status() -> dict:
+        """Return iQuant connection status (no auth required)."""
+        now = datetime.now(BEIJING_TZ)
+        last_poll = _state.get("last_poll_time")
+        if last_poll is not None:
+            gap_seconds = (now - last_poll).total_seconds()
+            connected = gap_seconds < HEARTBEAT_TIMEOUT_MINUTES * 60
+            last_poll_str = last_poll.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            gap_seconds = None
+            connected = False
+            last_poll_str = None
+        return {
+            "connected": connected,
+            "last_poll_time": last_poll_str,
+            "gap_seconds": round(gap_seconds) if gap_seconds is not None else None,
+            "holdings_count": len(_state["holdings"]),
+            "pending_count": len(_state["pending_signals"]),
+        }
+
+    router._get_status = _get_status  # type: ignore[attr-defined]
+
     # --- V15 Background scheduler (trading operations only) ---
 
     async def _signal_scheduler() -> None:
@@ -1304,5 +1326,10 @@ def create_iquant_router() -> APIRouter:
                 "composite_score": round(rec.v3_score, 4),
             }
         }
+
+    @router.get("/status")
+    async def iquant_status() -> dict:
+        """Public iQuant connection status (no auth required)."""
+        return _get_status()
 
     return router

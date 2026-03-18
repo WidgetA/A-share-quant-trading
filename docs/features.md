@@ -33,6 +33,7 @@
 | 0.10.1 | 2026-02-19 | - | STR-004: Remove gap-fade filter (ineffective in validation, precision ~50%) |
 | 0.10.2 | 2026-02-20 | - | STR-004: Sync docs with code (fix scoring formula, add Step 5.5/5.6/limit-up docs) |
 | 0.10.3 | 2026-03-05 | - | STR-004: Add Step 5.7 LLM board relevance filter + flip scoring to +Z(gfo)+Z(amp) + board leader bonus |
+| 0.11.0 | 2026-03-18 | - | SYS-005/STR-005: Replace Strategy Status with iQuant connection status on dashboard, remove strategy controller |
 
 ---
 
@@ -302,12 +303,13 @@ if bot.is_configured():
 **API Endpoints**:
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `GET /` | GET | Main dashboard (pending list) |
+| `GET /` | GET | Main dashboard (iQuant status, positions, pending confirmations) |
 | `GET /confirm/{id}` | GET | Confirmation page |
 | `GET /api/pending` | GET | List pending confirmations |
 | `GET /api/pending/{id}` | GET | Get confirmation details |
 | `POST /api/pending/{id}/submit` | POST | Submit user decision |
 | `GET /api/status` | GET | Health check |
+| `GET /api/iquant/status` | GET | iQuant connection status (no auth) |
 
 **Configuration** (Environment Variables):
 | Variable | Default | Description |
@@ -651,6 +653,7 @@ await engine.stop()
 | 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
 | iQuant未连接 | 09:33 无心跳 | 提示检查QMT是否启动 |
 | iQuant掉线 | Poll间隔 > 3min | 最后心跳时间、失联时长 |
+| Dashboard状态 | 页面每10s刷新 | 在线/离线、最后心跳、持仓/待执行数 |
 | 扫描无推荐 | Scan returns None | 通知今日无符合条件股票 |
 | 扫描/跳空失败 | Exception | 完整错误堆栈 |
 

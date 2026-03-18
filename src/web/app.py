@@ -4,7 +4,6 @@
 
 # === DEPENDENCIES ===
 # - pending_store: For accessing pending confirmations
-# - strategy_controller: For strategy start/stop control
 # - position_manager: For displaying current positions
 # - jinja2: For HTML template rendering
 
@@ -28,7 +27,6 @@ from src.web.routes import (
 )
 
 if TYPE_CHECKING:
-    from src.common.strategy_controller import StrategyController
     from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
@@ -42,7 +40,6 @@ STATIC_DIR = WEB_DIR / "static"
 def create_app(
     store: PendingConfirmationStore | None = None,
     web_base_url: str = "http://localhost:8000",
-    strategy_controller: StrategyController | None = None,
     position_manager: PositionManager | None = None,
 ) -> FastAPI:
     """
@@ -51,7 +48,6 @@ def create_app(
     Args:
         store: Pending confirmation store. Uses global singleton if not provided.
         web_base_url: Base URL for generating links in notifications.
-        strategy_controller: Controller for strategy start/stop.
         position_manager: Manager for position data.
 
     Returns:
@@ -70,7 +66,6 @@ def create_app(
     # Store reference for routes
     app.state.pending_store = store
     app.state.web_base_url = web_base_url
-    app.state.strategy_controller = strategy_controller
     app.state.position_manager = position_manager
 
     # Set up templates

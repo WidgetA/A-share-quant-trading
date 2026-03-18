@@ -135,12 +135,14 @@ footer {
     border-radius: 6px;
 }
 
-.status-indicator.running {
+.status-indicator.running,
+.status-indicator.online {
     background: #c8e6c9;
     color: #2e7d32;
 }
 
-.status-indicator.stopped {
+.status-indicator.stopped,
+.status-indicator.offline {
     background: #ffcdd2;
     color: #c62828;
 }

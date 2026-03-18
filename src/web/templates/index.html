@@ -8,24 +8,23 @@
 
 {% block content %}
 <div class="dashboard">
-    <!-- Strategy Control Section -->
+    <!-- iQuant Connection Status -->
     <section class="strategy-section">
-        <h2>Strategy Status</h2>
+        <h2>iQuant 连接状态</h2>
         <div class="strategy-card">
             <div class="strategy-info">
-                <span class="status-indicator {{ 'running' if strategy_state.is_running else 'stopped' }}">
-                    {{ 'Running' if strategy_state.is_running else 'Stopped' }}
+                <span class="status-indicator {{ 'online' if iquant_status.connected else 'offline' }}">
+                    {{ '在线' if iquant_status.connected else '离线' }}
                 </span>
-                {% if strategy_state.state_changed_at %}
-                <span class="status-time">since {{ strategy_state.state_changed_at[:19] }}</span>
+                {% if iquant_status.last_poll_time %}
+                <span class="status-time">最后心跳: {{ iquant_status.last_poll_time[11:] }}</span>
+                {% else %}
+                <span class="status-time">从未连接</span>
                 {% endif %}
             </div>
-            <div class="strategy-controls">
-                {% if strategy_state.is_running %}
-                <button class="btn btn-danger" onclick="stopStrategy()">Stop Strategy</button>
-                {% else %}
-                <button class="btn btn-success" onclick="startStrategy()">Start Strategy</button>
-                {% endif %}
+            <div class="strategy-info">
+                <span class="status-time">持仓: {{ iquant_status.holdings_count }}</span>
+                <span class="status-time">待执行: {{ iquant_status.pending_count }}</span>
             </div>
         </div>
     </section>
@@ -139,38 +138,6 @@
 
 {% block scripts %}
 <script>
-// Strategy control functions
-async function startStrategy() {
-    try {
-        const response = await fetch('/api/strategy/start', { method: 'POST' });
-        const data = await response.json();
-        if (response.ok && data.success) {
-            window.location.reload();
-        } else {
-            alert('Failed to start: ' + (data.message || data.detail || 'Unknown error'));
-        }
-    } catch (error) {
-        alert('Network error: ' + error.message);
-    }
-}
-
-async function stopStrategy() {
-    if (!confirm('Are you sure you want to stop the strategy?')) {
-        return;
-    }
-    try {
-        const response = await fetch('/api/strategy/stop', { method: 'POST' });
-        const data = await response.json();
-        if (response.ok && data.success) {
-            window.location.reload();
-        } else {
-            alert('Failed to stop: ' + (data.message || data.detail || 'Unknown error'));
-        }
-    } catch (error) {
-        alert('Network error: ' + error.message);
-    }
-}
-
 // Update countdown timers
 function updateTimers() {
     document.querySelectorAll('.timer').forEach(el => {

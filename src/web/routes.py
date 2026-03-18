@@ -8,9 +8,6 @@
 # GET  /api/pending/{id}     - Get confirmation details (JSON)
 # POST /api/pending/{id}/submit - Submit user decision (JSON)
 # GET  /api/status           - Health check (JSON)
-# GET  /api/strategy/state   - Get strategy state (JSON)
-# POST /api/strategy/start   - Start strategy (JSON)
-# POST /api/strategy/stop    - Stop strategy (JSON)
 # GET  /api/positions        - Get current positions (JSON)
 #
 # === MOMENTUM BACKTEST ENDPOINTS ===
@@ -34,7 +31,6 @@ from starlette.responses import StreamingResponse
 from src.common.pending_store import PendingConfirmationStore
 
 if TYPE_CHECKING:
-    from src.common.strategy_controller import StrategyController
     from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
@@ -67,10 +63,6 @@ def create_router() -> APIRouter:
         """Get pending store from app state."""
         return request.app.state.pending_store
 
-    def get_strategy_controller(request: Request) -> StrategyController | None:
-        """Get strategy controller from app state."""
-        return getattr(request.app.state, "strategy_controller", None)
-
     def get_position_manager(request: Request) -> PositionManager | None:
         """Get position manager from app state."""
         return getattr(request.app.state, "position_manager", None)
@@ -84,12 +76,18 @@ def create_router() -> APIRouter:
         pending = store.get_pending_list()
         templates = request.app.state.templates
 
-        # Get strategy state
-        controller = get_strategy_controller(request)
-        if controller:
-            strategy_state = controller.to_dict()
+        # Get iQuant connection status
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if iquant_rtr and hasattr(iquant_rtr, "_get_status"):
+            iquant_status = iquant_rtr._get_status()
         else:
-            strategy_state = {"state": "unknown", "is_running": False}
+            iquant_status = {
+                "connected": False,
+                "last_poll_time": None,
+                "gap_seconds": None,
+                "holdings_count": 0,
+                "pending_count": 0,
+            }
 
         # Get positions (always reload from database)
         manager = get_position_manager(request)
@@ -112,7 +110,7 @@ def create_router() -> APIRouter:
                 "request": request,
                 "pending": pending,
                 "count": len(pending),
-                "strategy_state": strategy_state,
+                "iquant_status": iquant_status,
                 "positions": positions,
             },
         )
@@ -218,48 +216,6 @@ def create_router() -> APIRouter:
                 status_code=400,
                 detail="Failed to submit selection",
             )
-
-    # ==================== Strategy Control API ====================
-
-    @router.get("/api/strategy/state")
-    async def api_strategy_state(request: Request) -> dict:
-        """Get current strategy state."""
-        controller = get_strategy_controller(request)
-        if not controller:
-            return {
-                "state": "unavailable",
-                "is_running": False,
-                "message": "Strategy controller not initialized",
-            }
-        return controller.to_dict()
-
-    @router.post("/api/strategy/start")
-    async def api_strategy_start(request: Request) -> dict:
-        """Start strategy execution."""
-        controller = get_strategy_controller(request)
-        if not controller:
-            raise HTTPException(status_code=503, detail="Strategy controller not available")
-
-        success = await controller.start()
-        return {
-            "success": success,
-            "state": controller.state.value,
-            "message": "Strategy started" if success else "Strategy already running",
-        }
-
-    @router.post("/api/strategy/stop")
-    async def api_strategy_stop(request: Request) -> dict:
-        """Stop strategy execution."""
-        controller = get_strategy_controller(request)
-        if not controller:
-            raise HTTPException(status_code=503, detail="Strategy controller not available")
-
-        success = await controller.stop()
-        return {
-            "success": success,
-            "state": controller.state.value,
-            "message": "Strategy stopped" if success else "Strategy already stopped",
-        }
 
     # ==================== Position API ====================
 

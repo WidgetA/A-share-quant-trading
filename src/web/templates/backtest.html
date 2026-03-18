@@ -45,16 +45,27 @@
 .cache-bar .dot.ready { background: #4caf50; }
 .cache-bar .dot.loading { background: #ff9800; }
 .cache-bar .dot.empty { background: #ccc; }
-.cache-bar .download-btn { margin-left: auto; }
+.cache-download-controls { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+.cache-download-controls input[type="date"] { padding: 0.3rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.8rem; }
 
-/* Progress bar */
-.progress-bar-container { display: none; margin-bottom: 1rem; }
-.progress-bar-container.visible { display: block; }
+/* Download panel (progress + log) */
+.cache-download-panel { display: none; margin-bottom: 1rem; }
+.cache-download-panel.visible { display: block; }
+.progress-bar-container { margin-bottom: 0.4rem; }
 .progress-bar {
     height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden;
 }
 .progress-bar-fill { height: 100%; background: #1a1a2e; transition: width 0.3s; width: 0%; }
 .progress-text { font-size: 0.8rem; color: #666; margin-top: 0.3rem; }
+.download-log {
+    max-height: 180px; overflow-y: auto; background: #f5f5f5; border: 1px solid #e0e0e0;
+    border-radius: 4px; padding: 0.5rem 0.7rem; font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.78rem; line-height: 1.5; color: #444;
+}
+.download-log .log-info { color: #555; }
+.download-log .log-ok { color: #388e3c; }
+.download-log .log-err { color: #d32f2f; }
+.download-log .log-warn { color: #f57c00; }
 
 /* Results */
 .result-card {
@@ -125,13 +136,21 @@
     <div class="cache-bar" id="cacheBar">
         <span class="dot empty" id="cacheDot"></span>
         <span id="cacheText">检查缓存状态...</span>
-        <button class="btn btn-secondary btn-sm download-btn" id="cacheDownloadBtn" onclick="showCacheDialog()" style="display:none;">下载数据</button>
+        <div class="cache-download-controls" id="cacheControls" style="display:none;">
+            <input type="date" id="cacheStart" value="2024-01-01" title="起始日期" />
+            <span style="color:#888;">~</span>
+            <input type="date" id="cacheEnd" title="结束日期" />
+            <button class="btn btn-secondary btn-sm" id="cacheDownloadBtn" onclick="startCacheDownloadFromUI()">下载数据</button>
+        </div>
     </div>
 
-    <!-- Cache download progress -->
-    <div class="progress-bar-container" id="cacheProgress">
-        <div class="progress-bar"><div class="progress-bar-fill" id="cacheProgressFill"></div></div>
-        <div class="progress-text" id="cacheProgressText">准备下载...</div>
+    <!-- Cache download progress + log -->
+    <div class="cache-download-panel" id="cacheDownloadPanel">
+        <div class="progress-bar-container" id="cacheProgress">
+            <div class="progress-bar"><div class="progress-bar-fill" id="cacheProgressFill"></div></div>
+            <div class="progress-text" id="cacheProgressText"></div>
+        </div>
+        <div class="download-log" id="downloadLog"></div>
     </div>
 
     <!-- Tabs -->
@@ -216,48 +235,66 @@ async function checkCacheStatus() {
         const d = await r.json();
         const dot = document.getElementById('cacheDot');
         const text = document.getElementById('cacheText');
+        const controls = document.getElementById('cacheControls');
         const btn = document.getElementById('cacheDownloadBtn');
 
-        if (d.is_ready) {
+        if (d.status === 'ready') {
             dot.className = 'dot ready';
-            text.textContent = `缓存就绪: ${d.date_count || '?'} 个交易日 (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
-            btn.style.display = '';
+            text.textContent = `缓存就绪: ${d.daily_stocks || '?'} 只股票 (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
+            controls.style.display = '';
             btn.textContent = '补充下载';
-        } else if (d.is_loading) {
+        } else if (d.status === 'loading') {
             dot.className = 'dot loading';
             text.textContent = '缓存加载中...';
-            btn.style.display = 'none';
+            controls.style.display = 'none';
         } else {
             dot.className = 'dot empty';
             text.textContent = '缓存未加载';
-            btn.style.display = '';
+            controls.style.display = '';
             btn.textContent = '下载数据';
         }
     } catch(e) {
-        document.getElementById('cacheText').textContent = '无法获取缓存状态';
+        document.getElementById('cacheText').textContent = '无法连接服务器';
     }
 }
 
-function showCacheDialog() {
-    const start = prompt('下载起始日期 (YYYY-MM-DD):', '2024-01-01');
-    if (!start) return;
-    const end = prompt('下载结束日期 (YYYY-MM-DD):', new Date().toISOString().slice(0,10));
-    if (!end) return;
-    startCacheDownload(start, end);
+function dlLog(msg, cls) {
+    const log = document.getElementById('downloadLog');
+    const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    log.innerHTML += `<div class="${cls || 'log-info'}">[${ts}] ${msg}</div>`;
+    log.scrollTop = log.scrollHeight;
 }
 
-function startCacheDownload(startDate, endDate) {
-    const prog = document.getElementById('cacheProgress');
+function startCacheDownloadFromUI() {
+    const startDate = document.getElementById('cacheStart').value;
+    const endDate = document.getElementById('cacheEnd').value;
+    if (!startDate || !endDate) return;
+
+    const panel = document.getElementById('cacheDownloadPanel');
     const fill = document.getElementById('cacheProgressFill');
-    const text = document.getElementById('cacheProgressText');
-    prog.classList.add('visible');
+    const progText = document.getElementById('cacheProgressText');
+    const log = document.getElementById('downloadLog');
+    const btn = document.getElementById('cacheDownloadBtn');
+
+    panel.classList.add('visible');
     fill.style.width = '0%';
-    text.textContent = '开始下载...';
+    progText.textContent = '';
+    log.innerHTML = '';
+    btn.disabled = true;
+    btn.textContent = '下载中...';
+
+    dlLog(`连接服务器... 请求 ${startDate} ~ ${endDate}`);
 
     const body = JSON.stringify({ start_date: startDate, end_date: endDate });
     fetch('/api/momentum/tsanghi-prepare', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body
     }).then(async resp => {
+        if (!resp.ok) {
+            const err = await resp.text();
+            dlLog(`服务器返回错误 ${resp.status}: ${err}`, 'log-err');
+            return;
+        }
+        dlLog('已连接，开始接收数据...', 'log-ok');
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -271,22 +308,34 @@ function startCacheDownload(startDate, endDate) {
                 if (!line.startsWith('data: ')) continue;
                 try {
                     const d = JSON.parse(line.slice(6));
+                    if (d.type === 'status') {
+                        dlLog(d.message);
+                    }
                     if (d.progress !== undefined) {
-                        fill.style.width = (d.progress * 100) + '%';
-                        text.textContent = d.message || `${Math.round(d.progress*100)}%`;
+                        const pct = Math.round(d.progress * 100);
+                        fill.style.width = pct + '%';
+                        progText.textContent = `${pct}%`;
+                        if (d.message) dlLog(d.message);
                     }
-                    if (d.done) {
+                    if (d.type === 'complete') {
                         fill.style.width = '100%';
-                        text.textContent = d.message || '下载完成';
-                        setTimeout(() => { prog.classList.remove('visible'); checkCacheStatus(); }, 2000);
+                        progText.textContent = '100%';
+                        const src = d.cached ? '(来自缓存)' : '(已下载)';
+                        dlLog(`完成 ${src} — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
+                        setTimeout(checkCacheStatus, 1000);
                     }
-                    if (d.error) {
-                        text.textContent = '错误: ' + d.error;
+                    if (d.type === 'error') {
+                        dlLog('错误: ' + d.message, 'log-err');
                     }
                 } catch(e) {}
             }
         }
-    }).catch(e => { text.textContent = '下载失败: ' + e.message; });
+    }).catch(e => {
+        dlLog('连接失败: ' + e.message, 'log-err');
+    }).finally(() => {
+        btn.disabled = false;
+        btn.textContent = '下载数据';
+    });
 }
 
 // ========== Single-day scan ==========
@@ -532,6 +581,7 @@ function renderCsvResult(d) {
     const today = new Date().toISOString().slice(0, 10);
     document.getElementById('singleDate').value = today;
     document.getElementById('rangeEnd').value = today;
+    document.getElementById('cacheEnd').value = today;
     // Start date: 30 days ago
     const ago = new Date(); ago.setDate(ago.getDate() - 30);
     document.getElementById('rangeStart').value = ago.toISOString().slice(0, 10);
