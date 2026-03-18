@@ -35,6 +35,8 @@
 .btn-primary:disabled { background: #999; cursor: not-allowed; }
 .btn-secondary { background: #e0e0e0; color: #333; }
 .btn-secondary:hover { background: #d0d0d0; }
+.btn-danger { background: #dc3545; color: #fff; border: 1px solid #dc3545; }
+.btn-danger:hover { background: #c82333; }
 
 /* Cache status */
 .cache-bar {
@@ -141,6 +143,7 @@
             <span style="color:#888;">~</span>
             <input type="date" id="cacheEnd" title="结束日期" />
             <button class="btn btn-secondary btn-sm" id="cacheDownloadBtn" onclick="startCacheDownloadFromUI()">下载数据</button>
+            <button class="btn btn-danger btn-sm" id="cacheStopBtn" onclick="stopCacheDownload()" style="display:none;">停止下载</button>
         </div>
     </div>
 
@@ -265,6 +268,8 @@ function dlLog(msg, cls) {
     log.scrollTop = log.scrollHeight;
 }
 
+let currentDownloadAbortCtrl = null;
+
 function startCacheDownloadFromUI() {
     const startDate = document.getElementById('cacheStart').value;
     const endDate = document.getElementById('cacheEnd').value;
@@ -275,6 +280,7 @@ function startCacheDownloadFromUI() {
     const progText = document.getElementById('cacheProgressText');
     const log = document.getElementById('downloadLog');
     const btn = document.getElementById('cacheDownloadBtn');
+    const stopBtn = document.getElementById('cacheStopBtn');
 
     panel.classList.add('visible');
     fill.style.width = '0%';
@@ -282,12 +288,21 @@ function startCacheDownloadFromUI() {
     log.innerHTML = '';
     btn.disabled = true;
     btn.textContent = '下载中...';
+    stopBtn.style.display = '';
 
     dlLog(`连接服务器... 请求 ${startDate} ~ ${endDate}`);
 
+    currentDownloadAbortCtrl = new AbortController();
     const body = JSON.stringify({ start_date: startDate, end_date: endDate });
+
+    let lastLoggedPhase = '';
+    let lastLoggedPct = -10;
+
     fetch('/api/momentum/tsanghi-prepare', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body,
+        signal: currentDownloadAbortCtrl.signal,
     }).then(async resp => {
         if (!resp.ok) {
             const err = await resp.text();
@@ -308,14 +323,20 @@ function startCacheDownloadFromUI() {
                 if (!line.startsWith('data: ')) continue;
                 try {
                     const d = JSON.parse(line.slice(6));
+                    if (d.type === 'heartbeat') continue;
                     if (d.type === 'status') {
                         dlLog(d.message);
                     }
-                    if (d.progress !== undefined) {
+                    if (d.type === 'progress') {
                         const pct = Math.round(d.progress * 100);
                         fill.style.width = pct + '%';
-                        progText.textContent = `${pct}%`;
-                        if (d.message) dlLog(d.message);
+                        progText.textContent = `${pct}% — ${d.message}`;
+                        // Log on phase change or every 10% to avoid spam
+                        if (d.phase !== lastLoggedPhase || pct >= lastLoggedPct + 10) {
+                            dlLog(d.message);
+                            lastLoggedPhase = d.phase;
+                            lastLoggedPct = pct;
+                        }
                     }
                     if (d.type === 'complete') {
                         fill.style.width = '100%';
@@ -324,6 +345,9 @@ function startCacheDownloadFromUI() {
                         dlLog(`完成 ${src} — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
                         setTimeout(checkCacheStatus, 1000);
                     }
+                    if (d.type === 'cancelled') {
+                        dlLog(d.message, 'log-warn');
+                    }
                     if (d.type === 'error') {
                         dlLog('错误: ' + d.message, 'log-err');
                     }
@@ -331,11 +355,26 @@ function startCacheDownloadFromUI() {
             }
         }
     }).catch(e => {
-        dlLog('连接失败: ' + e.message, 'log-err');
+        if (e.name === 'AbortError') {
+            dlLog('下载已取消', 'log-warn');
+        } else {
+            dlLog('连接失败: ' + e.message, 'log-err');
+        }
     }).finally(() => {
         btn.disabled = false;
         btn.textContent = '下载数据';
+        stopBtn.style.display = 'none';
+        currentDownloadAbortCtrl = null;
     });
+}
+
+async function stopCacheDownload() {
+    if (currentDownloadAbortCtrl) {
+        currentDownloadAbortCtrl.abort();
+    }
+    try {
+        await fetch('/api/momentum/tsanghi-cancel', { method: 'POST' });
+    } catch(e) { /* best-effort */ }
 }
 
 // ========== Single-day scan ==========

@@ -496,6 +496,7 @@ class TsanghiBacktestCache:
         start_date: date,
         end_date: date,
         progress_cb: Callable[[str, int, int], Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """
         Download daily + minute data for all main-board stocks.
@@ -507,6 +508,7 @@ class TsanghiBacktestCache:
             start_date: First trading date (inclusive).
             end_date: Last trading date (inclusive).
             progress_cb: Optional callback(phase, current, total) for progress updates.
+            cancel_event: Optional threading.Event; set to abort download early.
         """
         self._start_date = start_date
         self._end_date = end_date
@@ -521,7 +523,7 @@ class TsanghiBacktestCache:
             await _maybe_await(progress_cb("init", 0, 0))
 
         # --- Phase 1: Daily OHLCV from tsanghi ---
-        await self._download_daily_tsanghi(dl_start, end_date, progress_cb)
+        await self._download_daily_tsanghi(dl_start, end_date, progress_cb, cancel_event)
 
         # Derive preClose from previous trading day's close for each stock.
         self._compute_pre_close()
@@ -530,7 +532,9 @@ class TsanghiBacktestCache:
         codes = list(self._daily.keys())
         self._stock_codes = codes
         if codes:
-            await self._download_minute_baostock(codes, dl_start, end_date, progress_cb)
+            await self._download_minute_baostock(
+                codes, dl_start, end_date, progress_cb, cancel_event
+            )
 
         total = len(self._stock_codes)
         if progress_cb:
@@ -549,6 +553,7 @@ class TsanghiBacktestCache:
         dl_start: date,
         end_date: date,
         progress_cb: Callable[[str, int, int], Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Download daily OHLCV from tsanghi /daily/latest (batch per-date).
 
@@ -567,6 +572,9 @@ class TsanghiBacktestCache:
             current = dl_start
 
             while current <= end_date:
+                if cancel_event and cancel_event.is_set():
+                    logger.info("Daily download cancelled by user")
+                    raise asyncio.CancelledError()
                 date_str = current.strftime("%Y-%m-%d")
                 day_has_data = False
 
@@ -649,6 +657,7 @@ class TsanghiBacktestCache:
         dl_start: date,
         end_date: date,
         progress_cb: Callable[[str, int, int], Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Download 5-min bars (09:35 + 09:40) from baostock for 9:40 snapshot."""
         done = [0]
@@ -667,6 +676,9 @@ class TsanghiBacktestCache:
                 bs_end = end_date.strftime("%Y-%m-%d")
 
                 for code in codes:
+                    if cancel_event and cancel_event.is_set():
+                        logger.info("Minute download cancelled by user")
+                        return
                     prefix = "sh" if code.startswith("6") else "sz"
                     bs_code = f"{prefix}.{code}"
 
@@ -727,9 +739,11 @@ class TsanghiBacktestCache:
         thread.start()
         while thread.is_alive():
             await asyncio.sleep(2)
+            if cancel_event and cancel_event.is_set():
+                break
             if progress_cb:
                 await _maybe_await(progress_cb("minute", done[0], total))
-        thread.join()
+        thread.join(timeout=5)
 
         if thread_exc:
             raise thread_exc[0]

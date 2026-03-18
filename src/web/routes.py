@@ -322,6 +322,9 @@ def create_momentum_router() -> APIRouter:
 
     router = APIRouter(tags=["momentum"])
 
+    def _sse(data: dict) -> str:
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
     def _get_monitor_state(request: Request) -> dict[str, Any]:
         """Get monitor state from app.state (created at startup)."""
         return getattr(
@@ -440,62 +443,137 @@ def create_momentum_router() -> APIRouter:
 
             return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
-        # 3) Download missing data
+        # 3) Download missing data (real-time progress via asyncio.Queue)
+        def _fmt_progress(phase: str, current: int, total: int) -> str:
+            if phase == "init":
+                return "正在初始化..."
+            elif phase == "daily":
+                return f"下载日线数据: {current}/{total} 天"
+            elif phase == "minute":
+                return f"下载分钟线数据: {current}/{total} 只"
+            elif phase == "download":
+                return f"下载完成: 共 {total} 只股票"
+            return f"{phase}: {current}/{total}"
+
         async def download_stream():
-            try:
-                from src.data.clients.tsanghi_backtest_cache import TsanghiBacktestCache
+            import threading
 
-                cache = existing or TsanghiBacktestCache()
-                msg = {"type": "status", "message": "开始下载..."}
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+            queue: asyncio.Queue[dict | None] = asyncio.Queue()
+            cancel_event = threading.Event()
 
-                progress_events: list[dict] = []
+            # Cancel any existing download task
+            prev_task = getattr(request.app.state, "tsanghi_download_task", None)
+            if prev_task and not prev_task.done():
+                prev_task.cancel()
+                try:
+                    await prev_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
-                def on_progress(phase: str, current: int, total: int):
-                    progress_events.append(
-                        {
-                            "progress": current / total if total > 0 else 0,
-                            "message": f"{phase}: {current}/{total}",
-                        }
-                    )
+            cache = existing or TsanghiBacktestCache()
 
-                await cache.download_prices(
-                    start_date,
-                    end_date,
-                    progress_cb=on_progress,
+            def on_progress(phase: str, current: int, total: int):
+                if phase == "init":
+                    overall = 0.0
+                elif phase == "daily":
+                    overall = 0.2 * (current / total) if total > 0 else 0
+                elif phase == "minute":
+                    overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
+                else:
+                    overall = 1.0
+                queue.put_nowait(
+                    {
+                        "type": "progress",
+                        "progress": overall,
+                        "message": _fmt_progress(phase, current, total),
+                        "phase": phase,
+                    }
                 )
 
-                for ev in progress_events:
-                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            async def _run_download():
+                try:
+                    await cache.download_prices(
+                        start_date,
+                        end_date,
+                        progress_cb=on_progress,
+                        cancel_event=cancel_event,
+                    )
+                    queue.put_nowait(None)  # sentinel: success
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
+                except Exception as e:
+                    queue.put_nowait({"type": "error", "message": str(e)[:200]})
+
+            request.app.state.tsanghi_cache_loading = True
+            download_task = asyncio.create_task(_run_download())
+            request.app.state.tsanghi_download_task = download_task
+            request.app.state.tsanghi_download_cancel = cancel_event
+
+            try:
+                yield _sse(
+                    {
+                        "type": "status",
+                        "message": f"开始下载 {body.start_date} ~ {body.end_date} ...",
+                    }
+                )
+
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30)
+                    except asyncio.TimeoutError:
+                        yield _sse({"type": "heartbeat"})
+                        continue
+
+                    if event is None:
+                        break  # download done
+                    if event.get("type") in ("error", "cancelled"):
+                        yield _sse(event)
+                        return
+
+                    yield _sse(event)
 
                 # Save to OSS if available
                 if check_oss_available():
-                    msg = {"type": "status", "message": "保存到 OSS..."}
-                    yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                    yield _sse({"type": "status", "message": "保存到 OSS..."})
                     await cache.save_to_oss()
 
                 request.app.state.tsanghi_cache = cache
-                request.app.state.tsanghi_cache_loading = False
                 # NOTE: do NOT inject into iQuant — trading cache is isolated
 
-                msg = {
-                    "type": "complete",
-                    "daily_count": len(cache._daily),
-                    "minute_count": len(cache._minute),
-                    "cached": False,
-                }
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
-
+                yield _sse(
+                    {
+                        "type": "complete",
+                        "daily_count": len(cache._daily),
+                        "minute_count": len(cache._minute),
+                        "cached": False,
+                    }
+                )
             except Exception as e:
                 logger.error(f"Tsanghi download error: {e}", exc_info=True)
-                err = {"type": "error", "message": str(e)[:200]}
-                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                yield _sse({"type": "error", "message": str(e)[:200]})
+            finally:
+                request.app.state.tsanghi_cache_loading = False
+                request.app.state.tsanghi_download_task = None
+                request.app.state.tsanghi_download_cancel = None
 
         return StreamingResponse(
             download_stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @router.post("/api/momentum/tsanghi-cancel")
+    async def tsanghi_cancel(request: Request):
+        """Cancel an in-progress tsanghi download."""
+        task = getattr(request.app.state, "tsanghi_download_task", None)
+        if task and not task.done():
+            cancel_event = getattr(request.app.state, "tsanghi_download_cancel", None)
+            if cancel_event:
+                cancel_event.set()
+            task.cancel()
+            return {"success": True, "message": "取消请求已发送"}
+        return {"success": False, "message": "没有正在进行的下载"}
 
     # === Single-day V15 scan ===
 

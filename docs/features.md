@@ -37,6 +37,7 @@
 | 0.11.1 | 2026-03-18 | - | SYS-005: Inline download log + calendar on backtest page, fix download_prices call, fix monitoring startup order |
 | 0.11.1 | 2026-03-18 | - | SYS-005: Isolate dashboard and iQuant trading caches — dashboard download no longer affects live trading |
 | 0.11.2 | 2026-03-19 | - | SYS-005: OSS cache prefix configurable via `OSS_CACHE_PREFIX` env var + fix dashboard save_to_oss async bug |
+| 0.11.3 | 2026-03-19 | - | SYS-005: Real-time download progress (asyncio.Queue SSE), descriptive Chinese logs, stop download button |
 
 ---
 
