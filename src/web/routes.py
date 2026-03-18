@@ -452,10 +452,12 @@ def create_momentum_router() -> APIRouter:
                 progress_events: list[dict] = []
 
                 def on_progress(phase: str, current: int, total: int):
-                    progress_events.append({
-                        "progress": current / total if total > 0 else 0,
-                        "message": f"{phase}: {current}/{total}",
-                    })
+                    progress_events.append(
+                        {
+                            "progress": current / total if total > 0 else 0,
+                            "message": f"{phase}: {current}/{total}",
+                        }
+                    )
 
                 await cache.download_prices(
                     start_date,
