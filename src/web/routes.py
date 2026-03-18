@@ -1494,12 +1494,12 @@ async def _run_intraday_monitor(state: dict) -> None:
                 except Exception:
                     pass
 
-            # After scan, wait until next day
+            # After scan, wait until next day (keep today_results for status endpoint)
             tomorrow = now + timedelta(days=1)
             target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
             wait_secs = (target - datetime.now(beijing_tz)).total_seconds()
-            state["today_results"] = []
             await asyncio.sleep(min(max(wait_secs, 10), 3600 * 18))
+            state["today_results"] = []
 
     except asyncio.CancelledError:
         logger.info("Intraday momentum monitor cancelled")
@@ -1984,7 +1984,12 @@ def create_trade_backtest_router() -> APIRouter:
         initial_capital = 100000.0
         cap_param = request.query_params.get("initial_capital")
         if cap_param:
-            initial_capital = float(cap_param)
+            try:
+                initial_capital = float(cap_param)
+            except ValueError:
+                raise HTTPException(400, f"initial_capital 参数无效: {cap_param}")
+            if initial_capital <= 0:
+                raise HTTPException(400, "initial_capital 必须为正数")
 
         capital = initial_capital
         trades: list[dict[str, Any]] = []
@@ -2018,6 +2023,11 @@ def create_trade_backtest_router() -> APIRouter:
                     )
                 buy_price = float(buy_day["open"])
                 sell_price = float(sell_day["close"])
+                if buy_price <= 0:
+                    raise HTTPException(
+                        400,
+                        f"第 {i} 行: {code} 在 {buy_date} 的开盘价为 0",
+                    )
 
                 lots = math.floor(capital / (buy_price * 100))
                 if lots <= 0:

@@ -1301,7 +1301,7 @@ def create_iquant_router() -> APIRouter:
                 "latest_price": round(rec.latest_price, 4),
                 "open_price": round(rec.open_price, 4),
                 "prev_close": round(rec.prev_close, 4),
-                "composite_score": round(rec.composite_score, 4),
+                "composite_score": round(rec.v3_score, 4),
             }
         }
 
