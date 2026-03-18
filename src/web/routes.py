@@ -1230,7 +1230,7 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
             raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
 
         today = datetime.now(beijing_tz).date()
-        prev_daily: dict[str, dict[str, float]] = {}
+        prev_daily: dict = {}
         for days_back in range(1, 8):
             prev_date = today - timedelta(days=days_back)
             prev_date_str = prev_date.strftime("%Y-%m-%d")

@@ -39,6 +39,7 @@ class DailyBar(NamedTuple):
     amount: float
     turnoverRatio: float | None
 
+
 logger = logging.getLogger(__name__)
 
 # OSS cache key prefix
