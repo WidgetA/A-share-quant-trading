@@ -6,36 +6,6 @@
 <div class="settings-page">
     <h2>Settings</h2>
 
-    <!-- iFinD Token Section -->
-    <section class="settings-section">
-        <div class="settings-card">
-            <h3>iFinD Refresh Token</h3>
-            <p class="settings-desc">用于 iFinD HTTP API 认证。从 iFinD Windows 客户端获取：工具 → refresh_token 查询/更新</p>
-
-            <!-- Current Status -->
-            <div class="token-status" id="tokenStatus">
-                <span class="token-status-label">当前状态：</span>
-                <span class="token-status-value" id="tokenStatusValue">加载中...</span>
-            </div>
-
-            <!-- Token Input -->
-            <div class="form-group">
-                <label for="tokenInput">新 Token</label>
-                <textarea id="tokenInput" class="token-input" rows="3"
-                    placeholder="粘贴 refresh_token..."></textarea>
-            </div>
-
-            <!-- Actions -->
-            <div class="token-actions">
-                <button class="btn btn-secondary" onclick="testToken()" id="testBtn">验证 Token</button>
-                <button class="btn btn-primary" onclick="saveToken()" id="saveBtn">保存</button>
-            </div>
-
-            <!-- Result Message -->
-            <div class="token-message hidden" id="tokenMessage"></div>
-        </div>
-    </section>
-
     <!-- Tushare Pro Token Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -155,516 +125,108 @@
             <div class="token-message hidden" id="iquantMessage"></div>
         </div>
     </section>
-
-    <!-- Tavily API Key Section -->
-    <section class="settings-section">
-        <div class="settings-card">
-            <h3>Tavily API Key</h3>
-            <p class="settings-desc">用于动量策略 Step 6 利空新闻搜索。免费额度 1000 次/月，注册：<a href="https://tavily.com" target="_blank">tavily.com</a></p>
-
-            <!-- Current Status -->
-            <div class="token-status" id="tavilyStatus">
-                <span class="token-status-label">当前状态：</span>
-                <span class="token-status-value" id="tavilyStatusValue">加载中...</span>
-            </div>
-
-            <!-- Key Input -->
-            <div class="form-group">
-                <label for="tavilyInput">API Key</label>
-                <input type="text" id="tavilyInput" class="token-input"
-                    placeholder="tvly-xxxxxxxxxxxxxxxx" style="font-family: monospace;">
-            </div>
-
-            <!-- Actions -->
-            <div class="token-actions">
-                <button class="btn btn-secondary" onclick="testTavilyKey()" id="tavilyTestBtn">验证 Key</button>
-                <button class="btn btn-primary" onclick="saveTavilyKey()" id="tavilySaveBtn">保存</button>
-            </div>
-
-            <!-- Result Message -->
-            <div class="token-message hidden" id="tavilyMessage"></div>
-        </div>
-    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// === iFinD Token ===
-async function loadTokenStatus() {
-    try {
-        const resp = await fetch('/api/settings/ifind-token');
-        const data = await resp.json();
-        const el = document.getElementById('tokenStatusValue');
-        if (data.configured) {
-            el.textContent = `${data.source_label} | ${data.masked_token} (${data.token_length} 字符)`;
-            el.className = 'token-status-value configured';
-        } else {
-            el.textContent = '未配置';
-            el.className = 'token-status-value not-configured';
-        }
-    } catch (e) {
-        document.getElementById('tokenStatusValue').textContent = '加载失败';
-    }
-}
-
 function showMessage(elId, text, success) {
     const el = document.getElementById(elId);
-    if (typeof text === 'object' && text !== null) {
-        text = JSON.stringify(text);
-    }
+    if (typeof text === 'object' && text !== null) text = JSON.stringify(text);
     el.textContent = text || '';
     el.className = 'token-message ' + (success ? 'success' : 'error');
 }
 
-async function testToken() {
-    const token = document.getElementById('tokenInput').value.trim();
-    if (!token) {
-        showMessage('tokenMessage', '请先输入 Token', false);
-        return;
-    }
-
-    const btn = document.getElementById('testBtn');
-    btn.disabled = true;
-    btn.textContent = '验证中...';
-    showMessage('tokenMessage', '', true);
-
+// Generic load/test/save helpers
+async function loadKeyStatus(apiPath, statusValueId) {
     try {
-        const resp = await fetch('/api/settings/ifind-token/test', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: token})
-        });
+        const resp = await fetch(apiPath);
         const data = await resp.json();
-        showMessage('tokenMessage', data.message || data.detail || '未知响应', data.success);
-    } catch (e) {
-        showMessage('tokenMessage', '请求失败: ' + (e.message || e), false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '验证 Token';
-    }
-}
-
-async function saveToken() {
-    const token = document.getElementById('tokenInput').value.trim();
-    if (!token) {
-        showMessage('tokenMessage', '请先输入 Token', false);
-        return;
-    }
-
-    const btn = document.getElementById('saveBtn');
-    btn.disabled = true;
-    btn.textContent = '保存中...';
-
-    try {
-        const resp = await fetch('/api/settings/ifind-token', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: token})
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-            showMessage('tokenMessage', data.message, true);
-            document.getElementById('tokenInput').value = '';
-            loadTokenStatus();
-        } else {
-            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
-            showMessage('tokenMessage', errMsg, false);
-        }
-    } catch (e) {
-        showMessage('tokenMessage', '请求失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '保存';
-    }
-}
-
-// === Tushare Pro Token ===
-async function loadTushareStatus() {
-    try {
-        const resp = await fetch('/api/settings/tushare-token');
-        const data = await resp.json();
-        const el = document.getElementById('tushareStatusValue');
+        const el = document.getElementById(statusValueId);
         if (data.configured) {
-            el.textContent = `${data.source_label} | ${data.masked_token} (${data.token_length} 字符)`;
+            const masked = data.masked_token || data.masked_key || '***';
+            const len = data.token_length || data.key_length || '?';
+            el.textContent = `${data.source_label} | ${masked} (${len} 字符)`;
             el.className = 'token-status-value configured';
         } else {
             el.textContent = '未配置';
             el.className = 'token-status-value not-configured';
         }
     } catch (e) {
-        document.getElementById('tushareStatusValue').textContent = '加载失败';
+        document.getElementById(statusValueId).textContent = '加载失败';
     }
 }
 
-async function testTushareToken() {
-    const token = document.getElementById('tushareInput').value.trim();
-    if (!token) {
-        showMessage('tushareMessage', '请先输入 Token', false);
-        return;
-    }
-
-    const btn = document.getElementById('tushareTestBtn');
-    btn.disabled = true;
-    btn.textContent = '验证中...';
-    showMessage('tushareMessage', '', true);
-
+async function testKey(apiPath, inputId, messageId, btnId, btnText) {
+    const token = document.getElementById(inputId).value.trim();
+    if (!token) { showMessage(messageId, '请先输入', false); return; }
+    const btn = document.getElementById(btnId);
+    btn.disabled = true; btn.textContent = '验证中...';
+    showMessage(messageId, '', true);
     try {
-        const resp = await fetch('/api/settings/tushare-token/test', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+        const resp = await fetch(apiPath, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({token: token})
         });
         const data = await resp.json();
-        showMessage('tushareMessage', data.message || data.detail || '未知响应', data.success);
+        showMessage(messageId, data.message || data.detail || '未知响应', data.success);
     } catch (e) {
-        showMessage('tushareMessage', '请求失败: ' + (e.message || e), false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '验证 Token';
-    }
+        showMessage(messageId, '请求失败: ' + (e.message || e), false);
+    } finally { btn.disabled = false; btn.textContent = btnText; }
 }
 
-async function saveTushareToken() {
-    const token = document.getElementById('tushareInput').value.trim();
-    if (!token) {
-        showMessage('tushareMessage', '请先输入 Token', false);
-        return;
-    }
-
-    const btn = document.getElementById('tushareSaveBtn');
-    btn.disabled = true;
-    btn.textContent = '保存中...';
-
+async function saveKey(apiPath, inputId, messageId, btnId, statusLoader, extraMsg) {
+    const token = document.getElementById(inputId).value.trim();
+    if (!token) { showMessage(messageId, '请先输入', false); return; }
+    const btn = document.getElementById(btnId);
+    btn.disabled = true; btn.textContent = '保存中...';
     try {
-        const resp = await fetch('/api/settings/tushare-token', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+        const resp = await fetch(apiPath, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({token: token})
         });
         const data = await resp.json();
         if (resp.ok && data.success) {
-            showMessage('tushareMessage', data.message, true);
-            document.getElementById('tushareInput').value = '';
-            loadTushareStatus();
+            showMessage(messageId, (data.message || '保存成功') + (extraMsg || ''), true);
+            document.getElementById(inputId).value = '';
+            statusLoader();
         } else {
-            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
-            showMessage('tushareMessage', errMsg, false);
+            showMessage(messageId, data.detail || data.message || '保存失败', false);
         }
     } catch (e) {
-        showMessage('tushareMessage', '请求失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '保存';
-    }
+        showMessage(messageId, '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '保存'; }
 }
 
-// === Tsanghi (沧海数据) Token ===
-async function loadTsanghiStatus() {
-    try {
-        const resp = await fetch('/api/settings/tsanghi-token');
-        const data = await resp.json();
-        const el = document.getElementById('tsanghiStatusValue');
-        if (data.configured) {
-            el.textContent = `${data.source_label} | ${data.masked_token} (${data.token_length} 字符)`;
-            el.className = 'token-status-value configured';
-        } else {
-            el.textContent = '未配置';
-            el.className = 'token-status-value not-configured';
-        }
-    } catch (e) {
-        document.getElementById('tsanghiStatusValue').textContent = '加载失败';
-    }
-}
+// Tushare
+function loadTushareStatus() { loadKeyStatus('/api/settings/tushare-token', 'tushareStatusValue'); }
+function testTushareToken() { testKey('/api/settings/tushare-token/test', 'tushareInput', 'tushareMessage', 'tushareTestBtn', '验证 Token'); }
+function saveTushareToken() { saveKey('/api/settings/tushare-token', 'tushareInput', 'tushareMessage', 'tushareSaveBtn', loadTushareStatus); }
 
-async function testTsanghiToken() {
-    const token = document.getElementById('tsanghiInput').value.trim();
-    if (!token) {
-        showMessage('tsanghiMessage', '请先输入 Token', false);
-        return;
-    }
+// Tsanghi
+function loadTsanghiStatus() { loadKeyStatus('/api/settings/tsanghi-token', 'tsanghiStatusValue'); }
+function testTsanghiToken() { testKey('/api/settings/tsanghi-token/test', 'tsanghiInput', 'tsanghiMessage', 'tsanghiTestBtn', '验证 Token'); }
+function saveTsanghiToken() { saveKey('/api/settings/tsanghi-token', 'tsanghiInput', 'tsanghiMessage', 'tsanghiSaveBtn', loadTsanghiStatus); }
 
-    const btn = document.getElementById('tsanghiTestBtn');
-    btn.disabled = true;
-    btn.textContent = '验证中...';
-    showMessage('tsanghiMessage', '', true);
+// Aliyun
+function loadAliyunStatus() { loadKeyStatus('/api/settings/aliyun-key', 'aliyunStatusValue'); }
+function testAliyunKey() { testKey('/api/settings/aliyun-key/test', 'aliyunInput', 'aliyunMessage', 'aliyunTestBtn', '验证 Key'); }
+function saveAliyunKey() { saveKey('/api/settings/aliyun-key', 'aliyunInput', 'aliyunMessage', 'aliyunSaveBtn', loadAliyunStatus); }
 
-    try {
-        const resp = await fetch('/api/settings/tsanghi-token/test', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: token})
-        });
-        const data = await resp.json();
-        showMessage('tsanghiMessage', data.message || data.detail || '未知响应', data.success);
-    } catch (e) {
-        showMessage('tsanghiMessage', '请求失败: ' + (e.message || e), false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '验证 Token';
-    }
-}
-
-async function saveTsanghiToken() {
-    const token = document.getElementById('tsanghiInput').value.trim();
-    if (!token) {
-        showMessage('tsanghiMessage', '请先输入 Token', false);
-        return;
-    }
-
-    const btn = document.getElementById('tsanghiSaveBtn');
-    btn.disabled = true;
-    btn.textContent = '保存中...';
-
-    try {
-        const resp = await fetch('/api/settings/tsanghi-token', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: token})
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-            showMessage('tsanghiMessage', data.message, true);
-            document.getElementById('tsanghiInput').value = '';
-            loadTsanghiStatus();
-        } else {
-            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
-            showMessage('tsanghiMessage', errMsg, false);
-        }
-    } catch (e) {
-        showMessage('tsanghiMessage', '请求失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '保存';
-    }
-}
-
-// === Aliyun DashScope API Key ===
-async function loadAliyunStatus() {
-    try {
-        const resp = await fetch('/api/settings/aliyun-key');
-        const data = await resp.json();
-        const el = document.getElementById('aliyunStatusValue');
-        if (data.configured) {
-            el.textContent = `${data.source_label} | ${data.masked_token} (${data.token_length} 字符)`;
-            el.className = 'token-status-value configured';
-        } else {
-            el.textContent = '未配置';
-            el.className = 'token-status-value not-configured';
-        }
-    } catch (e) {
-        document.getElementById('aliyunStatusValue').textContent = '加载失败';
-    }
-}
-
-async function testAliyunKey() {
-    const token = document.getElementById('aliyunInput').value.trim();
-    if (!token) {
-        showMessage('aliyunMessage', '请先输入 API Key', false);
-        return;
-    }
-
-    const btn = document.getElementById('aliyunTestBtn');
-    btn.disabled = true;
-    btn.textContent = '验证中...';
-    showMessage('aliyunMessage', '', true);
-
-    try {
-        const resp = await fetch('/api/settings/aliyun-key/test', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: token})
-        });
-        const data = await resp.json();
-        showMessage('aliyunMessage', data.message || data.detail || '未知响应', data.success);
-    } catch (e) {
-        showMessage('aliyunMessage', '请求失败: ' + (e.message || e), false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '验证 Key';
-    }
-}
-
-async function saveAliyunKey() {
-    const token = document.getElementById('aliyunInput').value.trim();
-    if (!token) {
-        showMessage('aliyunMessage', '请先输入 API Key', false);
-        return;
-    }
-
-    const btn = document.getElementById('aliyunSaveBtn');
-    btn.disabled = true;
-    btn.textContent = '保存中...';
-
-    try {
-        const resp = await fetch('/api/settings/aliyun-key', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: token})
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-            showMessage('aliyunMessage', data.message, true);
-            document.getElementById('aliyunInput').value = '';
-            loadAliyunStatus();
-        } else {
-            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
-            showMessage('aliyunMessage', errMsg, false);
-        }
-    } catch (e) {
-        showMessage('aliyunMessage', '请求失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '保存';
-    }
-}
-
-// === iQuant API Key ===
-async function loadIquantStatus() {
-    try {
-        const resp = await fetch('/api/settings/iquant-key');
-        const data = await resp.json();
-        const el = document.getElementById('iquantStatusValue');
-        if (data.configured) {
-            el.textContent = `${data.source_label} | ${data.masked_key} (${data.key_length} 字符)`;
-            el.className = 'token-status-value configured';
-        } else {
-            el.textContent = '未配置';
-            el.className = 'token-status-value not-configured';
-        }
-    } catch (e) {
-        document.getElementById('iquantStatusValue').textContent = '加载失败';
-    }
-}
-
+// iQuant
+function loadIquantStatus() { loadKeyStatus('/api/settings/iquant-key', 'iquantStatusValue'); }
 function generateIquantKey() {
-    // Generate a random 32-char hex string
     const arr = new Uint8Array(16);
     crypto.getRandomValues(arr);
-    const key = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
-    document.getElementById('iquantInput').value = key;
+    document.getElementById('iquantInput').value = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
     showMessage('iquantMessage', '已生成随机密钥，请保存后复制到 iQuant 脚本的 API_KEY 中', true);
 }
-
-async function saveIquantKey() {
-    const key = document.getElementById('iquantInput').value.trim();
-    if (!key) {
-        showMessage('iquantMessage', '请先输入或生成 API Key', false);
-        return;
-    }
-
-    const btn = document.getElementById('iquantSaveBtn');
-    btn.disabled = true;
-    btn.textContent = '保存中...';
-
-    try {
-        const resp = await fetch('/api/settings/iquant-key', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: key})
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-            showMessage('iquantMessage', data.message + '，请将此 Key 填入 iQuant 脚本的 API_KEY 变量', true);
-            loadIquantStatus();
-        } else {
-            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
-            showMessage('iquantMessage', errMsg, false);
-        }
-    } catch (e) {
-        showMessage('iquantMessage', '请求失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '保存';
-    }
-}
-
-// === Tavily API Key ===
-async function loadTavilyStatus() {
-    try {
-        const resp = await fetch('/api/settings/tavily-key');
-        const data = await resp.json();
-        const el = document.getElementById('tavilyStatusValue');
-        if (data.configured) {
-            el.textContent = `${data.source_label} | ${data.masked_key} (${data.key_length} 字符)`;
-            el.className = 'token-status-value configured';
-        } else {
-            el.textContent = '未配置';
-            el.className = 'token-status-value not-configured';
-        }
-    } catch (e) {
-        document.getElementById('tavilyStatusValue').textContent = '加载失败';
-    }
-}
-
-async function testTavilyKey() {
-    const key = document.getElementById('tavilyInput').value.trim();
-    if (!key) {
-        showMessage('tavilyMessage', '请先输入 API Key', false);
-        return;
-    }
-
-    const btn = document.getElementById('tavilyTestBtn');
-    btn.disabled = true;
-    btn.textContent = '验证中...';
-    showMessage('tavilyMessage', '', true);
-
-    try {
-        const resp = await fetch('/api/settings/tavily-key/test', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: key})
-        });
-        const data = await resp.json();
-        showMessage('tavilyMessage', data.message || data.detail || '未知响应', data.success);
-    } catch (e) {
-        showMessage('tavilyMessage', '请求失败: ' + (e.message || e), false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '验证 Key';
-    }
-}
-
-async function saveTavilyKey() {
-    const key = document.getElementById('tavilyInput').value.trim();
-    if (!key) {
-        showMessage('tavilyMessage', '请先输入 API Key', false);
-        return;
-    }
-
-    const btn = document.getElementById('tavilySaveBtn');
-    btn.disabled = true;
-    btn.textContent = '保存中...';
-
-    try {
-        const resp = await fetch('/api/settings/tavily-key', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({token: key})
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-            showMessage('tavilyMessage', data.message, true);
-            document.getElementById('tavilyInput').value = '';
-            loadTavilyStatus();
-        } else {
-            const errMsg = typeof data.detail === 'string' ? data.detail : data.message || '保存失败';
-            showMessage('tavilyMessage', errMsg, false);
-        }
-    } catch (e) {
-        showMessage('tavilyMessage', '请求失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '保存';
-    }
-}
+function saveIquantKey() { saveKey('/api/settings/iquant-key', 'iquantInput', 'iquantMessage', 'iquantSaveBtn', loadIquantStatus, '，请将此 Key 填入 iQuant 脚本的 API_KEY 变量'); }
 
 // Load all on page load
-loadTokenStatus();
 loadTushareStatus();
 loadTsanghiStatus();
 loadAliyunStatus();
 loadIquantStatus();
-loadTavilyStatus();
 </script>
 {% endblock %}
