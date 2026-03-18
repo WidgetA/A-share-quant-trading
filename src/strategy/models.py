@@ -26,6 +26,7 @@ class HistoricalDataProvider(Protocol):
         indicators: str,
         start_date: str,
         end_date: str,
+        function_para: dict[str, str] | None = None,
     ) -> dict: ...
 
     async def real_time_quotation(
