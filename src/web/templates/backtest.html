@@ -1,0 +1,546 @@
+{% extends "base.html" %}
+
+{% block title %}回测{% endblock %}
+
+{% block head %}
+<style>
+.backtest-page { max-width: 1100px; margin: 0 auto; }
+.backtest-page h2 { margin-bottom: 1rem; }
+
+/* Strategy selector */
+.strategy-bar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+.strategy-bar select { padding: 0.4rem 0.8rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
+
+/* Tabs */
+.tab-bar { display: flex; gap: 0; border-bottom: 2px solid #ddd; margin-bottom: 1.5rem; }
+.tab-btn {
+    padding: 0.6rem 1.2rem; background: none; border: none; border-bottom: 2px solid transparent;
+    margin-bottom: -2px; cursor: pointer; font-size: 0.95rem; color: #666; transition: all 0.2s;
+}
+.tab-btn.active { color: #1a1a2e; border-bottom-color: #1a1a2e; font-weight: 600; }
+.tab-btn:hover { color: #333; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Forms */
+.form-row { display: flex; gap: 1rem; align-items: flex-end; margin-bottom: 1rem; flex-wrap: wrap; }
+.form-group { display: flex; flex-direction: column; gap: 0.3rem; }
+.form-group label { font-size: 0.85rem; color: #555; font-weight: 500; }
+.form-group input, .form-group select {
+    padding: 0.5rem 0.7rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem;
+}
+.btn { padding: 0.5rem 1.2rem; border: none; border-radius: 4px; font-size: 0.9rem; cursor: pointer; transition: background 0.2s; }
+.btn-primary { background: #1a1a2e; color: white; }
+.btn-primary:hover { background: #2a2a4e; }
+.btn-primary:disabled { background: #999; cursor: not-allowed; }
+.btn-secondary { background: #e0e0e0; color: #333; }
+.btn-secondary:hover { background: #d0d0d0; }
+
+/* Cache status */
+.cache-bar {
+    display: flex; align-items: center; gap: 1rem; padding: 0.6rem 1rem;
+    background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 1.5rem; font-size: 0.85rem;
+}
+.cache-bar .dot { width: 8px; height: 8px; border-radius: 50%; }
+.cache-bar .dot.ready { background: #4caf50; }
+.cache-bar .dot.loading { background: #ff9800; }
+.cache-bar .dot.empty { background: #ccc; }
+.cache-bar .download-btn { margin-left: auto; }
+
+/* Progress bar */
+.progress-bar-container { display: none; margin-bottom: 1rem; }
+.progress-bar-container.visible { display: block; }
+.progress-bar {
+    height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden;
+}
+.progress-bar-fill { height: 100%; background: #1a1a2e; transition: width 0.3s; width: 0%; }
+.progress-text { font-size: 0.8rem; color: #666; margin-top: 0.3rem; }
+
+/* Results */
+.result-card {
+    background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1.2rem;
+    margin-bottom: 1rem;
+}
+.result-card h4 { margin-bottom: 0.5rem; font-size: 1rem; }
+.funnel-row { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.funnel-item { font-size: 0.85rem; }
+.funnel-item .label { color: #888; }
+.funnel-item .value { font-weight: 600; }
+
+/* Table */
+.result-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
+.result-table th, .result-table td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid #eee; }
+.result-table th { background: #f5f5f5; font-weight: 600; color: #555; }
+.result-table tr:hover { background: #fafafa; }
+.result-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.positive { color: #d32f2f; }
+.negative { color: #388e3c; }
+.recommended-row { background: #fff3e0 !important; }
+
+/* Range backtest stats */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.8rem; margin-top: 0.8rem; }
+.stat-card { background: #f9f9f9; padding: 0.6rem 0.8rem; border-radius: 6px; }
+.stat-card .stat-label { font-size: 0.75rem; color: #888; }
+.stat-card .stat-value { font-size: 1.1rem; font-weight: 600; }
+
+/* Equity curve placeholder */
+.equity-chart { width: 100%; height: 300px; background: #fafafa; border: 1px solid #eee; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #999; margin-top: 1rem; }
+
+/* Log area */
+.log-area {
+    max-height: 400px; overflow-y: auto; background: #1a1a1a; color: #ccc; padding: 0.8rem;
+    border-radius: 6px; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.8rem; line-height: 1.5;
+    margin-top: 1rem; display: none;
+}
+.log-area.visible { display: block; }
+.log-area .log-date { color: #888; }
+.log-area .log-rec { color: #ff9800; }
+.log-area .log-skip { color: #666; }
+.log-area .log-profit { color: #4caf50; }
+.log-area .log-loss { color: #ef5350; }
+
+/* CSV upload */
+.drop-zone {
+    border: 2px dashed #ccc; border-radius: 8px; padding: 2rem; text-align: center;
+    cursor: pointer; transition: all 0.2s; color: #888;
+}
+.drop-zone:hover, .drop-zone.dragover { border-color: #1a1a2e; background: #f0f0ff; color: #333; }
+.drop-zone input[type="file"] { display: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="backtest-page">
+    <h2>回测</h2>
+
+    <!-- Strategy Selector -->
+    <div class="strategy-bar">
+        <label>策略:</label>
+        <select id="strategySelector">
+            <option value="v15" selected>V15 动量漏斗</option>
+        </select>
+    </div>
+
+    <!-- Cache Status Bar -->
+    <div class="cache-bar" id="cacheBar">
+        <span class="dot empty" id="cacheDot"></span>
+        <span id="cacheText">检查缓存状态...</span>
+        <button class="btn btn-secondary btn-sm download-btn" id="cacheDownloadBtn" onclick="showCacheDialog()" style="display:none;">下载数据</button>
+    </div>
+
+    <!-- Cache download progress -->
+    <div class="progress-bar-container" id="cacheProgress">
+        <div class="progress-bar"><div class="progress-bar-fill" id="cacheProgressFill"></div></div>
+        <div class="progress-text" id="cacheProgressText">准备下载...</div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchTab('single')">V15 单日扫描</button>
+        <button class="tab-btn" onclick="switchTab('range')">V15 区间回测</button>
+        <button class="tab-btn" onclick="switchTab('csv')">CSV 交易分析</button>
+    </div>
+
+    <!-- Tab 1: Single-day scan -->
+    <div class="tab-panel active" id="tab-single">
+        <div class="form-row">
+            <div class="form-group">
+                <label>交易日期</label>
+                <input type="date" id="singleDate" />
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button class="btn btn-primary" id="singleRunBtn" onclick="runSingleScan()">扫描</button>
+            </div>
+        </div>
+        <div id="singleResult"></div>
+    </div>
+
+    <!-- Tab 2: Range backtest -->
+    <div class="tab-panel" id="tab-range">
+        <div class="form-row">
+            <div class="form-group">
+                <label>开始日期</label>
+                <input type="date" id="rangeStart" />
+            </div>
+            <div class="form-group">
+                <label>结束日期</label>
+                <input type="date" id="rangeEnd" />
+            </div>
+            <div class="form-group">
+                <label>初始资金</label>
+                <input type="number" id="rangeCapital" value="100000" min="10000" step="10000" />
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button class="btn btn-primary" id="rangeRunBtn" onclick="runRangeBacktest()">开始回测</button>
+            </div>
+        </div>
+        <div id="rangeStats"></div>
+        <div class="log-area" id="rangeLog"></div>
+    </div>
+
+    <!-- Tab 3: CSV trade analysis -->
+    <div class="tab-panel" id="tab-csv">
+        <div class="drop-zone" id="csvDropZone" onclick="document.getElementById('csvFileInput').click()">
+            <p>拖拽 CSV 文件到此处，或点击选择文件</p>
+            <p style="font-size:0.8rem; margin-top:0.5rem;">要求列: 股票代码, 买入时间, 卖出时间</p>
+            <input type="file" id="csvFileInput" accept=".csv" onchange="handleCsvFile(this.files[0])" />
+        </div>
+        <div class="form-row" style="margin-top:1rem;">
+            <div class="form-group">
+                <label>初始资金</label>
+                <input type="number" id="csvCapital" value="100000" min="10000" step="10000" />
+            </div>
+        </div>
+        <div id="csvResult"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ========== Tab switching ==========
+function switchTab(name) {
+    document.querySelectorAll('.tab-btn').forEach((b, i) => {
+        b.classList.toggle('active', ['single','range','csv'][i] === name);
+    });
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ========== Cache status ==========
+async function checkCacheStatus() {
+    try {
+        const r = await fetch('/api/momentum/tsanghi-cache-status');
+        const d = await r.json();
+        const dot = document.getElementById('cacheDot');
+        const text = document.getElementById('cacheText');
+        const btn = document.getElementById('cacheDownloadBtn');
+
+        if (d.is_ready) {
+            dot.className = 'dot ready';
+            text.textContent = `缓存就绪: ${d.date_count || '?'} 个交易日 (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
+            btn.style.display = '';
+            btn.textContent = '补充下载';
+        } else if (d.is_loading) {
+            dot.className = 'dot loading';
+            text.textContent = '缓存加载中...';
+            btn.style.display = 'none';
+        } else {
+            dot.className = 'dot empty';
+            text.textContent = '缓存未加载';
+            btn.style.display = '';
+            btn.textContent = '下载数据';
+        }
+    } catch(e) {
+        document.getElementById('cacheText').textContent = '无法获取缓存状态';
+    }
+}
+
+function showCacheDialog() {
+    const start = prompt('下载起始日期 (YYYY-MM-DD):', '2024-01-01');
+    if (!start) return;
+    const end = prompt('下载结束日期 (YYYY-MM-DD):', new Date().toISOString().slice(0,10));
+    if (!end) return;
+    startCacheDownload(start, end);
+}
+
+function startCacheDownload(startDate, endDate) {
+    const prog = document.getElementById('cacheProgress');
+    const fill = document.getElementById('cacheProgressFill');
+    const text = document.getElementById('cacheProgressText');
+    prog.classList.add('visible');
+    fill.style.width = '0%';
+    text.textContent = '开始下载...';
+
+    const body = JSON.stringify({ start_date: startDate, end_date: endDate });
+    const es = new EventSource('/api/momentum/tsanghi-prepare?' + new URLSearchParams({ start_date: startDate, end_date: endDate }));
+
+    // Use fetch with POST + SSE instead
+    fetch('/api/momentum/tsanghi-prepare', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body
+    }).then(async resp => {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const d = JSON.parse(line.slice(6));
+                    if (d.progress !== undefined) {
+                        fill.style.width = (d.progress * 100) + '%';
+                        text.textContent = d.message || `${Math.round(d.progress*100)}%`;
+                    }
+                    if (d.done) {
+                        fill.style.width = '100%';
+                        text.textContent = d.message || '下载完成';
+                        setTimeout(() => { prog.classList.remove('visible'); checkCacheStatus(); }, 2000);
+                    }
+                    if (d.error) {
+                        text.textContent = '错误: ' + d.error;
+                    }
+                } catch(e) {}
+            }
+        }
+    }).catch(e => { text.textContent = '下载失败: ' + e.message; });
+}
+
+// ========== Single-day scan ==========
+async function runSingleScan() {
+    const date = document.getElementById('singleDate').value;
+    if (!date) { alert('请选择日期'); return; }
+
+    const btn = document.getElementById('singleRunBtn');
+    btn.disabled = true; btn.textContent = '扫描中...';
+    document.getElementById('singleResult').innerHTML = '<p style="color:#888;">正在扫描...</p>';
+
+    try {
+        const r = await fetch('/api/momentum/backtest', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ trade_date: date })
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || '请求失败');
+        renderSingleResult(d);
+    } catch(e) {
+        document.getElementById('singleResult').innerHTML = `<div class="result-card"><p style="color:red;">${e.message}</p></div>`;
+    } finally {
+        btn.disabled = false; btn.textContent = '扫描';
+    }
+}
+
+function renderSingleResult(d) {
+    const el = document.getElementById('singleResult');
+    if (!d.success) {
+        el.innerHTML = `<div class="result-card"><p style="color:#888;">${d.error || '无数据'}</p></div>`;
+        return;
+    }
+
+    let html = '<div class="result-card"><h4>漏斗统计</h4><div class="funnel-row">';
+    const funnel = [
+        ['L1 高开股', d.initial_gainers],
+        ['L2-3 热门板块', d.hot_boards],
+        ['L4 板块扩展', d.l4_count],
+        ['L5 量价', d.l5_count],
+        ['L6 过滤', d.l6_count],
+        ['最终候选', d.final_candidates],
+    ];
+    funnel.forEach(([label, val]) => {
+        html += `<span class="funnel-item"><span class="label">${label}: </span><span class="value">${val}</span></span>`;
+    });
+    html += '</div></div>';
+
+    if (d.scored_stocks && d.scored_stocks.length > 0) {
+        html += '<div class="result-card"><h4>评分排名</h4>';
+        html += '<table class="result-table"><thead><tr>';
+        html += '<th>排名</th><th>代码</th><th>名称</th><th>板块</th><th class="num">V3分</th><th class="num">开盘涨幅</th><th class="num">换手振幅</th><th class="num">9:40价</th>';
+        html += '</tr></thead><tbody>';
+        d.scored_stocks.forEach((s, i) => {
+            const isRec = d.recommended_stock && s.stock_code === d.recommended_stock.stock_code;
+            html += `<tr class="${isRec ? 'recommended-row' : ''}">`;
+            html += `<td>${i+1}</td><td>${s.stock_code}</td><td>${s.stock_name}</td><td>${s.board_name}</td>`;
+            html += `<td class="num">${s.v3_score.toFixed(4)}</td>`;
+            html += `<td class="num ${s.gain_from_open_pct >= 0 ? 'positive' : 'negative'}">${s.gain_from_open_pct.toFixed(2)}%</td>`;
+            html += `<td class="num">${s.turnover_amp.toFixed(2)}x</td>`;
+            html += `<td class="num">${s.latest_price.toFixed(2)}</td>`;
+            html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+    }
+
+    if (d.recommended_stock) {
+        const r = d.recommended_stock;
+        html += `<div class="result-card" style="border-left: 3px solid #ff9800;"><h4>推荐: ${r.stock_name} (${r.stock_code})</h4>`;
+        html += `<p>板块: ${r.board_name} | V3分: ${r.v3_score.toFixed(4)} | 9:40价: ${r.latest_price.toFixed(2)} | 涨幅: ${r.gain_from_open_pct.toFixed(2)}%</p></div>`;
+    } else {
+        html += '<div class="result-card"><p style="color:#888;">该日无推荐股票</p></div>';
+    }
+
+    el.innerHTML = html;
+}
+
+// ========== Range backtest ==========
+async function runRangeBacktest() {
+    const startDate = document.getElementById('rangeStart').value;
+    const endDate = document.getElementById('rangeEnd').value;
+    const capital = document.getElementById('rangeCapital').value;
+    if (!startDate || !endDate) { alert('请选择日期范围'); return; }
+
+    const btn = document.getElementById('rangeRunBtn');
+    btn.disabled = true; btn.textContent = '回测中...';
+
+    const statsEl = document.getElementById('rangeStats');
+    const logEl = document.getElementById('rangeLog');
+    statsEl.innerHTML = '';
+    logEl.innerHTML = '';
+    logEl.classList.add('visible');
+
+    try {
+        const resp = await fetch('/api/momentum/combined-analysis', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ start_date: startDate, end_date: endDate, initial_capital: parseFloat(capital) })
+        });
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let lastSummary = null;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const d = JSON.parse(line.slice(6));
+                    if (d.type === 'day_result') {
+                        const bt = d.backtest;
+                        let cls = 'log-date';
+                        let detail = '';
+                        if (bt.has_trade) {
+                            cls = bt.profit >= 0 ? 'log-profit' : 'log-loss';
+                            detail = ` → ${bt.stock_name}(${bt.stock_code}) ` +
+                                     `买@${(bt.buy_price||0).toFixed(2)} ` +
+                                     `T+1开@${(bt.sell_price||0).toFixed(2)} ` +
+                                     `收益: ${(bt.return_pct||0).toFixed(2)}% ` +
+                                     `资金: ¥${(bt.capital||0).toFixed(0)}`;
+                        } else {
+                            cls = 'log-skip';
+                            detail = ` → ${bt.skip_reason || '无推荐'}`;
+                        }
+                        logEl.innerHTML += `<div class="${cls}">${bt.trade_date}${detail}</div>`;
+                        logEl.scrollTop = logEl.scrollHeight;
+                    } else if (d.type === 'complete') {
+                        lastSummary = d.backtest_summary;
+                    } else if (d.type === 'error') {
+                        logEl.innerHTML += `<div style="color:red;">错误: ${d.message}</div>`;
+                    }
+                } catch(e) {}
+            }
+        }
+
+        if (lastSummary) renderRangeStats(lastSummary);
+    } catch(e) {
+        statsEl.innerHTML = `<div class="result-card"><p style="color:red;">${e.message}</p></div>`;
+    } finally {
+        btn.disabled = false; btn.textContent = '开始回测';
+    }
+}
+
+function renderRangeStats(s) {
+    const el = document.getElementById('rangeStats');
+    let html = '<div class="result-card"><h4>回测结果</h4><div class="stats-grid">';
+    const items = [
+        ['交易日数', s.total_days],
+        ['有交易天数', s.trade_days],
+        ['胜率', (s.win_rate||0).toFixed(1) + '%'],
+        ['总收益率', (s.total_return_pct||0).toFixed(2) + '%'],
+        ['最终资金', '¥' + (s.final_capital||0).toFixed(0)],
+        ['最大单日盈利', '¥' + (s.max_win||0).toFixed(0)],
+        ['最大单日亏损', '¥' + (s.max_loss||0).toFixed(0)],
+        ['胜/负/平', `${s.win_days||0}/${s.lose_days||0}/${s.even_days||0}`],
+    ];
+    items.forEach(([label, val]) => {
+        html += `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${val}</div></div>`;
+    });
+    html += '</div></div>';
+    el.innerHTML = html;
+}
+
+// ========== CSV trade analysis ==========
+const dropZone = document.getElementById('csvDropZone');
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) handleCsvFile(e.dataTransfer.files[0]);
+});
+
+async function handleCsvFile(file) {
+    if (!file) return;
+    dropZone.querySelector('p').textContent = `已选择: ${file.name}`;
+
+    const capital = document.getElementById('csvCapital').value;
+    const resultEl = document.getElementById('csvResult');
+    resultEl.innerHTML = '<p style="color:#888;">分析中...</p>';
+
+    try {
+        const resp = await fetch(`/api/trade-backtest/analyze?initial_capital=${encodeURIComponent(capital)}`, {
+            method: 'POST',
+            body: file,
+        });
+        const d = await resp.json();
+        if (!resp.ok) throw new Error(d.detail || '分析失败');
+        renderCsvResult(d);
+    } catch(e) {
+        resultEl.innerHTML = `<div class="result-card"><p style="color:red;">${e.message}</p></div>`;
+    }
+}
+
+function renderCsvResult(d) {
+    const el = document.getElementById('csvResult');
+    const s = d.summary || {};
+    let html = '<div class="result-card"><h4>交易分析结果</h4><div class="stats-grid">';
+    const items = [
+        ['总交易数', s.total_trades],
+        ['胜率', (s.win_rate||0).toFixed(1) + '%'],
+        ['总收益率', (s.cumulative_return_pct||0).toFixed(2) + '%'],
+        ['最终资金', '¥' + (s.final_capital||0).toFixed(0)],
+        ['最大回撤', (s.max_drawdown_pct||0).toFixed(2) + '%'],
+        ['平均收益', (s.avg_return_pct||0).toFixed(2) + '%'],
+        ['平均持仓天数', (s.avg_holding_days||0).toFixed(1) + '天'],
+        ['总手续费', '¥' + ((s.total_commission||0) + (s.total_stamp_tax||0)).toFixed(2)],
+    ];
+    items.forEach(([label, val]) => {
+        html += `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${val}</div></div>`;
+    });
+    html += '</div></div>';
+
+    if (d.trades && d.trades.length > 0) {
+        html += '<div class="result-card"><h4>交易明细</h4>';
+        html += '<table class="result-table"><thead><tr>';
+        html += '<th>#</th><th>代码</th><th>买入日</th><th>卖出日</th><th class="num">买入价</th><th class="num">卖出价</th><th class="num">收益率</th>';
+        html += '</tr></thead><tbody>';
+        d.trades.forEach(t => {
+            const retPct = t.return_pct || 0;
+            html += `<tr>`;
+            html += `<td>${t.idx}</td><td>${t.stock_code}</td><td>${(t.buy_time||'').slice(0,10)}</td><td>${(t.sell_time||'').slice(0,10)}</td>`;
+            html += `<td class="num">${(t.buy_price||0).toFixed(2)}</td>`;
+            html += `<td class="num">${(t.sell_price||0).toFixed(2)}</td>`;
+            html += `<td class="num ${retPct >= 0 ? 'positive' : 'negative'}">${retPct.toFixed(2)}%</td>`;
+            html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+    }
+
+    el.innerHTML = html;
+}
+
+// ========== Init ==========
+(function() {
+    // Set default dates
+    const today = new Date().toISOString().slice(0, 10);
+    document.getElementById('singleDate').value = today;
+    document.getElementById('rangeEnd').value = today;
+    // Start date: 30 days ago
+    const ago = new Date(); ago.setDate(ago.getDate() - 30);
+    document.getElementById('rangeStart').value = ago.toISOString().slice(0, 10);
+
+    checkCacheStatus();
+    setInterval(checkCacheStatus, 30000);
+})();
+</script>
+{% endblock %}

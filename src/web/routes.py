@@ -143,6 +143,12 @@ def create_router() -> APIRouter:
             },
         )
 
+    @router.get("/momentum", response_class=HTMLResponse)
+    async def backtest_page(request: Request):
+        """Unified backtest page with 3 tabs."""
+        templates = request.app.state.templates
+        return templates.TemplateResponse("backtest.html", {"request": request})
+
     # ==================== API Endpoints ====================
 
     @router.get("/api/status")
