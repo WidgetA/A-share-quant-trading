@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
-# API routes and page handlers for trading confirmations.
-
+# API routes and page handlers for trading confirmations, backtesting, and settings.
+#
 # === ENDPOINTS ===
 # GET  /                     - Main dashboard (HTML)
 # GET  /confirm/{id}         - Confirmation page (HTML)
@@ -13,29 +13,12 @@
 # POST /api/strategy/stop    - Stop strategy (JSON)
 # GET  /api/positions        - Get current positions (JSON)
 #
-# === SIMULATION ENDPOINTS ===
-# POST /api/simulation/start   - Start new simulation
-# GET  /api/simulation/state   - Get simulation state
-# POST /api/simulation/advance - Advance to next phase
-# POST /api/simulation/select  - Submit signal selection
-# POST /api/simulation/sell    - Submit sell decision
-# GET  /api/simulation/result  - Get final result
-# DELETE /api/simulation       - Cancel simulation
-#
-# === ORDER ASSISTANT ENDPOINTS ===
-# GET  /order-assistant                      - Order assistant page (HTML)
-# GET  /api/order-assistant/state            - Current phase and time info (JSON)
-# GET  /api/order-assistant/messages         - Messages with pagination (JSON)
-# POST /api/order-assistant/feishu-notify    - Push new messages to Feishu (JSON)
-#
 # === MOMENTUM BACKTEST ENDPOINTS ===
-# GET  /momentum              - Momentum backtest page (HTML)
-# POST /api/momentum/backtest - Run single-day backtest (JSON)
-# POST /api/momentum/range-backtest - Run range backtest with SSE streaming
-# GET  /api/momentum/monitor-status - Get intraday monitor status (JSON)
-# POST /api/momentum/loss-analysis  - Analyze losing trades with LLM (SSE streaming)
-# POST /api/momentum/backfill         - Backfill scan stocks to DB (SSE streaming)
-# GET  /api/momentum/scan-stocks/csv  - Export scan selected stocks as CSV download
+# POST /api/momentum/backtest          - Run single-day V15 scan (JSON)
+# POST /api/momentum/combined-analysis - Run range backtest with SSE streaming
+# GET  /api/momentum/monitor-status    - Get intraday monitor status (JSON)
+# POST /api/momentum/tsanghi-prepare   - Pre-download tsanghi cache (SSE)
+# GET  /api/momentum/tsanghi-cache-status - Cache status (JSON)
 
 from __future__ import annotations
 
@@ -71,7 +54,7 @@ class SubmitResponse(BaseModel):
 
 
 class TokenUpdateRequest(BaseModel):
-    """Request body for updating iFinD token."""
+    """Request body for updating API tokens."""
 
     token: str
 
@@ -157,23 +140,6 @@ def create_router() -> APIRouter:
             {
                 "request": request,
                 "confirm": confirm.to_detail_dict(),
-            },
-        )
-
-    @router.get("/simulation", response_class=HTMLResponse)
-    async def simulation_page(request: Request):
-        """Historical simulation page."""
-        from src.simulation import get_simulation_manager
-
-        templates = request.app.state.templates
-        manager = get_simulation_manager()
-        state = manager.get_state()
-
-        return templates.TemplateResponse(
-            "simulation.html",
-            {
-                "request": request,
-                "state": state.to_dict(),
             },
         )
 
@@ -316,31 +282,18 @@ def create_router() -> APIRouter:
 
 
 def _parse_selection(confirm_type: str, selection: Any, data: dict) -> Any:
-    """
-    Parse and validate user selection based on confirmation type.
-
-    Args:
-        confirm_type: Type of confirmation.
-        selection: User's selection input.
-        data: Confirmation data for validation.
-
-    Returns:
-        Parsed and validated selection.
-    """
+    """Parse and validate user selection based on confirmation type."""
     if confirm_type == "premarket":
-        # Premarket: list of indices, "all", or "skip"
         if selection == "all":
             return "all"
         if selection in ("skip", None, []):
             return []
         if isinstance(selection, list):
-            # Validate indices
             max_idx = len(data.get("signals", []))
             return [i for i in selection if isinstance(i, int) and 1 <= i <= max_idx]
         return []
 
     elif confirm_type == "intraday":
-        # Intraday: boolean (buy or skip)
         if isinstance(selection, bool):
             return selection
         if selection in ("yes", "y", "buy", True):
@@ -348,7 +301,6 @@ def _parse_selection(confirm_type: str, selection: Any, data: dict) -> Any:
         return False
 
     elif confirm_type == "morning":
-        # Morning: list of slot_ids, "all", or "hold"
         if selection == "all":
             return "all"
         if selection in ("hold", None, []):
@@ -358,7 +310,6 @@ def _parse_selection(confirm_type: str, selection: Any, data: dict) -> Any:
         return []
 
     elif confirm_type == "limit_up":
-        # Limit-up: list of indices, "all", or "skip"
         if selection == "all":
             return "all"
         if selection in ("skip", None, []):
@@ -372,758 +323,22 @@ def _parse_selection(confirm_type: str, selection: Any, data: dict) -> Any:
         return selection
 
 
-# ==================== Simulation API Models ====================
+# ==================== Momentum Backtest Pydantic Models ====================
 
 
-class SimulationStartRequest(BaseModel):
-    """Request body for starting a simulation."""
-
-    start_date: str  # YYYY-MM-DD format
-    num_days: int = 1
-    initial_capital: float = 10_000_000.0
-    load_holdings_from: str | None = None  # Optional date to load holdings from
-
-
-class SimulationSelectRequest(BaseModel):
-    """Request body for signal selection."""
-
-    selected_indices: list[int]  # 1-based indices
-
-
-class SimulationSellRequest(BaseModel):
-    """Request body for sell decision."""
-
-    slots_to_sell: list[int]  # Slot IDs to sell
-
-
-def create_simulation_router() -> APIRouter:
-    """Create router for simulation endpoints."""
-    from datetime import datetime
-
-    from src.simulation import (
-        SimulationSettings,
-        get_simulation_manager,
-        reset_simulation_manager,
-    )
-
-    router = APIRouter(prefix="/api/simulation", tags=["simulation"])
-
-    @router.post("/start")
-    async def start_simulation(body: SimulationStartRequest) -> dict:
-        """Start a new simulation."""
-        manager = get_simulation_manager()
-
-        # Cancel any existing simulation
-        if manager.is_running:
-            await manager.cleanup()
-
-        # Parse start date
-        try:
-            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid date format: {body.start_date}. Use YYYY-MM-DD.",
-            )
-
-        # Parse load holdings date if specified
-        load_holdings_date = None
-        if body.load_holdings_from:
-            try:
-                load_holdings_date = datetime.strptime(body.load_holdings_from, "%Y-%m-%d").date()
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid load_holdings_from date: {body.load_holdings_from}",
-                )
-
-        # Create settings
-        settings = SimulationSettings(
-            start_date=start_date,
-            num_days=body.num_days,
-            initial_capital=body.initial_capital,
-            load_holdings_from_date=load_holdings_date,
-        )
-
-        # Initialize simulation
-        try:
-            await manager.initialize(settings)
-        except Exception as e:
-            logger.error(f"Failed to start simulation: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-        return {
-            "success": True,
-            "message": f"Simulation started for {start_date}",
-            "state": manager.get_state().to_dict(),
-        }
-
-    @router.get("/state")
-    async def get_simulation_state() -> dict:
-        """Get current simulation state."""
-        manager = get_simulation_manager()
-        state = manager.get_state()
-        return state.to_dict()
-
-    @router.post("/advance")
-    async def advance_simulation() -> dict:
-        """Advance simulation to next phase."""
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(
-                status_code=400,
-                detail="No simulation is running. Start one first.",
-            )
-
-        try:
-            new_phase = await manager.advance_to_next_phase()
-        except Exception as e:
-            import traceback
-
-            logger.error(f"Error advancing simulation: {e}")
-            logger.error(traceback.format_exc())
-            raise HTTPException(
-                status_code=500,
-                detail=f"推进模拟时出错: {str(e)}",
-            )
-
-        return {
-            "success": True,
-            "phase": new_phase.value,
-            "state": manager.get_state().to_dict(),
-        }
-
-    @router.post("/select")
-    async def submit_selection(body: SimulationSelectRequest) -> dict:
-        """Submit signal selection."""
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(
-                status_code=400,
-                detail="No simulation is running.",
-            )
-
-        await manager.process_selection(body.selected_indices)
-
-        return {
-            "success": True,
-            "selected": body.selected_indices,
-            "state": manager.get_state().to_dict(),
-        }
-
-    @router.post("/sell")
-    async def submit_sell_decision(body: SimulationSellRequest) -> dict:
-        """Submit sell decision for morning confirmation."""
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(
-                status_code=400,
-                detail="No simulation is running.",
-            )
-
-        await manager.process_sell_decision(body.slots_to_sell)
-
-        return {
-            "success": True,
-            "sold_slots": body.slots_to_sell,
-            "state": manager.get_state().to_dict(),
-        }
-
-    @router.post("/intraday/select")
-    async def submit_intraday_selection(body: SimulationSelectRequest) -> dict:
-        """Submit intraday signal selection."""
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(status_code=400, detail="No simulation is running.")
-
-        await manager.process_intraday_selection(body.selected_indices)
-
-        return {
-            "success": True,
-            "selected": body.selected_indices,
-            "state": manager.get_state().to_dict(),
-        }
-
-    @router.post("/intraday/skip")
-    async def skip_intraday() -> dict:
-        """Skip intraday messages and continue."""
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(status_code=400, detail="No simulation is running.")
-
-        await manager.skip_intraday()
-
-        return {
-            "success": True,
-            "state": manager.get_state().to_dict(),
-        }
-
-    @router.post("/sync")
-    async def sync_to_database(confirm: bool = False) -> dict:
-        """
-        Sync simulation results to trading database.
-
-        Requires explicit confirmation to prevent accidental syncs.
-        """
-        if not confirm:
-            raise HTTPException(
-                status_code=400,
-                detail="请确认同步操作 (设置 confirm=true)",
-            )
-
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(status_code=400, detail="No simulation is running.")
-
-        try:
-            result = await manager.sync_to_database()
-            return {
-                "success": True,
-                "message": "模拟结果已同步到数据库",
-                **result,
-            }
-        except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    @router.get("/result")
-    async def get_simulation_result() -> dict:
-        """Get final simulation result."""
-        manager = get_simulation_manager()
-
-        result = manager.get_result()
-        if not result:
-            raise HTTPException(
-                status_code=400,
-                detail="No simulation result available.",
-            )
-
-        return result.to_dict()
-
-    @router.get("/messages")
-    async def get_simulation_messages(
-        only_positive: bool = False,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> dict:
-        """
-        Get messages for the current simulation date with pagination.
-
-        Returns messages with pagination metadata for "Load More" functionality.
-        """
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(
-                status_code=400,
-                detail="Simulation not initialized.",
-            )
-
-        # Access internal components
-        hist_reader = manager._hist_message_reader
-        clock = manager._clock
-
-        if not hist_reader or not clock:
-            raise HTTPException(
-                status_code=500,
-                detail="Simulation components not available.",
-            )
-
-        # Get total count for pagination
-        total_count = await hist_reader.count_premarket_messages(
-            trade_date=clock.current_time,
-            only_positive=only_positive,
-        )
-
-        # Get paginated premarket messages
-        messages = await hist_reader.get_premarket_messages(
-            trade_date=clock.current_time,
-            only_positive=only_positive,
-            limit=limit,
-            offset=offset,
-        )
-
-        # Collect all unique stock codes to look up names
-        all_stock_codes: set[str] = set()
-        for msg in messages:
-            all_stock_codes.update(msg.stock_codes or [])
-            if msg.analysis and msg.analysis.affected_stocks:
-                all_stock_codes.update(msg.analysis.affected_stocks)
-
-        # Look up stock names using sector mapper
-        stock_names: dict[str, str] = {}
-        if all_stock_codes:
-            stock_names = manager._get_stock_names_dict(list(all_stock_codes))
-
-        # Convert to dict format
-        result = []
-        for msg in messages:
-            msg_dict: dict[str, Any] = {
-                "id": msg.id,
-                "source_type": msg.source_type,
-                "source_name": msg.source_name,
-                "title": msg.title,
-                "content": msg.content[:500] if msg.content else "",  # Truncate
-                "publish_time": msg.publish_time.isoformat() if msg.publish_time else None,
-                "stock_codes": msg.stock_codes,
-                "url": msg.url,
-            }
-
-            # Add analysis if available
-            if msg.analysis:
-                msg_dict["analysis"] = {
-                    "sentiment": msg.analysis.sentiment.value,
-                    "confidence": msg.analysis.confidence,
-                    "reasoning": msg.analysis.reasoning,
-                    "affected_stocks": msg.analysis.affected_stocks,
-                }
-            else:
-                msg_dict["analysis"] = None
-
-            result.append(msg_dict)
-
-        return {
-            "success": True,
-            "sim_date": clock.current_date.isoformat(),
-            "count": len(result),
-            "total_count": total_count,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(result) < total_count,
-            "messages": result,
-            "stock_names": stock_names,
-        }
-
-    @router.post("/messages/select")
-    async def select_messages(request: Request) -> dict:
-        """
-        Set pending signals from selected messages.
-
-        This endpoint allows users to select messages from the messages viewer.
-        The selected messages become pending signals for confirmation on the main page.
-        """
-        manager = get_simulation_manager()
-
-        if not manager.is_initialized:
-            raise HTTPException(status_code=400, detail="No simulation is running.")
-
-        data = await request.json()
-        messages = data.get("messages", [])
-
-        if not messages:
-            raise HTTPException(status_code=400, detail="No messages selected.")
-
-        try:
-            result = manager.set_signals_from_messages(messages)
-            return {
-                "success": True,
-                "count": result.get("count", 0),
-                "message": f"已选择 {result.get('count', 0)} 条消息",
-            }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    @router.delete("")
-    async def cancel_simulation() -> dict:
-        """Cancel current simulation."""
-        manager = get_simulation_manager()
-
-        if manager.is_running:
-            await manager.cleanup()
-
-        await reset_simulation_manager()
-
-        return {
-            "success": True,
-            "message": "Simulation cancelled",
-        }
-
-    return router
-
-
-# ==================== Order Assistant ====================
-
-
-# Lazy singletons for MessageReader, SectorMapper, and FeishuBot used by order assistant
-_oa_message_reader = None
-_oa_sector_mapper = None
-_oa_feishu_bot = None
-# Track message IDs already sent to Feishu (dedup across refreshes/tabs)
-_oa_feishu_sent_ids: set[str] = set()
-
-
-async def _get_oa_reader():
-    """Get or create the order assistant MessageReader (lazy singleton)."""
-    global _oa_message_reader
-    from src.data.readers.message_reader import create_message_reader_from_config
-
-    if _oa_message_reader is None or not _oa_message_reader.is_connected:
-        _oa_message_reader = create_message_reader_from_config()
-        await _oa_message_reader.connect()
-    return _oa_message_reader
-
-
-async def _get_oa_sector_mapper():
-    """Get or create the order assistant SectorMapper (lazy singleton)."""
-    global _oa_sector_mapper
-    from src.data.sources.sector_mapper import SectorMapper
-
-    if _oa_sector_mapper is None:
-        _oa_sector_mapper = SectorMapper()
-    if not _oa_sector_mapper.is_loaded:
-        await _oa_sector_mapper.load_sector_data()
-    return _oa_sector_mapper
-
-
-def _get_oa_stock_names(codes: list[str], mapper) -> dict[str, str]:
-    """Get stock names for a list of codes using sector mapper."""
-    result: dict[str, str] = {}
-    for code in codes:
-        clean_code = code.split(".")[0] if "." in code else code
-        name = mapper.get_stock_name(clean_code)
-        result[clean_code] = name or ""
-    return result
-
-
-def _get_oa_feishu_bot():
-    """Get or create the order assistant FeishuBot (lazy singleton)."""
-    global _oa_feishu_bot
-    if _oa_feishu_bot is None:
-        from src.common.feishu_bot import FeishuBot
-
-        _oa_feishu_bot = FeishuBot()
-    return _oa_feishu_bot
-
-
-def create_order_assistant_router() -> APIRouter:
-    """Create router for order assistant endpoints."""
-    from datetime import date, datetime, time, timedelta
-    from zoneinfo import ZoneInfo
-
-    beijing_tz = ZoneInfo("Asia/Shanghai")
-
-    router = APIRouter(tags=["order-assistant"])
-
-    def _get_current_phase(now: datetime) -> str:
-        """Determine market phase from current Beijing time."""
-        t = now.time()
-        if t < time(9, 30):
-            return "premarket"
-        elif t < time(15, 0):
-            return "trading"
-        else:
-            return "closed"
-
-    def _get_prev_trading_day_close(today: date) -> datetime:
-        """Get 15:00 of the last trading day (skip weekends)."""
-        prev = today - timedelta(days=1)
-        while prev.weekday() >= 5:
-            prev -= timedelta(days=1)
-        return datetime.combine(prev, time(15, 0))
-
-    @router.get("/order-assistant", response_class=HTMLResponse)
-    async def order_assistant_page(request: Request):
-        """Order assistant page — real-time news dashboard."""
-        templates = request.app.state.templates
-        now = datetime.now(beijing_tz)
-        phase = _get_current_phase(now)
-
-        return templates.TemplateResponse(
-            "order_assistant.html",
-            {
-                "request": request,
-                "phase": phase,
-                "beijing_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "today": now.strftime("%Y-%m-%d"),
-            },
-        )
-
-    @router.get("/api/order-assistant/state")
-    async def order_assistant_state() -> dict:
-        """Get current phase and time info."""
-        now = datetime.now(beijing_tz)
-        phase = _get_current_phase(now)
-
-        return {
-            "phase": phase,
-            "beijing_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "today": now.strftime("%Y-%m-%d"),
-        }
-
-    @router.get("/api/order-assistant/messages")
-    async def order_assistant_messages(
-        mode: str = "premarket",
-        only_positive: bool = False,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> dict:
-        """
-        Get messages for order assistant.
-
-        Args:
-            mode: "premarket" for overnight messages, "intraday" for trading-hours messages.
-            only_positive: Filter to positive sentiment only.
-            limit: Page size.
-            offset: Pagination offset.
-        """
-        if mode not in ("premarket", "intraday"):
-            raise HTTPException(status_code=400, detail="mode must be 'premarket' or 'intraday'")
-
-        now = datetime.now(beijing_tz)
-        today = now.date()
-
-        try:
-            reader = await _get_oa_reader()
-        except Exception as e:
-            logger.error(f"Failed to connect to message database: {e}")
-            raise HTTPException(status_code=503, detail=f"数据库连接失败: {e}")
-
-        # DB stores UTC timestamps (timestamptz). asyncpg interprets naive
-        # datetimes using the system TZ (Asia/Shanghai in container).
-        # Use timezone-aware Beijing datetimes so asyncpg converts to UTC
-        # correctly regardless of the system TZ setting.
-        _BJ_UTC = timedelta(hours=8)
-        now_bj = now.replace(tzinfo=None)
-
-        if mode == "premarket":
-            start_bj = _get_prev_trading_day_close(today)
-            end_bj = datetime.combine(today, time(9, 30))
-            # Cap end at current Beijing time if before 9:30
-            if now_bj < end_bj:
-                end_bj = now_bj
-        else:
-            # Intraday: from 9:30 today to now (or 15:00 if after hours)
-            start_bj = datetime.combine(today, time(9, 30))
-            end_bj = min(now_bj, datetime.combine(today, time(15, 0)))
-
-        # Tag with Beijing timezone — asyncpg converts to UTC automatically
-        start_time = start_bj.replace(tzinfo=beijing_tz)
-        end_time = end_bj.replace(tzinfo=beijing_tz)
-
-        try:
-            # Get total count
-            total_count = await reader.count_messages_in_range(
-                start_time=start_time,
-                end_time=end_time,
-                only_positive=only_positive,
-            )
-
-            # Get paginated messages
-            messages = await reader.get_messages_in_range(
-                start_time=start_time,
-                end_time=end_time,
-                only_positive=only_positive,
-                limit=limit,
-                offset=offset,
-                order_desc=True,
-            )
-        except Exception as e:
-            logger.error(f"Failed to query messages ({mode}): {e}")
-            raise HTTPException(status_code=500, detail=f"查询消息失败: {e}")
-
-        # Collect stock codes for name lookup
-        all_stock_codes: set[str] = set()
-        for msg in messages:
-            all_stock_codes.update(msg.stock_codes or [])
-            if msg.analysis and msg.analysis.affected_stocks:
-                all_stock_codes.update(msg.analysis.affected_stocks)
-
-        # Look up stock names
-        stock_names: dict[str, str] = {}
-        if all_stock_codes:
-            try:
-                mapper = await _get_oa_sector_mapper()
-                stock_names = _get_oa_stock_names(list(all_stock_codes), mapper)
-            except Exception as e:
-                logger.warning(f"Failed to load stock names: {e}")
-
-        # Convert to response format (same as simulation)
-        result = []
-        for msg in messages:
-            msg_dict: dict[str, Any] = {
-                "id": msg.id,
-                "source_type": msg.source_type,
-                "source_name": msg.source_name,
-                "title": msg.title,
-                "content": msg.content[:500] if msg.content else "",
-                "publish_time": (
-                    (msg.publish_time + _BJ_UTC).replace(tzinfo=None).isoformat()
-                    if msg.publish_time
-                    else None
-                ),
-                "stock_codes": msg.stock_codes,
-                "url": msg.url,
-            }
-
-            if msg.analysis:
-                msg_dict["analysis"] = {
-                    "sentiment": msg.analysis.sentiment.value,
-                    "confidence": msg.analysis.confidence,
-                    "reasoning": msg.analysis.reasoning,
-                    "affected_stocks": msg.analysis.affected_stocks,
-                }
-            else:
-                msg_dict["analysis"] = None
-
-            result.append(msg_dict)
-
-        import os
-
-        return {
-            "success": True,
-            "mode": mode,
-            "date": today.isoformat(),
-            "beijing_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "count": len(result),
-            "total_count": total_count,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(result) < total_count,
-            "messages": result,
-            "stock_names": stock_names,
-            "debug": {
-                "git_commit": os.environ.get("GIT_COMMIT", "unknown"),
-                "query_start": start_time.isoformat(),
-                "query_end": end_time.isoformat(),
-                "note": "query times are Beijing (asyncpg converts to UTC)",
-            },
-        }
-
-    @router.post("/api/order-assistant/feishu-notify")
-    async def order_assistant_feishu_notify(request: Request) -> dict:
-        """
-        Send new intraday messages to Feishu.
-
-        Expects JSON body:
-        {
-            "messages": [
-                {
-                    "id": "msg_123",
-                    "title": "...",
-                    "sentiment": "bullish",
-                    "confidence": "85%",
-                    "stocks": "600519.SH(贵州茅台)",
-                    "reasoning": "...",
-                    "publish_time": "2026-02-06T10:32"
-                }
-            ]
-        }
-
-        Deduplicates by message ID — safe to call repeatedly.
-        """
-        data = await request.json()
-        incoming = data.get("messages", [])
-
-        if not incoming:
-            return {"success": True, "sent": 0, "message": "无新消息"}
-
-        # Filter out already-sent messages
-        new_messages = [m for m in incoming if m.get("id") and m["id"] not in _oa_feishu_sent_ids]
-
-        if not new_messages:
-            return {"success": True, "sent": 0, "message": "消息已发送过"}
-
-        bot = _get_oa_feishu_bot()
-        if not bot.is_configured():
-            return {"success": False, "sent": 0, "message": "飞书未配置"}
-
-        # Build a single batched message
-        sentiment_icons = {
-            "strong_bullish": "📈📈",
-            "bullish": "📈",
-            "bearish": "📉",
-            "strong_bearish": "📉📉",
-        }
-        sentiment_labels = {
-            "strong_bullish": "强看多",
-            "bullish": "看多",
-            "bearish": "看空",
-            "strong_bearish": "强看空",
-        }
-
-        lines = [f"📊 盘中消息推送 ({len(new_messages)} 条新消息)", ""]
-
-        for msg in new_messages:
-            sentiment = msg.get("sentiment", "unknown")
-            icon = sentiment_icons.get(sentiment, "📌")
-            label = sentiment_labels.get(sentiment, sentiment)
-            confidence = msg.get("confidence", "")
-            pub_time = msg.get("publish_time", "")
-            if pub_time and len(pub_time) >= 16:
-                pub_time = pub_time[11:16]
-
-            lines.append(f"{icon} {label} {confidence} | {pub_time}")
-            lines.append(msg.get("title", "(无标题)"))
-            stocks = msg.get("stocks", "")
-            if stocks:
-                lines.append(f"股票: {stocks}")
-            reasoning = msg.get("reasoning", "")
-            if reasoning:
-                lines.append(f"分析: {reasoning[:80]}")
-            lines.append("")
-
-        feishu_message = "\n".join(lines).rstrip()
-        sent_ok = await bot.send_message(feishu_message, max_retries=3)
-
-        if sent_ok:
-            # Mark as sent to avoid duplicates
-            for msg in new_messages:
-                _oa_feishu_sent_ids.add(msg["id"])
-            logger.info(f"Sent {len(new_messages)} intraday messages to Feishu")
-        else:
-            logger.warning("Failed to send intraday messages to Feishu")
-
-        return {
-            "success": sent_ok,
-            "sent": len(new_messages) if sent_ok else 0,
-            "message": f"已推送 {len(new_messages)} 条消息" if sent_ok else "推送失败",
-        }
-
-    return router
-
-
-# ==================== Momentum Backtest ====================
-
-
-class MomentumBacktestRequest(BaseModel):
-    """Request body for momentum backtest."""
+class BacktestScanRequest(BaseModel):
+    """Request body for single-day V15 scan."""
 
     trade_date: str  # YYYY-MM-DD format
     notify: bool = False  # Send Feishu notification
-    data_source: str = "ifind"  # "ifind" or "tsanghi"
-    news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
-class MomentumRangeBacktestRequest(BaseModel):
-    """Request body for momentum range backtest."""
+class RangeBacktestRequest(BaseModel):
+    """Request body for range backtest with capital simulation."""
 
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
-    news_check: bool = False  # Enable negative news check (Tavily + LLM)
-
-
-class FunnelAnalysisRequest(BaseModel):
-    """Request body for funnel layer analysis."""
-
-    start_date: str  # YYYY-MM-DD format
-    end_date: str  # YYYY-MM-DD format
-
-
-class CombinedAnalysisRequest(BaseModel):
-    """Request body for combined range backtest + funnel analysis."""
-
-    start_date: str  # YYYY-MM-DD format
-    end_date: str  # YYYY-MM-DD format
-    initial_capital: float  # Starting capital in yuan
-    quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
-    data_source: str = "ifind"  # "ifind" or "tsanghi"
-    news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
 class TsanghiPrepareRequest(BaseModel):
@@ -1132,6 +347,9 @@ class TsanghiPrepareRequest(BaseModel):
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
     force: bool = False  # Force full re-download (clears existing cache)
+
+
+# ==================== Momentum Backtest Router ====================
 
 
 def create_momentum_router() -> APIRouter:
@@ -1156,13 +374,6 @@ def create_momentum_router() -> APIRouter:
             },
         )
 
-    def _get_ifind_client(request: Request):
-        """Get shared iFinD HTTP client from app.state."""
-        client = getattr(request.app.state, "ifind_client", None)
-        if client is None:
-            raise HTTPException(status_code=503, detail="iFinD 客户端未就绪")
-        return client
-
     def _get_fundamentals_db(request: Request):
         """Get shared fundamentals DB from app.state."""
         db = getattr(request.app.state, "fundamentals_db", None)
@@ -1170,74 +381,7 @@ def create_momentum_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="基本面数据库未就绪")
         return db
 
-    async def _create_news_checker():
-        """Create and start a NegativeNewsChecker.
-
-        Raises RuntimeError if API keys are missing — caller MUST NOT
-        call this unless the user explicitly enabled news checking.
-        Trading safety: user opted in → missing keys = halt, not skip.
-        """
-        from src.common.config import get_tavily_api_key
-        from src.common.siliconflow_client import SiliconFlowClient, SiliconFlowConfig
-        from src.common.tavily_client import TavilyClient
-        from src.strategy.analyzers.negative_news_checker import NegativeNewsChecker
-
-        try:
-            tavily_key = get_tavily_api_key()
-        except (ValueError, FileNotFoundError) as e:
-            raise RuntimeError(
-                "负面新闻检查已启用，但 Tavily API key 未配置。"
-                "请在 config 中设置 Tavily key，或取消勾选「启用负面新闻检查」。"
-            ) from e
-
-        sf_key = _get_llm_api_key()
-        if not sf_key:
-            raise RuntimeError(
-                "负面新闻检查已启用，但 SiliconFlow API key 未配置。"
-                "请在 config 中设置 LLM key，或取消勾选「启用负面新闻检查」。"
-            )
-
-        tavily = TavilyClient(api_key=tavily_key)
-        sf = SiliconFlowClient(SiliconFlowConfig(api_key=sf_key))
-        await tavily.start()
-        await sf.start()
-        return NegativeNewsChecker(tavily, sf)
-
-    def _create_board_relevance_filter():
-        """Create BoardRelevanceFilter. Raises on failure (trading safety)."""
-        from src.strategy.filters.board_relevance_filter import (
-            create_board_relevance_filter,
-        )
-
-        return create_board_relevance_filter()
-
-    async def _stop_news_checker(checker) -> None:
-        """Stop the Tavily and SiliconFlow clients inside a NegativeNewsChecker."""
-        if checker is None:
-            return
-        try:
-            await checker._tavily.stop()
-        except Exception:
-            pass
-        try:
-            await checker._llm.stop()
-        except Exception:
-            pass
-
-    @router.get("/momentum", response_class=HTMLResponse)
-    async def momentum_page(request: Request):
-        """Momentum backtest and monitor page."""
-        templates = request.app.state.templates
-        monitor_state = _get_monitor_state(request)
-        resp = templates.TemplateResponse(
-            "momentum_backtest.html",
-            {
-                "request": request,
-                "monitor_running": monitor_state["running"],
-            },
-        )
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        return resp
+    # === Tsanghi cache endpoints ===
 
     @router.get("/api/momentum/tsanghi-cache-status")
     async def tsanghi_cache_status(request: Request):
@@ -1248,7 +392,6 @@ def create_momentum_router() -> APIRouter:
             return {"status": "loading"}
         if cache is None:
             return {"status": "empty"}
-        # Diagnostic: sample date keys from a random stock to help debug format issues
         sample_dates: list[str] = []
         sample_code = ""
         for code, dates in cache._daily.items():
@@ -1260,7 +403,6 @@ def create_momentum_router() -> APIRouter:
                 )
                 break
 
-        # Detect internal gaps (dates where minute data is missing/sparse)
         minute_gaps = cache.find_minute_gaps()
         gap_ranges = [[str(s), str(e)] for s, e in minute_gaps]
 
@@ -1278,11 +420,7 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/tsanghi-prepare")
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
-        """Pre-download tsanghi data as SSE stream (incremental).
-
-        Loads existing cache from memory / OSS, calculates which date
-        ranges are missing, and only downloads the gaps.
-        """
+        """Pre-download tsanghi data as SSE stream (incremental)."""
         from src.data.clients.tsanghi_backtest_cache import (
             TsanghiBacktestCache,
             check_oss_available,
@@ -1294,9 +432,6 @@ def create_momentum_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
-        # Force re-download: clear everything and start from scratch.
-        # Don't load from OSS either — the whole point of force is to
-        # discard potentially corrupted/misaligned cached data.
         if body.force:
             request.app.state.tsanghi_cache = None
             existing = None
@@ -1309,15 +444,15 @@ def create_momentum_router() -> APIRouter:
             async def mem_cached_stream():
                 msg = {
                     "type": "complete",
-                    "daily_count": len(existing._daily),  # type: ignore[union-attr]
-                    "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                    "daily_count": len(existing._daily),
+                    "minute_count": len(existing._minute),
                     "cached": True,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(mem_cached_stream(), media_type="text/event-stream")
 
-        # 2) Try OSS cache (skipped when force=True, 60s timeout)
+        # 2) Try OSS cache (skipped when force=True)
         if not existing and not body.force:
             try:
                 existing = await asyncio.wait_for(
@@ -1335,138 +470,78 @@ def create_momentum_router() -> APIRouter:
             async def cached_stream():
                 msg = {
                     "type": "complete",
-                    "daily_count": len(existing._daily),  # type: ignore[union-attr]
-                    "minute_count": len(existing._minute),  # type: ignore[union-attr]
+                    "daily_count": len(existing._daily),
+                    "minute_count": len(existing._minute),
                     "cached": True,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
-        # 3) Pre-flight: verify OSS is reachable BEFORE downloading (15s timeout)
-        try:
-            oss_err = await asyncio.wait_for(asyncio.to_thread(check_oss_available), timeout=15)
-        except asyncio.TimeoutError:
-            oss_err = "OSS 连接超时 (15s)"
-        if oss_err:
-            raise HTTPException(
-                status_code=500,
-                detail=f"OSS 不可用，请先修复再下载: {oss_err}",
-            )
+        # 3) Download missing data
+        async def download_stream():
+            try:
+                from src.data.clients.tsanghi_backtest_cache import TsanghiBacktestCache
 
-        # 4) Calculate gaps to download (incremental).
-        # Work on a COPY so partial failures don't corrupt the live in-memory cache.
-        if existing:
-            gaps = existing.missing_ranges(start_date, end_date)
-            working = existing.copy()
-        else:
-            working = TsanghiBacktestCache()
-            gaps = [(start_date, end_date)]
+                cache = existing or TsanghiBacktestCache()
+                yield f"data: {json.dumps({'type': 'status', 'message': '开始下载...'}, ensure_ascii=False)}\n\n"
 
-        if not gaps:
-            # Shouldn't happen (covers_range check above), but just in case
-            request.app.state.tsanghi_cache = working
+                progress_events: list[dict] = []
 
-            async def nogap_stream():
+                def progress_cb(event: dict):
+                    progress_events.append(event)
+
+                await asyncio.to_thread(
+                    cache.download_prices,
+                    start_date,
+                    end_date,
+                    progress_callback=progress_cb,
+                )
+
+                for ev in progress_events:
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+                # Save to OSS if available
+                if check_oss_available():
+                    yield f"data: {json.dumps({'type': 'status', 'message': '保存到 OSS...'}, ensure_ascii=False)}\n\n"
+                    await asyncio.to_thread(cache.save_to_oss)
+
+                request.app.state.tsanghi_cache = cache
+                request.app.state.tsanghi_cache_loading = False
+
+                # Inject cache into iQuant router
+                iquant_rtr = getattr(request.app.state, "iquant_router", None)
+                if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
+                    iquant_rtr._inject_cache(cache)
+
                 msg = {
                     "type": "complete",
-                    "daily_count": len(working._daily),
-                    "minute_count": len(working._minute),
-                    "cached": True,
+                    "daily_count": len(cache._daily),
+                    "minute_count": len(cache._minute),
+                    "cached": False,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
-            return StreamingResponse(nogap_stream(), media_type="text/event-stream")
+            except Exception as e:
+                logger.error(f"Tsanghi download error: {e}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)[:200]}, ensure_ascii=False)}\n\n"
 
-        async def generate():
-            def sse(data: dict) -> str:
-                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-            progress_queue: asyncio.Queue = asyncio.Queue()
-
-            async def queue_progress(phase: str, current: int, total: int):
-                await progress_queue.put(
-                    {"type": "progress", "phase": phase, "current": current, "total": total}
-                )
-
-            download_error = None
-
-            async def do_download():
-                nonlocal download_error
-                try:
-                    for i, (gap_start, gap_end) in enumerate(gaps):
-                        label = f"{gap_start}~{gap_end}"
-                        await progress_queue.put(
-                            {"type": "info", "message": f"增量下载 {label} ({i + 1}/{len(gaps)})"}
-                        )
-                        gap_cache = TsanghiBacktestCache()
-                        await gap_cache.download_prices(gap_start, gap_end, queue_progress)
-                        working.merge_from(gap_cache)
-                    working._is_ready = True
-                    await progress_queue.put(None)
-                except Exception as e:
-                    download_error = str(e)
-                    await progress_queue.put(None)
-
-            task = asyncio.create_task(do_download())
-
-            try:
-                while True:
-                    item = await progress_queue.get()
-                    if item is None:
-                        break
-                    yield sse(item)
-            except (asyncio.CancelledError, GeneratorExit):
-                task.cancel()
-                logger.warning("tsanghi download cancelled (client disconnected)")
-                return
-
-            await task
-
-            if download_error:
-                yield sse({"type": "error", "message": download_error})
-            else:
-                # Only assign to app.state on complete success (no partial mutation)
-                request.app.state.tsanghi_cache = working
-
-                # Fire-and-forget OSS save — don't block SSE and won't be
-                # cancelled if the client disconnects
-                async def _bg_oss_save():
-                    try:
-                        err = await asyncio.wait_for(working.save_to_oss(), timeout=120)
-                        if err:
-                            logger.warning(f"tsanghi OSS save failed: {err}")
-                        else:
-                            logger.info("tsanghi cache saved to OSS OK")
-                    except asyncio.TimeoutError:
-                        logger.error("tsanghi OSS save timed out (120s)")
-                    except Exception as exc:
-                        logger.error(f"tsanghi OSS save exception: {exc}")
-
-                asyncio.create_task(_bg_oss_save())
-                yield sse(
-                    {
-                        "type": "complete",
-                        "daily_count": len(working._daily),
-                        "minute_count": len(working._minute),
-                        "start_date": str(working._start_date) if working._start_date else None,
-                        "end_date": str(working._end_date) if working._end_date else None,
-                    }
-                )
-
-        return StreamingResponse(generate(), media_type="text/event-stream")
-
-    @router.post("/api/momentum/backtest")
-    async def run_backtest(request: Request, body: MomentumBacktestRequest) -> dict:
-        """Run momentum sector strategy backtest for a specific date."""
-        from src.common.feishu_bot import FeishuBot
-        from src.data.clients.ifind_http_client import IFinDHttpError
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.momentum_sector_scanner import (
-            MomentumSectorScanner,
+        return StreamingResponse(
+            download_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-        # Parse date
+    # === Single-day V15 scan ===
+
+    @router.post("/api/momentum/backtest")
+    async def run_backtest(request: Request, body: BacktestScanRequest) -> dict:
+        """Run V15 strategy scan for a specific date using tsanghi cache."""
+        from src.common.feishu_bot import FeishuBot
+        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.strategies.v15_scanner import V15Scanner
+
         try:
             trade_date = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
         except ValueError:
@@ -1476,132 +551,108 @@ def create_momentum_router() -> APIRouter:
             )
 
         fundamentals_db = _get_fundamentals_db(request)
-        try:
-            news_checker = await _create_news_checker() if body.news_check else None
-        except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+
+        ak_cache = getattr(request.app.state, "tsanghi_cache", None)
+        if not ak_cache or not ak_cache.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载沧海数据")
 
         try:
+            date_key = trade_date.strftime("%Y-%m-%d")
+            try:
+                price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+            except MinuteDataMissingError as e:
+                return {
+                    "success": False,
+                    "trade_date": body.trade_date,
+                    "error": str(e),
+                }
+            if not price_snapshots:
+                return {
+                    "success": False,
+                    "trade_date": body.trade_date,
+                    "error": f"沧海缓存中无 {date_key} 的日线数据",
+                }
+
+            adapter = TsanghiHistoricalAdapter(ak_cache)
             concept_mapper = LocalConceptMapper()
-            if body.data_source == "tsanghi":
-                # --- Tsanghi path: read from pre-downloaded cache ---
-                from src.data.clients.tsanghi_backtest_cache import (
-                    TsanghiHistoricalAdapter,
-                )
+            scanner = V15Scanner(
+                historical_adapter=adapter,
+                fundamentals_db=fundamentals_db,
+                concept_mapper=concept_mapper,
+            )
 
-                ak_cache = getattr(request.app.state, "tsanghi_cache", None)
-                if not ak_cache or not ak_cache.is_ready:
-                    raise HTTPException(status_code=400, detail="请先预下载沧海数据")
-
-                adapter = TsanghiHistoricalAdapter(ak_cache)
-                scanner = MomentumSectorScanner(
-                    ifind_client=adapter,  # type: ignore[arg-type]
-                    fundamentals_db=fundamentals_db,
-                    concept_mapper=concept_mapper,
-                    negative_news_checker=news_checker,
-                    board_relevance_filter=_create_board_relevance_filter(),
-                )
-
-                date_key = trade_date.strftime("%Y-%m-%d")
-                try:
-                    price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
-                except MinuteDataMissingError as e:
-                    return {
-                        "success": False,
-                        "trade_date": body.trade_date,
-                        "error": str(e),
-                    }
-                if not price_snapshots:
-                    return {
-                        "success": False,
-                        "trade_date": body.trade_date,
-                        "error": f"沧海缓存中无 {date_key} 的日线数据",
-                    }
-            else:
-                # --- iFinD path: original logic ---
-                ifind_client = _get_ifind_client(request)
-                scanner = MomentumSectorScanner(
-                    ifind_client=ifind_client,
-                    fundamentals_db=fundamentals_db,
-                    concept_mapper=concept_mapper,
-                    negative_news_checker=news_checker,
-                    board_relevance_filter=_create_board_relevance_filter(),
-                )
-
-                date_str = trade_date.strftime("%Y%m%d")
-                query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
-                logger.info(f"Momentum backtest iwencai query: {query}")
-
-                try:
-                    iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
-                except IFinDHttpError as e:
-                    raise HTTPException(status_code=502, detail=f"iFinD查询失败: {e}")
-
-                price_snapshots, price_err = await _parse_iwencai_and_fetch_prices(
-                    ifind_client, iwencai_result, trade_date
-                )
-
-                if not price_snapshots:
-                    return {
-                        "success": True,
-                        "trade_date": body.trade_date,
-                        "initial_gainers": 0,
-                        "hot_boards": {},
-                        "selected_stocks": [],
-                        "message": price_err or "未找到符合条件的股票",
-                    }
-
-            # Run scan (pass trade_date so constituent prices use history_quotes)
             result = await scanner.scan(price_snapshots, trade_date=trade_date)
 
-            # Format response
-            rec = result.recommended_stock
-            response_data = {
+            rec = result.recommended
+            response_data: dict[str, Any] = {
                 "success": True,
                 "trade_date": body.trade_date,
-                "initial_gainers": len(result.initial_gainers),
-                "hot_boards": {name: codes for name, codes in result.hot_boards.items()},
-                "selected_stocks": [
+                "initial_gainers": result.initial_gainers_count,
+                "hot_boards": result.hot_board_count,
+                "l4_count": result.l4_count,
+                "l5_count": result.l5_count,
+                "l6_count": result.l6_count,
+                "final_candidates": result.final_candidates,
+                "scored_stocks": [
                     {
                         "stock_code": s.stock_code,
                         "stock_name": s.stock_name,
                         "board_name": s.board_name,
-                        "open_gain_pct": round(s.open_gain_pct, 2),
-                        "pe_ttm": round(s.pe_ttm, 2),
-                        "board_avg_pe": round(s.board_avg_pe, 2),
+                        "v3_score": round(s.v3_score, 4),
+                        "gain_from_open_pct": round(s.gain_from_open_pct, 2),
+                        "turnover_amp": round(s.turnover_amp, 2),
+                        "latest_price": round(s.latest_price, 2),
                     }
-                    for s in result.selected_stocks
+                    for s in result.all_scored
                 ],
                 "recommended_stock": {
                     "stock_code": rec.stock_code,
                     "stock_name": rec.stock_name,
                     "board_name": rec.board_name,
-                    "board_stock_count": rec.board_stock_count,
-                    "open_gain_pct": round(rec.open_gain_pct, 2),
+                    "v3_score": round(rec.v3_score, 4),
                     "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
                     "turnover_amp": round(rec.turnover_amp, 2),
-                    "composite_score": round(rec.composite_score, 2),
-                    "pe_ttm": round(rec.pe_ttm, 2),
-                    "board_avg_pe": round(rec.board_avg_pe, 2),
                     "open_price": round(rec.open_price, 2),
                     "prev_close": round(rec.prev_close, 2),
-                    "news_check_passed": rec.news_check_passed,
-                    "news_check_detail": rec.news_check_detail,
+                    "latest_price": round(rec.latest_price, 2),
                 }
                 if rec
                 else None,
             }
 
             # Send Feishu if requested
-            if body.notify and result.has_results:
+            if body.notify and rec:
                 bot = FeishuBot()
                 if bot.is_configured():
+                    from src.strategy.models import RecommendedStock
+
+                    # Adapt V15ScoredStock to RecommendedStock for Feishu
+                    adapted_rec = RecommendedStock(
+                        stock_code=rec.stock_code,
+                        stock_name=rec.stock_name,
+                        board_name=rec.board_name,
+                        board_stock_count=result.final_candidates,
+                        open_gain_pct=round(
+                            (rec.open_price - rec.prev_close) / rec.prev_close * 100
+                            if rec.prev_close > 0
+                            else 0,
+                            2,
+                        ),
+                        pe_ttm=0.0,
+                        board_avg_pe=0.0,
+                        open_price=rec.open_price,
+                        prev_close=rec.prev_close,
+                        latest_price=rec.latest_price,
+                        gain_from_open_pct=rec.gain_from_open_pct,
+                        turnover_amp=rec.turnover_amp,
+                        composite_score=rec.v3_score,
+                    )
                     await bot.send_momentum_scan_result(
-                        selected_stocks=result.selected_stocks,
-                        hot_boards=result.hot_boards,
-                        initial_gainer_count=len(result.initial_gainers),
+                        selected_stocks=[],
+                        hot_boards={},
+                        initial_gainer_count=result.initial_gainers_count,
                         scan_time=result.scan_time,
-                        recommended_stock=result.recommended_stock,
+                        recommended_stock=adapted_rec,
                     )
                     response_data["feishu_sent"] = True
 
@@ -1610,1216 +661,22 @@ def create_momentum_router() -> APIRouter:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Momentum backtest error: {e}", exc_info=True)
+            logger.error(f"V15 backtest error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
-        finally:
-            await _stop_news_checker(news_checker)
 
-    @router.get("/api/momentum/monitor-status")
-    async def get_monitor_status(request: Request) -> dict:
-        """Get intraday monitor status and latest results."""
-        monitor_state = _get_monitor_state(request)
-        return {
-            "running": monitor_state["running"],
-            "last_scan_time": monitor_state["last_scan_time"],
-            "today_results": monitor_state["today_results"],
-        }
-
-    @router.post("/api/momentum/monitor/start")
-    async def start_monitor(request: Request) -> dict:
-        """Manually start the intraday monitor."""
-        monitor_state = _get_monitor_state(request)
-        if monitor_state["running"]:
-            return {"success": True, "message": "监控已在运行中"}
-
-        # Store app_state ref so background task can access OSS cache
-        monitor_state["_app_state"] = request.app.state
-        task = asyncio.create_task(_run_intraday_monitor(monitor_state))
-        monitor_state["task"] = task
-        return {"success": True, "message": "监控已启动"}
-
-    @router.post("/api/momentum/monitor/stop")
-    async def stop_monitor(request: Request) -> dict:
-        """Manually stop the intraday monitor."""
-        monitor_state = _get_monitor_state(request)
-        task = monitor_state.get("task")
-        if task and not task.done():
-            task.cancel()
-        monitor_state["running"] = False
-        monitor_state["task"] = None
-        return {"success": True, "message": "监控已停止"}
-
-    @router.post("/api/momentum/monitor/trigger")
-    async def trigger_monitor_scan(request: Request) -> dict:
-        """Manually trigger a momentum scan right now (any time of day)."""
-        monitor_state = _get_monitor_state(request)
-        # Pass OSS cache for historical lookback (avoids unreliable API)
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-        try:
-            result = await _execute_monitor_scan(monitor_state, tsanghi_cache=tsanghi_cache)
-            if result:
-                return {"success": True, "result": result}
-            return {"success": False, "message": "扫描完成但无结果（无合格股票或数据源不可用）"}
-        except Exception as e:
-            logger.error(f"Manual trigger scan error: {e}", exc_info=True)
-            return {"success": False, "message": f"扫描出错: {type(e).__name__}: {e}"}
-
-    @router.get("/api/momentum/monitor/config")
-    async def get_monitor_config() -> dict:
-        """Get current monitor data source config."""
-        from src.common.config import get_monitor_data_source
-
-        return {"data_source": get_monitor_data_source()}
-
-    @router.post("/api/momentum/monitor/config")
-    async def set_monitor_config(request: Request) -> dict:
-        """Update monitor data source config."""
-        from src.common.config import set_monitor_data_source
-
-        body = await request.json()
-        source = body.get("data_source", "")
-        if source not in ("ifind", "tushare"):
-            raise HTTPException(status_code=400, detail="data_source must be 'ifind' or 'tushare'")
-        set_monitor_data_source(source)
-        return {"success": True, "data_source": source}
-
-    @router.post("/api/momentum/range-backtest")
-    async def run_range_backtest(request: Request, body: MomentumRangeBacktestRequest):
-        """[DEPRECATED] Use /api/momentum/combined-analysis instead.
-
-        Run momentum range backtest with SSE streaming progress."""
-        import asyncio
-        import json
-        import math
-        from datetime import datetime
-
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.momentum_sector_scanner import (
-            MomentumSectorScanner,
-        )
-
-        # Validate dates
-        try:
-            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
-            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
-
-        if end_date <= start_date:
-            raise HTTPException(status_code=400, detail="结束日期必须晚于起始日期")
-
-        if body.initial_capital < 1000:
-            raise HTTPException(status_code=400, detail="起始资金不能低于 1000 元")
-
-        ifind_client = _get_ifind_client(request)
-        fundamentals_db = _get_fundamentals_db(request)
-        try:
-            news_checker = await _create_news_checker() if body.news_check else None
-        except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-        async def event_stream():
-            """SSE event generator for range backtest."""
-
-            def sse(data: dict) -> str:
-                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-            try:
-                concept_mapper = LocalConceptMapper()
-                scanner = MomentumSectorScanner(
-                    ifind_client=ifind_client,
-                    fundamentals_db=fundamentals_db,
-                    concept_mapper=concept_mapper,
-                    negative_news_checker=news_checker,
-                    board_relevance_filter=_create_board_relevance_filter(),
-                )
-
-                # Get trading calendar from AKShare (avoid iFinD to prevent session conflict)
-                # Include extra days beyond end_date for T+1 sell price lookups.
-                from datetime import timedelta as _td
-
-                trading_days_all = _get_trading_calendar(start_date, end_date + _td(days=10))
-                trading_days = [d for d in trading_days_all if start_date <= d <= end_date]
-                # Build T+1 map from the full list (needed for selling on T+1)
-                _next_day_map: dict = {}
-                for _idx, _d in enumerate(trading_days_all):
-                    if _idx + 1 < len(trading_days_all):
-                        _next_day_map[_d] = trading_days_all[_idx + 1]
-                if not trading_days:
-                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
-                    return
-
-                if len(trading_days) > 250:
-                    trading_days = trading_days[:250]
-                    first, last = trading_days[0], trading_days[-1]
-                    yield sse(
-                        {
-                            "type": "warning",
-                            "message": f"已截断至前 250 个交易日 ({first} ~ {last})",
-                        }
-                    )
-
-                yield sse(
-                    {
-                        "type": "init",
-                        "total_days": len(trading_days),
-                        "start_date": str(trading_days[0]),
-                        "end_date": str(trading_days[-1]),
-                        "initial_capital": body.initial_capital,
-                    }
-                )
-
-                capital = body.initial_capital
-                day_results: list[dict] = []
-
-                for i, day in enumerate(trading_days):
-                    yield sse(
-                        {
-                            "type": "progress",
-                            "day": i + 1,
-                            "total": len(trading_days),
-                            "trade_date": str(day),
-                        }
-                    )
-
-                    # Run single-day scan
-                    try:
-                        scan_result = await _run_momentum_scan_for_date(ifind_client, scanner, day)
-                    except Exception as e:
-                        logger.error(f"Range backtest scan error on {day}: {e}")
-                        day_results.append(
-                            {
-                                "trade_date": str(day),
-                                "has_trade": False,
-                                "skip_reason": f"策略出错: {str(e)[:50]}",
-                                "capital": round(capital, 2),
-                            }
-                        )
-                        yield sse(
-                            {
-                                "type": "day_result",
-                                **day_results[-1],
-                            }
-                        )
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    rec = (
-                        scan_result.recommended_stock
-                        if scan_result and scan_result.recommended_stock
-                        else None
-                    )
-
-                    if not rec:
-                        day_results.append(
-                            {
-                                "trade_date": str(day),
-                                "has_trade": False,
-                                "skip_reason": "无推荐",
-                                "capital": round(capital, 2),
-                            }
-                        )
-                        yield sse({"type": "day_result", **day_results[-1]})
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    # Fetch buy price: use 9:40 price (from scan), fallback to open
-                    buy_price = rec.latest_price
-                    if buy_price <= 0:
-                        buy_price = rec.open_price
-                    if buy_price <= 0:
-                        # Fallback: fetch 9:40 price directly
-                        try:
-                            prices = await _fetch_stock_940_price(ifind_client, rec.stock_code, day)
-                            if prices:
-                                buy_price = prices[0][1]
-                        except Exception as e:
-                            logger.warning(f"Buy 9:40 fallback failed for {rec.stock_code}: {e}")
-                    if buy_price <= 0:
-                        # Last resort: use open price
-                        try:
-                            prices = await _fetch_stock_open_prices(
-                                ifind_client, rec.stock_code, day
-                            )
-                            if prices:
-                                buy_price = prices[0][1]
-                        except Exception as e:
-                            logger.warning(f"Buy open fallback failed for {rec.stock_code}: {e}")
-
-                    if buy_price <= 0:
-                        day_results.append(
-                            {
-                                "trade_date": str(day),
-                                "has_trade": False,
-                                "skip_reason": "无法获取买入价",
-                                "stock_code": rec.stock_code,
-                                "stock_name": rec.stock_name,
-                                "capital": round(capital, 2),
-                            }
-                        )
-                        yield sse({"type": "day_result", **day_results[-1]})
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    # Fetch next trading day open price for selling (次日开盘卖)
-                    sell_price = 0.0
-                    sell_date_str = ""
-                    sell_fetch_error = ""
-                    next_day = _next_day_map.get(day)
-
-                    if next_day:
-                        try:
-                            sell_prices = await _fetch_stock_open_prices(
-                                ifind_client, rec.stock_code, next_day
-                            )
-                            if sell_prices:
-                                sell_price = sell_prices[0][1]
-                                sell_date_str = str(sell_prices[0][0])
-                        except Exception as e:
-                            sell_fetch_error = str(e)
-                            logger.error(
-                                f"Sell price fetch error for {rec.stock_code} on {next_day}: {e}"
-                            )
-                    else:
-                        sell_fetch_error = "无下一交易日"
-
-                    if sell_price <= 0:
-                        detail = sell_fetch_error or "次日开盘价为0或无数据"
-                        day_results.append(
-                            {
-                                "trade_date": str(day),
-                                "has_trade": False,
-                                "skip_reason": f"无法获取次日开盘卖出价: {detail}",
-                                "stock_code": rec.stock_code,
-                                "stock_name": rec.stock_name,
-                                "capital": round(capital, 2),
-                            }
-                        )
-                        yield sse({"type": "day_result", **day_results[-1]})
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    # Calculate lots
-                    lots = math.floor(capital / (buy_price * 100))
-                    if lots <= 0:
-                        day_results.append(
-                            {
-                                "trade_date": str(day),
-                                "has_trade": False,
-                                "skip_reason": f"资金不足 (需 {buy_price * 100:.0f} 元/手)",
-                                "stock_code": rec.stock_code,
-                                "stock_name": rec.stock_name,
-                                "capital": round(capital, 2),
-                            }
-                        )
-                        yield sse({"type": "day_result", **day_results[-1]})
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    # Check total buy cost fits within capital
-                    buy_amount = lots * 100 * buy_price
-                    buy_commission = max(buy_amount * 0.003, 5.0)
-                    buy_transfer = buy_amount * 0.00001
-                    total_buy_cost = buy_amount + buy_commission + buy_transfer
-
-                    while total_buy_cost > capital and lots > 0:
-                        lots -= 1
-                        buy_amount = lots * 100 * buy_price
-                        buy_commission = max(buy_amount * 0.003, 5.0)
-                        buy_transfer = buy_amount * 0.00001
-                        total_buy_cost = buy_amount + buy_commission + buy_transfer
-
-                    if lots <= 0:
-                        day_results.append(
-                            {
-                                "trade_date": str(day),
-                                "has_trade": False,
-                                "skip_reason": "资金不足（含手续费）",
-                                "stock_code": rec.stock_code,
-                                "stock_name": rec.stock_name,
-                                "capital": round(capital, 2),
-                            }
-                        )
-                        yield sse({"type": "day_result", **day_results[-1]})
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    # Calculate sell proceeds
-                    sell_amount = lots * 100 * sell_price
-                    sell_commission = max(sell_amount * 0.003, 5.0)
-                    sell_transfer = sell_amount * 0.00001
-                    sell_stamp = sell_amount * 0.0005
-                    net_sell = sell_amount - sell_commission - sell_transfer - sell_stamp
-
-                    # Update capital
-                    capital_before = capital
-                    capital = capital - total_buy_cost + net_sell
-                    trade_profit = net_sell - total_buy_cost
-                    trade_return_pct = (
-                        trade_profit / total_buy_cost * 100 if total_buy_cost > 0 else 0
-                    )
-
-                    day_result = {
-                        "trade_date": str(day),
-                        "has_trade": True,
-                        "stock_code": rec.stock_code,
-                        "stock_name": rec.stock_name,
-                        "board_name": rec.board_name,
-                        "buy_price": round(buy_price, 2),
-                        "sell_price": round(sell_price, 2),
-                        "sell_date": sell_date_str,
-                        "lots": lots,
-                        "buy_amount": round(buy_amount, 2),
-                        "buy_commission": round(buy_commission, 2),
-                        "buy_transfer": round(buy_transfer, 2),
-                        "sell_amount": round(sell_amount, 2),
-                        "sell_commission": round(sell_commission, 2),
-                        "sell_transfer": round(sell_transfer, 2),
-                        "sell_stamp": round(sell_stamp, 2),
-                        "profit": round(trade_profit, 2),
-                        "return_pct": round(trade_return_pct, 2),
-                        "capital_before": round(capital_before, 2),
-                        "capital": round(capital, 2),
-                        "hot_boards": {
-                            name: codes
-                            for name, codes in (
-                                scan_result.hot_boards if scan_result else {}
-                            ).items()
-                        },
-                    }
-                    if rec.news_check_passed is not None:
-                        day_result["news_check_passed"] = rec.news_check_passed
-                        day_result["news_check_detail"] = rec.news_check_detail
-                    day_results.append(day_result)
-                    yield sse({"type": "day_result", **day_result})
-                    await asyncio.sleep(0.05)
-
-                # Summary
-                trade_results = [d for d in day_results if d.get("has_trade")]
-                wins = [d for d in trade_results if d["profit"] > 0]
-                losses = [d for d in trade_results if d["profit"] < 0]
-                total_return_pct = (capital - body.initial_capital) / body.initial_capital * 100
-
-                summary = {
-                    "initial_capital": body.initial_capital,
-                    "final_capital": round(capital, 2),
-                    "total_return_pct": round(total_return_pct, 2),
-                    "total_days": len(trading_days),
-                    "trade_days": len(trade_results),
-                    "skip_days": len(trading_days) - len(trade_results),
-                    "win_days": len(wins),
-                    "lose_days": len(losses),
-                    "even_days": len(trade_results) - len(wins) - len(losses),
-                    "win_rate": round(
-                        len(wins) / len(trade_results) * 100 if trade_results else 0, 1
-                    ),
-                    "max_win": round(max((d["profit"] for d in trade_results), default=0), 2),
-                    "max_loss": round(min((d["profit"] for d in trade_results), default=0), 2),
-                    "total_commission": round(
-                        sum(
-                            d.get("buy_commission", 0) + d.get("sell_commission", 0)
-                            for d in trade_results
-                        ),
-                        2,
-                    ),
-                    "total_stamp_tax": round(sum(d.get("sell_stamp", 0) for d in trade_results), 2),
-                }
-                yield sse({"type": "complete", "summary": summary})
-
-            except Exception as e:
-                logger.error(f"Range backtest error: {e}", exc_info=True)
-                yield sse({"type": "error", "message": f"回测出错: {str(e)}"})
-            finally:
-                await _stop_news_checker(news_checker)
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    @router.post("/api/momentum/loss-analysis")
-    async def run_loss_analysis(request: Request):
-        """Analyze losing trades from range backtest with board trend data and LLM."""
-        import json
-
-        body = await request.json()
-        losing_trades = body.get("losing_trades", [])
-        data_source = body.get("data_source", "ifind")
-
-        if data_source == "tsanghi":
-            from src.data.clients.tsanghi_backtest_cache import (
-                TsanghiHistoricalAdapter,
-            )
-
-            ak_cache = getattr(request.app.state, "tsanghi_cache", None)
-            if ak_cache and ak_cache.is_ready:
-                quote_client = TsanghiHistoricalAdapter(ak_cache)
-            else:
-                quote_client = _get_ifind_client(request)
-        else:
-            quote_client = _get_ifind_client(request)
-
-        if not losing_trades:
-            raise HTTPException(status_code=400, detail="没有亏损交易数据")
-
-        async def analysis_stream():
-            def sse(data: dict) -> str:
-                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-            yield sse({"type": "init", "total": len(losing_trades)})
-
-            try:
-                analyses = []
-                for idx, trade in enumerate(losing_trades):
-                    trade_date_str = trade["trade_date"]
-                    board_name = trade.get("board_name", "")
-                    hot_boards = trade.get("hot_boards", {})
-                    trigger_codes = hot_boards.get(board_name, [])
-
-                    yield sse(
-                        {
-                            "type": "progress",
-                            "index": idx,
-                            "total": len(losing_trades),
-                            "stock_code": trade["stock_code"],
-                            "stock_name": trade.get("stock_name", ""),
-                            "message": (
-                                f"正在分析 {trade['stock_code']} {trade.get('stock_name', '')}..."
-                            ),
-                        }
-                    )
-
-                    # Fetch board trend data (iFinD only — tsanghi has no board index)
-                    board_data = {}
-                    if board_name and data_source != "tsanghi":
-                        try:
-                            board_data = await _fetch_board_trend(
-                                quote_client, board_name, trade_date_str
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "Board trend fetch failed for"
-                                f" {board_name} on {trade_date_str}: {e}"
-                            )
-
-                    # Fetch individual stock full-day data for context
-                    stock_day_data = {}
-                    try:
-                        stock_day_data = await _fetch_stock_day_trend(
-                            quote_client, trade["stock_code"], trade_date_str
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Stock day trend fetch failed for {trade['stock_code']}: {e}"
-                        )
-
-                    # Call LLM for per-stock analysis
-                    llm_analysis = ""
-                    try:
-                        llm_analysis = await _call_llm_stock_analysis(
-                            trade, board_data, stock_day_data, trigger_codes
-                        )
-                    except Exception as e:
-                        logger.error(f"LLM analysis failed for {trade['stock_code']}: {e}")
-                        llm_analysis = f"LLM 分析失败: {str(e)[:100]}"
-
-                    analysis_entry = {
-                        "stock_code": trade["stock_code"],
-                        "stock_name": trade.get("stock_name", ""),
-                        "board_name": board_name,
-                        "trade_date": trade_date_str,
-                        "sell_date": trade.get("sell_date", ""),
-                        "buy_price": trade.get("buy_price", 0),
-                        "sell_price": trade.get("sell_price", 0),
-                        "profit": trade.get("profit", 0),
-                        "return_pct": trade.get("return_pct", 0),
-                        "trigger_codes": trigger_codes,
-                        "board_data": board_data,
-                        "stock_day_data": stock_day_data,
-                        "llm_analysis": llm_analysis,
-                    }
-                    analyses.append(analysis_entry)
-
-                    yield sse({"type": "stock_analysis", "index": idx, **analysis_entry})
-
-                # Strategy-level LLM summary
-                yield sse(
-                    {
-                        "type": "progress",
-                        "index": len(losing_trades),
-                        "total": len(losing_trades),
-                        "message": "正在生成策略总结...",
-                    }
-                )
-
-                strategy_summary = ""
-                try:
-                    strategy_summary = await _call_llm_strategy_summary(analyses)
-                except Exception as e:
-                    logger.error(f"LLM strategy summary failed: {e}")
-                    strategy_summary = f"策略总结生成失败: {str(e)[:100]}"
-
-                yield sse({"type": "strategy_summary", "summary": strategy_summary})
-                yield sse({"type": "complete"})
-
-            except Exception as e:
-                logger.error(f"Loss analysis error: {e}", exc_info=True)
-                yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
-
-        return StreamingResponse(
-            analysis_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    @router.post("/api/momentum/funnel-analysis")
-    async def run_funnel_analysis(request: Request, body: FunnelAnalysisRequest):
-        """[DEPRECATED] Use /api/momentum/combined-analysis instead.
-
-        Run funnel layer analysis with SSE streaming.
-
-        Evaluates each filter layer's effectiveness by calculating next-day
-        returns for stocks at every stage of the selection pipeline.
-        """
-        import json
-        from datetime import datetime
-        from statistics import median as stat_median
-
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.filters.stock_filter import create_main_board_only_filter
-        from src.strategy.strategies.momentum_sector_scanner import (
-            MomentumSectorScanner,
-            SelectedStock,
-        )
-
-        # Validate dates
-        try:
-            start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
-            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
-
-        if end_date < start_date:
-            raise HTTPException(status_code=400, detail="结束日期不能早于起始日期")
-
-        LAYER_NAMES = [
-            "L0: 全部成分股",
-            "L1: 涨幅>0.56%",
-            "L2: 动量质量过滤",
-            "L3: 冲高回落过滤",
-            "L4: 最终推荐",
-        ]
-
-        ifind_client = _get_ifind_client(request)
-        fundamentals_db = _get_fundamentals_db(request)
-
-        async def event_stream():
-            def sse(data: dict) -> str:
-                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-            try:
-                # Get trading calendar (include extra days for T+1)
-                from datetime import timedelta
-
-                trading_days = _get_trading_calendar(start_date, end_date + timedelta(days=10))
-                if not trading_days:
-                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
-                    return
-
-                days_in_range = [d for d in trading_days if start_date <= d <= end_date]
-                if not days_in_range:
-                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
-                    return
-
-                # Build T+1 map
-                next_day_map = {}
-                for i, d in enumerate(trading_days):
-                    if d > end_date:
-                        break
-                    if d >= start_date and i + 1 < len(trading_days):
-                        next_day_map[d] = trading_days[i + 1]
-
-                if len(days_in_range) > 250:
-                    days_in_range = days_in_range[:250]
-                    yield sse(
-                        {
-                            "type": "warning",
-                            "message": (
-                                "已截断至前 250 个交易日"
-                                f" ({days_in_range[0]} ~ {days_in_range[-1]})"
-                            ),
-                        }
-                    )
-
-                yield sse(
-                    {
-                        "type": "init",
-                        "total_days": len(days_in_range),
-                        "start_date": str(days_in_range[0]),
-                        "end_date": str(days_in_range[-1]),
-                    }
-                )
-
-                concept_mapper = LocalConceptMapper()
-                stock_filter = create_main_board_only_filter()
-
-                # Accumulate all returns per layer across all days
-                all_layer_returns: dict[str, list[float]] = {n: [] for n in LAYER_NAMES}
-                all_layer_counts: dict[str, list[int]] = {n: [] for n in LAYER_NAMES}
-                # Per-stock detail for filtered-out analysis
-                all_layer_detail: dict[str, list[dict]] = {n: [] for n in LAYER_NAMES}
-                days_processed = 0
-
-                for day_idx, trade_date in enumerate(days_in_range):
-                    next_trade_date = next_day_map.get(trade_date)
-                    if not next_trade_date:
-                        continue
-
-                    yield sse(
-                        {
-                            "type": "progress",
-                            "day": day_idx + 1,
-                            "total": len(days_in_range),
-                            "trade_date": str(trade_date),
-                        }
-                    )
-
-                    try:
-                        # Fetch price data
-                        price_snapshots, price_err = await _parse_iwencai_and_fetch_prices_for_date(
-                            ifind_client, trade_date
-                        )
-                        if not price_snapshots:
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": price_err or "无价格数据",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        # Steps 1-4 via scanner
-                        scanner = MomentumSectorScanner(
-                            ifind_client=ifind_client,
-                            fundamentals_db=fundamentals_db,
-                            concept_mapper=concept_mapper,
-                            stock_filter=stock_filter,
-                            board_relevance_filter=_create_board_relevance_filter(),
-                        )
-                        scanner._trade_date = trade_date
-
-                        gainers = await scanner._step1_filter_gainers(price_snapshots)
-                        if not gainers:
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": "无初筛股",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        stock_boards = await scanner._step2_reverse_lookup(list(gainers.keys()))
-                        hot_boards = scanner._step3_find_hot_boards(stock_boards)
-                        if not hot_boards:
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": "无热门板块",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        board_constituents = await scanner._step4_get_constituents(
-                            list(hot_boards.keys())
-                        )
-
-                        # Step 5: layer capture (no PE filter)
-                        all_constituent_codes: set[str] = set()
-                        filtered_bc: dict[str, list[tuple[str, str]]] = {}
-                        for bn, stocks in board_constituents.items():
-                            allowed = [(c, n) for c, n in stocks if stock_filter.is_allowed(c)]
-                            filtered_bc[bn] = allowed
-                            for c, _ in allowed:
-                                all_constituent_codes.add(c)
-
-                        missing = [c for c in all_constituent_codes if c not in price_snapshots]
-                        if missing:
-                            extra = await scanner._fetch_constituent_prices(missing)
-                            price_snapshots = {**price_snapshots, **extra}
-
-                        # Build layers: L0 (all constituents), L1 (gain filter)
-                        l0: list[SelectedStock] = []
-                        l1: list[SelectedStock] = []
-
-                        for bn, stocks in filtered_bc.items():
-                            for code, name in stocks:
-                                snap = price_snapshots.get(code)
-                                if not snap:
-                                    continue
-
-                                ss = SelectedStock(
-                                    stock_code=code,
-                                    stock_name=name,
-                                    board_name=bn,
-                                    open_gain_pct=snap.open_gain_pct,
-                                    pe_ttm=0.0,
-                                    board_avg_pe=0.0,
-                                )
-                                l0.append(ss)
-
-                                threshold = MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD
-                                if snap.gain_from_open_pct >= threshold:
-                                    l1.append(ss)
-
-                        # Collect all boards per stock before dedup
-                        stock_all_boards: dict[str, list[str]] = defaultdict(list)
-                        for s in l1:
-                            if s.board_name not in stock_all_boards[s.stock_code]:
-                                stock_all_boards[s.stock_code].append(s.board_name)
-
-                        # Deduplicate
-                        def _dedup(stocks):
-                            seen = {}
-                            for s in stocks:
-                                ex = seen.get(s.stock_code)
-                                if ex is None or s.open_gain_pct > ex.open_gain_pct:
-                                    seen[s.stock_code] = s
-                            return list(seen.values())
-
-                        l0 = _dedup(l0)
-                        l1 = _dedup(l1)
-
-                        # L2: momentum quality filter
-                        from src.strategy.filters.momentum_quality_filter import (
-                            MomentumQualityConfig,
-                            MomentumQualityFilter,
-                        )
-
-                        quality_config = MomentumQualityConfig(enabled=True)
-                        quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
-                        if l1:
-                            l2, qa = await quality_filter_inst.filter_stocks(
-                                l1, price_snapshots, trade_date
-                            )
-                        else:
-                            l2 = list(l1)
-                            qa = []
-
-                        # Build cup, trend, avg_vol from quality assessments
-                        cup_data_l = {
-                            a.stock_code: a.consecutive_up_days
-                            for a in qa
-                            if a.consecutive_up_days is not None
-                        }
-                        trend_data_l = {
-                            a.stock_code: a.trend_pct for a in qa if a.trend_pct is not None
-                        }
-                        avg_vol_data_l = {
-                            a.stock_code: a.avg_daily_volume
-                            for a in qa
-                            if a.avg_daily_volume is not None
-                        }
-
-                        # L3: reversal factor filter (缩量冲高)
-                        from src.strategy.filters.reversal_factor_filter import (
-                            ReversalFactorConfig,
-                            ReversalFactorFilter,
-                        )
-
-                        reversal_config = ReversalFactorConfig(enabled=True)
-                        reversal_filter_inst = ReversalFactorFilter(reversal_config)
-                        if l2:
-                            l3, _ = await reversal_filter_inst.filter_stocks(
-                                l2, price_snapshots, avg_vol_data_l, trade_date
-                            )
-                        else:
-                            l3 = list(l2)
-
-                        # Step 5.7: Board relevance filter + best board selection
-                        if scanner._board_relevance_filter and l3:
-                            expanded: list[SelectedStock] = []
-                            for s in l3:
-                                for bn in stock_all_boards.get(s.stock_code, [s.board_name]):
-                                    expanded.append(
-                                        SelectedStock(
-                                            stock_code=s.stock_code,
-                                            stock_name=s.stock_name,
-                                            board_name=bn,
-                                            open_gain_pct=s.open_gain_pct,
-                                            pe_ttm=s.pe_ttm,
-                                            board_avg_pe=s.board_avg_pe,
-                                        )
-                                    )
-                            kept, rel_results = await scanner._board_relevance_filter.filter_stocks(
-                                expanded
-                            )
-                            rel_lookup = {
-                                (r.stock_code, r.board_name): r.level for r in rel_results
-                            }
-                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
-                            l3 = MomentumSectorScanner._pick_best_boards(
-                                l3, kept, rel_lookup, hot_board_sizes
-                            )
-                        elif l3:
-                            # No filter — pick hottest board as best guess
-                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
-                            for s in l3:
-                                boards = stock_all_boards.get(s.stock_code, [s.board_name])
-                                s.board_name = max(
-                                    boards,
-                                    key=lambda b: hot_board_sizes.get(b, 0),
-                                )
-
-                        # L4: recommendation
-                        l4 = []
-                        if l3:
-                            rec, _scored = await scanner._step6_recommend(
-                                l3, price_snapshots, cup_data_l, trend_data_l, avg_vol_data_l
-                            )
-                            if rec:
-                                l4 = [
-                                    SelectedStock(
-                                        stock_code=rec.stock_code,
-                                        stock_name=rec.stock_name,
-                                        board_name=rec.board_name,
-                                        open_gain_pct=rec.open_gain_pct,
-                                        pe_ttm=rec.pe_ttm,
-                                        board_avg_pe=rec.board_avg_pe,
-                                    )
-                                ]
-
-                        all_layers = [l0, l1, l2, l3, l4]
-
-                        # Fetch revenue growth for L3 stocks from DB
-                        day_revenue_growth: dict[str, float] = {}
-                        if l3:
-                            l3_codes = [s.stock_code for s in l3]
-                            day_revenue_growth = await fundamentals_db.batch_get_revenue_growth(
-                                l3_codes
-                            )
-
-                        # Collect all codes for T+1 fetch
-                        all_codes = set()
-                        for layer in all_layers:
-                            for s in layer:
-                                all_codes.add(s.stock_code)
-
-                        if not all_codes:
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": "成分股无价格",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        # Fetch T+1 open (consistent with interval backtest: 次日开盘卖)
-                        next_open = await _fetch_batch_prices(
-                            ifind_client, list(all_codes), next_trade_date, indicator="open"
-                        )
-
-                        # Calculate returns per layer (with costs, same as backtest)
-                        day_layers = {}
-                        for lname, lstocks in zip(LAYER_NAMES, all_layers):
-                            returns = []
-                            for s in lstocks:
-                                snap = price_snapshots.get(s.stock_code)
-                                sell_price = next_open.get(s.stock_code)
-                                if snap and sell_price and snap.latest_price > 0:
-                                    ret = _calc_net_return_pct(snap.latest_price, sell_price)
-                                    ret_rounded = round(ret, 2)
-                                    returns.append(ret_rounded)
-                                    detail_entry = {
-                                        "trade_date": str(trade_date),
-                                        "stock_code": s.stock_code,
-                                        "stock_name": s.stock_name,
-                                        "board_name": s.board_name,
-                                        "return_pct": ret_rounded,
-                                    }
-                                    rg = day_revenue_growth.get(s.stock_code)
-                                    if rg is not None:
-                                        detail_entry["revenue_growth"] = round(rg, 2)
-                                    all_layer_detail[lname].append(detail_entry)
-
-                            count = len(lstocks)
-                            all_layer_counts[lname].append(count)
-                            all_layer_returns[lname].extend(returns)
-
-                            if returns:
-                                avg_r = sum(returns) / len(returns)
-                                win_r = sum(1 for r in returns if r > 0) / len(returns) * 100
-                                med_r = stat_median(returns)
-                            else:
-                                avg_r = win_r = med_r = 0.0
-
-                            day_layers[lname] = {
-                                "count": count,
-                                "avg_return": round(avg_r, 2),
-                                "win_rate": round(win_r, 1),
-                                "median_return": round(med_r, 2),
-                            }
-
-                        days_processed += 1
-                        yield sse(
-                            {
-                                "type": "day_result",
-                                "trade_date": str(trade_date),
-                                "layers": day_layers,
-                            }
-                        )
-                        await asyncio.sleep(0.05)
-
-                    except Exception as e:
-                        logger.error(f"Funnel analysis error on {trade_date}: {e}", exc_info=True)
-                        yield sse(
-                            {
-                                "type": "day_skip",
-                                "trade_date": str(trade_date),
-                                "reason": f"出错: {str(e)[:60]}",
-                            }
-                        )
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    # Clear concept cache between days
-                    concept_mapper.clear_cache()
-
-                # Summary
-                summary_layers = {}
-                for lname in LAYER_NAMES:
-                    rets = all_layer_returns[lname]
-                    counts = all_layer_counts[lname]
-                    if rets:
-                        avg_r = sum(rets) / len(rets)
-                        win_r = sum(1 for r in rets if r > 0) / len(rets) * 100
-                        med_r = stat_median(rets)
-                    else:
-                        avg_r = win_r = med_r = 0.0
-                    avg_count = sum(counts) / len(counts) if counts else 0.0
-
-                    summary_layers[lname] = {
-                        "avg_count": round(avg_count, 1),
-                        "avg_return": round(avg_r, 2),
-                        "win_rate": round(win_r, 1),
-                        "median_return": round(med_r, 2),
-                    }
-
-                # Conclusions
-                conclusions = []
-                pairs = [
-                    (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "动量质量过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "冲高回落过滤"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
-                ]
-                for prev_n, curr_n, label in pairs:
-                    prev_r = summary_layers[prev_n]["avg_return"]
-                    curr_r = summary_layers[curr_n]["avg_return"]
-                    diff = curr_r - prev_r
-                    if all_layer_returns[prev_n] and all_layer_returns[curr_n]:
-                        if diff > 0.05:
-                            verdict = "positive"
-                        elif diff < -0.05:
-                            verdict = "negative"
-                        else:
-                            verdict = "neutral"
-                    else:
-                        verdict = "no_data"
-                    conclusions.append(
-                        {
-                            "filter": label,
-                            "prev_return": round(prev_r, 2),
-                            "curr_return": round(curr_r, 2),
-                            "diff": round(diff, 2),
-                            "verdict": verdict,
-                        }
-                    )
-
-                # Build L0 pool stats per day for reference
-                l0_pool_stats_by_day: dict[str, dict] = {}
-                l0_by_day: dict[str, list[dict]] = defaultdict(list)
-                for item in all_layer_detail[LAYER_NAMES[0]]:
-                    l0_by_day[item["trade_date"]].append(item)
-                for day_str, items in l0_by_day.items():
-                    total = len(items)
-                    pos = sum(1 for it in items if it["return_pct"] > 0)
-                    l0_pool_stats_by_day[day_str] = {
-                        "total": total,
-                        "positive": pos,
-                        "pct": round(pos / total * 100, 1) if total else 0.0,
-                    }
-
-                # Filtered-out best stocks per layer transition (by day)
-                filtered_out_best = []
-                transitions = [
-                    (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 动量质量"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 冲高回落"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
-                ]
-                for prev_n, curr_n, label in transitions:
-                    prev_by_day: dict[str, list[dict]] = defaultdict(list)
-                    curr_codes_by_day: dict[str, set[str]] = defaultdict(set)
-                    for item in all_layer_detail[prev_n]:
-                        prev_by_day[item["trade_date"]].append(item)
-                    for item in all_layer_detail[curr_n]:
-                        curr_codes_by_day[item["trade_date"]].add(item["stock_code"])
-
-                    # Build per-day breakdown
-                    daily_data: list[dict] = []
-                    all_filtered: list[dict] = []
-                    for day_str in sorted(prev_by_day.keys()):
-                        items = prev_by_day[day_str]
-                        curr_codes = curr_codes_by_day.get(day_str, set())
-                        day_filtered = [it for it in items if it["stock_code"] not in curr_codes]
-                        all_filtered.extend(day_filtered)
-                        _empty = {"total": 0, "positive": 0, "pct": 0}
-                        pool_s = l0_pool_stats_by_day.get(day_str, _empty)
-                        if not day_filtered:
-                            daily_data.append(
-                                {
-                                    "trade_date": day_str,
-                                    "filtered_count": 0,
-                                    "avg_return": 0,
-                                    "positive_count": 0,
-                                    "positive_pct": 0,
-                                    "pool_total": pool_s["total"],
-                                    "pool_positive_count": pool_s["positive"],
-                                    "pool_positive_pct": pool_s["pct"],
-                                    "top_stocks": [],
-                                }
-                            )
-                            continue
-                        d_rets = [f["return_pct"] for f in day_filtered]
-                        d_avg = sum(d_rets) / len(d_rets)
-                        d_pos = sum(1 for r in d_rets if r > 0)
-                        d_pos_pct = round(d_pos / len(day_filtered) * 100, 1)
-                        d_top3 = sorted(
-                            day_filtered,
-                            key=lambda x: x["return_pct"],
-                            reverse=True,
-                        )[:3]
-                        daily_data.append(
-                            {
-                                "trade_date": day_str,
-                                "filtered_count": len(day_filtered),
-                                "avg_return": round(d_avg, 2),
-                                "positive_count": d_pos,
-                                "positive_pct": d_pos_pct,
-                                "pool_total": pool_s["total"],
-                                "pool_positive_count": pool_s["positive"],
-                                "pool_positive_pct": pool_s["pct"],
-                                "top_stocks": d_top3,
-                            }
-                        )
-
-                    # Overall summary for this layer
-                    if not all_filtered:
-                        filtered_out_best.append(
-                            {
-                                "label": label,
-                                "total_filtered": 0,
-                                "avg_return": 0,
-                                "positive_count": 0,
-                                "positive_pct": 0,
-                                "pool_total": 0,
-                                "pool_positive_count": 0,
-                                "pool_positive_pct": 0,
-                                "days": daily_data,
-                            }
-                        )
-                    else:
-                        rets = [f["return_pct"] for f in all_filtered]
-                        avg_r = sum(rets) / len(rets)
-                        pos_count = sum(1 for r in rets if r > 0)
-                        pos_pct = round(pos_count / len(all_filtered) * 100, 1)
-                        total_pool = sum(
-                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("total", 0)
-                            for d in daily_data
-                        )
-                        total_pool_pos = sum(
-                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("positive", 0)
-                            for d in daily_data
-                        )
-                        avg_pool_pct = (
-                            round(total_pool_pos / total_pool * 100, 1) if total_pool else 0
-                        )
-                        filtered_out_best.append(
-                            {
-                                "label": label,
-                                "total_filtered": len(all_filtered),
-                                "avg_return": round(avg_r, 2),
-                                "positive_count": pos_count,
-                                "positive_pct": pos_pct,
-                                "pool_total": total_pool,
-                                "pool_positive_count": total_pool_pos,
-                                "pool_positive_pct": avg_pool_pct,
-                                "days": daily_data,
-                            }
-                        )
-
-                yield sse(
-                    {
-                        "type": "complete",
-                        "days_processed": days_processed,
-                        "summary": summary_layers,
-                        "conclusions": conclusions,
-                        "filtered_out_best": filtered_out_best,
-                    }
-                )
-
-            except Exception as e:
-                logger.error(f"Funnel analysis error: {e}", exc_info=True)
-                yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
+    # === Range backtest with capital simulation ===
 
     @router.post("/api/momentum/combined-analysis")
-    async def run_combined_analysis(request: Request, body: CombinedAnalysisRequest):
-        """Run combined range backtest + funnel analysis with SSE streaming.
-
-        Single pass: builds funnel layers per day AND simulates capital trading
-        on the L3 recommendation. Eliminates duplicate iFinD calls.
-        """
+    async def run_combined_analysis(request: Request, body: RangeBacktestRequest):
+        """Run V15 range backtest with capital simulation (SSE streaming)."""
         import json
         import math
         from datetime import datetime
-        from statistics import median as stat_median
 
+        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.filters.momentum_quality_filter import (
-            MomentumQualityConfig,
-            MomentumQualityFilter,
-        )
-        from src.strategy.filters.stock_filter import create_main_board_only_filter
-        from src.strategy.strategies.momentum_sector_scanner import (
-            MomentumSectorScanner,
-            SelectedStock,
-        )
+        from src.strategy.strategies.v15_scanner import V15Scanner
 
-        # Validate dates
         try:
             start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
             end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
@@ -2832,34 +689,12 @@ def create_momentum_router() -> APIRouter:
         if body.initial_capital < 1000:
             raise HTTPException(status_code=400, detail="起始资金不能低于 1000 元")
 
-        LAYER_NAMES = [
-            "L0: 全部成分股",
-            "L1: 涨幅>0.56%",
-            "L2: 动量质量过滤",
-            "L3: 冲高回落过滤",
-            "L4: 最终推荐",
-        ]
-
-        concept_mapper = LocalConceptMapper()
-        use_tsanghi = body.data_source == "tsanghi"
-        if use_tsanghi:
-            from src.data.clients.tsanghi_backtest_cache import (
-                TsanghiHistoricalAdapter,
-            )
-
-            tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-            if not tsanghi_cache or not tsanghi_cache.is_ready:
-                raise HTTPException(status_code=400, detail="请先预下载沧海数据")
-            ifind_client = TsanghiHistoricalAdapter(tsanghi_cache)
-        else:
-            ifind_client = _get_ifind_client(request)
-            tsanghi_cache = None
+        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
+        if not tsanghi_cache or not tsanghi_cache.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载沧海数据")
 
         fundamentals_db = _get_fundamentals_db(request)
-        try:
-            news_checker = await _create_news_checker() if body.news_check else None
-        except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        adapter = TsanghiHistoricalAdapter(tsanghi_cache)
 
         async def event_stream():
             def sse(data: dict) -> str:
@@ -2868,7 +703,9 @@ def create_momentum_router() -> APIRouter:
             try:
                 from datetime import timedelta
 
-                trading_days_all = _get_trading_calendar(start_date, end_date + timedelta(days=10))
+                trading_days_all = _get_trading_calendar(
+                    start_date, end_date + timedelta(days=10)
+                )
                 if not trading_days_all:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
@@ -2891,10 +728,7 @@ def create_momentum_router() -> APIRouter:
                     yield sse(
                         {
                             "type": "warning",
-                            "message": (
-                                "已截断至前 250 个交易日"
-                                f" ({days_in_range[0]} ~ {days_in_range[-1]})"
-                            ),
+                            "message": f"已截断至前 250 个交易日 ({days_in_range[0]} ~ {days_in_range[-1]})",
                         }
                     )
 
@@ -2908,16 +742,7 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-                # concept_mapper already created above (LocalConceptMapper)
-                stock_filter = create_main_board_only_filter()
-
-                # Funnel accumulators
-                all_layer_returns: dict[str, list[float]] = {n: [] for n in LAYER_NAMES}
-                all_layer_counts: dict[str, list[int]] = {n: [] for n in LAYER_NAMES}
-                all_layer_detail: dict[str, list[dict]] = {n: [] for n in LAYER_NAMES}
-                days_processed = 0
-
-                # Backtest state
+                concept_mapper = LocalConceptMapper()
                 capital = body.initial_capital
                 day_results: list[dict] = []
 
@@ -2936,34 +761,25 @@ def create_momentum_router() -> APIRouter:
                     )
 
                     try:
-                        if use_tsanghi:
-                            date_key = trade_date.strftime("%Y-%m-%d")
-                            try:
-                                price_snapshots = _build_snapshots_from_cache(
-                                    tsanghi_cache,
-                                    date_key,
-                                )
-                            except MinuteDataMissingError as e:
-                                price_snapshots = {}
-                                price_err = str(e)
-                            else:
-                                price_err = (
-                                    "" if price_snapshots else f"沧海缓存中无 {date_key} 的日线数据"
-                                )
-                        else:
-                            (
-                                price_snapshots,
-                                price_err,
-                            ) = await _parse_iwencai_and_fetch_prices_for_date(
-                                ifind_client, trade_date
+                        date_key = trade_date.strftime("%Y-%m-%d")
+                        try:
+                            price_snapshots = _build_snapshots_from_cache(
+                                tsanghi_cache, date_key
                             )
+                        except MinuteDataMissingError as e:
+                            price_snapshots = {}
+                            price_err = str(e)
+                        else:
+                            price_err = (
+                                "" if price_snapshots else f"沧海缓存中无 {date_key} 的日线数据"
+                            )
+
                         if not price_snapshots:
-                            skip_reason = price_err or "无价格数据"
                             day_results.append(
                                 {
                                     "trade_date": str(trade_date),
                                     "has_trade": False,
-                                    "skip_reason": skip_reason,
+                                    "skip_reason": price_err or "无价格数据",
                                     "capital": round(capital, 2),
                                 }
                             )
@@ -2971,374 +787,53 @@ def create_momentum_router() -> APIRouter:
                                 {
                                     "type": "day_skip",
                                     "trade_date": str(trade_date),
-                                    "reason": skip_reason,
+                                    "reason": price_err or "无价格数据",
                                 }
                             )
                             await asyncio.sleep(0.05)
                             continue
 
-                        scanner = MomentumSectorScanner(
-                            ifind_client=ifind_client,
+                        scanner = V15Scanner(
+                            historical_adapter=adapter,
                             fundamentals_db=fundamentals_db,
                             concept_mapper=concept_mapper,
-                            stock_filter=stock_filter,
-                            negative_news_checker=news_checker,
-                            board_relevance_filter=_create_board_relevance_filter(),
                         )
-                        scanner._trade_date = trade_date
-
-                        gainers = await scanner._step1_filter_gainers(price_snapshots)
-                        if not gainers:
-                            day_results.append(
-                                {
-                                    "trade_date": str(trade_date),
-                                    "has_trade": False,
-                                    "skip_reason": "无初筛股",
-                                    "capital": round(capital, 2),
-                                }
-                            )
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": "无初筛股",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        stock_boards = await scanner._step2_reverse_lookup(list(gainers.keys()))
-                        hot_boards = scanner._step3_find_hot_boards(stock_boards)
-                        if not hot_boards:
-                            day_results.append(
-                                {
-                                    "trade_date": str(trade_date),
-                                    "has_trade": False,
-                                    "skip_reason": "无热门板块",
-                                    "capital": round(capital, 2),
-                                }
-                            )
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": "无热门板块",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        board_constituents = await scanner._step4_get_constituents(
-                            list(hot_boards.keys())
+                        scan_result = await scanner.scan(
+                            price_snapshots, trade_date=trade_date
                         )
 
-                        # Build layers L0, L1
-                        all_constituent_codes: set[str] = set()
-                        filtered_bc: dict[str, list[tuple[str, str]]] = {}
-                        for bn, stocks in board_constituents.items():
-                            allowed = [(c, n) for c, n in stocks if stock_filter.is_allowed(c)]
-                            filtered_bc[bn] = allowed
-                            for c, _ in allowed:
-                                all_constituent_codes.add(c)
+                        rec = scan_result.recommended
 
-                        # Filter out ST stocks
-                        if all_constituent_codes:
-                            non_st = set(
-                                await fundamentals_db.batch_filter_st(list(all_constituent_codes))
-                            )
-                            filtered_bc = {
-                                bn: [(c, n) for c, n in stocks if c in non_st]
-                                for bn, stocks in filtered_bc.items()
-                            }
-                            all_constituent_codes &= non_st
-
-                        missing = [c for c in all_constituent_codes if c not in price_snapshots]
-                        if missing:
-                            extra = await scanner._fetch_constituent_prices(missing)
-                            price_snapshots = {**price_snapshots, **extra}
-
-                        l0: list[SelectedStock] = []
-                        l1: list[SelectedStock] = []
-
-                        for bn, stocks in filtered_bc.items():
-                            for code, name in stocks:
-                                snap = price_snapshots.get(code)
-                                if not snap:
-                                    continue
-
-                                ss = SelectedStock(
-                                    stock_code=code,
-                                    stock_name=name,
-                                    board_name=bn,
-                                    open_gain_pct=snap.open_gain_pct,
-                                    pe_ttm=0.0,
-                                    board_avg_pe=0.0,
-                                )
-                                l0.append(ss)
-
-                                threshold = MomentumSectorScanner.GAIN_FROM_OPEN_THRESHOLD
-                                if snap.gain_from_open_pct >= threshold:
-                                    l1.append(ss)
-
-                        # Collect all boards per stock before dedup
-                        stock_all_boards: dict[str, list[str]] = defaultdict(list)
-                        for s in l1:
-                            if s.board_name not in stock_all_boards[s.stock_code]:
-                                stock_all_boards[s.stock_code].append(s.board_name)
-
-                        def _dedup(stocks):
-                            seen = {}
-                            for s in stocks:
-                                ex = seen.get(s.stock_code)
-                                if ex is None or s.open_gain_pct > ex.open_gain_pct:
-                                    seen[s.stock_code] = s
-                            return list(seen.values())
-
-                        l0 = _dedup(l0)
-                        l1 = _dedup(l1)
-
-                        # L2: momentum quality filter
-                        quality_config = MomentumQualityConfig(enabled=body.quality_filter)
-                        quality_filter_inst = MomentumQualityFilter(ifind_client, quality_config)
-                        if body.quality_filter and l1:
-                            l2, qa2 = await quality_filter_inst.filter_stocks(
-                                l1, price_snapshots, trade_date
-                            )
-                        else:
-                            l2 = list(l1)
-                            qa2 = []
-
-                        # Always fetch historical data for Step 6 scoring,
-                        # even if quality filter is off
-                        if not qa2 and l1:
-                            qa2_data = await quality_filter_inst._fetch_historical_context(
-                                [s.stock_code for s in l1], trade_date
-                            )
-                            cup_data_l2: dict[str, int] = {
-                                code: v["consecutive_up_days"]
-                                for code, v in qa2_data.items()
-                                if v.get("consecutive_up_days") is not None
-                            }
-                            trend_data_l2: dict[str, float] = {
-                                code: v["trend_pct"]
-                                for code, v in qa2_data.items()
-                                if v.get("trend_pct") is not None
-                            }
-                            avg_vol_data_l2: dict[str, float] = {
-                                code: v["avg_daily_volume"]
-                                for code, v in qa2_data.items()
-                                if v.get("avg_daily_volume") is not None
-                                and v["avg_daily_volume"] > 0
-                            }
-                        else:
-                            cup_data_l2 = {
-                                a.stock_code: a.consecutive_up_days
-                                for a in qa2
-                                if a.consecutive_up_days is not None
-                            }
-                            trend_data_l2 = {
-                                a.stock_code: a.trend_pct for a in qa2 if a.trend_pct is not None
-                            }
-                            avg_vol_data_l2 = {
-                                a.stock_code: a.avg_daily_volume
-                                for a in qa2
-                                if a.avg_daily_volume is not None
-                            }
-
-                        # L3: reversal factor filter (缩量冲高)
-                        from src.strategy.filters.reversal_factor_filter import (
-                            ReversalFactorConfig,
-                            ReversalFactorFilter,
-                        )
-
-                        reversal_config = ReversalFactorConfig(enabled=True)
-                        reversal_filter_inst = ReversalFactorFilter(reversal_config)
-                        reversal_diag: list[dict] = []
-                        if l2:
-                            l3, rev_assessments = await reversal_filter_inst.filter_stocks(
-                                l2, price_snapshots, avg_vol_data_l2, trade_date
-                            )
-                            for ra in rev_assessments:
-                                snap_r = price_snapshots.get(ra.stock_code)
-                                svr = ra.surge_volume_ratio
-                                rv = ra.relative_volume
-                                reversal_diag.append(
-                                    {
-                                        "code": ra.stock_code,
-                                        "ratio": round(svr, 4) if svr is not None else None,
-                                        "surge": round(ra.surge_pct, 4) if ra.surge_pct else None,
-                                        "rel_vol": round(rv, 4) if rv else None,
-                                        "early_vol": snap_r.early_volume if snap_r else None,
-                                        "avg_vol": avg_vol_data_l2.get(ra.stock_code),
-                                        "filtered": ra.filtered_out,
-                                    }
-                                )
-                        else:
-                            l3 = list(l2)
-
-                        # Step 5.7: Board relevance filter + best board selection
-                        if scanner._board_relevance_filter and l3:
-                            expanded: list[SelectedStock] = []
-                            for s in l3:
-                                for bn in stock_all_boards.get(s.stock_code, [s.board_name]):
-                                    expanded.append(
-                                        SelectedStock(
-                                            stock_code=s.stock_code,
-                                            stock_name=s.stock_name,
-                                            board_name=bn,
-                                            open_gain_pct=s.open_gain_pct,
-                                            pe_ttm=s.pe_ttm,
-                                            board_avg_pe=s.board_avg_pe,
-                                        )
-                                    )
-                            kept, rel_results = await scanner._board_relevance_filter.filter_stocks(
-                                expanded
-                            )
-                            rel_lookup = {
-                                (r.stock_code, r.board_name): r.level for r in rel_results
-                            }
-                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
-                            l3 = MomentumSectorScanner._pick_best_boards(
-                                l3, kept, rel_lookup, hot_board_sizes
-                            )
-                        elif l3:
-                            # No filter — pick hottest board as best guess
-                            hot_board_sizes = {b: len(codes) for b, codes in hot_boards.items()}
-                            for s in l3:
-                                boards = stock_all_boards.get(s.stock_code, [s.board_name])
-                                s.board_name = max(
-                                    boards,
-                                    key=lambda b: hot_board_sizes.get(b, 0),
-                                )
-
-                        # L4: recommendation
-                        l4 = []
-                        rec = None
-                        if l3:
-                            rec, _scored = await scanner._step6_recommend(
-                                l3, price_snapshots, cup_data_l2, trend_data_l2, avg_vol_data_l2
-                            )
-                            if rec:
-                                l4 = [
-                                    SelectedStock(
-                                        stock_code=rec.stock_code,
-                                        stock_name=rec.stock_name,
-                                        board_name=rec.board_name,
-                                        open_gain_pct=rec.open_gain_pct,
-                                        pe_ttm=rec.pe_ttm,
-                                        board_avg_pe=rec.board_avg_pe,
-                                    )
-                                ]
-
-                        all_layers = [l0, l1, l2, l3, l4]
-
-                        # Fetch revenue growth for L3 stocks from DB
-                        day_revenue_growth: dict[str, float] = {}
-                        if l3:
-                            l3_codes = [s.stock_code for s in l3]
-                            day_revenue_growth = await fundamentals_db.batch_get_revenue_growth(
-                                l3_codes
-                            )
-
-                        # Collect all codes for T+1 fetch
-                        all_codes = set()
-                        for layer in all_layers:
-                            for s in layer:
-                                all_codes.add(s.stock_code)
-
-                        if not all_codes:
-                            day_results.append(
-                                {
-                                    "trade_date": str(trade_date),
-                                    "has_trade": False,
-                                    "skip_reason": "成分股无价格",
-                                    "capital": round(capital, 2),
-                                }
-                            )
-                            yield sse(
-                                {
-                                    "type": "day_skip",
-                                    "trade_date": str(trade_date),
-                                    "reason": "成分股无价格",
-                                }
-                            )
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        # Fetch T+1 open prices for all layer stocks
-                        next_open = await _fetch_batch_prices(
-                            ifind_client,
-                            list(all_codes),
-                            next_trade_date,
-                            indicator="open",
-                        )
-
-                        # === Funnel: calculate returns per layer ===
-                        day_layers = {}
-                        for lname, lstocks in zip(LAYER_NAMES, all_layers):
-                            returns = []
-                            for s in lstocks:
-                                snap = price_snapshots.get(s.stock_code)
-                                sell_p = next_open.get(s.stock_code)
-                                if snap and sell_p and snap.latest_price > 0:
-                                    ret = _calc_net_return_pct(snap.latest_price, sell_p)
-                                    ret_rounded = round(ret, 2)
-                                    returns.append(ret_rounded)
-                                    detail_entry = {
-                                        "trade_date": str(trade_date),
-                                        "stock_code": s.stock_code,
-                                        "stock_name": s.stock_name,
-                                        "board_name": s.board_name,
-                                        "return_pct": ret_rounded,
-                                    }
-                                    rg = day_revenue_growth.get(s.stock_code)
-                                    if rg is not None:
-                                        detail_entry["revenue_growth"] = round(rg, 2)
-                                    all_layer_detail[lname].append(detail_entry)
-
-                            count = len(lstocks)
-                            all_layer_counts[lname].append(count)
-                            all_layer_returns[lname].extend(returns)
-
-                            if returns:
-                                avg_r = sum(returns) / len(returns)
-                                win_r = sum(1 for r in returns if r > 0) / len(returns) * 100
-                                med_r = stat_median(returns)
-                            else:
-                                avg_r = win_r = med_r = 0.0
-
-                            day_layers[lname] = {
-                                "count": count,
-                                "avg_return": round(avg_r, 2),
-                                "win_rate": round(win_r, 1),
-                                "median_return": round(med_r, 2),
-                            }
-
-                        # === Backtest: capital tracking on L4 recommendation ===
+                        # Build day backtest entry
                         day_backtest: dict = {
                             "trade_date": str(trade_date),
                             "has_trade": False,
                             "capital": round(capital, 2),
+                            "funnel": {
+                                "l1": scan_result.initial_gainers_count,
+                                "l3": scan_result.hot_board_count,
+                                "l4": scan_result.l4_count,
+                                "l5": scan_result.l5_count,
+                                "l6": scan_result.l6_count,
+                                "final": scan_result.final_candidates,
+                            },
                         }
 
                         if rec:
-                            rec_snap = price_snapshots.get(rec.stock_code)
-                            buy_price = 0.0
-                            if rec_snap:
-                                buy_price = rec_snap.latest_price
-                            if buy_price <= 0 and rec_snap:
-                                buy_price = rec_snap.open_price
+                            buy_price = rec.latest_price
+                            if buy_price <= 0:
+                                buy_price = rec.open_price
 
-                            sell_price_val = next_open.get(rec.stock_code, 0.0)
-                            if sell_price_val <= 0:
-                                try:
-                                    sell_prices = await _fetch_stock_open_prices(
-                                        ifind_client, rec.stock_code, next_trade_date
-                                    )
-                                    if sell_prices:
-                                        sell_price_val = sell_prices[0][1]
-                                except Exception:
-                                    pass
+                            # Get T+1 open from cache
+                            next_date_key = next_trade_date.strftime("%Y-%m-%d")
+                            next_day_data = tsanghi_cache.get_daily(
+                                rec.stock_code, next_date_key
+                            )
+                            sell_price_val = (
+                                float(next_day_data["open"])
+                                if next_day_data and next_day_data.get("open")
+                                else 0.0
+                            )
 
                             if buy_price > 0 and sell_price_val > 0:
                                 lots = math.floor(capital / (buy_price * 100))
@@ -3346,14 +841,18 @@ def create_momentum_router() -> APIRouter:
                                     buy_amount = lots * 100 * buy_price
                                     buy_commission = max(buy_amount * 0.003, 5.0)
                                     buy_transfer = buy_amount * 0.00001
-                                    total_buy_cost = buy_amount + buy_commission + buy_transfer
+                                    total_buy_cost = (
+                                        buy_amount + buy_commission + buy_transfer
+                                    )
 
                                     while total_buy_cost > capital and lots > 0:
                                         lots -= 1
                                         buy_amount = lots * 100 * buy_price
                                         buy_commission = max(buy_amount * 0.003, 5.0)
                                         buy_transfer = buy_amount * 0.00001
-                                        total_buy_cost = buy_amount + buy_commission + buy_transfer
+                                        total_buy_cost = (
+                                            buy_amount + buy_commission + buy_transfer
+                                        )
 
                                 if lots > 0:
                                     sell_amount = lots * 100 * sell_price_val
@@ -3361,7 +860,10 @@ def create_momentum_router() -> APIRouter:
                                     sell_transfer = sell_amount * 0.00001
                                     sell_stamp = sell_amount * 0.0005
                                     net_sell = (
-                                        sell_amount - sell_commission - sell_transfer - sell_stamp
+                                        sell_amount
+                                        - sell_commission
+                                        - sell_transfer
+                                        - sell_stamp
                                     )
 
                                     capital_before = capital
@@ -3383,19 +885,18 @@ def create_momentum_router() -> APIRouter:
                                         "sell_price": round(sell_price_val, 2),
                                         "sell_date": str(next_trade_date),
                                         "lots": lots,
-                                        "buy_amount": round(buy_amount, 2),
-                                        "buy_commission": round(buy_commission, 2),
-                                        "buy_transfer": round(buy_transfer, 2),
-                                        "sell_amount": round(sell_amount, 2),
-                                        "sell_commission": round(sell_commission, 2),
-                                        "sell_transfer": round(sell_transfer, 2),
-                                        "sell_stamp": round(sell_stamp, 2),
                                         "profit": round(trade_profit, 2),
                                         "return_pct": round(trade_return_pct, 2),
                                         "capital_before": round(capital_before, 2),
                                         "capital": round(capital, 2),
-                                        "hot_boards": {
-                                            name: list(codes) for name, codes in hot_boards.items()
+                                        "v3_score": round(rec.v3_score, 4),
+                                        "funnel": {
+                                            "l1": scan_result.initial_gainers_count,
+                                            "l3": scan_result.hot_board_count,
+                                            "l4": scan_result.l4_count,
+                                            "l5": scan_result.l5_count,
+                                            "l6": scan_result.l6_count,
+                                            "final": scan_result.final_candidates,
                                         },
                                     }
                                 else:
@@ -3404,7 +905,6 @@ def create_momentum_router() -> APIRouter:
                                     )
                                     day_backtest["stock_code"] = rec.stock_code
                                     day_backtest["stock_name"] = rec.stock_name
-                                    day_backtest["capital"] = round(capital, 2)
                             else:
                                 reason_parts = []
                                 if buy_price <= 0:
@@ -3414,32 +914,24 @@ def create_momentum_router() -> APIRouter:
                                 day_backtest["skip_reason"] = "、".join(reason_parts)
                                 day_backtest["stock_code"] = rec.stock_code
                                 day_backtest["stock_name"] = rec.stock_name
-                                day_backtest["capital"] = round(capital, 2)
                         else:
                             day_backtest["skip_reason"] = "无推荐"
-                            day_backtest["capital"] = round(capital, 2)
 
-                        if rec and rec.news_check_passed is not None:
-                            day_backtest["news_check_passed"] = rec.news_check_passed
-                            day_backtest["news_check_detail"] = rec.news_check_detail
-
+                        day_backtest["capital"] = round(capital, 2)
                         day_results.append(day_backtest)
-                        days_processed += 1
 
-                        sse_payload: dict = {
-                            "type": "day_result",
-                            "trade_date": str(trade_date),
-                            "backtest": day_backtest,
-                            "funnel": day_layers,
-                        }
-                        if reversal_diag:
-                            sse_payload["reversal_debug"] = reversal_diag
-                        yield sse(sse_payload)
+                        yield sse(
+                            {
+                                "type": "day_result",
+                                "trade_date": str(trade_date),
+                                "backtest": day_backtest,
+                            }
+                        )
                         await asyncio.sleep(0.05)
 
                     except Exception as e:
                         logger.error(
-                            f"Combined analysis error on {trade_date}: {e}",
+                            f"Range backtest error on {trade_date}: {e}",
                             exc_info=True,
                         )
                         day_results.append(
@@ -3462,182 +954,13 @@ def create_momentum_router() -> APIRouter:
 
                     concept_mapper.clear_cache()
 
-                # === Funnel summary ===
-                summary_layers = {}
-                for lname in LAYER_NAMES:
-                    rets = all_layer_returns[lname]
-                    counts = all_layer_counts[lname]
-                    if rets:
-                        avg_r = sum(rets) / len(rets)
-                        win_r = sum(1 for r in rets if r > 0) / len(rets) * 100
-                        med_r = stat_median(rets)
-                    else:
-                        avg_r = win_r = med_r = 0.0
-                    avg_count = sum(counts) / len(counts) if counts else 0.0
-
-                    summary_layers[lname] = {
-                        "avg_count": round(avg_count, 1),
-                        "avg_return": round(avg_r, 2),
-                        "win_rate": round(win_r, 1),
-                        "median_return": round(med_r, 2),
-                    }
-
-                conclusions = []
-                pairs = [
-                    (LAYER_NAMES[0], LAYER_NAMES[1], "涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "动量质量过滤"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "冲高回落过滤"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "最终推荐"),
-                ]
-                for prev_n, curr_n, label in pairs:
-                    prev_r = summary_layers[prev_n]["avg_return"]
-                    curr_r = summary_layers[curr_n]["avg_return"]
-                    diff = curr_r - prev_r
-                    if all_layer_returns[prev_n] and all_layer_returns[curr_n]:
-                        if diff > 0.05:
-                            verdict = "positive"
-                        elif diff < -0.05:
-                            verdict = "negative"
-                        else:
-                            verdict = "neutral"
-                    else:
-                        verdict = "no_data"
-                    conclusions.append(
-                        {
-                            "filter": label,
-                            "prev_return": round(prev_r, 2),
-                            "curr_return": round(curr_r, 2),
-                            "diff": round(diff, 2),
-                            "verdict": verdict,
-                        }
-                    )
-
-                # Build L0 pool stats per day for reference
-                l0_pool_stats_by_day: dict[str, dict] = {}
-                l0_by_day: dict[str, list[dict]] = defaultdict(list)
-                for item in all_layer_detail[LAYER_NAMES[0]]:
-                    l0_by_day[item["trade_date"]].append(item)
-                for day_str, items in l0_by_day.items():
-                    total = len(items)
-                    pos = sum(1 for it in items if it["return_pct"] > 0)
-                    l0_pool_stats_by_day[day_str] = {
-                        "total": total,
-                        "positive": pos,
-                        "pct": round(pos / total * 100, 1) if total else 0.0,
-                    }
-
-                # Filtered-out best stocks
-                filtered_out_best = []
-                transitions = [
-                    (LAYER_NAMES[0], LAYER_NAMES[1], "L0→L1 涨幅筛选"),
-                    (LAYER_NAMES[1], LAYER_NAMES[2], "L1→L2 动量质量"),
-                    (LAYER_NAMES[2], LAYER_NAMES[3], "L2→L3 冲高回落"),
-                    (LAYER_NAMES[3], LAYER_NAMES[4], "L3→L4 最终推荐"),
-                ]
-                for prev_n, curr_n, label in transitions:
-                    prev_by_day: dict[str, list[dict]] = defaultdict(list)
-                    curr_codes_by_day: dict[str, set[str]] = defaultdict(set)
-                    for item in all_layer_detail[prev_n]:
-                        prev_by_day[item["trade_date"]].append(item)
-                    for item in all_layer_detail[curr_n]:
-                        curr_codes_by_day[item["trade_date"]].add(item["stock_code"])
-
-                    daily_data: list[dict] = []
-                    all_filtered: list[dict] = []
-                    for day_str in sorted(prev_by_day.keys()):
-                        items = prev_by_day[day_str]
-                        curr_codes = curr_codes_by_day.get(day_str, set())
-                        day_filtered = [it for it in items if it["stock_code"] not in curr_codes]
-                        all_filtered.extend(day_filtered)
-                        _empty = {"total": 0, "positive": 0, "pct": 0}
-                        pool_s = l0_pool_stats_by_day.get(day_str, _empty)
-                        if not day_filtered:
-                            daily_data.append(
-                                {
-                                    "trade_date": day_str,
-                                    "filtered_count": 0,
-                                    "avg_return": 0,
-                                    "positive_count": 0,
-                                    "positive_pct": 0,
-                                    "pool_total": pool_s["total"],
-                                    "pool_positive_count": pool_s["positive"],
-                                    "pool_positive_pct": pool_s["pct"],
-                                    "top_stocks": [],
-                                }
-                            )
-                            continue
-                        d_rets = [f["return_pct"] for f in day_filtered]
-                        d_avg = sum(d_rets) / len(d_rets)
-                        d_pos = sum(1 for r in d_rets if r > 0)
-                        d_pos_pct = round(d_pos / len(day_filtered) * 100, 1)
-                        d_top3 = sorted(
-                            day_filtered,
-                            key=lambda x: x["return_pct"],
-                            reverse=True,
-                        )[:3]
-                        daily_data.append(
-                            {
-                                "trade_date": day_str,
-                                "filtered_count": len(day_filtered),
-                                "avg_return": round(d_avg, 2),
-                                "positive_count": d_pos,
-                                "positive_pct": d_pos_pct,
-                                "pool_total": pool_s["total"],
-                                "pool_positive_count": pool_s["positive"],
-                                "pool_positive_pct": pool_s["pct"],
-                                "top_stocks": d_top3,
-                            }
-                        )
-
-                    if not all_filtered:
-                        filtered_out_best.append(
-                            {
-                                "label": label,
-                                "total_filtered": 0,
-                                "avg_return": 0,
-                                "positive_count": 0,
-                                "positive_pct": 0,
-                                "pool_total": 0,
-                                "pool_positive_count": 0,
-                                "pool_positive_pct": 0,
-                                "days": daily_data,
-                            }
-                        )
-                    else:
-                        rets = [f["return_pct"] for f in all_filtered]
-                        avg_r = sum(rets) / len(rets)
-                        pos_count = sum(1 for r in rets if r > 0)
-                        pos_pct = round(pos_count / len(all_filtered) * 100, 1)
-                        total_pool = sum(
-                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("total", 0)
-                            for d in daily_data
-                        )
-                        total_pool_pos = sum(
-                            l0_pool_stats_by_day.get(d["trade_date"], {}).get("positive", 0)
-                            for d in daily_data
-                        )
-                        avg_pool_pct = (
-                            round(total_pool_pos / total_pool * 100, 1) if total_pool else 0
-                        )
-                        filtered_out_best.append(
-                            {
-                                "label": label,
-                                "total_filtered": len(all_filtered),
-                                "avg_return": round(avg_r, 2),
-                                "positive_count": pos_count,
-                                "positive_pct": pos_pct,
-                                "pool_total": total_pool,
-                                "pool_positive_count": total_pool_pos,
-                                "pool_positive_pct": avg_pool_pct,
-                                "days": daily_data,
-                            }
-                        )
-
-                # === Backtest summary ===
+                # === Summary ===
                 trade_results = [d for d in day_results if d.get("has_trade")]
                 wins = [d for d in trade_results if d["profit"] > 0]
                 losses = [d for d in trade_results if d["profit"] < 0]
-                total_return_pct = (capital - body.initial_capital) / body.initial_capital * 100
+                total_return_pct = (
+                    (capital - body.initial_capital) / body.initial_capital * 100
+                )
 
                 backtest_summary = {
                     "initial_capital": body.initial_capital,
@@ -3653,684 +976,85 @@ def create_momentum_router() -> APIRouter:
                         len(wins) / len(trade_results) * 100 if trade_results else 0,
                         1,
                     ),
-                    "max_win": round(max((d["profit"] for d in trade_results), default=0), 2),
-                    "max_loss": round(min((d["profit"] for d in trade_results), default=0), 2),
-                    "total_commission": round(
-                        sum(
-                            d.get("buy_commission", 0) + d.get("sell_commission", 0)
-                            for d in trade_results
-                        ),
-                        2,
+                    "max_win": round(
+                        max((d["profit"] for d in trade_results), default=0), 2
                     ),
-                    "total_stamp_tax": round(sum(d.get("sell_stamp", 0) for d in trade_results), 2),
+                    "max_loss": round(
+                        min((d["profit"] for d in trade_results), default=0), 2
+                    ),
                 }
 
                 yield sse(
                     {
                         "type": "complete",
-                        "days_processed": days_processed,
+                        "days_processed": len(days_in_range),
                         "backtest_summary": backtest_summary,
-                        "funnel_summary": summary_layers,
-                        "conclusions": conclusions,
-                        "filtered_out_best": filtered_out_best,
                     }
                 )
 
             except Exception as e:
-                logger.error(f"Combined analysis error: {e}", exc_info=True)
+                logger.error(f"Range backtest error: {e}", exc_info=True)
                 yield sse({"type": "error", "message": f"分析出错: {str(e)}"})
-            finally:
-                await _stop_news_checker(news_checker)
 
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # === Intraday monitor endpoints ===
+
+    @router.get("/api/momentum/monitor-status")
+    async def get_monitor_status(request: Request) -> dict:
+        """Get intraday monitor status and latest results."""
+        monitor_state = _get_monitor_state(request)
+        return {
+            "running": monitor_state["running"],
+            "last_scan_time": monitor_state["last_scan_time"],
+            "today_results": monitor_state["today_results"],
+        }
+
+    @router.post("/api/momentum/monitor/start")
+    async def start_monitor(request: Request) -> dict:
+        """Manually start the intraday monitor."""
+        monitor_state = _get_monitor_state(request)
+        if monitor_state["running"]:
+            return {"success": True, "message": "监控已在运行中"}
+
+        monitor_state["_app_state"] = request.app.state
+        task = asyncio.create_task(_run_intraday_monitor(monitor_state))
+        monitor_state["task"] = task
+        return {"success": True, "message": "监控已启动"}
+
+    @router.post("/api/momentum/monitor/stop")
+    async def stop_monitor(request: Request) -> dict:
+        """Manually stop the intraday monitor."""
+        monitor_state = _get_monitor_state(request)
+        task = monitor_state.get("task")
+        if task and not task.done():
+            task.cancel()
+        monitor_state["running"] = False
+        monitor_state["task"] = None
+        return {"success": True, "message": "监控已停止"}
+
+    @router.post("/api/momentum/monitor/trigger")
+    async def trigger_monitor_scan(request: Request) -> dict:
+        """Manually trigger a momentum scan right now (any time of day)."""
+        monitor_state = _get_monitor_state(request)
+        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
+        try:
+            result = await _execute_monitor_scan(monitor_state, tsanghi_cache=tsanghi_cache)
+            if result is None:
+                return {"success": False, "message": "扫描未产生结果"}
+            return {"success": True, "result": result}
+        except Exception as e:
+            logger.error(f"Manual scan trigger error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"扫描失败: {str(e)}")
 
     return router
 
 
-async def _fetch_board_trend(ifind_client, board_name: str, trade_date_str: str) -> dict:
-    """Fetch board/concept index intraday trend data for a given date.
-
-    Tries to find the concept board index via iwencai, then fetches
-    intraday high-frequency data. Falls back to history_quotes for
-    open/close if high_frequency fails.
-
-    Returns dict with: open_gain, gain_940, day_gain, max_gain, min_gain
-    """
-    # Try to find board index code via iwencai
-    board_index_code = ""
-    try:
-        result = await ifind_client.smart_stock_picking(f"{board_name} 板块指数代码", "zhishu")
-        tables = result.get("tables", [])
-        if tables:
-            for tw in tables:
-                table = tw.get("table", tw) if isinstance(tw, dict) else {}
-                for col_name, col_data in table.items():
-                    if "代码" in col_name and col_data:
-                        code = str(col_data[0]).strip()
-                        if code:
-                            board_index_code = code
-                            break
-                if board_index_code:
-                    break
-    except Exception as e:
-        logger.warning(f"iwencai board index lookup failed for {board_name}: {e}")
-
-    if not board_index_code:
-        return {"error": "无法获取板块指数代码", "board_name": board_name}
-
-    # Fetch intraday high-frequency data for the board index
-    start_time = f"{trade_date_str} 09:30:00"
-    end_time = f"{trade_date_str} 15:00:00"
-
-    try:
-        hf_data = await ifind_client.high_frequency(
-            codes=board_index_code,
-            indicators="close",
-            start_time=start_time,
-            end_time=end_time,
-            function_para={"Interval": "1"},
-        )
-
-        tables = hf_data.get("tables", [])
-        if not tables:
-            raise ValueError(f"No high_frequency data for {board_index_code}")
-
-        tbl = tables[0].get("table", {})
-        close_vals = tbl.get("close", [])
-
-        if not close_vals:
-            raise ValueError(f"Empty close data for {board_index_code}")
-
-    except Exception as e:
-        logger.warning(f"Board high_frequency failed for {board_index_code}: {e}")
-        # Fallback: use history_quotes for basic open/close data
-        try:
-            hist_data = await ifind_client.history_quotes(
-                codes=board_index_code,
-                indicators="open,close,preClose,high,low",
-                start_date=trade_date_str,
-                end_date=trade_date_str,
-            )
-            tables = hist_data.get("tables", [])
-            if tables:
-                tbl = tables[0].get("table", {})
-                open_p = float(tbl.get("open", [0])[0] or 0)
-                close_p = float(tbl.get("close", [0])[0] or 0)
-                prev_c = float(tbl.get("preClose", [0])[0] or 0)
-                high_p = float(tbl.get("high", [0])[0] or 0)
-                low_p = float(tbl.get("low", [0])[0] or 0)
-                if prev_c > 0:
-                    return {
-                        "board_index_code": board_index_code,
-                        "open_gain": round((open_p / prev_c - 1) * 100, 2),
-                        "gain_940": None,
-                        "day_gain": round((close_p / prev_c - 1) * 100, 2),
-                        "max_gain": round((high_p / prev_c - 1) * 100, 2),
-                        "min_gain": round((low_p / prev_c - 1) * 100, 2),
-                    }
-        except Exception as e2:
-            logger.warning(f"Board history_quotes also failed: {e2}")
-        return {"error": f"板块数据获取失败: {str(e)[:50]}", "board_name": board_name}
-
-    # Get prev_close for the board index
-    prev_close = 0.0
-    try:
-        hist_data = await ifind_client.history_quotes(
-            codes=board_index_code,
-            indicators="preClose,open",
-            start_date=trade_date_str,
-            end_date=trade_date_str,
-        )
-        tables_h = hist_data.get("tables", [])
-        if tables_h:
-            tbl_h = tables_h[0].get("table", {})
-            prev_vals = tbl_h.get("preClose", [])
-            if prev_vals:
-                prev_close = float(prev_vals[0])
-    except Exception:
-        pass
-
-    if prev_close <= 0:
-        return {"error": "无法获取板块前收盘价", "board_index_code": board_index_code}
-
-    # Calculate gains from intraday data
-    prices = [float(v) for v in close_vals if v is not None]
-    if not prices:
-        return {"error": "板块分钟线数据为空"}
-
-    open_price = prices[0]
-    close_price = prices[-1]
-    max_price = max(prices)
-    min_price = min(prices)
-
-    # Find 9:40 price (approximately the 10th minute bar)
-    price_940 = prices[min(9, len(prices) - 1)]
-
-    return {
-        "board_index_code": board_index_code,
-        "open_gain": round((open_price / prev_close - 1) * 100, 2),
-        "gain_940": round((price_940 / prev_close - 1) * 100, 2),
-        "day_gain": round((close_price / prev_close - 1) * 100, 2),
-        "max_gain": round((max_price / prev_close - 1) * 100, 2),
-        "min_gain": round((min_price / prev_close - 1) * 100, 2),
-    }
-
-
-async def _fetch_stock_day_trend(ifind_client, stock_code: str, trade_date_str: str) -> dict:
-    """Fetch individual stock's full-day data: open, high, low, close, prev_close."""
-    suffix = ".SH" if stock_code.startswith("6") else ".SZ"
-    code = f"{stock_code}{suffix}"
-
-    data = await ifind_client.history_quotes(
-        codes=code,
-        indicators="open,high,low,close,preClose",
-        start_date=trade_date_str,
-        end_date=trade_date_str,
-    )
-    tables = data.get("tables", [])
-    if not tables:
-        return {}
-
-    tbl = tables[0].get("table", {})
-    open_p = float(tbl.get("open", [0])[0] or 0)
-    high_p = float(tbl.get("high", [0])[0] or 0)
-    low_p = float(tbl.get("low", [0])[0] or 0)
-    close_p = float(tbl.get("close", [0])[0] or 0)
-    prev_c = float(tbl.get("preClose", [0])[0] or 0)
-
-    if prev_c <= 0:
-        return {"open": open_p, "high": high_p, "low": low_p, "close": close_p}
-
-    return {
-        "open": open_p,
-        "high": high_p,
-        "low": low_p,
-        "close": close_p,
-        "prev_close": prev_c,
-        "open_gain": round((open_p / prev_c - 1) * 100, 2),
-        "day_gain": round((close_p / prev_c - 1) * 100, 2),
-        "max_gain": round((high_p / prev_c - 1) * 100, 2),
-        "min_gain": round((low_p / prev_c - 1) * 100, 2),
-    }
-
-
-def _get_llm_api_key() -> str:
-    """Get Silicon Flow API key from env var (Docker) or secrets.yaml (local)."""
-    import os
-
-    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
-    if api_key:
-        return api_key
-
-    try:
-        from src.common.config import load_secrets
-
-        secrets = load_secrets()
-        return secrets.get_str("siliconflow.api_key", "")
-    except Exception:
-        return ""
-
-
-def _create_board_relevance_filter_global():
-    """Module-level factory for BoardRelevanceFilter. Raises on failure."""
-    from src.strategy.filters.board_relevance_filter import (
-        create_board_relevance_filter,
-    )
-
-    return create_board_relevance_filter()
-
-
-async def _call_llm_stock_analysis(
-    trade: dict, board_data: dict, stock_day_data: dict, trigger_codes: list[str]
-) -> str:
-    """Call Silicon Flow LLM to analyze why a specific trade lost money."""
-    import httpx
-
-    api_key = _get_llm_api_key()
-    if not api_key:
-        return "LLM API key 未配置"
-
-    system_prompt = (
-        "你是一个A股量化交易分析师。请分析以下亏损交易的原因。\n\n"
-        "策略说明：动量板块策略\n"
-        "1. 预筛开盘涨幅>-0.5%的沪深主板非ST股票\n"
-        "2. 9:40时筛选(9:40价-开盘价)/开盘价>0.56%的股票\n"
-        "3. 反查概念板块，找到有>=2只入选股的【热门概念板块】\n"
-        "4. 拉取热门板块全部成分股，再筛9:40 vs开盘>0.56%\n"
-        "5. 过滤假突破（下跌趋势+低换手）和冲高回落（从高点大幅回落）\n"
-        "6. 在最大板块中排除涨停股，按 Z(开盘涨幅)-Z(营收增长率) 打分，"
-        "选开盘涨幅高+营收增长率低的（纯资金/题材驱动，短线延续性更强）\n"
-        "7. 买入价为9:40价格，次日开盘卖出。"
-    )
-
-    # Build board trend text (only when data available)
-    board_text = ""
-    if board_data and "error" not in board_data:
-        parts = []
-        if board_data.get("open_gain") is not None:
-            parts.append(f"开盘涨幅: {board_data['open_gain']:+.2f}%")
-        if board_data.get("gain_940") is not None:
-            parts.append(f"9:40涨幅: {board_data['gain_940']:+.2f}%")
-        if board_data.get("day_gain") is not None:
-            parts.append(f"全天涨幅: {board_data['day_gain']:+.2f}%")
-        if board_data.get("max_gain") is not None:
-            parts.append(f"盘中最高: {board_data['max_gain']:+.2f}%")
-        if board_data.get("min_gain") is not None:
-            parts.append(f"盘中最低: {board_data['min_gain']:+.2f}%")
-        if parts:
-            board_text = "\n板块当日走势：\n" + "\n".join(f"- {p}" for p in parts)
-
-    # Build stock day trend text
-    stock_text = ""
-    if stock_day_data and stock_day_data.get("prev_close"):
-        stock_text = (
-            f"\n个股当日走势：\n"
-            f"- 开盘涨幅: {stock_day_data.get('open_gain', 0):+.2f}%\n"
-            f"- 全天涨幅: {stock_day_data.get('day_gain', 0):+.2f}%\n"
-            f"- 盘中最高: {stock_day_data.get('max_gain', 0):+.2f}%\n"
-            f"- 盘中最低: {stock_day_data.get('min_gain', 0):+.2f}%"
-        )
-
-    trigger_text = ", ".join(trigger_codes) if trigger_codes else "未知"
-
-    user_prompt = (
-        f"亏损交易信息：\n"
-        f"- 股票：{trade['stock_code']} {trade.get('stock_name', '')}\n"
-        f"- 所属板块：{trade.get('board_name', '')}\n"
-        f"- 买入日期：{trade['trade_date']}，买入价：{trade.get('buy_price', 0)}\n"
-        f"- 卖出日期：{trade.get('sell_date', '')}，卖出价：{trade.get('sell_price', 0)}\n"
-        f"- 亏损：{trade.get('profit', 0):.2f}元（{trade.get('return_pct', 0):+.2f}%）\n"
-        f"- 该板块触发股票（9:40 vs 开盘>0.56%）：{trigger_text}\n"
-        f"{board_text}"
-        f"{stock_text}\n\n"
-        f"请分析这笔交易亏损的可能原因（2-3句话），重点关注：\n"
-        f"1. 个股当日走势是否冲高回落？\n"
-        f"2. 个股是否有特殊情况？\n"
-        f"3. 选股逻辑在这个场景下的缺陷？"
-    )
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            "https://api.siliconflow.cn/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "Qwen/Qwen2.5-72B-Instruct",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "max_tokens": 800,
-                "temperature": 0.3,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-
-
-async def _call_llm_strategy_summary(analyses: list[dict]) -> str:
-    """Call Silicon Flow LLM to summarize strategy weaknesses from all losing trades."""
-    import httpx
-
-    api_key = _get_llm_api_key()
-    if not api_key:
-        return "LLM API key 未配置"
-
-    # Build summary of all analyses
-    trade_summaries = []
-    for a in analyses:
-        board_info = ""
-        bd = a.get("board_data", {})
-        if bd and "error" not in bd:
-            board_info = f"板块全天{bd.get('day_gain', '?')}%(最高{bd.get('max_gain', '?')}%)"
-
-        trade_summaries.append(
-            f"- {a['stock_code']} {a.get('stock_name', '')} | "
-            f"板块:{a.get('board_name', '')} | "
-            f"亏损{a.get('return_pct', 0):+.2f}% | "
-            f"{board_info}\n"
-            f"  分析: {a.get('llm_analysis', '无')[:200]}"
-        )
-
-    system_prompt = (
-        "你是一个A股量化交易策略分析师。请基于以下亏损交易的逐笔分析，"
-        "总结该策略的问题和改进建议。\n\n"
-        "策略说明：动量板块策略\n"
-        "1. 预筛开盘涨幅>-0.5%的沪深主板非ST股票\n"
-        "2. 9:40时筛选(9:40价-开盘价)/开盘价>0.56%的股票\n"
-        "3. 反查概念板块，找到有>=2只入选股的【热门概念板块】\n"
-        "4. 拉取热门板块全部成分股，再筛9:40 vs开盘>0.56%\n"
-        "5. 过滤假突破（下跌趋势+低换手）和冲高回落（从高点大幅回落）\n"
-        "6. 在最大板块中排除涨停股，按 Z(开盘涨幅)-Z(营收增长率) 打分，"
-        "选开盘涨幅高+营收增长率低的（纯资金/题材驱动，短线延续性更强）\n"
-        "7. 买入价为9:40价格，次日开盘卖出。"
-    )
-
-    user_prompt = (
-        f"回测期间共 {len(analyses)} 笔亏损交易：\n\n"
-        + "\n\n".join(trade_summaries)
-        + "\n\n请总结：\n"
-        "1. 这些亏损交易的共性问题（2-3点）\n"
-        "2. 策略的主要弱点\n"
-        "3. 可能的改进方向（2-3条具体建议）"
-    )
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            "https://api.siliconflow.cn/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "Qwen/Qwen2.5-72B-Instruct",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "max_tokens": 1500,
-                "temperature": 0.3,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-
-
-async def _parse_iwencai_and_fetch_prices(
-    ifind_client, iwencai_result: dict, trade_date
-) -> tuple[dict, str]:
-    """Parse iwencai response and fetch historical prices via history_quotes.
-
-    Returns:
-        (snapshots_dict, error_reason) — error_reason is empty on success.
-    """
-    from src.data.clients.ifind_http_client import IFinDHttpError
-    from src.strategy.models import PriceSnapshot
-
-    tables = iwencai_result.get("tables", [])
-    if not tables:
-        return {}, "iwencai返回无tables"
-
-    raw_codes: list[str] = []
-    names_map: dict[str, str] = {}
-
-    for table_wrapper in tables:
-        if not isinstance(table_wrapper, dict):
-            continue
-        table = table_wrapper.get("table", table_wrapper)
-        if not isinstance(table, dict):
-            continue
-
-        codes = None
-        names = None
-        for col_name, col_data in table.items():
-            if "代码" in col_name:
-                codes = col_data
-            elif "简称" in col_name or "名称" in col_name:
-                names = col_data
-
-        if not codes:
-            continue
-
-        for i in range(len(codes)):
-            raw = str(codes[i]).strip()
-            bare = raw
-            for suffix in (".SZ", ".SH", ".BJ", ".sz", ".sh", ".bj"):
-                if bare.endswith(suffix):
-                    bare = bare[: -len(suffix)]
-                    break
-            if len(bare) == 6 and bare.isdigit():
-                raw_codes.append(raw)
-                name = str(names[i]).strip() if names and i < len(names) else ""
-                names_map[bare] = name
-
-    if not raw_codes:
-        return {}, "iwencai结果中无有效股票代码"
-
-    # Batch fetch prices
-    snapshots: dict[str, PriceSnapshot] = {}
-    batch_size = 50
-    date_fmt = trade_date.strftime("%Y-%m-%d")
-    last_price_err = ""
-
-    for i in range(0, len(raw_codes), batch_size):
-        batch = raw_codes[i : i + batch_size]
-        formatted = []
-        for raw in batch:
-            if "." in raw:
-                formatted.append(raw)
-            else:
-                suffix = ".SH" if raw.startswith("6") else ".SZ"
-                formatted.append(f"{raw}{suffix}")
-
-        codes_str = ",".join(formatted)
-
-        try:
-            data = await ifind_client.history_quotes(
-                codes=codes_str,
-                indicators="open,preClose",
-                start_date=date_fmt,
-                end_date=date_fmt,
-            )
-
-            for table_entry in data.get("tables", []):
-                thscode = table_entry.get("thscode", "")
-                bare = thscode.split(".")[0] if thscode else ""
-                if not bare:
-                    continue
-
-                tbl = table_entry.get("table", {})
-                open_vals = tbl.get("open", [])
-                prev_vals = tbl.get("preClose", [])
-
-                if open_vals and prev_vals:
-                    open_price = float(open_vals[0])
-                    prev_close = float(prev_vals[0])
-                    if prev_close > 0:
-                        snapshots[bare] = PriceSnapshot(
-                            stock_code=bare,
-                            stock_name=names_map.get(bare, ""),
-                            open_price=open_price,
-                            prev_close=prev_close,
-                            latest_price=open_price,
-                        )
-
-        except IFinDHttpError as e:
-            last_price_err = str(e)
-            logger.error(f"history_quotes batch failed: {e}")
-        except Exception as e:
-            last_price_err = str(e)
-            logger.error(f"history_quotes unexpected error: {e}")
-
-    if not snapshots:
-        reason = f"iwencai返回{len(raw_codes)}只股票，history_quotes失败"
-        if last_price_err:
-            reason += f": {last_price_err[:80]}"
-        return {}, reason
-
-    # Fetch 9:40 price and volume (for gain check, buy price, and gap-fade filter)
-    data_940 = await _fetch_940_data_batch(ifind_client, list(snapshots.keys()), trade_date)
-    for code, (price, volume, high, low) in data_940.items():
-        if code in snapshots and price > 0:
-            snapshots[code].latest_price = price
-            snapshots[code].early_volume = volume
-            snapshots[code].high_price = high
-            snapshots[code].low_price = low
-
-    return snapshots, ""
-
-
-def _get_trading_calendar(start_date, end_date) -> list:
-    """Get trading days via AKShare (tool_trade_date_hist_sina).
-
-    Returns list of datetime.date in [start_date, end_date).
-    Falls back to weekday generation on failure.
-    """
-    from datetime import timedelta
-
-    try:
-        import akshare as ak
-
-        df = ak.tool_trade_date_hist_sina()
-        all_dates = set(df["trade_date"].dt.date)
-        days = sorted(d for d in all_dates if start_date <= d < end_date)
-        if days:
-            logger.info(f"AKShare trading calendar: {len(days)} days in [{start_date}, {end_date})")
-            return days
-        logger.warning("AKShare trading calendar returned no dates in range")
-    except Exception as e:
-        logger.warning(f"AKShare trading calendar failed: {e}")
-
-    # Fallback: weekdays
-    logger.warning("Falling back to weekday generation for trading calendar")
-    days = []
-    current = start_date
-    while current < end_date:
-        if current.weekday() < 5:
-            days.append(current)
-        current += timedelta(days=1)
-    return days
-
-
-async def _fetch_stock_open_prices(ifind_client, stock_code: str, target_date) -> list:
-    """Fetch open price for a stock on a specific date (single-day query).
-
-    Returns list of (date, open_price) tuples (always one element).
-    """
-    suffix = ".SH" if stock_code.startswith("6") else ".SZ"
-    code = f"{stock_code}{suffix}"
-    date_str = target_date.strftime("%Y-%m-%d")
-
-    # Must use multiple indicators — iFinD returns empty tables for single-indicator queries.
-    data = await ifind_client.history_quotes(
-        codes=code,
-        indicators="open,preClose",
-        start_date=date_str,
-        end_date=date_str,
-    )
-    tables = data.get("tables", [])
-    if not tables:
-        raise ValueError(f"iFinD returned empty tables for {code} ({date_str}): {data}")
-    tbl = tables[0].get("table", {})
-    opens = tbl.get("open", [])
-    if not opens:
-        raise ValueError(f"No open data for {code} ({date_str}): table={tbl}")
-    return [(target_date, float(opens[0]))]
-
-
-async def _fetch_stock_close_prices(ifind_client, stock_code: str, target_date) -> list:
-    """Fetch close price for a stock on a specific date (single-day query).
-
-    Returns list of (date, close_price) tuples (always one element).
-    """
-    suffix = ".SH" if stock_code.startswith("6") else ".SZ"
-    code = f"{stock_code}{suffix}"
-    date_str = target_date.strftime("%Y-%m-%d")
-
-    # Must use multiple indicators — iFinD returns empty tables for single-indicator queries.
-    data = await ifind_client.history_quotes(
-        codes=code,
-        indicators="close,preClose",
-        start_date=date_str,
-        end_date=date_str,
-    )
-    tables = data.get("tables", [])
-    if not tables:
-        raise ValueError(f"iFinD returned empty tables for {code} ({date_str}): {data}")
-    tbl = tables[0].get("table", {})
-    closes = tbl.get("close", [])
-    if not closes:
-        raise ValueError(f"No close data for {code} ({date_str}): table={tbl}")
-    return [(target_date, float(closes[0]))]
-
-
-async def _fetch_940_data_batch(
-    ifind_client, stock_codes: list[str], trade_date
-) -> dict[str, tuple[float, float, float, float]]:
-    """Fetch 9:40 price, volume, high, low via high_frequency API (1-min bars).
-
-    Returns:
-        dict: stock_code → (price_at_940, cumulative_volume, max_high, min_low)
-    """
-    result: dict[str, tuple[float, float, float, float]] = {}
-    batch_size = 50
-    start_time = f"{trade_date} 09:30:00"
-    end_time = f"{trade_date} 09:40:00"
-
-    for i in range(0, len(stock_codes), batch_size):
-        batch = stock_codes[i : i + batch_size]
-        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
-
-        try:
-            data = await ifind_client.high_frequency(
-                codes=codes_str,
-                indicators="close,volume,high,low",
-                start_time=start_time,
-                end_time=end_time,
-                function_para={"Interval": "1"},
-            )
-
-            for table_entry in data.get("tables", []):
-                thscode = table_entry.get("thscode", "")
-                bare_code = thscode.split(".")[0] if thscode else ""
-                if not bare_code:
-                    continue
-
-                tbl = table_entry.get("table", {})
-                close_vals = tbl.get("close", [])
-                vol_vals = tbl.get("volume", [])
-                high_vals = tbl.get("high", [])
-                low_vals = tbl.get("low", [])
-
-                price = 0.0
-                cum_volume = 0.0
-                max_high = 0.0
-                min_low = 0.0
-
-                if close_vals:
-                    last_close = close_vals[-1]
-                    if last_close is not None:
-                        price = float(last_close)
-
-                if vol_vals:
-                    cum_volume = sum(float(v) for v in vol_vals if v is not None)
-
-                if high_vals:
-                    valid_highs = [float(v) for v in high_vals if v is not None]
-                    if valid_highs:
-                        max_high = max(valid_highs)
-
-                if low_vals:
-                    valid_lows = [float(v) for v in low_vals if v is not None]
-                    if valid_lows:
-                        min_low = min(valid_lows)
-
-                if price > 0:
-                    result[bare_code] = (price, cum_volume, max_high, min_low)
-
-        except Exception as e:
-            logger.warning(f"high_frequency 9:40 fetch failed for batch: {e}")
-
-    return result
-
-
-async def _fetch_stock_940_price(ifind_client, stock_code: str, target_date) -> list:
-    """Fetch 9:40 price for a single stock. Returns [(date, price)] or empty list."""
-    data = await _fetch_940_data_batch(ifind_client, [stock_code], target_date)
-    if stock_code in data and data[stock_code][0] > 0:
-        return [(target_date, data[stock_code][0])]
-    return []
+# ==================== Helper Functions ====================
 
 
 class MinuteDataMissingError(Exception):
@@ -4347,8 +1071,6 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
 
     Raises:
         MinuteDataMissingError: if minute data coverage < 50% of daily candidates.
-            This prevents silent degradation where missing minute data causes
-            gain_from_open=0% for all stocks, producing unreliable results.
     """
     from src.strategy.models import PriceSnapshot
 
@@ -4356,7 +1078,6 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
     snapshots: dict[str, PriceSnapshot] = {}
 
     if not all_daily:
-        # Debug: log sample date keys to diagnose format mismatch
         for code, dates in tsanghi_cache._daily.items():
             if dates:
                 sample_keys = sorted(dates.keys())[:5]
@@ -4373,7 +1094,6 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
             )
         return snapshots
 
-    # Count daily candidates (pass pre-filter) vs those with minute data
     daily_candidates = 0
     minute_hits = 0
 
@@ -4383,14 +1103,12 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
         if prev_close <= 0 or open_price <= 0:
             continue
 
-        # Pre-filter: open gain > -0.5% (same as iwencai query)
         open_gain = (open_price - prev_close) / prev_close * 100
         if open_gain < -0.5:
             continue
 
         daily_candidates += 1
 
-        # 9:40 price from minute cache — NO fallback allowed
         data_940 = tsanghi_cache.get_940_price(code, date_str)
         if not data_940:
             continue
@@ -4423,39 +1141,9 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
     return snapshots
 
 
-async def _parse_iwencai_and_fetch_prices_for_date(ifind_client, trade_date) -> tuple[dict, str]:
-    """Convenience wrapper: run iwencai pre-filter + fetch prices for a date.
-
-    Returns:
-        (snapshots_dict, error_reason) — snapshots is empty dict on failure,
-        error_reason is empty string on success or describes the failure.
-    """
-    from src.data.clients.ifind_http_client import IFinDHttpError
-
-    date_str = trade_date.strftime("%Y%m%d")
-    query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
-    try:
-        iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
-    except IFinDHttpError as e:
-        logger.error(f"iwencai query failed for {trade_date}: {e}")
-        return {}, f"iwencai查询失败: {e}"
-    except Exception as e:
-        logger.error(f"iwencai query unexpected error for {trade_date}: {e}")
-        return {}, f"iwencai异常: {e}"
-
-    return await _parse_iwencai_and_fetch_prices(ifind_client, iwencai_result, trade_date)
-
-
 def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
-    """Calculate net return percentage after transaction costs (assuming 1 lot = 100 shares).
-
-    Uses the same cost model as interval backtest:
-    - Buy commission: max(0.3%, ¥5)
-    - Sell commission: max(0.3%, ¥5)
-    - Stamp tax (sell): 0.05%
-    - Transfer fee: 0.001% each way
-    """
-    shares = 100  # 1 lot
+    """Calculate net return percentage after transaction costs (assuming 1 lot = 100 shares)."""
+    shares = 100
     buy_amount = shares * buy_price
     buy_commission = max(buy_amount * 0.003, 5.0)
     buy_transfer = buy_amount * 0.00001
@@ -4470,279 +1158,207 @@ def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
     return (net_sell - total_buy_cost) / total_buy_cost * 100 if total_buy_cost > 0 else 0.0
 
 
-async def _fetch_batch_prices(
-    ifind_client, stock_codes: list[str], target_date, indicator: str = "close"
-) -> dict[str, float]:
-    """Fetch a single price indicator for multiple stocks on a single date.
-
-    Args:
-        indicator: Price field to fetch, e.g. "close" or "open".
-    """
-    from src.data.clients.ifind_http_client import IFinDHttpError
-
-    result: dict[str, float] = {}
-    batch_size = 50
-    date_str = target_date.strftime("%Y-%m-%d")
-
-    # iFinD returns empty tables for single-indicator queries, so always include preClose
-    indicators_str = f"{indicator},preClose" if indicator != "preClose" else "close,preClose"
-
-    for i in range(0, len(stock_codes), batch_size):
-        batch = stock_codes[i : i + batch_size]
-        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
-        try:
-            data = await ifind_client.history_quotes(
-                codes=codes_str,
-                indicators=indicators_str,
-                start_date=date_str,
-                end_date=date_str,
-            )
-            for table_entry in data.get("tables", []):
-                thscode = table_entry.get("thscode", "")
-                bare = thscode.split(".")[0] if thscode else ""
-                if not bare:
-                    continue
-                tbl = table_entry.get("table", {})
-                vals = tbl.get(indicator, [])
-                if vals and vals[0] is not None:
-                    result[bare] = float(vals[0])
-        except IFinDHttpError as e:
-            logger.warning(f"Batch {indicator} fetch failed for {target_date}: {e}")
-
-    return result
-
-
-async def _fetch_batch_close(ifind_client, stock_codes: list[str], target_date) -> dict[str, float]:
-    """Fetch close prices for multiple stocks on a single date."""
-    return await _fetch_batch_prices(ifind_client, stock_codes, target_date, indicator="close")
-
-
-async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
-    """Run full momentum scan for a specific date. Returns ScanResult or None."""
-    from src.data.clients.ifind_http_client import IFinDHttpError
-
-    date_str = trade_date.strftime("%Y%m%d")
-    query = f"{date_str}开盘涨幅大于-0.5%的沪深主板非ST股票"
+def _get_trading_calendar(start_date, end_date) -> list:
+    """Get trading days via AKShare (tool_trade_date_hist_sina)."""
+    from datetime import timedelta
 
     try:
-        iwencai_result = await ifind_client.smart_stock_picking(query, "stock")
-    except IFinDHttpError as e:
-        logger.error(f"iwencai query failed for {trade_date}: {e}")
-        return None
+        import akshare as ak
 
-    price_snapshots, _price_err = await _parse_iwencai_and_fetch_prices(
-        ifind_client, iwencai_result, trade_date
+        df = ak.tool_trade_date_hist_sina()
+        all_dates = set(df["trade_date"].dt.date)
+        days = sorted(d for d in all_dates if start_date <= d < end_date)
+        if days:
+            logger.info(f"AKShare trading calendar: {len(days)} days in [{start_date}, {end_date})")
+            return days
+        logger.warning("AKShare trading calendar returned no dates in range")
+    except Exception as e:
+        logger.warning(f"AKShare trading calendar failed: {e}")
+
+    # Fallback: weekdays
+    logger.warning("Falling back to weekday generation for trading calendar")
+    days = []
+    current = start_date
+    while current < end_date:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _get_llm_api_key() -> str:
+    """Get Silicon Flow API key from env var (Docker) or secrets.yaml (local)."""
+    import os
+
+    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
+    if api_key:
+        return api_key
+
+    try:
+        from src.common.config import load_secrets
+
+        secrets = load_secrets()
+        return secrets.get_str("siliconflow.api_key", "")
+    except Exception:
+        return ""
+
+
+def _create_board_relevance_filter_global():
+    """Module-level factory for BoardRelevanceFilter. Raises on failure."""
+    from src.strategy.filters.board_relevance_filter import (
+        create_board_relevance_filter,
     )
 
-    if not price_snapshots:
-        return None
-
-    return await scanner.scan(price_snapshots, trade_date=trade_date)
+    return create_board_relevance_filter()
 
 
 async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict | None:
-    """
-    Execute a single momentum scan using the configured data source.
-
-    Supports two data source modes:
-    - 'sina': Sina batch quotes (free) + IQuantHistoricalAdapter (tsanghi for lookback)
-    - 'ifind': iFinD iwencai polling + iFinD historical data
+    """Execute a single momentum scan using Tushare + V15Scanner.
 
     Returns result_entry dict on success, None on failure.
-    Both the auto-scheduler and the manual trigger button call this.
     """
     import time as time_module
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
-    from src.common.config import get_monitor_data_source
+    from src.common.config import get_tushare_token
     from src.common.feishu_bot import FeishuBot
+    from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
+    from src.data.clients.tushare_realtime import TushareRealtimeClient
     from src.data.sources.local_concept_mapper import LocalConceptMapper
-    from src.strategy.strategies.momentum_sector_scanner import (
-        MomentumSectorScanner,
-        PriceSnapshot,
-    )
+    from src.strategy.filters.stock_filter import create_main_board_only_filter
+    from src.strategy.models import PriceSnapshot
+    from src.strategy.strategies.v15_scanner import V15Scanner
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    data_source = get_monitor_data_source()
-    logger.info(f"Monitor scan starting (data_source={data_source})")
+    logger.info("Monitor scan starting (tushare + V15Scanner)")
 
     start_time = time_module.monotonic()
 
-    if data_source == "tushare":
-        # --- Tushare path: batch fetch all main-board stocks ---
-        from datetime import timedelta
+    # Quick weekday check
+    now_bj = datetime.now(beijing_tz)
+    if now_bj.weekday() >= 5:
+        day_name = "周六" if now_bj.weekday() == 5 else "周日"
+        logger.warning(f"Monitor: 今天是{day_name}，A股不开市")
+        raise RuntimeError(f"今天是{day_name}，A股不开市，无法扫描")
 
-        from src.common.config import get_tushare_token
-        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
-        from src.data.clients.tushare_realtime import TushareRealtimeClient
-        from src.strategy.filters.stock_filter import create_main_board_only_filter
+    fundamentals_db = state.get("fundamentals_db")
+    if not fundamentals_db:
+        logger.error("Monitor: fundamentals DB not available")
+        return None
 
-        # Quick weekday check — A-share market only opens Mon-Fri
-        now_bj = datetime.now(beijing_tz)
-        if now_bj.weekday() >= 5:  # Saturday=5, Sunday=6
-            day_name = "周六" if now_bj.weekday() == 5 else "周日"
-            logger.warning(f"Monitor (tushare): 今天是{day_name}，A股不开市")
-            raise RuntimeError(f"今天是{day_name}，A股不开市，无法扫描")
-
-        fundamentals_db = state.get("fundamentals_db")
-        if not fundamentals_db:
-            logger.error("Monitor: fundamentals DB not available")
-            return None
-
-        # Get universe: prefer OSS cache (complete, zero query), fallback to PG
-        stock_filter = create_main_board_only_filter()
-        cache_ready = tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)
-        if cache_ready and tsanghi_cache.stock_codes:
-            all_codes = tsanghi_cache.stock_codes
-            logger.info(f"Monitor (tushare): universe from OSS cache ({len(all_codes)} codes)")
-        else:
-            all_codes = await fundamentals_db.get_all_stock_codes()
-            logger.info(f"Monitor (tushare): universe from PG ({len(all_codes)} codes)")
-        universe = [c for c in all_codes if stock_filter.is_allowed(c)]
-        logger.info(f"Monitor (tushare): universe has {len(universe)} codes")
-
-        tushare_token = get_tushare_token()
-        tushare = TushareRealtimeClient(token=tushare_token)
-        await tushare.start()
-        try:
-            quotes = await tushare.batch_get_quotes(universe)
-            logger.info(f"Monitor (tushare): got {len(quotes)} quotes")
-
-            # Supplement preClose from OSS cache (rt_min doesn't provide it)
-            if not (tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)):
-                raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
-
-            # Find prev trading day's close in cache (try last 7 days)
-            today = datetime.now(beijing_tz).date()
-            prev_daily: dict[str, dict[str, float]] = {}
-            for days_back in range(1, 8):
-                prev_date = today - timedelta(days=days_back)
-                prev_date_str = prev_date.strftime("%Y-%m-%d")
-                prev_daily = tsanghi_cache.get_all_codes_with_daily(prev_date_str)
-                if prev_daily:
-                    logger.info(
-                        f"Monitor (tushare): preClose from cache date {prev_date_str} "
-                        f"({len(prev_daily)} stocks)"
-                    )
-                    break
-
-            price_snapshots: dict[str, PriceSnapshot] = {}
-            skipped_no_prev = 0
-            for code, q in quotes.items():
-                if not q.is_trading:
-                    continue
-                # Get preClose from cache
-                cached_day = prev_daily.get(code)
-                prev_close = cached_day["close"] if cached_day else 0.0
-                if prev_close <= 0:
-                    skipped_no_prev += 1
-                    continue
-                price_snapshots[code] = PriceSnapshot(
-                    stock_code=code,
-                    stock_name="",
-                    open_price=q.open_price,
-                    prev_close=prev_close,
-                    latest_price=q.latest_price,
-                    early_volume=q.volume,
-                    high_price=q.high_price,
-                    low_price=q.low_price,
-                )
-
-            if skipped_no_prev:
-                logger.warning(
-                    f"Monitor (tushare): skipped {skipped_no_prev} stocks (no preClose in cache)"
-                )
-
-            if not price_snapshots:
-                not_trading = sum(1 for q in quotes.values() if not q.is_trading)
-                raise RuntimeError(
-                    f"盘中扫描数据异常：构建快照为空。"
-                    f"quotes={len(quotes)}, 停牌/无数据={not_trading}, "
-                    f"缺prev_close={skipped_no_prev}, prev_daily={len(prev_daily)}。"
-                    f"请检查Tushare数据和OSS缓存是否正常。"
-                )
-
-            adapter = IQuantHistoricalAdapter(tushare, cache=tsanghi_cache)
-            concept_mapper = LocalConceptMapper()
-            scanner = MomentumSectorScanner(
-                ifind_client=adapter,  # type: ignore[arg-type]
-                fundamentals_db=fundamentals_db,
-                concept_mapper=concept_mapper,
-                stock_filter=stock_filter,
-                board_relevance_filter=_create_board_relevance_filter_global(),
-            )
-            scan_result = await scanner.scan(price_snapshots, trade_date=None)
-        finally:
-            await tushare.stop()
-
+    # Get universe
+    stock_filter = create_main_board_only_filter()
+    cache_ready = tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)
+    if cache_ready and tsanghi_cache.stock_codes:
+        all_codes = tsanghi_cache.stock_codes
+        logger.info(f"Monitor: universe from OSS cache ({len(all_codes)} codes)")
     else:
-        # --- iFinD path: original logic (iwencai pre-filter + iFinD history) ---
-        ifind_client = state.get("ifind_client")
-        fundamentals_db = state.get("fundamentals_db")
+        all_codes = await fundamentals_db.get_all_stock_codes()
+        logger.info(f"Monitor: universe from PG ({len(all_codes)} codes)")
+    universe = [c for c in all_codes if stock_filter.is_allowed(c)]
+    logger.info(f"Monitor: universe has {len(universe)} codes")
 
-        if not ifind_client or not fundamentals_db:
-            logger.error("Monitor: iFinD client or fundamentals DB not available")
-            return None
+    tushare_token = get_tushare_token()
+    tushare = TushareRealtimeClient(token=tushare_token)
+    await tushare.start()
+    try:
+        quotes = await tushare.batch_get_quotes(universe)
+        logger.info(f"Monitor: got {len(quotes)} quotes")
 
+        # Supplement preClose from OSS cache
+        if not (tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)):
+            raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
+
+        today = datetime.now(beijing_tz).date()
+        prev_daily: dict[str, dict[str, float]] = {}
+        for days_back in range(1, 8):
+            prev_date = today - timedelta(days=days_back)
+            prev_date_str = prev_date.strftime("%Y-%m-%d")
+            prev_daily = tsanghi_cache.get_all_codes_with_daily(prev_date_str)
+            if prev_daily:
+                logger.info(
+                    f"Monitor: preClose from cache date {prev_date_str} "
+                    f"({len(prev_daily)} stocks)"
+                )
+                break
+
+        price_snapshots: dict[str, PriceSnapshot] = {}
+        skipped_no_prev = 0
+        for code, q in quotes.items():
+            if not q.is_trading:
+                continue
+            cached_day = prev_daily.get(code)
+            prev_close = cached_day["close"] if cached_day else 0.0
+            if prev_close <= 0:
+                skipped_no_prev += 1
+                continue
+            price_snapshots[code] = PriceSnapshot(
+                stock_code=code,
+                stock_name="",
+                open_price=q.open_price,
+                prev_close=prev_close,
+                latest_price=q.latest_price,
+                early_volume=q.volume,
+                high_price=q.high_price,
+                low_price=q.low_price,
+            )
+
+        if skipped_no_prev:
+            logger.warning(f"Monitor: skipped {skipped_no_prev} stocks (no preClose in cache)")
+
+        if not price_snapshots:
+            not_trading = sum(1 for q in quotes.values() if not q.is_trading)
+            raise RuntimeError(
+                f"盘中扫描数据异常：构建快照为空。"
+                f"quotes={len(quotes)}, 停牌/无数据={not_trading}, "
+                f"缺prev_close={skipped_no_prev}, prev_daily={len(prev_daily)}。"
+                f"请检查Tushare数据和OSS缓存是否正常。"
+            )
+
+        adapter = IQuantHistoricalAdapter(tushare, cache=tsanghi_cache)
         concept_mapper = LocalConceptMapper()
-
-        result = await ifind_client.smart_stock_picking("涨幅大于-0.5%的沪深主板非ST股票", "stock")
-        snapshots = await _parse_iwencai_realtime(ifind_client, result)
-        if not snapshots:
-            logger.info("Monitor (ifind): no pre-filtered stocks found")
-            return None
-
-        scanner = MomentumSectorScanner(
-            ifind_client=ifind_client,
+        scanner = V15Scanner(
+            historical_adapter=adapter,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
-            board_relevance_filter=_create_board_relevance_filter_global(),
+            stock_filter=stock_filter,
         )
-        scan_result = await scanner.scan(snapshots, trade_date=None)
+        scan_result = await scanner.scan(price_snapshots)
+    finally:
+        await tushare.stop()
 
     elapsed = time_module.monotonic() - start_time
     scan_time = datetime.now(beijing_tz)
 
-    # Build result entry for state storage
-    rec = scan_result.recommended_stock
+    rec = scan_result.recommended
     result_entry = {
         "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
-        "initial_gainers": len(scan_result.initial_gainers),
-        "hot_boards": len(scan_result.hot_boards),
-        "selected_count": len(scan_result.selected_stocks),
+        "initial_gainers": scan_result.initial_gainers_count,
+        "hot_boards": scan_result.hot_board_count,
+        "l4_count": scan_result.l4_count,
+        "l5_count": scan_result.l5_count,
+        "l6_count": scan_result.l6_count,
+        "final_candidates": scan_result.final_candidates,
         "elapsed_seconds": round(elapsed, 1),
-        "data_source": data_source,
-        "selected_stocks": [
+        "scored_top5": [
             {
                 "stock_code": s.stock_code,
                 "stock_name": s.stock_name,
                 "board_name": s.board_name,
-                "open_gain_pct": round(s.open_gain_pct, 2),
-                "pe_ttm": round(s.pe_ttm, 2),
-                "board_avg_pe": round(s.board_avg_pe, 2),
+                "v3_score": round(s.v3_score, 4),
+                "gain_from_open_pct": round(s.gain_from_open_pct, 2),
             }
-            for s in scan_result.selected_stocks
-        ],
-        "scored_top5": [
-            {
-                "stock_code": c.stock_code,
-                "stock_name": c.stock_name,
-                "board_name": c.board_name,
-                "composite_score": round(c.composite_score, 2),
-                "gain_from_open_pct": round(c.gain_from_open_pct, 2),
-            }
-            for c in scan_result.scored_candidates[:5]
+            for s in scan_result.all_scored[:5]
         ],
         "recommended_stock": {
             "stock_code": rec.stock_code,
             "stock_name": rec.stock_name,
             "board_name": rec.board_name,
-            "board_stock_count": rec.board_stock_count,
-            "open_gain_pct": round(rec.open_gain_pct, 2),
+            "v3_score": round(rec.v3_score, 4),
             "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
             "turnover_amp": round(rec.turnover_amp, 2),
-            "composite_score": round(rec.composite_score, 2),
+            "latest_price": round(rec.latest_price, 2),
         }
         if rec
         else None,
@@ -4754,32 +1370,57 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
 
     # Send Feishu notification
     bot = FeishuBot()
-    if bot.is_configured():
+    if bot.is_configured() and rec:
+        from src.strategy.models import RecommendedStock, ScanResult
+
+        adapted_rec = RecommendedStock(
+            stock_code=rec.stock_code,
+            stock_name=rec.stock_name,
+            board_name=rec.board_name,
+            board_stock_count=scan_result.final_candidates,
+            open_gain_pct=round(
+                (rec.open_price - rec.prev_close) / rec.prev_close * 100
+                if rec.prev_close > 0
+                else 0,
+                2,
+            ),
+            pe_ttm=0.0,
+            board_avg_pe=0.0,
+            open_price=rec.open_price,
+            prev_close=rec.prev_close,
+            latest_price=rec.latest_price,
+            gain_from_open_pct=rec.gain_from_open_pct,
+            turnover_amp=rec.turnover_amp,
+            composite_score=rec.v3_score,
+        )
+        adapted_result = ScanResult(
+            initial_gainers=[],
+            hot_boards={},
+            recommended_stock=adapted_rec,
+        )
         await bot.send_daily_pick_report(
-            scan_result=scan_result,
+            scan_result=adapted_result,
             elapsed_seconds=elapsed,
             scan_time=scan_time,
         )
         logger.info("Monitor: Feishu daily pick report sent")
-    else:
+    elif not bot.is_configured():
         logger.warning(
             "Monitor: Feishu bot NOT configured — set FEISHU_APP_ID, "
             "FEISHU_APP_SECRET, FEISHU_CHAT_ID environment variables"
         )
 
     logger.info(
-        f"Monitor scan complete: {len(scan_result.selected_stocks)} selected, "
-        f"{elapsed:.1f}s elapsed (source={data_source})"
+        f"Monitor scan complete: {scan_result.final_candidates} candidates, "
+        f"{elapsed:.1f}s elapsed"
     )
     return result_entry
 
 
 async def _run_intraday_monitor(state: dict) -> None:
-    """
-    Background task: intraday momentum monitor.
+    """Background task: intraday momentum monitor.
 
-    Runs every trading day at ~9:40, executes momentum scan, sends Feishu notification.
-    Supports dual data source: 'sina' (free) or 'ifind' (paid).
+    Runs every trading day at ~9:40, executes V15 scan, sends Feishu notification.
     """
     import asyncio
     from datetime import datetime, time, timedelta
@@ -4827,7 +1468,6 @@ async def _run_intraday_monitor(state: dict) -> None:
                 tsanghi_cache = getattr(app_state, "tsanghi_cache", None) if app_state else None
                 result = await _execute_monitor_scan(state, tsanghi_cache=tsanghi_cache)
                 if result is None:
-                    # Silent failure (return None) — notify so user knows
                     logger.warning("Monitor scan returned None (no result)")
                     try:
                         from src.common.feishu_bot import FeishuBot
@@ -4842,7 +1482,6 @@ async def _run_intraday_monitor(state: dict) -> None:
                         pass
             except Exception as e:
                 logger.error(f"Monitor scan error: {e}", exc_info=True)
-                # Notify Feishu about the error
                 try:
                     from src.common.feishu_bot import FeishuBot
 
@@ -4859,7 +1498,7 @@ async def _run_intraday_monitor(state: dict) -> None:
             tomorrow = now + timedelta(days=1)
             target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
             wait_secs = (target - datetime.now(beijing_tz)).total_seconds()
-            state["today_results"] = []  # Reset for next day
+            state["today_results"] = []
             await asyncio.sleep(min(max(wait_secs, 10), 3600 * 18))
 
     except asyncio.CancelledError:
@@ -4872,103 +1511,7 @@ async def _run_intraday_monitor(state: dict) -> None:
         logger.info("Intraday momentum monitor stopped")
 
 
-async def _parse_iwencai_realtime(ifind_client, iwencai_result: dict) -> dict:
-    """Parse iwencai response and fetch real-time prices."""
-    from src.data.clients.ifind_http_client import IFinDHttpError
-    from src.strategy.models import PriceSnapshot
-
-    tables = iwencai_result.get("tables", [])
-    if not tables:
-        return {}
-
-    raw_codes: list[str] = []
-    names_map: dict[str, str] = {}
-
-    for table_wrapper in tables:
-        if not isinstance(table_wrapper, dict):
-            continue
-        table = table_wrapper.get("table", table_wrapper)
-        if not isinstance(table, dict):
-            continue
-
-        codes = None
-        names = None
-        for col_name, col_data in table.items():
-            if "代码" in col_name:
-                codes = col_data
-            elif "简称" in col_name or "名称" in col_name:
-                names = col_data
-
-        if codes:
-            for i in range(len(codes)):
-                raw = str(codes[i]).strip()
-                bare = raw
-                for suffix in (".SZ", ".SH", ".BJ"):
-                    if bare.upper().endswith(suffix):
-                        bare = bare[: -len(suffix)]
-                        break
-                if len(bare) == 6 and bare.isdigit():
-                    raw_codes.append(raw)
-                    name = str(names[i]).strip() if names and i < len(names) else ""
-                    names_map[bare] = name
-
-    if not raw_codes:
-        return {}
-
-    snapshots: dict[str, PriceSnapshot] = {}
-    batch_size = 50
-
-    for i in range(0, len(raw_codes), batch_size):
-        batch = raw_codes[i : i + batch_size]
-        formatted = []
-        for raw in batch:
-            if "." in raw:
-                formatted.append(raw)
-            else:
-                suffix = ".SH" if raw.startswith("6") else ".SZ"
-                formatted.append(f"{raw}{suffix}")
-
-        codes_str = ",".join(formatted)
-
-        try:
-            data = await ifind_client.real_time_quotation(
-                codes=codes_str,
-                indicators="open,preClose,latest",
-            )
-
-            for table_entry in data.get("tables", []):
-                thscode = table_entry.get("thscode", "")
-                bare = thscode.split(".")[0] if thscode else ""
-                if not bare:
-                    continue
-
-                tbl = table_entry.get("table", {})
-                open_vals = tbl.get("open", [])
-                prev_vals = tbl.get("preClose", [])
-                latest_vals = tbl.get("latest", [])
-
-                if open_vals and prev_vals and latest_vals:
-                    open_price = float(open_vals[0]) if open_vals[0] else 0.0
-                    prev_close = float(prev_vals[0]) if prev_vals[0] else 0.0
-                    latest = float(latest_vals[0]) if latest_vals[0] else 0.0
-                    if prev_close > 0:
-                        snapshots[bare] = PriceSnapshot(
-                            stock_code=bare,
-                            stock_name=names_map.get(bare, ""),
-                            open_price=open_price,
-                            prev_close=prev_close,
-                            latest_price=latest,
-                        )
-
-        except IFinDHttpError as e:
-            logger.error(f"real_time_quotation batch failed: {e}")
-
-    return snapshots
-
-
 # === SAFETY AUDIT ENDPOINT ===
-# Included in the main router (create_router) so it's always available.
-# The audit runs once at startup; this endpoint returns cached results.
 
 
 def _register_safety_audit_endpoint(router: APIRouter) -> None:
@@ -4987,7 +1530,7 @@ def _register_safety_audit_endpoint(router: APIRouter) -> None:
 
 
 def create_settings_router() -> APIRouter:
-    """Create router for settings page (iFinD token management)."""
+    """Create router for settings page (API key management)."""
     router = APIRouter(tags=["settings"])
 
     @router.get("/settings", response_class=HTMLResponse)
@@ -4995,90 +1538,6 @@ def create_settings_router() -> APIRouter:
         """Settings page."""
         templates = request.app.state.templates
         return templates.TemplateResponse("settings.html", {"request": request})
-
-    @router.get("/api/settings/ifind-token")
-    async def get_ifind_token_status():
-        """Get current iFinD token status (masked)."""
-        from src.common.config import get_ifind_refresh_token, get_ifind_token_source
-
-        source = get_ifind_token_source()
-        source_labels = {
-            "web_ui": "Web UI (当前会话)",
-            "persisted_file": "Web UI (已持久化)",
-            "env_var": "环境变量",
-            "secrets_yaml": "secrets.yaml",
-            "not_configured": "未配置",
-        }
-
-        try:
-            token = get_ifind_refresh_token()
-            # Mask token: show first 8 and last 8 chars
-            if len(token) > 20:
-                masked = token[:8] + "..." + token[-8:]
-            else:
-                masked = "***"
-            return {
-                "configured": True,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": masked,
-                "token_length": len(token),
-            }
-        except ValueError:
-            return {
-                "configured": False,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": "",
-                "token_length": 0,
-            }
-
-    @router.post("/api/settings/ifind-token")
-    async def update_ifind_token(body: TokenUpdateRequest):
-        """Save a new iFinD refresh_token."""
-        from src.common.config import set_ifind_refresh_token
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        set_ifind_refresh_token(token)
-        return {"success": True, "message": "Token 已保存，新的 API 调用将使用此 token"}
-
-    @router.post("/api/settings/ifind-token/test")
-    async def test_ifind_token(body: TokenUpdateRequest):
-        """Test an iFinD refresh_token by trying to obtain an access_token."""
-        import httpx
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        url = "https://quantapi.51ifind.com/api/v1/get_access_token"
-        headers = {
-            "Content-Type": "application/json",
-            "refresh_token": token,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-
-                error_code = data.get("errorcode", -1)
-                if error_code == 0:
-                    return {"success": True, "message": "Token 验证成功，可以正常获取 access_token"}
-                else:
-                    err_msg = data.get("errmsg", "未知错误")
-                    return {
-                        "success": False,
-                        "message": f"Token 验证失败: {err_msg} (错误码: {error_code})",
-                    }
-        except httpx.TimeoutException:
-            return {"success": False, "message": "请求超时，请检查网络连接"}
-        except httpx.HTTPError as e:
-            return {"success": False, "message": f"HTTP 请求失败: {e}"}
 
     # === TUSHARE TOKEN SETTINGS ===
 
@@ -5141,7 +1600,6 @@ def create_settings_router() -> APIRouter:
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                # Use rt_min with a single liquid stock to verify token + rt_min permission
                 response = await client.post(
                     "http://api.tushare.pro",
                     json={
@@ -5166,93 +1624,6 @@ def create_settings_router() -> APIRouter:
                     return {
                         "success": False,
                         "message": f"Token 验证失败: {msg} (错误码: {code})",
-                    }
-        except httpx.TimeoutException:
-            return {"success": False, "message": "请求超时，请检查网络连接"}
-        except httpx.HTTPError as e:
-            return {"success": False, "message": f"HTTP 请求失败: {e}"}
-
-    # === TAVILY API KEY SETTINGS ===
-
-    @router.get("/api/settings/tavily-key")
-    async def get_tavily_key_status():
-        """Get current Tavily API key status (masked)."""
-        from src.common.config import get_tavily_api_key, get_tavily_key_source
-
-        source = get_tavily_key_source()
-        source_labels = {
-            "web_ui": "Web UI (当前会话)",
-            "persisted_file": "Web UI (已持久化)",
-            "env_var": "环境变量",
-            "secrets_yaml": "secrets.yaml",
-            "not_configured": "未配置",
-        }
-
-        try:
-            key = get_tavily_api_key()
-            if len(key) > 16:
-                masked = key[:8] + "..." + key[-4:]
-            else:
-                masked = "***"
-            return {
-                "configured": True,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_key": masked,
-                "key_length": len(key),
-            }
-        except ValueError:
-            return {
-                "configured": False,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_key": "",
-                "key_length": 0,
-            }
-
-    @router.post("/api/settings/tavily-key")
-    async def update_tavily_key(body: TokenUpdateRequest):
-        """Save a new Tavily API key."""
-        from src.common.config import set_tavily_api_key
-
-        key = body.token.strip()
-        if not key:
-            raise HTTPException(status_code=400, detail="API Key 不能为空")
-
-        set_tavily_api_key(key)
-        return {"success": True, "message": "Tavily API Key 已保存"}
-
-    @router.post("/api/settings/tavily-key/test")
-    async def test_tavily_key(body: TokenUpdateRequest):
-        """Test a Tavily API key by running a simple search."""
-        import httpx
-
-        key = body.token.strip()
-        if not key:
-            raise HTTPException(status_code=400, detail="API Key 不能为空")
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    "https://api.tavily.com/search",
-                    json={
-                        "api_key": key,
-                        "query": "test",
-                        "max_results": 1,
-                        "search_depth": "basic",
-                    },
-                )
-                if resp.status_code == 200:
-                    return {"success": True, "message": "Tavily API Key 验证成功"}
-                else:
-                    detail = ""
-                    try:
-                        detail = resp.text[:200]
-                    except Exception:
-                        pass
-                    return {
-                        "success": False,
-                        "message": f"验证失败: HTTP {resp.status_code} — {detail}",
                     }
         except httpx.TimeoutException:
             return {"success": False, "message": "请求超时，请检查网络连接"}
@@ -5308,7 +1679,7 @@ def create_settings_router() -> APIRouter:
         set_iquant_api_key(key)
         return {"success": True, "message": "iQuant API Key 已保存"}
 
-    # === TSANGHI (沧海数据) TOKEN SETTINGS ===
+    # === TSANGHI TOKEN SETTINGS ===
 
     @router.get("/api/settings/tsanghi-token")
     async def get_tsanghi_token_status():
@@ -5395,15 +1766,12 @@ def create_settings_router() -> APIRouter:
         except httpx.HTTPError as e:
             return {"success": False, "message": f"HTTP 请求失败: {e}"}
 
-    # === Aliyun DashScope API Key ===
+    # === ALIYUN DASHSCOPE API KEY ===
 
     @router.get("/api/settings/aliyun-key")
     async def get_aliyun_key_status():
         """Get current Aliyun DashScope API key status (masked)."""
-        from src.common.config import (
-            get_aliyun_api_key,
-            get_aliyun_api_key_source,
-        )
+        from src.common.config import get_aliyun_api_key, get_aliyun_api_key_source
 
         source = get_aliyun_api_key_source()
         source_labels = {
@@ -5471,55 +1839,38 @@ def create_settings_router() -> APIRouter:
                     },
                     json={
                         "model": "qwen-plus",
-                        "messages": [
-                            {"role": "user", "content": "回复OK"},
-                        ],
+                        "messages": [{"role": "user", "content": "回复OK"}],
                         "max_tokens": 10,
                     },
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                return {
-                    "success": True,
-                    "message": f"验证成功，模型回复: {content}",
-                }
+                return {"success": True, "message": f"验证成功，模型回复: {content}"}
         except httpx.TimeoutException:
-            return {
-                "success": False,
-                "message": "请求超时，请检查网络连接",
-            }
+            return {"success": False, "message": "请求超时，请检查网络连接"}
         except httpx.HTTPStatusError as e:
-            return {
-                "success": False,
-                "message": f"API 验证失败 (HTTP {e.response.status_code})",
-            }
+            return {"success": False, "message": f"API 验证失败 (HTTP {e.response.status_code})"}
         except Exception as e:
-            return {
-                "success": False,
-                "message": f"验证失败: {e}",
-            }
+            return {"success": False, "message": f"验证失败: {e}"}
+
+    # === ALL KEYS STATUS ===
 
     @router.get("/api/settings/keys-status")
     async def get_all_keys_status():
         """Get status of all API keys needed for live trading."""
         from src.common.config import (
             get_aliyun_api_key_source,
-            get_ifind_token_source,
             get_iquant_key_source,
-            get_tavily_key_source,
             get_tsanghi_token_source,
             load_secrets,
         )
 
-        ifind_ok = get_ifind_token_source() != "not_configured"
-        tavily_ok = get_tavily_key_source() != "not_configured"
         iquant_ok = get_iquant_key_source() != "not_configured"
         tsanghi_ok = get_tsanghi_token_source() != "not_configured"
         aliyun_src = get_aliyun_api_key_source()
         aliyun_ok = aliyun_src != "not_configured"
 
-        # Check Silicon Flow from secrets.yaml
         sf_ok = False
         try:
             secrets = load_secrets()
@@ -5528,316 +1879,11 @@ def create_settings_router() -> APIRouter:
             pass
 
         return {
-            "ifind": {"configured": ifind_ok, "source": get_ifind_token_source()},
-            "tavily": {"configured": tavily_ok, "source": get_tavily_key_source()},
             "siliconflow": {"configured": sf_ok},
             "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
             "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
             "aliyun": {"configured": aliyun_ok, "source": aliyun_src},
-            "news_check_ready": tavily_ok and sf_ok,
         }
-
-    # === SCAN STOCKS BACKFILL (SSE) ===
-
-    @router.post("/api/momentum/backfill")
-    async def run_backfill(request: Request):
-        """Backfill momentum scan selected stocks with SSE streaming progress."""
-        import asyncio
-        import json
-        from datetime import datetime, timedelta
-
-        from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
-
-        try:
-            body = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="请求体不是有效 JSON")
-
-        start_date_str = body.get("start_date", "")
-        end_date_str = body.get("end_date", "")
-        if not start_date_str or not end_date_str:
-            raise HTTPException(
-                status_code=400,
-                detail=f"缺少日期参数 (received keys: {list(body.keys())})",
-            )
-
-        try:
-            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
-            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
-
-        if end_date <= start_date:
-            raise HTTPException(status_code=400, detail="结束日期必须晚于起始日期")
-
-        ifind_client = getattr(request.app.state, "ifind_client", None)
-        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
-        if not ifind_client:
-            raise HTTPException(status_code=503, detail="iFinD 客户端未就绪")
-        if not fundamentals_db:
-            raise HTTPException(status_code=503, detail="基本面数据库未就绪")
-
-        async def event_stream():
-            def sse(data: dict) -> str:
-                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-            scan_db = None
-            try:
-                yield sse({"type": "status", "message": "连接数据库..."})
-                scan_db = create_momentum_scan_db_from_config()
-                await scan_db.connect()
-
-                concept_mapper = LocalConceptMapper()
-                scanner = MomentumSectorScanner(
-                    ifind_client=ifind_client,
-                    fundamentals_db=fundamentals_db,
-                    concept_mapper=concept_mapper,
-                    board_relevance_filter=_create_board_relevance_filter_global(),
-                )
-
-                # Trading calendar
-                yield sse({"type": "status", "message": "获取交易日历..."})
-                full_cal = _get_trading_calendar(start_date, end_date + timedelta(days=10))
-                trading_days = [d for d in full_cal if start_date <= d <= end_date]
-
-                if not trading_days:
-                    yield sse({"type": "error", "message": "所选日期范围内无交易日"})
-                    return
-
-                # T+1 map
-                next_day_map: dict = {}
-                for idx, d in enumerate(full_cal):
-                    if idx + 1 < len(full_cal):
-                        next_day_map[d] = full_cal[idx + 1]
-
-                # Skip already-backfilled dates
-                yield sse({"type": "status", "message": "检查已有数据..."})
-                existing = set(
-                    await scan_db.get_dates_with_data(
-                        start_date=start_date_str,
-                        end_date=end_date_str,
-                    )
-                )
-                remaining = [d for d in trading_days if d not in existing]
-
-                yield sse(
-                    {
-                        "type": "init",
-                        "total_days": len(remaining),
-                        "skipped_days": len(trading_days) - len(remaining),
-                    }
-                )
-
-                if not remaining:
-                    yield sse({"type": "complete", "message": "所有日期已回填，无需操作"})
-                    return
-
-                success = 0
-                errors = 0
-                total_stocks = 0
-
-                for i, day in enumerate(remaining):
-                    yield sse(
-                        {
-                            "type": "progress",
-                            "day": i + 1,
-                            "total": len(remaining),
-                            "trade_date": str(day),
-                        }
-                    )
-
-                    try:
-                        price_snapshots, price_err = await _parse_iwencai_and_fetch_prices_for_date(
-                            ifind_client, day
-                        )
-
-                        if not price_snapshots:
-                            yield sse(
-                                {
-                                    "type": "day_result",
-                                    "trade_date": str(day),
-                                    "stocks": 0,
-                                    "status": "skip",
-                                    "message": price_err or "无价格数据",
-                                }
-                            )
-                            success += 1
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        result = await scanner.scan(price_snapshots, trade_date=day)
-                        selected = result.selected_stocks
-                        all_snapshots = result.all_snapshots
-
-                        if not selected:
-                            yield sse(
-                                {
-                                    "type": "day_result",
-                                    "trade_date": str(day),
-                                    "stocks": 0,
-                                    "status": "ok",
-                                    "message": "无选股",
-                                }
-                            )
-                            success += 1
-                            await asyncio.sleep(0.05)
-                            continue
-
-                        unique_codes = list({s.stock_code for s in selected})
-
-                        # T+1 open prices
-                        next_day = next_day_map.get(day)
-                        ndo_map: dict[str, float] = {}
-                        if next_day:
-                            ndo_map = await _fetch_batch_prices(
-                                ifind_client, unique_codes, next_day, indicator="open"
-                            )
-
-                        # Growth rates from DB
-                        growth_map = await fundamentals_db.batch_get_revenue_growth(unique_codes)
-
-                        # Build rows
-                        db_rows = []
-                        for s in selected:
-                            snap = all_snapshots.get(s.stock_code)
-                            bp = snap.latest_price if snap else 0.0
-                            ndo = ndo_map.get(s.stock_code)
-                            ret = None
-                            if ndo and bp > 0:
-                                ret = round(_calc_net_return_pct(bp, ndo), 4)
-                            db_rows.append(
-                                {
-                                    "stock_code": s.stock_code,
-                                    "stock_name": s.stock_name,
-                                    "board_name": s.board_name,
-                                    "open_gain_pct": s.open_gain_pct,
-                                    "pe_ttm": s.pe_ttm,
-                                    "board_avg_pe": s.board_avg_pe,
-                                    "open_price": snap.open_price if snap else 0.0,
-                                    "prev_close": snap.prev_close if snap else 0.0,
-                                    "buy_price": bp,
-                                    "next_day_open": ndo,
-                                    "return_pct": ret,
-                                    "growth_rate": growth_map.get(s.stock_code),
-                                }
-                            )
-
-                        saved = await scan_db.save_day(day, db_rows)
-                        total_stocks += saved
-                        success += 1
-
-                        yield sse(
-                            {
-                                "type": "day_result",
-                                "trade_date": str(day),
-                                "stocks": saved,
-                                "status": "ok",
-                            }
-                        )
-
-                    except Exception as e:
-                        errors += 1
-                        logger.error(f"Backfill error on {day}: {e}")
-                        yield sse(
-                            {
-                                "type": "day_result",
-                                "trade_date": str(day),
-                                "stocks": 0,
-                                "status": "error",
-                                "message": str(e)[:80],
-                            }
-                        )
-
-                    await asyncio.sleep(0.05)
-
-                yield sse(
-                    {
-                        "type": "complete",
-                        "success": success,
-                        "errors": errors,
-                        "total_stocks": total_stocks,
-                    }
-                )
-
-            except Exception as e:
-                logger.error(f"Backfill fatal error: {e}", exc_info=True)
-                yield sse({"type": "error", "message": str(e)[:200]})
-            finally:
-                if scan_db:
-                    await scan_db.close()
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    # === SCAN STOCKS CSV EXPORT ===
-
-    @router.get("/api/momentum/scan-stocks/csv")
-    async def export_scan_stocks_csv(start_date: str, end_date: str):
-        """Export momentum scan selected stocks as CSV file download.
-
-        Query params:
-            start_date: YYYY-MM-DD
-            end_date: YYYY-MM-DD
-        """
-        import csv
-        import io as _io
-        from datetime import datetime
-
-        from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
-
-        # Validate dates
-        try:
-            datetime.strptime(start_date, "%Y-%m-%d")
-            datetime.strptime(end_date, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
-
-        scan_db = create_momentum_scan_db_from_config()
-        try:
-            await scan_db.connect()
-            rows = await scan_db.query(start_date=start_date, end_date=end_date)
-        finally:
-            await scan_db.close()
-
-        if not rows:
-            raise HTTPException(status_code=404, detail="所选日期范围内无数据")
-
-        # Build CSV in memory
-        output = _io.StringIO()
-        writer = csv.DictWriter(
-            output,
-            fieldnames=[
-                "trade_date",
-                "stock_code",
-                "stock_name",
-                "board_name",
-                "open_gain_pct",
-                "pe_ttm",
-                "board_avg_pe",
-                "open_price",
-                "prev_close",
-                "buy_price",
-                "next_day_open",
-                "return_pct",
-                "growth_rate",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-        csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM for Excel compatibility
-        filename = f"momentum_scan_stocks_{start_date}_{end_date}.csv"
-
-        return StreamingResponse(
-            _io.BytesIO(csv_bytes),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
 
     return router
 
@@ -5855,11 +1901,6 @@ def create_trade_backtest_router() -> APIRouter:
 
     router = APIRouter(tags=["trade-backtest"])
 
-    @router.get("/trade-backtest", response_class=HTMLResponse)
-    async def trade_backtest_page(request: Request):
-        templates = request.app.state.templates
-        return templates.TemplateResponse("trade_backtest.html", {"request": request})
-
     @router.post("/api/trade-backtest/analyze")
     async def analyze_trades(request: Request):
         import traceback as _tb
@@ -5873,10 +1914,8 @@ def create_trade_backtest_router() -> APIRouter:
             raise HTTPException(500, f"分析失败: {exc}")
 
     async def _analyze_trades_impl(request: Request) -> dict[str, Any]:
-        # Receive CSV text directly in request body (no multipart)
         content = await request.body()
 
-        # Try common encodings for Chinese Excel exports
         text = None
         for encoding in ("utf-8-sig", "gbk", "gb2312"):
             try:
@@ -5897,7 +1936,6 @@ def create_trade_backtest_router() -> APIRouter:
         if missing:
             raise HTTPException(400, f"CSV 缺少必要列: {', '.join(missing)}")
 
-        # Parse rows
         rows_raw: list[dict[str, str]] = []
         for row in reader:
             code = row["股票代码"].strip()
@@ -5908,12 +1946,10 @@ def create_trade_backtest_router() -> APIRouter:
         if not rows_raw:
             raise HTTPException(400, "CSV 中没有交易记录")
 
-        # Use tsanghi cache for price lookup (already loaded at startup)
         tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
         if tsanghi_cache is None:
             raise HTTPException(503, "沧海缓存尚未加载完成，请稍后再试")
 
-        # Collect all dates from CSV and check cache coverage
         all_dates: list[str] = []
         for row in rows_raw:
             all_dates.append(row["买入时间"].strip()[:10])
@@ -5943,7 +1979,6 @@ def create_trade_backtest_router() -> APIRouter:
                 ),
             }
 
-        # Initial capital from query param
         import math
 
         initial_capital = 100000.0
@@ -5951,7 +1986,6 @@ def create_trade_backtest_router() -> APIRouter:
         if cap_param:
             initial_capital = float(cap_param)
 
-        # Build typed trade list — capital-based position sizing with fees
         capital = initial_capital
         trades: list[dict[str, Any]] = []
         returns: list[float] = []
@@ -5982,13 +2016,11 @@ def create_trade_backtest_router() -> APIRouter:
                         400,
                         f"第 {i} 行: 缓存中无 {code} 在 {sell_date} 的价格数据",
                     )
-                buy_price = float(buy_day["open"])  # type: ignore[arg-type]
-                sell_price = float(sell_day["close"])  # type: ignore[arg-type]
+                buy_price = float(buy_day["open"])
+                sell_price = float(sell_day["close"])
 
-                # Position sizing: how many lots can we buy?
                 lots = math.floor(capital / (buy_price * 100))
                 if lots <= 0:
-                    # Not enough capital — skip but still record
                     trades.append(
                         {
                             "idx": i,
@@ -6011,13 +2043,11 @@ def create_trade_backtest_router() -> APIRouter:
                     capital_history.append(capital)
                     continue
 
-                # Buy cost: commission 0.3% (min 5 yuan) + transfer 0.001%
                 buy_amount = lots * 100 * buy_price
                 buy_comm = max(buy_amount * 0.003, 5.0)
                 buy_transfer = buy_amount * 0.00001
                 total_buy_cost = buy_amount + buy_comm + buy_transfer
 
-                # Reduce lots if cost exceeds capital
                 while total_buy_cost > capital and lots > 0:
                     lots -= 1
                     buy_amount = lots * 100 * buy_price
@@ -6048,14 +2078,12 @@ def create_trade_backtest_router() -> APIRouter:
                     capital_history.append(capital)
                     continue
 
-                # Sell proceeds: commission + transfer + stamp tax 0.05%
                 sell_amount = lots * 100 * sell_price
                 sell_comm = max(sell_amount * 0.003, 5.0)
                 sell_transfer = sell_amount * 0.00001
                 sell_stamp = sell_amount * 0.0005
                 net_sell = sell_amount - sell_comm - sell_transfer - sell_stamp
 
-                # Update capital
                 trade_profit = net_sell - total_buy_cost
                 ret = round(trade_profit / total_buy_cost * 100, 2)
                 capital = capital - total_buy_cost + net_sell
@@ -6097,11 +2125,9 @@ def create_trade_backtest_router() -> APIRouter:
         wins = [r for r in returns if r > 0]
         losses = [r for r in returns if r < 0]
 
-        # Equity curve from capital history (normalized to 1.0)
         equity = [c / initial_capital for c in capital_history]
         cumulative_return_pct = (capital - initial_capital) / initial_capital * 100
 
-        # Max drawdown
         peak = equity[0]
         max_dd = 0.0
         for eq in equity:
@@ -6111,7 +2137,6 @@ def create_trade_backtest_router() -> APIRouter:
             if dd > max_dd:
                 max_dd = dd
 
-        # Consecutive wins/losses
         max_cw = max_cl = 0
         streak = 0
         for r in returns:
@@ -6124,14 +2149,12 @@ def create_trade_backtest_router() -> APIRouter:
             else:
                 streak = 0
 
-        # Profit factor (based on actual yuan amounts)
         profit_amounts = [r for r in returns if r > 0]
         loss_amounts = [abs(r) for r in returns if r < 0]
         sum_w = sum(profit_amounts) if profit_amounts else 0.0
         sum_l = sum(loss_amounts) if loss_amounts else 0.0
         profit_factor = round(sum_w / sum_l, 2) if sum_l > 0 else float("inf")
 
-        # Holding days
         avg_hold = round(statistics.mean(hold_days_list), 1) if hold_days_list else None
 
         summary = {
@@ -6157,7 +2180,6 @@ def create_trade_backtest_router() -> APIRouter:
             "total_stamp_tax": round(total_stamp_tax, 2),
         }
 
-        # Monthly breakdown
         monthly: dict[str, list[float]] = defaultdict(list)
         for idx, ret in enumerate(returns):
             month = buy_times[idx][:7]
@@ -6179,7 +2201,6 @@ def create_trade_backtest_router() -> APIRouter:
                 }
             )
 
-        # Equity curve data points
         equity_curve: list[dict[str, Any]] = [
             {"trade_idx": 0, "date": buy_times[0][:10], "equity": round(equity[0], 4)}
         ]

@@ -1233,14 +1233,10 @@ def create_iquant_router() -> APIRouter:
         body: BacktestScanRequest,
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
-        """Run momentum scan for a specific historical date (legacy backtest).
-
-        Uses the old MomentumSectorScanner for backtest compatibility.
-        """
+        """Run V15 scan for a specific historical date."""
         from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.filters.board_relevance_filter import create_board_relevance_filter
-        from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
+        from src.strategy.strategies.v15_scanner import V15Scanner
         from src.web.routes import MinuteDataMissingError, _build_snapshots_from_cache
 
         try:
@@ -1285,15 +1281,14 @@ def create_iquant_router() -> APIRouter:
             )
 
         concept_mapper = LocalConceptMapper()
-        scanner = MomentumSectorScanner(
-            ifind_client=adapter,  # type: ignore[arg-type]
+        scanner = V15Scanner(
+            historical_adapter=adapter,
             fundamentals_db=_state["fundamentals_db"],
             concept_mapper=concept_mapper,
-            board_relevance_filter=create_board_relevance_filter(),
         )
 
         scan_result = await scanner.scan(price_snapshots, trade_date=trade_date)
-        rec = scan_result.recommended_stock
+        rec = scan_result.recommended
 
         if not rec:
             return {"recommendation": None, "reason": "No recommendation for this date"}

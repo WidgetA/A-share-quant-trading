@@ -62,7 +62,7 @@ class TushareRealtimeClient:
 
     Two modes:
     1. batch_get_quotes(): Uses rt_min (batch, 1 bar/stock) for current snapshot.
-       Used by as_ifind_format() for MomentumSectorScanner.
+       Used by as_ifind_format() for realtime quotation adapter.
     2. batch_get_early_quotes(): Uses rt_min_daily (per-stock, all bars) and
        aggregates 9:30-9:40 bars. Used by V15 scan which needs stable early data.
 
@@ -312,15 +312,14 @@ class TushareRealtimeClient:
         )
 
     # ------------------------------------------------------------------
-    # iFinD format adapter (used by MomentumSectorScanner)
+    # Response format adapter (used by IQuantHistoricalAdapter)
     # ------------------------------------------------------------------
 
     async def as_ifind_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
         """
         Fetch quotes and return in iFinD real_time_quotation response format.
 
-        Uses rt_min (batch, current snapshot) since MomentumSectorScanner
-        only needs current price, not historical bars.
+        Uses rt_min (batch, current snapshot) for real-time quotes.
         """
         bare_codes = [c.split(".")[0] for c in stock_codes]
         quotes = await self.batch_get_quotes(bare_codes)

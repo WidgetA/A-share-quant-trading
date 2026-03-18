@@ -19,7 +19,7 @@
 #   across all windows.
 
 # === DATA FLOW ===
-# MomentumSectorScanner Step 5 → MomentumQualityFilter → Step 6
+# V15Scanner Step 5 → MomentumQualityFilter → Step 6
 
 from __future__ import annotations
 

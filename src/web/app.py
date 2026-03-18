@@ -22,10 +22,8 @@ from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.web.iquant_routes import create_iquant_router
 from src.web.routes import (
     create_momentum_router,
-    create_order_assistant_router,
     create_router,
     create_settings_router,
-    create_simulation_router,
     create_trade_backtest_router,
 )
 
@@ -83,14 +81,6 @@ def create_app(
     router = create_router()
     app.include_router(router)
 
-    # Add simulation router
-    simulation_router = create_simulation_router()
-    app.include_router(simulation_router)
-
-    # Add order assistant router
-    oa_router = create_order_assistant_router()
-    app.include_router(oa_router)
-
     # Add momentum backtest/monitor router
     momentum_router = create_momentum_router()
     app.include_router(momentum_router)
@@ -116,22 +106,11 @@ def create_app(
     async def startup():
         import asyncio
 
-        from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.web.routes import _run_intraday_monitor
 
         logger.info("Web UI started")
         store.start_cleanup_task()
-
-        # Shared iFinD HTTP client (token obtained once, reused by all endpoints)
-        ifind_client = IFinDHttpClient()
-        try:
-            await ifind_client.start()
-            app.state.ifind_client = ifind_client
-            logger.info("Shared iFinD HTTP client started")
-        except Exception as e:
-            logger.error(f"Failed to start shared iFinD client: {e}")
-            app.state.ifind_client = None
 
         # Shared fundamentals DB connection pool
         fundamentals_db = create_fundamentals_db_from_config()
@@ -207,14 +186,12 @@ def create_app(
             logger.info("iQuant V15 monitoring scheduler started")
 
         # Auto-start intraday momentum monitor as background task
-        # Pass shared clients via state dict so monitor doesn't create its own
         app.state.momentum_monitor_state = {
             "running": False,
             "last_scan_time": None,
             "last_result": None,
             "today_results": [],
             "task": None,
-            "ifind_client": app.state.ifind_client,
             "fundamentals_db": app.state.fundamentals_db,
             "_app_state": app.state,  # needed for tsanghi_cache access
         }
@@ -235,12 +212,6 @@ def create_app(
                 task.cancel()
             monitor_state["running"] = False
             logger.info("Intraday momentum monitor stopped")
-
-        # Close shared iFinD client
-        ifind_client = getattr(app.state, "ifind_client", None)
-        if ifind_client:
-            await ifind_client.stop()
-            logger.info("Shared iFinD HTTP client stopped")
 
         # Close shared fundamentals DB
         fundamentals_db = getattr(app.state, "fundamentals_db", None)

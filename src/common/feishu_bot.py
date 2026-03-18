@@ -281,7 +281,7 @@ Limit-up (skipped):
         Send momentum sector strategy scan result.
 
         Args:
-            selected_stocks: List of SelectedStock (from momentum_sector_scanner).
+            selected_stocks: List of SelectedStock (from strategy.models).
             hot_boards: Dict of board_name → list of initial gainer codes.
             initial_gainer_count: Number of stocks that passed initial >5% filter.
             scan_time: When the scan was performed.

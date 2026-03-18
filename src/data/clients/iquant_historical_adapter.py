@@ -1,7 +1,7 @@
 # === MODULE PURPOSE ===
 # Historical data adapter for the monitor/live scan subsystem.
-# Duck-types IFinDHttpClient so V15Scanner / MomentumSectorScanner work unchanged.
-
+# Implements HistoricalDataProvider protocol for V15Scanner.
+#
 # === DATA FLOW ===
 # - history_quotes(): Downloads from tsanghi daily_latest API (per-date batch).
 #   Data is held in memory for the current trading day so repeated calls
@@ -19,17 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 class IQuantHistoricalAdapter:
-    """
-    Duck-types IFinDHttpClient for monitor/live scan mode.
+    """Implements HistoricalDataProvider for monitor/live scan mode.
 
     Data source: tsanghi daily_latest API (per-date batch, 2 calls per date).
     Data is held in memory for the current trading day so repeated calls
     within one scan don't re-download. Cleared automatically on new day.
-
-    Methods implemented:
-        - history_quotes(): From tsanghi daily_latest API
-        - real_time_quotation(): Delegates to realtime client (Tushare/Sina)
-        - high_frequency(): Returns empty (live mode uses real_time_quotation)
 
     Volume convention: tsanghi returns 手 (lots); converted to 股 (shares) at read time.
     """

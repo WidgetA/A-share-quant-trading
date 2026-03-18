@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # V15 live trading scanner: 7-layer funnel from raw universe to single best stock.
-# Completely independent from MomentumSectorScanner (backtest code untouched).
+# Primary scanner used for both backtest and live trading.
 # No LLM filter, no negative news checker. Pure parametric funnel + V3 regression scoring.
 #
 # === 7-LAYER FUNNEL ===
@@ -15,7 +15,7 @@
 # L7:   V3 regression scoring → single best stock
 #
 # === DATA DEPENDENCIES ===
-# - PriceSnapshot: from momentum_sector_scanner (reused data model)
+# - PriceSnapshot: from strategy.models (shared data model)
 # - IQuantHistoricalAdapter: history_quotes (close + volume, 37+ trading days)
 # - LocalConceptMapper: board ↔ stock mapping
 # - FundamentalsDB: ST detection
@@ -172,12 +172,15 @@ class V15Scanner:
     async def scan(
         self,
         price_snapshots: dict[str, PriceSnapshot],
+        trade_date: date | None = None,
     ) -> V15ScanResult:
         """Run the 7-layer pipeline on 9:40 snapshots.
 
         Args:
             price_snapshots: Full universe snapshots (stock_code → PriceSnapshot).
                 Used for L1 filtering AND avg_market_open_gain computation.
+            trade_date: Reference date for historical data lookback.
+                Defaults to today for live mode; pass explicit date for backtest.
 
         Returns:
             V15ScanResult with recommended stock (or None).
@@ -214,7 +217,7 @@ class V15Scanner:
 
         # Fetch historical data ONCE for all L4 survivors (used by L5, L6, L7)
         codes = list({s.stock_code for s in selected})
-        hist = await self._fetch_historical(codes)
+        hist = await self._fetch_historical(codes, trade_date=trade_date)
 
         # L5: volume filter
         selected = self._l5_volume_filter(selected, snapshots, hist)

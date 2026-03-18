@@ -67,7 +67,7 @@ class FundamentalsDB:
     Data Flow:
         External process -> stock_fundamentals table -> this reader -> strategy
 
-    Follows the same asyncpg pool pattern as LimitUpDatabase.
+    Uses asyncpg connection pool pattern.
 
     Usage:
         db = FundamentalsDB(config)

@@ -1,16 +1,10 @@
 # === MODULE PURPOSE ===
 # Pre-downloads A-share daily + minute price data for backtesting.
-# Provides an adapter that mimics IFinDHttpClient interface so
-# MomentumSectorScanner can run without any code changes.
-
-# === DEPENDENCIES ===
-# - tsanghi (沧海数据): REST API for daily OHLCV
-# - baostock: Free A-share data source (5-min bars only, for 9:40 price)
-# - IFinDHttpClient interface: Adapter returns data in iFinD response format
-
+# Provides TsanghiHistoricalAdapter implementing HistoricalDataProvider protocol.
+#
 # === KEY CONCEPTS ===
 # - TsanghiBacktestCache: Downloads and stores all price data in memory + OSS
-# - TsanghiHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
+# - TsanghiHistoricalAdapter: Implements HistoricalDataProvider for V15Scanner
 # - Daily OHLCV: tsanghi /daily/latest (batch per-date, fast)
 # - Minute bars: baostock (5-min frequency), for 9:40 snapshot only
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
@@ -695,11 +689,10 @@ class TsanghiBacktestCache:
 
 
 class TsanghiHistoricalAdapter:
-    """
-    Duck-types IFinDHttpClient for backtest use.
+    """Implements HistoricalDataProvider for backtest use.
 
-    Reads from TsanghiBacktestCache and returns data in iFinD response format
-    so MomentumSectorScanner works without modification.
+    Reads from TsanghiBacktestCache and returns data in the expected
+    history_quotes / real_time_quotation response format.
     """
 
     def __init__(self, cache: TsanghiBacktestCache) -> None:

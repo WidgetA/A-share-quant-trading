@@ -1,7 +1,5 @@
 # === MODULE PURPOSE ===
 # Shared data models used across strategy, filters, and web layers.
-# Extracted from momentum_sector_scanner.py to decouple model definitions
-# from strategy implementation.
 
 from __future__ import annotations
 

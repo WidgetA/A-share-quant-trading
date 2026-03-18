@@ -206,8 +206,8 @@ class SinaRealtimeClient:
         """
         Fetch quotes and return in iFinD real_time_quotation response format.
 
-        This allows MomentumSectorScanner._fetch_prices_realtime()
-        to work unchanged by duck-typing the iFinD response shape.
+        Returns data in the expected real_time_quotation response format
+        for IQuantHistoricalAdapter compatibility.
 
         Args:
             stock_codes: Bare 6-digit codes
