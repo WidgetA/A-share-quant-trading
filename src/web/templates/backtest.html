@@ -255,9 +255,6 @@ function startCacheDownload(startDate, endDate) {
     text.textContent = '开始下载...';
 
     const body = JSON.stringify({ start_date: startDate, end_date: endDate });
-    const es = new EventSource('/api/momentum/tsanghi-prepare?' + new URLSearchParams({ start_date: startDate, end_date: endDate }));
-
-    // Use fetch with POST + SSE instead
     fetch('/api/momentum/tsanghi-prepare', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body
     }).then(async resp => {
