@@ -7,7 +7,6 @@ A quantitative trading system for China A-share market with modular architecture
 > - [docs/trading-safety-patterns.md](docs/trading-safety-patterns.md) — Forbidden/correct code patterns with examples
 > - [docs/datetime-timezone-guide.md](docs/datetime-timezone-guide.md) — Date calculation examples, asyncpg timezone pitfalls
 > - [docs/features.md](docs/features.md) — Feature specifications (check before any development)
-> - [docs/iFinD-HTTP-API-manual.txt](docs/iFinD-HTTP-API-manual.txt) — iFinD API reference (MUST read before any API call)
 
 ## 1. Development Workflow Rules
 
@@ -74,19 +73,21 @@ Rules:
 
 ## 8. Market Data Source Policy
 
-**Core Principle: Follow the `data_source` toggle — use whichever source the user selects.**
+**Data sources by purpose:**
 
-| Toggle Value | Source | Adapter |
-|-------------|--------|---------|
-| `"ifind"` | THS iFinD HTTP API | `IFinDHttpClient` |
-| `"tsanghi"` | 沧海数据 (日线) + baostock (分钟线) | `TsanghiHistoricalAdapter` |
+| Purpose | Source | Adapter |
+|---------|--------|---------|
+| Backtest (daily) | 沧海数据 tsanghi | `TsanghiHistoricalAdapter` / `TsanghiBacktestCache` |
+| Backtest (minute) | baostock | via `TsanghiBacktestCache` |
+| Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
+| Live (historical) | OSS cache | `IQuantHistoricalAdapter` |
+| Fundamentals | PostgreSQL `stock_fundamentals` | `FundamentalsDB` |
+| Board/concept | Local JSON files | `LocalConceptMapper` |
 
 Rules:
-1. **One source per session** — no mixing sources within a single backtest/scan
-2. **Adapter parity** — `TsanghiHistoricalAdapter` must support same indicator set as `IFinDHttpClient`
-3. **Live trading always uses iFinD** — toggle only affects backtesting
-4. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
-5. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
+1. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
+2. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
+3. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
 
 ## 9. Volume Unit Convention (CRITICAL)
 
@@ -96,34 +97,19 @@ Rules:
 |------------|-------------|------------|
 | **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
 | **baostock** `query_history_k_data_plus()` | **股** | None |
-| **iFinD** | **股** | None |
+| **Tushare** `rt_min_daily` | **股** | None |
 
 - Conversion at **adapter read layer**, not storage (raw cache keeps original values).
 - **Cross-verify**: `early_volume(10min) / avg_daily_volume` should be ~0.05-0.30. If >1.0, units are wrong.
 
-## 10. iFinD HTTP API Reference (CRITICAL)
-
-**Before writing ANY iFinD API call, ALWAYS read the manual first:**
-- [docs/iFinD-HTTP-API-manual.txt](docs/iFinD-HTTP-API-manual.txt) (machine-readable, for quick lookup)
-- [docs/iFinD-HTTP-API-manual.pdf](docs/iFinD-HTTP-API-manual.pdf) (official PDF)
-
-**Mandatory**: Verify endpoint URL, ALL parameter names, ALL indicator names against manual. Do NOT guess.
-
-Key endpoints: `basic_data_service`, `date_sequence`, `cmd_history_quotation`, `high_frequency`, `real_time_quotation`, `snap_shot`, `smart_stock_picking`, `get_trade_dates`, `report_query`
-
-**Important differences** (common source of bugs):
-- History uses `close`; real-time uses `latest` for current price
-- History uses `volume`/`amount`; snapshot uses `vol`/`amt` (tick) AND `volume`/`amount` (cumulative)
-- `name` is NOT a valid indicator for any quote endpoint
-
-## 11. Board/Concept Data — ALL from Local Files
+## 10. Board/Concept Data — ALL from Local Files
 
 - `data/sectors.json` — THS board names (concept/industry/region)
 - `data/board_constituents.json` — board → constituent stocks mapping
 - `src/data/sources/local_concept_mapper.py` — reads both files, builds forward+reverse index
 - **FORBIDDEN**: Runtime API calls for board data (no iwencai, no AkshareConceptMapper)
 
-## 12. Fundamentals Data — ALL from PostgreSQL
+## 11. Fundamentals Data — ALL from PostgreSQL
 
 - **All fundamentals (PE, growth, etc.) from PG table `stock_fundamentals`** — NEVER call iwencai/smart_stock_picking at runtime
 - Read methods in `src/data/database/fundamentals_db.py`

@@ -493,130 +493,9 @@ await engine.stop()
 
 ### [STR-003] News Analysis Strategy
 
-**Status**: Completed
+**Status**: Removed
 
-**Description**: News-driven trading strategy that uses pre-analyzed messages from external message collection project. Analysis results (sentiment, confidence, reasoning) are stored in `message_analysis` table and read via MessageReader JOIN.
-
-**Architecture Change (v0.6.0)**:
-- **Before**: Strategy called LLM (Silicon Flow Qwen) to analyze each message
-- **After**: External project analyzes messages; this project only filters and acts on results
-- **Benefit**: Faster execution (no API calls), analysis quality controlled by external project
-
-**Requirements**:
-- Filter positive messages (bullish/strong_bullish) at 8:30 AM (premarket)
-- Real-time monitoring for new positive messages during trading hours
-- Stock filtering: exclude BSE (北交所) and ChiNext (创业板)
-- Sector-level signal resolution to individual stocks
-- Slot-based position management (5 slots: 3 premarket + 2 intraday)
-- **Sector buying support**: Each slot can hold either one stock OR multiple stocks from the same sector
-  - Single stock: 20% capital on one stock
-  - Sector buying: 20% capital split equally among sector stocks (e.g., 光通信板块: 烽火通信 + 亨通光电 = 10% each)
-- Overnight holding tracking with morning sell confirmation
-- Command-line user interaction for buy/sell decisions
-- **Limit-up price check**: Skip buying stocks already at limit-up (涨停价) to avoid:
-  - Buying at the highest possible price with zero upside
-  - Next-day drop risk when limit-up cannot continue
-  - Detection methods: direct limit_up_price, calculated from prev_close, or change_ratio
-- **Limit-up user confirmation**: When sector has some stocks at limit-up:
-  - Show summary of limit-up vs available stocks
-  - Let user choose which available stocks to buy, or skip the sector entirely
-  - Prevents blindly buying the "leftover" stocks without user awareness
-
-**Technical Design**:
-- Message Model: `Message` with `MessageAnalysis` containing sentiment, confidence, reasoning
-- MessageReader: JOINs `messages` with `message_analysis` table to get pre-analyzed results
-- News Analyzer: Filters messages by sentiment (bullish/strong_bullish) and confidence threshold
-- Stock Filter: Pattern-based exchange detection and filtering
-- Sector Mapper: akshare-based industry board mapping
-- Position Manager: Slot-based capital allocation (20% per slot)
-  - `PositionSlot.holdings: list[StockHolding]` - Supports multiple stocks per slot
-  - `StockHolding`: stock_code, stock_name, quantity, entry_price
-  - Sector buying: capital divided equally among holdings
-  - State persistence: `save_to_file()` / `load_from_file()` for crash recovery
-- Holding Tracker: Overnight position tracking for next-day confirmation
-- User Interaction: Async command-line interface with timeout handling
-- Limit-Up Check: Before buying, verify stock is not at limit-up price
-
-**Sentiment Values** (from external `message_analysis` table):
-| Value | Meaning | Action |
-|-------|---------|--------|
-| `strong_bullish` | 强利好 | Buy signal |
-| `bullish` | 利好 | Buy signal |
-| `neutral` | 中性 | Ignore |
-| `bearish` | 利空 | Ignore |
-| `strong_bearish` | 强利空 | Ignore |
-
-**Files**:
-- `src/data/models/message.py` - Message and MessageAnalysis models
-- `src/data/readers/message_reader.py` - PostgreSQL reader with analysis JOIN
-- `src/common/user_interaction.py` - Command-line user interaction
-- `src/strategy/filters/stock_filter.py` - Exchange-based stock filtering
-- `src/strategy/analyzers/news_analyzer.py` - Filters pre-analyzed messages
-- `src/data/sources/sector_mapper.py` - Stock-to-sector mapping
-- `src/trading/position_manager.py` - Slot-based position management
-- `src/trading/holding_tracker.py` - Overnight holding tracking
-- `src/strategy/strategies/news_analysis_strategy.py` - Main strategy implementation
-- `config/news-strategy-config.yaml` - Strategy configuration
-
-**Usage**:
-```python
-# Strategy is auto-loaded by StrategyEngine
-# Configure in config/news-strategy-config.yaml
-
-# Manual testing:
-from src.strategy.strategies.news_analysis_strategy import NewsAnalysisStrategy
-from src.strategy.base import StrategyConfig, StrategyContext
-
-config = StrategyConfig(
-    name="news_analysis",
-    enabled=True,
-    parameters={
-        "total_capital": 10_000_000,
-        "min_confidence": 0.7,
-    }
-)
-strategy = NewsAnalysisStrategy(config)
-await strategy.on_load()
-
-# Generate signals (uses pre-analyzed messages from DB)
-async for signal in strategy.generate_signals(context):
-    print(f"Signal: {signal}")
-```
-
-**Configuration** (`config/news-strategy-config.yaml`):
-```yaml
-strategy:
-  news_analysis:
-    enabled: true
-    analysis:
-      min_confidence: 0.7
-      actionable_sentiments: ["strong_bullish", "bullish"]
-    position:
-      total_capital: 10000000
-      premarket_slots: 3
-      intraday_slots: 2
-    filter:
-      exclude_bse: true
-      exclude_chinext: true
-      exclude_star: false
-    schedule:
-      premarket_analysis_time: "08:30"
-      morning_confirmation_time: "09:00"
-```
-
-**Acceptance Criteria**:
-- [x] Message model with analysis fields (sentiment, confidence, reasoning)
-- [x] MessageReader JOINs message_analysis table
-- [x] Stock filter excluding BSE/ChiNext
-- [x] Sector mapper using akshare
-- [x] News analyzer filters pre-analyzed messages
-- [x] Position manager with slot allocation
-- [x] Holding tracker for overnight positions
-- [x] User interaction via command line
-- [x] Main strategy implementation
-- [x] Configuration file
-- [x] Limit-up price check before buying
-- [x] User confirmation when sector has limit-up stocks
+**Removal Note**: Removed in refactor/cleanup-v15-only. News-driven strategy was superseded by V15 momentum strategy (STR-005). All related files deleted: `news_analysis_strategy.py`, `news_analyzer.py`, `negative_news_checker.py`, `tavily_client.py`.
 
 ---
 
@@ -647,23 +526,20 @@ strategy:
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest, iFinD): iFinD `history_quotes` + `high_frequency` (9:40 price)
-- Price (backtest, free): tsanghi 沧海数据 (日线) + baostock (5min bars for 9:40 price)
-- Price (live): iFinD `real_time_quotation`
+- Price (backtest): tsanghi 沧海数据 (日线) + baostock (5min bars for 9:40 price) via `TsanghiBacktestCache`
+- Price (live): Tushare Pro `rt_min_daily`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
 
 **Key Files**:
-- `src/strategy/strategies/momentum_sector_scanner.py` — Core scanner logic (Step 1–6)
-- `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: 冲高回落 filter (extreme volume surge)
+- `src/strategy/strategies/v15_scanner.py` — Core V15 scanner logic (7-layer funnel + V3 scoring)
+- `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: volume filter (turnover_amp bounds)
 - `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
 - `src/strategy/filters/board_relevance_filter.py` — Step 5.7: LLM 板块相关度过滤
 - `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping (reads local JSON)
 - `data/sectors.json` — THS concept board name list (390 boards)
 - `data/board_constituents.json` — Board → constituent stocks mapping (pre-downloaded)
 - `src/data/database/fundamentals_db.py` — stock_fundamentals reader
-- `scripts/backtest_momentum.py` — Backtest script
-- `scripts/intraday_momentum_alert.py` — Live monitoring + Feishu alert
 
 **Backtest Modes**:
 
@@ -688,15 +564,14 @@ strategy:
 **Checklist**:
 - [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
-- [x] LocalConceptMapper: local JSON-based stock-to-board and board-to-stock lookups (replaced iwencai ConceptMapper)
-- [x] MomentumSectorScanner: Step 1–6 pipeline with recommendation scoring
-- [x] MomentumQualityFilter: Step 5.5 volume filter (turnover_amp > 3x upper bound + < 0.4x lower bound)
+- [x] LocalConceptMapper: local JSON-based stock-to-board and board-to-stock lookups
+- [x] V15Scanner: 7-layer funnel + V3 regression scoring (replaced MomentumSectorScanner)
+- [x] MomentumQualityFilter: Step 5.5 volume filter (turnover_amp bounds)
 - [x] ReversalFactorFilter: Step 5.6 冲高回落 filter (early fade + price position)
 - [x] Feishu notification: `send_momentum_scan_result()` with recommendation
-- [x] Backtest script with `--notify` option
-- [x] Intraday monitoring script (polls 9:30-9:40)
 - [x] Range backtest with trading cost simulation (SSE streaming)
-- [x] Tab-based UI for single-day vs range backtest
+- [x] Unified backtest page with 3 tabs (single-day, range, CSV analysis)
+- [x] Cache management scheduler (3am daily auto-fill)
 - [ ] Unit tests
 
 ---
@@ -1126,72 +1001,9 @@ Message collection has been moved to a separate project. This project now only r
 
 ### [DAT-005] Limit-Up Stocks Data Collection
 
-**Status**: Completed
+**Status**: Removed
 
-**Description**: Collect daily limit-up (涨停) stock information after market close using iFinD API, storing the data in PostgreSQL for analysis and strategy development.
-
-**Requirements**:
-- Fetch all limit-up stocks for a given trading day after market close (15:00)
-- Capture comprehensive limit-up information: stock code, name, price, time, reason, etc.
-- Store data in PostgreSQL database with proper indexing
-- Support historical data backfill
-- Idempotent: re-running for the same date updates existing records
-
-**Technical Design**:
-- Data Source: iFinD `THS_DataPool` API for limit-up board data
-- Database: PostgreSQL (same instance as trading, `trading` schema)
-- Table Schema:
-  - `trading.limit_up_stocks`:
-    - `id` (VARCHAR PRIMARY KEY) - Composite: date + stock_code
-    - `trade_date` (DATE) - Trading date
-    - `stock_code` (VARCHAR) - Stock code (e.g., "000001.SZ")
-    - `stock_name` (VARCHAR) - Stock name
-    - `limit_up_price` (DECIMAL) - Limit-up price
-    - `limit_up_time` (VARCHAR) - First limit-up time (HH:MM:SS)
-    - `open_count` (INTEGER) - Number of times limit opened
-    - `last_limit_up_time` (VARCHAR) - Last limit-up time if reopened
-    - `turnover_rate` (DECIMAL) - Turnover rate percentage
-    - `amount` (DECIMAL) - Trading amount (yuan)
-    - `circulation_mv` (DECIMAL) - Circulating market value
-    - `reason` (TEXT) - Limit-up reason/concept
-    - `industry` (VARCHAR) - Industry classification
-    - `created_at` (TIMESTAMP) - Record creation timestamp
-    - `updated_at` (TIMESTAMP) - Record update timestamp
-  - Indexes: trade_date, stock_code, limit_up_time
-
-**Files**:
-- `src/data/models/limit_up.py` - LimitUpStock data model
-- `src/data/database/limit_up_db.py` - PostgreSQL database layer
-- `src/data/sources/ifind_limit_up.py` - iFinD data source
-- `tests/unit/data/sources/test_ifind_limit_up.py` - Test file
-- `config/database-config.yaml` - Database configuration
-- `scripts/fetch_limit_up.py` - CLI script for fetching data
-
-**Usage**:
-```python
-from src.data.database.limit_up_db import create_limit_up_db_from_config
-
-# Create database from config and connect
-db = create_limit_up_db_from_config()
-await db.connect()
-
-# Save limit-up stocks
-await db.save(stock)
-await db.save_batch(stocks)
-
-# Query by date
-stocks = await db.query_by_date("2026-01-24")
-
-await db.close()
-```
-
-**Acceptance Criteria**:
-- [x] LimitUpStock data model defined
-- [x] PostgreSQL database layer with asyncpg
-- [x] iFinD data source implementation
-- [x] Comprehensive test coverage
-- [x] Configuration via YAML
-- [x] Historical backfill support
+**Removal Note**: Removed in refactor/cleanup-v15-only. iFinD-dependent limit-up data collection was not needed for V15 strategy. All related files deleted: `limit_up.py`, `limit_up_db.py`, `ifind_limit_up.py`, `fetch_limit_up.py`.
 
 ---
 
@@ -1264,39 +1076,9 @@ await db.close()
 
 ### [INF-004] THS SDK Installation
 
-**Status**: Completed
+**Status**: Removed
 
-**Description**: Installation scripts for TongHuaShun iFinD SDK on Linux servers.
-
-**Requirements**:
-- Auto-detect system architecture (32/64-bit)
-- Extract SDK tarball to installation directory
-- Check library dependencies via ldd
-- Install missing dependencies via apt-get/yum
-- Run official installiFinDPy.py installer
-- Configure LD_LIBRARY_PATH for runtime
-
-**Files**:
-- `scripts/install_ths_sdk.sh` - Main installation script
-- `scripts/check_ths_deps.sh` - Dependency checker utility
-
-**Usage**:
-```bash
-# Full installation
-sudo ./scripts/install_ths_sdk.sh
-
-# With custom options
-sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
-
-# Check dependencies only
-./scripts/check_ths_deps.sh /opt/ths_sdk
-```
-
-**Acceptance Criteria**:
-- [x] Installation script created
-- [x] Dependency checking implemented
-- [x] Support for apt-get and yum package managers
-- [x] Auto-detection of 32/64-bit architecture
+**Removal Note**: Removed in refactor/cleanup-v15-only. iFinD SDK is no longer used.
 
 ---
 
@@ -1304,195 +1086,17 @@ sudo ./scripts/install_ths_sdk.sh -f /path/to/sdk.tar.gz -d /opt/ths_sdk
 
 ### [SIM-001] Historical Simulation Trading
 
-**Status**: Completed
+**Status**: Removed
 
-**Description**: Replay historical trading days using stored messages and price data. Allows users to practice trading decisions in a fast-forward mode and calculate P&L.
-
-**Requirements**:
-- Select a historical date to start simulation
-- Optionally load historical position snapshot
-- Replay messages based on simulated time
-- Fast-forward through trading day phases (no real-time waiting)
-- User interaction for stock selection and sell decisions via Web UI
-- Calculate and display P&L at simulation end
-
-**Technical Design**:
-- **SimulationClock**: Virtual time controller that can jump to key time points
-- **HistoricalPriceService**: Fetches historical OHLCV from iFinD
-- **HistoricalMessageReader**: Wraps MessageReader to filter by simulated time
-- **SimulationContext**: Extended StrategyContext for simulation mode
-- **SimulationPositionManager**: Isolated position manager (no DB persistence)
-- **SimulationManager**: Main orchestrator for simulation lifecycle
-
-**Architecture**:
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Historical Simulation System                  │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────┐    ┌────────────────────────┐            │
-│  │ SimulationClock  │◄──►│ HistoricalPriceService │            │
-│  │ (虚拟时间控制)   │    │ (iFinD历史价格)        │            │
-│  └────────┬─────────┘    └────────────────────────┘            │
-│           │                                                     │
-│           ▼                                                     │
-│  ┌──────────────────┐    ┌────────────────────────┐            │
-│  │ SimulationContext│◄──►│HistoricalMessageReader │            │
-│  │ (模拟上下文)     │    │(按模拟时间过滤消息)    │            │
-│  └────────┬─────────┘    └────────────────────────┘            │
-│           │                                                     │
-│           ▼                                                     │
-│  ┌──────────────────┐    ┌────────────────────────┐            │
-│  │SimulationManager │◄──►│ Web UI (/api/simulation)│            │
-│  │ (主协调器)       │    └────────────────────────┘            │
-│  └────────┬─────────┘                                          │
-│           │                                                     │
-│           ▼                                                     │
-│  ┌──────────────────┐                                          │
-│  │SimPositionManager│                                          │
-│  │ (隔离的仓位管理) │                                          │
-│  └──────────────────┘                                          │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Simulation Phases**:
-| Phase | Time | Description |
-|-------|------|-------------|
-| PREMARKET_ANALYSIS | 08:30 | Review overnight messages, select signals |
-| MORNING_AUCTION | 09:25 | Execute pending buys, check limit-up |
-| TRADING_HOURS | 09:30-15:00 | Monitor positions, check intraday messages for buying opportunities |
-| MARKET_CLOSE | 15:00 | Day summary, P&L calculation, decide sell/hold for next-day open |
-| MORNING_CONFIRMATION | 09:00 (next day) | Decide sell/hold for positions, sell at next-day opening price |
-| COMPLETED | - | Simulation finished, show results |
-
-**Trading Hours Actions**:
-During trading hours, users can:
-- View and select from historical messages for buying
-- Check intraday messages for new buying opportunities
-- Fast forward to market close
-
-**API Endpoints**:
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/simulation/start` | POST | Start new simulation |
-| `/api/simulation/state` | GET | Get current state |
-| `/api/simulation/advance` | POST | Advance to next phase |
-| `/api/simulation/select` | POST | Submit signal selection (premarket) |
-| `/api/simulation/sell` | POST | Submit sell decision (market close or morning confirmation) |
-| `/api/simulation/intraday/select` | POST | Select intraday signals for buying |
-| `/api/simulation/intraday/skip` | POST | Skip intraday messages |
-| `/api/simulation/messages` | GET | Get historical messages |
-| `/api/simulation/messages/select` | POST | Select messages for buying |
-| `/api/simulation/result` | GET | Get final result |
-| `/api/simulation/sync` | POST | Sync results to database |
-| `/api/simulation` | DELETE | Cancel simulation |
-
-**Files**:
-- `src/simulation/__init__.py` - Module exports
-- `src/simulation/models.py` - Data models (phases, state, result)
-- `src/simulation/clock.py` - Virtual time controller
-- `src/simulation/historical_price_service.py` - iFinD historical prices
-- `src/simulation/historical_message_reader.py` - Time-filtered messages
-- `src/simulation/context.py` - Simulation context
-- `src/simulation/position_manager.py` - Isolated position manager
-- `src/simulation/manager.py` - Main orchestrator
-- `src/web/routes.py` - API routes (extended)
-- `config/simulation-config.yaml` - Simulation configuration
-
-**Usage**:
-```bash
-# Start simulation via API
-curl -X POST http://localhost:8000/api/simulation/start \
-  -H "Content-Type: application/json" \
-  -d '{"start_date": "2026-01-29", "num_days": 2}'
-
-# Get current state
-curl http://localhost:8000/api/simulation/state
-
-# Select signals (1-based indices)
-curl -X POST http://localhost:8000/api/simulation/select \
-  -d '{"selected_indices": [1, 2]}'
-
-# Advance to next phase
-curl -X POST http://localhost:8000/api/simulation/advance
-
-# Get final result
-curl http://localhost:8000/api/simulation/result
-```
-
-**Configuration** (`config/simulation-config.yaml`):
-```yaml
-simulation:
-  default_capital: 10000000
-  num_slots: 5
-  premarket_slots: 3
-  intraday_slots: 2
-  min_order_amount: 10000
-  lot_size: 100
-  price_source: "ifind"
-```
-
-**Acceptance Criteria**:
-- [x] SimulationClock with virtual time control
-- [x] HistoricalPriceService with iFinD integration
-- [x] HistoricalMessageReader with time filtering
-- [x] SimulationContext compatible with StrategyContext
-- [x] SimulationPositionManager with transaction tracking
-- [x] SimulationManager orchestrating all components
-- [x] Web API endpoints for simulation control
-- [x] Configuration file
-- [x] P&L calculation and result display
+**Removal Note**: Removed in refactor/cleanup-v15-only. Simulation module was iFinD-dependent and superseded by the unified backtest page. All files in `src/simulation/` deleted.
 
 ---
 
 ### [OA-001] Order Assistant (Real-time News Dashboard)
 
-**Status**: Completed
+**Status**: Removed
 
-**Description**: Real-time news analysis dashboard for manual trading decisions. Shows pre-analyzed messages from the database based on current Beijing time. No position management — purely informational.
-
-**Requirements**:
-- Auto-detect market phase based on Beijing time (pre-market / trading / closed)
-- Pre-market mode (before 9:30): show overnight messages (last trading day 15:00 to now)
-- Trading mode (9:30–15:00): show both pre-market (static) and intraday messages (auto-refresh every 30s)
-- After hours (after 15:00): show both sections statically
-- Same message card design as simulation (sentiment badges, stock tags, confidence %, reasoning)
-- Filter: "仅显示正面消息" toggle per section
-- Pagination: "加载更多" button per section
-- No position management, no buying/selling — read-only display
-
-**Technical Design**:
-- `create_order_assistant_router()` factory function (same pattern as simulation)
-- Lazy-init `MessageReader` singleton for real-time DB access
-- Uses `MessageReader.get_messages_in_range()` and `count_messages_in_range()` directly
-- Phase detection based on `datetime.now(ZoneInfo("Asia/Shanghai"))`
-- Frontend `setInterval` polling for intraday auto-refresh
-- Stock name lookup via `SectorMapper`
-
-**Files**:
-- `src/web/routes.py` - Order assistant routes (`create_order_assistant_router()`)
-- `src/web/templates/order_assistant.html` - Page template
-- `src/web/templates/base.html` - Nav link added
-- `src/web/static/style.css` - Additional styles
-- `src/web/app.py` - Router registration
-
-**API Endpoints**:
-```
-GET  /order-assistant                     - Page (HTML)
-GET  /api/order-assistant/state           - Current phase and time info (JSON)
-GET  /api/order-assistant/messages        - Messages with pagination (JSON)
-     ?mode=premarket|intraday
-     &only_positive=false
-     &limit=50
-     &offset=0
-```
-
-**Acceptance Criteria**:
-- [x] Phase auto-detection based on Beijing time
-- [x] Pre-market message display with analysis
-- [x] Intraday message display with auto-refresh
-- [x] Filter and pagination support
-- [x] Same message card design as simulation
-- [x] Navigation link in header
+**Removal Note**: Removed in refactor/cleanup-v15-only. Order assistant depended on news analysis (STR-003) which was removed. Template and routes deleted.
 
 ---
 

@@ -85,7 +85,7 @@ Communication: Message Queue (Redis/ZeroMQ) for real-time decoupling
 |--------|---------------|------------|
 | **Strategy** | Signal generation, risk rules, position sizing | Yes - strategies can be updated during trading hours |
 | **Trading** | Order execution, position management, P&L tracking | Partial - receives strategy updates in real-time |
-| **Data/Info** | Market data (iFinD), message reading (PostgreSQL) | No - runs continuously |
+| **Data/Info** | Market data (Tushare/tsanghi), fundamentals (PostgreSQL), boards (local JSON) | No - runs continuously |
 
 ### Decoupling Requirements
 
@@ -125,40 +125,50 @@ A-share-quant-trading/
 │   └── datetime-timezone-guide.md  # Date/time & asyncpg TZ handling
 ├── src/
 │   ├── strategy/            # Strategy module
+│   │   ├── models.py        # Shared data models (PriceSnapshot, etc.)
 │   │   ├── base.py          # Base strategy interface
-│   │   ├── engine.py        # Strategy engine with hot-reload
-│   │   ├── signals.py       # Signal generation
-│   │   ├── strategies/      # Concrete strategy implementations
-│   │   ├── analyzers/       # LLM-based analyzers
-│   │   └── filters/         # Stock filters
+│   │   ├── signals.py       # Signal types
+│   │   ├── strategies/
+│   │   │   └── v15_scanner.py  # V15 7-layer funnel + V3 scoring
+│   │   └── filters/         # Stock/quality filters
+│   │       ├── momentum_quality_filter.py  # Volume filter
+│   │       ├── reversal_factor_filter.py   # 冲高回落 filter
+│   │       ├── board_relevance_filter.py   # LLM board relevance
+│   │       └── stock_filter.py             # Exchange filter
 │   ├── trading/             # Trading module
-│   │   ├── executor.py      # Order execution
 │   │   ├── position_manager.py  # Slot-based position management
 │   │   ├── holding_tracker.py   # Overnight holding tracking
-│   │   ├── live/            # Live trading implementation
-│   │   └── paper/           # Paper trading simulation
+│   │   └── repository.py       # Trading DB repository
 │   ├── data/                # Data module
-│   │   ├── models/          # Data models (message.py, etc.)
-│   │   ├── readers/         # Data readers (PostgreSQL message reader)
-│   │   │   └── message_reader.py  # Read messages from external PostgreSQL
-│   │   └── sources/         # iFinD data sources (market data only)
-│   │       └── ifind_limit_up.py  # Limit-up stocks via iFinD
+│   │   ├── clients/         # Data source adapters
+│   │   │   ├── tsanghi_backtest_cache.py   # Backtest cache (OSS)
+│   │   │   ├── iquant_historical_adapter.py # Live historical adapter
+│   │   │   ├── tushare_realtime.py         # Tushare realtime quotes
+│   │   │   └── sina_realtime.py            # Sina realtime (fallback)
+│   │   ├── database/        # Database layers
+│   │   │   └── fundamentals_db.py  # Stock fundamentals reader
+│   │   ├── services/
+│   │   │   └── cache_scheduler.py  # 3am daily cache gap-fill
+│   │   └── sources/
+│   │       └── local_concept_mapper.py  # Board ↔ stock mapping
+│   ├── web/                 # Web UI
+│   │   ├── app.py           # FastAPI application
+│   │   ├── routes.py        # Main routes + backtest + settings
+│   │   ├── iquant_routes.py # iQuant live trading API
+│   │   └── templates/       # Jinja2 templates
 │   └── common/              # Shared utilities
-│       ├── coordinator.py   # Event-driven module coordination
+│       ├── config.py        # Configuration + credential management
+│       ├── feishu_bot.py    # Feishu notifications
 │       ├── scheduler.py     # Trading session scheduler
-│       ├── state_manager.py # State persistence and recovery
-│       ├── llm_service.py   # LLM integration (Silicon Flow)
-│       ├── user_interaction.py  # Command-line user interaction
-│       └── config.py        # Configuration management
-├── tests/
-│   ├── unit/
-│   └── integration/
+│       └── pending_store.py # Pending confirmation store
+├── data/                    # Runtime data files
+│   ├── sectors.json         # THS board names
+│   └── board_constituents.json  # Board → stock mapping
 ├── config/
-│   ├── main-config.yaml     # System configuration
-│   ├── database-config.yaml # PostgreSQL connection config
-│   └── news-strategy-config.yaml  # Strategy parameters
+│   └── database-config.yaml # PostgreSQL connection config
 ├── scripts/
-│   └── main.py              # Main entry point
+│   ├── iquant_live.py       # iQuant live trading script
+│   └── audit_trading_safety.py  # Safety audit
 └── .github/
     └── workflows/
         └── ci.yml
@@ -188,7 +198,7 @@ Before starting any development task:
 | Message Data | PostgreSQL (external, read-only) | Messages streamed by external collector |
 | Historical Data | PostgreSQL + TimescaleDB (optional) | Time-series optimized |
 | Config Format | YAML | Human-readable, supports hot-reload |
-| Market Data SDK | THS iFinD | A-share real-time and historical data |
+| Market Data | Tushare Pro (realtime), tsanghi/baostock (backtest) | A-share real-time and historical data |
 | PostgreSQL Client | asyncpg | Async PostgreSQL access |
 
 ## Environment Management (uv)
