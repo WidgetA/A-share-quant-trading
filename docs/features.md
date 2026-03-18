@@ -34,6 +34,7 @@
 | 0.10.2 | 2026-02-20 | - | STR-004: Sync docs with code (fix scoring formula, add Step 5.5/5.6/limit-up docs) |
 | 0.10.3 | 2026-03-05 | - | STR-004: Add Step 5.7 LLM board relevance filter + flip scoring to +Z(gfo)+Z(amp) + board leader bonus |
 | 0.11.0 | 2026-03-18 | - | SYS-005/STR-005: Replace Strategy Status with iQuant connection status on dashboard, remove strategy controller |
+| 0.11.1 | 2026-03-18 | - | SYS-005: Inline download log + calendar on backtest page, fix download_prices call, fix monitoring startup order |
 | 0.11.1 | 2026-03-18 | - | SYS-005: Isolate dashboard and iQuant trading caches — dashboard download no longer affects live trading |
 
 ---
@@ -304,13 +305,18 @@ if bot.is_configured():
 **API Endpoints**:
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `GET /` | GET | Main dashboard (iQuant status, positions, pending confirmations) |
+| `GET /` | GET | Main dashboard (iQuant connection status, positions, pending confirmations) |
+| `GET /backtest` | GET | Backtest page (single-day scan, range backtest, CSV analysis) |
 | `GET /confirm/{id}` | GET | Confirmation page |
 | `GET /api/pending` | GET | List pending confirmations |
 | `GET /api/pending/{id}` | GET | Get confirmation details |
 | `POST /api/pending/{id}/submit` | POST | Submit user decision |
 | `GET /api/status` | GET | Health check |
 | `GET /api/iquant/status` | GET | iQuant connection status (no auth) |
+| `GET /api/momentum/tsanghi-cache-status` | GET | Tsanghi cache status (polling) |
+| `POST /api/momentum/tsanghi-prepare` | POST | Download tsanghi data (SSE stream) |
+| `POST /api/momentum/backtest` | POST | Single-day V15 scan |
+| `POST /api/momentum/combined-analysis` | POST | Range backtest (SSE stream) |
 
 **Configuration** (Environment Variables):
 | Variable | Default | Description |
