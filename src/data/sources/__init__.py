@@ -9,7 +9,6 @@ from .announcement_content import (
     AnnouncementContentFetcher,
     create_content_fetcher_from_config,
 )
-from .ifind_limit_up import IFinDLimitUpSource
 from .sector_mapper import SectorData, SectorInfo, SectorMapper
 
 __all__ = [
@@ -22,6 +21,4 @@ __all__ = [
     "AnnouncementContent",
     "AnnouncementContentFetcher",
     "create_content_fetcher_from_config",
-    # iFinD
-    "IFinDLimitUpSource",
 ]
