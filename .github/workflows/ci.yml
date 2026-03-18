@@ -2,7 +2,7 @@ name: CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor/cleanup-v15-only]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -78,8 +78,8 @@ jobs:
 
   build-and-push:
     needs: [lint, test]
-    # Only run when pushing to main AND ACR secrets are configured
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
+    # Build and push on main or refactor branch push (when ACR secrets are configured)
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/cleanup-v15-only') && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,13 +94,22 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=test" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:latest
+            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ steps.tag.outputs.tag }}
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ github.sha }}
           build-args: |
             GIT_COMMIT=${{ github.sha }}

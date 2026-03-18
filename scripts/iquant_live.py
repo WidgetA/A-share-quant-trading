@@ -44,7 +44,7 @@ def _iquant_code(code):
 def _get_available_cash(ContextInfo):
     """查询可用资金。柜台未连接时返回 0。"""
     try:
-        acct = get_trade_detail_data(ContextInfo.accID, 'account', 'stock')
+        acct = get_trade_detail_data(ContextInfo.accID, 'stock', 'account')
         if acct:
             obj = acct[0]
             # 首次成功时打印字段名, 方便排查
@@ -63,7 +63,7 @@ def _get_available_cash(ContextInfo):
 def _get_position_volume(ContextInfo, code):
     """查询某只股票的可卖数量。"""
     try:
-        positions = get_trade_detail_data(ContextInfo.accID, 'position', 'stock')
+        positions = get_trade_detail_data(ContextInfo.accID, 'stock', 'position')
         for pos in (positions or []):
             pos_code = pos.m_strInstrumentID
             if pos_code == code or _iquant_code(pos_code.split(".")[0]) == code:
