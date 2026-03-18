@@ -788,8 +788,8 @@ def create_momentum_router() -> APIRouter:
                             next_date_key = next_trade_date.strftime("%Y-%m-%d")
                             next_day_data = tsanghi_cache.get_daily(rec.stock_code, next_date_key)
                             sell_price_val = (
-                                float(next_day_data["open"])
-                                if next_day_data and next_day_data.get("open")
+                                float(next_day_data.open)
+                                if next_day_data and next_day_data.open
                                 else 0.0
                             )
 
@@ -1074,8 +1074,8 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
     minute_hits = 0
 
     for code, day in all_daily.items():
-        open_price = day.get("open", 0)
-        prev_close = day.get("preClose", 0)
+        open_price = day.open
+        prev_close = day.preClose
         if prev_close <= 0 or open_price <= 0:
             continue
 
@@ -1247,7 +1247,7 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
             if not q.is_trading:
                 continue
             cached_day = prev_daily.get(code)
-            prev_close = cached_day["close"] if cached_day else 0.0
+            prev_close = cached_day.close if cached_day else 0.0
             if prev_close <= 0:
                 skipped_no_prev += 1
                 continue
@@ -1959,18 +1959,18 @@ def create_trade_backtest_router() -> APIRouter:
 
                 buy_day = tsanghi_cache.get_daily(code, buy_date)
                 sell_day = tsanghi_cache.get_daily(code, sell_date)
-                if not buy_day or buy_day.get("open") is None:
+                if not buy_day or buy_day.open is None:
                     raise HTTPException(
                         400,
                         f"第 {i} 行: 缓存中无 {code} 在 {buy_date} 的价格数据",
                     )
-                if not sell_day or sell_day.get("close") is None:
+                if not sell_day or sell_day.close is None:
                     raise HTTPException(
                         400,
                         f"第 {i} 行: 缓存中无 {code} 在 {sell_date} 的价格数据",
                     )
-                buy_price = float(buy_day["open"])
-                sell_price = float(sell_day["close"])
+                buy_price = float(buy_day.open)
+                sell_price = float(sell_day.close)
                 if buy_price <= 0:
                     raise HTTPException(
                         400,

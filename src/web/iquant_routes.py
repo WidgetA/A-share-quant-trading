@@ -439,7 +439,7 @@ def create_iquant_router() -> APIRouter:
         if cache and cache.is_ready:
             all_daily = cache.get_all_codes_with_daily(prev_trade_date)
             for code, daily in all_daily.items():
-                close_val = daily.get("close")
+                close_val = daily.close
                 if close_val and close_val > 0:
                     prev_closes[code] = close_val
 
