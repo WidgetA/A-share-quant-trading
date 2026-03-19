@@ -713,9 +713,10 @@ def create_iquant_router() -> APIRouter:
             for h in holdings:
                 buy_date = h.get("buy_date", "?")
                 lines.append(f"  - {h['code']} {h.get('name', '')} (买入: {buy_date})")
-            lines.append("今日将跳过扫描(持仓中)")
+            lines.append("扫描仍将执行(09:38-10:00)，有推荐会推送但不下单")
         else:
             lines.append("今日将执行V15扫描(09:38-10:00)")
+            lines.append("无持仓，有推荐将自动下单")
 
         msg = "\n".join(lines)
         logger.info("V15 readiness report sent")
@@ -986,22 +987,29 @@ def create_iquant_router() -> APIRouter:
         _state["executed_signals"].append(found)
 
         if found["type"] == "buy":
-            _state["holdings"].append(
-                {
-                    "code": found["stock_code"],
-                    "name": found.get("stock_name", ""),
-                    "buy_date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
-                    "entry_price": found.get("latest_price", 0.0),
-                    "marked_sell_today": False,
-                    "early_exit": False,
-                }
-            )
-            _save_holdings(_state["holdings"])
-            logger.info(
-                f"V15: BUY acked {found['stock_code']} @ {found.get('latest_price', '?')}, "
-                f"added to holdings ({len(_state['holdings'])} total)"
-            )
-            await _notify_feishu_ack(found)
+            # Prevent duplicate holdings for the same stock
+            already_held = any(h["code"] == found["stock_code"] for h in _state["holdings"])
+            if already_held:
+                logger.warning(
+                    f"V15: BUY acked {found['stock_code']} but already in holdings, skipping"
+                )
+            else:
+                _state["holdings"].append(
+                    {
+                        "code": found["stock_code"],
+                        "name": found.get("stock_name", ""),
+                        "buy_date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
+                        "entry_price": found.get("latest_price", 0.0),
+                        "marked_sell_today": False,
+                        "early_exit": False,
+                    }
+                )
+                _save_holdings(_state["holdings"])
+                logger.info(
+                    f"V15: BUY acked {found['stock_code']} @ {found.get('latest_price', '?')}, "
+                    f"added to holdings ({len(_state['holdings'])} total)"
+                )
+                await _notify_feishu_ack(found)
         elif found["type"] == "sell":
             _state["holdings"] = [h for h in _state["holdings"] if h["code"] != found["stock_code"]]
             _save_holdings(_state["holdings"])
