@@ -601,15 +601,6 @@ class TsanghiBacktestCache:
         # Derive preClose from previous trading day's close for each stock.
         self._compute_pre_close()
 
-        # Checkpoint: save daily data to OSS so it survives restarts
-        if self._daily and check_oss_available():
-            try:
-                self._recalculate_date_range()
-                await self.save_to_oss()
-                logger.warning(f"OSS checkpoint after daily phase: {len(self._daily)} stocks")
-            except Exception:
-                logger.warning("OSS checkpoint failed", exc_info=True)
-
         # --- Phase 2: Minute data from baostock (9:35 + 9:40 bars) ---
         codes = list(self._daily.keys())
         self._stock_codes = codes
@@ -741,6 +732,13 @@ class TsanghiBacktestCache:
 
                 if day_has_data:
                     trading_days_found += 1
+                    # Checkpoint every 50 trading days
+                    if trading_days_found % 50 == 0 and check_oss_available():
+                        try:
+                            self._recalculate_date_range()
+                            await self.save_to_oss()
+                        except Exception:
+                            pass
 
                 if progress_cb:
                     elapsed = (current - dl_start).days + 1
@@ -876,12 +874,23 @@ class TsanghiBacktestCache:
 
         thread = threading.Thread(target=_thread_wrapper, daemon=True)
         thread.start()
+        last_oss_save = 0
+        oss_available = bool(check_oss_available())
         while thread.is_alive():
             await asyncio.sleep(2)
             if cancel_event and cancel_event.is_set():
                 break
+            cur_done = done[0]
             if progress_cb:
-                await _maybe_await(progress_cb("minute", done[0], total))
+                await _maybe_await(progress_cb("minute", cur_done, total))
+            # Checkpoint to OSS every new stock
+            if oss_available and cur_done > last_oss_save:
+                try:
+                    self._recalculate_date_range()
+                    await self.save_to_oss()
+                    last_oss_save = cur_done
+                except Exception:
+                    pass
         thread.join(timeout=5)
 
         if thread_exc:
