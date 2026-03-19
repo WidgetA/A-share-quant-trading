@@ -478,6 +478,11 @@ def create_momentum_router() -> APIRouter:
                     pass
 
             cache = existing or TsanghiBacktestCache()
+            # Save reference immediately — cache is mutable, so
+            # background download populates it in-place. Even if
+            # the browser disconnects (finally block may not run),
+            # partial data is preserved for resume.
+            request.app.state.tsanghi_cache = cache
             resume_daily = len(cache._daily)
             resume_minute = len(cache._minute)
 
@@ -572,15 +577,6 @@ def create_momentum_router() -> APIRouter:
                 logger.error(f"Tsanghi download error: {e}", exc_info=True)
                 yield _sse({"type": "error", "message": str(e)[:200]})
             finally:
-                # Always save partial cache so next download can resume
-                d_count = len(cache._daily)
-                m_count = len(cache._minute)
-                logger.info(
-                    f"download_stream finally: saving partial cache "
-                    f"({d_count} daily, {m_count} minute)"
-                )
-                if d_count or m_count:
-                    request.app.state.tsanghi_cache = cache
                 request.app.state.tsanghi_cache_loading = False
                 request.app.state.tsanghi_download_task = None
                 request.app.state.tsanghi_download_cancel = None
