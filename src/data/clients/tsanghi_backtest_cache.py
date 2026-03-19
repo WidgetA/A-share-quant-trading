@@ -741,7 +741,7 @@ class TsanghiBacktestCache:
                         try:
                             self._recalculate_date_range()
                             await self.save_to_oss()
-                        except Exception:
+                        except (OSError, RuntimeError):
                             logger.warning("OSS daily checkpoint failed", exc_info=True)
 
                 if progress_cb:
@@ -893,7 +893,7 @@ class TsanghiBacktestCache:
                     self._recalculate_date_range()
                     await self.save_to_oss()
                     last_oss_save = cur_done
-                except Exception:
+                except (OSError, RuntimeError):
                     logger.warning("OSS minute checkpoint failed", exc_info=True)
         thread.join(timeout=5)
 
