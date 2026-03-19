@@ -245,7 +245,13 @@ async function checkCacheStatus() {
 
         if (d.status === 'ready') {
             dot.className = 'dot ready';
-            text.textContent = `缓存就绪: ${d.daily_stocks || '?'} 只股票, ${d.daily_days || '?'} 天 (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
+            const parts = [`日线 ${d.daily_stocks}只 ${d.daily_days}天`];
+            if (d.minute_stocks > 0) {
+                parts.push(`分钟线 ${d.minute_stocks}只`);
+            } else {
+                parts.push('分钟线 无');
+            }
+            text.textContent = `缓存就绪: ${parts.join(', ')} (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
             controls.style.display = '';
             btn.textContent = '补充下载';
         } else if (d.status === 'loading') {
