@@ -601,6 +601,15 @@ class TsanghiBacktestCache:
         # Derive preClose from previous trading day's close for each stock.
         self._compute_pre_close()
 
+        # Checkpoint: save daily data to OSS so it survives restarts
+        if self._daily and check_oss_available():
+            try:
+                self._recalculate_date_range()
+                await self.save_to_oss()
+                logger.warning(f"OSS checkpoint after daily phase: {len(self._daily)} stocks")
+            except Exception:
+                logger.warning("OSS checkpoint failed", exc_info=True)
+
         # --- Phase 2: Minute data from baostock (9:35 + 9:40 bars) ---
         codes = list(self._daily.keys())
         self._stock_codes = codes
