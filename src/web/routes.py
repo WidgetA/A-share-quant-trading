@@ -405,7 +405,7 @@ def create_momentum_router() -> APIRouter:
 
         ex_d = len(existing._daily) if existing else 0
         ex_m = len(existing._minute) if existing else 0
-        logger.info(
+        logger.warning(
             f"tsanghi-prepare: existing={existing is not None} "
             f"({ex_d} daily, {ex_m} minute), force={body.force}"
         )
