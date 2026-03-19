@@ -515,6 +515,21 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
+            async def _save_partial_oss():
+                """Save partial cache to OSS so it survives restarts."""
+                try:
+                    if check_oss_available() and (
+                        cache._daily or cache._minute
+                    ):
+                        await cache.save_to_oss()
+                        logger.warning(
+                            f"Partial cache saved to OSS: "
+                            f"{len(cache._daily)} daily, "
+                            f"{len(cache._minute)} minute"
+                        )
+                except Exception:
+                    logger.warning("Failed to save partial cache to OSS", exc_info=True)
+
             async def _run_download():
                 try:
                     await cache.download_prices(
@@ -526,8 +541,10 @@ def create_momentum_router() -> APIRouter:
                     queue.put_nowait(None)  # sentinel: success
                 except asyncio.CancelledError:
                     cancel_event.set()
+                    await _save_partial_oss()
                     queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
                 except Exception as e:
+                    await _save_partial_oss()
                     queue.put_nowait({"type": "error", "message": str(e)[:200]})
 
             request.app.state.tsanghi_cache_loading = True
