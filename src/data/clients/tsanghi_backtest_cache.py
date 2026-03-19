@@ -644,10 +644,24 @@ class TsanghiBacktestCache:
         await client.start()
 
         try:
-            # Resume support: find dates that already have daily data
+            # Resume support: skip entire date range already processed
             existing_daily_dates: set[str] = set()
             for code_dates in self._daily.values():
                 existing_daily_dates.update(code_dates.keys())
+
+            if existing_daily_dates:
+                latest_cached = max(existing_daily_dates)
+                latest_date = datetime.strptime(
+                    latest_cached, "%Y-%m-%d"
+                ).date()
+                if latest_date >= dl_start:
+                    skipped = (latest_date - dl_start).days + 1
+                    dl_start = latest_date + timedelta(days=1)
+                    logger.warning(
+                        f"Daily resume: skipping {skipped} days "
+                        f"(cached up to {latest_cached}), "
+                        f"starting from {dl_start}"
+                    )
 
             # Enumerate calendar dates and call API for each
             total_days = (end_date - dl_start).days + 1

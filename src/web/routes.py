@@ -353,7 +353,7 @@ def create_momentum_router() -> APIRouter:
         """Return tsanghi cache state for frontend polling."""
         loading = getattr(request.app.state, "tsanghi_cache_loading", False)
         cache = getattr(request.app.state, "tsanghi_cache", None)
-        if loading and cache is None:
+        if loading:
             return {"status": "loading"}
         if cache is None:
             return {"status": "empty"}
@@ -368,6 +368,11 @@ def create_momentum_router() -> APIRouter:
                 )
                 break
 
+        # Count trading days
+        all_dates: set[str] = set()
+        for dates in cache._daily.values():
+            all_dates.update(dates.keys())
+
         minute_gaps = cache.find_minute_gaps()
         gap_ranges = [[str(s), str(e)] for s, e in minute_gaps]
 
@@ -376,6 +381,7 @@ def create_momentum_router() -> APIRouter:
             "start_date": str(cache._start_date) if cache._start_date else None,
             "end_date": str(cache._end_date) if cache._end_date else None,
             "daily_stocks": len(cache._daily),
+            "daily_days": len(all_dates),
             "minute_stocks": len(cache._minute),
             "minute_gaps": gap_ranges,
             "has_gaps": len(gap_ranges) > 0,
