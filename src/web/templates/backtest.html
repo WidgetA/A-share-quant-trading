@@ -143,7 +143,6 @@
             <span style="color:#888;">~</span>
             <input type="date" id="cacheEnd" title="结束日期" />
             <button class="btn btn-secondary btn-sm" id="cacheDownloadBtn" onclick="startCacheDownloadFromUI()">下载数据</button>
-            <button class="btn btn-danger btn-sm" id="cacheStopBtn" onclick="stopCacheDownload()" style="display:none;">停止下载</button>
         </div>
     </div>
 
@@ -151,7 +150,10 @@
     <div class="cache-download-panel" id="cacheDownloadPanel">
         <div class="progress-bar-container" id="cacheProgress">
             <div class="progress-bar"><div class="progress-bar-fill" id="cacheProgressFill"></div></div>
-            <div class="progress-text" id="cacheProgressText"></div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <div class="progress-text" id="cacheProgressText" style="flex:1;"></div>
+                <button class="btn btn-danger btn-sm" id="cacheStopBtn" onclick="stopCacheDownload()" style="display:none;">停止下载</button>
+            </div>
         </div>
         <div class="download-log" id="downloadLog"></div>
     </div>
