@@ -518,7 +518,7 @@ def create_momentum_router() -> APIRouter:
             async def _save_partial_oss():
                 """Save partial cache to OSS so it survives restarts."""
                 try:
-                    if check_oss_available() and (cache._daily or cache._minute):
+                    if check_oss_available() is None and (cache._daily or cache._minute):
                         await cache.save_to_oss()
                         logger.warning(
                             f"Partial cache saved to OSS: "
@@ -585,7 +585,7 @@ def create_momentum_router() -> APIRouter:
                     yield _sse(event)
 
                 # Save to OSS if available
-                if check_oss_available():
+                if check_oss_available() is None:
                     yield _sse({"type": "status", "message": "保存到 OSS..."})
                     await cache.save_to_oss()
 

@@ -737,7 +737,7 @@ class TsanghiBacktestCache:
                 if day_has_data:
                     trading_days_found += 1
                     # Checkpoint every 50 trading days
-                    if trading_days_found % 50 == 0 and check_oss_available():
+                    if trading_days_found % 50 == 0 and check_oss_available() is None:
                         try:
                             self._recalculate_date_range()
                             await self.save_to_oss()
@@ -879,7 +879,7 @@ class TsanghiBacktestCache:
         thread = threading.Thread(target=_thread_wrapper, daemon=True)
         thread.start()
         last_oss_save = 0
-        oss_available = bool(check_oss_available())
+        oss_available = check_oss_available() is None
         while thread.is_alive():
             await asyncio.sleep(2)
             if cancel_event and cancel_event.is_set():
