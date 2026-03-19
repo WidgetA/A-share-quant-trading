@@ -413,9 +413,13 @@ class TsanghiBacktestCache:
             # Save data FIRST, meta LAST. If upload is interrupted between
             # files, meta still points to the old range — next load will detect
             # the gap and re-download instead of silently missing data.
+            # Snapshot dicts to avoid "dictionary changed size during
+            # iteration" when download thread modifies them concurrently.
+            daily_snapshot = dict(self._daily)
+            minute_snapshot = dict(self._minute)
             for name, obj in [
-                ("daily.pkl.gz", self._daily),
-                ("minute.pkl.gz", self._minute),
+                ("daily.pkl.gz", daily_snapshot),
+                ("minute.pkl.gz", minute_snapshot),
                 ("meta.pkl.gz", meta),
             ]:
                 # Stream: pickle → gzip → temp file (no full copy in RAM)
@@ -738,7 +742,7 @@ class TsanghiBacktestCache:
                             self._recalculate_date_range()
                             await self.save_to_oss()
                         except Exception:
-                            pass
+                            logger.warning("OSS daily checkpoint failed", exc_info=True)
 
                 if progress_cb:
                     elapsed = (current - dl_start).days + 1
@@ -890,7 +894,7 @@ class TsanghiBacktestCache:
                     await self.save_to_oss()
                     last_oss_save = cur_done
                 except Exception:
-                    pass
+                    logger.warning("OSS minute checkpoint failed", exc_info=True)
         thread.join(timeout=5)
 
         if thread_exc:
