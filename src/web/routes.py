@@ -471,6 +471,8 @@ def create_momentum_router() -> APIRouter:
                     pass
 
             cache = existing or TsanghiBacktestCache()
+            resume_daily = len(cache._daily)
+            resume_minute = len(cache._minute)
 
             def on_progress(phase: str, current: int, total: int):
                 if phase == "init":
@@ -511,6 +513,13 @@ def create_momentum_router() -> APIRouter:
             request.app.state.tsanghi_download_cancel = cancel_event
 
             try:
+                if resume_daily or resume_minute:
+                    yield _sse(
+                        {
+                            "type": "status",
+                            "message": f"断点续传: 已有 {resume_daily} 只日线, {resume_minute} 只分钟线缓存",
+                        }
+                    )
                 yield _sse(
                     {
                         "type": "status",
@@ -553,6 +562,9 @@ def create_momentum_router() -> APIRouter:
                 logger.error(f"Tsanghi download error: {e}", exc_info=True)
                 yield _sse({"type": "error", "message": str(e)[:200]})
             finally:
+                # Always save partial cache so next download can resume
+                if cache._daily or cache._minute:
+                    request.app.state.tsanghi_cache = cache
                 request.app.state.tsanghi_cache_loading = False
                 request.app.state.tsanghi_download_task = None
                 request.app.state.tsanghi_download_cancel = None
