@@ -40,14 +40,16 @@
 
 /* Cache status */
 .cache-bar {
-    display: flex; align-items: center; gap: 1rem; padding: 0.6rem 1rem;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
+    padding: 0.6rem 1rem;
     background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 1.5rem; font-size: 0.85rem;
 }
-.cache-bar .dot { width: 8px; height: 8px; border-radius: 50%; }
+.cache-bar .cache-status { display: flex; align-items: center; gap: 0.5rem; }
+.cache-bar .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .cache-bar .dot.ready { background: #4caf50; }
 .cache-bar .dot.loading { background: #ff9800; }
 .cache-bar .dot.empty { background: #ccc; }
-.cache-download-controls { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+.cache-download-controls { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; flex-shrink: 0; }
 .cache-download-controls input[type="date"] { padding: 0.3rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.8rem; }
 
 /* Download panel (progress + log) */
@@ -136,8 +138,10 @@
 
     <!-- Cache Status Bar -->
     <div class="cache-bar" id="cacheBar">
-        <span class="dot empty" id="cacheDot"></span>
-        <span id="cacheText">检查缓存状态...</span>
+        <div class="cache-status">
+            <span class="dot empty" id="cacheDot"></span>
+            <span id="cacheText">检查缓存状态...</span>
+        </div>
         <div class="cache-download-controls" id="cacheControls" style="display:none;">
             <input type="date" id="cacheStart" value="2024-01-01" title="起始日期" />
             <span style="color:#888;">~</span>
