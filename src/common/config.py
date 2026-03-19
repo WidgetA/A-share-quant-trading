@@ -511,6 +511,34 @@ def get_aliyun_api_key_source() -> str:
     return "not_configured"
 
 
+# --- Cache Scheduler Toggle ---
+
+_cache_scheduler_enabled_override: bool | None = None
+CACHE_SCHEDULER_FILE = PROJECT_ROOT / "data" / "cache_scheduler_enabled.txt"
+
+
+def get_cache_scheduler_enabled() -> bool:
+    """Return whether the cache scheduler is enabled. Default: True."""
+    global _cache_scheduler_enabled_override
+    if _cache_scheduler_enabled_override is not None:
+        return _cache_scheduler_enabled_override
+    if CACHE_SCHEDULER_FILE.exists():
+        val = CACHE_SCHEDULER_FILE.read_text(encoding="utf-8").strip().lower()
+        if val in ("false", "0", "off", "no"):
+            return False
+        return True
+    return True
+
+
+def set_cache_scheduler_enabled(enabled: bool) -> None:
+    """Set cache scheduler enabled state and persist to disk."""
+    global _cache_scheduler_enabled_override
+    _cache_scheduler_enabled_override = enabled
+    CACHE_SCHEDULER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_SCHEDULER_FILE.write_text(str(enabled).lower(), encoding="utf-8")
+    logger.info(f"Cache scheduler {'enabled' if enabled else 'disabled'} via web UI")
+
+
 def load_config(config_path: str | Path) -> Config:
     """
     Load configuration from a YAML file.

@@ -96,6 +96,23 @@
         </div>
     </section>
 
+    <!-- Cache Scheduler Toggle -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <div class="toggle-row">
+                <div class="toggle-info">
+                    <h3>缓存定时更新</h3>
+                    <p class="settings-desc">每日凌晨 3 点自动补全历史缓存数据（日线 + 分钟线）</p>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="cacheSchedulerToggle" onchange="toggleCacheScheduler(this)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="token-message hidden" id="cacheSchedulerMessage"></div>
+        </div>
+    </section>
+
     <!-- iQuant API Key Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -223,7 +240,32 @@ function generateIquantKey() {
 }
 function saveIquantKey() { saveKey('/api/settings/iquant-key', 'iquantInput', 'iquantMessage', 'iquantSaveBtn', loadIquantStatus, '，请将此 Key 填入 iQuant 脚本的 API_KEY 变量'); }
 
+// Cache Scheduler toggle
+async function loadCacheSchedulerStatus() {
+    try {
+        const resp = await fetch('/api/settings/cache-scheduler');
+        const data = await resp.json();
+        document.getElementById('cacheSchedulerToggle').checked = data.enabled;
+    } catch (e) {
+        console.error('Failed to load cache scheduler status', e);
+    }
+}
+async function toggleCacheScheduler(el) {
+    try {
+        const resp = await fetch('/api/settings/cache-scheduler', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: el.checked})
+        });
+        const data = await resp.json();
+        showMessage('cacheSchedulerMessage', data.message, data.success);
+    } catch (e) {
+        showMessage('cacheSchedulerMessage', '操作失败: ' + e.message, false);
+        el.checked = !el.checked;
+    }
+}
+
 // Load all on page load
+loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
 loadAliyunStatus();

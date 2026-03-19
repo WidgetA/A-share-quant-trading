@@ -81,6 +81,13 @@ class CacheScheduler:
                 )
                 await asyncio.sleep(wait_secs)
 
+                # Check if scheduler is enabled
+                from src.common.config import get_cache_scheduler_enabled
+
+                if not get_cache_scheduler_enabled():
+                    logger.info("CacheScheduler: disabled via settings, skipping this run")
+                    continue
+
                 try:
                     await self.check_and_fill_gaps()
                 except Exception as e:

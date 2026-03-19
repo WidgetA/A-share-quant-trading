@@ -1940,6 +1940,27 @@ def create_settings_router() -> APIRouter:
         except Exception as e:
             return {"success": False, "message": f"验证失败: {e}"}
 
+    # === CACHE SCHEDULER TOGGLE ===
+
+    @router.get("/api/settings/cache-scheduler")
+    async def get_cache_scheduler_status():
+        from src.common.config import get_cache_scheduler_enabled
+
+        return {"enabled": get_cache_scheduler_enabled()}
+
+    @router.post("/api/settings/cache-scheduler")
+    async def set_cache_scheduler_status(request: Request):
+        from src.common.config import set_cache_scheduler_enabled
+
+        body = await request.json()
+        enabled = bool(body.get("enabled", True))
+        set_cache_scheduler_enabled(enabled)
+        return {
+            "success": True,
+            "enabled": enabled,
+            "message": f"缓存定时更新已{'开启' if enabled else '关闭'}",
+        }
+
     # === ALL KEYS STATUS ===
 
     @router.get("/api/settings/keys-status")
