@@ -17,6 +17,18 @@ CACHE_START_DATE = date(2024, 1, 1)
 SCHEDULE_HOUR = 3  # 3am Beijing time
 
 
+async def _notify_feishu(message: str) -> None:
+    """Best-effort Feishu notification, never raises."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if bot.is_configured():
+            await bot.send_message(message)
+    except Exception:
+        logger.warning("Failed to send Feishu cache scheduler notification", exc_info=True)
+
+
 def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
     """Get trading days via AKShare, fallback to weekdays."""
     try:
@@ -73,6 +85,7 @@ class CacheScheduler:
                     await self.check_and_fill_gaps()
                 except Exception as e:
                     logger.error(f"CacheScheduler gap-fill failed: {e}", exc_info=True)
+                    await _notify_feishu(f"[缓存补全] 执行异常\n{e}")
 
         except asyncio.CancelledError:
             logger.info("CacheScheduler cancelled")
@@ -107,17 +120,45 @@ class CacheScheduler:
                     pass
 
         missing = [d for d in all_trading_days if d not in cached_dates]
-        if not missing:
+
+        # Also check for minute data gaps (daily exists but minute sparse/missing)
+        minute_gaps = cache.find_minute_gaps()
+
+        if not missing and not minute_gaps:
             logger.info("CacheScheduler: no gaps found, cache is complete")
             return {"gaps_found": 0, "dates_downloaded": 0}
 
-        logger.info(f"CacheScheduler: found {len(missing)} missing dates, downloading...")
+        # Merge daily gaps + minute gaps into unified download ranges
+        all_gaps: list[tuple[date, date]] = []
+        if missing:
+            all_gaps.extend(_group_contiguous_dates(missing))
+        if minute_gaps:
+            all_gaps.extend(minute_gaps)
 
-        # Group contiguous dates into ranges to minimize download calls
-        ranges = _group_contiguous_dates(missing)
+        # Deduplicate and sort
+        if len(all_gaps) > 1:
+            all_gaps.sort()
+            merged: list[tuple[date, date]] = [all_gaps[0]]
+            for s, e in all_gaps[1:]:
+                prev_s, prev_e = merged[-1]
+                if s <= prev_e + timedelta(days=3):
+                    merged[-1] = (prev_s, max(prev_e, e))
+                else:
+                    merged.append((s, e))
+            all_gaps = merged
+
+        parts = []
+        if missing:
+            parts.append(f"日线缺失: {len(missing)} 天")
+        if minute_gaps:
+            parts.append(f"分钟线缺失: {len(minute_gaps)} 段")
+        gap_summary = ", ".join(parts)
+
+        logger.info(f"CacheScheduler: {gap_summary}, downloading...")
+        await _notify_feishu(f"[缓存补全] 开始补全\n{gap_summary}\n下载范围: {len(all_gaps)} 段")
 
         total_downloaded = 0
-        for range_start, range_end in ranges:
+        for range_start, range_end in all_gaps:
             try:
                 logger.info(f"CacheScheduler: downloading {range_start} ~ {range_end}")
 
@@ -147,10 +188,33 @@ class CacheScheduler:
             except Exception as e:
                 logger.error(f"CacheScheduler: OSS save failed: {e}", exc_info=True)
 
+        total_ranges = len(all_gaps)
         logger.info(
-            f"CacheScheduler: done. {len(missing)} gaps found, {total_downloaded} dates downloaded."
+            f"CacheScheduler: done. {gap_summary}, "
+            f"{total_downloaded}/{total_ranges} ranges downloaded."
         )
-        return {"gaps_found": len(missing), "dates_downloaded": total_downloaded}
+
+        # Re-check minute gaps after download to see if they're resolved
+        remaining_minute_gaps = cache.find_minute_gaps()
+
+        # Data integrity validation
+        integrity_warnings = cache.validate_integrity()
+
+        failed_ranges = total_ranges - total_downloaded
+        if failed_ranges > 0 or remaining_minute_gaps or integrity_warnings:
+            fail_parts = []
+            if failed_ranges > 0:
+                fail_parts.append(f"下载失败: {failed_ranges}/{total_ranges} 段")
+            if remaining_minute_gaps:
+                fail_parts.append(f"分钟线仍缺失: {len(remaining_minute_gaps)} 段")
+            for w in integrity_warnings:
+                fail_parts.append(w)
+            await _notify_feishu("[缓存补全] 部分失败\n" + "\n".join(fail_parts))
+        else:
+            await _notify_feishu(f"[缓存补全] 补全成功\n已补全: {total_downloaded} 段")
+
+        total_gaps = len(missing) + len(minute_gaps)
+        return {"gaps_found": total_gaps, "dates_downloaded": total_downloaded}
 
 
 def _group_contiguous_dates(dates: list[date]) -> list[tuple[date, date]]:

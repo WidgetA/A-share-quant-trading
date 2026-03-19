@@ -325,6 +325,64 @@ class TsanghiBacktestCache:
                     f" (daily=[{d_lo}~{d_hi}], minute=[{m_lo}~{m_hi}])"
                 )
 
+    # --- Data integrity validation ---
+
+    # Expected main-board stock count range (00xxxx + 60xxxx)
+    _MIN_EXPECTED_STOCKS = 2500
+    _MAX_EXPECTED_STOCKS = 5000
+    # Min stocks per trading day (below this = suspicious data)
+    _MIN_STOCKS_PER_DAY = 1000
+    # Minute coverage: fraction of daily stocks that must have minute data
+    _MIN_MINUTE_COVERAGE = 0.5
+
+    def validate_integrity(self) -> list[str]:
+        """Run all data integrity checks. Returns list of warning messages (empty = OK).
+
+        Checks:
+        1. Total stock count in expected range (~2500-5000 for main board)
+        2. Per-day stock count consistency (no sudden drops)
+        3. Minute data coverage vs daily data
+        """
+        warnings: list[str] = []
+
+        # 1. Total stock count
+        total_stocks = len(self._daily)
+        if total_stocks < self._MIN_EXPECTED_STOCKS:
+            warnings.append(f"日线股票数偏少: {total_stocks} (预期 >={self._MIN_EXPECTED_STOCKS})")
+        elif total_stocks > self._MAX_EXPECTED_STOCKS:
+            warnings.append(
+                f"日线股票数异常多: {total_stocks} (预期 <={self._MAX_EXPECTED_STOCKS})"
+            )
+
+        # 2. Per-day stock count consistency
+        day_counts: dict[str, int] = {}
+        for _code, dates in self._daily.items():
+            for ds in dates:
+                day_counts[ds] = day_counts.get(ds, 0) + 1
+
+        if day_counts:
+            counts = sorted(day_counts.values())
+            median_count = counts[len(counts) // 2]
+
+            anomaly_days = []
+            for ds, count in sorted(day_counts.items()):
+                if count < self._MIN_STOCKS_PER_DAY and median_count > self._MIN_STOCKS_PER_DAY:
+                    anomaly_days.append(f"{ds}({count})")
+            if anomaly_days:
+                sample = anomaly_days[:5]
+                suffix = f" ...+{len(anomaly_days) - 5}天" if len(anomaly_days) > 5 else ""
+                warnings.append(
+                    f"日线某些天股票数异常少 (中位数{median_count}): {', '.join(sample)}{suffix}"
+                )
+
+        # 3. Minute coverage
+        minute_stocks = len(self._minute)
+        if total_stocks > 0 and minute_stocks < total_stocks * self._MIN_MINUTE_COVERAGE:
+            pct = minute_stocks / total_stocks * 100
+            warnings.append(f"分钟线覆盖率不足: {minute_stocks}/{total_stocks} ({pct:.0f}%)")
+
+        return warnings
+
     def _has_valid_format(self) -> bool:
         """Check if daily data has required fields (close, volume)."""
         for _code, dates in self._daily.items():
@@ -366,10 +424,19 @@ class TsanghiBacktestCache:
                     with os.fdopen(tmp_fd, "wb") as raw_f:
                         with gzip.GzipFile(fileobj=raw_f, mode="wb", compresslevel=1) as gz_f:
                             pickle.dump(obj, gz_f, protocol=pickle.HIGHEST_PROTOCOL)
-                    size_mb = os.path.getsize(tmp_path) / 1024 / 1024
+                    local_size = os.path.getsize(tmp_path)
+                    size_mb = local_size / 1024 / 1024
                     logger.info(f"Uploading {name} to OSS ({size_mb:.1f} MB compressed)...")
-                    bucket.put_object_from_file(f"{_OSS_PREFIX}{name}", tmp_path)
-                    logger.info(f"Uploaded {name} to OSS OK")
+                    oss_key = f"{_OSS_PREFIX}{name}"
+                    bucket.put_object_from_file(oss_key, tmp_path)
+                    # Verify upload: compare remote size with local size
+                    remote_meta = bucket.head_object(oss_key)
+                    remote_size = remote_meta.content_length
+                    if remote_size != local_size:
+                        raise RuntimeError(
+                            f"{name} upload size mismatch: local={local_size}, remote={remote_size}"
+                        )
+                    logger.info(f"Uploaded {name} to OSS OK (verified {size_mb:.1f} MB)")
                 finally:
                     if os.path.exists(tmp_path):
                         os.unlink(tmp_path)
@@ -486,6 +553,12 @@ class TsanghiBacktestCache:
                 f"{len(cache._minute)} minute, "
                 f"range [{cache._start_date} ~ {cache._end_date}]"
             )
+
+            # Data integrity validation
+            integrity_warnings = cache.validate_integrity()
+            for w in integrity_warnings:
+                logger.warning(f"OSS cache integrity: {w}")
+
             return cache
         except Exception:
             logger.error("Failed to load cache from OSS", exc_info=True)
@@ -548,6 +621,11 @@ class TsanghiBacktestCache:
         self._recalculate_date_range()
         self._is_ready = True
 
+        # Data integrity validation
+        integrity_warnings = self.validate_integrity()
+        for w in integrity_warnings:
+            logger.warning(f"Data integrity: {w}")
+
     async def _download_daily_tsanghi(
         self,
         dl_start: date,
@@ -566,9 +644,15 @@ class TsanghiBacktestCache:
         await client.start()
 
         try:
+            # Resume support: find dates that already have daily data
+            existing_daily_dates: set[str] = set()
+            for code_dates in self._daily.values():
+                existing_daily_dates.update(code_dates.keys())
+
             # Enumerate calendar dates and call API for each
             total_days = (end_date - dl_start).days + 1
             trading_days_found = 0
+            skipped_days = 0
             current = dl_start
 
             while current <= end_date:
@@ -576,6 +660,16 @@ class TsanghiBacktestCache:
                     logger.info("Daily download cancelled by user")
                     raise asyncio.CancelledError()
                 date_str = current.strftime("%Y-%m-%d")
+
+                # Skip dates already in cache
+                if date_str in existing_daily_dates:
+                    skipped_days += 1
+                    if progress_cb:
+                        elapsed = (current - dl_start).days + 1
+                        await _maybe_await(progress_cb("daily", elapsed, total_days))
+                    current += timedelta(days=1)
+                    continue
+
                 day_has_data = False
 
                 for exchange in ("XSHG", "XSHE"):
@@ -633,10 +727,18 @@ class TsanghiBacktestCache:
 
                 current += timedelta(days=1)
 
-            logger.info(
-                f"tsanghi daily download: {len(self._daily)} stocks, "
-                f"{trading_days_found} trading days in [{dl_start} ~ {end_date}]"
-            )
+            if skipped_days:
+                logger.info(
+                    f"tsanghi daily download: {len(self._daily)} stocks, "
+                    f"{trading_days_found} new trading days, "
+                    f"{skipped_days} skipped (cached) "
+                    f"in [{dl_start} ~ {end_date}]"
+                )
+            else:
+                logger.info(
+                    f"tsanghi daily download: {len(self._daily)} stocks, "
+                    f"{trading_days_found} trading days in [{dl_start} ~ {end_date}]"
+                )
         finally:
             await client.stop()
 
@@ -660,8 +762,24 @@ class TsanghiBacktestCache:
         cancel_event: threading.Event | None = None,
     ) -> None:
         """Download 5-min bars (09:35 + 09:40) from baostock for 9:40 snapshot."""
+        # Resume support: skip codes that already have minute data covering this range
+        existing_minute_codes = set()
+        dl_start_str = dl_start.strftime("%Y-%m-%d")
+        end_date_str = end_date.strftime("%Y-%m-%d")
+        for code in codes:
+            min_dates = self._minute.get(code)
+            if min_dates and any(dl_start_str <= ds <= end_date_str for ds in min_dates):
+                existing_minute_codes.add(code)
+
+        codes_to_download = [c for c in codes if c not in existing_minute_codes]
+        if existing_minute_codes:
+            logger.info(
+                f"Minute resume: skipping {len(existing_minute_codes)} stocks "
+                f"with existing data, downloading {len(codes_to_download)}"
+            )
+
         done = [0]
-        total = len(codes)
+        total = len(codes_to_download)
         thread_exc: list[BaseException] = []
 
         def _baostock_minute_download() -> None:
@@ -675,7 +793,7 @@ class TsanghiBacktestCache:
                 bs_start = dl_start.strftime("%Y-%m-%d")
                 bs_end = end_date.strftime("%Y-%m-%d")
 
-                for code in codes:
+                for code in codes_to_download:
                     if cancel_event and cancel_event.is_set():
                         logger.info("Minute download cancelled by user")
                         return

@@ -585,6 +585,11 @@ await engine.stop()
 - [x] Range backtest with trading cost simulation (SSE streaming)
 - [x] Unified backtest page with 3 tabs (single-day, range, CSV analysis)
 - [x] Cache management scheduler (3am daily auto-fill)
+- [x] Cache download resume: skip already-downloaded daily dates and minute stocks on retry
+- [x] Cache scheduler detects minute data gaps (not just daily gaps)
+- [x] Cache scheduler Feishu notifications (start / success / failure / exception)
+- [x] Data integrity validation: stock count, per-day consistency, minute coverage
+- [x] OSS upload size verification (head_object after put)
 - [ ] Unit tests
 
 ---
