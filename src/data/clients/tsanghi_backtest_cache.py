@@ -651,9 +651,7 @@ class TsanghiBacktestCache:
 
             if existing_daily_dates:
                 latest_cached = max(existing_daily_dates)
-                latest_date = datetime.strptime(
-                    latest_cached, "%Y-%m-%d"
-                ).date()
+                latest_date = datetime.strptime(latest_cached, "%Y-%m-%d").date()
                 if latest_date >= dl_start:
                     skipped = (latest_date - dl_start).days + 1
                     dl_start = latest_date + timedelta(days=1)
