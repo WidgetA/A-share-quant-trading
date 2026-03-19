@@ -517,7 +517,10 @@ def create_momentum_router() -> APIRouter:
                     yield _sse(
                         {
                             "type": "status",
-                            "message": f"断点续传: 已有 {resume_daily} 只日线, {resume_minute} 只分钟线缓存",
+                            "message": (
+                                f"断点续传: 已有 {resume_daily} 只日线, "
+                                f"{resume_minute} 只分钟线缓存"
+                            ),
                         }
                     )
                 yield _sse(
