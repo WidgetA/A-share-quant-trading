@@ -403,6 +403,13 @@ def create_momentum_router() -> APIRouter:
         else:
             existing = getattr(request.app.state, "tsanghi_cache", None)
 
+        ex_d = len(existing._daily) if existing else 0
+        ex_m = len(existing._minute) if existing else 0
+        logger.info(
+            f"tsanghi-prepare: existing={existing is not None} "
+            f"({ex_d} daily, {ex_m} minute), force={body.force}"
+        )
+
         # 1) Try in-memory cache
         if existing and existing.covers_range(start_date, end_date):
 
@@ -566,7 +573,13 @@ def create_momentum_router() -> APIRouter:
                 yield _sse({"type": "error", "message": str(e)[:200]})
             finally:
                 # Always save partial cache so next download can resume
-                if cache._daily or cache._minute:
+                d_count = len(cache._daily)
+                m_count = len(cache._minute)
+                logger.info(
+                    f"download_stream finally: saving partial cache "
+                    f"({d_count} daily, {m_count} minute)"
+                )
+                if d_count or m_count:
                     request.app.state.tsanghi_cache = cache
                 request.app.state.tsanghi_cache_loading = False
                 request.app.state.tsanghi_download_task = None
