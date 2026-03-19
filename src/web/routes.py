@@ -485,6 +485,11 @@ def create_momentum_router() -> APIRouter:
             request.app.state.tsanghi_cache = cache
             resume_daily = len(cache._daily)
             resume_minute = len(cache._minute)
+            # Count cached trading days
+            resume_dates: set[str] = set()
+            for dates in cache._daily.values():
+                resume_dates.update(dates.keys())
+            resume_days = len(resume_dates)
 
             def on_progress(phase: str, current: int, total: int):
                 if phase == "init":
@@ -530,8 +535,9 @@ def create_momentum_router() -> APIRouter:
                         {
                             "type": "status",
                             "message": (
-                                f"断点续传: 已有 {resume_daily} 只日线, "
-                                f"{resume_minute} 只分钟线缓存"
+                                f"断点续传: 已有 {resume_daily} 只股票 "
+                                f"{resume_days} 天日线, "
+                                f"{resume_minute} 只分钟线"
                             ),
                         }
                     )
