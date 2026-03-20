@@ -96,7 +96,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
         ]
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
-            lines.append(f"价格: {signal.get('latest_price', '-')}")
+            lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
             lines.append(f"V3评分: {signal.get('v3_score', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
@@ -242,7 +242,17 @@ async def get_trade_calendar() -> list[date]:
 
 
 async def run_v15_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
-    """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None."""
+    """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None.
+
+    IMPORTANT — price semantics:
+    Quotes are fetched via ``batch_get_early_quotes`` which aggregates
+    minute bars for 09:30-09:40 only (``rt_min_daily``).  The resulting
+    ``latest_price`` in the returned dict is the **09:40 early_close**,
+    NOT the real-time price at the moment of the scan invocation.
+    This is by design: ``latest_price`` represents the intended buy-time
+    reference price so it stays stable regardless of when the scan is
+    triggered (auto at 09:38 or manual at 13:00).
+    """
     from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
     from src.strategy.strategies.v15_scanner import V15Scanner
 
@@ -341,6 +351,7 @@ async def run_v15_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     if not rec:
         return None
 
+    # latest_price = early_close (09:40 price), see docstring above
     return {
         "stock_code": rec.stock_code,
         "stock_name": rec.stock_name,

@@ -127,7 +127,7 @@ async def _notify_feishu_ack(signal: dict) -> None:
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
-            lines.append(f"价格: {signal.get('latest_price', '-')}")
+            lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
             lines.append(f"板块: {signal.get('board_name', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
@@ -154,7 +154,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
         ]
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
-            lines.append(f"价格: {signal.get('latest_price', '-')}")
+            lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
             lines.append(f"V3评分: {signal.get('v3_score', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")

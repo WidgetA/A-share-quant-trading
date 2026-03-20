@@ -773,6 +773,13 @@ strategy:
 - File corruption → raise RuntimeError (fail-fast, no silent degradation)
 - Structure: `{code, name, buy_date, entry_price, marked_sell_today, early_exit}`
 
+**Price Semantics** (IMPORTANT):
+- V15 scan uses `batch_get_early_quotes()` which aggregates 09:30-09:40 minute bars
+- `latest_price` in scan results = `early_close` = **09:40 K-line close price**, NOT real-time price
+- This is stable regardless of when scan is triggered (auto 09:38 or manual 13:00)
+- `entry_price` in holdings = signal's `latest_price` = 09:40 price at scan time
+- Feishu notifications label this as "买入参考价(09:40)"
+
 **Data Sources**:
 - Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
 - Historical data: OSS cache (`TsanghiBacktestCache`) via `IQuantHistoricalAdapter`
@@ -785,8 +792,8 @@ strategy:
 | Alert | Trigger | Content |
 |-------|---------|---------|
 | 每日就绪报告 | 09:30 | iQuant连接状态、持仓数、今日计划(扫描/跳过) |
-| 买入/卖出信号推送 | Signal pushed | 股票代码、价格、板块、V3评分 |
-| 信号执行确认 | Signal acked | 股票代码、价格、推送→执行时间差 |
+| 买入/卖出信号推送 | Signal pushed | 股票代码、买入参考价(09:40 early_close)、板块、V3评分 |
+| 信号执行确认 | Signal acked | 股票代码、买入参考价(09:40)、推送→执行时间差 |
 | 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
 | iQuant未连接 | 09:33 无心跳 | 提示检查QMT是否启动 |
 | iQuant掉线 | Poll间隔 > 3min | 最后心跳时间、失联时长 |
