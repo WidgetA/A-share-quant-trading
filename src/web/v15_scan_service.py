@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo

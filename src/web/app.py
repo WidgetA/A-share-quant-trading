@@ -20,7 +20,6 @@ from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.web.iquant_routes import create_iquant_router
-from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
 from src.web.routes import (
     create_momentum_router,
     create_order_assistant_router,
@@ -29,6 +28,7 @@ from src.web.routes import (
     create_simulation_router,
     create_trade_backtest_router,
 )
+from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
 
 if TYPE_CHECKING:
     from src.common.strategy_controller import StrategyController
