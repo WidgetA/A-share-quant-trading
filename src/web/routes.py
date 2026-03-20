@@ -483,7 +483,13 @@ def create_momentum_router() -> APIRouter:
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            cache = existing or TsanghiBacktestCache()
+            # Always create a fresh cache for download so we don't
+            # mutate the trading cache (shared reference).
+            # If resuming, seed the new cache from existing data.
+            if existing:
+                cache = existing.copy()
+            else:
+                cache = TsanghiBacktestCache()
             # Save reference immediately — cache is mutable, so
             # background download populates it in-place. Even if
             # the browser disconnects (finally block may not run),
