@@ -666,9 +666,7 @@ def create_iquant_router() -> APIRouter:
                                 f"score={rec['v3_score']:.4f})",
                             }
                             _push_signal(rec_signal)
-                            logger.info(
-                                f"V15 trading: BUY signal pushed for {rec['stock_code']}"
-                            )
+                            logger.info(f"V15 trading: BUY signal pushed for {rec['stock_code']}")
                         elif rec and _state["holdings"]:
                             logger.info(
                                 f"V15 trading: scan recommends {rec['stock_code']}, "
