@@ -1,18 +1,20 @@
 # === MODULE PURPOSE ===
 # API endpoints for iQuant scripts running on a Windows server.
-# Fully isolated from the main online system — creates own DB pool,
-# own Tushare client, own historical adapter. No shared app.state resources.
+# Trading-only: manages holdings, signals, gap check, sell decisions.
+# Scan logic lives in v15_scan_service.py (decoupled).
 #
 # === ARCHITECTURE ===
 # Push-based: server runs background tasks that produce signals at the right time.
 # iQuant polls /pending-signals every bar, executes immediately, then acks.
 #
-# === V15 STRATEGY ===
+# === V15 TRADING (decoupled from scan) ===
 # Signal flow (T+2 adaptive sell):
 #   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
-#   09:38-10:00  → SCAN: if no holdings, run V15 7-layer funnel → BUY signal
+#   09:40-10:05  → TRADE DECISION: read scan result → BUY if no holdings
 #   14:50-14:58  → SELL: push SELL signals for marked holdings
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
+#
+# Scan runs independently in v15_scan_service.py (always pushes Feishu).
 #
 # === AUTHENTICATION ===
 # All endpoints require X-API-Key header matching IQUANT_API_KEY env var.
@@ -136,18 +138,6 @@ async def _notify_feishu_ack(signal: dict) -> None:
         logger.warning("Failed to send Feishu ack notification", exc_info=True)
 
 
-async def _notify_feishu_v15_top5(scan_result) -> None:
-    """Send V15 top-5 scored report to Feishu. Best-effort, never raises."""
-    try:
-        from src.common.feishu_bot import FeishuBot
-
-        bot = FeishuBot()
-        if bot.is_configured():
-            await bot.send_v15_top5_report(scan_result)
-    except Exception:
-        logger.warning("Failed to send Feishu V15 top-5 report", exc_info=True)
-
-
 async def _notify_feishu_signal(signal: dict) -> None:
     """Send signal notification to Feishu. Best-effort, never raises."""
     try:
@@ -232,89 +222,39 @@ def _count_trading_days(calendar: list[date], from_date: date, to_date: date) ->
 
 
 def create_iquant_router() -> APIRouter:
-    """Create the iQuant API router with V15 strategy.
+    """Create the iQuant API router with V15 trading logic.
 
-    V15 signal scheduler:
-    - 09:25-09:35: GAP CHECK (T+1 gap <-3% → early sell, T+2 → sell)
-    - 09:38-10:00: V15 SCAN (if no holdings → BUY signal)
+    Trading scheduler (decoupled from scan):
+    - 09:31-09:35: GAP CHECK (T+1 gap <-3% → early sell, T+2 → sell)
+    - 09:40-10:05: TRADE DECISION (read scan result → BUY if no holdings)
     - 14:50-14:58: SELL (push sell signals for marked holdings)
+
+    Scan runs independently in v15_scan_service.py.
     """
     router = APIRouter(prefix="/api/iquant", tags=["iquant"])
 
-    # Isolated state (not shared with main app.state)
+    # Trading state (scan state is injected via _inject_scan_state)
     _state: dict[str, Any] = {
         "initialized": False,
         "pending_signals": [],  # signals waiting for iQuant to execute
         "executed_signals": [],  # acked signals (history)
         "holdings": [],  # V15: [{code, name, buy_date, entry_price, marked_sell_today, early_exit}]
         "scheduler_task": None,
-        "universe_cache": None,
-        "tsanghi_cache": None,  # injected from app.py after OSS load
         # --- Monitoring ---
         "last_poll_time": None,  # datetime: last time iQuant polled /pending-signals
+        # --- Cross-module ---
+        "scan_state": None,  # V15ScanState from v15_scan_service (injected from app.py)
     }
 
     # --- Resource management ---
 
-    async def _ensure_resources() -> dict[str, Any]:
-        """Lazily initialize iQuant-specific resources and start scheduler."""
+    async def _ensure_trading_resources() -> dict[str, Any]:
+        """Initialize trading-only resources and start trading scheduler.
+
+        Scan resources (Tushare, FundDB, etc.) are owned by v15_scan_service.
+        """
         if _state["initialized"]:
             return _state
-
-        from src.common.config import get_tushare_token
-        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
-        from src.data.clients.tushare_realtime import TushareRealtimeClient
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-        from src.data.database.v15_scan_db import create_v15_scan_db_from_config
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
-
-        tushare_token = get_tushare_token()
-        tushare = TushareRealtimeClient(token=tushare_token)
-        try:
-            await tushare.start()
-        except Exception as e:
-            await _notify_feishu_error(
-                "Tushare连接失败",
-                f"Tushare实时行情客户端启动失败\n错误: {e}\n"
-                f"V15交易功能不可用，请检查Tushare token和网络",
-            )
-            raise
-        _state["realtime_client"] = tushare
-
-        fdb = create_fundamentals_db_from_config()
-        try:
-            await fdb.connect()
-        except Exception as e:
-            await _notify_feishu_error(
-                "数据库连接失败",
-                f"PostgreSQL基本面数据库连接失败\n错误: {e}\nV15交易功能不可用，请检查数据库配置",
-            )
-            raise
-        _state["fundamentals_db"] = fdb
-
-        # V15 scan history DB (non-critical — log and continue on failure)
-        try:
-            v15db = create_v15_scan_db_from_config()
-            await v15db.connect()
-            _state["v15_scan_db"] = v15db
-        except Exception as e:
-            logger.warning(f"V15ScanDB init failed (scan history disabled): {e}")
-            _state["v15_scan_db"] = None
-
-        # Build historical adapter with OSS cache if available
-        cache = _state.get("tsanghi_cache")
-        _state["historical_adapter"] = IQuantHistoricalAdapter(tushare, cache=cache)
-        _state["concept_mapper"] = LocalConceptMapper()
-        # V15 filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
-        _state["stock_filter"] = StockFilter(
-            StockFilterConfig(
-                exclude_bse=True,
-                exclude_chinext=True,
-                exclude_star=True,
-                exclude_sme=False,
-            )
-        )
 
         # Load persisted holdings
         _state["holdings"] = _load_holdings()
@@ -325,15 +265,15 @@ def create_iquant_router() -> APIRouter:
         except Exception as e:
             await _notify_feishu_error(
                 "交易日历加载失败",
-                f"无法加载交易日历(Tushare)\n错误: {e}\n跳空检测将无法判断交易日",
+                f"无法加载交易日历\n错误: {e}\n跳空检测将无法判断交易日",
             )
             raise
 
-        # Start V15 background scheduler
-        _state["scheduler_task"] = asyncio.create_task(_signal_scheduler())
+        # Start V15 trading scheduler
+        _state["scheduler_task"] = asyncio.create_task(_trading_scheduler())
 
         _state["initialized"] = True
-        logger.info("V15 iQuant resources initialized + scheduler started")
+        logger.info("V15 trading resources initialized + scheduler started")
         return _state
 
     async def _cleanup_resources() -> None:
@@ -342,33 +282,20 @@ def create_iquant_router() -> APIRouter:
             task = _state.get(key)
             if task and not task.done():
                 task.cancel()
-        rt_client = _state.get("realtime_client")
-        if rt_client:
-            await rt_client.stop()
-        fdb = _state.get("fundamentals_db")
-        if fdb:
-            await fdb.close()
         _state["initialized"] = False
-        logger.info("V15 iQuant resources cleaned up")
+        logger.info("V15 trading resources cleaned up")
 
     router._iquant_cleanup = _cleanup_resources  # type: ignore[attr-defined]
-    router._iquant_init = _ensure_resources  # type: ignore[attr-defined]
+    router._iquant_init = _ensure_trading_resources  # type: ignore[attr-defined]
 
-    # --- Cache injection (called from app.py after OSS load) ---
+    # --- Scan state injection (called from app.py) ---
 
-    def _inject_cache(cache: Any) -> None:
-        """Inject OSS cache and rebuild historical adapter."""
-        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
+    def _inject_scan_state(scan_state: Any) -> None:
+        """Inject V15ScanState reference for cross-module communication."""
+        _state["scan_state"] = scan_state
+        logger.info("V15 trading: scan_state injected")
 
-        _state["tsanghi_cache"] = cache
-        rt_client = _state.get("realtime_client")
-        if rt_client:
-            _state["historical_adapter"] = IQuantHistoricalAdapter(rt_client, cache=cache)
-            logger.info("V15: OSS cache injected, historical adapter rebuilt")
-        else:
-            logger.info("V15: OSS cache stored (adapter will be built on init)")
-
-    router._inject_cache = _inject_cache  # type: ignore[attr-defined]
+    router._inject_scan_state = _inject_scan_state  # type: ignore[attr-defined]
 
     # --- Signal helpers ---
 
@@ -383,152 +310,22 @@ def create_iquant_router() -> APIRouter:
             f"V15 signal pushed: {signal['type']} {signal['stock_code']} (id={signal['id']})"
         )
 
-    # --- Universe ---
-
-    async def _get_universe() -> list[str]:
-        """Get stock codes for V15 universe (main board + SME, cached)."""
-        if _state["universe_cache"]:
-            return _state["universe_cache"]
-
-        import akshare as ak
-
-        df = await asyncio.to_thread(ak.stock_info_a_code_name)
-        stock_filter = _state["stock_filter"]
-        codes = [
-            row["code"]
-            for _, row in df.iterrows()
-            if isinstance(row["code"], str)
-            and len(row["code"]) == 6
-            and stock_filter.is_allowed(row["code"])
-        ]
-        _state["universe_cache"] = codes
-        logger.info(f"V15 universe cached: {len(codes)} codes")
-        return codes
-
-    # --- V15 scan logic ---
-
-    async def _run_v15_scan() -> dict[str, Any] | None:
-        """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None."""
-        from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
-        from src.strategy.strategies.v15_scanner import V15Scanner, V15ScoredStock
-
-        universe = await _get_universe()
-        if not universe:
-            raise RuntimeError("Universe is empty")
-
-        rt_client = _state["realtime_client"]
-        quotes = await rt_client.batch_get_early_quotes(universe)
-        logger.info(f"V15 scan: Tushare rt_min_daily returned {len(quotes)} quotes")
-
-        if not quotes:
-            return None
-
-        # Get prev_close (previous trading day's close).
-        # L6.5 limit-up check needs real prev_close — NEVER approximate with open_price
-        # because gap-up stocks would get wrong limit price.
-        prev_closes: dict[str, float] = {}
-        today = datetime.now(BEIJING_TZ).date()
-        calendar = await _get_trade_calendar()
-        prev_dates = [d for d in calendar if d < today]
-        if not prev_dates:
-            raise RuntimeError("V15 scan: no previous trading day found in calendar")
-        prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
-
-        # Source 1: OSS cache (instant, no API call)
-        cache = _state.get("tsanghi_cache")
-        if cache and cache.is_ready:
-            all_daily = cache.get_all_codes_with_daily(prev_trade_date)
-            for code, daily in all_daily.items():
-                close_val = daily.get("close")
-                if close_val and close_val > 0:
-                    prev_closes[code] = close_val
-
-        # Source 2: tsanghi API fallback (2 calls for XSHG+XSHE)
-        # Use API if cache coverage < 80% of live quotes (partial cache is dangerous)
-        if len(prev_closes) < len(quotes) * 0.8:
-            from src.data.clients.tsanghi_client import TsanghiClient
-
-            ts_client = TsanghiClient()
-            await ts_client.start()
-            try:
-                for exchange in ("XSHG", "XSHE"):
-                    records = await ts_client.daily_latest(exchange, prev_trade_date)
-                    for row in records:
-                        ticker = str(row.get("ticker", ""))
-                        close_val = row.get("close")
-                        if ticker and len(ticker) == 6 and close_val:
-                            prev_closes[ticker] = float(close_val)
-            finally:
-                await ts_client.stop()
-
-        if not prev_closes:
-            raise RuntimeError(
-                f"V15 scan: failed to get prev_close for {prev_trade_date} "
-                f"from both OSS cache and tsanghi API"
-            )
-        logger.info(f"V15 scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
-
-        # Build PriceSnapshot dict
-        price_snapshots: dict[str, PriceSnapshot] = {}
-        for code, quote in quotes.items():
-            if not quote.is_trading:
-                continue
-            price_snapshots[code] = PriceSnapshot(
-                stock_code=code,
-                stock_name="",
-                open_price=quote.open_price,
-                prev_close=prev_closes.get(code, 0.0),
-                latest_price=quote.early_close,
-                early_volume=quote.early_volume,
-                high_price=quote.early_high,
-                low_price=quote.early_low,
-            )
-
-        scanner = V15Scanner(
-            historical_adapter=_state["historical_adapter"],
-            fundamentals_db=_state["fundamentals_db"],
-            concept_mapper=_state["concept_mapper"],
-        )
-
-        scan_result = await scanner.scan(price_snapshots)
-        today = datetime.now(BEIJING_TZ).date()
-
-        # Persist top-5 scored stocks (non-critical, never blocks trading)
-        if scan_result.all_scored and _state.get("v15_scan_db"):
-            try:
-                await _state["v15_scan_db"].save_top_n(
-                    today, scan_result.all_scored, scan_result.final_candidates
-                )
-            except Exception as e:
-                logger.warning(f"V15ScanDB save failed: {e}")
-
-        # Push top-5 report to Feishu (non-critical)
-        await _notify_feishu_v15_top5(scan_result)
-
-        rec: V15ScoredStock | None = scan_result.recommended
-        if not rec:
-            return None
-
-        return {
-            "stock_code": rec.stock_code,
-            "stock_name": rec.stock_name,
-            "board_name": rec.board_name,
-            "open_price": round(rec.open_price, 4),
-            "prev_close": round(rec.prev_close, 4),
-            "latest_price": round(rec.latest_price, 4),
-            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
-            "turnover_amp": round(rec.turnover_amp, 4),
-            "v3_score": round(rec.v3_score, 6),
-            "hot_board_count": scan_result.hot_board_count,
-            "final_candidates": scan_result.final_candidates,
-        }
-
     # --- Gap check logic ---
 
     async def _gap_check_holdings(today_date: date) -> None:
         """Check each holding for T+1 gap-down or T+2 sell."""
         calendar = await _get_trade_calendar()
-        rt_client = _state["realtime_client"]
+
+        # Use scan_state's realtime client for quotes
+        scan_state = _state.get("scan_state")
+        if not scan_state or not scan_state.realtime_client:
+            logger.error("V15 gap check: scan resources not ready, skipping")
+            await _notify_feishu_error(
+                "V15跳空检测跳过",
+                "扫描服务资源未初始化，无法获取实时行情，今日跳空检测跳过",
+            )
+            return
+        rt_client = scan_state.realtime_client
 
         for holding in _state["holdings"]:
             buy_date = date.fromisoformat(holding["buy_date"])
@@ -694,6 +491,7 @@ def create_iquant_router() -> APIRouter:
     async def _send_readiness_report(now_bj: datetime) -> None:
         """Send daily readiness report at 09:30."""
         holdings = _state["holdings"]
+        scan_state = _state.get("scan_state")
         last_poll = _state.get("last_poll_time")
         poll_status = "未连接"
         if last_poll:
@@ -703,20 +501,30 @@ def create_iquant_router() -> APIRouter:
             else:
                 poll_status = f"离线 ({gap / 60:.0f}分钟未响应)"
 
+        scan_status = "就绪" if scan_state and scan_state.initialized else "未初始化"
+
         lines = [
             "[V15] 每日就绪报告",
             f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
             f"iQuant状态: {poll_status}",
+            f"扫描服务: {scan_status}",
             f"当前持仓: {len(holdings)}只",
         ]
         if holdings:
             for h in holdings:
                 buy_date = h.get("buy_date", "?")
                 lines.append(f"  - {h['code']} {h.get('name', '')} (买入: {buy_date})")
-            lines.append("扫描仍将执行(09:38-10:00)，有推荐会推送但不下单")
+            lines.append("扫描仍将执行(09:38-10:00)，有推荐会推送飞书")
+            if _state["initialized"]:
+                lines.append("有持仓，BUY信号不会下单")
+            else:
+                lines.append("交易未初始化，不会下单")
         else:
             lines.append("今日将执行V15扫描(09:38-10:00)")
-            lines.append("无持仓，有推荐将自动下单")
+            if _state["initialized"]:
+                lines.append("无持仓，有推荐将自动下单")
+            else:
+                lines.append("iQuant未连接，有推荐仅推送飞书不下单")
 
         msg = "\n".join(lines)
         logger.info("V15 readiness report sent")
@@ -786,26 +594,26 @@ def create_iquant_router() -> APIRouter:
 
     router._start_monitoring = _start_monitoring  # type: ignore[attr-defined]
 
-    # --- V15 Background scheduler (trading operations only) ---
+    # --- V15 Trading scheduler (decoupled from scan) ---
 
-    async def _signal_scheduler() -> None:
-        """V15 trading scheduler: T+2 adaptive sell.
+    async def _trading_scheduler() -> None:
+        """V15 trading scheduler: gap check + trade decision + sell.
 
         Trading windows:
         1. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
-        2. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
+        2. TRADE_DECISION (09:40-10:05): Read scan result → BUY if no holdings
         3. SELL (14:50-14:58): Push SELL signals for marked holdings
 
-        Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
+        Scan runs independently in v15_scan_service.py.
         """
         GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
-        SCAN_WINDOW = (time(9, 38), time(10, 0))
+        TRADE_DECISION_WINDOW = (time(9, 40), time(10, 5))
         SELL_WINDOW = (time(14, 50), time(14, 58))
 
-        logger.info("V15 signal scheduler started")
+        logger.info("V15 trading scheduler started")
 
         gap_done_date = ""
-        scan_done_date = ""
+        trade_done_date = ""
         sell_done_date = ""
 
         try:
@@ -821,9 +629,6 @@ def create_iquant_router() -> APIRouter:
                     and GAP_CHECK_WINDOW[0] <= ex_time <= GAP_CHECK_WINDOW[1]
                     and _state["holdings"]
                 ):
-                    if not _state["initialized"]:
-                        await asyncio.sleep(10)
-                        continue
                     gap_done_date = ex_date
                     try:
                         await _gap_check_holdings(today_date)
@@ -838,51 +643,50 @@ def create_iquant_router() -> APIRouter:
                     if _state["holdings"]:
                         logger.info("V15: past GAP_CHECK window, skipping")
 
-                # --- SCAN: 09:38-10:00 ---
-                if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
-                    if not _state["initialized"]:
-                        await asyncio.sleep(10)
-                        continue
-
-                    scan_done_date = ex_date
-
-                    # Always scan + push Feishu top-5 report, regardless of holdings
-                    try:
-                        rec = await _run_v15_scan()
-                        if rec:
-                            if _state["holdings"]:
-                                logger.info(
-                                    f"V15: scan recommends {rec['stock_code']}, "
-                                    f"but holdings exist — BUY signal suppressed"
-                                )
-                            else:
-                                _push_signal(
-                                    {
-                                        "type": "buy",
-                                        "stock_code": rec["stock_code"],
-                                        "stock_name": rec["stock_name"],
-                                        "board_name": rec["board_name"],
-                                        "latest_price": rec["latest_price"],
-                                        "v3_score": rec["v3_score"],
-                                        "reason": f"V15推荐 (板块={rec['board_name']}, "
-                                        f"score={rec['v3_score']:.4f})",
-                                    }
-                                )
-                                await _notify_feishu_signal(_state["pending_signals"][-1])
-                        else:
-                            logger.info("V15 scan: no recommendation today")
-                            await _notify_feishu_error(
-                                "V15扫描结果",
-                                "今日V15扫描完成，无符合条件的推荐股票",
+                # --- TRADE DECISION: 09:40-10:05 ---
+                # Read scan result from scan_state (written by v15_scan_service)
+                if (
+                    trade_done_date != ex_date
+                    and TRADE_DECISION_WINDOW[0] <= ex_time <= TRADE_DECISION_WINDOW[1]
+                ):
+                    scan_state = _state.get("scan_state")
+                    if scan_state and scan_state.scan_done_date == ex_date:
+                        # Scan completed today — read result
+                        trade_done_date = ex_date
+                        rec = scan_state.today_recommendation
+                        if rec and not _state["holdings"]:
+                            rec_signal = {
+                                "type": "buy",
+                                "stock_code": rec["stock_code"],
+                                "stock_name": rec["stock_name"],
+                                "board_name": rec["board_name"],
+                                "latest_price": rec["latest_price"],
+                                "v3_score": rec["v3_score"],
+                                "reason": f"V15推荐 (板块={rec['board_name']}, "
+                                f"score={rec['v3_score']:.4f})",
+                            }
+                            _push_signal(rec_signal)
+                            logger.info(
+                                f"V15 trading: BUY signal pushed for {rec['stock_code']}"
                             )
-                    except Exception as e:
-                        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                        logger.error(f"V15 scan failed: {error_detail}")
-                        await _notify_feishu_error("V15扫描失败", error_detail)
+                        elif rec and _state["holdings"]:
+                            logger.info(
+                                f"V15 trading: scan recommends {rec['stock_code']}, "
+                                f"but holdings exist — BUY signal suppressed"
+                            )
+                        elif not rec:
+                            logger.info("V15 trading: scan completed, no recommendation")
+                    # else: scan not done yet, will check next loop iteration
 
-                # Scan deadline
-                if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
-                    scan_done_date = ex_date
+                # Trade decision deadline
+                if trade_done_date != ex_date and ex_time > TRADE_DECISION_WINDOW[1]:
+                    trade_done_date = ex_date
+                    scan_state = _state.get("scan_state")
+                    if not scan_state or scan_state.scan_done_date != ex_date:
+                        logger.warning(
+                            "V15 trading: scan did not complete in time, "
+                            "skipping trade decision (miss rather than risk)"
+                        )
 
                 # --- SELL: 14:50-14:58 ---
                 if sell_done_date != ex_date and SELL_WINDOW[0] <= ex_time <= SELL_WINDOW[1]:
@@ -913,28 +717,29 @@ def create_iquant_router() -> APIRouter:
                 # Adaptive sleep
                 all_done = (
                     gap_done_date == ex_date
-                    and scan_done_date == ex_date
+                    and trade_done_date == ex_date
                     and sell_done_date == ex_date
                 )
                 await asyncio.sleep(120 if all_done else 30)
 
         except asyncio.CancelledError:
-            logger.info("V15 signal scheduler stopped")
+            logger.info("V15 trading scheduler stopped")
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.critical(f"V15 signal scheduler CRASHED: {error_detail}")
+            logger.critical(f"V15 trading scheduler CRASHED: {error_detail}")
             await _notify_feishu_error(
                 "V15交易调度器崩溃",
-                f"信号调度器意外退出!\n{error_detail}\nV15今日将无法自动交易，请立即检查",
+                f"交易调度器意外退出!\n{error_detail}\nV15今日将无法自动交易，请立即检查",
             )
 
     # --- Endpoints ---
 
     @router.get("/ping")
     async def ping(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Health check + trigger lazy init."""
-        await _ensure_resources()
+        """Health check + trigger lazy init of trading resources."""
+        await _ensure_trading_resources()
         now = datetime.now(BEIJING_TZ)
+        scan_state = _state.get("scan_state")
         return {
             "status": "ok",
             "service": "iquant-v15",
@@ -942,6 +747,7 @@ def create_iquant_router() -> APIRouter:
             "pending_count": len(_state["pending_signals"]),
             "holdings_count": len(_state["holdings"]),
             "holdings": _state["holdings"],
+            "scan_initialized": bool(scan_state and scan_state.initialized),
         }
 
     @router.get("/pending-signals")
@@ -1161,13 +967,19 @@ def create_iquant_router() -> APIRouter:
     @router.post("/trigger-scan")
     async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
         """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
-        await _ensure_resources()
+        from src.web.v15_scan_service import run_v15_scan
+
+        scan_state = _state.get("scan_state")
+        if not scan_state or not scan_state.initialized:
+            raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
 
         try:
-            rec = await _run_v15_scan()
+            rec = await run_v15_scan(scan_state)
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
+
+        scan_state.today_recommendation = rec
 
         result: dict = {"success": True, "recommendation": None}
         if rec:
@@ -1195,8 +1007,12 @@ def create_iquant_router() -> APIRouter:
     @router.get("/universe")
     async def universe(api_key: str = Depends(_verify_api_key)) -> dict:
         """Return all stock codes in V15 universe (cached)."""
-        await _ensure_resources()
-        codes = await _get_universe()
+        from src.web.v15_scan_service import get_universe
+
+        scan_state = _state.get("scan_state")
+        if not scan_state or not scan_state.initialized:
+            raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
+        codes = await get_universe(scan_state)
         return {"codes": codes, "count": len(codes)}
 
     @router.post("/quote")
@@ -1205,13 +1021,15 @@ def create_iquant_router() -> APIRouter:
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
         """Get Tushare real-time quotes for specific stocks."""
-        await _ensure_resources()
+        scan_state = _state.get("scan_state")
+        if not scan_state or not scan_state.realtime_client:
+            raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
 
         if not body.stock_codes:
             raise HTTPException(status_code=400, detail="stock_codes is required")
 
         try:
-            rt_client = _state["realtime_client"]
+            rt_client = scan_state.realtime_client
             quotes = await rt_client.batch_get_quotes(body.stock_codes)
             return {
                 "success": True,
@@ -1256,7 +1074,9 @@ def create_iquant_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid date: {body.trade_date}")
 
-        await _ensure_resources()
+        scan_state = _state.get("scan_state")
+        if not scan_state or not scan_state.fundamentals_db:
+            raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
 
         if body.data_source == "tsanghi":
             ak_cache = getattr(request.app.state, "tsanghi_cache", None)
@@ -1295,7 +1115,7 @@ def create_iquant_router() -> APIRouter:
         concept_mapper = LocalConceptMapper()
         scanner = MomentumSectorScanner(
             ifind_client=adapter,  # type: ignore[arg-type]
-            fundamentals_db=_state["fundamentals_db"],
+            fundamentals_db=scan_state.fundamentals_db,
             concept_mapper=concept_mapper,
             board_relevance_filter=create_board_relevance_filter(),
         )

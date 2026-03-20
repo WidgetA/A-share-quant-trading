@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.web.iquant_routes import create_iquant_router
+from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
 from src.web.routes import (
     create_momentum_router,
     create_order_assistant_router,
@@ -103,10 +104,17 @@ def create_app(
     trade_bt_router = create_trade_backtest_router()
     app.include_router(trade_bt_router)
 
-    # Add iQuant API router (isolated from main system, lazily initialized)
+    # Add iQuant API router (trading only, scan is separate)
     iquant_router = create_iquant_router()
     app.include_router(iquant_router)
     app.state.iquant_router = iquant_router  # for shutdown cleanup
+
+    # V15 scan state (shared between scan service and trading router)
+    scan_state = V15ScanState()
+    app.state.v15_scan_state = scan_state
+    # Inject scan state into trading router
+    if hasattr(iquant_router, "_inject_scan_state"):
+        iquant_router._inject_scan_state(scan_state)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():
@@ -160,10 +168,10 @@ def create_app(
                         f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
                         f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
                     )
-                    # Inject cache into iQuant router for V15 historical data
-                    iquant_rtr = getattr(app.state, "iquant_router", None)
-                    if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
-                        iquant_rtr._inject_cache(oss_cache)
+                    # Inject cache into V15 scan service for historical data
+                    v15_ss = getattr(app.state, "v15_scan_state", None)
+                    if v15_ss:
+                        inject_cache(v15_ss, oss_cache)
                 else:
                     logger.warning("load_from_oss returned None — check OSS config/logs")
             except Exception as e:
@@ -205,6 +213,12 @@ def create_app(
         if iquant_rtr and hasattr(iquant_rtr, "_start_monitoring"):
             iquant_rtr._start_monitoring()
             logger.info("iQuant V15 monitoring scheduler started")
+
+        # Auto-start V15 scan scheduler (autonomous, independent of iQuant)
+        v15_ss = getattr(app.state, "v15_scan_state", None)
+        if v15_ss:
+            start_scan_scheduler(v15_ss)
+            logger.info("V15 scan scheduler started (autonomous)")
 
         # Auto-start intraday momentum monitor as background task
         # Pass shared clients via state dict so monitor doesn't create its own
@@ -248,10 +262,18 @@ def create_app(
             await fundamentals_db.close()
             logger.info("Shared fundamentals DB closed")
 
-        # Cleanup iQuant isolated resources
+        # Cleanup iQuant trading resources
         iquant_rtr = getattr(app.state, "iquant_router", None)
         if iquant_rtr and hasattr(iquant_rtr, "_iquant_cleanup"):
             await iquant_rtr._iquant_cleanup()
+
+        # Cleanup V15 scan resources
+        from src.web.v15_scan_service import cleanup_scan_resources
+
+        v15_ss = getattr(app.state, "v15_scan_state", None)
+        if v15_ss:
+            await cleanup_scan_resources(v15_ss)
+            logger.info("V15 scan resources cleaned up")
 
     return app
 

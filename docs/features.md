@@ -738,20 +738,34 @@ strategy:
 - **T+2** (default): mark sell at gap check, sell at 14:50-14:58
 - **Multi-day outage**: any holding with trading_days ≥ 2 since buy → sell
 
-**Three-Window Scheduler**:
+**Three-Scheduler Architecture** (scan decoupled from trading):
+
+| Scheduler | Starts | Responsibility |
+|-----------|--------|----------------|
+| Scan Scheduler | app.py startup (autonomous) | V15 scan + Feishu push, independent of iQuant/holdings |
+| Trading Scheduler | iQuant `/ping` (lazy) | Gap check, BUY/SELL signal decisions based on holdings |
+| Monitoring Scheduler | app.py startup | Heartbeat, signal timeout, readiness report |
+
+**Scan Scheduler** (v15_scan_service.py):
+- Initializes own resources (Tushare, FundDB, HistAdapter) with retry on failure
+- 09:38-10:00: Run V15 scan → push Feishu top-5 + recommendation (ALWAYS)
+- Writes result to `scan_state.today_recommendation`
+
+**Trading Scheduler** (iquant_routes.py):
 
 | Window | Time | Action |
 |--------|------|--------|
-| GAP_CHECK | 09:25-09:35 | Check holdings: T+1 gap → early exit; T+2 → mark sell |
-| SCAN | 09:38-10:00 | If no holdings → run V15 scan → push BUY signal |
+| GAP_CHECK | 09:31-09:35 | Check holdings: T+1 gap → early exit; T+2 → mark sell |
+| TRADE_DECISION | 09:40-10:05 | Read scan result → push BUY if no holdings |
 | SELL | 14:50-14:58 | Push SELL signal for all marked holdings |
 
 **Signal Flow**:
-1. Server pushes signal to `_state["pending_signals"]`
-2. QMT polls `GET /api/iquant/pending-signals` → receives signal
-3. QMT executes order, then `POST /api/iquant/ack-signal` with signal_id
-4. BUY ack: record entry_price, save holdings to disk
-5. SELL ack: remove from holdings, save to disk
+1. Scan service writes recommendation to `scan_state.today_recommendation`
+2. Trading scheduler reads it and pushes BUY signal to `_state["pending_signals"]` (if no holdings)
+3. QMT polls `GET /api/iquant/pending-signals` → receives signal
+4. QMT executes order, then `POST /api/iquant/ack-signal` with signal_id
+5. BUY ack: record entry_price, save holdings to disk
+6. SELL ack: remove from holdings, save to disk
 
 **Holdings Persistence** (trading safety):
 - Written to `data/v15_holdings.json` after every mutation
@@ -781,8 +795,9 @@ strategy:
 
 **Key Files**:
 - `src/strategy/strategies/v15_scanner.py` — V15 7-layer funnel + V3 regression scoring
-- `src/web/iquant_routes.py` — iQuant API router with T+2 scheduler + monitoring
-- `src/web/app.py` — OSS cache injection into iQuant router
+- `src/web/v15_scan_service.py` — Autonomous scan scheduler + scan logic + Feishu push
+- `src/web/iquant_routes.py` — Trading scheduler + signal/holdings management + iQuant endpoints
+- `src/web/app.py` — Startup wiring: scan service + trading router + OSS cache injection
 - `src/data/clients/iquant_historical_adapter.py` — Historical data adapter (duck-types IFinDHttpClient)
 - `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
 
@@ -797,11 +812,12 @@ strategy:
 
 **Checklist**:
 - [x] V15Scanner: 7-layer funnel + V3 scoring
-- [x] iQuant routes: T+2 adaptive scheduler with three windows
+- [x] Scan/trading decoupled: three independent schedulers
+- [x] Scan runs autonomously from startup (independent of iQuant)
 - [x] Holdings persistence to JSON file
 - [x] Trade calendar via akshare
 - [x] OSS cache injection from app.py
-- [x] Feishu notification with V15 prefix
+- [x] Feishu notification with V15 prefix (always, regardless of holdings)
 - [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
 - [ ] Unit tests
 - [ ] Production deployment verification
