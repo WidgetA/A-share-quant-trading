@@ -719,19 +719,14 @@ def create_iquant_router() -> APIRouter:
                         )
 
                 # --- SELL PRE-NOTIFY: 14:55 ---
-                if (
-                    sell_prenotify_done_date != ex_date
-                    and ex_time >= SELL_PRENOTIFY_TIME
-                ):
+                if sell_prenotify_done_date != ex_date and ex_time >= SELL_PRENOTIFY_TIME:
                     sell_prenotify_done_date = ex_date
                     marked = [h for h in _state["holdings"] if h.get("marked_sell_today")]
                     if marked:
                         try:
                             await _notify_feishu_sell_prenotify(marked)
                         except Exception:
-                            logger.warning(
-                                "V15: sell pre-notify Feishu failed", exc_info=True
-                            )
+                            logger.warning("V15: sell pre-notify Feishu failed", exc_info=True)
 
                 # --- SELL: 14:56-14:58 ---
                 if sell_done_date != ex_date and SELL_WINDOW[0] <= ex_time <= SELL_WINDOW[1]:
