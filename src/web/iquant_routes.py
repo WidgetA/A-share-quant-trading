@@ -151,7 +151,7 @@ async def _notify_feishu_sell_prenotify(marked_holdings: list[dict]) -> None:
         now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         lines = [
             f"[V15] 即将卖出提醒 ({now_str})",
-            f"以下持仓将于 14:56 卖出:",
+            "以下持仓将于 14:56 卖出:",
             "",
         ]
         for h in marked_holdings:
