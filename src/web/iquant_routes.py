@@ -11,7 +11,8 @@
 # Signal flow (T+2 adaptive sell):
 #   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
 #   09:40-10:05  → TRADE DECISION: read scan result → BUY if no holdings
-#   14:50-14:58  → SELL: push SELL signals for marked holdings
+#   14:55        → SELL PRE-NOTIFY: Feishu heads-up 1 min before sell
+#   14:56-14:58  → SELL: push SELL signals for marked holdings
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
 #
 # Scan runs independently in v15_scan_service.py (always pushes Feishu).
@@ -138,6 +139,33 @@ async def _notify_feishu_ack(signal: dict) -> None:
         logger.warning("Failed to send Feishu ack notification", exc_info=True)
 
 
+async def _notify_feishu_sell_prenotify(marked_holdings: list[dict]) -> None:
+    """Send pre-sell notification to Feishu 1 min before sell. Best-effort, never raises."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if not bot.is_configured():
+            return
+
+        now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
+        lines = [
+            f"[V15] 即将卖出提醒 ({now_str})",
+            f"以下持仓将于 14:56 卖出:",
+            "",
+        ]
+        for h in marked_holdings:
+            reason = "T+1跳空止损" if h.get("early_exit") else "T+2到期"
+            lines.append(f"  {h['code']} {h.get('name', '')} — {reason}")
+
+        lines.append("")
+        lines.append("请留意，1分钟后推送卖出信号")
+
+        await bot.send_message("\n".join(lines))
+    except Exception:
+        logger.warning("Failed to send Feishu sell pre-notify", exc_info=True)
+
+
 async def _notify_feishu_signal(signal: dict) -> None:
     """Send signal notification to Feishu. Best-effort, never raises."""
     try:
@@ -227,7 +255,8 @@ def create_iquant_router() -> APIRouter:
     Trading scheduler (decoupled from scan):
     - 09:31-09:35: GAP CHECK (T+1 gap <-3% → early sell, T+2 → sell)
     - 09:40-10:05: TRADE DECISION (read scan result → BUY if no holdings)
-    - 14:50-14:58: SELL (push sell signals for marked holdings)
+    - 14:55: SELL PRE-NOTIFY (Feishu heads-up 1 min before sell)
+    - 14:56-14:58: SELL (push sell signals for marked holdings)
 
     Scan runs independently in v15_scan_service.py.
     """
@@ -374,7 +403,7 @@ def create_iquant_router() -> APIRouter:
                         f"{holding['code']} {holding.get('name', '')} "
                         f"开盘跳空 {gap_pct:.2%}\n"
                         f"买入价: {entry_price:.2f}, 今开: {quote.open_price:.2f}\n"
-                        f"将于14:57卖出",
+                        f"将于14:56卖出",
                     )
                 else:
                     logger.info(
@@ -602,18 +631,21 @@ def create_iquant_router() -> APIRouter:
         Trading windows:
         1. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
         2. TRADE_DECISION (09:40-10:05): Read scan result → BUY if no holdings
-        3. SELL (14:50-14:58): Push SELL signals for marked holdings
+        3. SELL_PRENOTIFY (14:55): Feishu heads-up 1 min before sell
+        4. SELL (14:56-14:58): Push SELL signals for marked holdings
 
         Scan runs independently in v15_scan_service.py.
         """
         GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
         TRADE_DECISION_WINDOW = (time(9, 40), time(10, 5))
-        SELL_WINDOW = (time(14, 50), time(14, 58))
+        SELL_PRENOTIFY_TIME = time(14, 55)
+        SELL_WINDOW = (time(14, 56), time(14, 58))
 
         logger.info("V15 trading scheduler started")
 
         gap_done_date = ""
         trade_done_date = ""
+        sell_prenotify_done_date = ""
         sell_done_date = ""
 
         try:
@@ -686,7 +718,22 @@ def create_iquant_router() -> APIRouter:
                             "skipping trade decision (miss rather than risk)"
                         )
 
-                # --- SELL: 14:50-14:58 ---
+                # --- SELL PRE-NOTIFY: 14:55 ---
+                if (
+                    sell_prenotify_done_date != ex_date
+                    and ex_time >= SELL_PRENOTIFY_TIME
+                ):
+                    sell_prenotify_done_date = ex_date
+                    marked = [h for h in _state["holdings"] if h.get("marked_sell_today")]
+                    if marked:
+                        try:
+                            await _notify_feishu_sell_prenotify(marked)
+                        except Exception:
+                            logger.warning(
+                                "V15: sell pre-notify Feishu failed", exc_info=True
+                            )
+
+                # --- SELL: 14:56-14:58 ---
                 if sell_done_date != ex_date and SELL_WINDOW[0] <= ex_time <= SELL_WINDOW[1]:
                     marked = [h for h in _state["holdings"] if h.get("marked_sell_today")]
                     if marked:
@@ -716,6 +763,7 @@ def create_iquant_router() -> APIRouter:
                 all_done = (
                     gap_done_date == ex_date
                     and trade_done_date == ex_date
+                    and sell_prenotify_done_date == ex_date
                     and sell_done_date == ex_date
                 )
                 await asyncio.sleep(120 if all_done else 30)

@@ -734,8 +734,8 @@ strategy:
 | trend_consistency | avg_daily_return / (volatility + 0.001) | +0.002 |
 
 **T+2 Adaptive Sell**:
-- **T+1 gap check** (09:25-09:35): if gap = (open - entry_price) / entry_price < -3% → mark early exit, sell at 14:50-14:58
-- **T+2** (default): mark sell at gap check, sell at 14:50-14:58
+- **T+1 gap check** (09:25-09:35): if gap = (open - entry_price) / entry_price < -3% → mark early exit, Feishu pre-notify at 14:55, sell at 14:56-14:58
+- **T+2** (default): mark sell at gap check, Feishu pre-notify at 14:55, sell at 14:56-14:58
 - **Multi-day outage**: any holding with trading_days ≥ 2 since buy → sell
 
 **Three-Scheduler Architecture** (scan decoupled from trading):
@@ -757,7 +757,8 @@ strategy:
 |--------|------|--------|
 | GAP_CHECK | 09:31-09:35 | Check holdings: T+1 gap → early exit; T+2 → mark sell |
 | TRADE_DECISION | 09:40-10:05 | Read scan result → push BUY if no holdings |
-| SELL | 14:50-14:58 | Push SELL signal for all marked holdings |
+| SELL_PRENOTIFY | 14:55 | Feishu heads-up 1 min before sell |
+| SELL | 14:56-14:58 | Push SELL signal for all marked holdings |
 
 **Signal Flow**:
 1. Scan service writes recommendation to `scan_state.today_recommendation`
@@ -792,6 +793,7 @@ strategy:
 | Alert | Trigger | Content |
 |-------|---------|---------|
 | 每日就绪报告 | 09:30 | iQuant连接状态、持仓数、今日计划(扫描/跳过) |
+| 卖出预通知 | 14:55 有待卖持仓 | 股票代码、持仓天数、卖出原因、1分钟后卖出提醒 |
 | 买入/卖出信号推送 | Signal pushed | 股票代码、买入参考价(09:40 early_close)、板块、V3评分 |
 | 信号执行确认 | Signal acked | 股票代码、买入参考价(09:40)、推送→执行时间差 |
 | 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
