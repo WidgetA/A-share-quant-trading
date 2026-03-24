@@ -18,6 +18,12 @@ data_home = "/greptimedb_data"
 
 [[region_engine]]
 [region_engine.mito]
+global_write_buffer_size = "8MB"
+auto_flush_interval = "1m"
+enable_write_cache = false
+sst_meta_cache_size = "4MB"
+vector_cache_size = "0B"
+page_cache_size = "4MB"
 
 [[region_engine]]
 [region_engine.file]
