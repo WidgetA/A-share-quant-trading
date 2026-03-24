@@ -60,9 +60,26 @@ class CacheScheduler:
 
     def __init__(self, app_state) -> None:
         self._app_state = app_state
+        # Status tracking for dashboard display
+        self.next_run_time: str | None = None
+        self.last_run_time: str | None = None
+        self.last_run_result: str | None = None  # "success" | "failed" | "skipped" | "no_gaps"
+        self.last_run_message: str | None = None
 
     def _get_cache(self):
         return getattr(self._app_state, "backtest_cache", None)
+
+    def get_status(self) -> dict:
+        """Return scheduler status for dashboard display."""
+        from src.common.config import get_cache_scheduler_enabled
+
+        return {
+            "enabled": get_cache_scheduler_enabled(),
+            "next_run_time": self.next_run_time,
+            "last_run_time": self.last_run_time,
+            "last_run_result": self.last_run_result,
+            "last_run_message": self.last_run_message,
+        }
 
     async def run(self) -> None:
         """Main loop: sleep until 3am, check gaps, download."""
@@ -74,6 +91,7 @@ class CacheScheduler:
                 if now >= target:
                     target += timedelta(days=1)
 
+                self.next_run_time = target.strftime("%Y-%m-%d %H:%M")
                 wait_secs = (target - now).total_seconds()
                 logger.info(
                     f"CacheScheduler: next run at {target.strftime('%Y-%m-%d %H:%M')} "
@@ -81,17 +99,35 @@ class CacheScheduler:
                 )
                 await asyncio.sleep(wait_secs)
 
+                run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+
                 # Check if scheduler is enabled
                 from src.common.config import get_cache_scheduler_enabled
 
                 if not get_cache_scheduler_enabled():
                     logger.info("CacheScheduler: disabled via settings, skipping this run")
+                    self.last_run_time = run_time
+                    self.last_run_result = "skipped"
+                    self.last_run_message = "已关闭，跳过本次执行"
                     continue
 
                 try:
-                    await self.check_and_fill_gaps()
+                    result = await self.check_and_fill_gaps()
+                    self.last_run_time = run_time
+                    if result.get("error"):
+                        self.last_run_result = "failed"
+                        self.last_run_message = result["error"]
+                    elif result["gaps_found"] == 0:
+                        self.last_run_result = "no_gaps"
+                        self.last_run_message = "无缺失数据"
+                    else:
+                        self.last_run_result = "success"
+                        self.last_run_message = f"已补全 {result['dates_downloaded']} 段"
                 except Exception as e:
                     logger.error(f"CacheScheduler gap-fill failed: {e}", exc_info=True)
+                    self.last_run_time = run_time
+                    self.last_run_result = "failed"
+                    self.last_run_message = str(e)[:100]
                     await _notify_feishu(f"[缓存补全] 执行异常\n{e}")
 
         except asyncio.CancelledError:

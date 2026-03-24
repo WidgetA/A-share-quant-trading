@@ -184,6 +184,7 @@ def create_app(
         from src.data.services.cache_scheduler import CacheScheduler
 
         cache_scheduler = CacheScheduler(app.state)
+        app.state.cache_scheduler = cache_scheduler
         app.state.cache_scheduler_task = asyncio.create_task(cache_scheduler.run())
         logger.info("Cache scheduler started (3am daily)")
 

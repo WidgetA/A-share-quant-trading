@@ -40,6 +40,7 @@
 | 0.11.2 | 2026-03-19 | - | ~~SYS-005: OSS cache prefix~~ (obsolete — replaced by GreptimeDB in 0.12.0) |
 | 0.12.0 | 2026-03-24 | - | SYS-005: Replace pickle+OSS backtest cache with GreptimeDB (asyncpg pgwire), no in-memory caching |
 | 0.11.3 | 2026-03-19 | - | SYS-005: Real-time download progress (asyncio.Queue SSE), descriptive Chinese logs, stop download button |
+| 0.12.1 | 2026-03-24 | - | SYS-005: Dashboard cache scheduler status card with toggle, next run time, last result display |
 
 ---
 
@@ -593,6 +594,7 @@ await engine.stop()
 - [x] Cache scheduler Feishu notifications (start / success / failure / exception)
 - [x] Data integrity validation: stock count, per-day consistency, minute coverage
 - [x] Data integrity validation on write (GreptimeDB)
+- [x] Dashboard: cache scheduler status card (next run time, last result, enable/disable toggle)
 - [ ] Unit tests
 
 ---

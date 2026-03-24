@@ -82,6 +82,16 @@ def create_router() -> APIRouter:
                 "pending_count": 0,
             }
 
+        # Get cache scheduler status
+        scheduler = getattr(request.app.state, "cache_scheduler", None)
+        scheduler_status = scheduler.get_status() if scheduler else {
+            "enabled": False,
+            "next_run_time": None,
+            "last_run_time": None,
+            "last_run_result": None,
+            "last_run_message": None,
+        }
+
         return templates.TemplateResponse(
             "index.html",
             {
@@ -89,6 +99,7 @@ def create_router() -> APIRouter:
                 "pending": pending,
                 "count": len(pending),
                 "iquant_status": iquant_status,
+                "scheduler": scheduler_status,
             },
         )
 
@@ -982,6 +993,15 @@ def create_momentum_router() -> APIRouter:
         """Return cache scheduler status and coverage info."""
         cache = getattr(request.app.state, "backtest_cache", None)
         scheduler_task = getattr(request.app.state, "cache_scheduler_task", None)
+        scheduler = getattr(request.app.state, "cache_scheduler", None)
+
+        scheduler_info = scheduler.get_status() if scheduler else {
+            "enabled": False,
+            "next_run_time": None,
+            "last_run_time": None,
+            "last_run_result": None,
+            "last_run_message": None,
+        }
 
         if not cache or not cache.is_ready:
             return {
@@ -993,6 +1013,7 @@ def create_momentum_router() -> APIRouter:
                 "scheduler_running": scheduler_task is not None and not scheduler_task.done()
                 if scheduler_task
                 else False,
+                **scheduler_info,
             }
 
         db_start, db_end = await cache.get_date_range()
@@ -1007,6 +1028,7 @@ def create_momentum_router() -> APIRouter:
             "scheduler_running": scheduler_task is not None and not scheduler_task.done()
             if scheduler_task
             else False,
+            **scheduler_info,
         }
 
     @router.post("/api/cache/trigger")
