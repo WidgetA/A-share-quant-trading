@@ -516,6 +516,11 @@ class GreptimeBacktestCache:
         )
 
         # Phase 2: Minute data from baostock
+        # If daily resume skipped most days, stock_codes may be empty/small.
+        # Fall back to all codes in DB so minute data still gets downloaded.
+        if not stock_codes:
+            stock_codes = await self.get_stock_codes()
+
         if stock_codes:
             await self._download_minute_baostock(
                 stock_codes, dl_start, end_date, progress_cb, cancel_event
