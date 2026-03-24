@@ -8,70 +8,73 @@
 
 {% block content %}
 <div class="dashboard">
-    <!-- iQuant Connection Status -->
-    <section class="strategy-section">
-        <h2>iQuant 连接状态</h2>
-        <div class="strategy-card">
-            <div class="strategy-info">
+    <!-- Status Cards Grid -->
+    <div class="status-grid">
+        <!-- iQuant Connection Status -->
+        <div class="status-card">
+            <div class="status-card-header">
+                <h3>iQuant 连接</h3>
                 <span class="status-indicator {{ 'online' if iquant_status.connected else 'offline' }}">
                     {{ '在线' if iquant_status.connected else '离线' }}
                 </span>
-                {% if iquant_status.last_poll_time %}
-                <span class="status-time">最后心跳: {{ iquant_status.last_poll_time[11:] }}</span>
-                {% else %}
-                <span class="status-time">从未连接</span>
-                {% endif %}
             </div>
-            <div class="strategy-info">
-                <span class="status-time">持仓: {{ iquant_status.holdings_count }}</span>
-                <span class="status-time">待执行: {{ iquant_status.pending_count }}</span>
-            </div>
-        </div>
-    </section>
-
-    <!-- Cache Scheduler Status -->
-    <section class="strategy-section">
-        <h2>缓存定时更新</h2>
-        <div class="strategy-card">
-            <div class="strategy-info" style="display:flex;align-items:center;justify-content:space-between;">
-                <div>
-                    <label class="toggle-switch" style="vertical-align:middle;">
-                        <input type="checkbox" id="schedulerToggle"
-                            {% if scheduler.enabled %}checked{% endif %}
-                            onchange="toggleScheduler(this)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                    <span style="margin-left:8px;font-weight:500;">
-                        {{ '已开启' if scheduler.enabled else '已关闭' }}
+            <div class="status-card-body">
+                <div class="status-card-row">
+                    <span class="status-card-label">心跳</span>
+                    <span class="status-card-value">
+                        {{ iquant_status.last_poll_time[11:] if iquant_status.last_poll_time else '从未连接' }}
                     </span>
                 </div>
-                <span class="status-time">
-                    {% if scheduler.next_run_time %}
-                    下次: {{ scheduler.next_run_time }}
-                    {% else %}
-                    等待计算...
-                    {% endif %}
-                </span>
+                <div class="status-card-row">
+                    <span class="status-card-label">持仓</span>
+                    <span class="status-card-value">{{ iquant_status.holdings_count }}</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">待执行</span>
+                    <span class="status-card-value">{{ iquant_status.pending_count }}</span>
+                </div>
             </div>
-            {% if scheduler.last_run_time %}
-            <div class="strategy-info" style="margin-top:6px;font-size:0.9rem;color:#666;">
-                <span>
-                    上次 ({{ scheduler.last_run_time }}):
-                    {% if scheduler.last_run_result == 'success' %}
-                    <span style="color:#2e7d32;">补全成功</span>
-                    {% elif scheduler.last_run_result == 'no_gaps' %}
-                    <span style="color:#2e7d32;">无缺失</span>
-                    {% elif scheduler.last_run_result == 'skipped' %}
-                    <span style="color:#999;">跳过</span>
-                    {% elif scheduler.last_run_result == 'failed' %}
-                    <span style="color:#d32f2f;">失败</span>
-                    {% endif %}
-                    {% if scheduler.last_run_message %} — {{ scheduler.last_run_message }}{% endif %}
-                </span>
-            </div>
-            {% endif %}
         </div>
-    </section>
+
+        <!-- Cache Scheduler Status -->
+        <div class="status-card">
+            <div class="status-card-header">
+                <h3>缓存定时更新</h3>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="schedulerToggle"
+                        {% if scheduler.enabled %}checked{% endif %}
+                        onchange="toggleScheduler(this)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="status-card-body">
+                <div class="status-card-row">
+                    <span class="status-card-label">状态</span>
+                    <span class="status-card-value">{{ '已开启' if scheduler.enabled else '已关闭' }}</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">下次执行</span>
+                    <span class="status-card-value">{{ scheduler.next_run_time or '计算中...' }}</span>
+                </div>
+                {% if scheduler.last_run_time %}
+                <div class="status-card-row">
+                    <span class="status-card-label">上次 {{ scheduler.last_run_time[5:] }}</span>
+                    <span class="status-card-value">
+                        {% if scheduler.last_run_result == 'success' %}
+                        <span style="color:#2e7d32;">补全成功</span>
+                        {% elif scheduler.last_run_result == 'no_gaps' %}
+                        <span style="color:#2e7d32;">无缺失</span>
+                        {% elif scheduler.last_run_result == 'skipped' %}
+                        <span style="color:#999;">跳过</span>
+                        {% elif scheduler.last_run_result == 'failed' %}
+                        <span style="color:#d32f2f;">失败</span>
+                        {% endif %}
+                    </span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
 
     <!-- Pending Confirmations Section -->
     <section class="confirmations-section">
