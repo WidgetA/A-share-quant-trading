@@ -595,7 +595,7 @@ class GreptimeBacktestCache:
                 if day_records:
                     trading_days_found += 1
                     # Batch INSERT to GreptimeDB
-                    await self._batch_insert_daily(ts_ms, day_records)
+                    await self._write_daily(ts_ms, day_records)
                     # Update prev_close_map for next day
                     for code, rec_data in day_records:
                         prev_close_map[code] = rec_data["close"]
@@ -737,7 +737,7 @@ class GreptimeBacktestCache:
                 break  # done
 
             code, min_data = item
-            await self._batch_insert_minute(code, min_data)
+            await self._write_minute(code, min_data)
 
             if progress_cb and done[0] % 50 == 0:
                 await _maybe_await(progress_cb("minute", done[0], total))
@@ -750,46 +750,41 @@ class GreptimeBacktestCache:
         if thread_exc:
             raise thread_exc[0]
 
-    # ==================== Internal INSERT Helpers ====================
+    # ==================== Internal Write Helpers ====================
 
-    async def _batch_insert_daily(self, ts_ms: int, records: list[tuple[str, dict]]) -> None:
-        """Batch INSERT daily records for a single date."""
-        batch_size = 500
-        for i in range(0, len(records), batch_size):
-            batch = records[i : i + batch_size]
-            values_parts = []
-            for code, rec in batch:
-                tr = rec["turnover_ratio"]
-                tr_str = str(tr) if tr is not None else "NULL"
-                values_parts.append(
-                    f"('{code}', {ts_ms}, "
-                    f"{rec['open']}, {rec['high']}, {rec['low']}, {rec['close']}, "
-                    f"{rec['pre_close']}, {rec['volume']}, {rec['amount']}, {tr_str})"
-                )
-            sql = (
-                "INSERT INTO backtest_daily "
-                "(stock_code, ts, open_price, high_price, low_price, close_price, "
-                "pre_close, vol, amount, turnover_ratio) VALUES " + ", ".join(values_parts)
+    async def _write_daily(self, ts_ms: int, records: list[tuple[str, dict]]) -> None:
+        """INSERT daily records for a single date (one INSERT per day)."""
+        if not records:
+            return
+        values = []
+        for code, rec in records:
+            tr = rec["turnover_ratio"]
+            tr_str = str(tr) if tr is not None else "NULL"
+            values.append(
+                f"('{code}',{ts_ms},"
+                f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
+                f"{rec['pre_close']},{rec['volume']},{rec['amount']},{tr_str})"
             )
-            await self._db.insert(sql)
+        sql = (
+            "INSERT INTO backtest_daily"
+            "(stock_code,ts,open_price,high_price,low_price,close_price,"
+            "pre_close,vol,amount,turnover_ratio) VALUES " + ",".join(values)
+        )
+        await self._db.insert(sql)
 
-    async def _batch_insert_minute(
+    async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
     ) -> None:
-        """INSERT minute data for a single stock across all dates."""
+        """INSERT minute data for a single stock (one INSERT per stock)."""
         if not min_data:
             return
-        values_parts = []
+        values = []
         for ds, (close_940, cum_vol, max_high, min_low) in min_data.items():
             ts_ms = _date_to_epoch_ms(_parse_date_str(ds))
-            values_parts.append(
-                f"('{code}', {ts_ms}, {close_940}, {cum_vol}, {max_high}, {min_low})"
-            )
-        # Batch all dates for this stock in one INSERT
+            values.append(f"('{code}',{ts_ms},{close_940},{cum_vol},{max_high},{min_low})")
         sql = (
-            "INSERT INTO backtest_minute "
-            "(stock_code, ts, close_940, cum_volume, max_high, min_low) VALUES "
-            + ", ".join(values_parts)
+            "INSERT INTO backtest_minute"
+            "(stock_code,ts,close_940,cum_volume,max_high,min_low) VALUES " + ",".join(values)
         )
         await self._db.insert(sql)
 

@@ -3,6 +3,15 @@
 #
 # IMPORTANT: All 3 [[region_engine]] blocks (mito, file, metric) MUST be present.
 # If any is missing, config-rs array merge breaks with cryptic errors.
+#
+# NOTE: This file is committed to git with local-dev defaults (type = "File").
+# On the server, manually update [storage] to use OSS:
+#   type = "Oss"
+#   bucket = "your-bucket"
+#   root = "/greptimedb"
+#   access_key_id = "xxx"
+#   access_key_secret = "xxx"
+#   endpoint = "https://oss-cn-shanghai-internal.aliyuncs.com"
 
 [storage]
 data_home = "/greptimedb_data"
