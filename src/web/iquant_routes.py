@@ -249,7 +249,7 @@ def create_iquant_router() -> APIRouter:
         "holdings": [],  # V15: [{code, name, buy_date, entry_price, marked_sell_today, early_exit}]
         "scheduler_task": None,
         "universe_cache": None,
-        "tsanghi_cache": None,  # injected from app.py after OSS load
+        "backtest_cache": None,  # injected from app.py after GreptimeDB connect
         # --- Monitoring ---
         "last_poll_time": None,  # datetime: last time iQuant polled /pending-signals
     }
@@ -302,9 +302,7 @@ def create_iquant_router() -> APIRouter:
             logger.warning(f"V15ScanDB init failed (scan history disabled): {e}")
             _state["v15_scan_db"] = None
 
-        # Build historical adapter with OSS cache if available
-        cache = _state.get("tsanghi_cache")
-        _state["historical_adapter"] = IQuantHistoricalAdapter(tushare, cache=cache)
+        _state["historical_adapter"] = IQuantHistoricalAdapter(tushare)
         _state["concept_mapper"] = LocalConceptMapper()
         # V15 filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
         _state["stock_filter"] = StockFilter(
@@ -354,19 +352,12 @@ def create_iquant_router() -> APIRouter:
     router._iquant_cleanup = _cleanup_resources  # type: ignore[attr-defined]
     router._iquant_init = _ensure_resources  # type: ignore[attr-defined]
 
-    # --- Cache injection (called from app.py after OSS load) ---
+    # --- Cache injection (called from app.py after GreptimeDB connect) ---
 
     def _inject_cache(cache: Any) -> None:
-        """Inject OSS cache and rebuild historical adapter."""
-        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
-
-        _state["tsanghi_cache"] = cache
-        rt_client = _state.get("realtime_client")
-        if rt_client:
-            _state["historical_adapter"] = IQuantHistoricalAdapter(rt_client, cache=cache)
-            logger.info("V15: OSS cache injected, historical adapter rebuilt")
-        else:
-            logger.info("V15: OSS cache stored (adapter will be built on init)")
+        """Inject GreptimeDB backtest cache for preClose lookups."""
+        _state["backtest_cache"] = cache
+        logger.info("V15: GreptimeDB backtest cache injected")
 
     router._inject_cache = _inject_cache  # type: ignore[attr-defined]
 
@@ -434,10 +425,10 @@ def create_iquant_router() -> APIRouter:
             raise RuntimeError("V15 scan: no previous trading day found in calendar")
         prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
 
-        # Source 1: OSS cache (instant, no API call)
-        cache = _state.get("tsanghi_cache")
+        # Source 1: GreptimeDB cache (instant SQL query)
+        cache = _state.get("backtest_cache")
         if cache and cache.is_ready:
-            all_daily = cache.get_all_codes_with_daily(prev_trade_date)
+            all_daily = await cache.get_all_codes_with_daily(prev_trade_date)
             for code, daily in all_daily.items():
                 close_val = daily.close
                 if close_val and close_val > 0:
@@ -1256,7 +1247,7 @@ def create_iquant_router() -> APIRouter:
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
         """Run V15 scan for a specific historical date."""
-        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.v15_scanner import V15Scanner
         from src.web.routes import MinuteDataMissingError, _build_snapshots_from_cache
@@ -1269,33 +1260,23 @@ def create_iquant_router() -> APIRouter:
         await _ensure_resources()
 
         if body.data_source == "tsanghi":
-            ak_cache = getattr(request.app.state, "tsanghi_cache", None)
-            if not ak_cache and getattr(request.app.state, "tsanghi_cache_loading", False):
-                logger.info("backtest-scan: tsanghi cache loading from OSS, waiting...")
-                for _ in range(90):
-                    await asyncio.sleep(1)
-                    ak_cache = getattr(request.app.state, "tsanghi_cache", None)
-                    if ak_cache:
-                        break
-                    if not getattr(request.app.state, "tsanghi_cache_loading", False):
-                        break
-
-            if not ak_cache:
+            bt_cache = getattr(request.app.state, "backtest_cache", None)
+            if not bt_cache or not bt_cache.is_ready:
                 raise HTTPException(
                     status_code=503,
-                    detail="沧海缓存未加载。请先在 web 页面的回测页下载数据。",
+                    detail="GreptimeDB 缓存未连接。请先在 web 页面的回测页下载数据。",
                 )
 
             date_key = trade_date.strftime("%Y-%m-%d")
             try:
-                price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+                price_snapshots = await _build_snapshots_from_cache(bt_cache, date_key)
             except MinuteDataMissingError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
             if not price_snapshots:
                 return {"recommendation": None, "reason": f"No data for {date_key}"}
 
-            adapter = TsanghiHistoricalAdapter(ak_cache)
+            adapter = GreptimeHistoricalAdapter(bt_cache)
         else:
             raise HTTPException(
                 status_code=400,

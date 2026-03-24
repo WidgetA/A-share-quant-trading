@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
-
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -26,9 +24,6 @@ from src.web.routes import (
     create_trade_backtest_router,
 )
 
-if TYPE_CHECKING:
-    from src.trading.position_manager import PositionManager
-
 logger = logging.getLogger(__name__)
 
 # Template and static file directories
@@ -40,7 +35,6 @@ STATIC_DIR = WEB_DIR / "static"
 def create_app(
     store: PendingConfirmationStore | None = None,
     web_base_url: str = "http://localhost:8000",
-    position_manager: PositionManager | None = None,
 ) -> FastAPI:
     """
     Create FastAPI application.
@@ -48,7 +42,6 @@ def create_app(
     Args:
         store: Pending confirmation store. Uses global singleton if not provided.
         web_base_url: Base URL for generating links in notifications.
-        position_manager: Manager for position data.
 
     Returns:
         Configured FastAPI app.
@@ -66,7 +59,6 @@ def create_app(
     # Store reference for routes
     app.state.pending_store = store
     app.state.web_base_url = web_base_url
-    app.state.position_manager = position_manager
 
     # Set up templates
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -129,40 +121,22 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
-        # Tsanghi backtest cache — single shared instance.
-        # Both dashboard and iQuant trading read from the same cache.
-        # Dashboard download creates a NEW cache object, so the trading
-        # reference still points to the old (stable) data — no copy needed.
-        app.state.tsanghi_cache = None
-        app.state.tsanghi_cache_trading = None
-        app.state.tsanghi_cache_loading = True  # frontend polls this
+        # GreptimeDB backtest cache — single shared instance
+        from src.data.clients.greptime_backtest_cache import create_backtest_cache_from_config
 
-        async def _bg_load_oss_cache():
-            try:
-                from src.data.clients.tsanghi_backtest_cache import TsanghiBacktestCache
+        backtest_cache = create_backtest_cache_from_config()
+        try:
+            await backtest_cache.start()
+            app.state.backtest_cache = backtest_cache
+            logger.info("GreptimeDB backtest cache connected")
 
-                logger.info("Loading tsanghi cache from OSS (background)...")
-                oss_cache = await asyncio.to_thread(TsanghiBacktestCache.load_from_oss)
-                if oss_cache:
-                    app.state.tsanghi_cache = oss_cache
-                    app.state.tsanghi_cache_trading = oss_cache
-                    logger.info(
-                        f"Tsanghi cache pre-loaded from OSS: "
-                        f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
-                        f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
-                    )
-                    # Inject shared cache into iQuant router
-                    iquant_rtr = getattr(app.state, "iquant_router", None)
-                    if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
-                        iquant_rtr._inject_cache(oss_cache)
-                else:
-                    logger.warning("load_from_oss returned None — check OSS config/logs")
-            except Exception as e:
-                logger.warning(f"Failed to pre-load tsanghi cache from OSS: {e}")
-            finally:
-                app.state.tsanghi_cache_loading = False
-
-        asyncio.create_task(_bg_load_oss_cache())
+            # Inject shared cache into iQuant router
+            iquant_rtr = getattr(app.state, "iquant_router", None)
+            if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
+                iquant_rtr._inject_cache(backtest_cache)
+        except Exception as e:
+            logger.error(f"Failed to connect GreptimeDB backtest cache: {e}")
+            app.state.backtest_cache = None
 
         # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
         # CRITICAL: must start before anything else — safety monitoring cannot be skipped
@@ -220,7 +194,7 @@ def create_app(
             "today_results": [],
             "task": None,
             "fundamentals_db": app.state.fundamentals_db,
-            "_app_state": app.state,  # needed for tsanghi_cache access
+            "_app_state": app.state,  # needed for backtest_cache access
         }
         task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
         app.state.momentum_monitor_state["task"] = task
@@ -259,6 +233,12 @@ def create_app(
         if fundamentals_db:
             await fundamentals_db.close()
             logger.info("Shared fundamentals DB closed")
+
+        # Close GreptimeDB backtest cache
+        backtest_cache = getattr(app.state, "backtest_cache", None)
+        if backtest_cache:
+            await backtest_cache.stop()
+            logger.info("GreptimeDB backtest cache closed")
 
         # Cleanup iQuant isolated resources
         iquant_rtr = getattr(app.state, "iquant_router", None)

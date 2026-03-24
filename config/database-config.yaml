@@ -2,22 +2,7 @@
 # This file configures database connections for the strategy platform.
 
 database:
-  # External PostgreSQL for messages (read-only)
-  # Messages are written by external collector project
-  messages:
-    host: "${DB_HOST:localhost}"
-    port: ${DB_PORT:5432}
-    database: "${DB_NAME:messages}"
-    user: "${DB_USER:reader}"
-    password: "${DB_PASSWORD}"
-    pool_min_size: 2
-    pool_max_size: 10
-    schema: "public"
-    table_name: "messages"
-    read_only: true
-
-  # Trading data (positions, orders, transactions)
-  # Uses separate schema for isolation from messages
+  # V15 scan history (uses 'trading' schema)
   trading:
     host: "${DB_HOST:localhost}"
     port: ${DB_PORT:5432}
@@ -39,3 +24,9 @@ database:
     pool_min_size: 2
     pool_max_size: 5
     schema: "public"
+
+# GreptimeDB — backtest data cache (daily OHLCV + minute bars)
+greptimedb:
+  host: "${GREPTIME_HOST:localhost}"
+  port: ${GREPTIME_PORT:4000}
+  database: "public"

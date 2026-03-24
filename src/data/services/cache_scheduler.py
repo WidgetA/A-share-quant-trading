@@ -1,7 +1,7 @@
 # === MODULE PURPOSE ===
-# Background scheduler that auto-fills missing dates in TsanghiBacktestCache.
+# Background scheduler that auto-fills missing dates in GreptimeDB backtest cache.
 # Runs daily at 3am Beijing time: checks for gaps from 2024-01-01 to yesterday,
-# downloads missing dates, and saves to OSS.
+# downloads missing dates into GreptimeDB.
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
 
 
 class CacheScheduler:
-    """Background task that auto-fills TsanghiBacktestCache gaps at 3am daily.
+    """Background task that auto-fills GreptimeDB backtest cache gaps at 3am daily.
 
     Usage:
         scheduler = CacheScheduler(app.state)
@@ -62,10 +62,10 @@ class CacheScheduler:
         self._app_state = app_state
 
     def _get_cache(self):
-        return getattr(self._app_state, "tsanghi_cache_trading", None)
+        return getattr(self._app_state, "backtest_cache", None)
 
     async def run(self) -> None:
-        """Main loop: sleep until 3am, check gaps, download, save to OSS."""
+        """Main loop: sleep until 3am, check gaps, download."""
         logger.info("CacheScheduler started, will run daily at 3am Beijing time")
         try:
             while True:
@@ -107,8 +107,8 @@ class CacheScheduler:
             dict with keys: gaps_found, dates_downloaded, error (if any)
         """
         cache = self._get_cache()
-        if cache is None:
-            msg = "tsanghi_cache not available, skipping gap check"
+        if cache is None or not cache.is_ready:
+            msg = "backtest_cache not available, skipping gap check"
             logger.warning(msg)
             return {"gaps_found": 0, "dates_downloaded": 0, "error": msg}
 
@@ -117,19 +117,12 @@ class CacheScheduler:
         if not all_trading_days:
             return {"gaps_found": 0, "dates_downloaded": 0, "error": "No trading days found"}
 
-        # Find dates missing from cache
-        cached_dates = set()
-        for code_dates in cache._daily.values():
-            for ds in code_dates:
-                try:
-                    cached_dates.add(datetime.strptime(ds, "%Y-%m-%d").date())
-                except ValueError:
-                    pass
-
-        missing = [d for d in all_trading_days if d not in cached_dates]
+        # Find dates missing from cache (query existing dates from GreptimeDB)
+        existing_dates = await cache._get_existing_daily_dates()
+        missing = [d for d in all_trading_days if d not in existing_dates]
 
         # Also check for minute data gaps (daily exists but minute sparse/missing)
-        minute_gaps = cache.find_minute_gaps()
+        minute_gaps = await cache.find_minute_gaps()
 
         if not missing and not minute_gaps:
             logger.info("CacheScheduler: no gaps found, cache is complete")
@@ -184,17 +177,6 @@ class CacheScheduler:
                     exc_info=True,
                 )
 
-        # Save to OSS after downloading
-        if total_downloaded > 0:
-            try:
-                oss_key = await cache.save_to_oss()
-                if oss_key:
-                    logger.info(f"CacheScheduler: saved to OSS, key={oss_key}")
-                else:
-                    logger.warning("CacheScheduler: OSS save returned None (OSS not configured?)")
-            except Exception as e:
-                logger.error(f"CacheScheduler: OSS save failed: {e}", exc_info=True)
-
         total_ranges = len(all_gaps)
         logger.info(
             f"CacheScheduler: done. {gap_summary}, "
@@ -202,10 +184,10 @@ class CacheScheduler:
         )
 
         # Re-check minute gaps after download to see if they're resolved
-        remaining_minute_gaps = cache.find_minute_gaps()
+        remaining_minute_gaps = await cache.find_minute_gaps()
 
         # Data integrity validation
-        integrity_warnings = cache.validate_integrity()
+        integrity_warnings = await cache.validate_integrity()
 
         failed_ranges = total_ranges - total_downloaded
         if failed_ranges > 0 or remaining_minute_gaps or integrity_warnings:

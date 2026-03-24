@@ -329,7 +329,7 @@ if bot.is_configured():
 | `WEB_PORT` | `8000` | Bind port |
 | `WEB_BASE_URL` | auto | Base URL for notification links |
 | `INTERACTION_MODE` | `web` | `web` or `cli` |
-| `OSS_CACHE_PREFIX` | `akshare-cache/` | OSS key prefix for cache files — use different values per environment to avoid cross-contamination |
+| `GREPTIME_HOST` | `localhost` | GreptimeDB host for backtest cache |
 
 **Timeout Defaults** (unchanged from CLI):
 | Type | Timeout | Default Action |
@@ -373,7 +373,7 @@ services:
       - WEB_ENABLED=true
       - WEB_BASE_URL=http://your-server:8000
       - INTERACTION_MODE=web
-      - OSS_CACHE_PREFIX=akshare-cache-prod/  # 不同环境用不同前缀
+      - GREPTIME_HOST=greptimedb  # GreptimeDB host for backtest cache
 ```
 
 **Acceptance Criteria**:
@@ -540,7 +540,7 @@ await engine.stop()
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest): tsanghi 沧海数据 (日线) + baostock (5min bars for 9:40 price) via `TsanghiBacktestCache`
+- Price (backtest): tsanghi 沧海数据 (日线) + baostock (5min bars for 9:40 price) via `GreptimeBacktestCache`
 - Price (live): Tushare Pro `rt_min_daily`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
@@ -591,7 +591,7 @@ await engine.stop()
 - [x] Cache scheduler detects minute data gaps (not just daily gaps)
 - [x] Cache scheduler Feishu notifications (start / success / failure / exception)
 - [x] Data integrity validation: stock count, per-day consistency, minute coverage
-- [x] OSS upload size verification (head_object after put)
+- [x] Data integrity validation on write (GreptimeDB)
 - [ ] Unit tests
 
 ---
@@ -656,7 +656,7 @@ await engine.stop()
 
 **Data Sources**:
 - Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
-- Historical data: OSS cache (`TsanghiBacktestCache`) via `IQuantHistoricalAdapter`
+- Historical data: GreptimeDB (`GreptimeBacktestCache`) via `IQuantHistoricalAdapter`
 - Board data: `LocalConceptMapper` (local JSON files)
 - Fundamentals (ST filter): PostgreSQL `stock_fundamentals` table
 - Trade calendar: akshare `tool_trade_date_hist_sina()` (cached in memory)
@@ -678,7 +678,7 @@ await engine.stop()
 **Key Files**:
 - `src/strategy/strategies/v15_scanner.py` — V15 7-layer funnel + V3 regression scoring
 - `src/web/iquant_routes.py` — iQuant API router with T+2 scheduler + monitoring
-- `src/web/app.py` — OSS cache injection into iQuant router
+- `src/web/app.py` — GreptimeDB cache injection into iQuant router
 - `src/data/clients/iquant_historical_adapter.py` — Historical data adapter (duck-types IFinDHttpClient)
 - `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
 
@@ -696,7 +696,7 @@ await engine.stop()
 - [x] iQuant routes: T+2 adaptive scheduler with three windows
 - [x] Holdings persistence to JSON file
 - [x] Trade calendar via akshare
-- [x] OSS cache injection from app.py
+- [x] GreptimeDB cache injection from app.py
 - [x] Feishu notification with V15 prefix
 - [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
 - [ ] Unit tests

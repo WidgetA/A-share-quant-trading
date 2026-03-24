@@ -1,0 +1,17 @@
+# GreptimeDB configuration for A-Share Trading System
+# Mounted into container at /etc/greptimedb/config.toml
+#
+# IMPORTANT: All 3 [[region_engine]] blocks (mito, file, metric) MUST be present.
+# If any is missing, config-rs array merge breaks with cryptic errors.
+
+[storage]
+data_home = "/greptimedb_data"
+
+[[region_engine]]
+[region_engine.mito]
+
+[[region_engine]]
+[region_engine.file]
+
+[[region_engine]]
+[region_engine.metric]

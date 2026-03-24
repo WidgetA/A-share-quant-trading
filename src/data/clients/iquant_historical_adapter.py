@@ -28,13 +28,12 @@ class IQuantHistoricalAdapter:
     Volume convention: tsanghi returns 手 (lots); converted to 股 (shares) at read time.
     """
 
-    def __init__(self, realtime_client: Any, cache: Any = None) -> None:
+    def __init__(self, realtime_client: Any) -> None:
         """
         Args:
             realtime_client: Duck-typed realtime client for real-time data delegation.
                 Must implement as_ifind_format(stock_codes, indicators) -> dict.
                 Typically TushareRealtimeClient or SinaRealtimeClient.
-            cache: Optional TsanghiBacktestCache (unused, kept for backward compat).
         """
         if not hasattr(realtime_client, "as_ifind_format"):
             raise TypeError(

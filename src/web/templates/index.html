@@ -29,69 +29,6 @@
         </div>
     </section>
 
-    <!-- Positions Section -->
-    <section class="positions-section">
-        <h2>Current Positions
-            {% if positions.summary %}
-            ({{ positions.summary.filled_slots_count|default(0) }}/{{ positions.summary.total_slots|default(5) }})
-            {% endif %}
-        </h2>
-
-        {% set filled_slots = [] %}
-        {% for slot in positions.slots %}
-            {% if slot.state == 'filled' %}
-                {% set _ = filled_slots.append(slot) %}
-            {% endif %}
-        {% endfor %}
-
-        {% if filled_slots %}
-        <div class="positions-list">
-            {% for slot in positions.slots %}
-            {% if slot.state == 'filled' %}
-            <div class="position-card">
-                <div class="position-header">
-                    <span class="slot-badge {{ slot.slot_type }}">
-                        {{ 'Premarket' if slot.slot_type == 'premarket' else 'Intraday' }} #{{ slot.slot_id }}
-                    </span>
-                    <span class="entry-time">{{ slot.entry_time[:16] if slot.entry_time else '' }}</span>
-                </div>
-                <div class="position-body">
-                    {% for holding in slot.holdings %}
-                    <div class="holding-row">
-                        <div class="holding-main">
-                            <span class="stock-code">{{ holding.stock_code }}</span>
-                            <span class="stock-name">{{ holding.stock_name or '' }}</span>
-                        </div>
-                        <div class="holding-details">
-                            <span class="quantity">{{ holding.quantity }} shares</span>
-                            <span class="entry-price">@ {{ "%.2f"|format(holding.entry_price or 0) }}</span>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% if slot.entry_reason %}
-                <div class="position-footer">
-                    <span class="entry-reason">{{ slot.entry_reason }}</span>
-                </div>
-                {% endif %}
-            </div>
-            {% endif %}
-            {% endfor %}
-        </div>
-
-        {% if positions.summary %}
-        <div class="positions-summary">
-            <span>Total Capital: {{ "%.0f"|format(positions.summary.total_capital|default(0)) }}</span>
-            <span>Slot Capital: {{ "%.0f"|format(positions.summary.slot_capital|default(0)) }}</span>
-        </div>
-        {% endif %}
-        {% else %}
-        <div class="empty-state small">
-            <p>No current positions</p>
-        </div>
-        {% endif %}
-    </section>
-
     <!-- Pending Confirmations Section -->
     <section class="confirmations-section">
         <h2>Pending Confirmations ({{ count }})</h2>

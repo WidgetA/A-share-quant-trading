@@ -141,7 +141,7 @@ A-share-quant-trading/
 │   │   └── repository.py       # Trading DB repository
 │   ├── data/                # Data module
 │   │   ├── clients/         # Data source adapters
-│   │   │   ├── tsanghi_backtest_cache.py   # Backtest cache (OSS)
+│   │   │   ├── greptime_backtest_cache.py   # Backtest cache (GreptimeDB)
 │   │   │   ├── iquant_historical_adapter.py # Live historical adapter
 │   │   │   ├── tushare_realtime.py         # Tushare realtime quotes
 │   │   │   └── sina_realtime.py            # Sina realtime (fallback)

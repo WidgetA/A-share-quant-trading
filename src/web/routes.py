@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -29,9 +29,6 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from src.common.pending_store import PendingConfirmationStore
-
-if TYPE_CHECKING:
-    from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +60,6 @@ def create_router() -> APIRouter:
         """Get pending store from app state."""
         return request.app.state.pending_store
 
-    def get_position_manager(request: Request) -> PositionManager | None:
-        """Get position manager from app state."""
-        return getattr(request.app.state, "position_manager", None)
-
     # ==================== HTML Pages ====================
 
     @router.get("/", response_class=HTMLResponse)
@@ -89,21 +82,6 @@ def create_router() -> APIRouter:
                 "pending_count": 0,
             }
 
-        # Get positions (always reload from database)
-        manager = get_position_manager(request)
-        if manager:
-            if manager.has_repository:
-                try:
-                    await manager.load_from_db()
-                except Exception as e:
-                    logger.warning(f"Failed to reload positions from DB: {e}")
-            positions = {
-                "slots": manager.get_state().get("slots", []),
-                "summary": manager.get_summary(),
-            }
-        else:
-            positions = {"slots": [], "summary": {}}
-
         return templates.TemplateResponse(
             "index.html",
             {
@@ -111,7 +89,6 @@ def create_router() -> APIRouter:
                 "pending": pending,
                 "count": len(pending),
                 "iquant_status": iquant_status,
-                "positions": positions,
             },
         )
 
@@ -216,27 +193,6 @@ def create_router() -> APIRouter:
                 status_code=400,
                 detail="Failed to submit selection",
             )
-
-    # ==================== Position API ====================
-
-    @router.get("/api/positions")
-    async def api_positions(request: Request) -> dict:
-        """Get all current positions (always reads from database)."""
-        manager = get_position_manager(request)
-        if not manager:
-            return {"positions": [], "summary": {}, "message": "Position manager not initialized"}
-
-        # Always reload from database for fresh data
-        if manager.has_repository:
-            try:
-                await manager.load_from_db()
-            except Exception as e:
-                logger.warning(f"Failed to reload positions from DB: {e}")
-
-        return {
-            "positions": manager.get_state().get("slots", []),
-            "summary": manager.get_summary(),
-        }
 
     _register_safety_audit_endpoint(router)
 
@@ -350,113 +306,41 @@ def create_momentum_router() -> APIRouter:
 
     @router.get("/api/momentum/tsanghi-cache-status")
     async def tsanghi_cache_status(request: Request):
-        """Return tsanghi cache state for frontend polling."""
-        loading = getattr(request.app.state, "tsanghi_cache_loading", False)
-        cache = getattr(request.app.state, "tsanghi_cache", None)
-        if loading:
-            return {"status": "loading"}
+        """Return backtest cache state for frontend polling."""
+        cache = getattr(request.app.state, "backtest_cache", None)
         if cache is None:
             return {"status": "empty"}
-        sample_dates: list[str] = []
-        sample_code = ""
-        for code, dates in cache._daily.items():
-            if dates:
-                sample_code = code
-                sorted_keys = sorted(dates.keys())
-                sample_dates = (
-                    sorted_keys[:3] + sorted_keys[-3:] if len(sorted_keys) > 6 else sorted_keys
-                )
-                break
-
-        # Count trading days
-        all_dates: set[str] = set()
-        for dates in cache._daily.values():
-            all_dates.update(dates.keys())
-
-        minute_gaps = cache.find_minute_gaps()
-        gap_ranges = [[str(s), str(e)] for s, e in minute_gaps]
-
-        return {
-            "status": "ready",
-            "start_date": str(cache._start_date) if cache._start_date else None,
-            "end_date": str(cache._end_date) if cache._end_date else None,
-            "daily_stocks": len(cache._daily),
-            "daily_days": len(all_dates),
-            "minute_stocks": len(cache._minute),
-            "minute_gaps": gap_ranges,
-            "has_gaps": len(gap_ranges) > 0,
-            "debug_sample_code": sample_code,
-            "debug_sample_dates": sample_dates,
-        }
+        return await cache.get_cache_status()
 
     @router.post("/api/momentum/tsanghi-prepare")
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
-        """Pre-download tsanghi data as SSE stream (incremental)."""
-        from src.data.clients.tsanghi_backtest_cache import (
-            TsanghiBacktestCache,
-            check_oss_available,
-        )
-
+        """Pre-download backtest data as SSE stream (incremental)."""
         try:
             start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
             end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
-        if body.force:
-            request.app.state.tsanghi_cache = None
-            existing = None
-        else:
-            existing = getattr(request.app.state, "tsanghi_cache", None)
+        cache = getattr(request.app.state, "backtest_cache", None)
+        if cache is None:
+            raise HTTPException(status_code=503, detail="GreptimeDB 缓存未连接")
 
-        ex_d = len(existing._daily) if existing else 0
-        ex_m = len(existing._minute) if existing else 0
-        logger.warning(
-            f"tsanghi-prepare: existing={existing is not None} "
-            f"({ex_d} daily, {ex_m} minute), force={body.force}"
-        )
-
-        # 1) Try in-memory cache
-        if existing and existing.covers_range(start_date, end_date):
-
-            async def mem_cached_stream():
-                msg = {
-                    "type": "complete",
-                    "daily_count": len(existing._daily),
-                    "minute_count": len(existing._minute),
-                    "cached": True,
-                }
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
-
-            return StreamingResponse(mem_cached_stream(), media_type="text/event-stream")
-
-        # 2) Try OSS cache (skipped when force=True)
-        if not existing and not body.force:
-            try:
-                existing = await asyncio.wait_for(
-                    asyncio.to_thread(TsanghiBacktestCache.load_from_oss), timeout=60
-                )
-            except asyncio.TimeoutError:
-                logger.warning("load_from_oss timed out (60s), will re-download")
-                existing = None
-            except Exception:
-                logger.warning("load_from_oss failed, will re-download", exc_info=True)
-                existing = None
-        if existing and existing.covers_range(start_date, end_date):
-            request.app.state.tsanghi_cache = existing
+        # Check if already covered
+        if not body.force and await cache.covers_range(start_date, end_date):
+            status = await cache.get_cache_status()
 
             async def cached_stream():
                 msg = {
                     "type": "complete",
-                    "daily_count": len(existing._daily),
-                    "minute_count": len(existing._minute),
+                    "daily_count": status.get("daily_stocks", 0),
+                    "minute_count": status.get("minute_stocks", 0),
                     "cached": True,
                 }
                 yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
-        # 3) Download missing data (real-time progress via asyncio.Queue)
+        # Download missing data (real-time progress via asyncio.Queue)
         def _fmt_progress(phase: str, current: int, total: int) -> str:
             if phase == "init":
                 return "正在初始化..."
@@ -475,33 +359,13 @@ def create_momentum_router() -> APIRouter:
             cancel_event = threading.Event()
 
             # Cancel any existing download task
-            prev_task = getattr(request.app.state, "tsanghi_download_task", None)
+            prev_task = getattr(request.app.state, "cache_download_task", None)
             if prev_task and not prev_task.done():
                 prev_task.cancel()
                 try:
                     await prev_task
                 except (asyncio.CancelledError, Exception):
                     pass
-
-            # Always create a fresh cache for download so we don't
-            # mutate the trading cache (shared reference).
-            # If resuming, seed the new cache from existing data.
-            if existing:
-                cache = existing.copy()
-            else:
-                cache = TsanghiBacktestCache()
-            # Save reference immediately — cache is mutable, so
-            # background download populates it in-place. Even if
-            # the browser disconnects (finally block may not run),
-            # partial data is preserved for resume.
-            request.app.state.tsanghi_cache = cache
-            resume_daily = len(cache._daily)
-            resume_minute = len(cache._minute)
-            # Count cached trading days
-            resume_dates: set[str] = set()
-            for dates in cache._daily.values():
-                resume_dates.update(dates.keys())
-            resume_days = len(resume_dates)
 
             def on_progress(phase: str, current: int, total: int):
                 if phase == "init":
@@ -521,19 +385,6 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-            async def _save_partial_oss():
-                """Save partial cache to OSS so it survives restarts."""
-                try:
-                    if check_oss_available() is None and (cache._daily or cache._minute):
-                        await cache.save_to_oss()
-                        logger.warning(
-                            f"Partial cache saved to OSS: "
-                            f"{len(cache._daily)} daily, "
-                            f"{len(cache._minute)} minute"
-                        )
-                except Exception:
-                    logger.warning("Failed to save partial cache to OSS", exc_info=True)
-
             async def _run_download():
                 try:
                     await cache.download_prices(
@@ -545,29 +396,15 @@ def create_momentum_router() -> APIRouter:
                     queue.put_nowait(None)  # sentinel: success
                 except asyncio.CancelledError:
                     cancel_event.set()
-                    await _save_partial_oss()
                     queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
                 except Exception as e:
-                    await _save_partial_oss()
                     queue.put_nowait({"type": "error", "message": str(e)[:200]})
 
-            request.app.state.tsanghi_cache_loading = True
             download_task = asyncio.create_task(_run_download())
-            request.app.state.tsanghi_download_task = download_task
-            request.app.state.tsanghi_download_cancel = cancel_event
+            request.app.state.cache_download_task = download_task
+            request.app.state.cache_download_cancel = cancel_event
 
             try:
-                if resume_daily or resume_minute:
-                    yield _sse(
-                        {
-                            "type": "status",
-                            "message": (
-                                f"断点续传: 已有 {resume_daily} 只股票 "
-                                f"{resume_days} 天日线, "
-                                f"{resume_minute} 只分钟线"
-                            ),
-                        }
-                    )
                 yield _sse(
                     {
                         "type": "status",
@@ -590,29 +427,21 @@ def create_momentum_router() -> APIRouter:
 
                     yield _sse(event)
 
-                # Save to OSS if available
-                if check_oss_available() is None:
-                    yield _sse({"type": "status", "message": "保存到 OSS..."})
-                    await cache.save_to_oss()
-
-                request.app.state.tsanghi_cache = cache
-                # NOTE: do NOT inject into iQuant — trading cache is isolated
-
+                status = await cache.get_cache_status()
                 yield _sse(
                     {
                         "type": "complete",
-                        "daily_count": len(cache._daily),
-                        "minute_count": len(cache._minute),
+                        "daily_count": status.get("daily_stocks", 0),
+                        "minute_count": status.get("minute_stocks", 0),
                         "cached": False,
                     }
                 )
             except Exception as e:
-                logger.error(f"Tsanghi download error: {e}", exc_info=True)
+                logger.error(f"Cache download error: {e}", exc_info=True)
                 yield _sse({"type": "error", "message": str(e)[:200]})
             finally:
-                request.app.state.tsanghi_cache_loading = False
-                request.app.state.tsanghi_download_task = None
-                request.app.state.tsanghi_download_cancel = None
+                request.app.state.cache_download_task = None
+                request.app.state.cache_download_cancel = None
 
         return StreamingResponse(
             download_stream(),
@@ -622,10 +451,10 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/tsanghi-cancel")
     async def tsanghi_cancel(request: Request):
-        """Cancel an in-progress tsanghi download."""
-        task = getattr(request.app.state, "tsanghi_download_task", None)
+        """Cancel an in-progress cache download."""
+        task = getattr(request.app.state, "cache_download_task", None)
         if task and not task.done():
-            cancel_event = getattr(request.app.state, "tsanghi_download_cancel", None)
+            cancel_event = getattr(request.app.state, "cache_download_cancel", None)
             if cancel_event:
                 cancel_event.set()
             task.cancel()
@@ -636,9 +465,9 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/backtest")
     async def run_backtest(request: Request, body: BacktestScanRequest) -> dict:
-        """Run V15 strategy scan for a specific date using tsanghi cache."""
+        """Run V15 strategy scan for a specific date using backtest cache."""
         from src.common.feishu_bot import FeishuBot
-        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.v15_scanner import V15Scanner
 
@@ -652,14 +481,14 @@ def create_momentum_router() -> APIRouter:
 
         fundamentals_db = _get_fundamentals_db(request)
 
-        ak_cache = getattr(request.app.state, "tsanghi_cache", None)
-        if not ak_cache or not ak_cache.is_ready:
-            raise HTTPException(status_code=400, detail="请先预下载沧海数据")
+        cache = getattr(request.app.state, "backtest_cache", None)
+        if not cache or not cache.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
         try:
             date_key = trade_date.strftime("%Y-%m-%d")
             try:
-                price_snapshots = _build_snapshots_from_cache(ak_cache, date_key)
+                price_snapshots = await _build_snapshots_from_cache(cache, date_key)
             except MinuteDataMissingError as e:
                 return {
                     "success": False,
@@ -673,7 +502,7 @@ def create_momentum_router() -> APIRouter:
                     "error": f"沧海缓存中无 {date_key} 的日线数据",
                 }
 
-            adapter = TsanghiHistoricalAdapter(ak_cache)
+            adapter = GreptimeHistoricalAdapter(cache)
             concept_mapper = LocalConceptMapper()
             scanner = V15Scanner(
                 historical_adapter=adapter,
@@ -773,7 +602,7 @@ def create_momentum_router() -> APIRouter:
         import math
         from datetime import datetime
 
-        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.strategies.v15_scanner import V15Scanner
 
@@ -789,12 +618,12 @@ def create_momentum_router() -> APIRouter:
         if body.initial_capital < 1000:
             raise HTTPException(status_code=400, detail="起始资金不能低于 1000 元")
 
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-        if not tsanghi_cache or not tsanghi_cache.is_ready:
-            raise HTTPException(status_code=400, detail="请先预下载沧海数据")
+        backtest_cache = getattr(request.app.state, "backtest_cache", None)
+        if not backtest_cache or not backtest_cache.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
         fundamentals_db = _get_fundamentals_db(request)
-        adapter = TsanghiHistoricalAdapter(tsanghi_cache)
+        adapter = GreptimeHistoricalAdapter(backtest_cache)
 
         async def event_stream():
             def sse(data: dict) -> str:
@@ -862,7 +691,7 @@ def create_momentum_router() -> APIRouter:
                     try:
                         date_key = trade_date.strftime("%Y-%m-%d")
                         try:
-                            price_snapshots = _build_snapshots_from_cache(tsanghi_cache, date_key)
+                            price_snapshots = await _build_snapshots_from_cache(backtest_cache, date_key)
                         except MinuteDataMissingError as e:
                             price_snapshots = {}
                             price_err = str(e)
@@ -921,7 +750,7 @@ def create_momentum_router() -> APIRouter:
 
                             # Get T+1 open from cache
                             next_date_key = next_trade_date.strftime("%Y-%m-%d")
-                            next_day_data = tsanghi_cache.get_daily(rec.stock_code, next_date_key)
+                            next_day_data = await backtest_cache.get_daily(rec.stock_code, next_date_key)
                             sell_price_val = (
                                 float(next_day_data.open)
                                 if next_day_data and next_day_data.open
@@ -1121,9 +950,9 @@ def create_momentum_router() -> APIRouter:
     async def trigger_monitor_scan(request: Request) -> dict:
         """Manually trigger a momentum scan right now (any time of day)."""
         monitor_state = _get_monitor_state(request)
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
+        backtest_cache = getattr(request.app.state, "backtest_cache", None)
         try:
-            result = await _execute_monitor_scan(monitor_state, tsanghi_cache=tsanghi_cache)
+            result = await _execute_monitor_scan(monitor_state, backtest_cache=backtest_cache)
             if result is None:
                 return {"success": False, "message": "扫描未产生结果"}
             return {"success": True, "result": result}
@@ -1136,14 +965,30 @@ def create_momentum_router() -> APIRouter:
     @router.get("/api/cache/status")
     async def cache_scheduler_status(request: Request) -> dict:
         """Return cache scheduler status and coverage info."""
-        cache = getattr(request.app.state, "tsanghi_cache", None)
+        cache = getattr(request.app.state, "backtest_cache", None)
         scheduler_task = getattr(request.app.state, "cache_scheduler_task", None)
+
+        if not cache or not cache.is_ready:
+            return {
+                "cache_ready": False,
+                "start_date": None,
+                "end_date": None,
+                "daily_stock_count": 0,
+                "minute_stock_count": 0,
+                "scheduler_running": scheduler_task is not None and not scheduler_task.done()
+                if scheduler_task
+                else False,
+            }
+
+        db_start, db_end = await cache.get_date_range()
+        daily_count = await cache.get_daily_stock_count()
+        minute_count = await cache.get_minute_stock_count()
         return {
-            "cache_ready": cache is not None and cache.is_ready if cache else False,
-            "start_date": str(cache._start_date) if cache and cache._start_date else None,
-            "end_date": str(cache._end_date) if cache and cache._end_date else None,
-            "daily_stock_count": len(cache._daily) if cache else 0,
-            "minute_stock_count": len(cache._minute) if cache else 0,
+            "cache_ready": True,
+            "start_date": str(db_start) if db_start else None,
+            "end_date": str(db_end) if db_end else None,
+            "daily_stock_count": daily_count,
+            "minute_stock_count": minute_count,
             "scheduler_running": scheduler_task is not None and not scheduler_task.done()
             if scheduler_task
             else False,
@@ -1154,9 +999,9 @@ def create_momentum_router() -> APIRouter:
         """Manually trigger the cache gap-fill process."""
         from src.data.services.cache_scheduler import CacheScheduler
 
-        cache = getattr(request.app.state, "tsanghi_cache", None)
+        cache = getattr(request.app.state, "backtest_cache", None)
         if not cache:
-            raise HTTPException(503, "缓存未加载，请等待 OSS 缓存加载完成")
+            raise HTTPException(503, "GreptimeDB 缓存未连接")
 
         scheduler = CacheScheduler(request.app.state)
         result = await scheduler.check_and_fill_gaps()
@@ -1174,8 +1019,8 @@ class MinuteDataMissingError(Exception):
     pass
 
 
-def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
-    """Build PriceSnapshot dict from TsanghiBacktestCache for a given date.
+async def _build_snapshots_from_cache(cache, date_str: str) -> dict:
+    """Build PriceSnapshot dict from GreptimeBacktestCache for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
@@ -1185,24 +1030,13 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
     """
     from src.strategy.models import PriceSnapshot
 
-    all_daily = tsanghi_cache.get_all_codes_with_daily(date_str)
+    all_daily = await cache.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
 
     if not all_daily:
-        for code, dates in tsanghi_cache._daily.items():
-            if dates:
-                sample_keys = sorted(dates.keys())[:5]
-                logger.warning(
-                    f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
-                    f"but stock {code} has {len(dates)} dates, "
-                    f"sample keys: {sample_keys}"
-                )
-                break
-        else:
-            logger.warning(
-                f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
-                f"_daily has {len(tsanghi_cache._daily)} stocks but all date dicts are empty"
-            )
+        logger.warning(
+            f"_build_snapshots_from_cache: no data for date_str='{date_str}'"
+        )
         return snapshots
 
     daily_candidates = 0
@@ -1220,7 +1054,7 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
 
         daily_candidates += 1
 
-        data_940 = tsanghi_cache.get_940_price(code, date_str)
+        data_940 = await cache.get_940_price(code, date_str)
         if not data_940:
             continue
 
@@ -1306,7 +1140,7 @@ def _create_board_relevance_filter_global():
     return create_board_relevance_filter()
 
 
-async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict | None:
+async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict | None:
     """Execute a single momentum scan using Tushare + V15Scanner.
 
     Returns result_entry dict on success, None on failure.
@@ -1343,10 +1177,14 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
 
     # Get universe
     stock_filter = create_main_board_only_filter()
-    cache_ready = tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)
-    if cache_ready and tsanghi_cache.stock_codes:
-        all_codes = tsanghi_cache.stock_codes
-        logger.info(f"Monitor: universe from OSS cache ({len(all_codes)} codes)")
+    cache_ready = backtest_cache and getattr(backtest_cache, "is_ready", False)
+    if cache_ready:
+        all_codes = await backtest_cache.get_stock_codes()
+        if all_codes:
+            logger.info(f"Monitor: universe from GreptimeDB cache ({len(all_codes)} codes)")
+        else:
+            all_codes = await fundamentals_db.get_all_stock_codes()
+            logger.info(f"Monitor: universe from PG ({len(all_codes)} codes)")
     else:
         all_codes = await fundamentals_db.get_all_stock_codes()
         logger.info(f"Monitor: universe from PG ({len(all_codes)} codes)")
@@ -1360,16 +1198,16 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
         quotes = await tushare.batch_get_quotes(universe)
         logger.info(f"Monitor: got {len(quotes)} quotes")
 
-        # Supplement preClose from OSS cache
-        if not (tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)):
-            raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
+        # Supplement preClose from GreptimeDB cache
+        if not (backtest_cache and getattr(backtest_cache, "is_ready", False)):
+            raise RuntimeError("GreptimeDB 缓存未连接，无法进行扫描。请先下载回测数据。")
 
         today = datetime.now(beijing_tz).date()
         prev_daily: dict = {}
         for days_back in range(1, 8):
             prev_date = today - timedelta(days=days_back)
             prev_date_str = prev_date.strftime("%Y-%m-%d")
-            prev_daily = tsanghi_cache.get_all_codes_with_daily(prev_date_str)
+            prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
             if prev_daily:
                 logger.info(
                     f"Monitor: preClose from cache date {prev_date_str} ({len(prev_daily)} stocks)"
@@ -1406,10 +1244,10 @@ async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict 
                 f"盘中扫描数据异常：构建快照为空。"
                 f"quotes={len(quotes)}, 停牌/无数据={not_trading}, "
                 f"缺prev_close={skipped_no_prev}, prev_daily={len(prev_daily)}。"
-                f"请检查Tushare数据和OSS缓存是否正常。"
+                f"请检查Tushare数据和GreptimeDB缓存是否正常。"
             )
 
-        adapter = IQuantHistoricalAdapter(tushare, cache=tsanghi_cache)
+        adapter = IQuantHistoricalAdapter(tushare)
         concept_mapper = LocalConceptMapper()
         scanner = V15Scanner(
             historical_adapter=adapter,
@@ -1557,8 +1395,8 @@ async def _run_intraday_monitor(state: dict) -> None:
             logger.info("Monitor: entering scan window")
             try:
                 app_state = state.get("_app_state")
-                tsanghi_cache = getattr(app_state, "tsanghi_cache", None) if app_state else None
-                result = await _execute_monitor_scan(state, tsanghi_cache=tsanghi_cache)
+                backtest_cache = getattr(app_state, "backtest_cache", None) if app_state else None
+                result = await _execute_monitor_scan(state, backtest_cache=backtest_cache)
                 if result is None:
                     logger.warning("Monitor scan returned None (no result)")
                     try:
@@ -2050,9 +1888,9 @@ def create_trade_backtest_router() -> APIRouter:
         if not rows_raw:
             raise HTTPException(400, "CSV 中没有交易记录")
 
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-        if tsanghi_cache is None:
-            raise HTTPException(503, "沧海缓存尚未加载完成，请稍后再试")
+        backtest_cache = getattr(request.app.state, "backtest_cache", None)
+        if backtest_cache is None or not backtest_cache.is_ready:
+            raise HTTPException(503, "GreptimeDB 缓存未连接，请稍后再试")
 
         all_dates: list[str] = []
         for row in rows_raw:
@@ -2064,10 +1902,11 @@ def create_trade_backtest_router() -> APIRouter:
         csv_start = date.fromisoformat(all_dates[0])
         csv_end = date.fromisoformat(all_dates[-1])
 
-        if not tsanghi_cache.covers_range(csv_start, csv_end):
-            cache_start = str(tsanghi_cache._start_date) if tsanghi_cache._start_date else "无"
-            cache_end = str(tsanghi_cache._end_date) if tsanghi_cache._end_date else "无"
-            gaps = tsanghi_cache.missing_ranges(csv_start, csv_end)
+        if not await backtest_cache.covers_range(csv_start, csv_end):
+            db_start, db_end = await backtest_cache.get_date_range()
+            cache_start = str(db_start) if db_start else "无"
+            cache_end = str(db_end) if db_end else "无"
+            gaps = await backtest_cache.missing_ranges(csv_start, csv_end)
             gap_strs = [f"{s}~{e}" for s, e in gaps] if gaps else [f"{csv_start}~{csv_end}"]
             return {
                 "needs_cache_update": True,
@@ -2113,8 +1952,8 @@ def create_trade_backtest_router() -> APIRouter:
                 buy_date = buy_time[:10]
                 sell_date = sell_time[:10]
 
-                buy_day = tsanghi_cache.get_daily(code, buy_date)
-                sell_day = tsanghi_cache.get_daily(code, sell_date)
+                buy_day = await backtest_cache.get_daily(code, buy_date)
+                sell_day = await backtest_cache.get_daily(code, sell_date)
                 if not buy_day or buy_day.open is None:
                     raise HTTPException(
                         400,

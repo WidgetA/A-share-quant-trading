@@ -14,7 +14,7 @@ from typing import Protocol, runtime_checkable
 class HistoricalDataProvider(Protocol):
     """Duck-typed interface for history_quotes + real_time_quotation.
 
-    Both IQuantHistoricalAdapter and TsanghiHistoricalAdapter implement this.
+    Both IQuantHistoricalAdapter and GreptimeHistoricalAdapter implement this.
     """
 
     async def history_quotes(

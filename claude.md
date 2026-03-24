@@ -77,10 +77,10 @@ Rules:
 
 | Purpose | Source | Adapter |
 |---------|--------|---------|
-| Backtest (daily) | 沧海数据 tsanghi | `TsanghiHistoricalAdapter` / `TsanghiBacktestCache` |
-| Backtest (minute) | baostock | via `TsanghiBacktestCache` |
+| Backtest (daily) | 沧海数据 tsanghi | `GreptimeHistoricalAdapter` / `GreptimeBacktestCache` |
+| Backtest (minute) | baostock | via `GreptimeBacktestCache` |
 | Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
-| Live (historical) | OSS cache | `IQuantHistoricalAdapter` |
+| Live (historical) | GreptimeDB | `IQuantHistoricalAdapter` |
 | Fundamentals | PostgreSQL `stock_fundamentals` | `FundamentalsDB` |
 | Board/concept | Local JSON files | `LocalConceptMapper` |
 
