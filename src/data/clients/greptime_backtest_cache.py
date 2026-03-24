@@ -681,6 +681,7 @@ class GreptimeBacktestCache:
         thread_exc: list[BaseException] = []
         # Collect minute data in thread, then INSERT from main async loop
         minute_queue: asyncio.Queue[tuple[str, dict[str, tuple]] | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
 
         def _baostock_minute_download() -> None:
             import baostock as bs
@@ -688,7 +689,7 @@ class GreptimeBacktestCache:
             lg = bs.login()
             if lg.error_code != "0":
                 thread_exc.append(RuntimeError(f"baostock login failed: {lg.error_msg}"))
-                asyncio.get_event_loop().call_soon_threadsafe(minute_queue.put_nowait, None)
+                loop.call_soon_threadsafe(minute_queue.put_nowait, None)
                 return
 
             try:
@@ -745,14 +746,12 @@ class GreptimeBacktestCache:
                             day_data[bar_date] = (c, v, h, lo)
 
                     if day_data:
-                        asyncio.get_event_loop().call_soon_threadsafe(
-                            minute_queue.put_nowait, (code, day_data)
-                        )
+                        loop.call_soon_threadsafe(minute_queue.put_nowait, (code, day_data))
             except Exception as e:
                 thread_exc.append(e)
             finally:
                 bs.logout()
-                asyncio.get_event_loop().call_soon_threadsafe(minute_queue.put_nowait, None)
+                loop.call_soon_threadsafe(minute_queue.put_nowait, None)
 
         thread = threading.Thread(target=_baostock_minute_download, daemon=True)
         thread.start()
