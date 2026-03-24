@@ -128,50 +128,55 @@ class GreptimeClient:
 
     Uses asyncpg with GreptimeDB-specific settings:
     - statement_cache_size=0 (GreptimeDB doesn't support DEALLOCATE/PREPARE)
-    - Single connection (no pool needed for this workload)
+    - Connection pool for safe concurrent access (download + status polling)
     """
 
     def __init__(self, host: str, port: int, database: str = "public") -> None:
         self._host = host
         self._port = port
         self._database = database
-        self._conn: asyncpg.Connection | None = None
+        self._pool: asyncpg.Pool | None = None
 
     async def start(self) -> None:
-        self._conn = await asyncpg.connect(
+        self._pool = await asyncpg.create_pool(
             host=self._host,
             port=self._port,
             database=self._database,
             user="greptime",
+            min_size=1,
+            max_size=3,
             statement_cache_size=0,
         )
 
     async def stop(self) -> None:
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
 
     @property
     def is_connected(self) -> bool:
-        return self._conn is not None and not self._conn.is_closed()
+        return self._pool is not None and not self._pool._closed
 
     async def execute(self, sql: str) -> str:
         """Execute DDL/DML and return status string."""
-        if not self._conn:
+        if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        return await self._conn.execute(sql)
+        async with self._pool.acquire() as conn:
+            return await conn.execute(sql)
 
     async def fetch(self, sql: str) -> list[asyncpg.Record]:
         """Execute SELECT and return rows."""
-        if not self._conn:
+        if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        return await self._conn.fetch(sql)
+        async with self._pool.acquire() as conn:
+            return await conn.fetch(sql)
 
     async def fetchrow(self, sql: str) -> asyncpg.Record | None:
         """Execute SELECT and return first row."""
-        if not self._conn:
+        if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        return await self._conn.fetchrow(sql)
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(sql)
 
 
 # ---------------------------------------------------------------------------
