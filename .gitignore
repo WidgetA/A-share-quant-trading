@@ -58,9 +58,10 @@ credentials.json
 secrets.yaml
 config/secrets.yaml
 
-# === Docker ===
+# === Docker & Infra (contain secrets) ===
 docker-compose*.yml
 !docker-compose.example.yml
+config/greptimedb.toml
 
 # === OS ===
 .DS_Store
