@@ -315,6 +315,15 @@ def create_momentum_router() -> APIRouter:
     @router.post("/api/momentum/tsanghi-prepare")
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
         """Pre-download backtest data as SSE stream (incremental)."""
+        # Check tsanghi token first — most common misconfiguration on new servers
+        from src.common.config import get_tsanghi_token_source
+
+        if get_tsanghi_token_source() == "not_configured":
+            raise HTTPException(
+                status_code=503,
+                detail="沧海数据 token 未配置，请先在设置页面配置 tsanghi token",
+            )
+
         try:
             start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
             end_date = datetime.strptime(body.end_date, "%Y-%m-%d").date()
