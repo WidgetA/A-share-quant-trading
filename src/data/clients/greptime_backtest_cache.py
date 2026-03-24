@@ -696,13 +696,17 @@ class GreptimeBacktestCache:
                 thread_exc.append(RuntimeError(f"baostock login failed: {lg.error_msg}"))
                 loop.call_soon_threadsafe(minute_queue.put_nowait, None)
                 return
+            n = len(codes_to_download)
+            logger.info(f"baostock login OK, downloading minute for {n} stocks")
 
             try:
                 start_str = dl_start.strftime("%Y-%m-%d")
                 end_str = end_date.strftime("%Y-%m-%d")
+                downloaded = 0
 
                 for code in codes_to_download:
                     if cancel_event and cancel_event.is_set():
+                        logger.info("Minute download cancelled by user")
                         break
 
                     prefix = "sh" if code.startswith("6") else "sz"
@@ -750,12 +754,17 @@ class GreptimeBacktestCache:
                         else:
                             day_data[bar_date] = (c, v, h, lo)
 
+                    downloaded += 1
                     if day_data:
                         loop.call_soon_threadsafe(minute_queue.put_nowait, (code, day_data))
+                    if downloaded % 100 == 0:
+                        logger.info(f"baostock minute: {downloaded}/{n} queried")
             except Exception as e:
+                logger.error(f"baostock minute thread error: {e}")
                 thread_exc.append(e)
             finally:
                 bs.logout()
+                logger.info(f"baostock minute thread done: {downloaded} stocks queried")
                 loop.call_soon_threadsafe(minute_queue.put_nowait, None)
 
         thread = threading.Thread(target=_baostock_minute_download, daemon=True)
