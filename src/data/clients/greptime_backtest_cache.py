@@ -232,8 +232,10 @@ class GreptimeBacktestCache:
             return None
         r = rows[0]
         return (
-            float(r["close_940"]), float(r["cum_volume"]),
-            float(r["max_high"]), float(r["min_low"]),
+            float(r["close_940"]),
+            float(r["cum_volume"]),
+            float(r["max_high"]),
+            float(r["min_low"]),
         )
 
     async def get_all_codes_with_daily(self, date_str: str) -> dict[str, DailyBar]:
@@ -279,23 +281,17 @@ class GreptimeBacktestCache:
 
     async def get_daily_stock_count(self) -> int:
         """Count distinct stock codes in daily table."""
-        rows = await self._db.query(
-            "SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily"
-        )
+        rows = await self._db.query("SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily")
         return int(rows[0]["cnt"]) if rows else 0
 
     async def get_minute_stock_count(self) -> int:
         """Count distinct stock codes in minute table."""
-        rows = await self._db.query(
-            "SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute"
-        )
+        rows = await self._db.query("SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute")
         return int(rows[0]["cnt"]) if rows else 0
 
     async def get_daily_date_count(self) -> int:
         """Count distinct trading dates in daily table."""
-        rows = await self._db.query(
-            "SELECT COUNT(DISTINCT ts) as cnt FROM backtest_daily"
-        )
+        rows = await self._db.query("SELECT COUNT(DISTINCT ts) as cnt FROM backtest_daily")
         return int(rows[0]["cnt"]) if rows else 0
 
     # ==================== Range / Gap Detection ====================
@@ -344,9 +340,7 @@ class GreptimeBacktestCache:
         gap_dates.sort()
         return _group_contiguous_dates(gap_dates)
 
-    async def missing_ranges(
-        self, start_date: date, end_date: date
-    ) -> list[tuple[date, date]]:
+    async def missing_ranges(self, start_date: date, end_date: date) -> list[tuple[date, date]]:
         """Return date ranges not covered by this cache (boundary + internal gaps)."""
         db_start, db_end = await self.get_date_range()
         if db_start is None or db_end is None:
@@ -411,8 +405,7 @@ class GreptimeBacktestCache:
                 sample = anomaly_days[:5]
                 suffix = f" ...+{len(anomaly_days) - 5}天" if len(anomaly_days) > 5 else ""
                 warnings.append(
-                    f"日线某些天股票数异常少 (中位数{median_count}): "
-                    f"{', '.join(sample)}{suffix}"
+                    f"日线某些天股票数异常少 (中位数{median_count}): {', '.join(sample)}{suffix}"
                 )
 
         # 3. Minute coverage
@@ -475,7 +468,10 @@ class GreptimeBacktestCache:
 
         # Phase 1: Daily OHLCV from tsanghi
         stock_codes = await self._download_daily_tsanghi(
-            dl_start, end_date, progress_cb, cancel_event,
+            dl_start,
+            end_date,
+            progress_cb,
+            cancel_event,
         )
 
         # Phase 2: Minute data from baostock
@@ -579,16 +575,21 @@ class GreptimeBacktestCache:
                             continue  # skip suspended stocks
 
                         pre_close = prev_close_map.get(ticker, 0.0)
-                        day_records.append((ticker, {
-                            "open": float(o),
-                            "high": float(rec.get("high", o)),
-                            "low": float(rec.get("low", o)),
-                            "close": float(c),
-                            "pre_close": pre_close,
-                            "volume": float(rec.get("volume", 0)),
-                            "amount": 0.0,
-                            "turnover_ratio": None,
-                        }))
+                        day_records.append(
+                            (
+                                ticker,
+                                {
+                                    "open": float(o),
+                                    "high": float(rec.get("high", o)),
+                                    "low": float(rec.get("low", o)),
+                                    "close": float(c),
+                                    "pre_close": pre_close,
+                                    "volume": float(rec.get("volume", 0)),
+                                    "amount": 0.0,
+                                    "turnover_ratio": None,
+                                },
+                            )
+                        )
                         all_stock_codes.add(ticker)
 
                 if day_records:
@@ -751,9 +752,7 @@ class GreptimeBacktestCache:
 
     # ==================== Internal INSERT Helpers ====================
 
-    async def _batch_insert_daily(
-        self, ts_ms: int, records: list[tuple[str, dict]]
-    ) -> None:
+    async def _batch_insert_daily(self, ts_ms: int, records: list[tuple[str, dict]]) -> None:
         """Batch INSERT daily records for a single date."""
         batch_size = 500
         for i in range(0, len(records), batch_size):
@@ -770,8 +769,7 @@ class GreptimeBacktestCache:
             sql = (
                 "INSERT INTO backtest_daily "
                 "(stock_code, ts, open_price, high_price, low_price, close_price, "
-                "pre_close, vol, amount, turnover_ratio) VALUES "
-                + ", ".join(values_parts)
+                "pre_close, vol, amount, turnover_ratio) VALUES " + ", ".join(values_parts)
             )
             await self._db.insert(sql)
 
@@ -802,9 +800,7 @@ class GreptimeBacktestCache:
         rows = await self._db.query("SELECT DISTINCT ts FROM backtest_daily")
         return {_epoch_ms_to_date(_to_epoch_ms(r["ts"])) for r in rows}
 
-    async def _get_existing_minute_codes(
-        self, start_date: date, end_date: date
-    ) -> set[str]:
+    async def _get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have minute data in the given range."""
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
