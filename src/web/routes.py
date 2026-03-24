@@ -84,13 +84,17 @@ def create_router() -> APIRouter:
 
         # Get cache scheduler status
         scheduler = getattr(request.app.state, "cache_scheduler", None)
-        scheduler_status = scheduler.get_status() if scheduler else {
-            "enabled": False,
-            "next_run_time": None,
-            "last_run_time": None,
-            "last_run_result": None,
-            "last_run_message": None,
-        }
+        scheduler_status = (
+            scheduler.get_status()
+            if scheduler
+            else {
+                "enabled": False,
+                "next_run_time": None,
+                "last_run_time": None,
+                "last_run_result": None,
+                "last_run_message": None,
+            }
+        )
 
         return templates.TemplateResponse(
             "index.html",
@@ -995,13 +999,17 @@ def create_momentum_router() -> APIRouter:
         scheduler_task = getattr(request.app.state, "cache_scheduler_task", None)
         scheduler = getattr(request.app.state, "cache_scheduler", None)
 
-        scheduler_info = scheduler.get_status() if scheduler else {
-            "enabled": False,
-            "next_run_time": None,
-            "last_run_time": None,
-            "last_run_result": None,
-            "last_run_message": None,
-        }
+        scheduler_info = (
+            scheduler.get_status()
+            if scheduler
+            else {
+                "enabled": False,
+                "next_run_time": None,
+                "last_run_time": None,
+                "last_run_result": None,
+                "last_run_message": None,
+            }
+        )
 
         if not cache or not cache.is_ready:
             return {
