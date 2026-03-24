@@ -193,10 +193,9 @@ Before starting any development task:
 |----------|--------|-----------|
 | Language | Python 3.11+ | Ecosystem, quant libraries |
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
-| Message Queue | Redis Pub/Sub or ZeroMQ | Low latency, simple setup |
 | Trading Data | PostgreSQL (trading schema) | Unified with messages DB |
 | Message Data | PostgreSQL (external, read-only) | Messages streamed by external collector |
-| Historical Data | PostgreSQL + TimescaleDB (optional) | Time-series optimized |
+| Backtest Cache | GreptimeDB (asyncpg pgwire port 4003) | Time-series optimized, OSS object storage, no in-memory caching |
 | Config Format | YAML | Human-readable, supports hot-reload |
 | Market Data | Tushare Pro (realtime), tsanghi/baostock (backtest) | A-share real-time and historical data |
 | PostgreSQL Client | asyncpg | Async PostgreSQL access |

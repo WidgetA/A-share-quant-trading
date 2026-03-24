@@ -63,19 +63,20 @@ Scanner 日志按 Step 编号输出，关键步骤：
 
 | 文件 | 内容 | 来源 |
 |------|------|------|
-| `data/experiment_turnover_amp_cache.pkl` | 9 个月日线 + 分钟线（3196 只股票） | tsanghi 日线 + baostock 5 分钟线 |
-| `data/experiment_volume_profile_*.pkl` | 量价分布实验数据 | baostock |
+| GreptimeDB `backtest_daily` 表 | 日线 OHLCV（主板全量） | tsanghi 日线 |
+| GreptimeDB `backtest_minute` 表 | 9:40 快照（close_940, cum_volume, max_high, min_low） | baostock 5 分钟线 |
 
-**加载方式：**
+**加载方式（asyncpg）：**
 ```python
-import pickle
-with open("data/experiment_turnover_amp_cache.pkl", "rb") as f:
-    raw = pickle.load(f)
-daily = raw["daily"]   # {bare_code: {date_str: {open,high,low,close,volume,...}}}
-minute = raw["minute"] # {bare_code: {date_str: (close_940, cum_vol) or (close, vol, high, low)}}
+# 通过 GreptimeBacktestCache 读取
+cache = app.state.backtest_cache
+bar = await cache.get_daily("600519", "2024-06-01")
+# bar = {"open": ..., "high": ..., "low": ..., "close": ..., "volume": ..., ...}
+snap = await cache.get_940_price("600519", "2024-06-01")
+# snap = (close_940, cum_volume, max_high, min_low)
 ```
 
-**注意：** 旧缓存的 minute 格式是 2-tuple `(close, volume)`，新缓存是 4-tuple `(close, volume, high, low)`。
+> **历史**: v0.12.0 之前使用 pickle 文件 (`experiment_turnover_amp_cache.pkl`)，已迁移至 GreptimeDB。
 
 ### 2.4 行情数据接口
 
