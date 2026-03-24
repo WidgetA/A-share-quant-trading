@@ -32,7 +32,7 @@ services:
       - INTERACTION_MODE=web
       # GreptimeDB (回测数据缓存)
       - GREPTIME_HOST=greptimedb
-      - GREPTIME_PORT=4000
+      - GREPTIME_PORT=4003
       # 时区
       - TZ=Asia/Shanghai
     volumes:

@@ -28,5 +28,5 @@ database:
 # GreptimeDB — backtest data cache (daily OHLCV + minute bars)
 greptimedb:
   host: "${GREPTIME_HOST:localhost}"
-  port: ${GREPTIME_PORT:4000}
+  port: ${GREPTIME_PORT:4003}
   database: "public"

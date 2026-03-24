@@ -4,7 +4,7 @@
 # GreptimeHistoricalAdapter implementing HistoricalDataProvider for V15Scanner.
 #
 # === KEY CONCEPTS ===
-# - All reads go through SQL (HTTP API port 4000), no in-memory caching
+# - All reads go through SQL via asyncpg (PostgreSQL wire protocol, port 4003)
 # - Natural upsert: same (stock_code, ts) = last write wins
 # - No transactions needed — each INSERT is independently persisted via WAL
 # - Volume stored in 手 (lots) — adapter converts ×100 at read time
@@ -25,7 +25,7 @@ import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, NamedTuple
 
-import httpx
+import asyncpg
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class DailyBar(NamedTuple):
 
 
 # ---------------------------------------------------------------------------
-# Low-level GreptimeDB HTTP client
+# Low-level GreptimeDB client via asyncpg (PostgreSQL wire protocol, port 4003)
 # ---------------------------------------------------------------------------
 
 _CREATE_DAILY_SQL = """
@@ -96,58 +96,82 @@ def _parse_date_str(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").date()
 
 
+def _ts_to_date(val: Any) -> date:
+    """Convert asyncpg timestamp result to date.
+
+    GreptimeDB pgwire returns timestamps as datetime objects.
+    """
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, (int, float)):
+        return _epoch_ms_to_date(val)
+    if isinstance(val, str):
+        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        return dt.date()
+    raise TypeError(f"Cannot convert {type(val)} to date: {val}")
+
+
+def _ts_to_epoch_ms(val: Any) -> int:
+    """Convert asyncpg timestamp result to epoch ms."""
+    if isinstance(val, datetime):
+        return int(val.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str):
+        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    raise TypeError(f"Cannot convert {type(val)} to epoch ms: {val}")
+
+
 class GreptimeClient:
-    """Low-level async HTTP client for GreptimeDB /v1/sql endpoint."""
+    """Low-level async client for GreptimeDB via PostgreSQL wire protocol (port 4003).
+
+    Uses asyncpg with GreptimeDB-specific settings:
+    - statement_cache_size=0 (GreptimeDB doesn't support DEALLOCATE/PREPARE)
+    - Single connection (no pool needed for this workload)
+    """
 
     def __init__(self, host: str, port: int, database: str = "public") -> None:
-        self._url = f"http://{host}:{port}/v1/sql?db={database}"
-        self._client: httpx.AsyncClient | None = None
+        self._host = host
+        self._port = port
+        self._database = database
+        self._conn: asyncpg.Connection | None = None
 
     async def start(self) -> None:
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10, read=120, write=30, pool=10),
-            headers={"X-Greptime-Timezone": "+8:00"},
+        self._conn = await asyncpg.connect(
+            host=self._host,
+            port=self._port,
+            database=self._database,
+            user="greptime",
+            statement_cache_size=0,
         )
 
     async def stop(self) -> None:
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        if self._conn:
+            await self._conn.close()
+            self._conn = None
 
     @property
     def is_connected(self) -> bool:
-        return self._client is not None
+        return self._conn is not None and not self._conn.is_closed()
 
-    async def execute(self, sql: str) -> dict:
-        """Execute SQL and return raw GreptimeDB response."""
-        if not self._client:
+    async def execute(self, sql: str) -> str:
+        """Execute DDL/DML and return status string."""
+        if not self._conn:
             raise RuntimeError("GreptimeClient not started")
-        resp = await self._client.post(self._url, data={"sql": sql})
-        resp.raise_for_status()
-        body = resp.json()
-        if "error" in body:
-            raise RuntimeError(f"GreptimeDB error: {body['error']}")
-        return body
+        return await self._conn.execute(sql)
 
-    async def query(self, sql: str) -> list[dict]:
-        """Execute SELECT and return rows as list of dicts."""
-        body = await self.execute(sql)
-        output = body.get("output", [])
-        if not output:
-            return []
-        records = output[0].get("records", {})
-        schemas = records.get("schema", {}).get("column_schemas", [])
-        rows = records.get("rows", [])
-        col_names = [s["name"] for s in schemas]
-        return [dict(zip(col_names, row)) for row in rows]
+    async def fetch(self, sql: str) -> list[asyncpg.Record]:
+        """Execute SELECT and return rows."""
+        if not self._conn:
+            raise RuntimeError("GreptimeClient not started")
+        return await self._conn.fetch(sql)
 
-    async def insert(self, sql: str) -> int:
-        """Execute INSERT and return affected rows count."""
-        body = await self.execute(sql)
-        output = body.get("output", [])
-        if output:
-            return output[0].get("affectedrows", 0)
-        return 0
+    async def fetchrow(self, sql: str) -> asyncpg.Record | None:
+        """Execute SELECT and return first row."""
+        if not self._conn:
+            raise RuntimeError("GreptimeClient not started")
+        return await self._conn.fetchrow(sql)
 
 
 # ---------------------------------------------------------------------------
@@ -168,14 +192,14 @@ class GreptimeBacktestCache:
     All reads go through SQL — no in-memory caching.
 
     Usage:
-        cache = GreptimeBacktestCache("localhost", 4000)
+        cache = GreptimeBacktestCache("localhost", 4003)
         await cache.start()
         await cache.download_prices(start_date, end_date, progress_cb)
         bar = await cache.get_daily("600519", "2024-06-01")
         await cache.stop()
     """
 
-    def __init__(self, host: str = "localhost", port: int = 4000, database: str = "public") -> None:
+    def __init__(self, host: str = "localhost", port: int = 4003, database: str = "public") -> None:
         self._db = GreptimeClient(host, port, database)
 
     async def start(self) -> None:
@@ -183,7 +207,7 @@ class GreptimeBacktestCache:
         await self._db.start()
         await self._db.execute(_CREATE_DAILY_SQL)
         await self._db.execute(_CREATE_MINUTE_SQL)
-        logger.info(f"GreptimeBacktestCache connected to {self._db._url}")
+        logger.info(f"GreptimeBacktestCache connected via pgwire {self._db._host}:{self._db._port}")
 
     async def stop(self) -> None:
         """Close connection."""
@@ -198,24 +222,23 @@ class GreptimeBacktestCache:
     async def get_daily(self, code: str, date_str: str) -> DailyBar | None:
         """Get daily OHLCV for a stock on a date. date_str is YYYY-MM-DD."""
         ms = _date_to_epoch_ms(_parse_date_str(date_str))
-        rows = await self._db.query(
+        row = await self._db.fetchrow(
             f"SELECT open_price, high_price, low_price, close_price, pre_close, "
             f"vol, amount, turnover_ratio "
             f"FROM backtest_daily "
             f"WHERE stock_code = '{code}' AND ts = {ms}"
         )
-        if not rows:
+        if not row:
             return None
-        r = rows[0]
         return DailyBar(
-            open=float(r["open_price"]),
-            high=float(r["high_price"]),
-            low=float(r["low_price"]),
-            close=float(r["close_price"]),
-            preClose=float(r["pre_close"]),
-            volume=float(r["vol"]),
-            amount=float(r["amount"]),
-            turnoverRatio=r["turnover_ratio"],
+            open=float(row["open_price"]),
+            high=float(row["high_price"]),
+            low=float(row["low_price"]),
+            close=float(row["close_price"]),
+            preClose=float(row["pre_close"]),
+            volume=float(row["vol"]),
+            amount=float(row["amount"]),
+            turnoverRatio=row["turnover_ratio"],
         )
 
     async def get_940_price(
@@ -223,25 +246,24 @@ class GreptimeBacktestCache:
     ) -> tuple[float, float, float, float] | None:
         """Get 9:40 price data: (close, cum_volume, max_high, min_low)."""
         ms = _date_to_epoch_ms(_parse_date_str(date_str))
-        rows = await self._db.query(
+        row = await self._db.fetchrow(
             f"SELECT close_940, cum_volume, max_high, min_low "
             f"FROM backtest_minute "
             f"WHERE stock_code = '{code}' AND ts = {ms}"
         )
-        if not rows:
+        if not row:
             return None
-        r = rows[0]
         return (
-            float(r["close_940"]),
-            float(r["cum_volume"]),
-            float(r["max_high"]),
-            float(r["min_low"]),
+            float(row["close_940"]),
+            float(row["cum_volume"]),
+            float(row["max_high"]),
+            float(row["min_low"]),
         )
 
     async def get_all_codes_with_daily(self, date_str: str) -> dict[str, DailyBar]:
         """Get daily data for ALL stocks on a specific date."""
         ms = _date_to_epoch_ms(_parse_date_str(date_str))
-        rows = await self._db.query(
+        rows = await self._db.fetch(
             f"SELECT stock_code, open_price, high_price, low_price, close_price, "
             f"pre_close, vol, amount, turnover_ratio "
             f"FROM backtest_daily WHERE ts = {ms}"
@@ -262,37 +284,38 @@ class GreptimeBacktestCache:
 
     async def get_stock_codes(self) -> list[str]:
         """Get all unique stock codes in daily table."""
-        rows = await self._db.query(
+        rows = await self._db.fetch(
             "SELECT DISTINCT stock_code FROM backtest_daily ORDER BY stock_code"
         )
         return [r["stock_code"] for r in rows]
 
     async def get_date_range(self) -> tuple[date | None, date | None]:
         """Get (min_date, max_date) of daily data."""
-        rows = await self._db.query(
+        row = await self._db.fetchrow(
             "SELECT MIN(ts) as min_ts, MAX(ts) as max_ts FROM backtest_daily"
         )
-        if not rows or rows[0]["min_ts"] is None:
+        if not row or row["min_ts"] is None:
             return (None, None)
-        # GreptimeDB returns timestamps as strings or numbers depending on format
-        min_ts = rows[0]["min_ts"]
-        max_ts = rows[0]["max_ts"]
-        return (_epoch_ms_to_date(_to_epoch_ms(min_ts)), _epoch_ms_to_date(_to_epoch_ms(max_ts)))
+        return (_ts_to_date(row["min_ts"]), _ts_to_date(row["max_ts"]))
 
     async def get_daily_stock_count(self) -> int:
         """Count distinct stock codes in daily table."""
-        rows = await self._db.query("SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily")
-        return int(rows[0]["cnt"]) if rows else 0
+        row = await self._db.fetchrow(
+            "SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily"
+        )
+        return int(row["cnt"]) if row else 0
 
     async def get_minute_stock_count(self) -> int:
         """Count distinct stock codes in minute table."""
-        rows = await self._db.query("SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute")
-        return int(rows[0]["cnt"]) if rows else 0
+        row = await self._db.fetchrow(
+            "SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute"
+        )
+        return int(row["cnt"]) if row else 0
 
     async def get_daily_date_count(self) -> int:
         """Count distinct trading dates in daily table."""
-        rows = await self._db.query("SELECT COUNT(DISTINCT ts) as cnt FROM backtest_daily")
-        return int(rows[0]["cnt"]) if rows else 0
+        row = await self._db.fetchrow("SELECT COUNT(DISTINCT ts) as cnt FROM backtest_daily")
+        return int(row["cnt"]) if row else 0
 
     # ==================== Range / Gap Detection ====================
 
@@ -309,21 +332,21 @@ class GreptimeBacktestCache:
         A date is a "gap" if daily_count > 100 and minute_count < 50% of daily_count.
         Returns sorted list of contiguous gap ranges.
         """
-        daily_rows = await self._db.query(
+        daily_rows = await self._db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts"
         )
-        minute_rows = await self._db.query(
+        minute_rows = await self._db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_minute GROUP BY ts"
         )
 
         daily_counts: dict[int, int] = {}
         for r in daily_rows:
-            ts_ms = _to_epoch_ms(r["ts"])
+            ts_ms = _ts_to_epoch_ms(r["ts"])
             daily_counts[ts_ms] = int(r["cnt"])
 
         minute_counts: dict[int, int] = {}
         for r in minute_rows:
-            ts_ms = _to_epoch_ms(r["ts"])
+            ts_ms = _ts_to_epoch_ms(r["ts"])
             minute_counts[ts_ms] = int(r["cnt"])
 
         gap_dates: list[date] = []
@@ -388,7 +411,7 @@ class GreptimeBacktestCache:
             warnings.append(f"日线股票数异常多: {total_stocks} (预期 <={_MAX_EXPECTED_STOCKS})")
 
         # 2. Per-day stock count consistency
-        daily_rows = await self._db.query(
+        daily_rows = await self._db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts ORDER BY cnt"
         )
         if daily_rows:
@@ -399,7 +422,7 @@ class GreptimeBacktestCache:
             for r in daily_rows:
                 cnt = int(r["cnt"])
                 if cnt < _MIN_STOCKS_PER_DAY and median_count > _MIN_STOCKS_PER_DAY:
-                    d = _epoch_ms_to_date(_to_epoch_ms(r["ts"]))
+                    d = _ts_to_date(r["ts"])
                     anomaly_days.append(f"{d}({cnt})")
             if anomaly_days:
                 sample = anomaly_days[:5]
@@ -594,7 +617,7 @@ class GreptimeBacktestCache:
 
                 if day_records:
                     trading_days_found += 1
-                    # Batch INSERT to GreptimeDB
+                    # INSERT this day's data immediately
                     await self._write_daily(ts_ms, day_records)
                     # Update prev_close_map for next day
                     for code, rec_data in day_records:
@@ -646,97 +669,84 @@ class GreptimeBacktestCache:
 
             lg = bs.login()
             if lg.error_code != "0":
-                raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+                thread_exc.append(RuntimeError(f"baostock login failed: {lg.error_msg}"))
+                asyncio.get_event_loop().call_soon_threadsafe(minute_queue.put_nowait, None)
+                return
 
             try:
-                bs_start = dl_start.strftime("%Y-%m-%d")
-                bs_end = end_date.strftime("%Y-%m-%d")
+                start_str = dl_start.strftime("%Y-%m-%d")
+                end_str = end_date.strftime("%Y-%m-%d")
 
                 for code in codes_to_download:
                     if cancel_event and cancel_event.is_set():
-                        logger.info("Minute download cancelled by user")
-                        return
+                        break
 
                     prefix = "sh" if code.startswith("6") else "sz"
                     bs_code = f"{prefix}.{code}"
 
-                    try:
-                        rs = bs.query_history_k_data_plus(
-                            bs_code,
-                            "date,time,high,low,close,volume",
-                            start_date=bs_start,
-                            end_date=bs_end,
-                            frequency="5",
-                            adjustflag="2",  # 前复权
+                    rs = bs.query_history_k_data_plus(
+                        bs_code,
+                        "date,time,open,high,low,close,volume",
+                        start_date=start_str,
+                        end_date=end_str,
+                        frequency="5",
+                        adjustflag="2",
+                    )
+
+                    # Aggregate: for each date, compute 9:40 snapshot
+                    # 9:35 bar covers 9:30-9:35, 9:40 bar covers 9:35-9:40
+                    day_data: dict[str, tuple[float, float, float, float]] = {}
+
+                    while rs.error_code == "0" and rs.next():
+                        row = rs.get_row_data()
+                        bar_date = row[0]  # YYYY-MM-DD
+                        bar_time = row[1]  # YYYYMMDDHHMMSSmmm
+                        hhmm = bar_time[8:12]  # e.g. "0935", "0940"
+
+                        if hhmm not in ("0935", "0940"):
+                            continue
+
+                        try:
+                            float(row[2])  # open (unused, validate only)
+                            h = float(row[3])
+                            lo = float(row[4])
+                            c = float(row[5])
+                            v = float(row[6])
+                        except (ValueError, IndexError):
+                            continue
+
+                        if bar_date in day_data:
+                            prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
+                            day_data[bar_date] = (
+                                c,  # close of latest bar (9:40)
+                                prev_v + v,  # cumulative volume
+                                max(prev_h, h),
+                                min(prev_l, lo),
+                            )
+                        else:
+                            day_data[bar_date] = (c, v, h, lo)
+
+                    if day_data:
+                        asyncio.get_event_loop().call_soon_threadsafe(
+                            minute_queue.put_nowait, (code, day_data)
                         )
-                        if rs.error_code == "0":
-                            min_data: dict[str, tuple[float, float, float, float]] = {}
-                            while rs.next():
-                                row = rs.get_row_data()
-                                if len(row) < 6:
-                                    continue
-                                hhmm = row[1][8:12]
-                                if hhmm not in ("0935", "0940"):
-                                    continue
-                                ds = row[0]
-                                close_val = float(row[4])
-                                vol_val = float(row[5])
-                                high_val = float(row[2])
-                                low_val = float(row[3])
-
-                                if ds in min_data:
-                                    prev = min_data[ds]
-                                    min_data[ds] = (
-                                        close_val,
-                                        prev[1] + vol_val,
-                                        max(prev[2], high_val),
-                                        min(prev[3], low_val) if prev[3] > 0 else low_val,
-                                    )
-                                else:
-                                    min_data[ds] = (close_val, vol_val, high_val, low_val)
-
-                            if min_data:
-                                minute_queue.put_nowait((code, min_data))
-
-                    except Exception:
-                        logger.error(f"Minute download failed for {code}")
-                        raise
-
-                    done[0] += 1
-
-                # Signal completion
-                minute_queue.put_nowait(None)
+            except Exception as e:
+                thread_exc.append(e)
             finally:
                 bs.logout()
+                asyncio.get_event_loop().call_soon_threadsafe(minute_queue.put_nowait, None)
 
-        def _thread_wrapper() -> None:
-            try:
-                _baostock_minute_download()
-            except BaseException as exc:
-                thread_exc.append(exc)
-                minute_queue.put_nowait(None)  # unblock consumer
-
-        thread = threading.Thread(target=_thread_wrapper, daemon=True)
+        thread = threading.Thread(target=_baostock_minute_download, daemon=True)
         thread.start()
 
-        # Consume from queue and INSERT to GreptimeDB
+        # Consume from queue and INSERT
         while True:
-            # Poll progress and queue
-            try:
-                item = await asyncio.wait_for(minute_queue.get(), timeout=2)
-            except asyncio.TimeoutError:
-                if cancel_event and cancel_event.is_set():
-                    break
-                if progress_cb:
-                    await _maybe_await(progress_cb("minute", done[0], total))
-                if not thread.is_alive() and minute_queue.empty():
-                    break
-                continue
-
+            item = await minute_queue.get()
             if item is None:
-                break  # done
+                break
 
             code, min_data = item
+            done[0] += 1
             await self._write_minute(code, min_data)
 
             if progress_cb and done[0] % 50 == 0:
@@ -770,7 +780,7 @@ class GreptimeBacktestCache:
             "(stock_code,ts,open_price,high_price,low_price,close_price,"
             "pre_close,vol,amount,turnover_ratio) VALUES " + ",".join(values)
         )
-        await self._db.insert(sql)
+        await self._db.execute(sql)
 
     async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
@@ -786,20 +796,20 @@ class GreptimeBacktestCache:
             "INSERT INTO backtest_minute"
             "(stock_code,ts,close_940,cum_volume,max_high,min_low) VALUES " + ",".join(values)
         )
-        await self._db.insert(sql)
+        await self._db.execute(sql)
 
     # ==================== Resume Helpers ====================
 
     async def _get_existing_daily_dates(self) -> set[date]:
         """Get all dates that have daily data in DB."""
-        rows = await self._db.query("SELECT DISTINCT ts FROM backtest_daily")
-        return {_epoch_ms_to_date(_to_epoch_ms(r["ts"])) for r in rows}
+        rows = await self._db.fetch("SELECT DISTINCT ts FROM backtest_daily")
+        return {_ts_to_date(r["ts"]) for r in rows}
 
     async def _get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have minute data in the given range."""
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
-        rows = await self._db.query(
+        rows = await self._db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_minute "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
         )
@@ -811,12 +821,12 @@ class GreptimeBacktestCache:
         Used to seed pre_close computation during incremental downloads.
         """
         # Get the most recent date in DB
-        rows = await self._db.query("SELECT MAX(ts) as max_ts FROM backtest_daily")
-        if not rows or rows[0]["max_ts"] is None:
+        row = await self._db.fetchrow("SELECT MAX(ts) as max_ts FROM backtest_daily")
+        if not row or row["max_ts"] is None:
             return {}
-        max_ts = _to_epoch_ms(rows[0]["max_ts"])
+        max_ts = _ts_to_epoch_ms(row["max_ts"])
         # Get closes on that date
-        rows = await self._db.query(
+        rows = await self._db.fetch(
             f"SELECT stock_code, close_price FROM backtest_daily WHERE ts = {max_ts}"
         )
         return {r["stock_code"]: float(r["close_price"]) for r in rows}
@@ -865,7 +875,7 @@ class GreptimeHistoricalAdapter:
 
         for full_code in code_list:
             bare = full_code.split(".")[0]
-            rows = await self._cache._db.query(
+            rows = await self._cache._db.fetch(
                 f"SELECT ts, open_price, high_price, low_price, close_price, "
                 f"pre_close, vol, amount, turnover_ratio "
                 f"FROM backtest_daily "
@@ -892,11 +902,11 @@ class GreptimeHistoricalAdapter:
             }
 
             for r in rows:
-                ts_date = _epoch_ms_to_date(_to_epoch_ms(r["ts"]))
+                ts_date = _ts_to_date(r["ts"])
                 time_vals.append(ts_date.strftime("%Y-%m-%d"))
                 for ind in indicator_list:
                     col = ind_to_col.get(ind, ind)
-                    val = r.get(col)
+                    val = r[col] if col in r.keys() else None
                     # tsanghi volume is in 手; convert to 股 at read time
                     if ind == "volume" and val is not None:
                         val = val * 100
@@ -992,17 +1002,6 @@ class GreptimeHistoricalAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _to_epoch_ms(val: Any) -> int:
-    """Convert GreptimeDB timestamp value (int, float, or string) to epoch ms."""
-    if isinstance(val, (int, float)):
-        return int(val)
-    # String timestamp like "2024-01-02T00:00:00"
-    if isinstance(val, str):
-        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-        return int(dt.timestamp() * 1000)
-    raise TypeError(f"Cannot convert {type(val)} to epoch ms: {val}")
-
-
 def _group_contiguous_dates(dates: list[date]) -> list[tuple[date, date]]:
     """Group sorted dates into contiguous ranges (allowing 3-day gaps for weekends)."""
     if not dates:
@@ -1029,9 +1028,9 @@ async def _maybe_await(result: Any) -> None:
 
 
 def create_backtest_cache_from_config() -> GreptimeBacktestCache:
-    """Create GreptimeBacktestCache from database-config.yaml settings."""
+    """Create GreptimeBacktestCache from env var settings."""
     import os
 
     host = os.environ.get("GREPTIME_HOST", "localhost")
-    port = int(os.environ.get("GREPTIME_PORT", "4000"))
+    port = int(os.environ.get("GREPTIME_PORT", "4003"))
     return GreptimeBacktestCache(host=host, port=port)
