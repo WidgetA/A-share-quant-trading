@@ -691,7 +691,9 @@ def create_momentum_router() -> APIRouter:
                     try:
                         date_key = trade_date.strftime("%Y-%m-%d")
                         try:
-                            price_snapshots = await _build_snapshots_from_cache(backtest_cache, date_key)
+                            price_snapshots = await _build_snapshots_from_cache(
+                                backtest_cache, date_key,
+                            )
                         except MinuteDataMissingError as e:
                             price_snapshots = {}
                             price_err = str(e)
@@ -750,7 +752,9 @@ def create_momentum_router() -> APIRouter:
 
                             # Get T+1 open from cache
                             next_date_key = next_trade_date.strftime("%Y-%m-%d")
-                            next_day_data = await backtest_cache.get_daily(rec.stock_code, next_date_key)
+                            next_day_data = await backtest_cache.get_daily(
+                                rec.stock_code, next_date_key,
+                            )
                             sell_price_val = (
                                 float(next_day_data.open)
                                 if next_day_data and next_day_data.open

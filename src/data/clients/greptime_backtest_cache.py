@@ -231,7 +231,10 @@ class GreptimeBacktestCache:
         if not rows:
             return None
         r = rows[0]
-        return (float(r["close_940"]), float(r["cum_volume"]), float(r["max_high"]), float(r["min_low"]))
+        return (
+            float(r["close_940"]), float(r["cum_volume"]),
+            float(r["max_high"]), float(r["min_low"]),
+        )
 
     async def get_all_codes_with_daily(self, date_str: str) -> dict[str, DailyBar]:
         """Get daily data for ALL stocks on a specific date."""
@@ -471,7 +474,9 @@ class GreptimeBacktestCache:
             await _maybe_await(progress_cb("init", 0, 0))
 
         # Phase 1: Daily OHLCV from tsanghi
-        stock_codes = await self._download_daily_tsanghi(dl_start, end_date, progress_cb, cancel_event)
+        stock_codes = await self._download_daily_tsanghi(
+            dl_start, end_date, progress_cb, cancel_event,
+        )
 
         # Phase 2: Minute data from baostock
         if stock_codes:
