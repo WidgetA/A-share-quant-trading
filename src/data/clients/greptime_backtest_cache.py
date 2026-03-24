@@ -123,12 +123,24 @@ def _ts_to_epoch_ms(val: Any) -> int:
     raise TypeError(f"Cannot convert {type(val)} to epoch ms: {val}")
 
 
+class _GreptimeConnection(asyncpg.Connection):
+    """asyncpg connection subclass that disables reset for GreptimeDB.
+
+    GreptimeDB doesn't support RESET ALL / DEALLOCATE ALL which asyncpg
+    runs when returning connections to the pool. Override to no-op.
+    """
+
+    async def reset(self, *, timeout: float | None = None) -> None:  # type: ignore[override]
+        pass
+
+
 class GreptimeClient:
     """Low-level async client for GreptimeDB via PostgreSQL wire protocol (port 4003).
 
     Uses asyncpg with GreptimeDB-specific settings:
     - statement_cache_size=0 (GreptimeDB doesn't support DEALLOCATE/PREPARE)
     - Connection pool for safe concurrent access (download + status polling)
+    - Custom connection class with no-op reset (GreptimeDB doesn't support RESET ALL)
     """
 
     def __init__(self, host: str, port: int, database: str = "public") -> None:
@@ -143,9 +155,10 @@ class GreptimeClient:
             port=self._port,
             database=self._database,
             user="greptime",
-            min_size=1,
+            min_size=0,
             max_size=3,
             statement_cache_size=0,
+            connection_class=_GreptimeConnection,
         )
 
     async def stop(self) -> None:
