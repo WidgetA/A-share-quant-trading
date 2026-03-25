@@ -713,7 +713,7 @@ strategy:
 |-------|------|-------|
 | L1 | Gain Filter | gain_from_open ≥ 0.2578%, main board + SME (00/60), non-ST, price ≥ ¥12 |
 | L2 | Board Lookup | Reverse concept lookup via LocalConceptMapper |
-| L3 | Hot Boards | Boards with ≥2 L1-qualifying stocks, exclude blacklist (物联网/医疗器械概念/特高压/冷链物流/特钢概念/三胎概念) |
+| L3 | Hot Boards | Boards with ≥2 L1-qualifying stocks, avg gain ≥ 0.80%, exclude blacklist (物联网/医疗器械概念/特高压/冷链物流/特钢概念/三胎概念) |
 | L4 | Constituent Expansion | All stocks in hot boards, re-apply L1 gain + price + ST filters |
 | L5 | Volume Filter | turnover_amp = early_vol/(avg_vol×0.125), keep [0.498, 6.0] |
 | L6 | Reversal Filter | ReversalFactorFilter(percentile=95, floor=0.15, min_sample=10) |

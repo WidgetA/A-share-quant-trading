@@ -357,8 +357,13 @@ Limit-up (skipped):
             f"[V15] 每日扫描报告 ({time_str})",
             (
                 f"初筛: {scan_result.initial_gainers_count}只 | "
-                f"热门板块: {scan_result.hot_board_count}个 | "
-                f"L5: {scan_result.l5_count} | L6: {scan_result.l6_count} | "
+                f"热门板块: {scan_result.hot_board_count}个"
+                + (
+                    f"(弱板块过滤: {scan_result.l3_filtered_by_avg_gain}个)"
+                    if getattr(scan_result, "l3_filtered_by_avg_gain", 0)
+                    else ""
+                )
+                + f" | L5: {scan_result.l5_count} | L6: {scan_result.l6_count} | "
                 f"最终: {scan_result.final_candidates}只"
             ),
         ]

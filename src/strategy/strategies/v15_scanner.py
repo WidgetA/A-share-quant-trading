@@ -6,7 +6,7 @@
 # === 7-LAYER FUNNEL ===
 # L1:   gain_from_open >= 0.26%, main_board+SME, non-ST, price >= 12.0
 # L2:   reverse lookup stock → concept boards (local JSON)
-# L3:   hot boards (>=2 gainers), exclude blacklist
+# L3:   hot boards (>=2 gainers, avg gain >= 0.80%), exclude blacklist
 # L4:   board constituent expansion + L1 gain re-filter
 # L5:   volume filter (turnover_amp ∈ [0.498, 6.0], 37d lookback)
 # L6:   reversal filter (percentile=95, floor=0.15, min_sample=10)
@@ -77,6 +77,7 @@ class V15ScanResult:
     all_scored: list[V15ScoredStock] = field(default_factory=list)
     initial_gainers_count: int = 0
     hot_board_count: int = 0
+    l3_filtered_by_avg_gain: int = 0
     l4_count: int = 0
     l5_count: int = 0
     l6_count: int = 0
@@ -112,6 +113,7 @@ class V15Scanner:
 
     # ── L3 Parameters ──
     MIN_STOCKS_PER_BOARD = 2
+    MIN_BOARD_AVG_GAIN = 0.80  # avg gain_from_open_pct (%) for hot board qualification
     BOARD_BLACKLIST = frozenset(
         {"物联网", "医疗器械概念", "特高压", "冷链物流", "特钢概念", "三胎概念"}
     )
@@ -197,9 +199,10 @@ class V15Scanner:
         stock_boards = await self._l2_board_lookup(list(gainers.keys()))
         logger.info(f"L2: boards found for {len(stock_boards)} stocks")
 
-        # L3: hot boards
-        hot_boards = self._l3_hot_boards(stock_boards)
+        # L3: hot boards (avg gain >= threshold)
+        hot_boards, l3_avg_filtered = self._l3_hot_boards(stock_boards, gainers)
         result.hot_board_count = len(hot_boards)
+        result.l3_filtered_by_avg_gain = l3_avg_filtered
         logger.info(f"L3: {len(hot_boards)} hot boards")
         if not hot_boards:
             return result
@@ -325,18 +328,41 @@ class V15Scanner:
 
     # ── L3: Hot Boards ──
 
-    def _l3_hot_boards(self, stock_boards: dict[str, list[str]]) -> dict[str, list[str]]:
-        """Find boards with >= 2 gainers, excluding blacklist."""
+    def _l3_hot_boards(
+        self,
+        stock_boards: dict[str, list[str]],
+        gainers: dict[str, PriceSnapshot],
+    ) -> tuple[dict[str, list[str]], int]:
+        """Find boards with >= 2 gainers AND avg gain >= threshold, excluding blacklist.
+
+        Returns:
+            (hot_boards, filtered_by_avg_gain_count)
+        """
         board_to_stocks: dict[str, list[str]] = defaultdict(list)
         for code, boards in stock_boards.items():
             for board in boards:
                 if board not in self.BOARD_BLACKLIST:
                     board_to_stocks[board].append(code)
-        return {
-            b: codes
-            for b, codes in board_to_stocks.items()
-            if len(codes) >= self.MIN_STOCKS_PER_BOARD
-        }
+
+        result: dict[str, list[str]] = {}
+        filtered_by_avg = 0
+        for b, codes in board_to_stocks.items():
+            if len(codes) < self.MIN_STOCKS_PER_BOARD:
+                continue
+            gains = [gainers[c].gain_from_open_pct for c in codes if c in gainers]
+            if not gains:
+                continue
+            avg_gain = sum(gains) / len(gains)
+            if avg_gain < self.MIN_BOARD_AVG_GAIN:
+                filtered_by_avg += 1
+                logger.info(
+                    f"L3: filtered '{b}' ({len(codes)} stocks, "
+                    f"avg_gain={avg_gain:.2f}% < {self.MIN_BOARD_AVG_GAIN}%)"
+                )
+                continue
+            result[b] = codes
+
+        return result, filtered_by_avg
 
     # ── L4: Constituent Expansion ──
 
