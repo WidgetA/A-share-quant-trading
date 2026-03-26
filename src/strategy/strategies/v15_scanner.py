@@ -115,7 +115,7 @@ class V15Scanner:
     MIN_STOCKS_PER_BOARD = 2
     MIN_BOARD_AVG_GAIN = 0.80  # avg gain_from_open_pct (%) for hot board qualification
     BOARD_BLACKLIST = frozenset(
-        {"物联网", "医疗器械概念", "特高压", "冷链物流", "特钢概念", "三胎概念"}
+        {"物联网", "医疗器械概念", "特高压", "冷链物流", "特钢概念", "三胎概念", "长三角一体化"}
     )
 
     # ── L5 Parameters ──
