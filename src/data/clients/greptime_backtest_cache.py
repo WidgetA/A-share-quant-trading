@@ -571,6 +571,10 @@ class GreptimeBacktestCache:
                         f"(cached up to {latest_cached}), starting from {dl_start}"
                     )
 
+            if progress_cb:
+                skipped = len(existing_dates)
+                await _maybe_await(progress_cb("daily_resume", skipped, skipped))
+
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
 
@@ -678,6 +682,15 @@ class GreptimeBacktestCache:
                 f"with existing data, downloading {len(codes_to_download)}"
             )
 
+        if progress_cb:
+            await _maybe_await(
+                progress_cb(
+                    "minute_resume",
+                    len(existing_codes),
+                    len(codes),
+                )
+            )
+
         if not codes_to_download:
             return
 
@@ -780,7 +793,7 @@ class GreptimeBacktestCache:
             done[0] += 1
             await self._write_minute(code, min_data)
 
-            if progress_cb and done[0] % 50 == 0:
+            if progress_cb and done[0] % 10 == 0:
                 await _maybe_await(progress_cb("minute", done[0], total))
 
         thread.join(timeout=5)

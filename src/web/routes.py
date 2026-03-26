@@ -370,8 +370,17 @@ def create_momentum_router() -> APIRouter:
         def _fmt_progress(phase: str, current: int, total: int) -> str:
             if phase == "init":
                 return "正在初始化..."
+            elif phase == "daily_resume":
+                if current > 0:
+                    return f"日线已缓存 {current} 天，检查剩余..."
+                return "检查日线缓存..."
             elif phase == "daily":
                 return f"下载日线数据: {current}/{total} 天"
+            elif phase == "minute_resume":
+                remaining = total - current
+                if current > 0:
+                    return f"分钟线已缓存 {current}/{total} 只，需下载 {remaining} 只"
+                return f"分钟线需下载 {total} 只"
             elif phase == "minute":
                 return f"下载分钟线数据: {current}/{total} 只"
             elif phase == "download":
@@ -396,8 +405,12 @@ def create_momentum_router() -> APIRouter:
             def on_progress(phase: str, current: int, total: int):
                 if phase == "init":
                     overall = 0.0
+                elif phase == "daily_resume":
+                    overall = 0.05
                 elif phase == "daily":
-                    overall = 0.2 * (current / total) if total > 0 else 0
+                    overall = 0.05 + 0.15 * (current / total) if total > 0 else 0.05
+                elif phase == "minute_resume":
+                    overall = 0.2
                 elif phase == "minute":
                     overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
                 else:
