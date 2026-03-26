@@ -4403,11 +4403,12 @@ def _build_snapshots_from_cache(
         if not data_940:
             continue
 
-        minute_hits += 1
         latest_price, cum_vol, max_high, min_low = data_940
 
         if latest_price <= 0:
             continue
+
+        minute_hits += 1
 
         snapshots[code] = PriceSnapshot(
             stock_code=code,

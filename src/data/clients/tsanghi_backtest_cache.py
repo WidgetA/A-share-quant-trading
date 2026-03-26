@@ -652,13 +652,28 @@ class TsanghiBacktestCache:
 
                                 if ds in min_data:
                                     prev = min_data[ds]
+                                    if prev[3] <= 0 or low_val <= 0:
+                                        logger.warning(
+                                            f"Minute bar low=0 for {code} on {ds} "
+                                            f"(prev_low={prev[3]}, new_low={low_val}), "
+                                            f"skipping this date"
+                                        )
+                                        del min_data[ds]
+                                        continue
                                     min_data[ds] = (
                                         close_val,  # 09:40 close overwrites 09:35
                                         prev[1] + vol_val,  # cumulative volume
                                         max(prev[2], high_val),
-                                        min(prev[3], low_val) if prev[3] > 0 else low_val,
+                                        min(prev[3], low_val),
                                     )
                                 else:
+                                    if low_val <= 0 or high_val <= 0 or close_val <= 0:
+                                        logger.warning(
+                                            f"Minute bar invalid price for {code} on {ds} "
+                                            f"(close={close_val}, high={high_val}, low={low_val}), "
+                                            f"skipping"
+                                        )
+                                        continue
                                     min_data[ds] = (close_val, vol_val, high_val, low_val)
 
                             if min_data:
