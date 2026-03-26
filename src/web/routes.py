@@ -6246,7 +6246,10 @@ def create_v15_backtest_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="基本面数据库未就绪")
 
         # Build snapshots from cache
-        snapshots = _build_snapshots_from_cache(tsanghi_cache, body.trade_date)
+        try:
+            snapshots = _build_snapshots_from_cache(tsanghi_cache, body.trade_date)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
         if not snapshots:
             return {
                 "success": True,
@@ -6271,7 +6274,11 @@ def create_v15_backtest_router() -> APIRouter:
         )
 
         # Run scan
-        result = await scanner.scan(snapshots, trade_date=td)
+        try:
+            result = await scanner.scan(snapshots, trade_date=td)
+        except Exception as e:
+            logger.exception("V15 backtest scan failed")
+            raise HTTPException(status_code=500, detail=f"扫描失败: {e}")
 
         # Build funnel layers
         funnel = [

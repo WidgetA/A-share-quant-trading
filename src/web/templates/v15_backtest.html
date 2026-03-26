@@ -110,7 +110,8 @@ document.getElementById('v15-form').addEventListener('submit', async (e) => {
         });
         const data = await resp.json();
         if (!resp.ok) {
-            alert(data.detail || '回测失败');
+            const msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+            alert(msg || '回测失败');
             return;
         }
         renderV15Results(data);
