@@ -523,7 +523,12 @@ class GreptimeBacktestCache:
 
         if stock_codes:
             await self._download_minute_baostock(
-                stock_codes, dl_start, end_date, progress_cb, cancel_event
+                stock_codes,
+                dl_start,
+                end_date,
+                resume_check_start=start_date,
+                progress_cb=progress_cb,
+                cancel_event=cancel_event,
             )
 
         total = len(stock_codes)
@@ -674,12 +679,17 @@ class GreptimeBacktestCache:
         codes: list[str],
         dl_start: date,
         end_date: date,
+        resume_check_start: date | None = None,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> None:
         """Download 5-min bars from baostock and INSERT to GreptimeDB."""
         # Resume: check which codes already have minute data
-        existing_codes = await self._get_existing_minute_codes(dl_start, end_date)
+        # Use resume_check_start (actual target dates) instead of dl_start (which
+        # includes 60-day lookback) so gap-fill downloads aren't skipped just because
+        # the stock has older minute data in the lookback window.
+        check_start = resume_check_start or dl_start
+        existing_codes = await self._get_existing_minute_codes(check_start, end_date)
         codes_to_download = [c for c in codes if c not in existing_codes]
         if existing_codes:
             logger.info(
