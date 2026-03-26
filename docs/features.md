@@ -41,6 +41,7 @@
 | 0.12.0 | 2026-03-24 | - | SYS-005: Replace pickle+OSS backtest cache with GreptimeDB (asyncpg pgwire), no in-memory caching |
 | 0.11.3 | 2026-03-19 | - | SYS-005: Real-time download progress (asyncio.Queue SSE), descriptive Chinese logs, stop download button |
 | 0.12.1 | 2026-03-24 | - | SYS-005: Dashboard cache scheduler status card with toggle, next run time, last result display |
+| 0.12.2 | 2026-03-26 | - | SYS-005: Cache scheduler download timeout (4h/range), per-range Feishu progress, align manual/scheduler gap detection |
 
 ---
 
@@ -591,10 +592,12 @@ await engine.stop()
 - [x] Cache scheduler toggle on Settings page (enable/disable, persisted to disk)
 - [x] Cache download resume: skip already-downloaded daily dates and minute stocks on retry
 - [x] Cache scheduler detects minute data gaps (not just daily gaps)
-- [x] Cache scheduler Feishu notifications (start / success / failure / exception)
+- [x] Cache scheduler Feishu notifications (all scenarios: start / progress / success / failure / timeout / exception / no_gaps / disabled)
 - [x] Data integrity validation: stock count, per-day consistency, minute coverage
 - [x] Data integrity validation on write (GreptimeDB)
 - [x] Dashboard: cache scheduler status card (next run time, last result, enable/disable toggle)
+- [x] Cache scheduler per-range download timeout (4 hours max)
+- [x] Manual download gap check aligned with scheduler (boundaries + minute gaps via `missing_ranges()`)
 - [ ] Unit tests
 
 ---

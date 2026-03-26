@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 CACHE_START_DATE = date(2024, 1, 1)
 SCHEDULE_HOUR = 3  # 3am Beijing time
+DOWNLOAD_TIMEOUT_SECONDS = 4 * 3600  # 4 hours max per range
 
 
 async def _notify_feishu(message: str) -> None:
@@ -109,6 +110,7 @@ class CacheScheduler:
                     self.last_run_time = run_time
                     self.last_run_result = "skipped"
                     self.last_run_message = "已关闭，跳过本次执行"
+                    await _notify_feishu("[缓存补全] 调度器已关闭，跳过本次执行")
                     continue
 
                 try:
@@ -162,6 +164,7 @@ class CacheScheduler:
 
         if not missing and not minute_gaps:
             logger.info("CacheScheduler: no gaps found, cache is complete")
+            await _notify_feishu("[缓存补全] 缓存完整，无缺失数据")
             return {"gaps_found": 0, "dates_downloaded": 0}
 
         # Merge daily gaps + minute gaps into unified download ranges
@@ -194,9 +197,10 @@ class CacheScheduler:
         await _notify_feishu(f"[缓存补全] 开始补全\n{gap_summary}\n下载范围: {len(all_gaps)} 段")
 
         total_downloaded = 0
-        for range_start, range_end in all_gaps:
+        total_ranges = len(all_gaps)
+        for idx, (range_start, range_end) in enumerate(all_gaps, 1):
             try:
-                logger.info(f"CacheScheduler: downloading {range_start} ~ {range_end}")
+                logger.info(f"CacheScheduler: downloading {range_start} ~ {range_end} ({idx}/{total_ranges})")
 
                 async def _progress(phase, current, total):
                     if progress_callback:
@@ -204,16 +208,35 @@ class CacheScheduler:
                             f"Downloading {range_start}~{range_end}: {phase} {current}/{total}"
                         )
 
-                await cache.download_prices(range_start, range_end, _progress)
+                await asyncio.wait_for(
+                    cache.download_prices(range_start, range_end, _progress),
+                    timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                )
                 range_days = len(_get_trading_calendar(range_start, range_end))
                 total_downloaded += range_days
+                await _notify_feishu(
+                    f"[缓存补全] 进度 {idx}/{total_ranges}\n"
+                    f"已完成: {range_start} ~ {range_end}"
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"CacheScheduler: download {range_start}~{range_end} timed out "
+                    f"after {DOWNLOAD_TIMEOUT_SECONDS}s"
+                )
+                await _notify_feishu(
+                    f"[缓存补全] 超时 ({idx}/{total_ranges})\n"
+                    f"{range_start} ~ {range_end} 超过{DOWNLOAD_TIMEOUT_SECONDS // 3600}小时未完成，已跳过"
+                )
             except Exception as e:
                 logger.error(
                     f"CacheScheduler: failed to download {range_start}~{range_end}: {e}",
                     exc_info=True,
                 )
+                await _notify_feishu(
+                    f"[缓存补全] 失败 ({idx}/{total_ranges})\n"
+                    f"{range_start} ~ {range_end}: {str(e)[:100]}"
+                )
 
-        total_ranges = len(all_gaps)
         logger.info(
             f"CacheScheduler: done. {gap_summary}, "
             f"{total_downloaded}/{total_ranges} ranges downloaded."

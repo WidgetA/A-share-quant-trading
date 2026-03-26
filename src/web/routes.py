@@ -349,20 +349,22 @@ def create_momentum_router() -> APIRouter:
         if cache is None:
             raise HTTPException(status_code=503, detail="GreptimeDB 缓存未连接")
 
-        # Check if already covered
-        if not body.force and await cache.covers_range(start_date, end_date):
-            status = await cache.get_cache_status()
+        # Check if already covered (boundaries + minute gaps)
+        if not body.force:
+            gaps = await cache.missing_ranges(start_date, end_date)
+            if not gaps:
+                status = await cache.get_cache_status()
 
-            async def cached_stream():
-                msg = {
-                    "type": "complete",
-                    "daily_count": status.get("daily_stocks", 0),
-                    "minute_count": status.get("minute_stocks", 0),
-                    "cached": True,
-                }
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                async def cached_stream():
+                    msg = {
+                        "type": "complete",
+                        "daily_count": status.get("daily_stocks", 0),
+                        "minute_count": status.get("minute_stocks", 0),
+                        "cached": True,
+                    }
+                    yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
-            return StreamingResponse(cached_stream(), media_type="text/event-stream")
+                return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
         # Download missing data (real-time progress via asyncio.Queue)
         def _fmt_progress(phase: str, current: int, total: int) -> str:
