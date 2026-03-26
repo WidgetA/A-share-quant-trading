@@ -4339,11 +4339,18 @@ class MinuteDataMissingError(Exception):
     pass
 
 
-def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
+def _build_snapshots_from_cache(
+    tsanghi_cache, date_str: str, *, skip_open_gain_filter: bool = False
+) -> dict:
     """Build PriceSnapshot dict from TsanghiBacktestCache for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
+
+    Args:
+        skip_open_gain_filter: If True, skip the open_gain > -0.5% pre-filter.
+            V15 backtest needs ALL stocks for accurate avg_market_open_gain
+            and L4 constituent expansion.
 
     Raises:
         MinuteDataMissingError: if minute data coverage < 50% of daily candidates.
@@ -4384,9 +4391,10 @@ def _build_snapshots_from_cache(tsanghi_cache, date_str: str) -> dict:
             continue
 
         # Pre-filter: open gain > -0.5% (same as iwencai query)
-        open_gain = (open_price - prev_close) / prev_close * 100
-        if open_gain < -0.5:
-            continue
+        if not skip_open_gain_filter:
+            open_gain = (open_price - prev_close) / prev_close * 100
+            if open_gain < -0.5:
+                continue
 
         daily_candidates += 1
 
@@ -6249,7 +6257,9 @@ def create_v15_backtest_router() -> APIRouter:
 
         # Build snapshots from cache
         try:
-            snapshots = _build_snapshots_from_cache(tsanghi_cache, body.trade_date)
+            snapshots = _build_snapshots_from_cache(
+                tsanghi_cache, body.trade_date, skip_open_gain_filter=True
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
         if not snapshots:
@@ -6266,8 +6276,8 @@ def create_v15_backtest_router() -> APIRouter:
                 "message": f"{body.trade_date} 无可用数据（非交易日或数据未下载）",
             }
 
-        # Create scanner with tsanghi adapter
-        adapter = TsanghiHistoricalAdapter(tsanghi_cache)
+        # Create scanner with tsanghi adapter (trade_date for real_time_quotation)
+        adapter = TsanghiHistoricalAdapter(tsanghi_cache, trade_date=td)
         concept_mapper = LocalConceptMapper()
         scanner = V15Scanner(
             historical_adapter=adapter,  # type: ignore[arg-type]

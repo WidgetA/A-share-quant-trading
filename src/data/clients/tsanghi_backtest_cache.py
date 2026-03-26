@@ -702,8 +702,9 @@ class TsanghiHistoricalAdapter:
     so MomentumSectorScanner works without modification.
     """
 
-    def __init__(self, cache: TsanghiBacktestCache) -> None:
+    def __init__(self, cache: TsanghiBacktestCache, trade_date: date | None = None) -> None:
         self._cache = cache
+        self.trade_date: date | None = trade_date
 
     @property
     def is_connected(self) -> bool:
@@ -810,8 +811,38 @@ class TsanghiHistoricalAdapter:
         codes: str,
         indicators: str,
     ) -> dict[str, Any]:
-        """Not supported in backtest mode."""
-        return {"errorcode": 0, "tables": []}
+        """Return 9:40 snapshot data from cache for the backtest date."""
+        if self.trade_date is None:
+            return {"errorcode": 0, "tables": []}
+
+        date_str = self.trade_date.strftime("%Y-%m-%d")
+        tables: list[dict[str, Any]] = []
+
+        for full_code in (c.strip() for c in codes.split(",") if c.strip()):
+            bare = full_code.split(".")[0]
+            day = self._cache.get_daily(bare, date_str)
+            data_940 = self._cache.get_940_price(bare, date_str)
+            if not day or not data_940:
+                continue
+
+            close_940, vol_940, high_940, low_940 = data_940
+            table: dict[str, list[float]] = {}
+            for ind in (i.strip() for i in indicators.split(",")):
+                if ind == "open":
+                    table["open"] = [day.get("open", 0.0)]
+                elif ind == "preClose":
+                    table["preClose"] = [day.get("preClose", 0.0)]
+                elif ind == "latest":
+                    table["latest"] = [close_940]
+                elif ind == "volume":
+                    table["volume"] = [vol_940]
+                elif ind == "high":
+                    table["high"] = [high_940]
+                elif ind == "low":
+                    table["low"] = [low_940]
+            tables.append({"thscode": full_code, "table": table})
+
+        return {"errorcode": 0, "tables": tables}
 
     async def get_trade_dates(
         self,
