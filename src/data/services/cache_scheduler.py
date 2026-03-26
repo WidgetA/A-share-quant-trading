@@ -200,7 +200,10 @@ class CacheScheduler:
         total_ranges = len(all_gaps)
         for idx, (range_start, range_end) in enumerate(all_gaps, 1):
             try:
-                logger.info(f"CacheScheduler: downloading {range_start} ~ {range_end} ({idx}/{total_ranges})")
+                logger.info(
+                    f"CacheScheduler: downloading {range_start} ~ {range_end} "
+                    f"({idx}/{total_ranges})"
+                )
 
                 async def _progress(phase, current, total):
                     if progress_callback:
@@ -225,7 +228,8 @@ class CacheScheduler:
                 )
                 await _notify_feishu(
                     f"[缓存补全] 超时 ({idx}/{total_ranges})\n"
-                    f"{range_start} ~ {range_end} 超过{DOWNLOAD_TIMEOUT_SECONDS // 3600}小时未完成，已跳过"
+                    f"{range_start} ~ {range_end} "
+                    f"超过{DOWNLOAD_TIMEOUT_SECONDS // 3600}小时未完成，已跳过"
                 )
             except Exception as e:
                 logger.error(
