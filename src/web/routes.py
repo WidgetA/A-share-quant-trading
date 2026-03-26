@@ -6206,17 +6206,19 @@ def create_trade_backtest_router() -> APIRouter:
 # ── V15 Backtest Router ─────────────────────────────────────
 
 
+class V15BacktestRequest(BaseModel):
+    """Request body for V15 single-day backtest."""
+
+    trade_date: str  # YYYY-MM-DD
+
+
 def create_v15_backtest_router() -> APIRouter:
     """Create router for V15 single-day backtest."""
     from datetime import datetime
 
     from fastapi.responses import HTMLResponse
-    from pydantic import BaseModel
 
     router = APIRouter()
-
-    class V15BacktestRequest(BaseModel):
-        trade_date: str  # YYYY-MM-DD
 
     @router.get("/v15", response_class=HTMLResponse)
     async def v15_page(request: Request):
