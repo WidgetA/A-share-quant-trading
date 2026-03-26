@@ -83,6 +83,14 @@ class V15ScanResult:
     l6_count: int = 0
     final_candidates: int = 0
     scan_time: datetime = field(default_factory=datetime.now)
+    # Per-layer stock lists for debugging/export
+    l1_codes: list[str] = field(default_factory=list)
+    l3_boards_detail: dict[str, list[str]] = field(default_factory=dict)
+    l4_codes: list[str] = field(default_factory=list)
+    l5_codes: list[str] = field(default_factory=list)
+    l6_codes: list[str] = field(default_factory=list)
+    l6_5_codes: list[str] = field(default_factory=list)
+    l6_6_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -193,6 +201,7 @@ class V15Scanner:
         # L1: gain filter + main board + non-ST + price floor
         gainers = await self._l1_gain_filter(price_snapshots)
         result.initial_gainers_count = len(gainers)
+        result.l1_codes = sorted(gainers.keys())
         threshold = self.GAIN_FROM_OPEN_THRESHOLD
         logger.info(f"L1: {len(gainers)} gainers (>={threshold}%, price>={self.MIN_PRICE})")
         if not gainers:
@@ -206,6 +215,7 @@ class V15Scanner:
         hot_boards, l3_avg_filtered = self._l3_hot_boards(stock_boards, gainers)
         result.hot_board_count = len(hot_boards)
         result.l3_filtered_by_avg_gain = l3_avg_filtered
+        result.l3_boards_detail = {b: sorted(codes) for b, codes in hot_boards.items()}
         logger.info(f"L3: {len(hot_boards)} hot boards")
         if not hot_boards:
             return result
@@ -215,6 +225,7 @@ class V15Scanner:
             hot_boards, price_snapshots
         )
         result.l4_count = len(selected)
+        result.l4_codes = sorted(s.stock_code for s in selected)
         logger.info(f"L4: {len(selected)} constituent gainers")
         if not selected:
             return result
@@ -226,6 +237,7 @@ class V15Scanner:
         # L5: volume filter
         selected = self._l5_volume_filter(selected, snapshots, hist)
         result.l5_count = len(selected)
+        result.l5_codes = sorted(s.stock_code for s in selected)
         logger.info(f"L5: {len(selected)} passed volume filter")
         if not selected:
             return result
@@ -252,18 +264,21 @@ class V15Scanner:
         kept_codes = {s.stock_code for s in kept_adapted}
         selected = [s for s in selected if s.stock_code in kept_codes]
         result.l6_count = len(selected)
+        result.l6_codes = sorted(s.stock_code for s in selected)
         logger.info(f"L6: {len(selected)} passed reversal filter")
         if not selected:
             return result
 
         # L6.5: limit-up filter
         selected = self._l6_5_limit_up_filter(selected, snapshots)
+        result.l6_5_codes = sorted(s.stock_code for s in selected)
         logger.info(f"L6.5: {len(selected)} passed limit-up filter")
         if not selected:
             return result
 
         # L6.6: upper shadow filter
         selected = self._l6_6_upper_shadow_filter(selected, snapshots)
+        result.l6_6_codes = sorted(s.stock_code for s in selected)
         logger.info(f"L6.6: {len(selected)} passed upper shadow filter")
         if not selected:
             return result

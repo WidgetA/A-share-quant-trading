@@ -6362,6 +6362,15 @@ def create_v15_backtest_router() -> APIRouter:
             "recommended": rec_dict,
             "all_scored": all_scored_list,
             "hot_boards": hot_boards_display,
+            "layers": {
+                "l1_codes": result.l1_codes,
+                "l3_boards": result.l3_boards_detail,
+                "l4_codes": result.l4_codes,
+                "l5_codes": result.l5_codes,
+                "l6_codes": result.l6_codes,
+                "l6_5_codes": result.l6_5_codes,
+                "l6_6_codes": result.l6_6_codes,
+            },
         }
 
     return router

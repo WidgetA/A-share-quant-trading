@@ -42,6 +42,7 @@
                     <span class="result-badge recommend" id="v15-rec-badge" style="display:none">
                         推股: <strong id="v15-rec-name"></strong>
                     </span>
+                    <button id="v15-export-btn" class="btn btn-secondary" style="margin-left:auto;font-size:0.85rem;padding:4px 12px">导出</button>
                 </div>
             </div>
 
@@ -91,6 +92,19 @@
 
 {% block scripts %}
 <script>
+let _v15LastData = null;
+
+document.getElementById('v15-export-btn').addEventListener('click', () => {
+    if (!_v15LastData) return;
+    const blob = new Blob([JSON.stringify(_v15LastData, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `v15_backtest_${_v15LastData.trade_date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+});
+
 document.getElementById('v15-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const dateVal = document.getElementById('v15_date').value;
@@ -125,6 +139,7 @@ document.getElementById('v15-form').addEventListener('submit', async (e) => {
 });
 
 function renderV15Results(data) {
+    _v15LastData = data;
     document.getElementById('v15-results').classList.remove('hidden');
     document.getElementById('v15-result-date').textContent = data.trade_date;
     document.getElementById('v15-gainers').textContent = data.initial_gainers;
