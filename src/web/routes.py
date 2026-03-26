@@ -383,9 +383,11 @@ def create_momentum_router() -> APIRouter:
                 if current > 0:
                     return f"分钟线已缓存 {current}/{total} 只，需下载 {remaining} 只"
                 return f"分钟线需下载 {total} 只"
+            elif phase == "minute_active":
+                return f"正在下载: {detail} ({current}/{total} 已完成)"
             elif phase == "minute":
                 if detail:
-                    return f"分钟线 {current}/{total}: {detail}"
+                    return f"分钟线 {current}/{total} 已写入"
                 return f"下载分钟线数据: {current}/{total} 只"
             elif phase == "download":
                 return f"下载完成: 共 {total} 只股票"
@@ -415,6 +417,8 @@ def create_momentum_router() -> APIRouter:
                     overall = 0.05 + 0.15 * (current / total) if total > 0 else 0.05
                 elif phase == "minute_resume":
                     overall = 0.2
+                elif phase == "minute_active":
+                    overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
                 elif phase == "minute":
                     overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
                 else:

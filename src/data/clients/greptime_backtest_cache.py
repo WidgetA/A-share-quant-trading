@@ -703,6 +703,7 @@ class GreptimeBacktestCache:
         done = [0]
         total = len(codes_to_download)
         thread_exc: list[BaseException] = []
+        _DOWNLOADING = "__downloading__"
         # Collect minute data in thread, then INSERT from main async loop
         minute_queue: asyncio.Queue[tuple[str, dict[str, tuple]] | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -727,6 +728,9 @@ class GreptimeBacktestCache:
                     if cancel_event and cancel_event.is_set():
                         logger.info("Minute download cancelled by user")
                         break
+
+                    # Signal "currently downloading" to main loop
+                    loop.call_soon_threadsafe(minute_queue.put_nowait, (_DOWNLOADING, code))
 
                     prefix = "sh" if code.startswith("6") else "sz"
                     bs_code = f"{prefix}.{code}"
@@ -795,11 +799,17 @@ class GreptimeBacktestCache:
             if item is None:
                 break
 
+            # "Currently downloading" signal from thread
+            if item[0] == _DOWNLOADING:
+                if progress_cb:
+                    await _maybe_await(progress_cb("minute_active", done[0], total, item[1]))
+                continue
+
             code, min_data = item
             done[0] += 1
             await self._write_minute(code, min_data)
 
-            if progress_cb and done[0] % 10 == 0:
+            if progress_cb and done[0] % 50 == 0:
                 await _maybe_await(progress_cb("minute", done[0], total, code))
 
         thread.join(timeout=5)
