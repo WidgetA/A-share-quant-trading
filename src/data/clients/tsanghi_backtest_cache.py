@@ -831,7 +831,12 @@ class TsanghiHistoricalAdapter:
                 if ind == "open":
                     table["open"] = [day.get("open", 0.0)]
                 elif ind == "preClose":
-                    table["preClose"] = [day.get("preClose", 0.0)]
+                    # Match live behavior: TushareRealtimeClient returns None
+                    # for preClose (rt_min endpoint doesn't provide it).
+                    # V15Scanner._fetch_constituent_prices() skips stocks with
+                    # preClose=None, so we must replicate that to get consistent
+                    # results between backtest and live scan.
+                    table["preClose"] = [None]
                 elif ind == "latest":
                     table["latest"] = [close_940]
                 elif ind == "volume":
