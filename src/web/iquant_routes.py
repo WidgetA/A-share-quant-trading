@@ -106,7 +106,7 @@ async def _notify_feishu_error(title: str, detail: str) -> None:
 
         bot = FeishuBot()
         if bot.is_configured():
-            await bot.send_alert(f"[V15] {title}", detail)
+            await bot.send_alert(f"[V16] {title}", detail)
     except Exception:
         logger.warning("Failed to send Feishu error notification", exc_info=True)
 
@@ -124,7 +124,7 @@ async def _notify_feishu_ack(signal: dict) -> None:
         pushed = signal.get("created_at", "?")
         acked = signal.get("acked_at", "?")
         lines = [
-            f"[V15] {direction}已执行",
+            f"[V16] {direction}已执行",
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
@@ -150,7 +150,7 @@ async def _notify_feishu_sell_prenotify(marked_holdings: list[dict]) -> None:
 
         now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         lines = [
-            f"[V15] 即将卖出提醒 ({now_str})",
+            f"[V16] 即将卖出提醒 ({now_str})",
             "以下持仓将于 14:56 卖出:",
             "",
         ]
@@ -177,7 +177,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
 
         direction = "买入" if signal["type"] == "buy" else "卖出"
         lines = [
-            f"[V15] {direction}信号",
+            f"[V16] {direction}信号",
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
@@ -533,7 +533,7 @@ def create_iquant_router() -> APIRouter:
         scan_status = "就绪" if scan_state and scan_state.initialized else "未初始化"
 
         lines = [
-            "[V15] 每日就绪报告",
+            "[V16] 每日就绪报告",
             f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
             f"iQuant状态: {poll_status}",
             f"扫描服务: {scan_status}",
@@ -880,7 +880,7 @@ def create_iquant_router() -> APIRouter:
         now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
         msg = (
-            f"[V15] iQuant脚本已启动\n"
+            f"[V16] iQuant脚本已启动\n"
             f"可用资金: {cash:,.2f}\n"
             f"持仓数: {len(_state['holdings'])}\n"
             f"时间: {now_str}"
@@ -910,7 +910,7 @@ def create_iquant_router() -> APIRouter:
         reason = body.get("reason", "")
         now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
 
-        text = f"[V15] 下单已执行\n{msg}"
+        text = f"[V16] 下单已执行\n{msg}"
         if stock_name:
             text += f"\n名称: {stock_name}"
         if reason:

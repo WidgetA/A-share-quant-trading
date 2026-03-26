@@ -63,7 +63,7 @@ async def _notify_feishu_error(title: str, detail: str) -> None:
 
         bot = FeishuBot()
         if bot.is_configured():
-            await bot.send_alert(f"[V15] {title}", detail)
+            await bot.send_alert(f"[V16] {title}", detail)
     except Exception:
         logger.warning("Failed to send Feishu error notification", exc_info=True)
 
@@ -91,7 +91,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
 
         direction = "买入" if signal["type"] == "buy" else "卖出"
         lines = [
-            f"[V15] {direction}信号",
+            f"[V16] {direction}信号",
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
