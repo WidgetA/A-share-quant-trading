@@ -218,8 +218,7 @@ class CacheScheduler:
                 range_days = len(_get_trading_calendar(range_start, range_end))
                 total_downloaded += range_days
                 await _notify_feishu(
-                    f"[缓存补全] 进度 {idx}/{total_ranges}\n"
-                    f"已完成: {range_start} ~ {range_end}"
+                    f"[缓存补全] 进度 {idx}/{total_ranges}\n已完成: {range_start} ~ {range_end}"
                 )
             except asyncio.TimeoutError:
                 logger.error(
