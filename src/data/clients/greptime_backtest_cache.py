@@ -491,7 +491,7 @@ class GreptimeBacktestCache:
         self,
         start_date: date,
         end_date: date,
-        progress_cb: Callable[[str, int, int], Any] | None = None,
+        progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> None:
         """Download daily + minute data for all main-board stocks.
@@ -505,7 +505,7 @@ class GreptimeBacktestCache:
         dl_start = start_date - timedelta(days=60)
 
         if progress_cb:
-            await _maybe_await(progress_cb("init", 0, 0))
+            await _maybe_await(progress_cb("init", 0, 0, ""))
 
         # Phase 1: Daily OHLCV from tsanghi
         stock_codes = await self._download_daily_tsanghi(
@@ -528,7 +528,7 @@ class GreptimeBacktestCache:
 
         total = len(stock_codes)
         if progress_cb:
-            await _maybe_await(progress_cb("download", total, total))
+            await _maybe_await(progress_cb("download", total, total, ""))
 
         daily_count = await self.get_daily_stock_count()
         minute_count = await self.get_minute_stock_count()
@@ -546,7 +546,7 @@ class GreptimeBacktestCache:
         self,
         dl_start: date,
         end_date: date,
-        progress_cb: Callable[[str, int, int], Any] | None = None,
+        progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> list[str]:
         """Download daily OHLCV from tsanghi and INSERT to GreptimeDB.
@@ -573,7 +573,7 @@ class GreptimeBacktestCache:
 
             if progress_cb:
                 skipped = len(existing_dates)
-                await _maybe_await(progress_cb("daily_resume", skipped, skipped))
+                await _maybe_await(progress_cb("daily_resume", skipped, skipped, ""))
 
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
@@ -595,7 +595,9 @@ class GreptimeBacktestCache:
                 if current in existing_dates:
                     if progress_cb:
                         elapsed = (current - dl_start).days + 1
-                        await _maybe_await(progress_cb("daily", elapsed, total_days))
+                        await _maybe_await(
+                            progress_cb("daily", elapsed, total_days, f"{date_str} 已缓存")
+                        )
                     current += timedelta(days=1)
                     continue
 
@@ -652,7 +654,10 @@ class GreptimeBacktestCache:
 
                 if progress_cb:
                     elapsed = (current - dl_start).days + 1
-                    await _maybe_await(progress_cb("daily", elapsed, total_days))
+                    stocks_today = len(day_records)
+                    await _maybe_await(
+                        progress_cb("daily", elapsed, total_days, f"{date_str} ({stocks_today}只)")
+                    )
 
                 current += timedelta(days=1)
 
@@ -669,7 +674,7 @@ class GreptimeBacktestCache:
         codes: list[str],
         dl_start: date,
         end_date: date,
-        progress_cb: Callable[[str, int, int], Any] | None = None,
+        progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> None:
         """Download 5-min bars from baostock and INSERT to GreptimeDB."""
@@ -688,6 +693,7 @@ class GreptimeBacktestCache:
                     "minute_resume",
                     len(existing_codes),
                     len(codes),
+                    "",
                 )
             )
 
@@ -794,12 +800,12 @@ class GreptimeBacktestCache:
             await self._write_minute(code, min_data)
 
             if progress_cb and done[0] % 10 == 0:
-                await _maybe_await(progress_cb("minute", done[0], total))
+                await _maybe_await(progress_cb("minute", done[0], total, code))
 
         thread.join(timeout=5)
 
         if progress_cb:
-            await _maybe_await(progress_cb("minute", done[0], total))
+            await _maybe_await(progress_cb("minute", done[0], total, ""))
 
         if thread_exc:
             raise thread_exc[0]

@@ -367,7 +367,7 @@ def create_momentum_router() -> APIRouter:
                 return StreamingResponse(cached_stream(), media_type="text/event-stream")
 
         # Download missing data (real-time progress via asyncio.Queue)
-        def _fmt_progress(phase: str, current: int, total: int) -> str:
+        def _fmt_progress(phase: str, current: int, total: int, detail: str = "") -> str:
             if phase == "init":
                 return "正在初始化..."
             elif phase == "daily_resume":
@@ -375,6 +375,8 @@ def create_momentum_router() -> APIRouter:
                     return f"日线已缓存 {current} 天，检查剩余..."
                 return "检查日线缓存..."
             elif phase == "daily":
+                if detail:
+                    return f"日线 {current}/{total}: {detail}"
                 return f"下载日线数据: {current}/{total} 天"
             elif phase == "minute_resume":
                 remaining = total - current
@@ -382,6 +384,8 @@ def create_momentum_router() -> APIRouter:
                     return f"分钟线已缓存 {current}/{total} 只，需下载 {remaining} 只"
                 return f"分钟线需下载 {total} 只"
             elif phase == "minute":
+                if detail:
+                    return f"分钟线 {current}/{total}: {detail}"
                 return f"下载分钟线数据: {current}/{total} 只"
             elif phase == "download":
                 return f"下载完成: 共 {total} 只股票"
@@ -402,7 +406,7 @@ def create_momentum_router() -> APIRouter:
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            def on_progress(phase: str, current: int, total: int):
+            def on_progress(phase: str, current: int, total: int, detail: str = ""):
                 if phase == "init":
                     overall = 0.0
                 elif phase == "daily_resume":
@@ -419,7 +423,7 @@ def create_momentum_router() -> APIRouter:
                     {
                         "type": "progress",
                         "progress": overall,
-                        "message": _fmt_progress(phase, current, total),
+                        "message": _fmt_progress(phase, current, total, detail),
                         "phase": phase,
                     }
                 )

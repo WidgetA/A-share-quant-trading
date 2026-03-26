@@ -205,7 +205,7 @@ class CacheScheduler:
                     f"({idx}/{total_ranges})"
                 )
 
-                async def _progress(phase, current, total):
+                async def _progress(phase, current, total, detail=""):
                     if progress_callback:
                         await progress_callback(
                             f"Downloading {range_start}~{range_end}: {phase} {current}/{total}"
