@@ -175,12 +175,15 @@ class V15Scanner:
     async def scan(
         self,
         price_snapshots: dict[str, PriceSnapshot],
+        trade_date: date | None = None,
     ) -> V15ScanResult:
         """Run the 7-layer pipeline on 9:40 snapshots.
 
         Args:
             price_snapshots: Full universe snapshots (stock_code → PriceSnapshot).
                 Used for L1 filtering AND avg_market_open_gain computation.
+            trade_date: Reference date for historical data lookback (L5/L6/L7).
+                Defaults to today if None. Must be set for backtesting.
 
         Returns:
             V15ScanResult with recommended stock (or None).
@@ -218,7 +221,7 @@ class V15Scanner:
 
         # Fetch historical data ONCE for all L4 survivors (used by L5, L6, L7)
         codes = list({s.stock_code for s in selected})
-        hist = await self._fetch_historical(codes)
+        hist = await self._fetch_historical(codes, trade_date=trade_date)
 
         # L5: volume filter
         selected = self._l5_volume_filter(selected, snapshots, hist)

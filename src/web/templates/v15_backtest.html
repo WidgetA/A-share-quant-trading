@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+
+{% block title %}V15 回测{% endblock %}
+
+{% block content %}
+<div class="momentum-page">
+    <h2>V15 策略回测</h2>
+
+    <!-- Backtest Form -->
+    <section class="momentum-section">
+        <div class="sim-card">
+            <form id="v15-form" class="sim-form">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="v15_date">回测日期</label>
+                        <input type="date" id="v15_date" name="v15_date" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" id="v15-btn">开始回测</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- Loading -->
+    <section id="v15-loading" class="momentum-section hidden">
+        <div class="sim-card loading-card">
+            <div class="loading-spinner"></div>
+            <p>回测运行中...</p>
+            <p class="loading-hint">L1: 涨幅过滤 → L2: 板块映射 → L3: 热门板块 → L4: 成分股扩展 → L5: 量能 → L6: 反转 → L7: V3评分</p>
+        </div>
+    </section>
+
+    <!-- Results -->
+    <section id="v15-results" class="momentum-section hidden">
+        <div class="sim-card">
+            <div class="result-header">
+                <h3>回测结果 <span id="v15-result-date"></span></h3>
+                <div class="result-summary">
+                    <span class="result-badge">初筛: <strong id="v15-gainers">0</strong> 只</span>
+                    <span class="result-badge">热门板块: <strong id="v15-boards">0</strong> 个</span>
+                    <span class="result-badge highlight">最终候选: <strong id="v15-final">0</strong> 只</span>
+                    <span class="result-badge recommend" id="v15-rec-badge" style="display:none">
+                        推股: <strong id="v15-rec-name"></strong>
+                    </span>
+                </div>
+            </div>
+
+            <!-- Recommendation card -->
+            <div id="v15-rec-card" class="recommend-card hidden">
+                <div class="recommend-label">推荐</div>
+                <div class="recommend-body">
+                    <div class="recommend-stock">
+                        <span class="recommend-code" id="v15-rec-code"></span>
+                        <span class="recommend-stock-name" id="v15-rec-stock-name"></span>
+                    </div>
+                    <div class="recommend-details">
+                        <span class="recommend-detail" id="v15-rec-score"></span>
+                        <span class="recommend-detail" id="v15-rec-gain"></span>
+                        <span class="recommend-detail" id="v15-rec-amp"></span>
+                        <span class="recommend-detail" id="v15-rec-board"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- V3 Factor Breakdown (for recommended stock) -->
+            <div id="v15-factors" class="hidden" style="margin-bottom:1.25rem;padding:12px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px">
+                <h4 style="margin:0 0 8px;font-size:0.9rem;color:#475569">V3 评分因子明细</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 16px;font-size:0.85rem" id="v15-factor-grid"></div>
+            </div>
+
+            <!-- Funnel -->
+            <details style="margin-bottom:1.25rem">
+                <summary style="cursor:pointer;font-weight:600;font-size:0.95rem;color:#334155">漏斗明细</summary>
+                <table class="stock-table" style="margin-top:8px">
+                    <thead><tr><th>层级</th><th>通过数量</th></tr></thead>
+                    <tbody id="v15-funnel-body"></tbody>
+                </table>
+            </details>
+
+            <!-- Empty state -->
+            <div id="v15-empty" class="result-empty hidden">
+                <p>未筛选到符合条件的股票</p>
+            </div>
+
+            <!-- Scored stocks grouped by board -->
+            <div id="v15-boards-container"></div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('v15-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const dateVal = document.getElementById('v15_date').value;
+    if (!dateVal) return;
+
+    const btn = document.getElementById('v15-btn');
+    btn.disabled = true;
+    btn.textContent = '回测中...';
+    document.getElementById('v15-loading').classList.remove('hidden');
+    document.getElementById('v15-results').classList.add('hidden');
+
+    try {
+        const resp = await fetch('/api/v15/backtest', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({trade_date: dateVal})
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert(data.detail || '回测失败');
+            return;
+        }
+        renderV15Results(data);
+    } catch (err) {
+        alert('请求失败: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '开始回测';
+        document.getElementById('v15-loading').classList.add('hidden');
+    }
+});
+
+function renderV15Results(data) {
+    document.getElementById('v15-results').classList.remove('hidden');
+    document.getElementById('v15-result-date').textContent = data.trade_date;
+    document.getElementById('v15-gainers').textContent = data.initial_gainers;
+    document.getElementById('v15-boards').textContent = data.hot_board_count;
+    document.getElementById('v15-final').textContent = data.final_candidates;
+
+    // Funnel table
+    const funnelBody = document.getElementById('v15-funnel-body');
+    const funnel = data.funnel || [];
+    funnelBody.innerHTML = funnel.map(f =>
+        `<tr><td>${f.label}</td><td>${f.count}</td></tr>`
+    ).join('');
+
+    // Recommendation
+    const rec = data.recommended;
+    const recBadge = document.getElementById('v15-rec-badge');
+    const recCard = document.getElementById('v15-rec-card');
+    const factorsDiv = document.getElementById('v15-factors');
+
+    if (rec) {
+        recBadge.style.display = '';
+        document.getElementById('v15-rec-name').textContent = rec.stock_name;
+        recCard.classList.remove('hidden');
+        document.getElementById('v15-rec-code').textContent = rec.stock_code;
+        document.getElementById('v15-rec-stock-name').textContent = rec.stock_name;
+        document.getElementById('v15-rec-score').textContent = `V3评分: ${rec.v3_score >= 0 ? '+' : ''}${rec.v3_score.toFixed(4)}`;
+        document.getElementById('v15-rec-gain').textContent = `盘中涨幅: ${rec.gain_from_open_pct >= 0 ? '+' : ''}${rec.gain_from_open_pct.toFixed(2)}%`;
+        document.getElementById('v15-rec-amp').textContent = `换手放大: ${rec.turnover_amp.toFixed(2)}x`;
+        document.getElementById('v15-rec-board').textContent = `板块: ${rec.board_name}`;
+
+        // V3 factor breakdown
+        factorsDiv.classList.remove('hidden');
+        const factors = [
+            {name: 'trend_10d (10日趋势)', value: rec.trend_10d, coeff: -0.1034},
+            {name: 'avg_daily_return (20日均收益)', value: rec.avg_daily_return, coeff: 1.0699},
+            {name: 'intraday_range (盘中波动)', value: rec.intraday_range_940, coeff: -0.3293},
+            {name: 'consecutive_up (连涨天数)', value: rec.consecutive_up_days, coeff: 0.0089},
+            {name: 'market_gain (大盘强度)', value: rec.avg_market_open_gain, coeff: 0.4792},
+            {name: 'trend_consistency (趋势一致性)', value: rec.trend_consistency, coeff: 0.002},
+        ];
+        document.getElementById('v15-factor-grid').innerHTML = factors.map(f => {
+            const val = typeof f.value === 'number' ? f.value.toFixed(4) : f.value;
+            const contrib = (f.coeff * f.value).toFixed(4);
+            return `<span style="color:#64748b">${f.name}: <b style="color:#1e293b">${val}</b> <span style="color:#94a3b8">(${contrib >= 0 ? '+' : ''}${contrib})</span></span>`;
+        }).join('');
+    } else {
+        recBadge.style.display = '';
+        document.getElementById('v15-rec-name').textContent = '无';
+        recCard.classList.remove('hidden');
+        document.getElementById('v15-rec-code').textContent = '--';
+        document.getElementById('v15-rec-stock-name').textContent = '今日无推荐标的';
+        document.getElementById('v15-rec-score').textContent = '';
+        document.getElementById('v15-rec-gain').textContent = '';
+        document.getElementById('v15-rec-amp').textContent = '';
+        document.getElementById('v15-rec-board').textContent = '';
+        factorsDiv.classList.add('hidden');
+    }
+
+    // Scored stocks grouped by board
+    const container = document.getElementById('v15-boards-container');
+    const emptyEl = document.getElementById('v15-empty');
+    const allScored = data.all_scored || [];
+
+    if (allScored.length === 0) {
+        container.innerHTML = '';
+        emptyEl.classList.remove('hidden');
+        return;
+    }
+    emptyEl.classList.add('hidden');
+
+    // Group by board
+    const boardMap = {};
+    allScored.forEach(s => {
+        if (!boardMap[s.board_name]) boardMap[s.board_name] = [];
+        boardMap[s.board_name].push(s);
+    });
+
+    // Sort boards by number of stocks descending
+    const sortedBoards = Object.entries(boardMap).sort((a, b) => b[1].length - a[1].length);
+
+    let html = '';
+    for (const [boardName, stocks] of sortedBoards) {
+        const triggerCodes = (data.hot_boards[boardName] || []).join(', ');
+        html += `
+            <div class="board-group">
+                <div class="board-header">
+                    <span class="board-name">${boardName}</span>
+                    <span class="board-trigger">触发: ${triggerCodes}</span>
+                </div>
+                <table class="stock-table">
+                    <thead>
+                        <tr>
+                            <th>代码</th>
+                            <th>名称</th>
+                            <th>盘中涨幅</th>
+                            <th>V3评分</th>
+                            <th>换手放大</th>
+                            <th>连涨</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        // Sort stocks by v3_score descending within board
+        stocks.sort((a, b) => b.v3_score - a.v3_score);
+        stocks.forEach(s => {
+            const gainClass = s.gain_from_open_pct > 3 ? 'gain-high' : (s.gain_from_open_pct > 1 ? 'gain-mid' : 'gain-low');
+            const isRec = rec && s.stock_code === rec.stock_code;
+            html += `
+                        <tr class="${isRec ? 'recommended-row' : ''}">
+                            <td class="stock-code">${s.stock_code}</td>
+                            <td>${s.stock_name}${isRec ? ' <span class="rec-tag">推荐</span>' : ''}</td>
+                            <td class="${gainClass}">${s.gain_from_open_pct >= 0 ? '+' : ''}${s.gain_from_open_pct.toFixed(2)}%</td>
+                            <td>${s.v3_score >= 0 ? '+' : ''}${s.v3_score.toFixed(4)}</td>
+                            <td>${s.turnover_amp.toFixed(2)}x</td>
+                            <td>${s.consecutive_up_days}天</td>
+                        </tr>
+            `;
+        });
+        html += '</tbody></table></div>';
+    }
+
+    container.innerHTML = html;
+}
+</script>
+{% endblock %}

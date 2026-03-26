@@ -27,6 +27,7 @@ from src.web.routes import (
     create_settings_router,
     create_simulation_router,
     create_trade_backtest_router,
+    create_v15_backtest_router,
 )
 from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
 
@@ -103,6 +104,10 @@ def create_app(
     # Add trade backtest router (CSV upload → stats)
     trade_bt_router = create_trade_backtest_router()
     app.include_router(trade_bt_router)
+
+    # Add V15 backtest router
+    v15_bt_router = create_v15_backtest_router()
+    app.include_router(v15_bt_router)
 
     # Add iQuant API router (trading only, scan is separate)
     iquant_router = create_iquant_router()

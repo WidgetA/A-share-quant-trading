@@ -6201,3 +6201,148 @@ def create_trade_backtest_router() -> APIRouter:
         }
 
     return router
+
+
+# ── V15 Backtest Router ─────────────────────────────────────
+
+
+def create_v15_backtest_router() -> APIRouter:
+    """Create router for V15 single-day backtest."""
+    from datetime import datetime
+
+    from fastapi.responses import HTMLResponse
+    from pydantic import BaseModel
+
+    router = APIRouter()
+
+    class V15BacktestRequest(BaseModel):
+        trade_date: str  # YYYY-MM-DD
+
+    @router.get("/v15", response_class=HTMLResponse)
+    async def v15_page(request: Request):
+        templates = request.app.state.templates
+        return templates.TemplateResponse("v15_backtest.html", {"request": request})
+
+    @router.post("/api/v15/backtest")
+    async def run_v15_backtest(request: Request, body: V15BacktestRequest):
+        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.strategies.v15_scanner import V15Scanner
+
+        # Validate date
+        try:
+            td = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
+
+        # Get tsanghi cache
+        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
+        if not tsanghi_cache or not tsanghi_cache.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载沧海数据")
+
+        # Get fundamentals DB
+        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
+        if fundamentals_db is None:
+            raise HTTPException(status_code=503, detail="基本面数据库未就绪")
+
+        # Build snapshots from cache
+        snapshots = _build_snapshots_from_cache(tsanghi_cache, body.trade_date)
+        if not snapshots:
+            return {
+                "success": True,
+                "trade_date": body.trade_date,
+                "initial_gainers": 0,
+                "hot_board_count": 0,
+                "final_candidates": 0,
+                "funnel": [],
+                "recommended": None,
+                "all_scored": [],
+                "hot_boards": {},
+                "message": f"{body.trade_date} 无可用数据（非交易日或数据未下载）",
+            }
+
+        # Create scanner with tsanghi adapter
+        adapter = TsanghiHistoricalAdapter(tsanghi_cache)
+        concept_mapper = LocalConceptMapper()
+        scanner = V15Scanner(
+            historical_adapter=adapter,  # type: ignore[arg-type]
+            fundamentals_db=fundamentals_db,
+            concept_mapper=concept_mapper,
+        )
+
+        # Run scan
+        result = await scanner.scan(snapshots, trade_date=td)
+
+        # Build funnel layers
+        funnel = [
+            {
+                "label": "L1: 涨幅过滤 (≥0.26%, ≥12元, 主板, 非ST)",
+                "count": result.initial_gainers_count,
+            },
+            {"label": "L3: 热门板块 (≥2只)", "count": result.hot_board_count},
+            {"label": "L4: 成分股扩展 + L1复筛", "count": result.l4_count},
+            {"label": "L5: 量能过滤", "count": result.l5_count},
+            {"label": "L6: 反转因子过滤", "count": result.l6_count},
+            {"label": "L7: V3评分 → 最终候选", "count": result.final_candidates},
+        ]
+
+        # Build hot_boards map for display
+        hot_boards_display: dict[str, list[str]] = {}
+        if result.all_scored:
+            for s in result.all_scored:
+                if s.board_name not in hot_boards_display:
+                    hot_boards_display[s.board_name] = []
+
+        # Serialize recommended stock
+        rec_dict = None
+        if result.recommended:
+            r = result.recommended
+            rec_dict = {
+                "stock_code": r.stock_code,
+                "stock_name": r.stock_name,
+                "board_name": r.board_name,
+                "v3_score": r.v3_score,
+                "latest_price": r.latest_price,
+                "open_price": r.open_price,
+                "prev_close": r.prev_close,
+                "gain_from_open_pct": r.gain_from_open_pct,
+                "turnover_amp": r.turnover_amp,
+                "trend_10d": r.trend_10d,
+                "avg_daily_return": r.avg_daily_return,
+                "intraday_range_940": r.intraday_range_940,
+                "consecutive_up_days": r.consecutive_up_days,
+                "avg_market_open_gain": r.avg_market_open_gain,
+                "trend_consistency": r.trend_consistency,
+            }
+
+        # Serialize all scored stocks
+        all_scored_list = [
+            {
+                "stock_code": s.stock_code,
+                "stock_name": s.stock_name,
+                "board_name": s.board_name,
+                "v3_score": s.v3_score,
+                "gain_from_open_pct": s.gain_from_open_pct,
+                "turnover_amp": s.turnover_amp,
+                "consecutive_up_days": s.consecutive_up_days,
+            }
+            for s in result.all_scored
+        ]
+
+        return {
+            "success": True,
+            "trade_date": body.trade_date,
+            "initial_gainers": result.initial_gainers_count,
+            "hot_board_count": result.hot_board_count,
+            "l3_filtered_by_avg_gain": result.l3_filtered_by_avg_gain,
+            "l4_count": result.l4_count,
+            "l5_count": result.l5_count,
+            "l6_count": result.l6_count,
+            "final_candidates": result.final_candidates,
+            "funnel": funnel,
+            "recommended": rec_dict,
+            "all_scored": all_scored_list,
+            "hot_boards": hot_boards_display,
+        }
+
+    return router
