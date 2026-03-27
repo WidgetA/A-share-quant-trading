@@ -841,7 +841,7 @@ class TsanghiHistoricalAdapter:
                 continue
 
             close_940, vol_940, high_940, low_940 = data_940
-            table: dict[str, list[float]] = {}
+            table: dict[str, list[float | None]] = {}
             for ind in (i.strip() for i in indicators.split(",")):
                 if ind == "open":
                     table["open"] = [day.get("open", 0.0)]
