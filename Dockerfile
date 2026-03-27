@@ -34,7 +34,7 @@ ENV BUILD_TIME=${BUILD_TIME}
 # Add Debian oldstable for legacy libidn11 required by iFinD SDK
 RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/bullseye.list
 
-# Install system dependencies required by iFinD SDK
+# Install system dependencies required by iFinD SDK and LightGBM (cache bust: 2026-03-27)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     libgcc-s1 \
