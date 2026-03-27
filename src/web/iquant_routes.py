@@ -1057,8 +1057,10 @@ def create_iquant_router() -> APIRouter:
             concept_mapper=LocalConceptMapper(),
             stock_filter=StockFilter(
                 StockFilterConfig(
-                    exclude_bse=True, exclude_chinext=True,
-                    exclude_star=True, exclude_sme=False,
+                    exclude_bse=True,
+                    exclude_chinext=True,
+                    exclude_star=True,
+                    exclude_sme=False,
                 )
             ),
         )

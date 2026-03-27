@@ -231,8 +231,7 @@ class V16Scanner:
                 universe.add(c)
 
         logger.info(
-            f"Step 0: {len(clean_boards)} clean boards, "
-            f"{len(universe)} unique stocks in universe"
+            f"Step 0: {len(clean_boards)} clean boards, {len(universe)} unique stocks in universe"
         )
         return clean_boards, universe
 
@@ -355,9 +354,7 @@ class V16Scanner:
                 f"board='{board}' LGB={top1.score:.4f} "
                 f"price={top1.buy_price:.2f}"
             )
-            top5_str = ", ".join(
-                f"{s.code}(LGB={s.score:.4f})" for s in scored[:5]
-            )
+            top5_str = ", ".join(f"{s.code}(LGB={s.score:.4f})" for s in scored[:5])
             logger.info(f"Step 7: Top 5: {top5_str}")
         else:
             logger.info("Step 7: No scored candidates")
@@ -551,9 +548,7 @@ class V16Scanner:
             for s in candidates
         ]
 
-        kept_adapted, _ = await self._reversal.filter_stocks(
-            adapted, snapshots, avg_vol_data
-        )
+        kept_adapted, _ = await self._reversal.filter_stocks(adapted, snapshots, avg_vol_data)
         kept_codes = {s.stock_code for s in kept_adapted}
         return [s for s in candidates if s.code in kept_codes]
 
@@ -576,8 +571,7 @@ class V16Scanner:
             limit_price = round(sd.prev_close * (1 + self.LIMIT_UP_RATIO), 2)
             if sd.open_price >= limit_price or sd.price_940 >= limit_price:
                 logger.info(
-                    f"Step 6.5: filtered {s.code} ({s.name}): "
-                    f"at limit-up {limit_price:.2f}"
+                    f"Step 6.5: filtered {s.code} ({s.name}): at limit-up {limit_price:.2f}"
                 )
                 continue
             kept.append(s)
@@ -595,9 +589,7 @@ class V16Scanner:
         for s in candidates:
             sd = stock_data[s.code]
             if sd.open_price <= 0:
-                raise RuntimeError(
-                    f"Step 6.6: open_price=0 for {s.code} ({s.name}). Halting."
-                )
+                raise RuntimeError(f"Step 6.6: open_price=0 for {s.code} ({s.name}). Halting.")
 
             gain_from_open = (sd.price_940 - sd.open_price) / sd.open_price * 100
             body_top = max(sd.open_price, sd.price_940)
@@ -626,9 +618,7 @@ class V16Scanner:
     ) -> list[ScoredStock]:
         """Score candidates with LGBRank model."""
         if not self._scorer:
-            raise RuntimeError(
-                "Step 7: LGBRankScorer not provided. Cannot score candidates."
-            )
+            raise RuntimeError("Step 7: LGBRankScorer not provided. Cannot score candidates.")
 
         # Build CandidateSnapshot list + history_map
         snapshots: list[CandidateSnapshot] = []

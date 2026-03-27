@@ -292,9 +292,7 @@ async def _fetch_history_ohlcv(
 
     for i in range(0, len(codes), batch_size):
         batch = codes[i : i + batch_size]
-        codes_str = ",".join(
-            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
-        )
+        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
         data = await hist_adapter.history_quotes(
             codes=codes_str,
@@ -370,13 +368,12 @@ def _build_stock_data(
                     f"only {len(rows)} history days (IPO: {time_vals[0]})"
                 )
                 return None
-        # Old stock with insufficient data — error
+        # Old stock with insufficient data — hard error, never silently skip
         if len(rows) < 5:
-            logger.warning(
-                f"V16: skipping {code} ({name}): only {len(rows)} history rows "
-                f"(need ≥5 for LGBRank, ≥{LOOKBACK_DAYS} ideal)"
+            raise RuntimeError(
+                f"V16: {code} ({name}) has only {len(rows)} history rows "
+                f"(need ≥5 for LGBRank). Old stock with missing data — halting."
             )
-            return None
 
     hist_df = pd.DataFrame(rows)
 
@@ -480,7 +477,11 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     logger.info(f"V16 scan: Tushare returned {len(quotes)} quotes")
 
     if not quotes:
-        return None
+        await _notify_feishu_error(
+            "9:40行情全空",
+            f"Tushare batch_get_early_quotes 返回空\n请求股票数: {len(universe_list)}\n扫描中止",
+        )
+        raise RuntimeError(f"V16 scan: Tushare returned 0 quotes for {len(universe_list)} stocks")
 
     # Fetch prev_close
     today = datetime.now(BEIJING_TZ).date()
@@ -490,17 +491,16 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     # Fetch 37d OHLCV history for ALL universe stocks with quotes
     trading_codes = [c for c, q in quotes.items() if q.is_trading]
     logger.info(f"V16 scan: {len(trading_codes)} stocks trading, fetching history...")
-    hist_raw = await _fetch_history_ohlcv(
-        scan_state.historical_adapter, trading_codes, today
-    )
+    hist_raw = await _fetch_history_ohlcv(scan_state.historical_adapter, trading_codes, today)
     logger.info(f"V16 scan: history fetched for {len(hist_raw)} stocks")
 
     # Build V16StockData for each stock
     from src.strategy.strategies.v16_scanner import V16StockData  # noqa: F811
 
     stock_data: dict[str, V16StockData] = {}
-    skipped_no_hist = 0
-    skipped_no_prev_close = 0
+    errors_no_prev_close: list[str] = []
+    errors_no_hist: list[str] = []
+    errors_build: list[str] = []
     skipped_new = 0
 
     for code in trading_codes:
@@ -510,29 +510,71 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
 
         pc = prev_closes.get(code)
         if not pc or pc <= 0:
-            skipped_no_prev_close += 1
+            errors_no_prev_close.append(code)
             continue
 
         hr = hist_raw.get(code)
         if not hr:
-            skipped_no_hist += 1
+            errors_no_hist.append(code)
             continue
 
-        sd = _build_stock_data(code, "", quote, pc, hr, today)
+        try:
+            sd = _build_stock_data(code, "", quote, pc, hr, today)
+        except RuntimeError as e:
+            errors_build.append(f"{code}: {e}")
+            continue
+
         if sd is None:
             skipped_new += 1
             continue
 
         stock_data[code] = sd
 
+    # --- Data failure reporting: never silent ---
+    total_errors = len(errors_no_prev_close) + len(errors_no_hist) + len(errors_build)
+    if total_errors > 0:
+        detail_lines = []
+        if errors_no_prev_close:
+            detail_lines.append(
+                f"缺昨收({len(errors_no_prev_close)}): " + ", ".join(errors_no_prev_close[:20])
+            )
+        if errors_no_hist:
+            detail_lines.append(f"缺历史({len(errors_no_hist)}): " + ", ".join(errors_no_hist[:20]))
+        if errors_build:
+            detail_lines.append(f"构建失败({len(errors_build)}): " + "\n".join(errors_build[:10]))
+        detail = "\n".join(detail_lines)
+        logger.error(
+            f"V16 scan: {total_errors} stocks with data errors "
+            f"(no_prev_close={len(errors_no_prev_close)}, "
+            f"no_hist={len(errors_no_hist)}, "
+            f"build_fail={len(errors_build)})"
+        )
+        await _notify_feishu_error(
+            "数据缺失报警",
+            f"交易中股票: {len(trading_codes)}\n"
+            f"数据错误: {total_errors} 只\n"
+            f"新股跳过: {skipped_new} 只\n"
+            f"成功构建: {len(stock_data)} 只\n\n{detail}",
+        )
+
+    # If error rate > 20%, halt scan — data source likely broken
+    if total_errors > 0 and total_errors > len(trading_codes) * 0.2:
+        raise RuntimeError(
+            f"V16 scan: data error rate {total_errors}/{len(trading_codes)} "
+            f"exceeds 20% threshold — data source likely broken, halting"
+        )
+
     logger.info(
         f"V16 scan: built {len(stock_data)} V16StockData "
-        f"(skipped: no_hist={skipped_no_hist}, no_prev_close={skipped_no_prev_close}, "
-        f"new_listing={skipped_new})"
+        f"(errors={total_errors}, new_listing={skipped_new})"
     )
 
     if not stock_data:
-        return None
+        await _notify_feishu_error(
+            "无有效股票数据",
+            f"交易中股票: {len(trading_codes)}\n全部数据缺失或为新股, 无法执行扫描",
+        )
+        raise RuntimeError("V16 scan: no valid stock data after building")
 
     # Run V16 scan
     scan_result = await scanner.scan(stock_data, clean_boards)

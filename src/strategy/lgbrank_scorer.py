@@ -15,6 +15,7 @@
     在 9:40 完成 L1~L6.6 漏斗过滤后，把通过的候选股送入此模块评分。
     取 top-N 买入。
 """
+
 from __future__ import annotations
 
 import json
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════
 #  特征计算（自包含，不依赖 src.strategy.features）
 # ══════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class CandidateSnapshot:
@@ -53,6 +55,7 @@ class CandidateSnapshot:
       volatility_20d:   过去20日收益率标准差
       consecutive_up_days: 连续上涨天数 (整数)
     """
+
     code: str
     name: str
     open_price: float
@@ -116,15 +119,25 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
     """
     result = {}
     if hist is None or len(hist) < 5:
-        return {k: 0.0 for k in [
-            "open_pattern_consistency", "vol_price_divergence_5d",
-            "intraday_momentum_continuation", "volume_concentration_ratio",
-            "relative_strength_vs_high", "gain_consistency_score",
-            "amplitude_decay_trend", "turnover_stability_index",
-            "close_to_vwap_position", "vol_weighted_gain_ratio",
-            "price_channel_pct", "up_days_pct_20d", "amplitude_20d",
-            "vol_ratio_5d_20d",
-        ]}
+        return {
+            k: 0.0
+            for k in [
+                "open_pattern_consistency",
+                "vol_price_divergence_5d",
+                "intraday_momentum_continuation",
+                "volume_concentration_ratio",
+                "relative_strength_vs_high",
+                "gain_consistency_score",
+                "amplitude_decay_trend",
+                "turnover_stability_index",
+                "close_to_vwap_position",
+                "vol_weighted_gain_ratio",
+                "price_channel_pct",
+                "up_days_pct_20d",
+                "amplitude_20d",
+                "vol_ratio_5d_20d",
+            ]
+        }
 
     opens = hist["open"].values.astype(float)
     highs = hist["high"].values.astype(float)
@@ -136,7 +149,7 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
     # 1. open_pattern_consistency
     ranges = highs - lows + 1e-8
     open_positions = (opens - lows) / ranges
-    result["open_pattern_consistency"] = float(1 - np.std(open_positions[-min(20, n):]))
+    result["open_pattern_consistency"] = float(1 - np.std(open_positions[-min(20, n) :]))
 
     # 2. vol_price_divergence_5d
     if n >= 10:
@@ -158,19 +171,19 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
     result["intraday_momentum_continuation"] = float(lower_s.mean() - upper_s.mean())
 
     # 4. volume_concentration_ratio
-    v20 = volumes[-min(20, n):]
+    v20 = volumes[-min(20, n) :]
     sorted_v = np.sort(v20)[::-1]
     top_n = max(1, int(len(v20) * 0.1))
     result["volume_concentration_ratio"] = float(1 - sorted_v[:top_n].sum() / (v20.sum() + 1e-8))
 
     # 5. relative_strength_vs_high
-    high_20d = highs[-min(20, n):].max()
+    high_20d = highs[-min(20, n) :].max()
     result["relative_strength_vs_high"] = float(closes[-1] / (high_20d + 1e-8))
 
     # 6. gain_consistency_score
     if n >= 3:
         daily_rets = np.diff(closes) / (closes[:-1] + 1e-8)
-        rets_20 = daily_rets[-min(20, len(daily_rets)):]
+        rets_20 = daily_rets[-min(20, len(daily_rets)) :]
         cv = np.std(rets_20) / (np.abs(np.mean(rets_20)) + 1e-6)
         result["gain_consistency_score"] = float(1 / (1 + cv))
     else:
@@ -178,7 +191,7 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
 
     # 7. amplitude_decay_trend
     if n >= 5:
-        amps = (highs[-min(10, n):] - lows[-min(10, n):]) / (lows[-min(10, n):] + 1e-8)
+        amps = (highs[-min(10, n) :] - lows[-min(10, n) :]) / (lows[-min(10, n) :] + 1e-8)
         x = np.arange(len(amps))
         if len(amps) >= 3:
             slope = np.polyfit(x, amps, 1)[0]
@@ -190,7 +203,7 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
 
     # 8. turnover_stability_index
     if n >= 5:
-        v_recent = volumes[-min(20, n):]
+        v_recent = volumes[-min(20, n) :]
         vol_changes = np.diff(v_recent) / (v_recent[:-1] + 1e-8)
         result["turnover_stability_index"] = float(max(0, 1 - np.std(vol_changes)))
     else:
@@ -208,31 +221,31 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
     # 10. vol_weighted_gain_ratio
     if n >= 3:
         dr = np.diff(closes) / (closes[:-1] + 1e-8)
-        dr10 = dr[-min(10, len(dr)):]
-        vr10 = volumes[-len(dr10):]
+        dr10 = dr[-min(10, len(dr)) :]
+        vr10 = volumes[-len(dr10) :]
         result["vol_weighted_gain_ratio"] = float((dr10 * vr10).sum() / (vr10.sum() + 1e-8) * 100)
     else:
         result["vol_weighted_gain_ratio"] = 0.0
 
     # 11. price_channel_pct
-    low_20d = lows[-min(20, n):].min()
+    low_20d = lows[-min(20, n) :].min()
     result["price_channel_pct"] = float((closes[-1] - low_20d) / (high_20d - low_20d + 1e-8))
 
     # 12. up_days_pct_20d
     if n >= 3:
-        dr_all = np.diff(closes[-min(21, n):])
+        dr_all = np.diff(closes[-min(21, n) :])
         result["up_days_pct_20d"] = float((dr_all > 0).sum() / (len(dr_all) + 1e-8))
     else:
         result["up_days_pct_20d"] = 0.0
 
     # 13. amplitude_20d
-    amps_20 = (highs[-min(20, n):] - lows[-min(20, n):]) / (opens[-min(20, n):] + 1e-8)
+    amps_20 = (highs[-min(20, n) :] - lows[-min(20, n) :]) / (opens[-min(20, n) :] + 1e-8)
     result["amplitude_20d"] = float(amps_20.mean())
 
     # 14. vol_ratio_5d_20d
     if n >= 10:
         vol_5d = volumes[-5:].mean()
-        vol_20d = volumes[-min(20, n):].mean()
+        vol_20d = volumes[-min(20, n) :].mean()
         result["vol_ratio_5d_20d"] = float(vol_5d / (vol_20d + 1e-8))
     else:
         result["vol_ratio_5d_20d"] = 1.0
@@ -242,6 +255,7 @@ def _compute_advanced_features(hist: pd.DataFrame) -> dict:
 
 def _compute_engineered_features(feats: dict) -> dict:
     """计算 11 个衍生特征。"""
+
     def _g(key):
         return feats.get(key, 0.0)
 
@@ -249,8 +263,7 @@ def _compute_engineered_features(feats: dict) -> dict:
         "momentum_contrarian": -_g("avg_daily_return_20d") * (1 + _g("consecutive_up_days") / 10),
         "trend_acceleration": _g("trend_10d") - _g("trend_pct"),
         "momentum_quality": (
-            _g("trend_10d") / (_g("volatility_20d") + 0.001)
-            * max(0, _g("avg_daily_return_20d"))
+            _g("trend_10d") / (_g("volatility_20d") + 0.001) * max(0, _g("avg_daily_return_20d"))
         ),
         "vol_normalized_return": _g("avg_daily_return_20d") / (_g("volatility_20d") + 0.001),
         "range_to_vol": _g("intraday_range_940") / (_g("volatility_20d") + 0.001),
@@ -280,14 +293,16 @@ def _add_zscore(feature_dicts: list[dict], raw_names: list[str]) -> None:
 #  LGBRankScorer 主类
 # ══════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class ScoredStock:
     """评分结果"""
+
     code: str
     name: str
     score: float
-    rank: int           # 1-based, 1 = best
-    buy_price: float    # 9:40 价格
+    rank: int  # 1-based, 1 = best
+    buy_price: float  # 9:40 价格
 
 
 class LGBRankScorer:
@@ -382,12 +397,14 @@ class LGBRankScorer:
         results = []
         for rank_0, idx in enumerate(order):
             s = candidates[idx]
-            results.append(ScoredStock(
-                code=s.code,
-                name=s.name,
-                score=float(scores_arr[idx]),
-                rank=rank_0 + 1,
-                buy_price=s.price_at_940,
-            ))
+            results.append(
+                ScoredStock(
+                    code=s.code,
+                    name=s.name,
+                    score=float(scores_arr[idx]),
+                    rank=rank_0 + 1,
+                    buy_price=s.price_at_940,
+                )
+            )
 
         return results

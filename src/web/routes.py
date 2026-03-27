@@ -6312,7 +6312,10 @@ def create_v15_backtest_router() -> APIRouter:
         stock_data: dict[str, V16StockData] = {}
         lookback_days = 37
         skipped_reasons: dict[str, int] = {
-            "no_daily": 0, "no_940": 0, "no_hist": 0, "new_listing": 0
+            "no_daily": 0,
+            "no_940": 0,
+            "no_hist": 0,
+            "new_listing": 0,
         }
 
         for code in universe_codes:
@@ -6419,10 +6422,7 @@ def create_v15_backtest_router() -> APIRouter:
                 history_df=hist_df,
             )
 
-        logger.info(
-            f"V16 backtest: built {len(stock_data)} stocks, "
-            f"skipped: {skipped_reasons}"
-        )
+        logger.info(f"V16 backtest: built {len(stock_data)} stocks, skipped: {skipped_reasons}")
 
         if not stock_data:
             return {

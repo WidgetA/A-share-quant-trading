@@ -421,19 +421,13 @@ Limit-up (skipped):
             board = scan_result.stock_best_board.get(top1.code, "-")
             lines.append("")
             lines.append(f"推荐 Top-1: {top1.code} {top1.name}")
-            lines.append(
-                f"  板块: {board} | LGB: {top1.score:.4f} | "
-                f"价格: {top1.buy_price:.2f}"
-            )
+            lines.append(f"  板块: {board} | LGB: {top1.score:.4f} | 价格: {top1.buy_price:.2f}")
 
             lines.append("")
             lines.append("评分前10:")
             for s in recommended:
                 board = scan_result.stock_best_board.get(s.code, "-")
-                lines.append(
-                    f"{s.rank}. {s.code} {s.name}  "
-                    f"LGB={s.score:.4f}  {board}"
-                )
+                lines.append(f"{s.rank}. {s.code} {s.name}  LGB={s.score:.4f}  {board}")
         else:
             lines.append("")
             lines.append("推荐: 无")
