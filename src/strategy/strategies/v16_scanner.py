@@ -159,22 +159,6 @@ class V16Scanner:
     MAX_UPPER_SHADOW = 0.030  # 3.0%
     SHADOW_EXEMPT_GAIN = 9.5  # gain_from_open >= 9.5% exempt
 
-    # ── V15 board blacklist (carried over) ──
-    BOARD_BLACKLIST = frozenset(
-        {
-            "物联网",
-            "医疗器械概念",
-            "特高压",
-            "冷链物流",
-            "特钢概念",
-            "三胎概念",
-            "长三角一体化",
-            "海南自贸区",
-            "中俄贸易概念",
-            "碳中和",
-        }
-    )
-
     # ── Top-N for recommendation ──
     TOP_N = 10
 
@@ -225,12 +209,9 @@ class V16Scanner:
         universe: set[str] = set()
 
         for board_name, members in self._mapper._board_stocks.items():
-            # Skip broad concept boards and blacklisted boards
+            # Skip broad concept boards (too many stocks) and junk boards
             if board_name in BROAD_CONCEPT_BOARDS:
                 continue
-            if board_name in self.BOARD_BLACKLIST:
-                continue
-            # is_junk_board already filtered in LocalConceptMapper, but double-check
             if is_junk_board(board_name):
                 continue
 

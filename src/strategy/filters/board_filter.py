@@ -187,6 +187,15 @@ JUNK_BOARDS: set[str] = {
     "新股与次新股",
     "科创次新股",
     "摘帽",
+    # ---- 信号不可靠/关联度低 ----
+    "特高压",
+    "冷链物流",
+    "特钢概念",
+    "三胎概念",
+    "长三角一体化",
+    "海南自贸区",
+    "中俄贸易概念",
+    "碳中和",
 }
 
 # Boards that ARE real technology/industry themes but have too many constituents
