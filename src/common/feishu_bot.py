@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         SelectedStock,
     )
     from src.strategy.strategies.v15_scanner import V15ScanResult
+    from src.strategy.strategies.v16_scanner import V16ScanResult
 
 from src.common.config import get_feishu_config
 
@@ -393,6 +394,49 @@ Limit-up (skipped):
                     f"换手{s.turnover_amp:.2f}x  "
                     f"连涨{s.consecutive_up_days}天"
                 )
+
+        return await self.send_message("\n".join(lines))
+
+    async def send_v16_top10_report(
+        self,
+        scan_result: V16ScanResult,
+        scan_time: datetime | None = None,
+    ) -> bool:
+        """Send V16 scanner top-10 scored candidates to Feishu."""
+        now = scan_time or datetime.now(BEIJING_TZ)
+        time_str = now.strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"[V16] 每日扫描报告 ({time_str})",
+            (
+                f"股票池: {scan_result.step0_universe_count}只 | "
+                f"热门板块: {scan_result.step2_hot_board_count}个 | "
+                f"最终: {scan_result.final_candidates}只"
+            ),
+        ]
+
+        recommended = scan_result.recommended
+        if recommended:
+            top1 = recommended[0]
+            board = scan_result.stock_best_board.get(top1.code, "-")
+            lines.append("")
+            lines.append(f"推荐 Top-1: {top1.code} {top1.name}")
+            lines.append(
+                f"  板块: {board} | LGB: {top1.score:.4f} | "
+                f"价格: {top1.buy_price:.2f}"
+            )
+
+            lines.append("")
+            lines.append("评分前10:")
+            for s in recommended:
+                board = scan_result.stock_best_board.get(s.code, "-")
+                lines.append(
+                    f"{s.rank}. {s.code} {s.name}  "
+                    f"LGB={s.score:.4f}  {board}"
+                )
+        else:
+            lines.append("")
+            lines.append("推荐: 无")
 
         return await self.send_message("\n".join(lines))
 

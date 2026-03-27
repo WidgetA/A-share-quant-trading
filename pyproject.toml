@@ -15,6 +15,9 @@ dependencies = [
     "jinja2>=3.1.6",
     "oss2>=2.19.1",
     "python-multipart>=0.0.22",
+    "lightgbm>=4.0",
+    "numpy",
+    "pandas",
 ]
 
 [project.optional-dependencies]

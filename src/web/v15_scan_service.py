@@ -1,15 +1,15 @@
 # === MODULE PURPOSE ===
-# Autonomous V15 scan scheduler — runs independently from app startup.
+# Autonomous V16 scan scheduler — runs independently from app startup.
 # Decoupled from trading: always scans + pushes Feishu, never checks holdings.
 #
 # === ARCHITECTURE ===
-# Owns scan resources (Tushare, FundamentalsDB, HistAdapter, ConceptMapper).
+# Owns scan resources (Tushare, FundamentalsDB, HistAdapter, ConceptMapper, LGBRank).
 # Writes today's recommendation to V15ScanState for trading module to read.
 # Resource initialization retries on failure (resilient to transient errors).
 #
 # === DATA FLOW ===
-# 09:38-10:00  → Run V15 7-layer scan → push Feishu top-5 + recommendation
-#              → Write result to scan_state.today_recommendation
+# 09:38-10:00  → Run V16 scan → push Feishu top-10 + recommendation
+#              → Write result to scan_state.today_recommendation (top-1 for trading)
 # Trading scheduler (in iquant_routes.py) reads scan_state to decide BUY/SELL.
 
 from __future__ import annotations
@@ -18,13 +18,19 @@ import asyncio
 import logging
 import traceback
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 # --- Scan state container ---
@@ -68,16 +74,16 @@ async def _notify_feishu_error(title: str, detail: str) -> None:
         logger.warning("Failed to send Feishu error notification", exc_info=True)
 
 
-async def _notify_feishu_v15_top5(scan_result: Any) -> None:
-    """Send V15 top-5 scored report to Feishu. Best-effort, never raises."""
+async def _notify_feishu_v16_top10(scan_result: Any) -> None:
+    """Send V16 top-10 scored report to Feishu. Best-effort, never raises."""
     try:
         from src.common.feishu_bot import FeishuBot
 
         bot = FeishuBot()
         if bot.is_configured():
-            await bot.send_v15_top5_report(scan_result)
+            await bot.send_v16_top10_report(scan_result)
     except Exception:
-        logger.warning("Failed to send Feishu V15 top-5 report", exc_info=True)
+        logger.warning("Failed to send Feishu V16 top-10 report", exc_info=True)
 
 
 async def _notify_feishu_signal(signal: dict) -> None:
@@ -97,7 +103,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
             lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
-            lines.append(f"V3评分: {signal.get('v3_score', '-')}")
+            lines.append(f"LGB评分: {signal.get('lgb_score', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
         lines.append(f"时间: {signal.get('created_at', '')}")
@@ -130,7 +136,7 @@ async def init_scan_resources(scan_state: V15ScanState) -> None:
     except Exception as e:
         await _notify_feishu_error(
             "Tushare连接失败",
-            f"Tushare实时行情客户端启动失败\n错误: {e}\nV15扫描功能不可用",
+            f"Tushare实时行情客户端启动失败\n错误: {e}\nV16扫描功能不可用",
         )
         raise
     scan_state.realtime_client = tushare
@@ -143,7 +149,7 @@ async def init_scan_resources(scan_state: V15ScanState) -> None:
         await tushare.stop()
         await _notify_feishu_error(
             "数据库连接失败",
-            f"PostgreSQL基本面数据库连接失败\n错误: {e}\nV15扫描功能不可用",
+            f"PostgreSQL基本面数据库连接失败\n错误: {e}\nV16扫描功能不可用",
         )
         raise
     scan_state.fundamentals_db = fdb
@@ -161,7 +167,7 @@ async def init_scan_resources(scan_state: V15ScanState) -> None:
     cache = scan_state.tsanghi_cache
     scan_state.historical_adapter = IQuantHistoricalAdapter(tushare, cache=cache)
     scan_state.concept_mapper = LocalConceptMapper()
-    # V15 filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
+    # V16 filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
     scan_state.stock_filter = StockFilter(
         StockFilterConfig(
             exclude_bse=True,
@@ -172,7 +178,7 @@ async def init_scan_resources(scan_state: V15ScanState) -> None:
     )
 
     scan_state.initialized = True
-    logger.info("V15 scan resources initialized")
+    logger.info("V16 scan resources initialized")
 
 
 async def cleanup_scan_resources(scan_state: V15ScanState) -> None:
@@ -190,31 +196,7 @@ async def cleanup_scan_resources(scan_state: V15ScanState) -> None:
     if v15db:
         await v15db.close()
     scan_state.initialized = False
-    logger.info("V15 scan resources cleaned up")
-
-
-# --- Universe ---
-
-
-async def get_universe(scan_state: V15ScanState) -> list[str]:
-    """Get stock codes for V15 universe (main board + SME, cached)."""
-    if scan_state.universe_cache:
-        return scan_state.universe_cache
-
-    import akshare as ak
-
-    df = await asyncio.to_thread(ak.stock_info_a_code_name)
-    stock_filter = scan_state.stock_filter
-    codes = [
-        row["code"]
-        for _, row in df.iterrows()
-        if isinstance(row["code"], str)
-        and len(row["code"]) == 6
-        and stock_filter.is_allowed(row["code"])
-    ]
-    scan_state.universe_cache = codes
-    logger.info(f"V15 universe cached: {len(codes)} codes")
-    return codes
+    logger.info("V16 scan resources cleaned up")
 
 
 # --- Trade calendar (shared) ---
@@ -238,44 +220,21 @@ async def get_trade_calendar() -> list[date]:
     return _trade_calendar_cache
 
 
-# --- V15 scan logic ---
+# --- V16 data building helpers ---
+
+LOOKBACK_DAYS = 37  # trading days for historical data
 
 
-async def run_v15_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
-    """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None.
-
-    IMPORTANT — price semantics:
-    Quotes are fetched via ``batch_get_early_quotes`` which aggregates
-    minute bars for 09:30-09:40 only (``rt_min_daily``).  The resulting
-    ``latest_price`` in the returned dict is the **09:40 early_close**,
-    NOT the real-time price at the moment of the scan invocation.
-    This is by design: ``latest_price`` represents the intended buy-time
-    reference price so it stays stable regardless of when the scan is
-    triggered (auto at 09:38 or manual at 13:00).
-    """
-    from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
-    from src.strategy.strategies.v15_scanner import V15Scanner
-
-    universe = await get_universe(scan_state)
-    if not universe:
-        raise RuntimeError("Universe is empty")
-
-    rt_client = scan_state.realtime_client
-    quotes = await rt_client.batch_get_early_quotes(universe)
-    logger.info(f"V15 scan: Tushare rt_min_daily returned {len(quotes)} quotes")
-
-    if not quotes:
-        return None
-
-    # Get prev_close (previous trading day's close).
-    # L6.5 limit-up check needs real prev_close — NEVER approximate with open_price
-    prev_closes: dict[str, float] = {}
-    today = datetime.now(BEIJING_TZ).date()
-    calendar = await get_trade_calendar()
+async def _fetch_prev_closes(
+    scan_state: V15ScanState, today: date, calendar: list[date]
+) -> dict[str, float]:
+    """Fetch prev_close for all stocks. Returns code → prev_close."""
     prev_dates = [d for d in calendar if d < today]
     if not prev_dates:
-        raise RuntimeError("V15 scan: no previous trading day found in calendar")
+        raise RuntimeError("V16 scan: no previous trading day found in calendar")
     prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
+
+    prev_closes: dict[str, float] = {}
 
     # Source 1: OSS cache (instant, no API call)
     cache = scan_state.tsanghi_cache
@@ -286,8 +245,8 @@ async def run_v15_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
             if close_val and close_val > 0:
                 prev_closes[code] = close_val
 
-    # Source 2: tsanghi API fallback (2 calls for XSHG+XSHE)
-    if len(prev_closes) < len(quotes) * 0.8:
+    # Source 2: tsanghi API fallback
+    if len(prev_closes) < 100:
         from src.data.clients.tsanghi_client import TsanghiClient
 
         ts_client = TsanghiClient()
@@ -305,64 +264,298 @@ async def run_v15_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
 
     if not prev_closes:
         raise RuntimeError(
-            f"V15 scan: failed to get prev_close for {prev_trade_date} "
+            f"V16 scan: failed to get prev_close for {prev_trade_date} "
             f"from both OSS cache and tsanghi API"
         )
-    logger.info(f"V15 scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
+    logger.info(f"V16: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
+    return prev_closes
 
-    # Build PriceSnapshot dict
-    price_snapshots: dict[str, PriceSnapshot] = {}
-    for code, quote in quotes.items():
-        if not quote.is_trading:
-            continue
-        price_snapshots[code] = PriceSnapshot(
-            stock_code=code,
-            stock_name="",
-            open_price=quote.open_price,
-            prev_close=prev_closes.get(code, 0.0),
-            latest_price=quote.early_close,
-            early_volume=quote.early_volume,
-            high_price=quote.early_high,
-            low_price=quote.early_low,
+
+async def _fetch_history_ohlcv(
+    hist_adapter: Any,
+    codes: list[str],
+    ref_date: date,
+) -> dict[str, dict]:
+    """Fetch 37d OHLCV history via historical adapter. Returns code → raw history dict.
+
+    The returned dict per code has keys: time, open, high, low, close, volume
+    """
+    if not codes:
+        return {}
+
+    calendar_buffer = LOOKBACK_DAYS * 2 + 15
+    start = ref_date - timedelta(days=calendar_buffer)
+    end = ref_date - timedelta(days=1)
+
+    result: dict[str, dict] = {}
+    batch_size = 50
+
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i : i + batch_size]
+        codes_str = ",".join(
+            f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch
         )
 
-    scanner = V15Scanner(
-        historical_adapter=scan_state.historical_adapter,
-        fundamentals_db=scan_state.fundamentals_db,
-        concept_mapper=scan_state.concept_mapper,
+        data = await hist_adapter.history_quotes(
+            codes=codes_str,
+            indicators="open,high,low,close,volume",
+            start_date=start.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+        )
+
+        for table_entry in data.get("tables", []):
+            thscode = table_entry.get("thscode", "")
+            bare_code = thscode.split(".")[0] if thscode else ""
+            if not bare_code:
+                continue
+
+            tbl = table_entry.get("table", {})
+            result[bare_code] = {
+                "time": tbl.get("time", []),
+                "open": tbl.get("open", []),
+                "high": tbl.get("high", []),
+                "low": tbl.get("low", []),
+                "close": tbl.get("close", []),
+                "volume": tbl.get("volume", []),
+            }
+
+    return result
+
+
+def _build_stock_data(
+    code: str,
+    name: str,
+    quote: Any,
+    prev_close: float,
+    hist_raw: dict,
+    ref_date: date,
+) -> Any:
+    """Build V16StockData from raw data. Returns None if data is insufficient.
+
+    Raises RuntimeError for old stocks with missing data.
+    """
+    from src.strategy.strategies.v16_scanner import V16StockData
+
+    time_vals = hist_raw.get("time", [])
+    close_vals = hist_raw.get("close", [])
+    open_vals = hist_raw.get("open", [])
+    high_vals = hist_raw.get("high", [])
+    low_vals = hist_raw.get("low", [])
+    vol_vals = hist_raw.get("volume", [])
+
+    # Build valid OHLCV rows
+    rows = []
+    for idx in range(len(time_vals)):
+        try:
+            o = float(open_vals[idx]) if open_vals[idx] is not None else None
+            h = float(high_vals[idx]) if high_vals[idx] is not None else None
+            lo = float(low_vals[idx]) if low_vals[idx] is not None else None
+            c = float(close_vals[idx]) if close_vals[idx] is not None else None
+            v = float(vol_vals[idx]) if vol_vals[idx] is not None else None
+        except (ValueError, IndexError):
+            continue
+        if o is None or h is None or lo is None or c is None or v is None:
+            continue
+        if o <= 0 or c <= 0:
+            continue
+        rows.append({"open": o, "high": h, "low": lo, "close": c, "volume": v})
+
+    if len(rows) < LOOKBACK_DAYS:
+        # Check if new listing (first date < 37 trading days ago)
+        if time_vals:
+            first_date = datetime.strptime(time_vals[0], "%Y-%m-%d").date()
+            if (ref_date - first_date).days < 60:  # ~37 trading days ≈ 55 calendar days
+                logger.info(
+                    f"V16: skipping new listing {code} ({name}): "
+                    f"only {len(rows)} history days (IPO: {time_vals[0]})"
+                )
+                return None
+        # Old stock with insufficient data — error
+        if len(rows) < 5:
+            logger.warning(
+                f"V16: skipping {code} ({name}): only {len(rows)} history rows "
+                f"(need ≥5 for LGBRank, ≥{LOOKBACK_DAYS} ideal)"
+            )
+            return None
+
+    hist_df = pd.DataFrame(rows)
+
+    # Compute derived metrics from history
+    closes = np.array([r["close"] for r in rows])
+    volumes = np.array([r["volume"] for r in rows])
+
+    # avg_daily_volume (37d)
+    recent_vol = volumes[-LOOKBACK_DAYS:]
+    avg_daily_volume = float(recent_vol.mean()) if len(recent_vol) > 0 else 0.0
+
+    # trend_5d
+    trend_5d = 0.0
+    if len(closes) >= 6:
+        c_now, c_5ago = closes[-1], closes[-6]
+        if c_5ago > 0:
+            trend_5d = (c_now - c_5ago) / c_5ago
+
+    # trend_10d
+    trend_10d = 0.0
+    if len(closes) >= 11:
+        c_now, c_10ago = closes[-1], closes[-11]
+        if c_10ago > 0:
+            trend_10d = (c_now - c_10ago) / c_10ago
+
+    # avg_daily_return_20d and volatility_20d
+    avg_daily_return_20d = 0.0
+    volatility_20d = 0.0
+    if len(closes) >= 2:
+        returns = np.diff(closes) / closes[:-1]
+        recent_returns = returns[-20:] if len(returns) >= 20 else returns
+        avg_daily_return_20d = float(np.mean(recent_returns))
+        if len(recent_returns) >= 2:
+            volatility_20d = float(np.std(recent_returns))
+
+    # consecutive_up_days
+    consecutive_up_days = 0
+    for j in range(len(closes) - 1, 0, -1):
+        if closes[j] > closes[j - 1]:
+            consecutive_up_days += 1
+        else:
+            break
+
+    return V16StockData(
+        code=code,
+        name=name,
+        open_price=quote.open_price,
+        prev_close=prev_close,
+        price_940=quote.early_close,
+        high_940=quote.early_high,
+        low_940=quote.early_low,
+        volume_940=quote.early_volume,
+        avg_daily_volume=avg_daily_volume,
+        trend_5d=trend_5d,
+        trend_10d=trend_10d,
+        avg_daily_return_20d=avg_daily_return_20d,
+        volatility_20d=volatility_20d,
+        consecutive_up_days=consecutive_up_days,
+        history_df=hist_df,
     )
 
-    scan_result = await scanner.scan(price_snapshots)
-    today = datetime.now(BEIJING_TZ).date()
 
-    # Persist top-5 scored stocks (non-critical, never blocks)
-    if scan_result.all_scored and scan_state.v15_scan_db:
-        try:
-            await scan_state.v15_scan_db.save_top_n(
-                today, scan_result.all_scored, scan_result.final_candidates
-            )
-        except Exception as e:
-            logger.warning(f"V15ScanDB save failed: {e}")
+# --- V16 scan logic ---
 
-    # Push top-5 report to Feishu (always, non-critical)
-    await _notify_feishu_v15_top5(scan_result)
 
-    rec = scan_result.recommended
-    if not rec:
+async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
+    """Run V16 scan via Tushare + V16Scanner + LGBRank. Returns recommendation dict or None.
+
+    IMPORTANT — price semantics:
+    Quotes are fetched via ``batch_get_early_quotes`` which aggregates
+    minute bars for 09:30-09:40 only (``rt_min_daily``).  The resulting
+    ``latest_price`` in the returned dict is the **09:40 early_close**,
+    NOT the real-time price at the moment of the scan invocation.
+    """
+    from src.strategy.lgbrank_scorer import LGBRankScorer
+    from src.strategy.strategies.v16_scanner import V16Scanner
+
+    # Initialize LGBRank scorer
+    model_path = _PROJECT_ROOT / "models" / "lgbrank_latest.txt"
+    feature_path = _PROJECT_ROOT / "models" / "feature_list.json"
+    scorer = LGBRankScorer(model_path, feature_path)
+
+    # Build V16 scanner
+    scanner = V16Scanner(
+        fundamentals_db=scan_state.fundamentals_db,
+        concept_mapper=scan_state.concept_mapper,
+        stock_filter=scan_state.stock_filter,
+        scorer=scorer,
+    )
+
+    # Step 0: Get universe from board cleaning
+    clean_boards, universe_codes = scanner.get_universe()
+    if not universe_codes:
+        raise RuntimeError("V16 scan: universe is empty after board cleaning")
+    logger.info(f"V16 scan: universe = {len(universe_codes)} stocks")
+
+    # Fetch 9:40 quotes from Tushare (only for universe stocks)
+    rt_client = scan_state.realtime_client
+    universe_list = sorted(universe_codes)
+    quotes = await rt_client.batch_get_early_quotes(universe_list)
+    logger.info(f"V16 scan: Tushare returned {len(quotes)} quotes")
+
+    if not quotes:
         return None
 
-    # latest_price = early_close (09:40 price), see docstring above
+    # Fetch prev_close
+    today = datetime.now(BEIJING_TZ).date()
+    calendar = await get_trade_calendar()
+    prev_closes = await _fetch_prev_closes(scan_state, today, calendar)
+
+    # Fetch 37d OHLCV history for ALL universe stocks with quotes
+    trading_codes = [c for c, q in quotes.items() if q.is_trading]
+    logger.info(f"V16 scan: {len(trading_codes)} stocks trading, fetching history...")
+    hist_raw = await _fetch_history_ohlcv(
+        scan_state.historical_adapter, trading_codes, today
+    )
+    logger.info(f"V16 scan: history fetched for {len(hist_raw)} stocks")
+
+    # Build V16StockData for each stock
+    from src.strategy.strategies.v16_scanner import V16StockData  # noqa: F811
+
+    stock_data: dict[str, V16StockData] = {}
+    skipped_no_hist = 0
+    skipped_no_prev_close = 0
+    skipped_new = 0
+
+    for code in trading_codes:
+        quote = quotes.get(code)
+        if not quote or not quote.is_trading:
+            continue
+
+        pc = prev_closes.get(code)
+        if not pc or pc <= 0:
+            skipped_no_prev_close += 1
+            continue
+
+        hr = hist_raw.get(code)
+        if not hr:
+            skipped_no_hist += 1
+            continue
+
+        sd = _build_stock_data(code, "", quote, pc, hr, today)
+        if sd is None:
+            skipped_new += 1
+            continue
+
+        stock_data[code] = sd
+
+    logger.info(
+        f"V16 scan: built {len(stock_data)} V16StockData "
+        f"(skipped: no_hist={skipped_no_hist}, no_prev_close={skipped_no_prev_close}, "
+        f"new_listing={skipped_new})"
+    )
+
+    if not stock_data:
+        return None
+
+    # Run V16 scan
+    scan_result = await scanner.scan(stock_data, clean_boards)
+
+    # Push top-10 report to Feishu (always, non-critical)
+    await _notify_feishu_v16_top10(scan_result)
+
+    recommended = scan_result.recommended
+    if not recommended:
+        return None
+
+    # Return top-1 for trading module (today_recommendation)
+    top1 = recommended[0]
+    board = scan_result.stock_best_board.get(top1.code, "")
     return {
-        "stock_code": rec.stock_code,
-        "stock_name": rec.stock_name,
-        "board_name": rec.board_name,
-        "open_price": round(rec.open_price, 4),
-        "prev_close": round(rec.prev_close, 4),
-        "latest_price": round(rec.latest_price, 4),
-        "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
-        "turnover_amp": round(rec.turnover_amp, 4),
-        "v3_score": round(rec.v3_score, 6),
-        "hot_board_count": scan_result.hot_board_count,
+        "stock_code": top1.code,
+        "stock_name": top1.name,
+        "board_name": board,
+        "open_price": round(stock_data[top1.code].open_price, 4),
+        "prev_close": round(stock_data[top1.code].prev_close, 4),
+        "latest_price": round(top1.buy_price, 4),
+        "lgb_score": round(top1.score, 6),
+        "hot_board_count": scan_result.step2_hot_board_count,
         "final_candidates": scan_result.final_candidates,
     }
 
@@ -374,22 +567,22 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
     """Autonomous scan scheduler. Runs from app startup, independent of iQuant.
 
     Time window: 09:38-10:00
-    - Always runs V15 scan
-    - Always pushes Feishu top-5 report + recommendation
+    - Always runs V16 scan
+    - Always pushes Feishu top-10 report + recommendation
     - Writes result to scan_state.today_recommendation
     - Does NOT check holdings or push trading signals
     """
     SCAN_WINDOW = (time(9, 38), time(10, 0))
     scan_done_date = ""
 
-    logger.info("V15 scan scheduler started (autonomous)")
+    logger.info("V16 scan scheduler started (autonomous)")
 
     # Initialize resources with retry
     while not scan_state.initialized:
         try:
             await init_scan_resources(scan_state)
         except Exception as e:
-            logger.error(f"V15 scan resource init failed, retry in 60s: {e}")
+            logger.error(f"V16 scan resource init failed, retry in 60s: {e}")
             await asyncio.sleep(60)
 
     # Pre-load trade calendar
@@ -414,7 +607,7 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                 scan_state.scan_done_date = ex_date
 
                 try:
-                    rec = await run_v15_scan(scan_state)
+                    rec = await run_v16_scan(scan_state)
                     scan_state.today_recommendation = rec
                     scan_state.scan_error = None
 
@@ -426,24 +619,24 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                             "stock_name": rec["stock_name"],
                             "board_name": rec["board_name"],
                             "latest_price": rec["latest_price"],
-                            "v3_score": rec["v3_score"],
-                            "reason": f"V15推荐 (板块={rec['board_name']}, "
-                            f"score={rec['v3_score']:.4f})",
+                            "lgb_score": rec["lgb_score"],
+                            "reason": f"V16推荐 (板块={rec['board_name']}, "
+                            f"LGB={rec['lgb_score']:.4f})",
                             "created_at": now_str,
                         }
                         await _notify_feishu_signal(rec_signal)
                     else:
-                        logger.info("V15 scan: no recommendation today")
+                        logger.info("V16 scan: no recommendation today")
                         await _notify_feishu_error(
-                            "V15扫描结果",
-                            "今日V15扫描完成，无符合条件的推荐股票",
+                            "V16扫描结果",
+                            "今日V16扫描完成，无符合条件的推荐股票",
                         )
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                     scan_state.scan_error = error_detail
                     scan_state.today_recommendation = None
-                    logger.error(f"V15 scan failed: {error_detail}")
-                    await _notify_feishu_error("V15扫描失败", error_detail)
+                    logger.error(f"V16 scan failed: {error_detail}")
+                    await _notify_feishu_error("V16扫描失败", error_detail)
 
             # Scan deadline
             if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
@@ -454,13 +647,13 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
             await asyncio.sleep(30 if scan_done_date == ex_date else 15)
 
     except asyncio.CancelledError:
-        logger.info("V15 scan scheduler stopped")
+        logger.info("V16 scan scheduler stopped")
     except Exception as e:
         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        logger.critical(f"V15 scan scheduler CRASHED: {error_detail}")
+        logger.critical(f"V16 scan scheduler CRASHED: {error_detail}")
         await _notify_feishu_error(
-            "V15扫描调度器崩溃",
-            f"扫描调度器意外退出!\n{error_detail}\n今日将无法推送V15扫描结果",
+            "V16扫描调度器崩溃",
+            f"扫描调度器意外退出!\n{error_detail}\n今日将无法推送V16扫描结果",
         )
 
 
@@ -483,6 +676,6 @@ def inject_cache(scan_state: V15ScanState, cache: Any) -> None:
         scan_state.historical_adapter = IQuantHistoricalAdapter(
             scan_state.realtime_client, cache=cache
         )
-        logger.info("V15 scan: OSS cache injected, historical adapter rebuilt")
+        logger.info("V16 scan: OSS cache injected, historical adapter rebuilt")
     else:
-        logger.info("V15 scan: OSS cache stored (adapter will be built on init)")
+        logger.info("V16 scan: OSS cache stored (adapter will be built on init)")

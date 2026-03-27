@@ -6212,37 +6212,40 @@ def create_trade_backtest_router() -> APIRouter:
     return router
 
 
-# ── V15 Backtest Router ─────────────────────────────────────
+# ── V16 Backtest Router ─────────────────────────────────────
 
 
 class V15BacktestRequest(BaseModel):
-    """Request body for V15 single-day backtest."""
+    """Request body for V16 single-day backtest."""
 
     trade_date: str  # YYYY-MM-DD
 
 
 def create_v15_backtest_router() -> APIRouter:
-    """Create router for V15 single-day backtest."""
+    """Create router for V16 single-day backtest."""
     from datetime import datetime
 
     from fastapi.responses import HTMLResponse
 
     router = APIRouter()
 
-    @router.get("/v15", response_class=HTMLResponse)
-    async def v15_page(request: Request):
+    @router.get("/v16", response_class=HTMLResponse)
+    async def v16_page(request: Request):
         templates = request.app.state.templates
         return templates.TemplateResponse("v15_backtest.html", {"request": request})
 
-    @router.post("/api/v15/backtest")
-    async def run_v15_backtest(request: Request, body: V15BacktestRequest):
-        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.v15_scanner import V15Scanner
+    @router.post("/api/v16/backtest")
+    async def run_v16_backtest(request: Request, body: V15BacktestRequest):
+        import numpy as np
+        import pandas as pd
 
-        # Validate date
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.lgbrank_scorer import LGBRankScorer
+        from src.strategy.strategies.v16_scanner import V16Scanner, V16StockData
+
+        # Validate date format
         try:
-            td = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
+            datetime.strptime(body.trade_date, "%Y-%m-%d")
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
 
@@ -6256,95 +6259,226 @@ def create_v15_backtest_router() -> APIRouter:
         if fundamentals_db is None:
             raise HTTPException(status_code=503, detail="基本面数据库未就绪")
 
-        # Build snapshots from cache
+        # Init LGBRank scorer
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parent.parent.parent
+        model_path = project_root / "models" / "lgbrank_latest.txt"
+        feature_path = project_root / "models" / "feature_list.json"
         try:
-            snapshots = _build_snapshots_from_cache(
-                tsanghi_cache, body.trade_date, skip_open_gain_filter=True
-            )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if not snapshots:
+            scorer = LGBRankScorer(model_path, feature_path)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=500, detail=f"模型文件缺失: {e}")
+
+        # Build V16 scanner
+        concept_mapper = LocalConceptMapper()
+        scanner = V16Scanner(
+            fundamentals_db=fundamentals_db,
+            concept_mapper=concept_mapper,
+            scorer=scorer,
+        )
+
+        # Step 0: Get universe
+        clean_boards, universe_codes = scanner.get_universe()
+        if not universe_codes:
             return {
                 "success": True,
                 "trade_date": body.trade_date,
-                "initial_gainers": 0,
+                "step0_universe": 0,
                 "hot_board_count": 0,
                 "final_candidates": 0,
                 "funnel": [],
-                "recommended": None,
+                "recommended": [],
                 "all_scored": [],
-                "hot_boards": {},
-                "message": f"{body.trade_date} 无可用数据（非交易日或数据未下载）",
+                "message": "股票池为空",
             }
 
-        # Create scanner with tsanghi adapter (trade_date for real_time_quotation)
-        adapter = TsanghiHistoricalAdapter(tsanghi_cache, trade_date=td)
-        concept_mapper = LocalConceptMapper()
-        scanner = V15Scanner(
-            historical_adapter=adapter,  # type: ignore[arg-type]
-            fundamentals_db=fundamentals_db,
-            concept_mapper=concept_mapper,
+        # Build V16StockData from tsanghi cache
+        all_daily = tsanghi_cache.get_all_codes_with_daily(body.trade_date)
+        if not all_daily:
+            return {
+                "success": True,
+                "trade_date": body.trade_date,
+                "step0_universe": len(universe_codes),
+                "hot_board_count": 0,
+                "final_candidates": 0,
+                "funnel": [],
+                "recommended": [],
+                "all_scored": [],
+                "message": f"{body.trade_date} 无可用日线数据（非交易日或数据未下载）",
+            }
+
+        # Build stock data with 37d history
+        stock_data: dict[str, V16StockData] = {}
+        lookback_days = 37
+        skipped_reasons: dict[str, int] = {
+            "no_daily": 0, "no_940": 0, "no_hist": 0, "new_listing": 0
+        }
+
+        for code in universe_codes:
+            day = all_daily.get(code)
+            if not day:
+                skipped_reasons["no_daily"] += 1
+                continue
+
+            open_price = day.get("open", 0)
+            prev_close = day.get("preClose") or day.get("close", 0)
+            if open_price <= 0 or prev_close <= 0:
+                skipped_reasons["no_daily"] += 1
+                continue
+
+            # Get 9:40 data
+            data_940 = tsanghi_cache.get_940_price(code, body.trade_date)
+            if not data_940:
+                skipped_reasons["no_940"] += 1
+                continue
+
+            price_940, cum_vol, max_high, min_low = data_940
+            if price_940 <= 0:
+                skipped_reasons["no_940"] += 1
+                continue
+
+            # Build 37d history DataFrame
+            # Get trading dates before td
+            all_dates_for_code = sorted(tsanghi_cache._daily.get(code, {}).keys())
+            hist_dates = [d for d in all_dates_for_code if d < body.trade_date]
+            hist_dates = hist_dates[-lookback_days:]  # last 37
+
+            rows = []
+            for hd in hist_dates:
+                hday = tsanghi_cache._daily.get(code, {}).get(hd, {})
+                o = hday.get("open")
+                h = hday.get("high")
+                lo = hday.get("low")
+                c = hday.get("close")
+                v = hday.get("volume")
+                if o and h and lo and c and v:
+                    o, h, lo, c, v = float(o), float(h), float(lo), float(c), float(v)
+                    # tsanghi cache volume is in 手 (lots), convert to 股 (shares)
+                    v = v * 100
+                    if o > 0 and c > 0:
+                        rows.append({"open": o, "high": h, "low": lo, "close": c, "volume": v})
+
+            if len(rows) < 5:
+                # Check if new listing
+                if hist_dates and len(hist_dates) < lookback_days:
+                    skipped_reasons["new_listing"] += 1
+                else:
+                    skipped_reasons["no_hist"] += 1
+                continue
+
+            hist_df = pd.DataFrame(rows)
+            closes = np.array([r["close"] for r in rows])
+            volumes = np.array([r["volume"] for r in rows])
+
+            # Derived metrics
+            recent_vol = volumes[-lookback_days:]
+            avg_daily_volume = float(recent_vol.mean()) if len(recent_vol) > 0 else 0.0
+
+            trend_5d = 0.0
+            if len(closes) >= 6:
+                if closes[-6] > 0:
+                    trend_5d = (closes[-1] - closes[-6]) / closes[-6]
+
+            trend_10d = 0.0
+            if len(closes) >= 11:
+                if closes[-11] > 0:
+                    trend_10d = (closes[-1] - closes[-11]) / closes[-11]
+
+            avg_daily_return_20d = 0.0
+            volatility_20d = 0.0
+            if len(closes) >= 2:
+                returns = np.diff(closes) / closes[:-1]
+                recent_returns = returns[-20:] if len(returns) >= 20 else returns
+                avg_daily_return_20d = float(np.mean(recent_returns))
+                if len(recent_returns) >= 2:
+                    volatility_20d = float(np.std(recent_returns))
+
+            consecutive_up_days = 0
+            for j in range(len(closes) - 1, 0, -1):
+                if closes[j] > closes[j - 1]:
+                    consecutive_up_days += 1
+                else:
+                    break
+
+            stock_data[code] = V16StockData(
+                code=code,
+                name="",
+                open_price=open_price,
+                prev_close=prev_close,
+                price_940=price_940,
+                high_940=max_high,
+                low_940=min_low,
+                volume_940=cum_vol,
+                avg_daily_volume=avg_daily_volume,
+                trend_5d=trend_5d,
+                trend_10d=trend_10d,
+                avg_daily_return_20d=avg_daily_return_20d,
+                volatility_20d=volatility_20d,
+                consecutive_up_days=consecutive_up_days,
+                history_df=hist_df,
+            )
+
+        logger.info(
+            f"V16 backtest: built {len(stock_data)} stocks, "
+            f"skipped: {skipped_reasons}"
         )
 
-        # Run scan
+        if not stock_data:
+            return {
+                "success": True,
+                "trade_date": body.trade_date,
+                "step0_universe": len(universe_codes),
+                "hot_board_count": 0,
+                "final_candidates": 0,
+                "funnel": [],
+                "recommended": [],
+                "all_scored": [],
+                "message": f"{body.trade_date} 无法构建股票数据",
+            }
+
+        # Run V16 scan
         try:
-            result = await scanner.scan(snapshots, trade_date=td)
+            result = await scanner.scan(stock_data, clean_boards)
         except Exception as e:
-            logger.exception("V15 backtest scan failed")
+            logger.exception("V16 backtest scan failed")
             raise HTTPException(status_code=500, detail=f"扫描失败: {e}")
 
         # Build funnel layers
         funnel = [
-            {
-                "label": "L1: 涨幅过滤 (≥0.26%, ≥12元, 主板, 非ST)",
-                "count": result.initial_gainers_count,
-            },
-            {"label": "L3: 热门板块 (≥2只)", "count": result.hot_board_count},
-            {"label": "L4: 成分股扩展 + L1复筛", "count": result.l4_count},
-            {"label": "L5: 量能过滤", "count": result.l5_count},
-            {"label": "L6: 反转因子过滤", "count": result.l6_count},
-            {"label": "L7: V3评分 → 最终候选", "count": result.final_candidates},
+            {"label": "Step 0: 股票池 (板块清洗)", "count": result.step0_universe_count},
+            {"label": "Step 2: 热门板块", "count": result.step2_hot_board_count},
+            {"label": "Step 3: 涨幅过滤 (≥0.26%, 非ST)", "count": result.step3_count},
+            {"label": "Step 4: 价格过滤 (≥12元)", "count": result.step4_count},
+            {"label": "Step 5: 量能过滤", "count": result.step5_count},
+            {"label": "Step 6: 反转因子过滤", "count": result.step6_count},
+            {"label": "Step 6.5: 涨停过滤", "count": result.step6_5_count},
+            {"label": "Step 6.6: 上影线过滤", "count": result.step6_6_count},
+            {"label": "Step 7: LGBRank → Top-10", "count": result.final_candidates},
         ]
 
-        # Build hot_boards map for display
-        hot_boards_display: dict[str, list[str]] = {}
-        if result.all_scored:
-            for s in result.all_scored:
-                if s.board_name not in hot_boards_display:
-                    hot_boards_display[s.board_name] = []
-
-        # Serialize recommended stock
-        rec_dict = None
-        if result.recommended:
-            r = result.recommended
-            rec_dict = {
-                "stock_code": r.stock_code,
-                "stock_name": r.stock_name,
-                "board_name": r.board_name,
-                "v3_score": r.v3_score,
-                "latest_price": r.latest_price,
-                "open_price": r.open_price,
-                "prev_close": r.prev_close,
-                "gain_from_open_pct": r.gain_from_open_pct,
-                "turnover_amp": r.turnover_amp,
-                "trend_10d": r.trend_10d,
-                "avg_daily_return": r.avg_daily_return,
-                "intraday_range_940": r.intraday_range_940,
-                "consecutive_up_days": r.consecutive_up_days,
-                "avg_market_open_gain": r.avg_market_open_gain,
-                "trend_consistency": r.trend_consistency,
+        # Serialize recommended (top-10)
+        rec_list = [
+            {
+                "code": s.code,
+                "name": s.name,
+                "score": round(s.score, 4),
+                "rank": s.rank,
+                "buy_price": round(s.buy_price, 2),
+                "board": result.stock_best_board.get(s.code, "-"),
             }
+            for s in result.recommended
+        ]
 
-        # Serialize all scored stocks
+        # Serialize all scored
         all_scored_list = [
             {
-                "stock_code": s.stock_code,
-                "stock_name": s.stock_name,
-                "board_name": s.board_name,
-                "v3_score": s.v3_score,
-                "gain_from_open_pct": s.gain_from_open_pct,
-                "turnover_amp": s.turnover_amp,
-                "consecutive_up_days": s.consecutive_up_days,
+                "code": s.code,
+                "name": s.name,
+                "score": round(s.score, 4),
+                "rank": s.rank,
+                "buy_price": round(s.buy_price, 2),
+                "board": result.stock_best_board.get(s.code, "-"),
             }
             for s in result.all_scored
         ]
@@ -6352,25 +6486,30 @@ def create_v15_backtest_router() -> APIRouter:
         return {
             "success": True,
             "trade_date": body.trade_date,
-            "initial_gainers": result.initial_gainers_count,
-            "hot_board_count": result.hot_board_count,
-            "l3_filtered_by_avg_gain": result.l3_filtered_by_avg_gain,
-            "l4_count": result.l4_count,
-            "l5_count": result.l5_count,
-            "l6_count": result.l6_count,
+            "step0_universe": result.step0_universe_count,
+            "hot_board_count": result.step2_hot_board_count,
+            "step2_filtered_by_avg_gain": result.step2_filtered_by_avg_gain,
+            "step3_count": result.step3_count,
+            "step4_count": result.step4_count,
+            "step5_count": result.step5_count,
+            "step6_count": result.step6_count,
+            "step6_5_count": result.step6_5_count,
+            "step6_6_count": result.step6_6_count,
             "final_candidates": result.final_candidates,
             "funnel": funnel,
-            "recommended": rec_dict,
+            "recommended": rec_list,
             "all_scored": all_scored_list,
-            "hot_boards": hot_boards_display,
+            "hot_boards": result.step2_boards_detail,
             "layers": {
-                "l1_codes": result.l1_codes,
-                "l3_boards": result.l3_boards_detail,
-                "l4_codes": result.l4_codes,
-                "l5_codes": result.l5_codes,
-                "l6_codes": result.l6_codes,
-                "l6_5_codes": result.l6_5_codes,
-                "l6_6_codes": result.l6_6_codes,
+                "step0_codes": result.step0_codes,
+                "step2_boards": result.step2_boards_detail,
+                "step2_codes": result.step2_codes,
+                "step3_codes": result.step3_codes,
+                "step4_codes": result.step4_codes,
+                "step5_codes": result.step5_codes,
+                "step6_codes": result.step6_codes,
+                "step6_5_codes": result.step6_5_codes,
+                "step6_6_codes": result.step6_6_codes,
             },
         }
 

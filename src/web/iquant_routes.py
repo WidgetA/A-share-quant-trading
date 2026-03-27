@@ -183,7 +183,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
             lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
-            lines.append(f"V3评分: {signal.get('v3_score', '-')}")
+            lines.append(f"LGB评分: {signal.get('lgb_score', signal.get('v3_score', '-'))}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
         lines.append(f"时间: {signal.get('created_at', '')}")
@@ -693,9 +693,9 @@ def create_iquant_router() -> APIRouter:
                                 "stock_name": rec["stock_name"],
                                 "board_name": rec["board_name"],
                                 "latest_price": rec["latest_price"],
-                                "v3_score": rec["v3_score"],
-                                "reason": f"V15推荐 (板块={rec['board_name']}, "
-                                f"score={rec['v3_score']:.4f})",
+                                "lgb_score": rec.get("lgb_score", 0),
+                                "reason": f"V16推荐 (板块={rec['board_name']}, "
+                                f"LGB={rec.get('lgb_score', 0):.4f})",
                             }
                             _push_signal(rec_signal)
                             logger.info(f"V15 trading: BUY signal pushed for {rec['stock_code']}")
@@ -1007,15 +1007,15 @@ def create_iquant_router() -> APIRouter:
 
     @router.post("/trigger-scan")
     async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
-        from src.web.v15_scan_service import run_v15_scan
+        """Manually trigger V16 scan + Feishu top-10 report (bypasses time window)."""
+        from src.web.v15_scan_service import run_v16_scan
 
         scan_state = _state.get("scan_state")
         if not scan_state or not scan_state.initialized:
             raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
 
         try:
-            rec = await run_v15_scan(scan_state)
+            rec = await run_v16_scan(scan_state)
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
@@ -1033,9 +1033,9 @@ def create_iquant_router() -> APIRouter:
                         "stock_name": rec["stock_name"],
                         "board_name": rec["board_name"],
                         "latest_price": rec["latest_price"],
-                        "v3_score": rec["v3_score"],
-                        "reason": f"V15手动扫描 (板块={rec['board_name']}, "
-                        f"score={rec['v3_score']:.4f})",
+                        "lgb_score": rec.get("lgb_score", 0),
+                        "reason": f"V16手动扫描 (板块={rec['board_name']}, "
+                        f"LGB={rec.get('lgb_score', 0):.4f})",
                     }
                 )
                 await _notify_feishu_signal(_state["pending_signals"][-1])
@@ -1047,14 +1047,23 @@ def create_iquant_router() -> APIRouter:
 
     @router.get("/universe")
     async def universe(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Return all stock codes in V15 universe (cached)."""
-        from src.web.v15_scan_service import get_universe
+        """Return all stock codes in V16 universe (from board cleaning)."""
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
+        from src.strategy.strategies.v16_scanner import V16Scanner
 
-        scan_state = _state.get("scan_state")
-        if not scan_state or not scan_state.initialized:
-            raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
-        codes = await get_universe(scan_state)
-        return {"codes": codes, "count": len(codes)}
+        scanner = V16Scanner(
+            fundamentals_db=None,
+            concept_mapper=LocalConceptMapper(),
+            stock_filter=StockFilter(
+                StockFilterConfig(
+                    exclude_bse=True, exclude_chinext=True,
+                    exclude_star=True, exclude_sme=False,
+                )
+            ),
+        )
+        _, universe_codes = scanner.get_universe()
+        return {"codes": sorted(universe_codes), "count": len(universe_codes)}
 
     @router.post("/quote")
     async def quote(
