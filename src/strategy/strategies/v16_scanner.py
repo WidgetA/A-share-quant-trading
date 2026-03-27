@@ -161,7 +161,18 @@ class V16Scanner:
 
     # ── V15 board blacklist (carried over) ──
     BOARD_BLACKLIST = frozenset(
-        {"物联网", "医疗器械概念", "特高压", "冷链物流", "特钢概念", "三胎概念", "长三角一体化"}
+        {
+            "物联网",
+            "医疗器械概念",
+            "特高压",
+            "冷链物流",
+            "特钢概念",
+            "三胎概念",
+            "长三角一体化",
+            "海南自贸区",
+            "中俄贸易概念",
+            "碳中和",
+        }
     )
 
     # ── Top-N for recommendation ──
@@ -294,11 +305,18 @@ class V16Scanner:
             if c in stock_data
         ]
 
-        # ── Step 3: Individual gain + ST filter ──
+        # ── ST filter (after board avg gain, before individual filters) ──
+        pre_st = len(candidates)
+        non_st = set(await self._fdb.batch_filter_st([s.code for s in candidates]))
+        candidates = [s for s in candidates if s.code in non_st]
+        st_removed = pre_st - len(candidates)
+        logger.info(f"ST filter: {pre_st} → {len(candidates)} (removed {st_removed} ST)")
+
+        # ── Step 3: Individual gain filter ──
         candidates = await self._step3_gain_filter(candidates, stock_data)
         result.step3_count = len(candidates)
         result.step3_codes = sorted(s.code for s in candidates)
-        logger.info(f"Step 3: {len(candidates)} passed gain + ST filter")
+        logger.info(f"Step 3: {len(candidates)} passed gain filter")
         if not candidates:
             return result
 
@@ -418,14 +436,14 @@ class V16Scanner:
 
         return hot_boards, dict(stock_all_boards), filtered_by_avg, board_avg_gains
 
-    # ── Step 3: Gain + ST Filter ──
+    # ── Step 3: Gain Filter ──
 
     async def _step3_gain_filter(
         self,
         candidates: list[_FunnelStock],
         stock_data: dict[str, V16StockData],
     ) -> list[_FunnelStock]:
-        """Filter by gain_from_open ≥ 0.26% and non-ST."""
+        """Filter by gain_from_open ≥ 0.26%. ST already filtered before Step 3."""
         kept: list[_FunnelStock] = []
         for s in candidates:
             sd = stock_data[s.code]
@@ -436,12 +454,7 @@ class V16Scanner:
                 continue
             kept.append(s)
 
-        if not kept:
-            return []
-
-        # ST filter
-        non_st = set(await self._fdb.batch_filter_st([s.code for s in kept]))
-        return [s for s in kept if s.code in non_st]
+        return kept
 
     # ── Step 4: Price Floor ──
 
