@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6 \
     libssl3t64 \
     libcurl4t64 \
+    libgomp1 \
     zlib1g \
     libidn11 \
     && rm -rf /var/lib/apt/lists/* \
@@ -57,6 +58,9 @@ COPY scripts/ ./scripts/
 COPY config/ ./config/
 # Static data files — placed outside /app/data which is a volume mount
 COPY data/sectors.json data/board_constituents.json data/board_relevance_cache.json ./bundled_data/
+
+# Copy LGBRank model files
+COPY models/ ./models/
 
 # Copy and install iFinD SDK
 COPY vendor/ ./vendor/
