@@ -391,11 +391,13 @@ class LGBRankScorer:
         # Step 5: 模型推理
         scores = self.model.predict(X)
 
-        # Step 6: 排名
+        # Step 6: 排名 (deterministic: score desc, then code asc for tiebreaker)
         scores_arr = np.asarray(scores, dtype=float)
-        order = np.argsort(-scores_arr)
+        indexed = [(float(scores_arr[i]), candidates[i].code, i) for i in range(len(candidates))]
+        indexed.sort(key=lambda t: (-t[0], t[1]))
+
         results = []
-        for rank_0, idx in enumerate(order):
+        for rank_0, (_sc, _code, idx) in enumerate(indexed):
             s = candidates[idx]
             results.append(
                 ScoredStock(
