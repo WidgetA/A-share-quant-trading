@@ -405,6 +405,7 @@ Limit-up (skipped):
         """Send V16 scanner top-10 scored candidates to Feishu."""
         now = scan_time or datetime.now(BEIJING_TZ)
         time_str = now.strftime("%Y-%m-%d %H:%M")
+        board_gains = scan_result.step2_board_avg_gains
 
         lines = [
             f"[V16] 每日扫描报告 ({time_str})",
@@ -419,15 +420,26 @@ Limit-up (skipped):
         if recommended:
             top1 = recommended[0]
             board = scan_result.stock_best_board.get(top1.code, "-")
+            bg = board_gains.get(board, 0)
             lines.append("")
             lines.append(f"推荐 Top-1: {top1.code} {top1.name}")
-            lines.append(f"  板块: {board} | LGB: {top1.score:.4f} | 价格: {top1.buy_price:.2f}")
+            lines.append(
+                f"  板块: {board}(均涨{bg:+.2f}%) | "
+                f"LGB: {top1.score:.4f} | "
+                f"买入价: {top1.buy_price:.2f} (9:40)"
+            )
 
             lines.append("")
             lines.append("评分前10:")
             for s in recommended:
                 board = scan_result.stock_best_board.get(s.code, "-")
-                lines.append(f"{s.rank}. {s.code} {s.name}  LGB={s.score:.4f}  {board}")
+                bg = board_gains.get(board, 0)
+                lines.append(
+                    f"{s.rank}. {s.code} {s.name}  "
+                    f"LGB={s.score:.4f}  "
+                    f"买入:{s.buy_price:.2f}  "
+                    f"{board}({bg:+.2f}%)"
+                )
         else:
             lines.append("")
             lines.append("推荐: 无")

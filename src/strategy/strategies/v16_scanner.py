@@ -108,6 +108,8 @@ class V16ScanResult:
 
     # Hot boards mapping: code → best board name
     stock_best_board: dict[str, str] = field(default_factory=dict)
+    # Board avg gain (%) for hot boards
+    step2_board_avg_gains: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -256,12 +258,13 @@ class V16Scanner:
         result.step0_codes = sorted(stock_data.keys())
 
         # ── Step 2: Hot boards ──
-        hot_boards, stock_all_boards, avg_gain_filtered = self._step2_hot_boards(
+        hot_boards, stock_all_boards, avg_gain_filtered, board_avg_gains = self._step2_hot_boards(
             clean_boards, stock_data
         )
         result.step2_hot_board_count = len(hot_boards)
         result.step2_filtered_by_avg_gain = avg_gain_filtered
         result.step2_boards_detail = {b: sorted(codes) for b, codes in hot_boards.items()}
+        result.step2_board_avg_gains = board_avg_gains
 
         # Collect unique codes from hot boards
         hot_board_codes: set[str] = set()
@@ -367,19 +370,21 @@ class V16Scanner:
         self,
         clean_boards: dict[str, list[tuple[str, str]]],
         stock_data: dict[str, V16StockData],
-    ) -> tuple[dict[str, list[str]], dict[str, list[str]], int]:
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], int, dict[str, float]]:
         """Find boards with avg gain ≥ threshold using ALL traded constituents.
 
         Key difference from V15: avg gain uses ALL constituents that have trading
         data (not just gainers). This gives a true picture of board momentum.
 
         Returns:
-            (hot_boards, stock_all_boards, filtered_by_avg_gain_count)
+            (hot_boards, stock_all_boards, filtered_by_avg_gain_count, board_avg_gains)
             hot_boards: board_name → [code, ...]
             stock_all_boards: code → [board_name, ...]
+            board_avg_gains: board_name → avg gain %
         """
         hot_boards: dict[str, list[str]] = {}
         stock_all_boards: dict[str, list[str]] = defaultdict(list)
+        board_avg_gains: dict[str, float] = {}
         filtered_by_avg = 0
 
         for board_name, members in clean_boards.items():
@@ -407,10 +412,11 @@ class V16Scanner:
                 continue
 
             hot_boards[board_name] = board_codes
+            board_avg_gains[board_name] = avg_gain
             for code in board_codes:
                 stock_all_boards[code].append(board_name)
 
-        return hot_boards, dict(stock_all_boards), filtered_by_avg
+        return hot_boards, dict(stock_all_boards), filtered_by_avg, board_avg_gains
 
     # ── Step 3: Gain + ST Filter ──
 

@@ -494,6 +494,16 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     hist_raw = await _fetch_history_ohlcv(scan_state.historical_adapter, trading_codes, today)
     logger.info(f"V16 scan: history fetched for {len(hist_raw)} stocks")
 
+    # Batch fetch company names from fundamentals DB
+    fdb = scan_state.fundamentals_db
+    name_map: dict[str, str] = {}
+    if fdb:
+        try:
+            fund_data = await fdb.batch_get_fundamentals(trading_codes)
+            name_map = {code: f.company_name for code, f in fund_data.items()}
+        except Exception as e:
+            logger.warning(f"V16 scan: failed to fetch company names: {e}")
+
     # Build V16StockData for each stock
     from src.strategy.strategies.v16_scanner import V16StockData  # noqa: F811
 
@@ -519,7 +529,7 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
             continue
 
         try:
-            sd = _build_stock_data(code, "", quote, pc, hr, today)
+            sd = _build_stock_data(code, name_map.get(code, ""), quote, pc, hr, today)
         except RuntimeError as e:
             errors_build.append(f"{code}: {e}")
             continue
