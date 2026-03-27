@@ -377,14 +377,15 @@ class LGBRankScorer:
         scores = self.model.predict(X)
 
         # Step 6: 排名
-        order = np.argsort(-scores)
+        scores_arr = np.asarray(scores, dtype=float)
+        order = np.argsort(-scores_arr)
         results = []
         for rank_0, idx in enumerate(order):
             s = candidates[idx]
             results.append(ScoredStock(
                 code=s.code,
                 name=s.name,
-                score=float(scores[idx]),
+                score=float(scores_arr[idx]),
                 rank=rank_0 + 1,
                 buy_price=s.price_at_940,
             ))
