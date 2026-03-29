@@ -625,7 +625,7 @@ class TsanghiBacktestCache:
         client = TsanghiClient()
         await client.start()
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(5)
         done_count = [0]
         total = len(codes)
         start_str = dl_start.strftime("%Y-%m-%d")
