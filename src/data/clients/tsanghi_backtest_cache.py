@@ -255,10 +255,21 @@ class TsanghiBacktestCache:
                 self._end_date = other._end_date
 
     def covers_range(self, start_date: date, end_date: date) -> bool:
-        """Check if cached data covers the requested date range."""
+        """Check if cached data covers the requested date range.
+
+        Returns False if boundary is not covered OR if there are minute-data
+        gaps within the requested range (otherwise incremental download skips
+        dates where minute data is missing).
+        """
         if not self._is_ready or not self._start_date or not self._end_date:
             return False
-        return self._start_date <= start_date and self._end_date >= end_date
+        if not (self._start_date <= start_date and self._end_date >= end_date):
+            return False
+        # Also reject if minute data has gaps within the requested range
+        for gap_start, gap_end in self.find_minute_gaps():
+            if gap_start <= end_date and gap_end >= start_date:
+                return False
+        return True
 
     def _recalculate_date_range(self) -> None:
         """Recompute _start_date/_end_date from actual data (daily AND minute).
