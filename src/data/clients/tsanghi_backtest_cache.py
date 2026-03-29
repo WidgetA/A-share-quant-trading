@@ -627,6 +627,7 @@ class TsanghiBacktestCache:
 
         sem = asyncio.Semaphore(5)
         done_count = [0]
+        fail_count = [0]
         total = len(codes)
         start_str = dl_start.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
@@ -649,7 +650,13 @@ class TsanghiBacktestCache:
                         end_date=end_str,
                     )
                 except RuntimeError as exc:
-                    logger.debug(f"tsanghi 5min({code}): {exc}")
+                    fail_count[0] += 1
+                    if fail_count[0] <= 10:
+                        logger.warning(f"tsanghi 5min({code}) failed: {exc}")
+                    elif fail_count[0] == 11:
+                        logger.warning(
+                            "tsanghi 5min: too many failures, suppressing further warnings"
+                        )
                     done_count[0] += 1
                     return code, {}
 
@@ -709,12 +716,24 @@ class TsanghiBacktestCache:
 
             # Collect results
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            success_count = 0
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
                 code, min_data = result
                 if min_data:
                     self._minute[code] = min_data
+                    success_count += 1
+
+            if fail_count[0] > 0:
+                logger.warning(
+                    f"tsanghi 5min download: {success_count} OK, "
+                    f"{fail_count[0]} failed out of {total} stocks"
+                )
+            else:
+                logger.info(
+                    f"tsanghi 5min download: {success_count} OK out of {total} stocks"
+                )
         finally:
             await client.stop()
 

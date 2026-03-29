@@ -87,7 +87,12 @@ class TsanghiClient:
                 code = body.get("code")
                 if code != 200:
                     msg = body.get("msg", "unknown error")
-                    raise RuntimeError(f"Tsanghi API error: {msg} (code={code})")
+                    # Treat API-level errors (rate limit, etc.) as retryable
+                    raise httpx.HTTPStatusError(
+                        f"Tsanghi API error: {msg} (code={code})",
+                        request=resp.request,
+                        response=resp,
+                    )
 
                 data = body.get("data")
                 if data is None:
