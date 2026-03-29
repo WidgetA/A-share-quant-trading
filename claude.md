@@ -79,7 +79,7 @@ Rules:
 | Toggle Value | Source | Adapter |
 |-------------|--------|---------|
 | `"ifind"` | THS iFinD HTTP API | `IFinDHttpClient` |
-| `"tsanghi"` | 沧海数据 (日线) + baostock (分钟线) | `TsanghiHistoricalAdapter` |
+| `"tsanghi"` | 沧海数据 (日线 + 5分钟线) | `TsanghiHistoricalAdapter` |
 
 Rules:
 1. **One source per session** — no mixing sources within a single backtest/scan
@@ -95,7 +95,7 @@ Rules:
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
 | **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
-| **baostock** `query_history_k_data_plus()` | **股** | None |
+| **tsanghi** `/5min` | **手** (1手=100股) | ×100 at download time in `TsanghiBacktestCache` |
 | **iFinD** | **股** | None |
 
 - Conversion at **adapter read layer**, not storage (raw cache keeps original values).

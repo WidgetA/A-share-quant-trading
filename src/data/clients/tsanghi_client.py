@@ -206,6 +206,38 @@ class TsanghiClient:
             params["date"] = date
         return await self._get(url, params)
 
+    async def five_min(
+        self,
+        exchange: str,
+        ticker: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 100_000,
+        order: int = 1,
+    ) -> list[dict]:
+        """Fetch 5-minute OHLCV bars for a single stock.
+
+        Args:
+            exchange: "XSHG" or "XSHE"
+            ticker: Bare stock code, e.g. "600519"
+            start_date: "YYYY-MM-DD" (optional)
+            end_date: "YYYY-MM-DD" (optional)
+            limit: Max records (default 100000 to get all bars)
+            order: 0=unordered, 1=ascending, 2=descending
+
+        Returns:
+            List of dicts with keys: ticker, date, open, high, low, close, volume.
+            date format: "YYYY-MM-DD HH:MM:SS" (e.g. "2026-03-27 09:35:00").
+            Volume is in 手 (lots). Caller must convert ×100 for 股.
+        """
+        url = f"{self.BASE_URL}/{exchange}/5min"
+        params: dict[str, Any] = {"ticker": ticker, "limit": limit, "order": order}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return await self._get(url, params)
+
 
 def bare_code_to_exchange(code: str) -> str:
     """Map a bare stock code to its tsanghi exchange code.

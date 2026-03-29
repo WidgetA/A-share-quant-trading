@@ -4,18 +4,19 @@
 # MomentumSectorScanner can run without any code changes.
 
 # === DEPENDENCIES ===
-# - tsanghi (沧海数据): REST API for daily OHLCV
-# - baostock: Free A-share data source (5-min bars only, for 9:40 price)
+# - tsanghi (沧海数据): REST API for daily OHLCV + 5-min bars (9:40 snapshot)
+# - baostock: Trading calendar only (get_trade_dates)
 # - IFinDHttpClient interface: Adapter returns data in iFinD response format
 
 # === KEY CONCEPTS ===
 # - TsanghiBacktestCache: Downloads and stores all price data in memory + OSS
 # - TsanghiHistoricalAdapter: Duck-types IFinDHttpClient for the scanner
 # - Daily OHLCV: tsanghi /daily/latest (batch per-date, fast)
-# - Minute bars: baostock (5-min frequency), for 9:40 snapshot only
+# - Minute bars: tsanghi /5min (per-stock, async concurrent), for 9:40 snapshot only
 # - OSS cache: Alibaba Cloud OSS — survives container redeployment
 # - Data is NOT used for live trading (backtest only)
-# - Volume stored in 手 (lots) — tsanghi natively returns 手; adapter converts ×100 at read time
+# - Daily volume stored in 手 (lots) — adapter converts ×100 at read time
+# - Minute volume stored in 股 (shares) — converted ×100 from 手 at download time
 
 from __future__ import annotations
 
@@ -25,7 +26,6 @@ import logging
 import os
 import pickle
 import tempfile
-import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
@@ -479,18 +479,18 @@ class TsanghiBacktestCache:
         # Derive preClose from previous trading day's close for each stock.
         self._compute_pre_close()
 
-        # --- Phase 2: Minute data from baostock (9:35 + 9:40 bars) ---
+        # --- Phase 2: Minute data from tsanghi 5min (9:35 + 9:40 bars) ---
         codes = list(self._daily.keys())
         self._stock_codes = codes
         if codes:
-            await self._download_minute_baostock(codes, dl_start, end_date, progress_cb)
+            await self._download_minute_tsanghi(codes, dl_start, end_date, progress_cb)
 
         total = len(self._stock_codes)
         if progress_cb:
             await _maybe_await(progress_cb("download", total, total))
         logger.info(
             f"Download complete: {len(self._daily)} daily (tsanghi), "
-            f"{len(self._minute)} minute (baostock) out of {total} stocks"
+            f"{len(self._minute)} minute (tsanghi 5min) out of {total} stocks"
         )
 
         # Recalculate range from actual data so metadata matches reality.
@@ -598,111 +598,114 @@ class TsanghiBacktestCache:
                     dates[ds]["preClose"] = dates[prev_ds]["close"]
                 # else: first day — preClose stays 0.0
 
-    async def _download_minute_baostock(
+    async def _download_minute_tsanghi(
         self,
         codes: list[str],
         dl_start: date,
         end_date: date,
         progress_cb: Callable[[str, int, int], Any] | None = None,
     ) -> None:
-        """Download 5-min bars (09:35 + 09:40) from baostock for 9:40 snapshot."""
-        done = [0]
+        """Download 5-min bars (09:35 + 09:40) from tsanghi for 9:40 snapshot.
+
+        Volume conversion: tsanghi 5min returns 手 (lots); we store 股 (shares) = lots × 100.
+        """
+        from src.data.clients.tsanghi_client import TsanghiClient, bare_code_to_exchange
+
+        client = TsanghiClient()
+        await client.start()
+
+        sem = asyncio.Semaphore(10)
+        done_count = [0]
         total = len(codes)
-        thread_exc: list[BaseException] = []
+        start_str = dl_start.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
 
-        def _baostock_minute_download() -> None:
-            import baostock as bs
+        async def _fetch_one(
+            code: str,
+        ) -> tuple[str, dict[str, tuple[float, float, float, float]]]:
+            async with sem:
+                try:
+                    exchange = bare_code_to_exchange(code)
+                except ValueError:
+                    done_count[0] += 1
+                    return code, {}
 
-            lg = bs.login()
-            if lg.error_code != "0":
-                raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+                try:
+                    records = await client.five_min(
+                        exchange,
+                        code,
+                        start_date=start_str,
+                        end_date=end_str,
+                    )
+                except RuntimeError as exc:
+                    logger.debug(f"tsanghi 5min({code}): {exc}")
+                    done_count[0] += 1
+                    return code, {}
 
-            try:
-                bs_start = dl_start.strftime("%Y-%m-%d")
-                bs_end = end_date.strftime("%Y-%m-%d")
+                min_data: dict[str, tuple[float, float, float, float]] = {}
+                for rec in records:
+                    dt_str = rec.get("date", "")
+                    if len(dt_str) < 19:
+                        continue
+                    bar_time = dt_str[11:19]  # "HH:MM:SS"
+                    if bar_time not in ("09:35:00", "09:40:00"):
+                        continue
 
-                for code in codes:
-                    prefix = "sh" if code.startswith("6") else "sz"
-                    bs_code = f"{prefix}.{code}"
+                    ds = dt_str[:10]  # "YYYY-MM-DD"
+                    close_val = float(rec.get("close", 0))
+                    high_val = float(rec.get("high", 0))
+                    low_val = float(rec.get("low", 0))
+                    # tsanghi 5min volume is in 手 (lots); convert to 股 (shares)
+                    vol_val = float(rec.get("volume", 0)) * 100
 
-                    try:
-                        rs = bs.query_history_k_data_plus(
-                            bs_code,
-                            "date,time,high,low,close,volume",
-                            start_date=bs_start,
-                            end_date=bs_end,
-                            frequency="5",
-                            adjustflag="2",  # 前复权
+                    if ds in min_data:
+                        prev = min_data[ds]
+                        if prev[3] <= 0 or low_val <= 0:
+                            logger.warning(
+                                f"Minute bar low=0 for {code} on {ds} "
+                                f"(prev_low={prev[3]}, new_low={low_val}), "
+                                f"skipping this date"
+                            )
+                            del min_data[ds]
+                            continue
+                        min_data[ds] = (
+                            close_val,  # 09:40 close overwrites 09:35
+                            prev[1] + vol_val,  # cumulative volume (股)
+                            max(prev[2], high_val),
+                            min(prev[3], low_val),
                         )
-                        if rs.error_code == "0":
-                            min_data: dict[str, tuple[float, float, float, float]] = {}
-                            while rs.next():
-                                row = rs.get_row_data()
-                                if len(row) < 6:
-                                    continue
-                                # time format: "20260120094000000"
-                                hhmm = row[1][8:12]
-                                if hhmm not in ("0935", "0940"):
-                                    continue
-                                ds = row[0]  # "2026-01-20"
-                                close_val = float(row[4])
-                                vol_val = float(row[5])
-                                high_val = float(row[2])
-                                low_val = float(row[3])
+                    else:
+                        if low_val <= 0 or high_val <= 0 or close_val <= 0:
+                            logger.warning(
+                                f"Minute bar invalid price for {code} on {ds} "
+                                f"(close={close_val}, high={high_val}, "
+                                f"low={low_val}), skipping"
+                            )
+                            continue
+                        min_data[ds] = (close_val, vol_val, high_val, low_val)
 
-                                if ds in min_data:
-                                    prev = min_data[ds]
-                                    if prev[3] <= 0 or low_val <= 0:
-                                        logger.warning(
-                                            f"Minute bar low=0 for {code} on {ds} "
-                                            f"(prev_low={prev[3]}, new_low={low_val}), "
-                                            f"skipping this date"
-                                        )
-                                        del min_data[ds]
-                                        continue
-                                    min_data[ds] = (
-                                        close_val,  # 09:40 close overwrites 09:35
-                                        prev[1] + vol_val,  # cumulative volume
-                                        max(prev[2], high_val),
-                                        min(prev[3], low_val),
-                                    )
-                                else:
-                                    if low_val <= 0 or high_val <= 0 or close_val <= 0:
-                                        logger.warning(
-                                            f"Minute bar invalid price for {code} on {ds} "
-                                            f"(close={close_val}, high={high_val}, low={low_val}), "
-                                            f"skipping"
-                                        )
-                                        continue
-                                    min_data[ds] = (close_val, vol_val, high_val, low_val)
+                done_count[0] += 1
+                return code, min_data
 
-                            if min_data:
-                                self._minute[code] = min_data
+        try:
+            tasks = [asyncio.create_task(_fetch_one(code)) for code in codes]
 
-                    except Exception:
-                        logger.error(f"Minute download failed for {code}")
-                        raise
+            # Progress reporting while tasks run
+            while not all(t.done() for t in tasks):
+                await asyncio.sleep(2)
+                if progress_cb:
+                    await _maybe_await(progress_cb("minute", done_count[0], total))
 
-                    done[0] += 1
-            finally:
-                bs.logout()
-
-        def _thread_wrapper() -> None:
-            try:
-                _baostock_minute_download()
-            except BaseException as exc:
-                thread_exc.append(exc)
-
-        thread = threading.Thread(target=_thread_wrapper, daemon=True)
-        thread.start()
-        while thread.is_alive():
-            await asyncio.sleep(2)
-            if progress_cb:
-                await _maybe_await(progress_cb("minute", done[0], total))
-        thread.join()
-
-        if thread_exc:
-            raise thread_exc[0]
+            # Collect results
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+                code, min_data = result
+                if min_data:
+                    self._minute[code] = min_data
+        finally:
+            await client.stop()
 
     async def save_to_oss(self) -> str | None:
         """Save cache to OSS. Returns None on success, error message on failure."""
