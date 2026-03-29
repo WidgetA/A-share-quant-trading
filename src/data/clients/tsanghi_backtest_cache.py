@@ -731,9 +731,7 @@ class TsanghiBacktestCache:
                     f"{fail_count[0]} failed out of {total} stocks"
                 )
             else:
-                logger.info(
-                    f"tsanghi 5min download: {success_count} OK out of {total} stocks"
-                )
+                logger.info(f"tsanghi 5min download: {success_count} OK out of {total} stocks")
         finally:
             await client.stop()
 
