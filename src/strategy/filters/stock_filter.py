@@ -77,8 +77,8 @@ class StockFilter:
     # Shanghai Main Board: 600xxx, 601xxx, 603xxx, 605xxx
     _SHANGHAI_MAIN_PATTERNS = [r"^60[0135]\d{3}$"]
 
-    # Shenzhen Main Board: 000xxx, 001xxx
-    _SHENZHEN_MAIN_PATTERNS = [r"^00[01]\d{3}$"]
+    # Shenzhen Main Board: 000xxx, 001xxx, 003xxx
+    _SHENZHEN_MAIN_PATTERNS = [r"^00[013]\d{3}$"]
 
     # SME Board (中小板): 002xxx
     _SME_PATTERNS = [r"^002\d{3}$"]

@@ -54,10 +54,11 @@ class TestStockFilter:
         assert default_filter.get_exchange("605001") == Exchange.SHANGHAI_MAIN
 
     def test_get_exchange_shenzhen_main(self, default_filter):
-        """Test Shenzhen main board detection."""
+        """Test Shenzhen main board detection (000/001/003 segments)."""
         assert default_filter.get_exchange("000001") == Exchange.SHENZHEN_MAIN
         assert default_filter.get_exchange("000002") == Exchange.SHENZHEN_MAIN
         assert default_filter.get_exchange("001289") == Exchange.SHENZHEN_MAIN
+        assert default_filter.get_exchange("003816") == Exchange.SHENZHEN_MAIN
 
     def test_get_exchange_sme(self, default_filter):
         """Test SME board detection."""
@@ -112,9 +113,10 @@ class TestStockFilter:
         assert default_filter.is_allowed("601398") is True
 
     def test_is_allowed_shenzhen_main(self, default_filter):
-        """Test Shenzhen main board stocks are allowed."""
+        """Test Shenzhen main board stocks are allowed (000/001/003)."""
         assert default_filter.is_allowed("000001") is True
         assert default_filter.is_allowed("000002") is True
+        assert default_filter.is_allowed("003816") is True
 
     def test_is_allowed_sme(self, default_filter):
         """Test SME board stocks are allowed."""

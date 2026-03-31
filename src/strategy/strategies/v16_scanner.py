@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from src.data.sources.local_concept_mapper import LocalConceptMapper
-from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS, is_junk_board
+from src.strategy.filters.board_filter import is_junk_board
 from src.strategy.filters.reversal_factor_filter import (
     ReversalFactorConfig,
     ReversalFactorFilter,
@@ -194,7 +194,7 @@ class V16Scanner:
         """Step 0: Board cleaning → clean boards + universe stock codes.
 
         1. Load all boards from LocalConceptMapper (junk already filtered)
-        2. Additionally filter BROAD_CONCEPT_BOARDS and BOARD_BLACKLIST
+        2. Filter junk boards
         3. Per board: keep only main board + SME stocks
         4. Aggregate all stock codes
 
@@ -209,9 +209,8 @@ class V16Scanner:
         universe: set[str] = set()
 
         for board_name, members in self._mapper._board_stocks.items():
-            # Skip broad concept boards (too many stocks) and junk boards
-            if board_name in BROAD_CONCEPT_BOARDS:
-                continue
+            # Skip junk boards (index constituents, fund holdings, etc.)
+            # NOTE: BROAD_CONCEPT_BOARDS are NOT filtered — kept for future study
             if is_junk_board(board_name):
                 continue
 
