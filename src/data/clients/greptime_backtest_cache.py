@@ -494,9 +494,7 @@ class GreptimeBacktestCache:
             table: str, where: str, level: str, check: str, message_tpl: str
         ) -> None:
             """Helper: COUNT + optional LIMIT-5 sample for one check."""
-            row = await self._db.fetchrow(
-                f"SELECT COUNT(*) as cnt FROM {table} WHERE {where}"
-            )
+            row = await self._db.fetchrow(f"SELECT COUNT(*) as cnt FROM {table} WHERE {where}")
             cnt = int(row["cnt"]) if row else 0
             if cnt == 0:
                 return
@@ -535,8 +533,7 @@ class GreptimeBacktestCache:
         # 2. NULL price fields
         await _count_and_sample(
             "backtest_daily",
-            "open_price IS NULL OR high_price IS NULL "
-            "OR low_price IS NULL OR close_price IS NULL",
+            "open_price IS NULL OR high_price IS NULL OR low_price IS NULL OR close_price IS NULL",
             "error",
             "null_prices",
             "日线: {cnt} 条记录价格字段为 NULL",
@@ -591,8 +588,7 @@ class GreptimeBacktestCache:
 
         # 8. Non-suspended with zero volume (warning if > 100, small numbers normal)
         row = await self._db.fetchrow(
-            "SELECT COUNT(*) as cnt FROM backtest_daily "
-            "WHERE is_suspended = false AND vol = 0"
+            "SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended = false AND vol = 0"
         )
         zero_vol_cnt = int(row["cnt"]) if row else 0
         if zero_vol_cnt > 100:
@@ -631,8 +627,7 @@ class GreptimeBacktestCache:
             # 11. NULL fields
             await _count_and_sample(
                 "backtest_minute",
-                "close_940 IS NULL OR cum_volume IS NULL "
-                "OR max_high IS NULL OR min_low IS NULL",
+                "close_940 IS NULL OR cum_volume IS NULL OR max_high IS NULL OR min_low IS NULL",
                 "error",
                 "null_minute_fields",
                 "分钟线: {cnt} 条记录有 NULL 字段",
