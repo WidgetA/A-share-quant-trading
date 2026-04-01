@@ -1356,10 +1356,7 @@ class GreptimeBacktestCache:
                         f"{date_str} FLUSH {upserted} 行...",
                     )
                 )
-            try:
-                await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-            except Exception as e:
-                logger.warning(f"FLUSH_TABLE failed after backfill {date_str}: {e}")
+            await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
 
             # Verify: this date should have 0 NULL is_suspended now
             verify = await self._db.fetch(
