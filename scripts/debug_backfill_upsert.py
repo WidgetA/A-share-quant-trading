@@ -39,8 +39,7 @@ async def main():
     async with pool.acquire() as conn:
         # 找一条 NULL 行
         row = await conn.fetchrow(
-            "SELECT stock_code, ts FROM backtest_daily "
-            "WHERE is_suspended IS NULL LIMIT 1"
+            "SELECT stock_code, ts FROM backtest_daily WHERE is_suspended IS NULL LIMIT 1"
         )
         if not row:
             print("没有 is_suspended IS NULL 的行，无需修复！")
@@ -54,7 +53,6 @@ async def main():
 
             ts_ms = int(calendar.timegm(ts.timetuple()) * 1000)
             date_str = ts.strftime("%Y-%m-%d")
-            date_yyyymmdd = ts.strftime("%Y%m%d")
         else:
             from datetime import datetime, timezone
 
@@ -62,13 +60,11 @@ async def main():
             dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
             date_str = dt.strftime("%Y-%m-%d")
 
-
         print(f"=== 测试目标: stock_code={code}, date={date_str} (ts_ms={ts_ms}) ===\n")
 
         # 读取当前完整行
         full = await conn.fetchrow(
-            f"SELECT * FROM backtest_daily "
-            f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
+            f"SELECT * FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
         print(f"[当前值] is_suspended = {full['is_suspended']}")
         print(
@@ -95,11 +91,7 @@ async def main():
         if is_susp:
             pre_close = float(full["pre_close"]) if full["pre_close"] else 0.0
             fill = pre_close if pre_close > 0 else 0.0
-            val = (
-                f"('{code}',{ts_ms},"
-                f"{fill},{fill},{fill},{fill},"
-                f"{pre_close},0.0,0.0,NULL,true)"
-            )
+            val = f"('{code}',{ts_ms},{fill},{fill},{fill},{fill},{pre_close},0.0,0.0,NULL,true)"
         else:
             val = (
                 f"('{code}',{ts_ms},"
@@ -114,8 +106,7 @@ async def main():
         result = await conn.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
         print(f"  INSERT result: {result}")
         check = await conn.fetchrow(
-            f"SELECT is_suspended FROM backtest_daily "
-            f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
+            f"SELECT is_suspended FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
         print(f"  SELECT is_suspended = {check['is_suspended']}")
         if check["is_suspended"] is not None:
@@ -127,8 +118,7 @@ async def main():
         # === 测试 2: DELETE + INSERT ===
         print("--- 测试 2: DELETE 后立即 INSERT ---")
         del_result = await conn.execute(
-            f"DELETE FROM backtest_daily "
-            f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
+            f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
         print(f"  DELETE result: {del_result}")
 
@@ -141,8 +131,7 @@ async def main():
         ins_result = await conn.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
         print(f"  INSERT result: {ins_result}")
         check2 = await conn.fetchrow(
-            f"SELECT is_suspended FROM backtest_daily "
-            f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
+            f"SELECT is_suspended FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
         print(f"  SELECT is_suspended = {check2['is_suspended']}")
         if check2["is_suspended"] is not None:
@@ -154,8 +143,7 @@ async def main():
         # === 测试 3: DELETE + 等 2 秒 + INSERT ===
         print("--- 测试 3: DELETE 后等 2 秒再 INSERT ---")
         await conn.execute(
-            f"DELETE FROM backtest_daily "
-            f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
+            f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
         print("  等待 2 秒...")
         await asyncio.sleep(2)
@@ -168,8 +156,7 @@ async def main():
 
         await conn.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
         check3 = await conn.fetchrow(
-            f"SELECT is_suspended FROM backtest_daily "
-            f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
+            f"SELECT is_suspended FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
         print(f"  SELECT is_suspended = {check3['is_suspended']}")
         if check3["is_suspended"] is not None:
