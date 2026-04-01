@@ -1217,6 +1217,16 @@ class GreptimeBacktestCache:
             date_str = day.strftime("%Y-%m-%d")
             ts_ms = _date_to_epoch_ms(day)
 
+            if progress_cb:
+                await _maybe_await(
+                    progress_cb(
+                        "backfill",
+                        idx,
+                        len(dates_to_fix),
+                        f"{date_str} 查询停牌...",
+                    )
+                )
+
             # Fetch suspended codes (fail-fast)
             try:
                 suspended_codes = await tushare_client.fetch_suspended_stocks(
@@ -1272,12 +1282,30 @@ class GreptimeBacktestCache:
             )
 
             # Step 1: DELETE all NULL rows for this date
+            if progress_cb:
+                await _maybe_await(
+                    progress_cb(
+                        "backfill",
+                        idx,
+                        len(dates_to_fix),
+                        f"{date_str} DELETE {len(db_codes)} 行...",
+                    )
+                )
             for code in db_codes:
                 await self._db.execute(
                     f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
                 )
 
             # Step 2: INSERT fresh rows with is_suspended set
+            if progress_cb:
+                await _maybe_await(
+                    progress_cb(
+                        "backfill",
+                        idx,
+                        len(dates_to_fix),
+                        f"{date_str} INSERT {len(db_codes)} 行...",
+                    )
+                )
             upserted = 0
             for code, rec in db_codes.items():
                 if code in suspended_codes:
@@ -1319,6 +1347,15 @@ class GreptimeBacktestCache:
                 upserted += 1
 
             # Step 3: FLUSH to persist (prevent old SST from overwriting)
+            if progress_cb:
+                await _maybe_await(
+                    progress_cb(
+                        "backfill",
+                        idx,
+                        len(dates_to_fix),
+                        f"{date_str} FLUSH {upserted} 行...",
+                    )
+                )
             try:
                 await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
             except Exception as e:
@@ -1349,13 +1386,14 @@ class GreptimeBacktestCache:
                     f"Backfill {date_str}: {upserted} rows OK (suspended={len(suspended_codes)})"
                 )
 
-            if progress_cb and ((idx + 1) % 5 == 0 or idx == len(dates_to_fix) - 1):
+            if progress_cb:
+                status = "✓" if null_remaining == 0 else f"⚠ {null_remaining} NULL"
                 await _maybe_await(
                     progress_cb(
                         "backfill",
                         idx + 1,
                         len(dates_to_fix),
-                        f"{date_str} 停牌{len(suspended_codes)}只",
+                        f"{date_str} {status} ({upserted}行, 停牌{len(suspended_codes)}只)",
                     )
                 )
 

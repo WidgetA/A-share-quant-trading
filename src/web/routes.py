@@ -385,6 +385,10 @@ def create_momentum_router() -> APIRouter:
                 if current > 0:
                     return f"分钟线已缓存 {current}/{total} 只，需下载 {remaining} 只"
                 return f"分钟线需下载 {total} 只"
+            elif phase == "backfill":
+                if detail:
+                    return f"回填 {current}/{total}: {detail}"
+                return f"回填停牌标记: {current}/{total} 天"
             elif phase == "minute_active":
                 return f"正在下载: {detail} ({current}/{total} 已完成)"
             elif phase == "minute":
