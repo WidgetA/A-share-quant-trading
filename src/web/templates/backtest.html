@@ -336,6 +336,23 @@ function startCacheDownloadFromUI() {
                 try {
                     const d = JSON.parse(line.slice(6));
                     if (d.type === 'heartbeat') continue;
+                    if (d.type === 'integrity_report') {
+                        if (d.issues && d.issues.length > 0) {
+                            dlLog('--- 数据完整性检查 ---', 'log-warn');
+                            for (const issue of d.issues) {
+                                const cls = issue.level === 'error' ? 'log-err' : 'log-warn';
+                                const prefix = issue.level === 'error' ? '[错误]' : '[警告]';
+                                let line = `  ${prefix} ${issue.message}`;
+                                if (issue.samples && issue.samples.length > 0) {
+                                    line += ` (示例: ${issue.samples.join(', ')})`;
+                                }
+                                dlLog(line, cls);
+                            }
+                            dlLog('--- 检查完成，继续下载 ---', 'log-warn');
+                        } else {
+                            dlLog('数据完整性检查通过', 'log-ok');
+                        }
+                    }
                     if (d.type === 'status') {
                         dlLog(d.message);
                     }

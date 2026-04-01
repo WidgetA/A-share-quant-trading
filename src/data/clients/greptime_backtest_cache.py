@@ -471,6 +471,184 @@ class GreptimeBacktestCache:
 
         return warnings
 
+    async def check_data_integrity(self) -> list[dict[str, Any]]:
+        """Run comprehensive data integrity checks on existing cached data.
+
+        Checks for garbage values, NULL fields, OHLC relationship violations,
+        and unreasonable values in both daily and minute tables.
+
+        Returns list of issue dicts (empty = all checks passed), each with:
+            level:   "error" | "warning"
+            check:   short identifier
+            message: human-readable description (Chinese)
+            count:   number of affected rows
+            samples: list of "stock_code @ date" strings (max 5)
+        """
+        issues: list[dict[str, Any]] = []
+
+        total_stocks = await self.get_daily_stock_count()
+        if total_stocks == 0:
+            return issues
+
+        async def _count_and_sample(
+            table: str, where: str, level: str, check: str, message_tpl: str
+        ) -> None:
+            """Helper: COUNT + optional LIMIT-5 sample for one check."""
+            row = await self._db.fetchrow(
+                f"SELECT COUNT(*) as cnt FROM {table} WHERE {where}"
+            )
+            cnt = int(row["cnt"]) if row else 0
+            if cnt == 0:
+                return
+            # Fetch sample rows for diagnosis
+            samples: list[str] = []
+            try:
+                sample_rows = await self._db.fetch(
+                    f"SELECT stock_code, ts FROM {table} WHERE {where} LIMIT 5"
+                )
+                for sr in sample_rows:
+                    d = _ts_to_date(sr["ts"])
+                    samples.append(f"{sr['stock_code']}@{d}")
+            except Exception:
+                pass  # sample fetch is best-effort
+            issues.append(
+                {
+                    "level": level,
+                    "check": check,
+                    "message": message_tpl.format(cnt=cnt),
+                    "count": cnt,
+                    "samples": samples,
+                }
+            )
+
+        # --- Daily table checks ---
+
+        # 1. NULL is_suspended (old data not backfilled)
+        await _count_and_sample(
+            "backtest_daily",
+            "is_suspended IS NULL",
+            "error",
+            "null_is_suspended",
+            "日线: {cnt} 条记录 is_suspended 为 NULL（需要回填）",
+        )
+
+        # 2. NULL price fields
+        await _count_and_sample(
+            "backtest_daily",
+            "open_price IS NULL OR high_price IS NULL "
+            "OR low_price IS NULL OR close_price IS NULL",
+            "error",
+            "null_prices",
+            "日线: {cnt} 条记录价格字段为 NULL",
+        )
+
+        # 3. Non-suspended stocks with zero open/close
+        await _count_and_sample(
+            "backtest_daily",
+            "is_suspended = false AND (open_price = 0 OR close_price = 0)",
+            "error",
+            "zero_price_active",
+            "日线: {cnt} 条非停牌记录 open/close 为 0",
+        )
+
+        # 4. Negative prices
+        await _count_and_sample(
+            "backtest_daily",
+            "open_price < 0 OR high_price < 0 OR low_price < 0 OR close_price < 0",
+            "error",
+            "negative_price",
+            "日线: {cnt} 条记录价格为负数",
+        )
+
+        # 5. high < low (non-suspended)
+        await _count_and_sample(
+            "backtest_daily",
+            "is_suspended = false AND high_price < low_price",
+            "error",
+            "high_lt_low",
+            "日线: {cnt} 条非停牌记录 high < low",
+        )
+
+        # 6. open/close outside [low, high] range
+        await _count_and_sample(
+            "backtest_daily",
+            "is_suspended = false AND ("
+            "open_price > high_price OR open_price < low_price "
+            "OR close_price > high_price OR close_price < low_price)",
+            "warning",
+            "ohlc_range_violation",
+            "日线: {cnt} 条非停牌记录 open/close 超出 [low,high] 范围",
+        )
+
+        # 7. Negative volume
+        await _count_and_sample(
+            "backtest_daily",
+            "vol < 0",
+            "error",
+            "negative_volume",
+            "日线: {cnt} 条记录 vol 为负数",
+        )
+
+        # 8. Non-suspended with zero volume (warning if > 100, small numbers normal)
+        row = await self._db.fetchrow(
+            "SELECT COUNT(*) as cnt FROM backtest_daily "
+            "WHERE is_suspended = false AND vol = 0"
+        )
+        zero_vol_cnt = int(row["cnt"]) if row else 0
+        if zero_vol_cnt > 100:
+            issues.append(
+                {
+                    "level": "warning",
+                    "check": "zero_volume_active",
+                    "message": f"日线: {zero_vol_cnt} 条非停牌记录 vol=0（涨跌停无成交属正常）",
+                    "count": zero_vol_cnt,
+                    "samples": [],
+                }
+            )
+
+        # --- Minute table checks ---
+
+        minute_count = await self.get_minute_stock_count()
+        if minute_count > 0:
+            # 9. close_940 <= 0
+            await _count_and_sample(
+                "backtest_minute",
+                "close_940 <= 0",
+                "error",
+                "zero_close_940",
+                "分钟线: {cnt} 条记录 close_940 <= 0",
+            )
+
+            # 10. max_high < min_low
+            await _count_and_sample(
+                "backtest_minute",
+                "max_high < min_low",
+                "error",
+                "minute_high_lt_low",
+                "分钟线: {cnt} 条记录 max_high < min_low",
+            )
+
+            # 11. NULL fields
+            await _count_and_sample(
+                "backtest_minute",
+                "close_940 IS NULL OR cum_volume IS NULL "
+                "OR max_high IS NULL OR min_low IS NULL",
+                "error",
+                "null_minute_fields",
+                "分钟线: {cnt} 条记录有 NULL 字段",
+            )
+
+            # 12. Negative cum_volume
+            await _count_and_sample(
+                "backtest_minute",
+                "cum_volume < 0",
+                "error",
+                "negative_cum_volume",
+                "分钟线: {cnt} 条记录 cum_volume 为负数",
+            )
+
+        return issues
+
     # ==================== Status for UI ====================
 
     async def get_cache_status(self) -> dict:

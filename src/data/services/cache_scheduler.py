@@ -197,6 +197,23 @@ class CacheScheduler:
         logger.info(f"CacheScheduler: {gap_summary}, downloading...")
         await _notify_feishu(f"[缓存补全] 开始补全\n{gap_summary}\n下载范围: {len(all_gaps)} 段")
 
+        # Pre-download integrity check
+        try:
+            integrity_issues = await cache.check_data_integrity()
+            if integrity_issues:
+                error_issues = [i for i in integrity_issues if i["level"] == "error"]
+                if error_issues:
+                    issue_lines = [
+                        f"  [{i['level']}] {i['message']}" for i in integrity_issues[:10]
+                    ]
+                    await _notify_feishu(
+                        f"[缓存补全] 下载前完整性检查\n"
+                        f"发现 {len(integrity_issues)} 个问题:\n"
+                        + "\n".join(issue_lines)
+                    )
+        except Exception as e:
+            logger.warning(f"Pre-download integrity check failed: {e}", exc_info=True)
+
         total_downloaded = 0
         total_ranges = len(all_gaps)
         for idx, (range_start, range_end) in enumerate(all_gaps, 1):

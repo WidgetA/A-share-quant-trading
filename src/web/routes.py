@@ -366,7 +366,11 @@ def create_momentum_router() -> APIRouter:
 
         # Download missing data (real-time progress via asyncio.Queue)
         def _fmt_progress(phase: str, current: int, total: int, detail: str = "") -> str:
-            if phase == "init":
+            if phase == "integrity_check":
+                if detail:
+                    return f"完整性检查: {detail}"
+                return f"数据完整性检查中... ({current}/{total})"
+            elif phase == "init":
                 return "正在初始化..."
             elif phase == "daily_resume":
                 if current > 0:
@@ -407,14 +411,16 @@ def create_momentum_router() -> APIRouter:
                     pass
 
             def on_progress(phase: str, current: int, total: int, detail: str = ""):
-                if phase == "init":
-                    overall = 0.0
-                elif phase == "daily_resume":
+                if phase == "integrity_check":
+                    overall = 0.01 + 0.04 * (current / total) if total > 0 else 0.01
+                elif phase == "init":
                     overall = 0.05
+                elif phase == "daily_resume":
+                    overall = 0.1
                 elif phase == "backfill":
-                    overall = 0.05 + 0.05 * (current / total) if total > 0 else 0.05
+                    overall = 0.1 + 0.05 * (current / total) if total > 0 else 0.1
                 elif phase == "daily":
-                    overall = 0.1 + 0.1 * (current / total) if total > 0 else 0.1
+                    overall = 0.15 + 0.05 * (current / total) if total > 0 else 0.15
                 elif phase == "minute_resume":
                     overall = 0.2
                 elif phase == "minute_active":
@@ -434,6 +440,42 @@ def create_momentum_router() -> APIRouter:
 
             async def _run_download():
                 try:
+                    # Pre-download integrity check
+                    on_progress("integrity_check", 0, 1, "开始检查...")
+                    issues = await cache.check_data_integrity()
+                    on_progress("integrity_check", 1, 1, "检查完成")
+                    if issues:
+                        error_count = sum(1 for i in issues if i["level"] == "error")
+                        warn_count = sum(1 for i in issues if i["level"] == "warning")
+                        parts = []
+                        if error_count:
+                            parts.append(f"{error_count} 个错误")
+                        if warn_count:
+                            parts.append(f"{warn_count} 个警告")
+                        queue.put_nowait(
+                            {
+                                "type": "integrity_report",
+                                "issues": [
+                                    {
+                                        "level": i["level"],
+                                        "message": i["message"],
+                                        "count": i["count"],
+                                        "samples": i.get("samples", []),
+                                    }
+                                    for i in issues
+                                ],
+                                "message": f"完整性检查: {', '.join(parts)}",
+                            }
+                        )
+                    else:
+                        queue.put_nowait(
+                            {
+                                "type": "integrity_report",
+                                "issues": [],
+                                "message": "数据完整性检查通过",
+                            }
+                        )
+
                     await cache.download_prices(
                         start_date,
                         end_date,
