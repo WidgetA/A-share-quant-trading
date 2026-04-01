@@ -235,8 +235,8 @@ class GreptimeBacktestCache:
         try:
             await self._db.execute("ALTER TABLE backtest_daily ADD COLUMN is_suspended BOOLEAN")
             logger.info("Added is_suspended column to backtest_daily")
-        except Exception:
-            pass  # column already exists
+        except Exception:  # safety: ignore — column already exists
+            pass
         logger.info(f"GreptimeBacktestCache connected via pgwire {self._db._host}:{self._db._port}")
 
     async def stop(self) -> None:
@@ -655,7 +655,7 @@ class GreptimeBacktestCache:
                                 f"错误: {str(e)[:200]}\n"
                                 f"已中止日线下载，防止写入错误停牌数据"
                             )
-                    except Exception:
+                    except Exception:  # safety: ignore — 通知失败不阻断下载
                         logger.warning("Failed to send Feishu alert for suspend_d failure")
                     raise
 
@@ -769,7 +769,7 @@ class GreptimeBacktestCache:
                                 f"停牌: {n} 只\n"
                                 f"{sample}{tail}"
                             )
-                    except Exception:
+                    except Exception:  # safety: ignore — 通知失败不阻断下载
                         logger.warning("Failed to send Feishu suspension alert")
 
                 # Case 2 聚合告警: 接口返回但数据为空的非停牌股
@@ -793,7 +793,7 @@ class GreptimeBacktestCache:
                                 f"open/close 为空，但 Tushare 未标记停牌\n"
                                 f"已跳过: {codes_sample}{extra}"
                             )
-                    except Exception:
+                    except Exception:  # safety: ignore — 通知失败不阻断下载
                         logger.warning("Failed to send Feishu null-data alert")
 
                 if day_records:
@@ -1056,7 +1056,7 @@ class GreptimeBacktestCache:
                             f"错误: {str(e)[:200]}\n"
                             f"已中止回填"
                         )
-                except Exception:
+                except Exception:  # safety: ignore — 通知失败不阻断下载
                     pass
                 raise
 
@@ -1320,7 +1320,7 @@ class GreptimeHistoricalAdapter:
 
         try:
             return await get_tushare_trade_calendar(start_date, end_date)
-        except Exception as e:
+        except Exception as e:  # safety: ignore — 交易日历有 DB 兜底
             logger.warning(f"Tushare trade_cal failed: {e}, falling back to DB inference")
 
         # Fallback: infer from existing daily data

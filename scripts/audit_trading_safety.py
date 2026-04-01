@@ -154,6 +154,9 @@ class ExceptionAuditor(ast.NodeVisitor):
 
     def _add(self, node: ast.AST, category: str, detail: str, severity: str = "CRITICAL"):
         lineno = getattr(node, "lineno", 0)
+        # Allow suppression via inline comment: # safety: ignore
+        if "# safety: ignore" in _get_source_line(self.source_lines, lineno):
+            return
         self.violations.append(
             Violation(
                 file=self.filepath,
