@@ -675,9 +675,6 @@ class GreptimeBacktestCache:
                         ticker = str(rec.get("ticker", ""))
                         if not ticker or len(ticker) != 6:
                             continue
-                        # Main-board only: 60xxxx (SH) and 00xxxx (SZ)
-                        if not (ticker.startswith("60") or ticker.startswith("00")):
-                            continue
 
                         seen_codes.add(ticker)
                         o = rec.get("open")
@@ -733,8 +730,6 @@ class GreptimeBacktestCache:
                 for susp_code in suspended_codes:
                     if susp_code in seen_codes:
                         continue
-                    if not (susp_code.startswith("60") or susp_code.startswith("00")):
-                        continue
                     pre_close = prev_close_map.get(susp_code, 0.0)
                     fill_price = pre_close if pre_close > 0 else 0.0
                     if fill_price <= 0:
@@ -759,26 +754,23 @@ class GreptimeBacktestCache:
 
                 # 停牌通报
                 if suspended_codes:
-                    susp_main = [
-                        c for c in suspended_codes if c.startswith("60") or c.startswith("00")
-                    ]
-                    if susp_main:
-                        logger.info(f"{date_str}: {len(susp_main)} stocks suspended")
-                        try:
-                            from src.common.feishu_bot import FeishuBot
+                    logger.info(f"{date_str}: {len(suspended_codes)} stocks suspended")
+                    try:
+                        from src.common.feishu_bot import FeishuBot
 
-                            bot = FeishuBot()
-                            if bot.is_configured():
-                                sample = ", ".join(sorted(susp_main)[:15])
-                                tail = f" 等{len(susp_main)}只" if len(susp_main) > 15 else ""
-                                await bot.send_message(
-                                    f"[缓存下载] 停牌记录\n"
-                                    f"日期: {date_str}\n"
-                                    f"停牌: {len(susp_main)} 只\n"
-                                    f"{sample}{tail}"
-                                )
-                        except Exception:
-                            logger.warning("Failed to send Feishu suspension alert")
+                        bot = FeishuBot()
+                        if bot.is_configured():
+                            sample = ", ".join(sorted(suspended_codes)[:15])
+                            n = len(suspended_codes)
+                            tail = f" 等{n}只" if n > 15 else ""
+                            await bot.send_message(
+                                f"[缓存下载] 停牌记录\n"
+                                f"日期: {date_str}\n"
+                                f"停牌: {n} 只\n"
+                                f"{sample}{tail}"
+                            )
+                    except Exception:
+                        logger.warning("Failed to send Feishu suspension alert")
 
                 # Case 2 聚合告警: 接口返回但数据为空的非停牌股
                 if _null_data_codes:
@@ -1006,23 +998,9 @@ class GreptimeBacktestCache:
         - Normal stocks: keep original data, is_suspended=false
         - Suspended stocks missing from DB: INSERT with pre_close fill
         """
-        # Bulk-fix non-main-board stocks (30xxxx, 68xxxx etc): just set false
-        await self._db.execute(
-            "INSERT INTO backtest_daily (stock_code, ts, open_price, high_price, "
-            "low_price, close_price, pre_close, vol, amount, turnover_ratio, "
-            "is_suspended) "
-            "SELECT stock_code, ts, open_price, high_price, low_price, "
-            "close_price, pre_close, vol, amount, turnover_ratio, false "
-            "FROM backtest_daily "
-            "WHERE is_suspended IS NULL "
-            "AND stock_code NOT LIKE '60%' AND stock_code NOT LIKE '00%'"
-        )
-
-        # Find main-board dates that need backfill
+        # Find dates that need backfill
         rows = await self._db.fetch(
-            "SELECT DISTINCT ts FROM backtest_daily "
-            "WHERE is_suspended IS NULL "
-            "AND (stock_code LIKE '60%' OR stock_code LIKE '00%')"
+            "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL"
         )
         if not rows:
             return
@@ -1082,10 +1060,6 @@ class GreptimeBacktestCache:
                     pass
                 raise
 
-            suspended_main = {
-                c for c in suspended_codes if c.startswith("60") or c.startswith("00")
-            }
-
             # Read all existing records for this date (full row for upsert)
             db_rows = await self._db.fetch(
                 f"SELECT stock_code, open_price, high_price, low_price, "
@@ -1096,8 +1070,6 @@ class GreptimeBacktestCache:
             db_codes: dict[str, dict] = {}
             for r in db_rows:
                 code = r["stock_code"]
-                if not (code.startswith("60") or code.startswith("00")):
-                    continue
                 db_codes[code] = {
                     "open": float(r["open_price"]),
                     "high": float(r["high_price"]),
@@ -1112,7 +1084,7 @@ class GreptimeBacktestCache:
             insert_values: list[str] = []
 
             for code, rec in db_codes.items():
-                if code in suspended_main:
+                if code in suspended_codes:
                     # Case A: in DB + suspended → fix OHLC
                     pre_close = rec["pre_close"]
                     fill = pre_close if pre_close > 0 else 0.0
@@ -1133,7 +1105,7 @@ class GreptimeBacktestCache:
                     prev_close_map[code] = rec["close"]
 
             # Case C: suspended but not in DB → insert with pre_close fill
-            for susp_code in suspended_main:
+            for susp_code in suspended_codes:
                 if susp_code in db_codes:
                     continue
                 pre_close = prev_close_map.get(susp_code, 0.0)
@@ -1160,7 +1132,7 @@ class GreptimeBacktestCache:
                         "backfill",
                         idx + 1,
                         len(dates_to_fix),
-                        f"{date_str} 停牌{len(suspended_main)}只",
+                        f"{date_str} 停牌{len(suspended_codes)}只",
                     )
                 )
 
