@@ -992,11 +992,8 @@ class GreptimeBacktestCache:
     ) -> None:
         """Fix existing daily records where is_suspended IS NULL.
 
-        Runs automatically during download_prices. Finds dates with NULL
-        is_suspended, queries Tushare suspend_d, and corrects:
-        - Suspended stocks: OHLC=pre_close, vol=0, is_suspended=true
-        - Normal stocks: keep original data, is_suspended=false
-        - Suspended stocks missing from DB: INSERT with pre_close fill
+        INSERT upsert works for single rows but silently fails for bulk
+        INSERT with 3000+ rows. Solution: INSERT in batches of 200.
         """
         # Find dates that need backfill
         rows = await self._db.fetch(
@@ -1006,6 +1003,8 @@ class GreptimeBacktestCache:
             return
 
         dates_to_fix = sorted(_ts_to_date(r["ts"]) for r in rows)
+        if not dates_to_fix:
+            return
         logger.info(
             f"Backfill is_suspended: {len(dates_to_fix)} dates need fixing "
             f"({dates_to_fix[0]} ~ {dates_to_fix[-1]})"
@@ -1118,32 +1117,21 @@ class GreptimeBacktestCache:
                 )
 
             if insert_values:
-                # DELETE old rows — GreptimeDB requires primary key in DELETE
-                all_codes = list(db_codes.keys()) + [
-                    c for c in suspended_codes if c not in db_codes
-                ]
+                # INSERT in batches — single INSERT with 3000+ rows silently fails
                 batch_size = 200
-                deleted_total = 0
-                for bi in range(0, len(all_codes), batch_size):
-                    batch = all_codes[bi : bi + batch_size]
-                    codes_str = ",".join(f"'{c}'" for c in batch)
-                    await self._db.execute(
-                        f"DELETE FROM backtest_daily "
-                        f"WHERE ts = {ts_ms} AND stock_code IN ({codes_str})"
-                    )
-                    deleted_total += len(batch)
+                cols = (
+                    "(stock_code,ts,open_price,high_price,low_price,close_price,"
+                    "pre_close,vol,amount,turnover_ratio,is_suspended)"
+                )
+                for bi in range(0, len(insert_values), batch_size):
+                    batch = insert_values[bi : bi + batch_size]
+                    sql = f"INSERT INTO backtest_daily{cols} VALUES " + ",".join(batch)
+                    await self._db.execute(sql)
                 logger.info(
-                    f"Backfill {date_str}: deleted {deleted_total} codes, "
-                    f"inserting {len(insert_values)} rows "
+                    f"Backfill {date_str}: {len(insert_values)} rows "
+                    f"in {(len(insert_values) - 1) // batch_size + 1} batches "
                     f"(suspended={len(suspended_codes)})"
                 )
-                sql = (
-                    "INSERT INTO backtest_daily"
-                    "(stock_code,ts,open_price,high_price,low_price,close_price,"
-                    "pre_close,vol,amount,turnover_ratio,is_suspended) VALUES "
-                    + ",".join(insert_values)
-                )
-                await self._db.execute(sql)
 
             if progress_cb and ((idx + 1) % 5 == 0 or idx == len(dates_to_fix) - 1):
                 await _maybe_await(
