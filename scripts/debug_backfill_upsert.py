@@ -61,7 +61,7 @@ async def main():
             ts_ms = int(ts)
             dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
             date_str = dt.strftime("%Y-%m-%d")
-            date_yyyymmdd = dt.strftime("%Y%m%d")
+
 
         print(f"=== 测试目标: stock_code={code}, date={date_str} (ts_ms={ts_ms}) ===\n")
 
