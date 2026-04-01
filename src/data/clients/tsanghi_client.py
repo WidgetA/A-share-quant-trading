@@ -19,8 +19,8 @@ from src.common.config import get_tsanghi_token
 
 logger = logging.getLogger(__name__)
 
-# Max concurrent requests to avoid overwhelming the API
-_DEFAULT_CONCURRENCY = 10
+# tsanghi API max concurrency is 2 (paid plan limit)
+_DEFAULT_CONCURRENCY = 2
 _DEFAULT_TIMEOUT = 30.0
 _MAX_RETRIES = 3
 

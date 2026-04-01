@@ -87,7 +87,8 @@ Rules:
 Rules:
 1. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
 2. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
-3. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
+3. **tsanghi max concurrency = 2** (paid plan limit) — hardcoded in `_DEFAULT_CONCURRENCY`
+4. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
 
 ## 9. Volume Unit Convention (CRITICAL)
 

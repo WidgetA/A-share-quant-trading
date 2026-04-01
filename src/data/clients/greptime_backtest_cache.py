@@ -593,6 +593,11 @@ class GreptimeBacktestCache:
                 skipped = len(existing_dates)
                 await _maybe_await(progress_cb("daily_resume", skipped, skipped, ""))
 
+            # Backfill: fix existing dates with is_suspended IS NULL
+            await self._backfill_is_suspended(
+                tushare_client, progress_cb, cancel_event
+            )
+
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
 
@@ -872,7 +877,7 @@ class GreptimeBacktestCache:
             done = 0
             start_str = dl_start.strftime("%Y-%m-%d")
             end_str = end_date.strftime("%Y-%m-%d")
-            sem = asyncio.Semaphore(10)
+            sem = asyncio.Semaphore(2)  # tsanghi API max concurrency
 
             async def _fetch_one(code: str) -> tuple[str, dict[str, tuple] | None]:
                 """Fetch 5min bars for one stock, aggregate to 9:40 snapshots."""
@@ -997,6 +1002,169 @@ class GreptimeBacktestCache:
             "(stock_code,ts,close_940,cum_volume,max_high,min_low) VALUES " + ",".join(values)
         )
         await self._db.execute(sql)
+
+    # ==================== Backfill ====================
+
+    async def _backfill_is_suspended(
+        self,
+        tushare_client: Any,
+        progress_cb: Callable[[str, int, int, str], Any] | None = None,
+        cancel_event: _CancelChecker = None,
+    ) -> None:
+        """Fix existing daily records where is_suspended IS NULL.
+
+        Runs automatically during download_prices. Finds dates with NULL
+        is_suspended, queries Tushare suspend_d, and corrects:
+        - Suspended stocks: OHLC=pre_close, vol=0, is_suspended=true
+        - Normal stocks: keep original data, is_suspended=false
+        - Suspended stocks missing from DB: INSERT with pre_close fill
+        """
+        # Find dates that need backfill
+        rows = await self._db.fetch(
+            "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL"
+        )
+        if not rows:
+            return
+
+        dates_to_fix = sorted(_ts_to_date(r["ts"]) for r in rows)
+        logger.info(
+            f"Backfill is_suspended: {len(dates_to_fix)} dates need fixing "
+            f"({dates_to_fix[0]} ~ {dates_to_fix[-1]})"
+        )
+
+        if progress_cb:
+            await _maybe_await(
+                progress_cb("backfill", 0, len(dates_to_fix), "回填停牌标记")
+            )
+
+        # Build prev_close map from the day before the earliest date to fix
+        prev_close_map: dict[str, float] = {}
+        earliest = dates_to_fix[0]
+        earliest_ms = _date_to_epoch_ms(earliest)
+        prev_rows = await self._db.fetch(
+            f"SELECT stock_code, close_price FROM backtest_daily "
+            f"WHERE ts < {earliest_ms} ORDER BY ts DESC LIMIT 10000"
+        )
+        for r in prev_rows:
+            code = r["stock_code"]
+            if code not in prev_close_map:
+                prev_close_map[code] = float(r["close_price"])
+
+        for idx, day in enumerate(dates_to_fix):
+            if cancel_event and cancel_event.is_set():
+                logger.info("Backfill cancelled by user")
+                raise asyncio.CancelledError()
+
+            date_str = day.strftime("%Y-%m-%d")
+            ts_ms = _date_to_epoch_ms(day)
+
+            # Fetch suspended codes (fail-fast)
+            try:
+                suspended_codes = await tushare_client.fetch_suspended_stocks(
+                    day.strftime("%Y%m%d")
+                )
+            except Exception as e:
+                logger.critical(
+                    f"FATAL: Tushare suspend_d failed during backfill for {date_str}: {e}",
+                    exc_info=True,
+                )
+                try:
+                    from src.common.feishu_bot import FeishuBot
+
+                    bot = FeishuBot()
+                    if bot.is_configured():
+                        await bot.send_message(
+                            f"[缓存回填] 严重错误\n"
+                            f"Tushare suspend_d API 失败 ({date_str})\n"
+                            f"错误: {str(e)[:200]}\n"
+                            f"已中止回填"
+                        )
+                except Exception:
+                    pass
+                raise
+
+            suspended_main = {
+                c for c in suspended_codes
+                if c.startswith("60") or c.startswith("00")
+            }
+
+            # Read all existing records for this date (full row for upsert)
+            db_rows = await self._db.fetch(
+                f"SELECT stock_code, open_price, high_price, low_price, "
+                f"close_price, pre_close, vol, amount, turnover_ratio "
+                f"FROM backtest_daily WHERE ts = {ts_ms}"
+            )
+
+            db_codes: dict[str, dict] = {}
+            for r in db_rows:
+                code = r["stock_code"]
+                if not (code.startswith("60") or code.startswith("00")):
+                    continue
+                db_codes[code] = {
+                    "open": float(r["open_price"]),
+                    "high": float(r["high_price"]),
+                    "low": float(r["low_price"]),
+                    "close": float(r["close_price"]),
+                    "pre_close": float(r["pre_close"]) if r["pre_close"] else 0.0,
+                    "vol": float(r["vol"]) if r["vol"] else 0.0,
+                    "amount": float(r["amount"]) if r["amount"] else 0.0,
+                    "tr": r["turnover_ratio"],
+                }
+
+            insert_values: list[str] = []
+
+            for code, rec in db_codes.items():
+                if code in suspended_main:
+                    # Case A: in DB + suspended → fix OHLC
+                    pre_close = rec["pre_close"]
+                    fill = pre_close if pre_close > 0 else 0.0
+                    insert_values.append(
+                        f"('{code}',{ts_ms},"
+                        f"{fill},{fill},{fill},{fill},"
+                        f"{pre_close},0.0,0.0,NULL,true)"
+                    )
+                else:
+                    # Case B: in DB + normal → keep data, set is_suspended=false
+                    tr_str = str(rec["tr"]) if rec["tr"] is not None else "NULL"
+                    insert_values.append(
+                        f"('{code}',{ts_ms},"
+                        f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
+                        f"{rec['pre_close']},{rec['vol']},{rec['amount']},"
+                        f"{tr_str},false)"
+                    )
+                    prev_close_map[code] = rec["close"]
+
+            # Case C: suspended but not in DB → insert with pre_close fill
+            for susp_code in suspended_main:
+                if susp_code in db_codes:
+                    continue
+                pre_close = prev_close_map.get(susp_code, 0.0)
+                if pre_close <= 0:
+                    continue
+                insert_values.append(
+                    f"('{susp_code}',{ts_ms},"
+                    f"{pre_close},{pre_close},{pre_close},{pre_close},"
+                    f"{pre_close},0.0,0.0,NULL,true)"
+                )
+
+            if insert_values:
+                sql = (
+                    "INSERT INTO backtest_daily"
+                    "(stock_code,ts,open_price,high_price,low_price,close_price,"
+                    "pre_close,vol,amount,turnover_ratio,is_suspended) VALUES "
+                    + ",".join(insert_values)
+                )
+                await self._db.execute(sql)
+
+            if progress_cb and ((idx + 1) % 20 == 0 or idx == len(dates_to_fix) - 1):
+                await _maybe_await(
+                    progress_cb(
+                        "backfill", idx + 1, len(dates_to_fix),
+                        f"{date_str} 停牌{len(suspended_main)}只"
+                    )
+                )
+
+        logger.info(f"Backfill is_suspended complete: {len(dates_to_fix)} dates fixed")
 
     # ==================== Resume Helpers ====================
 
