@@ -516,12 +516,12 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
             "交易中股票过少",
             f"行情返回: {len(quotes)} 只\n"
             f"标记交易中: {len(trading_codes)} 只\n"
-            f"占比: {len(trading_codes)/len(quotes):.1%} (阈值50%)\n"
+            f"占比: {len(trading_codes) / len(quotes):.1%} (阈值50%)\n"
             f"数据可能异常，扫描中止",
         )
         raise RuntimeError(
             f"V16 scan: only {len(trading_codes)}/{len(quotes)} stocks marked trading "
-            f"({len(trading_codes)/len(quotes):.1%}) — halting"
+            f"({len(trading_codes) / len(quotes):.1%}) — halting"
         )
 
     hist_raw = await _fetch_history_ohlcv(scan_state.historical_adapter, trading_codes, today)

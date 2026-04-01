@@ -224,6 +224,7 @@ class TushareRealtimeClient:
             *[_fetch_one(c) for c in stock_codes], return_exceptions=True
         )
 
+        failed_codes: list[str] = []
         for result in results:
             if isinstance(result, TushareRealtimeError):
                 raise result
@@ -232,7 +233,14 @@ class TushareRealtimeClient:
             bare_code, quote = result
             if quote is not None:
                 all_quotes[bare_code] = quote
+            else:
+                failed_codes.append(bare_code)
 
+        if failed_codes:
+            logger.warning(
+                f"rt_min_daily: {len(failed_codes)} stocks returned empty/unparseable data "
+                f"(first 20: {', '.join(failed_codes[:20])})"
+            )
         logger.info(f"rt_min_daily: fetched {len(all_quotes)}/{len(stock_codes)} stocks")
         return all_quotes
 
