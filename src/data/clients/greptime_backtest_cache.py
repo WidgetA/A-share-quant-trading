@@ -1018,9 +1018,7 @@ class GreptimeBacktestCache:
         suspended_count = total_before - len(codes)
         codes_to_download = [c for c in codes if c not in existing_codes]
         if suspended_count > 0:
-            logger.info(
-                f"Minute: skipped {suspended_count} fully-suspended stocks"
-            )
+            logger.info(f"Minute: skipped {suspended_count} fully-suspended stocks")
         logger.info(
             f"Minute resume: {len(existing_codes)} cached / {len(codes)} active, "
             f"downloading {len(codes_to_download)}"
@@ -1295,9 +1293,7 @@ class GreptimeBacktestCache:
                     )
                     prev_close_map[code] = rec["close"]
 
-                await self._db.execute(
-                    f"INSERT INTO backtest_daily{cols} VALUES {val}"
-                )
+                await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
                 upserted += 1
 
             # Case C: suspended but not in DB → insert with pre_close fill
@@ -1312,15 +1308,12 @@ class GreptimeBacktestCache:
                     f"{pre_close},{pre_close},{pre_close},{pre_close},"
                     f"{pre_close},0.0,0.0,NULL,true)"
                 )
-                await self._db.execute(
-                    f"INSERT INTO backtest_daily{cols} VALUES {val}"
-                )
+                await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
                 upserted += 1
 
             # Verify: this date should have 0 NULL is_suspended now
             verify = await self._db.fetch(
-                f"SELECT COUNT(*) FROM backtest_daily "
-                f"WHERE ts = {ts_ms} AND is_suspended IS NULL"
+                f"SELECT COUNT(*) FROM backtest_daily WHERE ts = {ts_ms} AND is_suspended IS NULL"
             )
             null_remaining = verify[0][0] if verify else -1
             if null_remaining > 0:
@@ -1340,8 +1333,7 @@ class GreptimeBacktestCache:
                     pass
             else:
                 logger.info(
-                    f"Backfill {date_str}: {upserted} rows OK "
-                    f"(suspended={len(suspended_codes)})"
+                    f"Backfill {date_str}: {upserted} rows OK (suspended={len(suspended_codes)})"
                 )
 
             if progress_cb and ((idx + 1) % 5 == 0 or idx == len(dates_to_fix) - 1):
