@@ -1006,9 +1006,23 @@ class GreptimeBacktestCache:
         - Normal stocks: keep original data, is_suspended=false
         - Suspended stocks missing from DB: INSERT with pre_close fill
         """
-        # Find dates that need backfill
+        # Bulk-fix non-main-board stocks (30xxxx, 68xxxx etc): just set false
+        await self._db.execute(
+            "INSERT INTO backtest_daily (stock_code, ts, open_price, high_price, "
+            "low_price, close_price, pre_close, vol, amount, turnover_ratio, "
+            "is_suspended) "
+            "SELECT stock_code, ts, open_price, high_price, low_price, "
+            "close_price, pre_close, vol, amount, turnover_ratio, false "
+            "FROM backtest_daily "
+            "WHERE is_suspended IS NULL "
+            "AND stock_code NOT LIKE '60%' AND stock_code NOT LIKE '00%'"
+        )
+
+        # Find main-board dates that need backfill
         rows = await self._db.fetch(
-            "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL"
+            "SELECT DISTINCT ts FROM backtest_daily "
+            "WHERE is_suspended IS NULL "
+            "AND (stock_code LIKE '60%' OR stock_code LIKE '00%')"
         )
         if not rows:
             return
