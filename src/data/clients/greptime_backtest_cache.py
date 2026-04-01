@@ -1348,26 +1348,46 @@ class GreptimeBacktestCache:
 
         logger.info(f"Backfill is_suspended complete: {len(dates_to_fix)} dates fixed")
 
-        # Verify: check if NULL dates remain
-        remaining = await self._db.fetch(
-            "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL"
+        # Final verification: count remaining NULL rows
+        null_count_row = await self._db.fetchrow(
+            "SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended IS NULL"
         )
-        if remaining:
+        null_remaining = int(null_count_row["cnt"]) if null_count_row else -1
+
+        try:
+            from src.common.feishu_bot import FeishuBot
+
+            bot = FeishuBot()
+            if not bot.is_configured():
+                bot = None
+        except Exception:
+            bot = None
+
+        if null_remaining > 0:
+            remaining = await self._db.fetch(
+                "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL"
+            )
             remaining_dates = sorted(_ts_to_date(r["ts"]) for r in remaining)
             msg = (
-                f"[缓存回填] 验证失败\n"
-                f"回填 {len(dates_to_fix)} 天后仍有 {len(remaining)} 天 is_suspended=NULL\n"
+                f"[缓存回填] ❌ 验证失败\n"
+                f"回填 {len(dates_to_fix)} 天后仍有 {null_remaining} 行 "
+                f"is_suspended=NULL ({len(remaining_dates)} 天)\n"
                 f"日期: {remaining_dates[:5]}"
             )
             logger.error(msg)
-            try:
-                from src.common.feishu_bot import FeishuBot
-
-                bot = FeishuBot()
-                if bot.is_configured():
+            if bot:
+                try:
                     await bot.send_message(msg)
-            except Exception:  # safety: ignore — 通知失败不阻断下载
-                pass
+                except Exception:
+                    pass
+        else:
+            msg = f"[缓存回填] ✅ 回填完成\n修复 {len(dates_to_fix)} 天, is_suspended NULL 剩余: 0"
+            logger.info(msg)
+            if bot:
+                try:
+                    await bot.send_message(msg)
+                except Exception:
+                    pass
 
     # ==================== Resume Helpers ====================
 
