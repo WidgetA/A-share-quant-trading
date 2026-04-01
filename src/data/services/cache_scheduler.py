@@ -208,8 +208,7 @@ class CacheScheduler:
                     ]
                     await _notify_feishu(
                         f"[缓存补全] 下载前完整性检查\n"
-                        f"发现 {len(integrity_issues)} 个问题:\n"
-                        + "\n".join(issue_lines)
+                        f"发现 {len(integrity_issues)} 个问题:\n" + "\n".join(issue_lines)
                     )
         except Exception as e:
             logger.warning(f"Pre-download integrity check failed: {e}", exc_info=True)
