@@ -146,39 +146,32 @@ def create_app(
             iquant_rtr._start_monitoring()
             logger.info("iQuant V15 monitoring scheduler started")
 
-        # Run trading safety audit at startup (non-critical, must not block monitoring)
+        # Run trading safety audit at startup → notify Feishu if CRITICAL
         try:
             from scripts.audit_trading_safety import run_audit
 
             audit_result = run_audit()
-            app.state.safety_audit = {
-                "critical_count": len(
-                    [v for v in audit_result.violations if v.severity == "CRITICAL"]
-                ),
-                "warning_count": len(
-                    [v for v in audit_result.violations if v.severity == "WARNING"]
-                ),
-                "violations": [
-                    {
-                        "file": v.file,
-                        "line": v.line,
-                        "category": v.category,
-                        "detail": v.detail,
-                        "severity": v.severity,
-                    }
-                    for v in audit_result.violations
-                ],
-                "files_scanned": audit_result.files_scanned,
-            }
-            if audit_result.violations:
-                critical = app.state.safety_audit["critical_count"]
+            critical_violations = [v for v in audit_result.violations if v.severity == "CRITICAL"]
+            if critical_violations:
                 logger.warning(
-                    f"Trading safety audit: {critical} CRITICAL violations found! "
+                    f"Trading safety audit: {len(critical_violations)} CRITICAL violations! "
                     f"Run 'uv run python scripts/audit_trading_safety.py' for details."
                 )
+                try:
+                    from src.common.feishu_bot import FeishuBot
+
+                    bot = FeishuBot()
+                    if bot.is_configured():
+                        details = "\n".join(
+                            f"  [{v.category}] {v.file}:{v.line}" for v in critical_violations[:10]
+                        )
+                        await bot.send_message(
+                            f"[交易安全审计] {len(critical_violations)} 个严重问题\n{details}"
+                        )
+                except Exception:
+                    logger.warning("Failed to send Feishu safety audit alert")
         except Exception as e:
             logger.error(f"Trading safety audit failed: {e}", exc_info=True)
-            app.state.safety_audit = None
 
         # Auto-start cache scheduler (3am daily gap-fill)
         from src.data.services.cache_scheduler import CacheScheduler

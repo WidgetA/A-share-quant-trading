@@ -209,8 +209,6 @@ def create_router() -> APIRouter:
                 detail="Failed to submit selection",
             )
 
-    _register_safety_audit_endpoint(router)
-
     return router
 
 
@@ -1518,18 +1516,6 @@ async def _run_intraday_monitor(state: dict) -> None:
 
 
 # === SAFETY AUDIT ENDPOINT ===
-
-
-def _register_safety_audit_endpoint(router: APIRouter) -> None:
-    """Register the /api/safety-audit endpoint on the given router."""
-
-    @router.get("/api/safety-audit")
-    async def safety_audit(request: Request):
-        """Return trading safety audit results (computed at startup)."""
-        audit = getattr(request.app.state, "safety_audit", None)
-        if audit is None:
-            return {"critical_count": 0, "warning_count": 0, "violations": []}
-        return audit
 
 
 # === SETTINGS ENDPOINTS ===
