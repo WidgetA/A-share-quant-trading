@@ -1118,6 +1118,9 @@ class GreptimeBacktestCache:
                 )
 
             if insert_values:
+                # DELETE old rows first — GreptimeDB's append+merge may not
+                # reliably update is_suspended from NULL via INSERT upsert
+                await self._db.execute(f"DELETE FROM backtest_daily WHERE ts = {ts_ms}")
                 sql = (
                     "INSERT INTO backtest_daily"
                     "(stock_code,ts,open_price,high_price,low_price,close_price,"
@@ -1126,7 +1129,7 @@ class GreptimeBacktestCache:
                 )
                 await self._db.execute(sql)
 
-            if progress_cb and ((idx + 1) % 20 == 0 or idx == len(dates_to_fix) - 1):
+            if progress_cb and ((idx + 1) % 5 == 0 or idx == len(dates_to_fix) - 1):
                 await _maybe_await(
                     progress_cb(
                         "backfill",
