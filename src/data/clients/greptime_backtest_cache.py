@@ -946,7 +946,7 @@ class GreptimeBacktestCache:
     # ==================== Internal Write Helpers ====================
 
     async def _write_daily(self, ts_ms: int, records: list[tuple[str, dict]]) -> None:
-        """INSERT daily records for a single date (one INSERT per day)."""
+        """INSERT daily records for a single date, batched to avoid silent failure."""
         if not records:
             return
         values = []
@@ -959,12 +959,15 @@ class GreptimeBacktestCache:
                 f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
                 f"{rec['pre_close']},{rec['volume']},{rec['amount']},{tr_str},{suspended})"
             )
-        sql = (
-            "INSERT INTO backtest_daily"
+        cols = (
             "(stock_code,ts,open_price,high_price,low_price,close_price,"
-            "pre_close,vol,amount,turnover_ratio,is_suspended) VALUES " + ",".join(values)
+            "pre_close,vol,amount,turnover_ratio,is_suspended)"
         )
-        await self._db.execute(sql)
+        batch_size = 200
+        for bi in range(0, len(values), batch_size):
+            batch = values[bi : bi + batch_size]
+            sql = f"INSERT INTO backtest_daily{cols} VALUES " + ",".join(batch)
+            await self._db.execute(sql)
 
     async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
@@ -1127,11 +1130,33 @@ class GreptimeBacktestCache:
                     batch = insert_values[bi : bi + batch_size]
                     sql = f"INSERT INTO backtest_daily{cols} VALUES " + ",".join(batch)
                     await self._db.execute(sql)
-                logger.info(
-                    f"Backfill {date_str}: {len(insert_values)} rows "
-                    f"in {(len(insert_values) - 1) // batch_size + 1} batches "
-                    f"(suspended={len(suspended_codes)})"
+
+                # Verify: this date should have 0 NULL is_suspended now
+                verify = await self._db.fetch(
+                    f"SELECT COUNT(*) FROM backtest_daily "
+                    f"WHERE ts = {ts_ms} AND is_suspended IS NULL"
                 )
+                null_remaining = verify[0][0] if verify else -1
+                if null_remaining > 0:
+                    msg = (
+                        f"[缓存回填] INSERT 静默失败\n"
+                        f"日期 {date_str}: 写入 {len(insert_values)} 行后"
+                        f"仍有 {null_remaining} 行 is_suspended=NULL"
+                    )
+                    logger.error(msg)
+                    try:
+                        from src.common.feishu_bot import FeishuBot
+
+                        bot = FeishuBot()
+                        if bot.is_configured():
+                            await bot.send_message(msg)
+                    except Exception:  # safety: ignore — 通知失败不阻断下载
+                        pass
+                else:
+                    logger.info(
+                        f"Backfill {date_str}: {len(insert_values)} rows OK "
+                        f"(suspended={len(suspended_codes)})"
+                    )
 
             if progress_cb and ((idx + 1) % 5 == 0 or idx == len(dates_to_fix) - 1):
                 await _maybe_await(
