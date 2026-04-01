@@ -64,7 +64,7 @@ Scanner 日志按 Step 编号输出，关键步骤：
 | 文件 | 内容 | 来源 |
 |------|------|------|
 | GreptimeDB `backtest_daily` 表 | 日线 OHLCV（主板全量） | tsanghi 日线 |
-| GreptimeDB `backtest_minute` 表 | 9:40 快照（close_940, cum_volume, max_high, min_low） | baostock 5 分钟线 |
+| GreptimeDB `backtest_minute` 表 | 9:40 快照（close_940, cum_volume, max_high, min_low） | tsanghi 5 分钟线 |
 
 **加载方式（asyncpg）：**
 ```python
@@ -80,12 +80,12 @@ snap = await cache.get_940_price("600519", "2024-06-01")
 
 ### 2.4 行情数据接口
 
-| 数据 | iFinD 接口 | akshare 替代 |
-|------|-----------|-------------|
-| 9:30-9:40 分钟线 | `high_frequency(Interval=1)` | baostock `query_history_k_data_plus` |
-| 实时快照 | `real_time_quotation` | - |
+| 数据 | iFinD 接口 | 替代方案 |
+|------|-----------|---------|
+| 9:30-9:40 分钟线 | `high_frequency(Interval=1)` | tsanghi `/5min` |
+| 实时快照 | `real_time_quotation` | Tushare `rt_min_daily` |
 | 日线历史 | `cmd_history_quotation` | tsanghi `/daily` |
-| 全天分钟线(复盘) | `high_frequency(09:30~15:00)` | baostock |
+| 全天分钟线(复盘) | `high_frequency(09:30~15:00)` | tsanghi `/5min` |
 
 ---
 

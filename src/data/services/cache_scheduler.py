@@ -30,16 +30,17 @@ async def _notify_feishu(message: str) -> None:
         logger.warning("Failed to send Feishu cache scheduler notification", exc_info=True)
 
 
-def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
-    """Get trading days via AKShare, fallback to weekdays."""
+async def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
+    """Get trading days via Tushare trade_cal, fallback to weekdays."""
     try:
-        import akshare as ak
+        from src.data.clients.tushare_realtime import get_tushare_trade_calendar
 
-        df = ak.tool_trade_date_hist_sina()
-        all_dates = set(df["trade_date"].dt.date)
-        return sorted(d for d in all_dates if start_date <= d <= end_date)
+        sd = start_date.strftime("%Y-%m-%d")
+        ed = end_date.strftime("%Y-%m-%d")
+        date_strs = await get_tushare_trade_calendar(sd, ed)
+        return sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in date_strs)
     except Exception as e:
-        logger.warning(f"AKShare trading calendar failed: {e}, using weekday fallback")
+        logger.warning(f"Tushare trade_cal failed: {e}, using weekday fallback")
         days = []
         current = start_date
         while current <= end_date:
@@ -151,7 +152,7 @@ class CacheScheduler:
             return {"gaps_found": 0, "dates_downloaded": 0, "error": msg}
 
         yesterday = datetime.now(BEIJING_TZ).date() - timedelta(days=1)
-        all_trading_days = _get_trading_calendar(CACHE_START_DATE, yesterday)
+        all_trading_days = await _get_trading_calendar(CACHE_START_DATE, yesterday)
         if not all_trading_days:
             return {"gaps_found": 0, "dates_downloaded": 0, "error": "No trading days found"}
 
@@ -215,7 +216,7 @@ class CacheScheduler:
                     cache.download_prices(range_start, range_end, _progress),
                     timeout=DOWNLOAD_TIMEOUT_SECONDS,
                 )
-                range_days = len(_get_trading_calendar(range_start, range_end))
+                range_days = len(await _get_trading_calendar(range_start, range_end))
                 total_downloaded += range_days
                 await _notify_feishu(
                     f"[缓存补全] 进度 {idx}/{total_ranges}\n已完成: {range_start} ~ {range_end}"

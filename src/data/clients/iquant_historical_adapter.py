@@ -211,13 +211,7 @@ class IQuantHistoricalAdapter:
         start_date: str,
         end_date: str,
     ) -> list[str]:
-        """Get trading dates via akshare."""
-        import asyncio
+        """Get trading dates via Tushare trade_cal."""
+        from src.data.clients.tushare_realtime import get_tushare_trade_calendar
 
-        import akshare as ak
-
-        df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
-        all_dates = df["trade_date"].dt.date
-        sd = datetime.strptime(start_date, "%Y-%m-%d").date()
-        ed = datetime.strptime(end_date, "%Y-%m-%d").date()
-        return [d.strftime("%Y-%m-%d") for d in sorted(all_dates) if sd <= d <= ed]
+        return await get_tushare_trade_calendar(start_date, end_date)

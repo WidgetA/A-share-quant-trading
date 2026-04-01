@@ -197,7 +197,7 @@ Before starting any development task:
 | Message Data | PostgreSQL (external, read-only) | Messages streamed by external collector |
 | Backtest Cache | GreptimeDB (asyncpg pgwire port 4003) | Time-series optimized, OSS object storage, no in-memory caching |
 | Config Format | YAML | Human-readable, supports hot-reload |
-| Market Data | Tushare Pro (realtime), tsanghi/baostock (backtest) | A-share real-time and historical data |
+| Market Data | Tushare Pro (realtime + trade_cal + stock_basic), tsanghi (backtest daily + 5min) | A-share real-time and historical data |
 | PostgreSQL Client | asyncpg | Async PostgreSQL access |
 
 ## Environment Management (uv)

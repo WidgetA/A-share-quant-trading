@@ -679,7 +679,8 @@ def create_momentum_router() -> APIRouter:
             try:
                 from datetime import timedelta
 
-                trading_days_all = _get_trading_calendar(start_date, end_date + timedelta(days=10))
+                cal_end = end_date + timedelta(days=10)
+                trading_days_all = await _get_trading_calendar(start_date, cal_end)
                 if not trading_days_all:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
@@ -1109,6 +1110,9 @@ async def _build_snapshots_from_cache(cache, date_str: str) -> dict:
     minute_hits = 0
 
     for code, day in all_daily.items():
+        if day.is_suspended:
+            continue
+
         open_price = day.open
         prev_close = day.preClose
         if prev_close <= 0 or open_price <= 0:
@@ -1169,22 +1173,30 @@ def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
     return (net_sell - total_buy_cost) / total_buy_cost * 100 if total_buy_cost > 0 else 0.0
 
 
-def _get_trading_calendar(start_date, end_date) -> list:
-    """Get trading days via AKShare (tool_trade_date_hist_sina)."""
+async def _get_trading_calendar(start_date, end_date) -> list:
+    """Get trading days via Tushare trade_cal, fallback to weekdays."""
+    from datetime import datetime as dt
     from datetime import timedelta
 
     try:
-        import akshare as ak
+        from src.data.clients.tushare_realtime import get_tushare_trade_calendar
 
-        df = ak.tool_trade_date_hist_sina()
-        all_dates = set(df["trade_date"].dt.date)
-        days = sorted(d for d in all_dates if start_date <= d < end_date)
+        sd = start_date.strftime("%Y-%m-%d")
+        ed = end_date.strftime("%Y-%m-%d")
+        date_strs = await get_tushare_trade_calendar(sd, ed)
+        days = sorted(
+            dt.strptime(d, "%Y-%m-%d").date()
+            for d in date_strs
+            if start_date <= dt.strptime(d, "%Y-%m-%d").date() < end_date
+        )
         if days:
-            logger.info(f"AKShare trading calendar: {len(days)} days in [{start_date}, {end_date})")
+            logger.info(
+                f"Tushare trading calendar: {len(days)} days in [{start_date}, {end_date})"
+            )
             return days
-        logger.warning("AKShare trading calendar returned no dates in range")
+        logger.warning("Tushare trading calendar returned no dates in range")
     except Exception as e:
-        logger.warning(f"AKShare trading calendar failed: {e}")
+        logger.warning(f"Tushare trade_cal failed: {e}")
 
     # Fallback: weekdays
     logger.warning("Falling back to weekday generation for trading calendar")

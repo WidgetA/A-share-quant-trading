@@ -11,7 +11,7 @@
 # - Response: JS variable assignments with comma-separated fields
 # - Field indices: 0=name, 1=open, 2=pre_close, 3=current, 4=high, 5=low,
 #                  6=buy1_price, 7=sell1_price, 8=volume(shares), 9=amount(yuan)
-# - Volume is in 股 (shares), matching iFinD/baostock convention
+# - Volume is in 股 (shares), matching system convention
 # - Fail-fast: network errors raise SinaRealtimeError (no silent fallback)
 
 from __future__ import annotations

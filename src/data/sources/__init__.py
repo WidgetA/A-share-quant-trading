@@ -9,13 +9,8 @@ from .announcement_content import (
     AnnouncementContentFetcher,
     create_content_fetcher_from_config,
 )
-from .sector_mapper import SectorData, SectorInfo, SectorMapper
 
 __all__ = [
-    # Sector mapping
-    "SectorMapper",
-    "SectorInfo",
-    "SectorData",
     # Content fetcher
     "AliyunConfig",
     "AnnouncementContent",

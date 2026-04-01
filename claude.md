@@ -78,7 +78,7 @@ Rules:
 | Purpose | Source | Adapter |
 |---------|--------|---------|
 | Backtest (daily) | 沧海数据 tsanghi | `GreptimeHistoricalAdapter` / `GreptimeBacktestCache` |
-| Backtest (minute) | baostock | via `GreptimeBacktestCache` |
+| Backtest (minute) | 沧海数据 tsanghi 5min | via `GreptimeBacktestCache` |
 | Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
 | Live (historical) | GreptimeDB | `IQuantHistoricalAdapter` |
 | Fundamentals | PostgreSQL `stock_fundamentals` | `FundamentalsDB` |
@@ -96,7 +96,7 @@ Rules:
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
 | **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
-| **baostock** `query_history_k_data_plus()` | **股** | None |
+| **tsanghi** `/5min` | **手** (1手=100股) | ×100 at download time in `TsanghiBacktestCache` |
 | **Tushare** `rt_min_daily` | **股** | None |
 
 - Conversion at **adapter read layer**, not storage (raw cache keeps original values).

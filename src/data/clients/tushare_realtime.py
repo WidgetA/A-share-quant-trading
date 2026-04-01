@@ -466,9 +466,163 @@ class TushareRealtimeClient:
 
         return None
 
+    async def fetch_trade_calendar(
+        self, start_date: str, end_date: str
+    ) -> list[str]:
+        """Fetch trading dates via Tushare trade_cal API.
+
+        Args:
+            start_date: YYYYMMDD format
+            end_date: YYYYMMDD format
+
+        Returns:
+            Sorted list of trading dates in YYYY-MM-DD format.
+        """
+        data = await self._api_call(
+            "trade_cal",
+            {"start_date": start_date, "end_date": end_date, "is_open": "1"},
+            fields="cal_date",
+        )
+
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+
+        if not fields or not items:
+            return []
+
+        idx = fields.index("cal_date")
+        dates: list[str] = []
+        for row in items:
+            raw = str(row[idx])
+            # Tushare returns YYYYMMDD — convert to YYYY-MM-DD
+            if len(raw) == 8:
+                dates.append(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}")
+            else:
+                dates.append(raw)
+
+        return sorted(dates)
+
+    async def fetch_suspended_stocks(self, trade_date: str) -> set[str]:
+        """Fetch all suspended stock codes for a given date via Tushare suspend_d.
+
+        Args:
+            trade_date: YYYYMMDD format
+
+        Returns:
+            Set of bare 6-digit stock codes that are suspended on that date.
+        """
+        data = await self._api_call(
+            "suspend_d",
+            {"trade_date": trade_date, "suspend_type": "S"},
+            fields="ts_code",
+        )
+
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+
+        if not fields or not items:
+            return set()
+
+        idx = fields.index("ts_code")
+        codes: set[str] = set()
+        for row in items:
+            ts_code = str(row[idx])
+            bare = ts_code.split(".")[0]
+            if len(bare) == 6:
+                codes.add(bare)
+
+        return codes
+
+    async def fetch_stock_list(self) -> list[str]:
+        """Fetch all listed A-share stock codes via Tushare stock_basic.
+
+        Returns:
+            List of bare 6-digit stock codes (e.g. ["000001", "600519", ...]).
+        """
+        data = await self._api_call(
+            "stock_basic",
+            {"list_status": "L"},
+            fields="ts_code",
+        )
+
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+
+        if not fields or not items:
+            return []
+
+        idx = fields.index("ts_code")
+        codes: list[str] = []
+        for row in items:
+            ts_code = str(row[idx])
+            bare = ts_code.split(".")[0]
+            if len(bare) == 6:
+                codes.append(bare)
+
+        return codes
+
     @staticmethod
     def _to_ts_code(bare_code: str) -> str:
         """Convert bare code to Tushare format: 600519 -> 600519.SH."""
         if bare_code.startswith("6"):
             return f"{bare_code}.SH"
         return f"{bare_code}.SZ"
+
+
+async def get_tushare_trade_calendar(
+    start_date: str, end_date: str, token: str | None = None
+) -> list[str]:
+    """Standalone helper to fetch trading calendar via Tushare trade_cal.
+
+    Creates a temporary TushareRealtimeClient, fetches the calendar, and closes.
+
+    Args:
+        start_date: YYYY-MM-DD format (converted internally to YYYYMMDD)
+        end_date: YYYY-MM-DD format (converted internally to YYYYMMDD)
+        token: Tushare token. If None, reads from config.
+
+    Returns:
+        Sorted list of trading dates in YYYY-MM-DD format.
+    """
+    if token is None:
+        from src.common.config import get_tushare_token
+
+        token = get_tushare_token()
+
+    # Convert YYYY-MM-DD → YYYYMMDD for Tushare API
+    sd = start_date.replace("-", "")
+    ed = end_date.replace("-", "")
+
+    client = TushareRealtimeClient(token=token)
+    await client.start()
+    try:
+        return await client.fetch_trade_calendar(sd, ed)
+    finally:
+        await client.stop()
+
+
+async def get_tushare_suspended_stocks(
+    trade_date: str, token: str | None = None
+) -> set[str]:
+    """Standalone helper to fetch suspended stocks for a date via Tushare suspend_d.
+
+    Args:
+        trade_date: YYYY-MM-DD format (converted internally to YYYYMMDD)
+        token: Tushare token. If None, reads from config.
+
+    Returns:
+        Set of bare 6-digit stock codes suspended on that date.
+    """
+    if token is None:
+        from src.common.config import get_tushare_token
+
+        token = get_tushare_token()
+
+    td = trade_date.replace("-", "")
+
+    client = TushareRealtimeClient(token=token)
+    await client.start()
+    try:
+        return await client.fetch_suspended_stocks(td)
+    finally:
+        await client.stop()

@@ -8,11 +8,12 @@
 # - Natural upsert: same (stock_code, ts) = last write wins
 # - No transactions needed — each INSERT is independently persisted via WAL
 # - Volume stored in 手 (lots) — adapter converts ×100 at read time
-# - Data sources: tsanghi (daily OHLCV) + baostock (5-min bars for 9:40 snapshot)
+# - Data sources: tsanghi (daily OHLCV + 5-min bars for 9:40 snapshot)
 #
 # === TABLES ===
 # backtest_daily:  stock_code(TAG), ts(TIME INDEX), open_price, high_price,
-#                  low_price, close_price, pre_close, vol, amount, turnover_ratio
+#                  low_price, close_price, pre_close, vol, amount, turnover_ratio,
+#                  is_suspended
 # backtest_minute: stock_code(TAG), ts(TIME INDEX), close_940, cum_volume,
 #                  max_high, min_low
 
@@ -28,6 +29,9 @@ from typing import Any, Callable, NamedTuple
 import asyncpg
 
 logger = logging.getLogger(__name__)
+
+# Cancel checker — compatible with both threading.Event and simple callables
+_CancelChecker = threading.Event | None
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +50,7 @@ class DailyBar(NamedTuple):
     volume: float  # in 手 (lots); adapter converts ×100 at read time
     amount: float
     turnoverRatio: float | None
+    is_suspended: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +69,7 @@ CREATE TABLE IF NOT EXISTS backtest_daily (
     vol FLOAT64,
     amount FLOAT64,
     turnover_ratio FLOAT64,
+    is_suspended BOOLEAN,
     PRIMARY KEY (stock_code)
 )
 """
@@ -242,7 +248,7 @@ class GreptimeBacktestCache:
         ms = _date_to_epoch_ms(_parse_date_str(date_str))
         row = await self._db.fetchrow(
             f"SELECT open_price, high_price, low_price, close_price, pre_close, "
-            f"vol, amount, turnover_ratio "
+            f"vol, amount, turnover_ratio, is_suspended "
             f"FROM backtest_daily "
             f"WHERE stock_code = '{code}' AND ts = {ms}"
         )
@@ -257,6 +263,7 @@ class GreptimeBacktestCache:
             volume=float(row["vol"]),
             amount=float(row["amount"]),
             turnoverRatio=row["turnover_ratio"],
+            is_suspended=bool(row["is_suspended"]) if row["is_suspended"] is not None else False,
         )
 
     async def get_940_price(
@@ -283,7 +290,7 @@ class GreptimeBacktestCache:
         ms = _date_to_epoch_ms(_parse_date_str(date_str))
         rows = await self._db.fetch(
             f"SELECT stock_code, open_price, high_price, low_price, close_price, "
-            f"pre_close, vol, amount, turnover_ratio "
+            f"pre_close, vol, amount, turnover_ratio, is_suspended "
             f"FROM backtest_daily WHERE ts = {ms}"
         )
         result: dict[str, DailyBar] = {}
@@ -297,6 +304,7 @@ class GreptimeBacktestCache:
                 volume=float(r["vol"]),
                 amount=float(r["amount"]),
                 turnoverRatio=r["turnover_ratio"],
+                is_suspended=bool(r["is_suspended"]) if r["is_suspended"] is not None else False,
             )
         return result
 
@@ -492,12 +500,12 @@ class GreptimeBacktestCache:
         start_date: date,
         end_date: date,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
-        cancel_event: threading.Event | None = None,
+        cancel_event: _CancelChecker | None = None,
     ) -> None:
         """Download daily + minute data for all main-board stocks.
 
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
-        Phase 2 — 5-min bars via baostock (per-stock, for 9:40 snapshot only).
+        Phase 2 — 5-min bars via tsanghi REST API (per-stock, for 9:40 snapshot).
 
         Data is written directly to GreptimeDB (each INSERT persisted independently).
         """
@@ -515,14 +523,14 @@ class GreptimeBacktestCache:
             cancel_event,
         )
 
-        # Phase 2: Minute data from baostock
+        # Phase 2: Minute data from tsanghi 5min
         # If daily resume skipped most days, stock_codes may be empty/small.
         # Fall back to all codes in DB so minute data still gets downloaded.
         if not stock_codes:
             stock_codes = await self.get_stock_codes()
 
         if stock_codes:
-            await self._download_minute_baostock(
+            await self._download_minute_tsanghi(
                 stock_codes,
                 dl_start,
                 end_date,
@@ -552,16 +560,21 @@ class GreptimeBacktestCache:
         dl_start: date,
         end_date: date,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
-        cancel_event: threading.Event | None = None,
+        cancel_event: _CancelChecker = None,
     ) -> list[str]:
         """Download daily OHLCV from tsanghi and INSERT to GreptimeDB.
 
         Returns list of all stock codes found.
         """
+        from src.common.config import get_tushare_token
         from src.data.clients.tsanghi_client import TsanghiClient
+        from src.data.clients.tushare_realtime import TushareRealtimeClient
 
         client = TsanghiClient()
         await client.start()
+
+        tushare_client = TushareRealtimeClient(token=get_tushare_token())
+        await tushare_client.start()
 
         try:
             # Resume: check which dates already exist in DB
@@ -607,12 +620,45 @@ class GreptimeBacktestCache:
                     continue
 
                 day_records: list[tuple[str, dict]] = []  # (code, record_dict)
+                _null_data_codes: list[str] = []  # 接口返回但数据为空的非停牌股
+
+                # Fetch suspended stocks from Tushare suspend_d (authoritative)
+                # If this fails, send Feishu alert and re-raise — do NOT write
+                # wrong suspension data.
+                try:
+                    suspended_codes = await tushare_client.fetch_suspended_stocks(
+                        current.strftime("%Y%m%d")
+                    )
+                except Exception as e:
+                    logger.critical(
+                        f"FATAL: Tushare suspend_d API failed for {date_str}: {e}. "
+                        f"Aborting daily download to prevent wrong suspension data.",
+                        exc_info=True,
+                    )
+                    try:
+                        from src.common.feishu_bot import FeishuBot
+
+                        bot = FeishuBot()
+                        if bot.is_configured():
+                            await bot.send_message(
+                                f"[缓存下载] 严重错误\n"
+                                f"Tushare suspend_d API 失败 ({date_str})\n"
+                                f"错误: {str(e)[:200]}\n"
+                                f"已中止日线下载，防止写入错误停牌数据"
+                            )
+                    except Exception:
+                        logger.warning("Failed to send Feishu alert for suspend_d failure")
+                    raise
+
+                seen_codes: set[str] = set()  # track codes from tsanghi
 
                 for exchange in ("XSHG", "XSHE"):
                     try:
                         records = await client.daily_latest(exchange, date_str)
                     except RuntimeError as e:
-                        logger.debug(f"tsanghi daily_latest({exchange}, {date_str}): {e}")
+                        logger.debug(
+                            f"tsanghi daily_latest({exchange}, {date_str}): {e}"
+                        )
                         continue
 
                     if not records:
@@ -626,28 +672,141 @@ class GreptimeBacktestCache:
                         if not (ticker.startswith("60") or ticker.startswith("00")):
                             continue
 
+                        seen_codes.add(ticker)
                         o = rec.get("open")
                         c = rec.get("close")
-                        if o is None or c is None:
-                            continue  # skip suspended stocks
-
                         pre_close = prev_close_map.get(ticker, 0.0)
-                        day_records.append(
-                            (
-                                ticker,
-                                {
-                                    "open": float(o),
-                                    "high": float(rec.get("high", o)),
-                                    "low": float(rec.get("low", o)),
-                                    "close": float(c),
-                                    "pre_close": pre_close,
-                                    "volume": float(rec.get("volume", 0)),
-                                    "amount": 0.0,
-                                    "turnover_ratio": None,
-                                },
+                        is_susp = ticker in suspended_codes
+
+                        if is_susp:
+                            # Case 1: Tushare suspend_d 确认停牌
+                            fill_price = pre_close if pre_close > 0 else 0.0
+                            day_records.append(
+                                (
+                                    ticker,
+                                    {
+                                        "open": fill_price,
+                                        "high": fill_price,
+                                        "low": fill_price,
+                                        "close": fill_price,
+                                        "pre_close": pre_close,
+                                        "volume": 0.0,
+                                        "amount": 0.0,
+                                        "turnover_ratio": None,
+                                        "is_suspended": True,
+                                    },
+                                )
                             )
-                        )
+                        elif o is None or c is None:
+                            # Case 2: 接口返回了记录但 open/close 为空，
+                            # 且 Tushare 未标记停牌 — 数据异常，跳过不写入
+                            _null_data_codes.append(ticker)
+                            continue
+                        else:
+                            day_records.append(
+                                (
+                                    ticker,
+                                    {
+                                        "open": float(o),
+                                        "high": float(rec.get("high", o)),
+                                        "low": float(rec.get("low", o)),
+                                        "close": float(c),
+                                        "pre_close": pre_close,
+                                        "volume": float(rec.get("volume", 0)),
+                                        "amount": 0.0,
+                                        "turnover_ratio": None,
+                                        "is_suspended": False,
+                                    },
+                                )
+                            )
                         all_stock_codes.add(ticker)
+
+                # Stocks in Tushare suspend list but NOT in tsanghi response
+                # (tsanghi may omit suspended stocks entirely)
+                for susp_code in suspended_codes:
+                    if susp_code in seen_codes:
+                        continue
+                    if not (susp_code.startswith("60") or susp_code.startswith("00")):
+                        continue
+                    pre_close = prev_close_map.get(susp_code, 0.0)
+                    fill_price = pre_close if pre_close > 0 else 0.0
+                    if fill_price <= 0:
+                        continue  # no price info at all, skip
+                    day_records.append(
+                        (
+                            susp_code,
+                            {
+                                "open": fill_price,
+                                "high": fill_price,
+                                "low": fill_price,
+                                "close": fill_price,
+                                "pre_close": pre_close,
+                                "volume": 0.0,
+                                "amount": 0.0,
+                                "turnover_ratio": None,
+                                "is_suspended": True,
+                            },
+                        )
+                    )
+                    all_stock_codes.add(susp_code)
+
+                # 停牌通报
+                if suspended_codes:
+                    susp_main = [
+                        c for c in suspended_codes
+                        if c.startswith("60") or c.startswith("00")
+                    ]
+                    if susp_main:
+                        logger.info(
+                            f"{date_str}: {len(susp_main)} stocks suspended"
+                        )
+                        try:
+                            from src.common.feishu_bot import FeishuBot
+
+                            bot = FeishuBot()
+                            if bot.is_configured():
+                                sample = ", ".join(sorted(susp_main)[:15])
+                                tail = (
+                                    f" 等{len(susp_main)}只"
+                                    if len(susp_main) > 15
+                                    else ""
+                                )
+                                await bot.send_message(
+                                    f"[缓存下载] 停牌记录\n"
+                                    f"日期: {date_str}\n"
+                                    f"停牌: {len(susp_main)} 只\n"
+                                    f"{sample}{tail}"
+                                )
+                        except Exception:
+                            logger.warning("Failed to send Feishu suspension alert")
+
+                # Case 2 聚合告警: 接口返回但数据为空的非停牌股
+                if _null_data_codes:
+                    codes_sample = ", ".join(_null_data_codes[:10])
+                    extra = (
+                        f" 等{len(_null_data_codes)}只"
+                        if len(_null_data_codes) > 10
+                        else ""
+                    )
+                    logger.warning(
+                        f"tsanghi {date_str}: {len(_null_data_codes)} stocks "
+                        f"returned null open/close but NOT in suspend_d list, "
+                        f"skipped: {codes_sample}{extra}"
+                    )
+                    try:
+                        from src.common.feishu_bot import FeishuBot
+
+                        bot = FeishuBot()
+                        if bot.is_configured():
+                            await bot.send_message(
+                                f"[缓存下载] 数据异常\n"
+                                f"日期: {date_str}\n"
+                                f"tsanghi 返回 {len(_null_data_codes)} 只股票 "
+                                f"open/close 为空，但 Tushare 未标记停牌\n"
+                                f"已跳过: {codes_sample}{extra}"
+                            )
+                    except Exception:
+                        logger.warning("Failed to send Feishu null-data alert")
 
                 if day_records:
                     trading_days_found += 1
@@ -673,21 +832,21 @@ class GreptimeBacktestCache:
             return sorted(all_stock_codes)
         finally:
             await client.stop()
+            await tushare_client.stop()
 
-    async def _download_minute_baostock(
+    async def _download_minute_tsanghi(
         self,
         codes: list[str],
         dl_start: date,
         end_date: date,
         resume_check_start: date | None = None,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
-        cancel_event: threading.Event | None = None,
+        cancel_event: _CancelChecker = None,
     ) -> None:
-        """Download 5-min bars from baostock and INSERT to GreptimeDB."""
+        """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB."""
+        from src.data.clients.tsanghi_client import TsanghiClient, bare_code_to_exchange
+
         # Resume: check which codes already have minute data
-        # Use resume_check_start (actual target dates) instead of dl_start (which
-        # includes 60-day lookback) so gap-fill downloads aren't skipped just because
-        # the stock has older minute data in the lookback window.
         check_start = resume_check_start or dl_start
         existing_codes = await self._get_existing_minute_codes(check_start, end_date)
         codes_to_download = [c for c in codes if c not in existing_codes]
@@ -699,136 +858,106 @@ class GreptimeBacktestCache:
 
         if progress_cb:
             await _maybe_await(
-                progress_cb(
-                    "minute_resume",
-                    len(existing_codes),
-                    len(codes),
-                    "",
-                )
+                progress_cb("minute_resume", len(existing_codes), len(codes), "")
             )
 
         if not codes_to_download:
             return
 
-        done = [0]
-        total = len(codes_to_download)
-        thread_exc: list[BaseException] = []
-        _DOWNLOADING = "__downloading__"
-        # Collect minute data in thread, then INSERT from main async loop
-        minute_queue: asyncio.Queue[tuple[str, dict[str, tuple]] | None] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
+        client = TsanghiClient()
+        await client.start()
 
-        def _baostock_minute_download() -> None:
-            import baostock as bs
+        try:
+            total = len(codes_to_download)
+            done = 0
+            start_str = dl_start.strftime("%Y-%m-%d")
+            end_str = end_date.strftime("%Y-%m-%d")
+            sem = asyncio.Semaphore(10)
 
-            lg = bs.login()
-            if lg.error_code != "0":
-                thread_exc.append(RuntimeError(f"baostock login failed: {lg.error_msg}"))
-                loop.call_soon_threadsafe(minute_queue.put_nowait, None)
-                return
-            n = len(codes_to_download)
-            logger.info(f"baostock login OK, downloading minute for {n} stocks")
+            async def _fetch_one(code: str) -> tuple[str, dict[str, tuple] | None]:
+                """Fetch 5min bars for one stock, aggregate to 9:40 snapshots."""
+                if cancel_event and cancel_event.is_set():
+                    return code, None
 
-            try:
-                start_str = dl_start.strftime("%Y-%m-%d")
-                end_str = end_date.strftime("%Y-%m-%d")
-                downloaded = 0
+                try:
+                    exchange = bare_code_to_exchange(code)
+                except ValueError:
+                    return code, None
 
-                for code in codes_to_download:
-                    if cancel_event and cancel_event.is_set():
-                        logger.info("Minute download cancelled by user")
-                        break
+                async with sem:
+                    try:
+                        bars = await client.five_min(exchange, code, start_str, end_str)
+                    except RuntimeError as e:
+                        logger.debug(f"tsanghi 5min({code}): {e}")
+                        return code, None
 
-                    # Signal "currently downloading" to main loop
-                    loop.call_soon_threadsafe(minute_queue.put_nowait, (_DOWNLOADING, code))
+                if not bars:
+                    return code, None
 
-                    prefix = "sh" if code.startswith("6") else "sz"
-                    bs_code = f"{prefix}.{code}"
+                # Aggregate 09:35 + 09:40 bars per day into 9:40 snapshot
+                day_data: dict[str, tuple[float, float, float, float]] = {}
+                for bar in bars:
+                    dt_str = str(bar.get("date", ""))
+                    if len(dt_str) < 16:
+                        continue
+                    bar_date = dt_str[:10]  # "yyyy-mm-dd"
+                    bar_time = dt_str[11:16]  # "hh:mm"
 
-                    rs = bs.query_history_k_data_plus(
-                        bs_code,
-                        "date,time,open,high,low,close,volume",
-                        start_date=start_str,
-                        end_date=end_str,
-                        frequency="5",
-                        adjustflag="2",
+                    if bar_time not in ("09:35", "09:40"):
+                        continue
+
+                    try:
+                        h = float(bar["high"])
+                        lo = float(bar["low"])
+                        c = float(bar["close"])
+                        # Volume in 手 → convert to 股
+                        v = float(bar.get("volume", 0)) * 100
+                    except (ValueError, TypeError, KeyError):
+                        continue
+
+                    if bar_date in day_data:
+                        prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
+                        day_data[bar_date] = (
+                            c,  # close of latest bar (9:40)
+                            prev_v + v,  # cumulative volume in 股
+                            max(prev_h, h),
+                            min(prev_l, lo),
+                        )
+                    else:
+                        day_data[bar_date] = (c, v, h, lo)
+
+                return code, day_data if day_data else None
+
+            # Process in batches to control memory and provide progress
+            batch_size = 50
+            for i in range(0, total, batch_size):
+                if cancel_event and cancel_event.is_set():
+                    logger.info("Minute download cancelled by user")
+                    raise asyncio.CancelledError()
+
+                batch = codes_to_download[i : i + batch_size]
+
+                if progress_cb and batch:
+                    await _maybe_await(
+                        progress_cb("minute_active", done, total, batch[0])
                     )
 
-                    # Aggregate: for each date, compute 9:40 snapshot
-                    # 9:35 bar covers 9:30-9:35, 9:40 bar covers 9:35-9:40
-                    day_data: dict[str, tuple[float, float, float, float]] = {}
+                results = await asyncio.gather(*[_fetch_one(c) for c in batch])
 
-                    while rs.error_code == "0" and rs.next():
-                        row = rs.get_row_data()
-                        bar_date = row[0]  # YYYY-MM-DD
-                        bar_time = row[1]  # YYYYMMDDHHMMSSmmm
-                        hhmm = bar_time[8:12]  # e.g. "0935", "0940"
-
-                        if hhmm not in ("0935", "0940"):
-                            continue
-
-                        try:
-                            float(row[2])  # open (unused, validate only)
-                            h = float(row[3])
-                            lo = float(row[4])
-                            c = float(row[5])
-                            v = float(row[6])
-                        except (ValueError, IndexError):
-                            continue
-
-                        if bar_date in day_data:
-                            prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
-                            day_data[bar_date] = (
-                                c,  # close of latest bar (9:40)
-                                prev_v + v,  # cumulative volume
-                                max(prev_h, h),
-                                min(prev_l, lo),
-                            )
-                        else:
-                            day_data[bar_date] = (c, v, h, lo)
-
-                    downloaded += 1
+                for code, day_data in results:
                     if day_data:
-                        loop.call_soon_threadsafe(minute_queue.put_nowait, (code, day_data))
-                    if downloaded % 100 == 0:
-                        logger.info(f"baostock minute: {downloaded}/{n} queried")
-            except Exception as e:
-                logger.error(f"baostock minute thread error: {e}")
-                thread_exc.append(e)
-            finally:
-                bs.logout()
-                logger.info(f"baostock minute thread done: {downloaded} stocks queried")
-                loop.call_soon_threadsafe(minute_queue.put_nowait, None)
+                        await self._write_minute(code, day_data)
+                    done += 1
 
-        thread = threading.Thread(target=_baostock_minute_download, daemon=True)
-        thread.start()
-
-        # Consume from queue and INSERT
-        while True:
-            item = await minute_queue.get()
-            if item is None:
-                break
-
-            # "Currently downloading" signal from thread
-            if item[0] == _DOWNLOADING:
                 if progress_cb:
-                    await _maybe_await(progress_cb("minute_active", done[0], total, item[1]))
-                continue
+                    await _maybe_await(progress_cb("minute", done, total, ""))
 
-            code, min_data = item
-            done[0] += 1
-            await self._write_minute(code, min_data)
+                if done % 200 == 0:
+                    logger.info(f"tsanghi minute: {done}/{total} stocks processed")
 
-            if progress_cb and done[0] % 50 == 0:
-                await _maybe_await(progress_cb("minute", done[0], total, code))
-
-        thread.join(timeout=5)
-
-        if progress_cb:
-            await _maybe_await(progress_cb("minute", done[0], total, ""))
-
-        if thread_exc:
-            raise thread_exc[0]
+            logger.info(f"tsanghi minute download done: {done}/{total} stocks")
+        finally:
+            await client.stop()
 
     # ==================== Internal Write Helpers ====================
 
@@ -840,15 +969,16 @@ class GreptimeBacktestCache:
         for code, rec in records:
             tr = rec["turnover_ratio"]
             tr_str = str(tr) if tr is not None else "NULL"
+            suspended = "true" if rec.get("is_suspended") else "false"
             values.append(
                 f"('{code}',{ts_ms},"
                 f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
-                f"{rec['pre_close']},{rec['volume']},{rec['amount']},{tr_str})"
+                f"{rec['pre_close']},{rec['volume']},{rec['amount']},{tr_str},{suspended})"
             )
         sql = (
             "INSERT INTO backtest_daily"
             "(stock_code,ts,open_price,high_price,low_price,close_price,"
-            "pre_close,vol,amount,turnover_ratio) VALUES " + ",".join(values)
+            "pre_close,vol,amount,turnover_ratio,is_suspended) VALUES " + ",".join(values)
         )
         await self._db.execute(sql)
 
@@ -947,7 +1077,7 @@ class GreptimeHistoricalAdapter:
             bare = full_code.split(".")[0]
             rows = await self._cache._db.fetch(
                 f"SELECT ts, open_price, high_price, low_price, close_price, "
-                f"pre_close, vol, amount, turnover_ratio "
+                f"pre_close, vol, amount, turnover_ratio, is_suspended "
                 f"FROM backtest_daily "
                 f"WHERE stock_code = '{bare}' AND ts >= {start_ms} AND ts <= {end_ms} "
                 f"ORDER BY ts"
@@ -969,6 +1099,7 @@ class GreptimeHistoricalAdapter:
                 "volume": "vol",
                 "amount": "amount",
                 "turnoverRatio": "turnover_ratio",
+                "is_suspended": "is_suspended",
             }
 
             for r in rows:
@@ -1041,30 +1172,25 @@ class GreptimeHistoricalAdapter:
         start_date: str,
         end_date: str,
     ) -> list[str]:
-        """Get trading dates via baostock."""
+        """Get trading dates via Tushare trade_cal.
 
-        def _query() -> list[str]:
-            import baostock as bs
-
-            lg = bs.login()
-            if lg.error_code != "0":
-                raise RuntimeError(f"baostock login failed: {lg.error_msg}")
-            try:
-                rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
-                dates: list[str] = []
-                while rs.next():
-                    row = rs.get_row_data()
-                    if row[1] == "1":
-                        dates.append(row[0])
-                return dates
-            finally:
-                bs.logout()
+        Falls back to inferring from existing daily data in GreptimeDB.
+        """
+        from src.data.clients.tushare_realtime import get_tushare_trade_calendar
 
         try:
-            return await asyncio.to_thread(_query)
-        except Exception:
-            logger.error("Failed to get trade dates")
-            raise
+            return await get_tushare_trade_calendar(start_date, end_date)
+        except Exception as e:
+            logger.warning(f"Tushare trade_cal failed: {e}, falling back to DB inference")
+
+        # Fallback: infer from existing daily data
+        rows = await self._cache._db.fetch(
+            "SELECT DISTINCT ts FROM backtest_daily ORDER BY ts"
+        )
+        all_dates = [_ts_to_date(r["ts"]).strftime("%Y-%m-%d") for r in rows]
+        sd = start_date if isinstance(start_date, str) else start_date.strftime("%Y-%m-%d")
+        ed = end_date if isinstance(end_date, str) else end_date.strftime("%Y-%m-%d")
+        return [d for d in all_dates if sd <= d <= ed]
 
 
 # ---------------------------------------------------------------------------

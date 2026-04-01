@@ -543,7 +543,7 @@ await engine.stop()
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest): tsanghi 沧海数据 (日线) + baostock (5min bars for 9:40 price) via `GreptimeBacktestCache`
+- Price (backtest): tsanghi 沧海数据 (日线 + 5min bars for 9:40 price) via `GreptimeBacktestCache`
 - Price (live): Tushare Pro `rt_min_daily`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
@@ -665,7 +665,7 @@ await engine.stop()
 - Historical data: GreptimeDB (`GreptimeBacktestCache`) via `IQuantHistoricalAdapter`
 - Board data: `LocalConceptMapper` (local JSON files)
 - Fundamentals (ST filter): PostgreSQL `stock_fundamentals` table
-- Trade calendar: akshare `tool_trade_date_hist_sina()` (cached in memory)
+- Trade calendar: Tushare `trade_cal` API (cached in memory)
 
 **Monitoring & Alerting** (Feishu notifications):
 
@@ -701,7 +701,7 @@ await engine.stop()
 - [x] V15Scanner: 7-layer funnel + V3 scoring
 - [x] iQuant routes: T+2 adaptive scheduler with three windows
 - [x] Holdings persistence to JSON file
-- [x] Trade calendar via akshare
+- [x] Trade calendar via Tushare trade_cal
 - [x] GreptimeDB cache injection from app.py
 - [x] Feishu notification with V15 prefix
 - [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation

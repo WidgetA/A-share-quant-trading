@@ -208,16 +208,17 @@ _trade_calendar_cache: list[date] | None = None
 
 
 async def _get_trade_calendar() -> list[date]:
-    """Get A-share trade calendar (cached). Uses akshare."""
+    """Get A-share trade calendar (cached). Uses Tushare trade_cal."""
     global _trade_calendar_cache
     if _trade_calendar_cache is not None:
         return _trade_calendar_cache
 
-    import akshare as ak
+    from src.data.clients.tushare_realtime import get_tushare_trade_calendar
 
-    df = await asyncio.to_thread(ak.tool_trade_date_hist_sina)
+    # Fetch a wide range covering all needed dates
+    date_strs = await get_tushare_trade_calendar("2020-01-01", "2030-12-31")
     _trade_calendar_cache = sorted(
-        datetime.strptime(str(d), "%Y-%m-%d").date() for d in df["trade_date"]
+        datetime.strptime(d, "%Y-%m-%d").date() for d in date_strs
     )
     logger.info(f"Trade calendar cached: {len(_trade_calendar_cache)} dates")
     return _trade_calendar_cache
@@ -381,17 +382,10 @@ def create_iquant_router() -> APIRouter:
         if _state["universe_cache"]:
             return _state["universe_cache"]
 
-        import akshare as ak
-
-        df = await asyncio.to_thread(ak.stock_info_a_code_name)
+        rt_client = _state["realtime_client"]
+        all_codes = await rt_client.fetch_stock_list()
         stock_filter = _state["stock_filter"]
-        codes = [
-            row["code"]
-            for _, row in df.iterrows()
-            if isinstance(row["code"], str)
-            and len(row["code"]) == 6
-            and stock_filter.is_allowed(row["code"])
-        ]
+        codes = [c for c in all_codes if stock_filter.is_allowed(c)]
         _state["universe_cache"] = codes
         logger.info(f"V15 universe cached: {len(codes)} codes")
         return codes
