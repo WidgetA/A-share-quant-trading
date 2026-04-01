@@ -1190,9 +1190,7 @@ async def _get_trading_calendar(start_date, end_date) -> list:
             if start_date <= dt.strptime(d, "%Y-%m-%d").date() < end_date
         )
         if days:
-            logger.info(
-                f"Tushare trading calendar: {len(days)} days in [{start_date}, {end_date})"
-            )
+            logger.info(f"Tushare trading calendar: {len(days)} days in [{start_date}, {end_date})")
             return days
         logger.warning("Tushare trading calendar returned no dates in range")
     except Exception as e:

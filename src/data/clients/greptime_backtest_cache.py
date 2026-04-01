@@ -594,9 +594,7 @@ class GreptimeBacktestCache:
                 await _maybe_await(progress_cb("daily_resume", skipped, skipped, ""))
 
             # Backfill: fix existing dates with is_suspended IS NULL
-            await self._backfill_is_suspended(
-                tushare_client, progress_cb, cancel_event
-            )
+            await self._backfill_is_suspended(tushare_client, progress_cb, cancel_event)
 
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
@@ -661,9 +659,7 @@ class GreptimeBacktestCache:
                     try:
                         records = await client.daily_latest(exchange, date_str)
                     except RuntimeError as e:
-                        logger.debug(
-                            f"tsanghi daily_latest({exchange}, {date_str}): {e}"
-                        )
+                        logger.debug(f"tsanghi daily_latest({exchange}, {date_str}): {e}")
                         continue
 
                     if not records:
@@ -758,24 +754,17 @@ class GreptimeBacktestCache:
                 # 停牌通报
                 if suspended_codes:
                     susp_main = [
-                        c for c in suspended_codes
-                        if c.startswith("60") or c.startswith("00")
+                        c for c in suspended_codes if c.startswith("60") or c.startswith("00")
                     ]
                     if susp_main:
-                        logger.info(
-                            f"{date_str}: {len(susp_main)} stocks suspended"
-                        )
+                        logger.info(f"{date_str}: {len(susp_main)} stocks suspended")
                         try:
                             from src.common.feishu_bot import FeishuBot
 
                             bot = FeishuBot()
                             if bot.is_configured():
                                 sample = ", ".join(sorted(susp_main)[:15])
-                                tail = (
-                                    f" 等{len(susp_main)}只"
-                                    if len(susp_main) > 15
-                                    else ""
-                                )
+                                tail = f" 等{len(susp_main)}只" if len(susp_main) > 15 else ""
                                 await bot.send_message(
                                     f"[缓存下载] 停牌记录\n"
                                     f"日期: {date_str}\n"
@@ -788,11 +777,7 @@ class GreptimeBacktestCache:
                 # Case 2 聚合告警: 接口返回但数据为空的非停牌股
                 if _null_data_codes:
                     codes_sample = ", ".join(_null_data_codes[:10])
-                    extra = (
-                        f" 等{len(_null_data_codes)}只"
-                        if len(_null_data_codes) > 10
-                        else ""
-                    )
+                    extra = f" 等{len(_null_data_codes)}只" if len(_null_data_codes) > 10 else ""
                     logger.warning(
                         f"tsanghi {date_str}: {len(_null_data_codes)} stocks "
                         f"returned null open/close but NOT in suspend_d list, "
@@ -862,9 +847,7 @@ class GreptimeBacktestCache:
             )
 
         if progress_cb:
-            await _maybe_await(
-                progress_cb("minute_resume", len(existing_codes), len(codes), "")
-            )
+            await _maybe_await(progress_cb("minute_resume", len(existing_codes), len(codes), ""))
 
         if not codes_to_download:
             return
@@ -943,9 +926,7 @@ class GreptimeBacktestCache:
                 batch = codes_to_download[i : i + batch_size]
 
                 if progress_cb and batch:
-                    await _maybe_await(
-                        progress_cb("minute_active", done, total, batch[0])
-                    )
+                    await _maybe_await(progress_cb("minute_active", done, total, batch[0]))
 
                 results = await asyncio.gather(*[_fetch_one(c) for c in batch])
 
@@ -1033,9 +1014,7 @@ class GreptimeBacktestCache:
         )
 
         if progress_cb:
-            await _maybe_await(
-                progress_cb("backfill", 0, len(dates_to_fix), "回填停牌标记")
-            )
+            await _maybe_await(progress_cb("backfill", 0, len(dates_to_fix), "回填停牌标记"))
 
         # Build prev_close map from the day before the earliest date to fix
         prev_close_map: dict[str, float] = {}
@@ -1084,8 +1063,7 @@ class GreptimeBacktestCache:
                 raise
 
             suspended_main = {
-                c for c in suspended_codes
-                if c.startswith("60") or c.startswith("00")
+                c for c in suspended_codes if c.startswith("60") or c.startswith("00")
             }
 
             # Read all existing records for this date (full row for upsert)
@@ -1159,8 +1137,10 @@ class GreptimeBacktestCache:
             if progress_cb and ((idx + 1) % 20 == 0 or idx == len(dates_to_fix) - 1):
                 await _maybe_await(
                     progress_cb(
-                        "backfill", idx + 1, len(dates_to_fix),
-                        f"{date_str} 停牌{len(suspended_main)}只"
+                        "backfill",
+                        idx + 1,
+                        len(dates_to_fix),
+                        f"{date_str} 停牌{len(suspended_main)}只",
                     )
                 )
 
@@ -1352,9 +1332,7 @@ class GreptimeHistoricalAdapter:
             logger.warning(f"Tushare trade_cal failed: {e}, falling back to DB inference")
 
         # Fallback: infer from existing daily data
-        rows = await self._cache._db.fetch(
-            "SELECT DISTINCT ts FROM backtest_daily ORDER BY ts"
-        )
+        rows = await self._cache._db.fetch("SELECT DISTINCT ts FROM backtest_daily ORDER BY ts")
         all_dates = [_ts_to_date(r["ts"]).strftime("%Y-%m-%d") for r in rows]
         sd = start_date if isinstance(start_date, str) else start_date.strftime("%Y-%m-%d")
         ed = end_date if isinstance(end_date, str) else end_date.strftime("%Y-%m-%d")

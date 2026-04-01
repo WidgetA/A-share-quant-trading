@@ -466,9 +466,7 @@ class TushareRealtimeClient:
 
         return None
 
-    async def fetch_trade_calendar(
-        self, start_date: str, end_date: str
-    ) -> list[str]:
+    async def fetch_trade_calendar(self, start_date: str, end_date: str) -> list[str]:
         """Fetch trading dates via Tushare trade_cal API.
 
         Args:
@@ -601,9 +599,7 @@ async def get_tushare_trade_calendar(
         await client.stop()
 
 
-async def get_tushare_suspended_stocks(
-    trade_date: str, token: str | None = None
-) -> set[str]:
+async def get_tushare_suspended_stocks(trade_date: str, token: str | None = None) -> set[str]:
     """Standalone helper to fetch suspended stocks for a date via Tushare suspend_d.
 
     Args:

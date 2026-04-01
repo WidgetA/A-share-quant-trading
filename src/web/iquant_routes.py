@@ -217,9 +217,7 @@ async def _get_trade_calendar() -> list[date]:
 
     # Fetch a wide range covering all needed dates
     date_strs = await get_tushare_trade_calendar("2020-01-01", "2030-12-31")
-    _trade_calendar_cache = sorted(
-        datetime.strptime(d, "%Y-%m-%d").date() for d in date_strs
-    )
+    _trade_calendar_cache = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in date_strs)
     logger.info(f"Trade calendar cached: {len(_trade_calendar_cache)} dates")
     return _trade_calendar_cache
 
