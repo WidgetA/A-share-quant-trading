@@ -474,7 +474,11 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     rt_client = scan_state.realtime_client
     universe_list = sorted(universe_codes)
     quotes = await rt_client.batch_get_early_quotes(universe_list)
-    logger.info(f"V16 scan: Tushare returned {len(quotes)} quotes")
+    quote_coverage = len(quotes) / len(universe_list) if universe_list else 0
+    logger.info(
+        f"V16 scan: Tushare returned {len(quotes)}/{len(universe_list)} quotes "
+        f"(coverage={quote_coverage:.1%})"
+    )
 
     if not quotes:
         await _notify_feishu_error(
@@ -482,6 +486,20 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
             f"Tushare batch_get_early_quotes 返回空\n请求股票数: {len(universe_list)}\n扫描中止",
         )
         raise RuntimeError(f"V16 scan: Tushare returned 0 quotes for {len(universe_list)} stocks")
+
+    # Quote coverage check: if API returned < 80% of requested stocks, data source is broken
+    if quote_coverage < 0.8:
+        await _notify_feishu_error(
+            "行情覆盖率不足",
+            f"请求: {len(universe_list)} 只\n"
+            f"返回: {len(quotes)} 只\n"
+            f"覆盖率: {quote_coverage:.1%} (阈值80%)\n"
+            f"Tushare API 可能异常，扫描中止",
+        )
+        raise RuntimeError(
+            f"V16 scan: quote coverage {len(quotes)}/{len(universe_list)} "
+            f"({quote_coverage:.1%}) below 80% threshold — halting"
+        )
 
     # Fetch prev_close
     today = datetime.now(BEIJING_TZ).date()
@@ -491,8 +509,40 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     # Fetch 37d OHLCV history for ALL universe stocks with quotes
     trading_codes = [c for c, q in quotes.items() if q.is_trading]
     logger.info(f"V16 scan: {len(trading_codes)} stocks trading, fetching history...")
+
+    # Trading stock coverage: if very few stocks are marked trading, data is suspect
+    if len(trading_codes) < len(quotes) * 0.5:
+        await _notify_feishu_error(
+            "交易中股票过少",
+            f"行情返回: {len(quotes)} 只\n"
+            f"标记交易中: {len(trading_codes)} 只\n"
+            f"占比: {len(trading_codes)/len(quotes):.1%} (阈值50%)\n"
+            f"数据可能异常，扫描中止",
+        )
+        raise RuntimeError(
+            f"V16 scan: only {len(trading_codes)}/{len(quotes)} stocks marked trading "
+            f"({len(trading_codes)/len(quotes):.1%}) — halting"
+        )
+
     hist_raw = await _fetch_history_ohlcv(scan_state.historical_adapter, trading_codes, today)
-    logger.info(f"V16 scan: history fetched for {len(hist_raw)} stocks")
+    hist_coverage = len(hist_raw) / len(trading_codes) if trading_codes else 0
+    logger.info(
+        f"V16 scan: history fetched for {len(hist_raw)}/{len(trading_codes)} stocks "
+        f"(coverage={hist_coverage:.1%})"
+    )
+
+    if hist_coverage < 0.8:
+        await _notify_feishu_error(
+            "历史数据覆盖率不足",
+            f"请求: {len(trading_codes)} 只\n"
+            f"返回: {len(hist_raw)} 只\n"
+            f"覆盖率: {hist_coverage:.1%} (阈值80%)\n"
+            f"历史数据源可能异常，扫描中止",
+        )
+        raise RuntimeError(
+            f"V16 scan: history coverage {len(hist_raw)}/{len(trading_codes)} "
+            f"({hist_coverage:.1%}) below 80% threshold — halting"
+        )
 
     # Batch fetch company names from fundamentals DB
     fdb = scan_state.fundamentals_db
