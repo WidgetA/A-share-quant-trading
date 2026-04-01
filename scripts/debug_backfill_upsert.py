@@ -1,13 +1,13 @@
 """诊断脚本：测试 GreptimeDB 对 is_suspended NULL 行的各种写入方式。
 
-用法: uv run python scripts/debug_backfill_upsert.py
+用法: python scripts/debug_backfill_upsert.py
 
 找一条 is_suspended IS NULL 的真实行，通过 Tushare suspend_d 查出
 该股票当天是否真正停牌，然后用正确的值依次测试：
   1. 单行 INSERT upsert（不 DELETE）
   2. DELETE 再 INSERT
   3. DELETE 后等 2 秒再 INSERT
-每步都 SELECT 验证结果。
+每步用 WHERE is_suspended IS NULL 验证该行是否真正脱离 NULL 状态。
 """
 
 import asyncio
@@ -19,6 +19,15 @@ import asyncpg
 class _Conn(asyncpg.Connection):
     async def reset(self, *, timeout=None):
         pass  # GreptimeDB 不支持 RESET ALL
+
+
+async def _check_still_null(conn: asyncpg.Connection, code: str, ts_ms: int) -> bool:
+    """检查该行是否仍然匹配 IS NULL —— 这是唯一可靠的判断标准。"""
+    r = await conn.fetchrow(
+        f"SELECT COUNT(*) as cnt FROM backtest_daily "
+        f"WHERE stock_code = '{code}' AND ts = {ts_ms} AND is_suspended IS NULL"
+    )
+    return int(r["cnt"]) > 0
 
 
 async def main():
@@ -66,10 +75,10 @@ async def main():
         full = await conn.fetchrow(
             f"SELECT * FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
-        print(f"[当前值] is_suspended = {full['is_suspended']}")
-        print(
-            f"         open={full['open_price']}, close={full['close_price']}, vol={full['vol']}\n"
-        )
+        print(f"[当前值] is_suspended = {full['is_suspended']}  (Python repr)")
+        print(f"         open={full['open_price']}, close={full['close_price']}, vol={full['vol']}")
+        still_null = await _check_still_null(conn, code, ts_ms)
+        print(f"         WHERE is_suspended IS NULL 匹配? {still_null}\n")
 
         # 通过 Tushare 查真正的停牌状态
         from src.data.clients.tushare_realtime import get_tushare_suspended_stocks
@@ -105,15 +114,13 @@ async def main():
         print("--- 测试 1: 单行 INSERT upsert（不 DELETE）---")
         result = await conn.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
         print(f"  INSERT result: {result}")
-        check = await conn.fetchrow(
-            f"SELECT is_suspended FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
-        )
-        print(f"  SELECT is_suspended = {check['is_suspended']}")
-        if check["is_suspended"] is not None:
-            print("  ✅ 纯 upsert 成功！后续回填用这个方案即可")
+        still_null_1 = await _check_still_null(conn, code, ts_ms)
+        print(f"  IS NULL 匹配? {still_null_1}")
+        if not still_null_1:
+            print("  ✅ 纯 upsert 成功！该行已脱离 IS NULL")
             await pool.close()
             return
-        print("  ❌ 纯 upsert 失败，is_suspended 仍为 NULL\n")
+        print("  ❌ 纯 upsert 失败，该行仍匹配 IS NULL\n")
 
         # === 测试 2: DELETE + INSERT ===
         print("--- 测试 2: DELETE 后立即 INSERT ---")
@@ -126,16 +133,14 @@ async def main():
             f"SELECT COUNT(*) as cnt FROM backtest_daily "
             f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
-        print(f"  DELETE 后 COUNT = {gone['cnt']}")
+        print(f"  DELETE 后总行数 = {gone['cnt']}")
 
         ins_result = await conn.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
         print(f"  INSERT result: {ins_result}")
-        check2 = await conn.fetchrow(
-            f"SELECT is_suspended FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
-        )
-        print(f"  SELECT is_suspended = {check2['is_suspended']}")
-        if check2["is_suspended"] is not None:
-            print("  ✅ DELETE + INSERT 成功！回填应该用 DELETE 再单行 INSERT")
+        still_null_2 = await _check_still_null(conn, code, ts_ms)
+        print(f"  IS NULL 匹配? {still_null_2}")
+        if not still_null_2:
+            print("  ✅ DELETE + INSERT 成功！")
             await pool.close()
             return
         print("  ❌ DELETE + INSERT 失败\n")
@@ -152,15 +157,13 @@ async def main():
             f"SELECT COUNT(*) as cnt FROM backtest_daily "
             f"WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
-        print(f"  2 秒后 COUNT = {gone2['cnt']}")
+        print(f"  2 秒后总行数 = {gone2['cnt']}")
 
         await conn.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
-        check3 = await conn.fetchrow(
-            f"SELECT is_suspended FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
-        )
-        print(f"  SELECT is_suspended = {check3['is_suspended']}")
-        if check3["is_suspended"] is not None:
-            print("  ✅ DELETE + 等待 + INSERT 成功！回填需要在 DELETE 后加延迟")
+        still_null_3 = await _check_still_null(conn, code, ts_ms)
+        print(f"  IS NULL 匹配? {still_null_3}")
+        if not still_null_3:
+            print("  ✅ DELETE + 等待 + INSERT 成功！")
         else:
             print("  ❌ 全部失败，可能需要 DROP TABLE 重建")
 
