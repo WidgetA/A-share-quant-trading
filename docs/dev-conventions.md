@@ -200,6 +200,51 @@ Before starting any development task:
 | Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d), tsanghi (backtest daily + 5min, **max concurrency=2**) | A-share real-time and historical data |
 | PostgreSQL Client | asyncpg | Async PostgreSQL access |
 
+## GreptimeDB 操作规范（CRITICAL）
+
+GreptimeDB 是 LSM-tree 存储引擎，数据分 memtable（内存）和 SST 文件（磁盘）两层。
+理解这个分层对正确写入数据至关重要。
+
+### ALTER TABLE 新增列后更新旧行
+
+**旧 SST 文件中的行没有新列**。直接 INSERT 同 PK 的行（upsert），新列的值只存在于 memtable。
+当 memtable flush 到 SST 并与旧 SST 合并时，**旧行会覆盖新列的值**，导致新列回退到 NULL。
+
+正确做法：**DELETE 旧行 → INSERT 新行 → FLUSH**
+
+```python
+# ❌ 错误：纯 upsert — flush 后新列值丢失
+await db.execute(f"INSERT INTO t{cols} VALUES {val}")
+
+# ✅ 正确：DELETE + INSERT + FLUSH
+for code in codes:
+    await db.execute(f"DELETE FROM t WHERE stock_code='{code}' AND ts={ts_ms}")
+for code in codes:
+    await db.execute(f"INSERT INTO t{cols} VALUES {val_map[code]}")
+await db.execute("ADMIN FLUSH_TABLE('t')")
+```
+
+### 批量写入规则
+
+| 操作 | 可靠上限 | 超过后果 |
+|------|---------|---------|
+| 单条 INSERT (VALUES 1 行) | 无限制 | — |
+| 批量 INSERT (VALUES N 行) | ~200 行 | 静默丢数据 |
+| 批量 DELETE (IN 子句) | ~200 code | 未验证，建议同上 |
+
+### ADMIN 管理命令
+
+```sql
+ADMIN FLUSH_TABLE('backtest_daily')    -- memtable → SST，确保写入持久化
+ADMIN COMPACT_TABLE('backtest_daily')  -- 合并 SST 文件，回收空间
+```
+
+### 连接池注意事项
+
+- 必须用 `asyncpg.create_pool(min_size=0, max_size=3, statement_cache_size=0)`
+- 必须自定义连接类禁用 `reset()`（GreptimeDB 不支持 `RESET ALL` / `DEALLOCATE ALL`）
+- 单连接不支持并发操作，必须用连接池
+
 ## Environment Management (uv)
 
 ```bash

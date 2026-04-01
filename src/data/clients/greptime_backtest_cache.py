@@ -1263,15 +1263,22 @@ class GreptimeBacktestCache:
                     "tr": r["turnover_ratio"],
                 }
 
-            # Single-row INSERT upsert — GreptimeDB DELETE tombstone + batch
-            # INSERT is unreliable for columns added via ALTER TABLE; single-row
-            # upsert (same primary key = last write wins) is the only safe path.
+            # ALTER TABLE 新增列的旧行在 SST 中没有该列，纯 upsert
+            # 在 memtable flush 后会被旧 SST 覆盖。
+            # 必须 DELETE 旧行 → INSERT 新行 → FLUSH 才能持久化。
             cols = (
                 "(stock_code,ts,open_price,high_price,low_price,close_price,"
                 "pre_close,vol,amount,turnover_ratio,is_suspended)"
             )
-            upserted = 0
 
+            # Step 1: DELETE all NULL rows for this date
+            for code in db_codes:
+                await self._db.execute(
+                    f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
+                )
+
+            # Step 2: INSERT fresh rows with is_suspended set
+            upserted = 0
             for code, rec in db_codes.items():
                 if code in suspended_codes:
                     # Case A: in DB + suspended → fix OHLC
@@ -1311,6 +1318,12 @@ class GreptimeBacktestCache:
                 await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
                 upserted += 1
 
+            # Step 3: FLUSH to persist (prevent old SST from overwriting)
+            try:
+                await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+            except Exception as e:
+                logger.warning(f"FLUSH_TABLE failed after backfill {date_str}: {e}")
+
             # Verify: this date should have 0 NULL is_suspended now
             verify = await self._db.fetch(
                 f"SELECT COUNT(*) FROM backtest_daily WHERE ts = {ts_ms} AND is_suspended IS NULL"
@@ -1318,8 +1331,8 @@ class GreptimeBacktestCache:
             null_remaining = verify[0][0] if verify else -1
             if null_remaining > 0:
                 msg = (
-                    f"[缓存回填] 单行 upsert 后仍失败\n"
-                    f"日期 {date_str}: upsert {upserted} 行后"
+                    f"[缓存回填] DELETE+INSERT+FLUSH 后仍失败\n"
+                    f"日期 {date_str}: 处理 {upserted} 行后"
                     f"仍有 {null_remaining} 行 is_suspended=NULL"
                 )
                 logger.error(msg)
