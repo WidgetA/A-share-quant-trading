@@ -231,6 +231,12 @@ class GreptimeBacktestCache:
         await self._db.start()
         await self._db.execute(_CREATE_DAILY_SQL)
         await self._db.execute(_CREATE_MINUTE_SQL)
+        # Add is_suspended column if missing (CREATE IF NOT EXISTS won't alter)
+        try:
+            await self._db.execute("ALTER TABLE backtest_daily ADD COLUMN is_suspended BOOLEAN")
+            logger.info("Added is_suspended column to backtest_daily")
+        except Exception:
+            pass  # column already exists
         logger.info(f"GreptimeBacktestCache connected via pgwire {self._db._host}:{self._db._port}")
 
     async def stop(self) -> None:
