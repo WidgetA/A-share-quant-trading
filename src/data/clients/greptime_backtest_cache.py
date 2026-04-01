@@ -1118,14 +1118,23 @@ class GreptimeBacktestCache:
                 )
 
             if insert_values:
-                # DELETE old rows first — GreptimeDB's append+merge may not
-                # reliably update is_suspended from NULL via INSERT upsert
-                del_result = await self._db.execute(
-                    f"DELETE FROM backtest_daily WHERE ts = {ts_ms}"
-                )
+                # DELETE old rows — GreptimeDB requires primary key in DELETE
+                all_codes = list(db_codes.keys()) + [
+                    c for c in suspended_codes if c not in db_codes
+                ]
+                batch_size = 200
+                deleted_total = 0
+                for bi in range(0, len(all_codes), batch_size):
+                    batch = all_codes[bi : bi + batch_size]
+                    codes_str = ",".join(f"'{c}'" for c in batch)
+                    await self._db.execute(
+                        f"DELETE FROM backtest_daily "
+                        f"WHERE ts = {ts_ms} AND stock_code IN ({codes_str})"
+                    )
+                    deleted_total += len(batch)
                 logger.info(
-                    f"Backfill {date_str}: DELETE={del_result}, "
-                    f"INSERT {len(insert_values)} rows "
+                    f"Backfill {date_str}: deleted {deleted_total} codes, "
+                    f"inserting {len(insert_values)} rows "
                     f"(suspended={len(suspended_codes)})"
                 )
                 sql = (
