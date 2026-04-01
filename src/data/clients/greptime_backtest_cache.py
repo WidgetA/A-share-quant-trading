@@ -1010,12 +1010,21 @@ class GreptimeBacktestCache:
         # Resume: check which codes already have minute data
         check_start = resume_check_start or dl_start
         existing_codes = await self._get_existing_minute_codes(check_start, end_date)
+        # Filter out stocks that are fully suspended (no active trading day)
+        # — they have no 5min bars from tsanghi and would be re-downloaded forever.
+        active_codes = await self._get_active_daily_codes(check_start, end_date)
+        total_before = len(codes)
+        codes = [c for c in codes if c in active_codes]
+        suspended_count = total_before - len(codes)
         codes_to_download = [c for c in codes if c not in existing_codes]
-        if existing_codes:
+        if suspended_count > 0:
             logger.info(
-                f"Minute resume: skipping {len(existing_codes)} stocks "
-                f"with existing data, downloading {len(codes_to_download)}"
+                f"Minute: skipped {suspended_count} fully-suspended stocks"
             )
+        logger.info(
+            f"Minute resume: {len(existing_codes)} cached / {len(codes)} active, "
+            f"downloading {len(codes_to_download)}"
+        )
 
         if progress_cb:
             await _maybe_await(progress_cb("minute_resume", len(existing_codes), len(codes), ""))
@@ -1235,11 +1244,11 @@ class GreptimeBacktestCache:
                     pass
                 raise
 
-            # Read all existing records for this date (full row for upsert)
+            # Read records with NULL is_suspended for this date
             db_rows = await self._db.fetch(
                 f"SELECT stock_code, open_price, high_price, low_price, "
                 f"close_price, pre_close, vol, amount, turnover_ratio "
-                f"FROM backtest_daily WHERE ts = {ts_ms}"
+                f"FROM backtest_daily WHERE ts = {ts_ms} AND is_suspended IS NULL"
             )
 
             db_codes: dict[str, dict] = {}
@@ -1256,14 +1265,21 @@ class GreptimeBacktestCache:
                     "tr": r["turnover_ratio"],
                 }
 
-            insert_values: list[str] = []
+            # Single-row INSERT upsert — GreptimeDB DELETE tombstone + batch
+            # INSERT is unreliable for columns added via ALTER TABLE; single-row
+            # upsert (same primary key = last write wins) is the only safe path.
+            cols = (
+                "(stock_code,ts,open_price,high_price,low_price,close_price,"
+                "pre_close,vol,amount,turnover_ratio,is_suspended)"
+            )
+            upserted = 0
 
             for code, rec in db_codes.items():
                 if code in suspended_codes:
                     # Case A: in DB + suspended → fix OHLC
                     pre_close = rec["pre_close"]
                     fill = pre_close if pre_close > 0 else 0.0
-                    insert_values.append(
+                    val = (
                         f"('{code}',{ts_ms},"
                         f"{fill},{fill},{fill},{fill},"
                         f"{pre_close},0.0,0.0,NULL,true)"
@@ -1271,13 +1287,18 @@ class GreptimeBacktestCache:
                 else:
                     # Case B: in DB + normal → keep data, set is_suspended=false
                     tr_str = str(rec["tr"]) if rec["tr"] is not None else "NULL"
-                    insert_values.append(
+                    val = (
                         f"('{code}',{ts_ms},"
                         f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
                         f"{rec['pre_close']},{rec['vol']},{rec['amount']},"
                         f"{tr_str},false)"
                     )
                     prev_close_map[code] = rec["close"]
+
+                await self._db.execute(
+                    f"INSERT INTO backtest_daily{cols} VALUES {val}"
+                )
+                upserted += 1
 
             # Case C: suspended but not in DB → insert with pre_close fill
             for susp_code in suspended_codes:
@@ -1286,50 +1307,42 @@ class GreptimeBacktestCache:
                 pre_close = prev_close_map.get(susp_code, 0.0)
                 if pre_close <= 0:
                     continue
-                insert_values.append(
+                val = (
                     f"('{susp_code}',{ts_ms},"
                     f"{pre_close},{pre_close},{pre_close},{pre_close},"
                     f"{pre_close},0.0,0.0,NULL,true)"
                 )
-
-            if insert_values:
-                # INSERT in batches — single INSERT with 3000+ rows silently fails
-                batch_size = 200
-                cols = (
-                    "(stock_code,ts,open_price,high_price,low_price,close_price,"
-                    "pre_close,vol,amount,turnover_ratio,is_suspended)"
+                await self._db.execute(
+                    f"INSERT INTO backtest_daily{cols} VALUES {val}"
                 )
-                for bi in range(0, len(insert_values), batch_size):
-                    batch = insert_values[bi : bi + batch_size]
-                    sql = f"INSERT INTO backtest_daily{cols} VALUES " + ",".join(batch)
-                    await self._db.execute(sql)
+                upserted += 1
 
-                # Verify: this date should have 0 NULL is_suspended now
-                verify = await self._db.fetch(
-                    f"SELECT COUNT(*) FROM backtest_daily "
-                    f"WHERE ts = {ts_ms} AND is_suspended IS NULL"
+            # Verify: this date should have 0 NULL is_suspended now
+            verify = await self._db.fetch(
+                f"SELECT COUNT(*) FROM backtest_daily "
+                f"WHERE ts = {ts_ms} AND is_suspended IS NULL"
+            )
+            null_remaining = verify[0][0] if verify else -1
+            if null_remaining > 0:
+                msg = (
+                    f"[缓存回填] 单行 upsert 后仍失败\n"
+                    f"日期 {date_str}: upsert {upserted} 行后"
+                    f"仍有 {null_remaining} 行 is_suspended=NULL"
                 )
-                null_remaining = verify[0][0] if verify else -1
-                if null_remaining > 0:
-                    msg = (
-                        f"[缓存回填] INSERT 静默失败\n"
-                        f"日期 {date_str}: 写入 {len(insert_values)} 行后"
-                        f"仍有 {null_remaining} 行 is_suspended=NULL"
-                    )
-                    logger.error(msg)
-                    try:
-                        from src.common.feishu_bot import FeishuBot
+                logger.error(msg)
+                try:
+                    from src.common.feishu_bot import FeishuBot
 
-                        bot = FeishuBot()
-                        if bot.is_configured():
-                            await bot.send_message(msg)
-                    except Exception:  # safety: ignore — 通知失败不阻断下载
-                        pass
-                else:
-                    logger.info(
-                        f"Backfill {date_str}: {len(insert_values)} rows OK "
-                        f"(suspended={len(suspended_codes)})"
-                    )
+                    bot = FeishuBot()
+                    if bot.is_configured():
+                        await bot.send_message(msg)
+                except Exception:  # safety: ignore — 通知失败不阻断下载
+                    pass
+            else:
+                logger.info(
+                    f"Backfill {date_str}: {upserted} rows OK "
+                    f"(suspended={len(suspended_codes)})"
+                )
 
             if progress_cb and ((idx + 1) % 5 == 0 or idx == len(dates_to_fix) - 1):
                 await _maybe_await(
@@ -1378,6 +1391,21 @@ class GreptimeBacktestCache:
         rows = await self._db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_minute "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
+        )
+        return {r["stock_code"] for r in rows}
+
+    async def _get_active_daily_codes(self, start_date: date, end_date: date) -> set[str]:
+        """Get stock codes that have at least one non-suspended trading day.
+
+        Stocks fully suspended/delisted in the range have no 5min bars from
+        tsanghi and should be excluded from minute download.
+        """
+        start_ms = _date_to_epoch_ms(start_date)
+        end_ms = _date_to_epoch_ms(end_date)
+        rows = await self._db.fetch(
+            f"SELECT DISTINCT stock_code FROM backtest_daily "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+            f"AND is_suspended = false AND vol > 0"
         )
         return {r["stock_code"] for r in rows}
 
