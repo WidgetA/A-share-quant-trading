@@ -1120,7 +1120,14 @@ class GreptimeBacktestCache:
             if insert_values:
                 # DELETE old rows first — GreptimeDB's append+merge may not
                 # reliably update is_suspended from NULL via INSERT upsert
-                await self._db.execute(f"DELETE FROM backtest_daily WHERE ts = {ts_ms}")
+                del_result = await self._db.execute(
+                    f"DELETE FROM backtest_daily WHERE ts = {ts_ms}"
+                )
+                logger.info(
+                    f"Backfill {date_str}: DELETE={del_result}, "
+                    f"INSERT {len(insert_values)} rows "
+                    f"(suspended={len(suspended_codes)})"
+                )
                 sql = (
                     "INSERT INTO backtest_daily"
                     "(stock_code,ts,open_price,high_price,low_price,close_price,"
@@ -1140,6 +1147,27 @@ class GreptimeBacktestCache:
                 )
 
         logger.info(f"Backfill is_suspended complete: {len(dates_to_fix)} dates fixed")
+
+        # Verify: check if NULL dates remain
+        remaining = await self._db.fetch(
+            "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL"
+        )
+        if remaining:
+            remaining_dates = sorted(_ts_to_date(r["ts"]) for r in remaining)
+            msg = (
+                f"[缓存回填] 验证失败\n"
+                f"回填 {len(dates_to_fix)} 天后仍有 {len(remaining)} 天 is_suspended=NULL\n"
+                f"日期: {remaining_dates[:5]}"
+            )
+            logger.error(msg)
+            try:
+                from src.common.feishu_bot import FeishuBot
+
+                bot = FeishuBot()
+                if bot.is_configured():
+                    await bot.send_message(msg)
+            except Exception:  # safety: ignore — 通知失败不阻断下载
+                pass
 
     # ==================== Resume Helpers ====================
 

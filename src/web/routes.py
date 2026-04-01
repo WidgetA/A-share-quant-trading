@@ -411,8 +411,10 @@ def create_momentum_router() -> APIRouter:
                     overall = 0.0
                 elif phase == "daily_resume":
                     overall = 0.05
+                elif phase == "backfill":
+                    overall = 0.05 + 0.05 * (current / total) if total > 0 else 0.05
                 elif phase == "daily":
-                    overall = 0.05 + 0.15 * (current / total) if total > 0 else 0.05
+                    overall = 0.1 + 0.1 * (current / total) if total > 0 else 0.1
                 elif phase == "minute_resume":
                     overall = 0.2
                 elif phase == "minute_active":
