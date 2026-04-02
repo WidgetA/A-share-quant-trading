@@ -2329,35 +2329,13 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/holdings")
     async def get_holdings(request: Request) -> dict:
-        """Get current broker positions (synced from iQuant) + V15 metadata."""
+        """Get current broker positions (synced from iQuant)."""
         iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr:
+        if not iquant_rtr or not hasattr(iquant_rtr, "_get_broker_positions"):
             return {"holdings": []}
 
-        # Broker positions are the source of truth
-        broker_pos = (
-            iquant_rtr._get_broker_positions()
-            if hasattr(iquant_rtr, "_get_broker_positions")
-            else []
-        )
-        # V15 holdings have metadata (name, buy_date, entry_price)
-        v15 = iquant_rtr._get_holdings() if hasattr(iquant_rtr, "_get_holdings") else []
-        v15_map = {h["code"]: h for h in v15}
-
-        # Merge: broker positions + V15 metadata where available
-        holdings = []
-        for pos in broker_pos:
-            code = pos["code"]
-            v15_h = v15_map.get(code, {})
-            holdings.append(
-                {
-                    "code": code,
-                    "name": v15_h.get("name", ""),
-                    "quantity": pos.get("volume", 0),
-                    "entry_price": v15_h.get("entry_price"),
-                    "buy_date": v15_h.get("buy_date", ""),
-                }
-            )
+        broker_pos = iquant_rtr._get_broker_positions()
+        holdings = [{"code": pos["code"], "quantity": pos.get("volume", 0)} for pos in broker_pos]
         return {"holdings": holdings}
 
     @router.get("/api/trading/recommendations")
@@ -2409,34 +2387,5 @@ def create_trading_router() -> APIRouter:
 
         pushed = iquant_rtr._push_order(signal)
         return {"success": True, "signal_id": pushed.get("id"), "quantity": quantity}
-
-    @router.post("/api/trading/sell")
-    async def submit_sell(request: Request) -> dict:
-        """Push a SELL signal into iQuant pending queue."""
-        body = await request.json()
-        stock_code = body.get("stock_code", "")
-        stock_name = body.get("stock_name", "")
-        quantity = int(body.get("quantity", 0))
-
-        if not stock_code or quantity <= 0:
-            raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
-
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr or not hasattr(iquant_rtr, "_push_order"):
-            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
-
-        signal = {
-            "type": "sell",
-            "stock_code": stock_code,
-            "stock_name": stock_name,
-            "quantity": quantity,
-            "price": None,
-            "price_type": "market",
-            "reason": "Dashboard手动卖出",
-            "manual": True,
-        }
-
-        pushed = iquant_rtr._push_order(signal)
-        return {"success": True, "signal_id": pushed.get("id")}
 
     return router

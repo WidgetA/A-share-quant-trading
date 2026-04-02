@@ -22,12 +22,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import traceback
 import uuid
 from datetime import date, datetime, time
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -39,8 +37,6 @@ logger = logging.getLogger(__name__)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
-# Holdings persistence file (trading safety: must survive restart)
-_HOLDINGS_PATH = Path("data/v15_holdings.json")
 
 # --- Authentication ---
 
@@ -177,33 +173,6 @@ async def _notify_feishu_signal(signal: dict) -> None:
         logger.warning("Failed to send Feishu signal notification", exc_info=True)
 
 
-# --- Holdings persistence ---
-
-
-def _save_holdings(holdings: list[dict]) -> None:
-    """Persist holdings to disk. Trading safety: must not lose holdings on restart."""
-    _HOLDINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _HOLDINGS_PATH.write_text(json.dumps(holdings, ensure_ascii=False, indent=2))
-    logger.info(f"V15 holdings saved ({len(holdings)} items)")
-
-
-def _load_holdings() -> list[dict]:
-    """Load holdings from disk on startup."""
-    if not _HOLDINGS_PATH.exists():
-        return []
-    try:
-        data = json.loads(_HOLDINGS_PATH.read_text())
-        if not isinstance(data, list):
-            raise ValueError("Holdings file is not a list")
-        logger.info(f"V15 holdings loaded from disk ({len(data)} items)")
-        return data
-    except (json.JSONDecodeError, ValueError) as e:
-        raise RuntimeError(
-            f"V15 holdings file corrupt: {e}. "
-            f"Cannot trade with unknown position state. Fix {_HOLDINGS_PATH} manually."
-        )
-
-
 # --- Trade calendar ---
 
 _trade_calendar_cache: list[date] | None = None
@@ -247,7 +216,6 @@ def create_iquant_router() -> APIRouter:
         "initialized": False,
         "pending_signals": [],  # signals waiting for iQuant to execute
         "executed_signals": [],  # acked signals (history)
-        "holdings": [],  # V15: [{code, name, buy_date, entry_price, marked_sell_today, early_exit}]
         "broker_positions": [],  # Actual broker positions: [{code, volume}]
         "scheduler_task": None,
         "universe_cache": None,
@@ -315,9 +283,6 @@ def create_iquant_router() -> APIRouter:
                 exclude_sme=False,
             )
         )
-
-        # Load persisted holdings
-        _state["holdings"] = _load_holdings()
 
         # Pre-load trade calendar
         try:
@@ -509,79 +474,6 @@ def create_iquant_router() -> APIRouter:
             "final_candidates": scan_result.final_candidates,
         }
 
-    # --- Gap check logic ---
-
-    async def _gap_check_holdings(today_date: date) -> None:
-        """Check each holding for T+1 gap-down or T+2 sell."""
-        calendar = await _get_trade_calendar()
-        rt_client = _state["realtime_client"]
-
-        for holding in _state["holdings"]:
-            buy_date = date.fromisoformat(holding["buy_date"])
-            days_held = _count_trading_days(calendar, buy_date, today_date)
-            entry_price = holding.get("entry_price", 0.0)
-
-            if days_held <= 0:
-                # Same day as buy (T+0) — cannot sell in A-share
-                continue
-
-            if days_held == 1:
-                # T+1: check gap
-                if entry_price <= 0:
-                    # No entry price recorded — mark early sell for safety
-                    holding["marked_sell_today"] = True
-                    holding["early_exit"] = True
-                    logger.warning(
-                        f"V15 gap check: {holding['code']} no entry_price, marking early exit"
-                    )
-                    continue
-
-                quotes = await rt_client.batch_get_quotes([holding["code"]])
-                quote = quotes.get(holding["code"])
-                if not quote or not quote.is_trading:
-                    holding["marked_sell_today"] = True
-                    holding["early_exit"] = True
-                    logger.warning(
-                        f"V15 gap check: {holding['code']} no quote available, marking early exit"
-                    )
-                    await _notify_feishu_error(
-                        "V15跳空检测失败",
-                        f"{holding['code']} {holding.get('name', '')} 无法获取开盘价，标记早卖",
-                    )
-                    continue
-
-                gap_pct = (quote.open_price - entry_price) / entry_price
-                if gap_pct < -0.03:
-                    holding["marked_sell_today"] = True
-                    holding["early_exit"] = True
-                    logger.info(
-                        f"V15 gap check: {holding['code']} gap={gap_pct:.2%} < -3%, "
-                        f"marking early exit (entry={entry_price:.2f}, open={quote.open_price:.2f})"
-                    )
-                    await _notify_feishu_error(
-                        "V15跳空止损",
-                        f"{holding['code']} {holding.get('name', '')} "
-                        f"开盘跳空 {gap_pct:.2%}\n"
-                        f"买入价: {entry_price:.2f}, 今开: {quote.open_price:.2f}\n"
-                        f"将于14:57卖出",
-                    )
-                else:
-                    logger.info(
-                        f"V15 gap check: {holding['code']} gap={gap_pct:.2%} >= -3%, "
-                        f"holding through T+1"
-                    )
-
-            elif days_held >= 2:
-                # T+2: sell today
-                holding["marked_sell_today"] = True
-                holding["early_exit"] = False
-                logger.info(
-                    f"V15: {holding['code']} T+2 reached (days_held={days_held}), "
-                    f"marking for sell today"
-                )
-
-        _save_holdings(_state["holdings"])
-
     # --- Monitoring helpers ---
 
     SIGNAL_TIMEOUT_MINUTES = 5  # alert if signal not acked within this time
@@ -679,7 +571,6 @@ def create_iquant_router() -> APIRouter:
 
     async def _send_readiness_report(now_bj: datetime) -> None:
         """Send daily readiness report at 09:30."""
-        holdings = _state["holdings"]
         last_poll = _state.get("last_poll_time")
         poll_status = "未连接"
         if last_poll:
@@ -689,19 +580,14 @@ def create_iquant_router() -> APIRouter:
             else:
                 poll_status = f"离线 ({gap / 60:.0f}分钟未响应)"
 
+        broker_pos = _state.get("broker_positions", [])
         lines = [
             "[V15] 每日就绪报告",
             f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
             f"iQuant状态: {poll_status}",
-            f"当前持仓: {len(holdings)}只",
+            f"券商持仓: {len(broker_pos)}只",
+            "今日将执行V15扫描(09:38-10:00)",
         ]
-        if holdings:
-            for h in holdings:
-                buy_date = h.get("buy_date", "?")
-                lines.append(f"  - {h['code']} {h.get('name', '')} (买入: {buy_date})")
-            lines.append("今日将跳过扫描(持仓中)")
-        else:
-            lines.append("今日将执行V15扫描(09:38-10:00)")
 
         msg = "\n".join(lines)
         logger.info("V15 readiness report sent")
@@ -794,12 +680,6 @@ def create_iquant_router() -> APIRouter:
 
     router._get_status = _get_status  # type: ignore[attr-defined]
 
-    def _get_holdings_list() -> list[dict]:
-        """Return current V15 holdings (for dashboard trading module)."""
-        return _state["holdings"]
-
-    router._get_holdings = _get_holdings_list  # type: ignore[attr-defined]
-
     def _get_broker_positions() -> list[dict]:
         """Return actual broker positions synced from iQuant."""
         return _state["broker_positions"]
@@ -820,54 +700,24 @@ def create_iquant_router() -> APIRouter:
     # --- V15 Background scheduler (trading operations only) ---
 
     async def _signal_scheduler() -> None:
-        """V15 trading scheduler: T+2 adaptive sell.
+        """V15 trading scheduler — scan only.
 
-        Trading windows:
-        1. GAP_CHECK (09:31-09:35): Check holdings for gap-down or T+2 sell
-        2. SCAN (09:38-10:00): If no holdings, run V15 scan → BUY signal
-        3. SELL (14:50-14:58): Push SELL signals for marked holdings
+        Trading window:
+        - SCAN (09:38-10:00): Run V15 scan → push Feishu report
 
         Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
         """
-        GAP_CHECK_WINDOW = (time(9, 31), time(9, 35))
         SCAN_WINDOW = (time(9, 38), time(10, 0))
-        SELL_WINDOW = (time(14, 50), time(14, 58))
 
         logger.info("V15 signal scheduler started")
 
-        gap_done_date = ""
         scan_done_date = ""
-        sell_done_date = ""
 
         try:
             while True:
                 now_bj = datetime.now(BEIJING_TZ)
                 ex_date = now_bj.strftime("%Y-%m-%d")
                 ex_time = now_bj.time().replace(second=0, microsecond=0)
-                today_date = now_bj.date()
-
-                # --- GAP CHECK: 09:31-09:35 ---
-                if (
-                    gap_done_date != ex_date
-                    and GAP_CHECK_WINDOW[0] <= ex_time <= GAP_CHECK_WINDOW[1]
-                    and _state["holdings"]
-                ):
-                    if not _state["initialized"]:
-                        await asyncio.sleep(10)
-                        continue
-                    gap_done_date = ex_date
-                    try:
-                        await _gap_check_holdings(today_date)
-                    except Exception as e:
-                        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                        logger.error(f"V15 gap check failed: {error_detail}")
-                        await _notify_feishu_error("V15跳空检测失败", error_detail)
-
-                # Gap check deadline
-                if gap_done_date != ex_date and ex_time > GAP_CHECK_WINDOW[1]:
-                    gap_done_date = ex_date
-                    if _state["holdings"]:
-                        logger.info("V15: past GAP_CHECK window, skipping")
 
                 # --- SCAN: 09:38-10:00 ---
                 if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
@@ -877,7 +727,6 @@ def create_iquant_router() -> APIRouter:
 
                     scan_done_date = ex_date
 
-                    # Always scan + push Feishu top-5 report (auto-trading disabled)
                     try:
                         rec = await _run_v15_scan()
                         if rec:
@@ -900,28 +749,7 @@ def create_iquant_router() -> APIRouter:
                 if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
                     scan_done_date = ex_date
 
-                # --- SELL: 14:50-14:58 (auto-trading disabled) ---
-                if sell_done_date != ex_date and SELL_WINDOW[0] <= ex_time <= SELL_WINDOW[1]:
-                    marked = [h for h in _state["holdings"] if h.get("marked_sell_today")]
-                    if marked:
-                        sell_done_date = ex_date
-                        codes = [h["code"] for h in marked]
-                        logger.info(
-                            f"V15: {len(marked)} holdings marked for sell {codes} "
-                            f"(auto-trading disabled, no signal pushed)"
-                        )
-
-                # Sell deadline
-                if sell_done_date != ex_date and ex_time > SELL_WINDOW[1]:
-                    sell_done_date = ex_date
-
-                # Adaptive sleep
-                all_done = (
-                    gap_done_date == ex_date
-                    and scan_done_date == ex_date
-                    and sell_done_date == ex_date
-                )
-                await asyncio.sleep(120 if all_done else 30)
+                await asyncio.sleep(120 if scan_done_date == ex_date else 30)
 
         except asyncio.CancelledError:
             logger.info("V15 signal scheduler stopped")
@@ -945,8 +773,7 @@ def create_iquant_router() -> APIRouter:
             "service": "iquant-v15",
             "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "pending_count": len(_state["pending_signals"]),
-            "holdings_count": len(_state["holdings"]),
-            "holdings": _state["holdings"],
+            "broker_positions": len(_state["broker_positions"]),
         }
 
     @router.get("/pending-signals")
@@ -991,32 +818,8 @@ def create_iquant_router() -> APIRouter:
         found["acked_at"] = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         _state["executed_signals"].append(found)
 
-        if found["type"] == "buy":
-            _state["holdings"].append(
-                {
-                    "code": found["stock_code"],
-                    "name": found.get("stock_name", ""),
-                    "buy_date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
-                    "entry_price": found.get("latest_price", 0.0),
-                    "quantity": found.get("quantity", 0),
-                    "marked_sell_today": False,
-                    "early_exit": False,
-                }
-            )
-            _save_holdings(_state["holdings"])
-            logger.info(
-                f"V15: BUY acked {found['stock_code']} @ {found.get('latest_price', '?')}, "
-                f"added to holdings ({len(_state['holdings'])} total)"
-            )
-            await _notify_feishu_ack(found)
-        elif found["type"] == "sell":
-            _state["holdings"] = [h for h in _state["holdings"] if h["code"] != found["stock_code"]]
-            _save_holdings(_state["holdings"])
-            logger.info(
-                f"V15: SELL acked {found['stock_code']}, "
-                f"removed from holdings ({len(_state['holdings'])} remaining)"
-            )
-            await _notify_feishu_ack(found)
+        logger.info(f"V15: {found['type'].upper()} acked {found['stock_code']}")
+        await _notify_feishu_ack(found)
 
         return {"success": True, "signal": found}
 
@@ -1031,12 +834,7 @@ def create_iquant_router() -> APIRouter:
         _state["available_cash"] = cash
         now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-        msg = (
-            f"[V15] iQuant脚本已启动\n"
-            f"可用资金: {cash:,.2f}\n"
-            f"持仓数: {len(_state['holdings'])}\n"
-            f"时间: {now_str}"
-        )
+        msg = f"[V15] iQuant脚本已启动\n可用资金: {cash:,.2f}\n时间: {now_str}"
         logger.info(f"iQuant report-status: cash={cash:.2f}")
 
         try:
@@ -1105,20 +903,6 @@ def create_iquant_router() -> APIRouter:
         _state["broker_positions"] = positions
         logger.info(f"iQuant sync-positions: {len(positions)} positions")
         return {"success": True, "count": len(positions)}
-
-    @router.get("/holdings")
-    async def holdings(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Return current holdings (for monitoring)."""
-        return {"holdings": _state["holdings"]}
-
-    @router.delete("/holdings")
-    async def clear_holdings(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Clear all holdings (admin use only)."""
-        count = len(_state["holdings"])
-        _state["holdings"] = []
-        _save_holdings(_state["holdings"])
-        logger.info(f"V15 holdings cleared ({count} items removed)")
-        return {"success": True, "cleared": count}
 
     @router.post("/manual-order")
     async def manual_order(
