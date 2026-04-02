@@ -1407,13 +1407,13 @@ class GreptimeBacktestCache:
         )
         null_remaining = int(null_count_row["cnt"]) if null_count_row else -1
 
-        bot = None
+        notifier = None
         try:
             from src.common.feishu_bot import FeishuBot
 
             _bot = FeishuBot()
             if _bot.is_configured():
-                bot = _bot
+                notifier = _bot
         except Exception:
             pass
 
@@ -1429,17 +1429,17 @@ class GreptimeBacktestCache:
                 f"日期: {remaining_dates[:5]}"
             )
             logger.error(msg)
-            if bot:
+            if notifier:
                 try:
-                    await bot.send_message(msg)
+                    await notifier.send_message(msg)
                 except Exception:
                     pass
         else:
             msg = f"[缓存回填] ✅ 回填完成\n修复 {len(dates_to_fix)} 天, is_suspended NULL 剩余: 0"
             logger.info(msg)
-            if bot:
+            if notifier:
                 try:
-                    await bot.send_message(msg)
+                    await notifier.send_message(msg)
                 except Exception:
                     pass
 
