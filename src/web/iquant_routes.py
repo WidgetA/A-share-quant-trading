@@ -647,29 +647,22 @@ def create_iquant_router() -> APIRouter:
                     # --- Clear stale broker data when offline ---
                     last_poll = _state.get("last_poll_time")
                     is_offline = last_poll is None or (
-                        (now_bj - last_poll).total_seconds()
-                        >= HEARTBEAT_TIMEOUT_SECONDS
+                        (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS
                     )
                     if is_offline:
                         if _state["broker_positions"] or _state.get("available_cash", 0) > 0:
-                            logger.info(
-                                "V15: iQuant offline — clearing broker positions/cash"
-                            )
+                            logger.info("V15: iQuant offline — clearing broker positions/cash")
                             _state["broker_positions"] = []
                             _state["available_cash"] = 0
 
                     # --- CONTINUOUS MONITORING ---
                     await _expire_stale_signals(now_bj)
                     await _check_signal_timeout(now_bj)
-                    heartbeat_alert_ts = await _check_heartbeat(
-                        now_bj, heartbeat_alert_ts
-                    )
+                    heartbeat_alert_ts = await _check_heartbeat(now_bj, heartbeat_alert_ts)
                 except asyncio.CancelledError:
                     raise  # propagate for clean shutdown
                 except Exception as e:
-                    logger.error(
-                        f"V15 monitoring iteration error: {e}", exc_info=True
-                    )
+                    logger.error(f"V15 monitoring iteration error: {e}", exc_info=True)
 
                 await asyncio.sleep(30)
 
