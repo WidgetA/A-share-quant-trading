@@ -5,14 +5,10 @@ iQuant 实盘下单脚本 — 轮询服务端 /pending-signals, 用 passorder() 
 在 iQuant (QMT) 1 分钟 K 线实盘模式下运行。
 
 两个独立循环:
-  - 状态线程 (30s): 心跳 + 同步持仓/余额 → 与交易时段无关
-  - handlebar (盘中): 轮询 /pending-signals → passorder() 下单
+  - 状态线程 (30s): 心跳 + 把 _state 中的持仓/余额发到服务端 (纯 HTTP, 不调 QMT API)
+  - handlebar (盘中): 更新持仓/余额到 _state + 轮询信号 + 下单
 
-下单方式 (统一 passorder):
-  - 买入: 市价 1101 (最优五档即时成交剩余撤销)
-  - 卖出: 市价 1101, 数量从持仓查询
-  - V15 买入: 可用资金 * 95% / 价格, 取整到 100 股
-  - V15 卖出: 查持仓可用数量, 全部卖出
+QMT API (get_trade_detail_data / passorder) 只能在主线程调用。
 """
 import json
 import threading
@@ -28,6 +24,9 @@ _state = {
     "startup_reported": False,
     "fields_printed": False,
     "pos_fields_printed": False,
+    # Broker state — written by main thread (init/handlebar), read by state thread
+    "positions": [],
+    "cash": 0,
 }
 
 
@@ -42,7 +41,7 @@ def _api_call(endpoint, method="GET", body=None):
     return json.loads(resp.read().decode("utf-8"))
 
 
-# ── Broker query helpers (use accID, not ContextInfo) ─────────
+# ── Broker query helpers (main thread only) ───────────────────
 
 def _iquant_code(code):
     """转为 iQuant 格式: 601398 -> 601398.SH"""
@@ -105,16 +104,26 @@ def _get_all_positions(accID):
     return []
 
 
-# ── State sync thread (independent of trading hours) ─────────
+def _refresh_broker_state():
+    """Query broker for positions + cash, store in _state. Main thread only."""
+    accID = _state["accID"]
+    positions = _get_all_positions(accID)
+    cash = _get_available_cash(accID)
+    # Only update if broker returned data; don't overwrite with empty
+    if positions or cash > 0:
+        _state["positions"] = positions
+        _state["cash"] = cash
+
+
+# ── State sync thread (pure HTTP, no QMT API) ────────────────
 
 def _state_sync_loop():
-    """Every 30s: heartbeat + sync positions + cash to server (no Feishu)."""
-    accID = _state["accID"]
+    """Every 30s: send heartbeat + current _state to server."""
     while True:
-        positions = _get_all_positions(accID)
-        cash = _get_available_cash(accID)
-
-        body = {"positions": positions, "available_cash": cash}
+        body = {
+            "positions": _state["positions"],
+            "available_cash": _state["cash"],
+        }
         try:
             _api_call("/heartbeat", "POST", body)
         except Exception as e:
@@ -123,6 +132,7 @@ def _state_sync_loop():
         # One-time startup Feishu notification
         if not _state["startup_reported"]:
             _state["startup_reported"] = True
+            cash = _state["cash"]
             if cash > 0:
                 try:
                     _api_call("/report-status", "POST", {"available_cash": cash})
@@ -135,7 +145,7 @@ def _state_sync_loop():
                         "message": "iQuant脚本已启动，当前券商柜台未连接（非交易时段或柜台尚未开启），余额暂时无法查询。柜台连通后将自动推送余额。",
                         "stock_code": "", "stock_name": "", "reason": "",
                     })
-                    print("[STATUS] startup notified (no cash yet)")
+                    print("[STATUS] startup notified (broker not connected)")
                 except Exception as e:
                     print("[STATUS NOTIFY ERR] %s" % e)
 
@@ -245,19 +255,27 @@ def init(ContextInfo):
     _state["accID"] = ContextInfo.accID
     print("[INIT] iQuant live trading script started")
     print("[INIT] API_BASE = %s" % API_BASE)
+
+    # Query broker state on main thread before starting sync thread
+    _refresh_broker_state()
+    print("[INIT] positions=%d cash=%.2f" % (len(_state["positions"]), _state["cash"]))
+
     t = threading.Thread(target=_state_sync_loop, daemon=True)
     t.start()
     print("[INIT] state sync thread started")
 
 
 def handlebar(ContextInfo):
-    """Trading only — poll signals and execute orders."""
+    """Update broker state + poll signals and execute orders."""
     now = time.time()
 
     # 节流: 每30秒最多轮询一次
     if now - _state.get("last_poll_ts", 0) < 30:
         return
     _state["last_poll_ts"] = now
+
+    # Update broker state (main thread — QMT APIs work here)
+    _refresh_broker_state()
 
     try:
         timetag = ContextInfo.get_bar_timetag(ContextInfo.barpos)
