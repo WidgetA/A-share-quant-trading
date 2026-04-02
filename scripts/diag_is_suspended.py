@@ -5,6 +5,7 @@ Run inside the trading-service container:
 
 Connects to GreptimeDB via asyncpg (pgwire port 4003).
 """
+
 import asyncio
 import os
 
@@ -19,7 +20,9 @@ async def main():
     print("Connected.\n")
 
     # 1. Count NULL rows
-    row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended IS NULL")
+    row = await conn.fetchrow(
+        "SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended IS NULL"
+    )
     null_cnt = row["cnt"]
     print(f"[1] is_suspended IS NULL 总行数: {null_cnt}")
 
@@ -29,7 +32,9 @@ async def main():
         return
 
     # 2. Which dates have NULL?
-    rows = await conn.fetch("SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL ORDER BY ts")
+    rows = await conn.fetch(
+        "SELECT DISTINCT ts FROM backtest_daily WHERE is_suspended IS NULL ORDER BY ts"
+    )
     print(f"[2] 涉及 {len(rows)} 个日期:")
     for r in rows[:10]:
         ts = r["ts"]
@@ -39,9 +44,15 @@ async def main():
     # 3. Total rows vs NULL rows per sample date
     if rows:
         sample_ts = rows[0]["ts"]
-        total = await conn.fetchrow(f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = '{sample_ts}'")
-        null = await conn.fetchrow(f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = '{sample_ts}' AND is_suspended IS NULL")
-        not_null = await conn.fetchrow(f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = '{sample_ts}' AND is_suspended IS NOT NULL")
+        total = await conn.fetchrow(
+            f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = '{sample_ts}'"
+        )
+        null = await conn.fetchrow(
+            f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = '{sample_ts}' AND is_suspended IS NULL"
+        )
+        not_null = await conn.fetchrow(
+            f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = '{sample_ts}' AND is_suspended IS NOT NULL"
+        )
         print(f"\n[3] 抽样日期 ts={sample_ts}:")
         print(f"    总行数:        {total['cnt']}")
         print(f"    NULL 行数:     {null['cnt']}")
@@ -56,7 +67,9 @@ async def main():
         print(f"    COMPACT_TABLE 失败: {e}")
 
     # 5. Re-check after compact
-    row2 = await conn.fetchrow("SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended IS NULL")
+    row2 = await conn.fetchrow(
+        "SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended IS NULL"
+    )
     print(f"\n[5] COMPACT 后 is_suspended IS NULL 总行数: {row2['cnt']}")
     if row2["cnt"] < null_cnt:
         print(f"    减少了 {null_cnt - row2['cnt']} 行 — COMPACT 有效!")

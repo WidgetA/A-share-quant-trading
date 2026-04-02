@@ -1407,14 +1407,15 @@ class GreptimeBacktestCache:
         )
         null_remaining = int(null_count_row["cnt"]) if null_count_row else -1
 
+        bot = None
         try:
             from src.common.feishu_bot import FeishuBot
 
-            bot = FeishuBot()
-            if not bot.is_configured():
-                bot = None
+            _bot = FeishuBot()
+            if _bot.is_configured():
+                bot = _bot
         except Exception:
-            bot = None
+            pass
 
         if null_remaining > 0:
             remaining = await self._db.fetch(
