@@ -81,15 +81,17 @@ def _get_all_positions(ContextInfo):
             return []
         result = []
         for pos in positions:
-            # 首次成功时打印字段名, 方便排查
+            # 首次成功时打印全部字段名+值, 方便排查
             if not _state["pos_fields_printed"]:
                 _state["pos_fields_printed"] = True
                 attrs = [a for a in dir(pos) if a.startswith('m_')]
                 print("[POS] fields: %s" % attrs)
+                for a in attrs:
+                    print("[POS]   %s = %s" % (a, getattr(pos, a, '?')))
             code = pos.m_strInstrumentID.split(".")[0]
-            volume = int(pos.m_nCanUseVolume)
-            if volume > 0:
-                result.append({"code": code, "volume": volume})
+            # m_nVolume=总持仓, m_nCanUseVolume=可卖(T+1才有)
+            volume = int(getattr(pos, 'm_nVolume', 0) or pos.m_nCanUseVolume)
+            result.append({"code": code, "volume": volume})
         return result
     except Exception as e:
         print("[POS ALL ERR] %s" % e)

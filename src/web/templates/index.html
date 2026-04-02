@@ -91,27 +91,27 @@
     <!-- Status Cards Grid -->
     <div class="status-grid">
         <!-- iQuant Connection Status -->
-        <div class="status-card">
+        <div class="status-card" id="iquantCard">
             <div class="status-card-header">
                 <h3>iQuant 连接</h3>
-                <span class="status-indicator {{ 'online' if iquant_status.connected else 'offline' }}">
-                    {{ '在线' if iquant_status.connected else '离线' }}
-                </span>
+                <span class="status-indicator" id="iquantIndicator">--</span>
             </div>
             <div class="status-card-body">
                 <div class="status-card-row">
                     <span class="status-card-label">心跳</span>
-                    <span class="status-card-value">
-                        {{ iquant_status.last_poll_time[11:] if iquant_status.last_poll_time else '从未连接' }}
-                    </span>
+                    <span class="status-card-value" id="iquantHeartbeat">--</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">余额</span>
+                    <span class="status-card-value" id="iquantCash">--</span>
                 </div>
                 <div class="status-card-row">
                     <span class="status-card-label">持仓</span>
-                    <span class="status-card-value">{{ iquant_status.holdings_count }}</span>
+                    <span class="status-card-value" id="iquantHoldings">--</span>
                 </div>
                 <div class="status-card-row">
                     <span class="status-card-label">待执行</span>
-                    <span class="status-card-value">{{ iquant_status.pending_count }}</span>
+                    <span class="status-card-value" id="iquantPending">--</span>
                 </div>
             </div>
         </div>
@@ -243,7 +243,7 @@ function renderHoldings(holdings) {
     }
 
     let html = '<table class="trading-table"><thead><tr>' +
-        '<th>代码</th><th>名称</th><th>股数</th><th>买入价</th><th>买入日</th><th>操作</th>' +
+        '<th>代码</th><th>名称</th><th>股数</th><th>买入价</th><th>操作</th>' +
         '</tr></thead><tbody>';
 
     for (const h of holdings) {
@@ -255,7 +255,6 @@ function renderHoldings(holdings) {
             '<td>' + esc(h.name || '') + '</td>' +
             '<td>' + qtyText + '</td>' +
             '<td class="price">' + entryPrice + '</td>' +
-            '<td>' + esc(h.buy_date || '') + '</td>' +
             '<td>';
         if (qty > 0) {
             html += '<button class="btn-sm btn-sell" onclick="doSell(\'' +
@@ -429,10 +428,29 @@ function esc(s) {
     return d.innerHTML;
 }
 
+// --- iQuant Status Polling ---
+async function loadIquantStatus() {
+    try {
+        const resp = await fetch('/api/iquant/status');
+        const d = await resp.json();
+        const ind = document.getElementById('iquantIndicator');
+        ind.textContent = d.connected ? '在线' : '离线';
+        ind.className = 'status-indicator ' + (d.connected ? 'online' : 'offline');
+        document.getElementById('iquantHeartbeat').textContent =
+            d.last_poll_time ? d.last_poll_time.substring(11) : '从未连接';
+        document.getElementById('iquantCash').textContent =
+            d.available_cash > 0 ? d.available_cash.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
+        document.getElementById('iquantHoldings').textContent = d.holdings_count;
+        document.getElementById('iquantPending').textContent = d.pending_count;
+    } catch (e) { /* ignore */ }
+}
+
 // --- Init ---
 document.getElementById('tradeDatePicker').addEventListener('change', loadRecommendations);
 loadHoldings();
 loadRecommendations();
+loadIquantStatus();
 setInterval(loadHoldings, 10000);
+setInterval(loadIquantStatus, 10000);
 </script>
 {% endblock %}

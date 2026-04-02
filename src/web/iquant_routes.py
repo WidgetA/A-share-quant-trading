@@ -789,6 +789,7 @@ def create_iquant_router() -> APIRouter:
             "gap_seconds": round(gap_seconds) if gap_seconds is not None else None,
             "holdings_count": len(_state["broker_positions"]),
             "pending_count": len(_state["pending_signals"]),
+            "available_cash": _state.get("available_cash", 0),
         }
 
     router._get_status = _get_status  # type: ignore[attr-defined]
@@ -798,6 +799,12 @@ def create_iquant_router() -> APIRouter:
         return _state["holdings"]
 
     router._get_holdings = _get_holdings_list  # type: ignore[attr-defined]
+
+    def _get_broker_positions() -> list[dict]:
+        """Return actual broker positions synced from iQuant."""
+        return _state["broker_positions"]
+
+    router._get_broker_positions = _get_broker_positions  # type: ignore[attr-defined]
 
     def _push_order(signal: dict) -> dict:
         """Push a manual order signal from dashboard (no auth).
