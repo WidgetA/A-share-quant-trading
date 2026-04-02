@@ -157,7 +157,7 @@
     </div>
 
     <!-- Trading Module -->
-    <section style="margin-top: 1.5rem;">
+    <div class="status-card" style="margin-top: 1.5rem;">
         <!-- Date picker -->
         <div class="date-bar">
             <label>日期</label>
@@ -186,7 +186,7 @@
                 <div class="empty-state">加载中...</div>
             </div>
         </div>
-    </section>
+    </div>
 </div>
 
 <!-- Toast element -->
@@ -300,10 +300,16 @@ async function loadRecommendations() {
     try {
         const resp = await fetch('/api/trading/recommendations?date=' + selectedDate);
         const data = await resp.json();
+        if (data.error) {
+            document.getElementById('recContainer').innerHTML =
+                '<div class="empty-state" style="color:#d32f2f;">查询失败: ' + esc(data.error) + '</div>';
+            document.getElementById('recCount').textContent = '0';
+            return;
+        }
         renderRecommendations(data.recommendations || [], isToday);
     } catch (e) {
         document.getElementById('recContainer').innerHTML =
-            '<div class="empty-state">加载推荐失败</div>';
+            '<div class="empty-state" style="color:#d32f2f;">加载推荐失败: ' + esc(e.message) + '</div>';
     }
 }
 
