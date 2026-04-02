@@ -115,6 +115,18 @@ def _refresh_broker_state():
         _state["cash"] = cash
 
 
+def _sync_state_now():
+    """Immediately push current _state to server (e.g. after a trade)."""
+    body = {
+        "positions": _state["positions"],
+        "available_cash": _state["cash"],
+    }
+    try:
+        _api_call("/heartbeat", "POST", body)
+    except Exception as e:
+        print("[SYNC NOW ERR] %s" % e)
+
+
 # ── State sync thread (pure HTTP, no QMT API) ────────────────
 
 def _state_sync_loop():
@@ -305,5 +317,8 @@ def handlebar(ContextInfo):
             success = _execute_signal(ContextInfo, signal)
             if success:
                 _ack_signal(sig_id)
+                # Immediately refresh positions/cash after trade
+                _refresh_broker_state()
+                _sync_state_now()
         except Exception as e:
             print("[EXEC ERR] signal %s: %s" % (sig_id, e))
