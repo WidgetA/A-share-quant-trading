@@ -723,18 +723,20 @@ def create_iquant_router() -> APIRouter:
         """Return pending signals for dashboard display."""
         results = []
         for sig in _state["pending_signals"]:
-            results.append({
-                "id": sig.get("id", ""),
-                "type": sig.get("type", ""),
-                "stock_code": sig.get("stock_code", ""),
-                "stock_name": sig.get("stock_name", ""),
-                "quantity": sig.get("quantity", 0),
-                "price_type": sig.get("price_type", "market"),
-                "price": sig.get("price"),
-                "reason": sig.get("reason", ""),
-                "created_at": sig.get("created_at", ""),
-                "manual": sig.get("manual", False),
-            })
+            results.append(
+                {
+                    "id": sig.get("id", ""),
+                    "type": sig.get("type", ""),
+                    "stock_code": sig.get("stock_code", ""),
+                    "stock_name": sig.get("stock_name", ""),
+                    "quantity": sig.get("quantity", 0),
+                    "price_type": sig.get("price_type", "market"),
+                    "price": sig.get("price"),
+                    "reason": sig.get("reason", ""),
+                    "created_at": sig.get("created_at", ""),
+                    "manual": sig.get("manual", False),
+                }
+            )
         return results
 
     router._get_pending_signals = _get_pending_signals  # type: ignore[attr-defined]
