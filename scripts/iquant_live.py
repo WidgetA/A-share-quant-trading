@@ -2,13 +2,13 @@
 """
 iQuant 实盘下单脚本 — 轮询服务端 /pending-signals, 用 passorder() 执行。
 
-在 iQuant (QMT) 1 分钟 K 线实盘模式下运行。
-
-两个独立循环:
+架构 (v2):
+  - init 主线程循环 (5s): 轮询信号 + passorder下单 + 刷新持仓余额
   - 状态线程 (30s): 心跳 + 把 _state 中的持仓/余额发到服务端 (纯 HTTP, 不调 QMT API)
-  - handlebar (盘中): 更新持仓/余额到 _state + 轮询信号 + 下单
+  - handlebar: 空壳 (QMT 框架要求存在)
 
 QMT API (get_trade_detail_data / passorder) 只能在主线程调用。
+init 不 return，主线程控制权不交回 QMT。
 """
 import json
 import threading
@@ -27,6 +27,9 @@ _state = {
     # Broker state — written by main thread (init/handlebar), read by state thread
     "positions": [],
     "cash": 0,
+    # Heartbeat thread liveness tracking
+    "sync_thread": None,        # threading.Thread reference
+    "last_sync_attempt": 0,     # time.time() of last heartbeat attempt
 }
 
 
@@ -130,38 +133,54 @@ def _sync_state_now():
 # ── State sync thread (pure HTTP, no QMT API) ────────────────
 
 def _state_sync_loop():
-    """Every 30s: send heartbeat + current _state to server."""
+    """Every 30s: send heartbeat + current _state to server.
+
+    Wrapped in outer try/except to survive ANY exception — if the inner
+    loop somehow breaks, we log and restart after a short delay.
+    """
     while True:
-        body = {
-            "positions": _state["positions"],
-            "available_cash": _state["cash"],
-        }
         try:
-            _api_call("/heartbeat", "POST", body)
+            _state["last_sync_attempt"] = time.time()
+            body = {
+                "positions": _state["positions"],
+                "available_cash": _state["cash"],
+            }
+            try:
+                _api_call("/heartbeat", "POST", body)
+                # Log success every ~5 min (every 10th beat) so user can verify in QMT console
+                beat_count = _state.get("beat_count", 0) + 1
+                _state["beat_count"] = beat_count
+                if beat_count % 10 == 1:
+                    print("[HEARTBEAT] ok #%d pos=%d cash=%.0f" % (
+                        beat_count, len(_state["positions"]), _state["cash"]))
+            except Exception as e:
+                print("[STATE SYNC ERR] %s" % e)
+
+            # One-time startup Feishu notification
+            if not _state["startup_reported"]:
+                _state["startup_reported"] = True
+                cash = _state["cash"]
+                if cash > 0:
+                    try:
+                        _api_call("/report-status", "POST", {"available_cash": cash})
+                        print("[STATUS] startup reported, cash=%.2f" % cash)
+                    except Exception as e:
+                        print("[STATUS ERR] %s" % e)
+                else:
+                    try:
+                        _api_call("/report-trade", "POST", {
+                            "message": "iQuant脚本已启动，当前券商柜台未连接（非交易时段或柜台尚未开启），余额暂时无法查询。柜台连通后将自动推送余额。",
+                            "stock_code": "", "stock_name": "", "reason": "",
+                        })
+                        print("[STATUS] startup notified (broker not connected)")
+                    except Exception as e:
+                        print("[STATUS NOTIFY ERR] %s" % e)
+
+            time.sleep(30)
         except Exception as e:
-            print("[STATE SYNC ERR] %s" % e)
-
-        # One-time startup Feishu notification
-        if not _state["startup_reported"]:
-            _state["startup_reported"] = True
-            cash = _state["cash"]
-            if cash > 0:
-                try:
-                    _api_call("/report-status", "POST", {"available_cash": cash})
-                    print("[STATUS] startup reported, cash=%.2f" % cash)
-                except Exception as e:
-                    print("[STATUS ERR] %s" % e)
-            else:
-                try:
-                    _api_call("/report-trade", "POST", {
-                        "message": "iQuant脚本已启动，当前券商柜台未连接（非交易时段或柜台尚未开启），余额暂时无法查询。柜台连通后将自动推送余额。",
-                        "stock_code": "", "stock_name": "", "reason": "",
-                    })
-                    print("[STATUS] startup notified (broker not connected)")
-                except Exception as e:
-                    print("[STATUS NOTIFY ERR] %s" % e)
-
-        time.sleep(30)
+            # Catch-all: don't let the thread die
+            print("[SYNC THREAD CRASH] %s — retrying in 10s" % e)
+            time.sleep(10)
 
 
 # ── Trade execution helpers ───────────────────────────────────
@@ -261,64 +280,96 @@ def _ack_signal(signal_id):
 
 # ── QMT entry points ─────────────────────────────────────────
 
+def _start_sync_thread():
+    """Start (or restart) the state sync thread. Returns the thread."""
+    t = threading.Thread(target=_state_sync_loop, daemon=True)
+    t.start()
+    _state["sync_thread"] = t
+    _state["last_sync_attempt"] = time.time()
+    return t
+
+
+POLL_INTERVAL = 5   # seconds between signal polls
+BROKER_REFRESH_INTERVAL = 30  # seconds between broker state refreshes
+
+
 def init(ContextInfo):
     ContextInfo.set_account("410015160653")
     ContextInfo.accID = "410015160653"
     _state["accID"] = ContextInfo.accID
-    print("[INIT] iQuant live trading script started")
+    _state["ContextInfo"] = ContextInfo
+    print("[INIT] iQuant live trading script started (v2 — main-thread loop)")
     print("[INIT] API_BASE = %s" % API_BASE)
+    print("[INIT] poll_interval = %ds" % POLL_INTERVAL)
 
     # Query broker state on main thread before starting sync thread
     _refresh_broker_state()
     print("[INIT] positions=%d cash=%.2f" % (len(_state["positions"]), _state["cash"]))
 
-    t = threading.Thread(target=_state_sync_loop, daemon=True)
-    t.start()
+    _start_sync_thread()
     print("[INIT] state sync thread started")
 
+    # Main-thread loop: poll signals + execute + refresh broker state
+    print("[INIT] entering main-thread polling loop...")
+    _main_loop(ContextInfo)
 
-def handlebar(ContextInfo):
-    """Update broker state + poll signals and execute orders."""
-    now = time.time()
 
-    # 节流: 每30秒最多轮询一次
-    if now - _state.get("last_poll_ts", 0) < 30:
-        return
-    _state["last_poll_ts"] = now
+def _main_loop(ContextInfo):
+    """Main-thread loop: poll signals every POLL_INTERVAL, refresh broker state periodically."""
+    last_broker_refresh = time.time()
+    poll_count = 0
 
-    # Update broker state (main thread — QMT APIs work here)
-    _refresh_broker_state()
-
-    try:
-        timetag = ContextInfo.get_bar_timetag(ContextInfo.barpos)
-        bar_time = timetag_to_datetime(timetag, "%H:%M")
-    except Exception as e:
-        print("[BAR ERR] %s" % e)
-        return
-
-    print("[BAR] time=%s barpos=%d" % (bar_time, ContextInfo.barpos))
-
-    try:
-        result = _api_call("/pending-signals")
-    except Exception as e:
-        print("[POLL ERR] %s: %s" % (bar_time, e))
-        return
-
-    signals = result.get("signals", [])
-    if not signals:
-        print("[POLL %s] no pending signals" % bar_time)
-        return
-
-    print("[POLL %s] found %d pending signal(s)" % (bar_time, len(signals)))
-
-    for signal in signals:
-        sig_id = signal.get("id", "?")
+    while True:
         try:
-            success = _execute_signal(ContextInfo, signal)
-            if success:
-                _ack_signal(sig_id)
-                # Immediately refresh positions/cash after trade
+            now = time.time()
+
+            # Watchdog: restart sync thread if dead or stuck
+            sync_thread = _state.get("sync_thread")
+            last_attempt = _state.get("last_sync_attempt", 0)
+            if sync_thread is None or not sync_thread.is_alive() or (now - last_attempt > 120):
+                reason = "dead" if (sync_thread and not sync_thread.is_alive()) else "stuck/missing"
+                print("[WATCHDOG] sync thread %s — restarting" % reason)
+                _start_sync_thread()
+
+            # Refresh broker state every BROKER_REFRESH_INTERVAL
+            if now - last_broker_refresh >= BROKER_REFRESH_INTERVAL:
                 _refresh_broker_state()
-                _sync_state_now()
+                last_broker_refresh = now
+
+            # Poll for pending signals
+            try:
+                result = _api_call("/pending-signals")
+            except Exception as e:
+                print("[POLL ERR] %s" % e)
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            signals = result.get("signals", [])
+            poll_count += 1
+
+            # Log every 60th poll (~5min) to avoid spam
+            if poll_count % 60 == 1:
+                print("[POLL #%d] signals=%d pos=%d cash=%.0f" % (
+                    poll_count, len(signals), len(_state["positions"]), _state["cash"]))
+
+            if signals:
+                print("[POLL] found %d pending signal(s)" % len(signals))
+                for signal in signals:
+                    sig_id = signal.get("id", "?")
+                    try:
+                        success = _execute_signal(ContextInfo, signal)
+                        if success:
+                            _ack_signal(sig_id)
+                            _refresh_broker_state()
+                            last_broker_refresh = time.time()
+                            _sync_state_now()
+                    except Exception as e:
+                        print("[EXEC ERR] signal %s: %s" % (sig_id, e))
+
+            time.sleep(POLL_INTERVAL)
+
         except Exception as e:
-            print("[EXEC ERR] signal %s: %s" % (sig_id, e))
+            print("[MAIN LOOP ERR] %s — continuing in %ds" % (e, POLL_INTERVAL))
+            time.sleep(POLL_INTERVAL)
+
+

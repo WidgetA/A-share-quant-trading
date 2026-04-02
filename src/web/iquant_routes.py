@@ -101,7 +101,7 @@ async def _notify_feishu_error(title: str, detail: str) -> None:
 
         bot = FeishuBot()
         if bot.is_configured():
-            await bot.send_alert(f"[V15] {title}", detail)
+            await bot.send_alert(f"[测试服] {title}", detail)
     except Exception:
         logger.warning("Failed to send Feishu error notification", exc_info=True)
 
@@ -119,7 +119,7 @@ async def _notify_feishu_ack(signal: dict) -> None:
         pushed = signal.get("created_at", "?")
         acked = signal.get("acked_at", "?")
         lines = [
-            f"[V15] {direction}已执行",
+            f"[测试服] {direction}已执行",
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
@@ -157,7 +157,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
 
         direction = "买入" if signal["type"] == "buy" else "卖出"
         lines = [
-            f"[V15] {direction}信号",
+            f"[测试服] {direction}信号",
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
@@ -478,7 +478,7 @@ def create_iquant_router() -> APIRouter:
 
     SIGNAL_TIMEOUT_MINUTES = 5  # alert if signal not acked within this time
     SIGNAL_EXPIRY_MINUTES = 10  # auto-expire signal after this time (no execution)
-    HEARTBEAT_TIMEOUT_MINUTES = 3  # alert if iQuant stops polling for this long
+    HEARTBEAT_TIMEOUT_SECONDS = 90  # consider offline after this many seconds without heartbeat
     TRADING_HOURS = (time(9, 30), time(15, 0))
 
     async def _check_signal_timeout(now_bj: datetime) -> None:
@@ -528,33 +528,44 @@ def create_iquant_router() -> APIRouter:
                 still_pending.append(sig)
         _state["pending_signals"] = still_pending
 
-    async def _check_heartbeat(now_bj: datetime, alert_sent_date: str) -> str:
-        """Alert if iQuant has not polled during trading hours. Returns updated alert date."""
-        ex_date = now_bj.strftime("%Y-%m-%d")
+    async def _check_heartbeat(now_bj: datetime, last_alert_ts: float) -> float:
+        """Alert if iQuant has not polled during trading hours.
+
+        Uses cooldown-based dedup: re-alert every 30 min while offline.
+        Returns updated last_alert_ts (unix timestamp).
+        """
         ex_time = now_bj.time()
+        ALERT_COOLDOWN = 30 * 60  # re-alert every 30 minutes
 
         # Only check during trading hours
         if not (TRADING_HOURS[0] <= ex_time <= TRADING_HOURS[1]):
-            return alert_sent_date
-
-        # Don't re-alert same day
-        if alert_sent_date == ex_date:
-            return alert_sent_date
+            return last_alert_ts
 
         last_poll = _state.get("last_poll_time")
+        now_ts = now_bj.timestamp()
+
+        # If iQuant is currently online, reset cooldown so next disconnect alerts immediately
+        if last_poll is not None:
+            gap_seconds = (now_bj - last_poll).total_seconds()
+            if gap_seconds < HEARTBEAT_TIMEOUT_SECONDS:
+                return 0  # reset — next disconnect will alert immediately
+
+        # Cooldown: don't spam alerts
+        if last_alert_ts > 0 and (now_ts - last_alert_ts) < ALERT_COOLDOWN:
+            return last_alert_ts
 
         if last_poll is None:
-            # Never polled today — alert after 09:33 (give 3min for startup)
+            # Never polled — alert after 09:33 (give 3min for startup)
             if ex_time >= time(9, 33):
                 logger.error("V15 heartbeat: iQuant has NEVER polled today")
                 await _notify_feishu_error(
                     "iQuant未连接",
                     "iQuant脚本今天从未连接服务器\n请检查QMT是否已启动并运行iquant_live.py",
                 )
-                return ex_date
+                return now_ts
         else:
             gap_minutes = (now_bj - last_poll).total_seconds() / 60
-            if gap_minutes >= HEARTBEAT_TIMEOUT_MINUTES:
+            if (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS:
                 last_str = last_poll.strftime("%H:%M:%S")
                 logger.error(
                     f"V15 heartbeat: iQuant offline {gap_minutes:.0f}min (last={last_str})"
@@ -565,9 +576,9 @@ def create_iquant_router() -> APIRouter:
                     f"最后心跳: {last_str}\n"
                     f"请检查QMT是否正常运行",
                 )
-                return ex_date
+                return now_ts
 
-        return alert_sent_date
+        return last_alert_ts
 
     async def _send_readiness_report(now_bj: datetime) -> None:
         """Send daily readiness report at 09:30."""
@@ -582,7 +593,7 @@ def create_iquant_router() -> APIRouter:
 
         broker_pos = _state.get("broker_positions", [])
         lines = [
-            "[V15] 每日就绪报告",
+            "[测试服] 每日就绪报告",
             f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
             f"iQuant状态: {poll_status}",
             f"券商持仓: {len(broker_pos)}只",
@@ -610,7 +621,7 @@ def create_iquant_router() -> APIRouter:
         Checks heartbeat, signal timeout/expiry, readiness report.
         """
         readiness_done_date = ""
-        heartbeat_alert_date = ""
+        heartbeat_alert_ts: float = 0
 
         logger.info("V15 monitoring scheduler started")
 
@@ -632,10 +643,18 @@ def create_iquant_router() -> APIRouter:
                 if readiness_done_date != ex_date and ex_time > time(9, 35):
                     readiness_done_date = ex_date
 
+                # --- Clear stale broker data when offline ---
+                last_poll = _state.get("last_poll_time")
+                if last_poll is None or (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS:
+                    if _state["broker_positions"] or _state.get("available_cash", 0) > 0:
+                        logger.info("V15: iQuant offline — clearing broker positions/cash")
+                        _state["broker_positions"] = []
+                        _state["available_cash"] = 0
+
                 # --- CONTINUOUS MONITORING ---
                 await _expire_stale_signals(now_bj)
                 await _check_signal_timeout(now_bj)
-                heartbeat_alert_date = await _check_heartbeat(now_bj, heartbeat_alert_date)
+                heartbeat_alert_ts = await _check_heartbeat(now_bj, heartbeat_alert_ts)
 
                 await asyncio.sleep(30)
 
@@ -663,7 +682,7 @@ def create_iquant_router() -> APIRouter:
         last_poll = _state.get("last_poll_time")
         if last_poll is not None:
             gap_seconds = (now - last_poll).total_seconds()
-            connected = gap_seconds < HEARTBEAT_TIMEOUT_MINUTES * 60
+            connected = gap_seconds < HEARTBEAT_TIMEOUT_SECONDS
             last_poll_str = last_poll.strftime("%Y-%m-%d %H:%M:%S")
         else:
             gap_seconds = None
@@ -696,6 +715,37 @@ def create_iquant_router() -> APIRouter:
         return _state["pending_signals"][-1]
 
     router._push_order = _push_order  # type: ignore[attr-defined]
+
+    def _get_pending_signals() -> list[dict]:
+        """Return pending signals for dashboard display."""
+        results = []
+        for sig in _state["pending_signals"]:
+            results.append({
+                "id": sig.get("id", ""),
+                "type": sig.get("type", ""),
+                "stock_code": sig.get("stock_code", ""),
+                "stock_name": sig.get("stock_name", ""),
+                "quantity": sig.get("quantity", 0),
+                "price_type": sig.get("price_type", "market"),
+                "price": sig.get("price"),
+                "reason": sig.get("reason", ""),
+                "created_at": sig.get("created_at", ""),
+                "manual": sig.get("manual", False),
+            })
+        return results
+
+    router._get_pending_signals = _get_pending_signals  # type: ignore[attr-defined]
+
+    def _cancel_signal(signal_id: str) -> bool:
+        """Remove a signal from pending queue. Returns True if found."""
+        for i, sig in enumerate(_state["pending_signals"]):
+            if sig.get("id") == signal_id:
+                removed = _state["pending_signals"].pop(i)
+                logger.info(f"Signal cancelled from dashboard: {removed.get('stock_code')} (id={signal_id})")
+                return True
+        return False
+
+    router._cancel_signal = _cancel_signal  # type: ignore[attr-defined]
 
     # --- V15 Background scheduler (trading operations only) ---
 
@@ -853,7 +903,7 @@ def create_iquant_router() -> APIRouter:
         _state["available_cash"] = cash
         now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-        msg = f"[V15] iQuant脚本已启动\n可用资金: {cash:,.2f}\n时间: {now_str}"
+        msg = f"[测试服] iQuant脚本已启动\n可用资金: {cash:,.2f}\n时间: {now_str}"
         logger.info(f"iQuant report-status: cash={cash:.2f}")
 
         try:
@@ -879,7 +929,7 @@ def create_iquant_router() -> APIRouter:
         reason = body.get("reason", "")
         now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
 
-        text = f"[V15] 下单已执行\n{msg}"
+        text = f"[测试服] 下单已执行\n{msg}"
         if stock_name:
             text += f"\n名称: {stock_name}"
         if reason:

@@ -156,6 +156,15 @@
         </div>
     </div>
 
+    <!-- Pending Signals Queue -->
+    <div class="panel" id="pendingSignalsPanel" style="display:none;">
+        <div class="panel-header">
+            <h3>待执行订单队列</h3>
+            <span class="badge" id="pendingSignalCount">0</span>
+        </div>
+        <div id="pendingSignalsContainer"></div>
+    </div>
+
     <!-- Trading Module (left column, right reserved for future) -->
     <div class="status-grid">
     <div class="status-card">
@@ -460,9 +469,75 @@ async function loadIquantStatus() {
             d.last_poll_time ? d.last_poll_time.substring(11) : '从未连接';
         document.getElementById('iquantCash').textContent =
             d.available_cash > 0 ? d.available_cash.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
-        document.getElementById('iquantHoldings').textContent = d.holdings_count;
+        document.getElementById('iquantHoldings').textContent = d.holdings_count || '--';
         document.getElementById('iquantPending').textContent = d.pending_count;
     } catch (e) { /* ignore */ }
+}
+
+// --- Pending Signals Queue ---
+async function loadPendingSignals() {
+    try {
+        const resp = await fetch('/api/trading/pending-signals');
+        const data = await resp.json();
+        renderPendingSignals(data.signals || []);
+    } catch (e) { /* ignore */ }
+}
+
+function renderPendingSignals(signals) {
+    const panel = document.getElementById('pendingSignalsPanel');
+    const el = document.getElementById('pendingSignalsContainer');
+    const badge = document.getElementById('pendingSignalCount');
+    badge.textContent = signals.length;
+
+    if (!signals.length) {
+        panel.style.display = 'none';
+        return;
+    }
+    panel.style.display = '';
+
+    let html = '<table class="trading-table"><thead><tr>' +
+        '<th>方向</th><th>代码</th><th>名称</th><th>数量</th><th>价格</th><th>来源</th><th>时间</th><th>操作</th>' +
+        '</tr></thead><tbody>';
+
+    for (const s of signals) {
+        const dir = s.type === 'buy' ? '买入' : '卖出';
+        const dirClass = s.type === 'buy' ? 'gain-pos' : 'gain-neg';
+        const priceStr = s.price_type === 'market' ? '市价' : (s.price ? s.price.toFixed(2) : '--');
+        const source = s.manual ? '手动' : 'V15';
+        html += '<tr>' +
+            '<td class="' + dirClass + '">' + dir + '</td>' +
+            '<td class="code">' + esc(s.stock_code) + '</td>' +
+            '<td>' + esc(s.stock_name || '') + '</td>' +
+            '<td>' + s.quantity + '</td>' +
+            '<td class="price">' + priceStr + '</td>' +
+            '<td>' + source + '</td>' +
+            '<td>' + esc(s.created_at || '') + '</td>' +
+            '<td><button class="btn-sm btn-sell" onclick="cancelSignal(\'' + esc(s.id) + '\')">撤销</button></td>' +
+            '</tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+}
+
+async function cancelSignal(signalId) {
+    if (!confirm('确认撤销该信号？')) return;
+    try {
+        const resp = await fetch('/api/trading/cancel-signal', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({signal_id: signalId})
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast('信号已撤销', 'success');
+            loadPendingSignals();
+            loadIquantStatus();
+        } else {
+            showToast('撤销失败: ' + (data.detail || '未知'), 'error');
+        }
+    } catch (e) {
+        showToast('撤销失败: ' + e.message, 'error');
+    }
 }
 
 // --- Init ---
@@ -470,7 +545,9 @@ document.getElementById('tradeDatePicker').addEventListener('change', loadRecomm
 loadHoldings();
 loadRecommendations();
 loadIquantStatus();
+loadPendingSignals();
 setInterval(loadHoldings, 10000);
 setInterval(loadIquantStatus, 10000);
+setInterval(loadPendingSignals, 5000);
 </script>
 {% endblock %}

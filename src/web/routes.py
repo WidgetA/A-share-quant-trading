@@ -2615,4 +2615,29 @@ def create_trading_router() -> APIRouter:
         pushed = iquant_rtr._push_order(signal)
         return {"success": True, "signal_id": pushed.get("id"), "quantity": quantity}
 
+    @router.get("/api/trading/pending-signals")
+    async def dashboard_pending_signals(request: Request) -> dict:
+        """Return pending signals for dashboard display (no auth)."""
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if not iquant_rtr or not hasattr(iquant_rtr, "_get_pending_signals"):
+            return {"signals": []}
+        return {"signals": iquant_rtr._get_pending_signals()}
+
+    @router.post("/api/trading/cancel-signal")
+    async def cancel_signal(request: Request) -> dict:
+        """Cancel a pending signal by ID (dashboard, no auth)."""
+        body = await request.json()
+        signal_id = body.get("signal_id", "")
+        if not signal_id:
+            raise HTTPException(status_code=400, detail="signal_id required")
+
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if not iquant_rtr or not hasattr(iquant_rtr, "_cancel_signal"):
+            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+
+        removed = iquant_rtr._cancel_signal(signal_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
+        return {"success": True, "signal_id": signal_id}
+
     return router
