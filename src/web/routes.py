@@ -2285,3 +2285,113 @@ def create_trade_backtest_router() -> APIRouter:
         }
 
     return router
+
+
+def create_trading_router() -> APIRouter:
+    """Router for the dashboard trading module (buy/sell + recommendations)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    router = APIRouter(tags=["trading"])
+    BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+    @router.get("/trading", response_class=HTMLResponse)
+    async def trading_page(request: Request):
+        """Trading page with holdings + recommendations."""
+        templates = request.app.state.templates
+        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+        return templates.TemplateResponse("trading.html", {
+            "request": request,
+            "today": today,
+        })
+
+    @router.get("/api/trading/holdings")
+    async def get_holdings(request: Request) -> dict:
+        """Get current V15 holdings from iQuant state."""
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if iquant_rtr and hasattr(iquant_rtr, "_get_holdings"):
+            holdings = iquant_rtr._get_holdings()
+        else:
+            holdings = []
+        return {"holdings": holdings}
+
+    @router.get("/api/trading/recommendations")
+    async def get_recommendations(request: Request, date: str | None = None) -> dict:
+        """Get top-10 recommendations from V15ScanDB for a given date."""
+        from src.data.database.v15_scan_db import create_v15_scan_db_from_config
+
+        if date is None:
+            date = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+
+        v15db = create_v15_scan_db_from_config()
+        try:
+            await v15db.connect()
+            rows = await v15db.query(start_date=date, end_date=date, limit=10)
+            return {"date": date, "recommendations": rows}
+        except Exception as e:
+            logger.error(f"V15ScanDB query failed: {e}")
+            return {"date": date, "recommendations": [], "error": str(e)}
+        finally:
+            await v15db.close()
+
+    @router.post("/api/trading/buy")
+    async def submit_buy(request: Request) -> dict:
+        """Push a BUY signal into iQuant pending queue."""
+        body = await request.json()
+        stock_code = body.get("stock_code", "")
+        stock_name = body.get("stock_name", "")
+        quantity = int(body.get("quantity", 0))
+        price = body.get("price")
+
+        if not stock_code or quantity <= 0 or quantity % 100 != 0:
+            raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
+
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if not iquant_rtr or not hasattr(iquant_rtr, "_push_order"):
+            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+
+        signal = {
+            "type": "buy",
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "quantity": quantity,
+            "price": float(price) if price else None,
+            "price_type": "limit" if price else "market",
+            "latest_price": float(price) if price else 0.0,
+            "reason": "Dashboard手动买入",
+            "manual": True,
+        }
+
+        pushed = iquant_rtr._push_order(signal)
+        return {"success": True, "signal_id": pushed.get("id"), "quantity": quantity}
+
+    @router.post("/api/trading/sell")
+    async def submit_sell(request: Request) -> dict:
+        """Push a SELL signal into iQuant pending queue."""
+        body = await request.json()
+        stock_code = body.get("stock_code", "")
+        stock_name = body.get("stock_name", "")
+        quantity = int(body.get("quantity", 0))
+
+        if not stock_code or quantity <= 0:
+            raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
+
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if not iquant_rtr or not hasattr(iquant_rtr, "_push_order"):
+            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+
+        signal = {
+            "type": "sell",
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "quantity": quantity,
+            "price": None,
+            "price_type": "market",
+            "reason": "Dashboard手动卖出",
+            "manual": True,
+        }
+
+        pushed = iquant_rtr._push_order(signal)
+        return {"success": True, "signal_id": pushed.get("id")}
+
+    return router

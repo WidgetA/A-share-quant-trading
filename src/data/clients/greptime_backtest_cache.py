@@ -1168,18 +1168,19 @@ class GreptimeBacktestCache:
     async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
     ) -> None:
-        """INSERT minute data for a single stock (one INSERT per stock)."""
+        """INSERT minute data for a single stock, batched to avoid silent failure."""
         if not min_data:
             return
         values = []
         for ds, (close_940, cum_vol, max_high, min_low) in min_data.items():
             ts_ms = _date_to_epoch_ms(_parse_date_str(ds))
             values.append(f"('{code}',{ts_ms},{close_940},{cum_vol},{max_high},{min_low})")
-        sql = (
-            "INSERT INTO backtest_minute"
-            "(stock_code,ts,close_940,cum_volume,max_high,min_low) VALUES " + ",".join(values)
-        )
-        await self._db.execute(sql)
+        cols = "(stock_code,ts,close_940,cum_volume,max_high,min_low)"
+        batch_size = 200
+        for bi in range(0, len(values), batch_size):
+            batch = values[bi : bi + batch_size]
+            sql = f"INSERT INTO backtest_minute{cols} VALUES " + ",".join(batch)
+            await self._db.execute(sql)
 
     # ==================== Backfill ====================
 
@@ -1467,14 +1468,43 @@ class GreptimeBacktestCache:
         return {_ts_to_date(r["ts"]) for r in rows}
 
     async def _get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
-        """Get stock codes that have minute data in the given range."""
+        """Get stock codes that have *sufficient* minute data in the given range.
+
+        Compares per-stock minute row count against daily active row count.
+        A stock is considered cached only if minute_count >= daily_count * 50%.
+        This prevents silent data loss from unbatched INSERTs being treated as
+        complete on resume.
+        """
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
-        rows = await self._db.fetch(
-            f"SELECT DISTINCT stock_code FROM backtest_minute "
-            f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
+
+        minute_rows = await self._db.fetch(
+            f"SELECT stock_code, COUNT(*) as cnt FROM backtest_minute "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms} GROUP BY stock_code"
         )
-        return {r["stock_code"] for r in rows}
+        daily_rows = await self._db.fetch(
+            f"SELECT stock_code, COUNT(*) as cnt FROM backtest_daily "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+            f"AND is_suspended = false AND vol > 0 GROUP BY stock_code"
+        )
+
+        minute_counts = {r["stock_code"]: int(r["cnt"]) for r in minute_rows}
+        daily_counts = {r["stock_code"]: int(r["cnt"]) for r in daily_rows}
+
+        complete: set[str] = set()
+        incomplete_count = 0
+        for code, m_cnt in minute_counts.items():
+            d_cnt = daily_counts.get(code, 0)
+            if d_cnt == 0 or m_cnt >= d_cnt * _MIN_MINUTE_COVERAGE:
+                complete.add(code)
+            else:
+                incomplete_count += 1
+        if incomplete_count > 0:
+            logger.info(
+                f"Minute resume: {incomplete_count} stocks have incomplete data, "
+                f"will re-download"
+            )
+        return complete
 
     async def _get_active_daily_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have at least one non-suspended trading day.

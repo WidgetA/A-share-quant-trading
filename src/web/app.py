@@ -23,6 +23,7 @@ from src.web.routes import (
     create_router,
     create_settings_router,
     create_trade_backtest_router,
+    create_trading_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,10 @@ def create_app(
     # Add trade backtest router (CSV upload → stats)
     trade_bt_router = create_trade_backtest_router()
     app.include_router(trade_bt_router)
+
+    # Add trading module router (dashboard buy/sell)
+    trading_router = create_trading_router()
+    app.include_router(trading_router)
 
     # Add iQuant API router (isolated from main system, lazily initialized)
     iquant_router = create_iquant_router()

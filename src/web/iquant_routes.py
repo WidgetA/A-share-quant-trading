@@ -8,10 +8,12 @@
 # iQuant polls /pending-signals every bar, executes immediately, then acks.
 #
 # === V15 STRATEGY ===
+# NOTE: Auto buy/sell signal pushing is DISABLED. Scheduler only scans + reports.
+#       Manual orders via /manual-order endpoint still work.
 # Signal flow (T+2 adaptive sell):
 #   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
-#   09:38-10:00  → SCAN: if no holdings, run V15 7-layer funnel → BUY signal
-#   14:50-14:58  → SELL: push SELL signals for marked holdings
+#   09:38-10:00  → SCAN: run V15 7-layer funnel → Feishu report (no auto BUY)
+#   14:50-14:58  → SELL: log marked holdings (no auto SELL)
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
 #
 # === AUTHENTICATION ===
@@ -480,7 +482,7 @@ def create_iquant_router() -> APIRouter:
         if scan_result.all_scored and _state.get("v15_scan_db"):
             try:
                 await _state["v15_scan_db"].save_top_n(
-                    today, scan_result.all_scored, scan_result.final_candidates
+                    today, scan_result.all_scored, scan_result.final_candidates, n=10
                 )
             except Exception as e:
                 logger.warning(f"V15ScanDB save failed: {e}")
@@ -790,6 +792,23 @@ def create_iquant_router() -> APIRouter:
 
     router._get_status = _get_status  # type: ignore[attr-defined]
 
+    def _get_holdings_list() -> list[dict]:
+        """Return current V15 holdings (for dashboard trading module)."""
+        return _state["holdings"]
+
+    router._get_holdings = _get_holdings_list  # type: ignore[attr-defined]
+
+    def _push_order(signal: dict) -> dict:
+        """Push a manual order signal from dashboard (no auth).
+
+        Same as /manual-order but callable internally without HTTP.
+        Returns the signal dict with assigned ID.
+        """
+        _push_signal(signal)
+        return _state["pending_signals"][-1]
+
+    router._push_order = _push_order  # type: ignore[attr-defined]
+
     # --- V15 Background scheduler (trading operations only) ---
 
     async def _signal_scheduler() -> None:
@@ -850,29 +869,14 @@ def create_iquant_router() -> APIRouter:
 
                     scan_done_date = ex_date
 
-                    # Always scan + push Feishu top-5 report, regardless of holdings
+                    # Always scan + push Feishu top-5 report (auto-trading disabled)
                     try:
                         rec = await _run_v15_scan()
                         if rec:
-                            if _state["holdings"]:
-                                logger.info(
-                                    f"V15: scan recommends {rec['stock_code']}, "
-                                    f"but holdings exist — BUY signal suppressed"
-                                )
-                            else:
-                                _push_signal(
-                                    {
-                                        "type": "buy",
-                                        "stock_code": rec["stock_code"],
-                                        "stock_name": rec["stock_name"],
-                                        "board_name": rec["board_name"],
-                                        "latest_price": rec["latest_price"],
-                                        "v3_score": rec["v3_score"],
-                                        "reason": f"V15推荐 (板块={rec['board_name']}, "
-                                        f"score={rec['v3_score']:.4f})",
-                                    }
-                                )
-                                await _notify_feishu_signal(_state["pending_signals"][-1])
+                            logger.info(
+                                f"V15: scan recommends {rec['stock_code']} "
+                                f"(auto-trading disabled, no signal pushed)"
+                            )
                         else:
                             logger.info("V15 scan: no recommendation today")
                             await _notify_feishu_error(
@@ -888,27 +892,16 @@ def create_iquant_router() -> APIRouter:
                 if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
                     scan_done_date = ex_date
 
-                # --- SELL: 14:50-14:58 ---
+                # --- SELL: 14:50-14:58 (auto-trading disabled) ---
                 if sell_done_date != ex_date and SELL_WINDOW[0] <= ex_time <= SELL_WINDOW[1]:
                     marked = [h for h in _state["holdings"] if h.get("marked_sell_today")]
                     if marked:
                         sell_done_date = ex_date
-                        for h in marked:
-                            reason = "V15尾盘卖出"
-                            if h.get("early_exit"):
-                                reason += " (T+1跳空止损)"
-                            else:
-                                reason += " (T+2到期)"
-                            _push_signal(
-                                {
-                                    "type": "sell",
-                                    "stock_code": h["code"],
-                                    "stock_name": h.get("name", ""),
-                                    "reason": reason,
-                                }
-                            )
-                            await _notify_feishu_signal(_state["pending_signals"][-1])
-                        logger.info(f"V15: pushed {len(marked)} SELL signals for marked holdings")
+                        codes = [h["code"] for h in marked]
+                        logger.info(
+                            f"V15: {len(marked)} holdings marked for sell {codes} "
+                            f"(auto-trading disabled, no signal pushed)"
+                        )
 
                 # Sell deadline
                 if sell_done_date != ex_date and ex_time > SELL_WINDOW[1]:
@@ -997,6 +990,7 @@ def create_iquant_router() -> APIRouter:
                     "name": found.get("stock_name", ""),
                     "buy_date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
                     "entry_price": found.get("latest_price", 0.0),
+                    "quantity": found.get("quantity", 0),
                     "marked_sell_today": False,
                     "early_exit": False,
                 }
@@ -1169,24 +1163,8 @@ def create_iquant_router() -> APIRouter:
         result: dict = {"success": True, "recommendation": None}
         if rec:
             result["recommendation"] = rec
-            if not _state["holdings"]:
-                _push_signal(
-                    {
-                        "type": "buy",
-                        "stock_code": rec["stock_code"],
-                        "stock_name": rec["stock_name"],
-                        "board_name": rec["board_name"],
-                        "latest_price": rec["latest_price"],
-                        "v3_score": rec["v3_score"],
-                        "reason": f"V15手动扫描 (板块={rec['board_name']}, "
-                        f"score={rec['v3_score']:.4f})",
-                    }
-                )
-                await _notify_feishu_signal(_state["pending_signals"][-1])
-                result["signal_pushed"] = True
-            else:
-                result["signal_pushed"] = False
-                result["reason"] = "holdings exist, BUY signal suppressed"
+            result["signal_pushed"] = False
+            result["reason"] = "auto-trading disabled"
         return result
 
     @router.get("/universe")
