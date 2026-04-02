@@ -1081,10 +1081,6 @@ class GreptimeBacktestCache:
                     except (ValueError, TypeError, KeyError):
                         continue
 
-                    # Skip suspended days — tsanghi returns bars with close=0
-                    if c <= 0:
-                        continue
-
                     if bar_date in day_data:
                         prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
                         day_data[bar_date] = (
