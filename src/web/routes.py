@@ -2300,10 +2300,13 @@ def create_trading_router() -> APIRouter:
         """Trading page with holdings + recommendations."""
         templates = request.app.state.templates
         today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
-        return templates.TemplateResponse("trading.html", {
-            "request": request,
-            "today": today,
-        })
+        return templates.TemplateResponse(
+            "trading.html",
+            {
+                "request": request,
+                "today": today,
+            },
+        )
 
     @router.get("/api/trading/holdings")
     async def get_holdings(request: Request) -> dict:

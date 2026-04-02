@@ -1501,8 +1501,7 @@ class GreptimeBacktestCache:
                 incomplete_count += 1
         if incomplete_count > 0:
             logger.info(
-                f"Minute resume: {incomplete_count} stocks have incomplete data, "
-                f"will re-download"
+                f"Minute resume: {incomplete_count} stocks have incomplete data, will re-download"
             )
         return complete
 
