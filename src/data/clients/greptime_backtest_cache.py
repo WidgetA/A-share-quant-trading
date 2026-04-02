@@ -718,6 +718,22 @@ class GreptimeBacktestCache:
                 cancel_event=cancel_event,
             )
 
+        # Phase 3: Verify minute coverage, re-download gap ranges
+        minute_gaps = await self.find_minute_gaps()
+        if minute_gaps and stock_codes:
+            logger.info(f"Minute gaps found after download: {len(minute_gaps)} ranges, backfilling")
+            for gap_start, gap_end in minute_gaps:
+                if cancel_event and cancel_event.is_set():
+                    break
+                logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
+                await self._download_minute_tsanghi(
+                    stock_codes,
+                    gap_start,
+                    gap_end,
+                    progress_cb=progress_cb,
+                    cancel_event=cancel_event,
+                )
+
         total = len(stock_codes)
         if progress_cb:
             await _maybe_await(progress_cb("download", total, total, ""))
