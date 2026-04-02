@@ -12,7 +12,7 @@
 #       Manual orders via /manual-order endpoint still work.
 # Signal flow (T+2 adaptive sell):
 #   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
-#   09:38-10:00  → SCAN: run V15 7-layer funnel → Feishu report (no auto BUY)
+#   09:39-10:00  → SCAN: run V15 7-layer funnel → Feishu report (no auto BUY)
 #   14:50-14:58  → SELL: log marked holdings (no auto SELL)
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
 #
@@ -206,7 +206,7 @@ def create_iquant_router() -> APIRouter:
 
     V15 signal scheduler:
     - 09:25-09:35: GAP CHECK (T+1 gap <-3% → early sell, T+2 → sell)
-    - 09:38-10:00: V15 SCAN (if no holdings → BUY signal)
+    - 09:39-10:00: V15 SCAN (if no holdings → BUY signal)
     - 14:50-14:58: SELL (push sell signals for marked holdings)
     """
     router = APIRouter(prefix="/api/iquant", tags=["iquant"])
@@ -586,7 +586,7 @@ def create_iquant_router() -> APIRouter:
             f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
             f"iQuant状态: {poll_status}",
             f"券商持仓: {len(broker_pos)}只",
-            "今日将执行V15扫描(09:38-10:00)",
+            "今日将执行V15扫描(09:39-10:00)",
         ]
 
         msg = "\n".join(lines)
@@ -703,7 +703,7 @@ def create_iquant_router() -> APIRouter:
         """V15 trading scheduler — scan only.
 
         Trading window:
-        - SCAN (09:38-10:00): Run V15 scan → push Feishu report
+        - SCAN (09:39-10:00): Run V15 scan → push Feishu report
 
         Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
         """
@@ -719,7 +719,7 @@ def create_iquant_router() -> APIRouter:
                 ex_date = now_bj.strftime("%Y-%m-%d")
                 ex_time = now_bj.time().replace(second=0, microsecond=0)
 
-                # --- SCAN: 09:38-10:00 ---
+                # --- SCAN: 09:39-10:00 ---
                 if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
                     if not _state["initialized"]:
                         await asyncio.sleep(10)

@@ -644,7 +644,7 @@ await engine.stop()
 | Window | Time | Action |
 |--------|------|--------|
 | GAP_CHECK | 09:25-09:35 | Check holdings: T+1 gap → early exit; T+2 → mark sell |
-| SCAN | 09:38-10:00 | If no holdings → run V15 scan → push BUY signal |
+| SCAN | 09:39-10:00 | If no holdings → run V15 scan → push BUY signal |
 | SELL | 14:50-14:58 | Push SELL signal for all marked holdings |
 
 **Signal Flow**:
