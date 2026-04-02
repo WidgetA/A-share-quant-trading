@@ -1296,6 +1296,11 @@ class GreptimeBacktestCache:
                     f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
                 )
 
+            # FLUSH after DELETE — persist tombstones to SST before INSERT,
+            # otherwise memtable auto-flush during INSERT may split tombstones
+            # and new rows into different SSTs, letting old data win on merge.
+            await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+
             # Step 2: INSERT fresh rows with is_suspended set
             if progress_cb:
                 await _maybe_await(
