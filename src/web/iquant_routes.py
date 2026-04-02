@@ -763,6 +763,16 @@ def create_iquant_router() -> APIRouter:
 
     # --- Endpoints ---
 
+    @router.post("/heartbeat")
+    async def heartbeat(api_key: str = Depends(_verify_api_key)) -> dict:
+        """Lightweight heartbeat — update last_poll_time only.
+
+        Called by a dedicated thread in iQuant script every 30s,
+        independent of handlebar / trading hours.
+        """
+        _state["last_poll_time"] = datetime.now(BEIJING_TZ)
+        return {"status": "ok"}
+
     @router.get("/ping")
     async def ping(api_key: str = Depends(_verify_api_key)) -> dict:
         """Health check + trigger lazy init."""

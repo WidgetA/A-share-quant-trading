@@ -16,6 +16,7 @@ iQuant 实盘下单脚本 — 轮询服务端 /pending-signals, 用 passorder() 
   - V15 卖出: 查持仓可用数量, 全部卖出
 """
 import json
+import threading
 import time
 import urllib.request
 
@@ -23,6 +24,16 @@ API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "20f4b05bed1fe28e3c808dabaa5fa37f"
 
 _state = {"last_poll_ts": 0, "reported": False, "fields_printed": False, "pos_fields_printed": False, "init_notified": False}
+
+
+def _heartbeat_loop():
+    """Background thread: send heartbeat every 30s, independent of handlebar."""
+    while True:
+        try:
+            _api_call("/heartbeat", "POST")
+        except Exception as e:
+            print("[HEARTBEAT ERR] %s" % e)
+        time.sleep(30)
 
 
 def _api_call(endpoint, method="GET", body=None):
@@ -207,6 +218,10 @@ def init(ContextInfo):
     ContextInfo.accID = "410015160653"
     print("[INIT] iQuant live trading script started")
     print("[INIT] API_BASE = %s" % API_BASE)
+    # Start heartbeat thread (daemon=True so it dies with the main process)
+    t = threading.Thread(target=_heartbeat_loop, daemon=True)
+    t.start()
+    print("[INIT] heartbeat thread started")
 
 
 def handlebar(ContextInfo):
