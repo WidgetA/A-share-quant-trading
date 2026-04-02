@@ -13,6 +13,7 @@ init 不 return，主线程控制权不交回 QMT。
 import json
 import threading
 import time
+import traceback
 import urllib.request
 
 API_BASE = "http://8.159.150.224:8000/api/iquant"
@@ -56,7 +57,9 @@ def _iquant_code(code):
 def _get_available_cash(accID):
     """查询可用资金。柜台未连接时返回 0。"""
     try:
+        print("[DEBUG] _get_available_cash: calling get_trade_detail_data(accID, 'stock', 'account')")
         acct = get_trade_detail_data(accID, 'stock', 'account')
+        print("[DEBUG] _get_available_cash: returned type=%s len=%s" % (type(acct).__name__, len(acct) if acct else 'N/A'))
         if acct:
             obj = acct[0]
             if not _state["fields_printed"]:
@@ -67,27 +70,31 @@ def _get_available_cash(accID):
         else:
             print("[ACCT] empty — 柜台可能未连接")
     except Exception as e:
-        print("[ACCT ERR] %s" % e)
+        print("[ACCT ERR] %s\n%s" % (e, traceback.format_exc()))
     return 0
 
 
 def _get_position_volume(accID, code):
     """查询某只股票的可卖数量。"""
     try:
+        print("[DEBUG] _get_position_volume: calling get_trade_detail_data(accID, 'stock', 'position') for %s" % code)
         positions = get_trade_detail_data(accID, 'stock', 'position')
+        print("[DEBUG] _get_position_volume: returned type=%s len=%s" % (type(positions).__name__, len(positions) if positions else 'N/A'))
         for pos in (positions or []):
             pos_code = pos.m_strInstrumentID
             if pos_code == code or _iquant_code(pos_code.split(".")[0]) == code:
                 return int(pos.m_nCanUseVolume)
     except Exception as e:
-        print("[POS ERR] %s" % e)
+        print("[POS ERR] %s\n%s" % (e, traceback.format_exc()))
     return 0
 
 
 def _get_all_positions(accID):
     """查询券商全部持仓, 返回 [{code, volume}]。柜台未连接时返回空列表。"""
     try:
+        print("[DEBUG] _get_all_positions: calling get_trade_detail_data(accID, 'stock', 'position')")
         positions = get_trade_detail_data(accID, 'stock', 'position')
+        print("[DEBUG] _get_all_positions: returned type=%s len=%s" % (type(positions).__name__, len(positions) if positions else 'N/A'))
         if not positions:
             return []
         result = []
@@ -103,7 +110,7 @@ def _get_all_positions(accID):
             result.append({"code": code, "volume": volume})
         return result
     except Exception as e:
-        print("[POS ALL ERR] %s" % e)
+        print("[POS ALL ERR] %s\n%s" % (e, traceback.format_exc()))
     return []
 
 
@@ -235,10 +242,22 @@ def _execute_signal(ContextInfo, signal):
         price_type_str = signal.get("price_type", "market")
 
         if price_type_str == "limit" and price > 0:
-            passorder(23, 11, accID, code, 11, price, quantity, "", 2, "", ContextInfo)
+            print("[DEBUG] passorder BUY LIMIT: code=%s price=%.2f qty=%d" % (code, price, quantity))
+            try:
+                ret = passorder(23, 11, accID, code, 11, price, quantity, "", 2, "", ContextInfo)
+                print("[DEBUG] passorder BUY LIMIT returned: %s (type=%s)" % (ret, type(ret).__name__))
+            except Exception as e:
+                print("[DEBUG] passorder BUY LIMIT EXCEPTION: %s" % e)
+                raise
             msg = "买入 %s %d股 限价%.2f" % (code, quantity, price)
         else:
-            passorder(23, 1101, accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
+            print("[DEBUG] passorder BUY MARKET: code=%s qty=%d" % (code, quantity))
+            try:
+                ret = passorder(23, 1101, accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
+                print("[DEBUG] passorder BUY MARKET returned: %s (type=%s)" % (ret, type(ret).__name__))
+            except Exception as e:
+                print("[DEBUG] passorder BUY MARKET EXCEPTION: %s" % e)
+                raise
             msg = "买入 %s %d股 市价" % (code, quantity)
         print("[BUY] %s" % msg)
         _report_trade(msg, signal)
@@ -256,10 +275,22 @@ def _execute_signal(ContextInfo, signal):
         price_type_str = signal.get("price_type", "market")
 
         if price_type_str == "limit" and price > 0:
-            passorder(24, 11, accID, code, 11, price, quantity, "", 2, "", ContextInfo)
+            print("[DEBUG] passorder SELL LIMIT: code=%s price=%.2f qty=%d" % (code, price, quantity))
+            try:
+                ret = passorder(24, 11, accID, code, 11, price, quantity, "", 2, "", ContextInfo)
+                print("[DEBUG] passorder SELL LIMIT returned: %s (type=%s)" % (ret, type(ret).__name__))
+            except Exception as e:
+                print("[DEBUG] passorder SELL LIMIT EXCEPTION: %s" % e)
+                raise
             msg = "卖出 %s %d股 限价%.2f" % (code, quantity, price)
         else:
-            passorder(24, 1101, accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
+            print("[DEBUG] passorder SELL MARKET: code=%s qty=%d" % (code, quantity))
+            try:
+                ret = passorder(24, 1101, accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
+                print("[DEBUG] passorder SELL MARKET returned: %s (type=%s)" % (ret, type(ret).__name__))
+            except Exception as e:
+                print("[DEBUG] passorder SELL MARKET EXCEPTION: %s" % e)
+                raise
             msg = "卖出 %s %d股 市价" % (code, quantity)
         print("[SELL] %s" % msg)
         _report_trade(msg, signal)

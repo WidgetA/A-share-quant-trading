@@ -156,16 +156,7 @@
         </div>
     </div>
 
-    <!-- Pending Signals Queue -->
-    <div class="panel" id="pendingSignalsPanel" style="display:none;">
-        <div class="panel-header">
-            <h3>待执行订单队列</h3>
-            <span class="badge" id="pendingSignalCount">0</span>
-        </div>
-        <div id="pendingSignalsContainer"></div>
-    </div>
-
-    <!-- Trading Module (left column, right reserved for future) -->
+    <!-- Trading Module (left column + right column) -->
     <div class="status-grid">
     <div class="status-card">
         <!-- Date picker -->
@@ -197,7 +188,18 @@
             </div>
         </div>
     </div>
-    <!-- Right column: reserved for future content -->
+    <!-- Right column: pending signals queue -->
+    <div class="status-card">
+        <div class="panel" id="pendingSignalsPanel">
+            <div class="panel-header">
+                <h3>待执行订单队列</h3>
+                <span class="badge" id="pendingSignalCount">0</span>
+            </div>
+            <div id="pendingSignalsContainer">
+                <div class="empty-state">暂无待执行信号</div>
+            </div>
+        </div>
+    </div>
     </div>
 </div>
 
@@ -490,10 +492,9 @@ function renderPendingSignals(signals) {
     badge.textContent = signals.length;
 
     if (!signals.length) {
-        panel.style.display = 'none';
+        el.innerHTML = '<div class="empty-state">暂无待执行信号</div>';
         return;
     }
-    panel.style.display = '';
 
     let html = '<table class="trading-table"><thead><tr>' +
         '<th>方向</th><th>代码</th><th>名称</th><th>数量</th><th>价格</th><th>来源</th><th>时间</th><th>操作</th>' +
@@ -503,7 +504,7 @@ function renderPendingSignals(signals) {
         const dir = s.type === 'buy' ? '买入' : '卖出';
         const dirClass = s.type === 'buy' ? 'gain-pos' : 'gain-neg';
         const priceStr = s.price_type === 'market' ? '市价' : (s.price ? s.price.toFixed(2) : '--');
-        const source = s.manual ? '手动' : 'V15';
+        const source = s.manual ? '手动' : '策略';
         html += '<tr>' +
             '<td class="' + dirClass + '">' + dir + '</td>' +
             '<td class="code">' + esc(s.stock_code) + '</td>' +

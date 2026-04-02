@@ -627,49 +627,54 @@ def create_iquant_router() -> APIRouter:
 
         try:
             while True:
-                now_bj = datetime.now(BEIJING_TZ)
-                ex_date = now_bj.strftime("%Y-%m-%d")
-                ex_time = now_bj.time().replace(second=0, microsecond=0)
+                try:
+                    now_bj = datetime.now(BEIJING_TZ)
+                    ex_date = now_bj.strftime("%Y-%m-%d")
+                    ex_time = now_bj.time().replace(second=0, microsecond=0)
 
-                # --- READINESS REPORT: 09:30 ---
-                if (
-                    readiness_done_date != ex_date
-                    and ex_time >= time(9, 30)
-                    and ex_time <= time(9, 35)
-                ):
-                    readiness_done_date = ex_date
-                    await _send_readiness_report(now_bj)
+                    # --- READINESS REPORT: 09:30 ---
+                    if (
+                        readiness_done_date != ex_date
+                        and ex_time >= time(9, 30)
+                        and ex_time <= time(9, 35)
+                    ):
+                        readiness_done_date = ex_date
+                        await _send_readiness_report(now_bj)
 
-                if readiness_done_date != ex_date and ex_time > time(9, 35):
-                    readiness_done_date = ex_date
+                    if readiness_done_date != ex_date and ex_time > time(9, 35):
+                        readiness_done_date = ex_date
 
-                # --- Clear stale broker data when offline ---
-                last_poll = _state.get("last_poll_time")
-                is_offline = last_poll is None or (
-                    (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS
-                )
-                if is_offline:
-                    if _state["broker_positions"] or _state.get("available_cash", 0) > 0:
-                        logger.info("V15: iQuant offline — clearing broker positions/cash")
-                        _state["broker_positions"] = []
-                        _state["available_cash"] = 0
+                    # --- Clear stale broker data when offline ---
+                    last_poll = _state.get("last_poll_time")
+                    is_offline = last_poll is None or (
+                        (now_bj - last_poll).total_seconds()
+                        >= HEARTBEAT_TIMEOUT_SECONDS
+                    )
+                    if is_offline:
+                        if _state["broker_positions"] or _state.get("available_cash", 0) > 0:
+                            logger.info(
+                                "V15: iQuant offline — clearing broker positions/cash"
+                            )
+                            _state["broker_positions"] = []
+                            _state["available_cash"] = 0
 
-                # --- CONTINUOUS MONITORING ---
-                await _expire_stale_signals(now_bj)
-                await _check_signal_timeout(now_bj)
-                heartbeat_alert_ts = await _check_heartbeat(now_bj, heartbeat_alert_ts)
+                    # --- CONTINUOUS MONITORING ---
+                    await _expire_stale_signals(now_bj)
+                    await _check_signal_timeout(now_bj)
+                    heartbeat_alert_ts = await _check_heartbeat(
+                        now_bj, heartbeat_alert_ts
+                    )
+                except asyncio.CancelledError:
+                    raise  # propagate for clean shutdown
+                except Exception as e:
+                    logger.error(
+                        f"V15 monitoring iteration error: {e}", exc_info=True
+                    )
 
                 await asyncio.sleep(30)
 
         except asyncio.CancelledError:
             logger.info("V15 monitoring scheduler stopped")
-        except Exception as e:
-            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.critical(f"V15 monitoring scheduler CRASHED: {error_detail}")
-            await _notify_feishu_error(
-                "V15监控调度器崩溃",
-                f"监控调度器意外退出!\n{error_detail}\n心跳检测/信号超时/就绪报告将全部停止",
-            )
 
     def _start_monitoring() -> None:
         """Start the monitoring scheduler. Safe to call at any time."""
@@ -695,15 +700,24 @@ def create_iquant_router() -> APIRouter:
             "connected": connected,
             "last_poll_time": last_poll_str,
             "gap_seconds": round(gap_seconds) if gap_seconds is not None else None,
-            "holdings_count": len(_state["broker_positions"]),
+            "holdings_count": len(_state["broker_positions"]) if connected else 0,
             "pending_count": len(_state["pending_signals"]),
-            "available_cash": _state.get("available_cash", 0),
+            "available_cash": _state.get("available_cash", 0) if connected else 0,
         }
 
     router._get_status = _get_status  # type: ignore[attr-defined]
 
     def _get_broker_positions() -> list[dict]:
-        """Return actual broker positions synced from iQuant."""
+        """Return actual broker positions synced from iQuant.
+
+        Returns empty list when iQuant is offline to avoid showing stale data.
+        """
+        last_poll = _state.get("last_poll_time")
+        if last_poll is None:
+            return []
+        now = datetime.now(BEIJING_TZ)
+        if (now - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS:
+            return []
         return _state["broker_positions"]
 
     router._get_broker_positions = _get_broker_positions  # type: ignore[attr-defined]
