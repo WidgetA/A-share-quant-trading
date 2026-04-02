@@ -3,7 +3,87 @@
 {% block title %}Trading Dashboard{% endblock %}
 
 {% block head %}
-<meta http-equiv="refresh" content="10">
+<style>
+/* Date picker bar */
+.date-bar {
+    display: flex; align-items: center; gap: 0.8rem;
+    margin-bottom: 1.5rem; padding: 0.6rem 1rem;
+    background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 6px;
+}
+.date-bar label { font-size: 0.9rem; font-weight: 500; color: #555; }
+.date-bar input[type="date"] {
+    padding: 0.4rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem;
+}
+.date-bar .date-hint { font-size: 0.8rem; color: #999; margin-left: auto; }
+
+/* Trading panels */
+.panel { margin-bottom: 1.5rem; }
+.panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 0.6rem;
+}
+.panel-header h3 { margin: 0; font-size: 1.05rem; }
+.panel-header .badge {
+    font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 10px;
+    background: #e0e0e0; color: #555;
+}
+
+/* Trading table */
+.trading-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.trading-table th {
+    text-align: left; padding: 0.5rem 0.6rem; border-bottom: 2px solid #ddd;
+    font-weight: 600; color: #555; font-size: 0.8rem; white-space: nowrap;
+}
+.trading-table td {
+    padding: 0.5rem 0.6rem; border-bottom: 1px solid #eee; vertical-align: middle;
+}
+.trading-table tr:hover { background: #fafafa; }
+.trading-table .code { font-family: monospace; font-weight: 500; }
+.trading-table .gain-pos { color: #d32f2f; font-weight: 500; }
+.trading-table .gain-neg { color: #2e7d32; font-weight: 500; }
+.trading-table .price { font-family: monospace; }
+
+/* Amount input */
+.amount-cell { display: flex; align-items: center; gap: 0.3rem; }
+.amount-input {
+    width: 80px; padding: 0.3rem 0.4rem; border: 1px solid #ccc; border-radius: 4px;
+    font-size: 0.85rem; text-align: right;
+}
+.amount-input:focus { outline: none; border-color: #1a1a2e; }
+.amount-unit { font-size: 0.8rem; color: #999; }
+
+/* Buttons */
+.btn-sm {
+    padding: 0.25rem 0.7rem; border: none; border-radius: 4px;
+    font-size: 0.8rem; cursor: pointer; transition: background 0.2s;
+}
+.btn-buy { background: #d32f2f; color: white; }
+.btn-buy:hover { background: #b71c1c; }
+.btn-buy:disabled { background: #ccc; cursor: not-allowed; }
+.btn-sell { background: #1976d2; color: white; }
+.btn-sell:hover { background: #1565c0; }
+.btn-sell:disabled { background: #ccc; cursor: not-allowed; }
+
+/* Error hint */
+.error-hint { color: #d32f2f; font-size: 0.75rem; display: none; margin-top: 2px; }
+.error-hint.visible { display: block; }
+
+/* Toast */
+.toast {
+    position: fixed; top: 20px; right: 20px; padding: 0.7rem 1.2rem;
+    border-radius: 6px; color: white; font-size: 0.85rem;
+    z-index: 1000; opacity: 0; transition: opacity 0.3s;
+}
+.toast.show { opacity: 1; }
+.toast.success { background: #2e7d32; }
+.toast.error { background: #d32f2f; }
+
+@media (max-width: 600px) {
+    .trading-table { font-size: 0.78rem; }
+    .amount-input { width: 60px; }
+    .trading-table th, .trading-table td { padding: 0.4rem; }
+}
+</style>
 {% endblock %}
 
 {% block content %}
@@ -76,70 +156,55 @@
         </div>
     </div>
 
-    <!-- Pending Confirmations Section -->
-    <section class="confirmations-section">
-        <h2>Pending Confirmations ({{ count }})</h2>
+    <!-- Trading Module -->
+    <section style="margin-top: 1.5rem;">
+        <!-- Date picker -->
+        <div class="date-bar">
+            <label>日期</label>
+            <input type="date" id="tradeDatePicker" value="{{ today }}">
+            <span class="date-hint" id="dateHint"></span>
+        </div>
 
-        {% if pending %}
-        <div class="pending-list">
-            {% for item in pending %}
-            <div class="pending-card {{ item.type }}">
-                <div class="card-header">
-                    <span class="type-badge">
-                        {% if item.type == 'premarket' %}
-                        Premarket
-                        {% elif item.type == 'intraday' %}
-                        Intraday
-                        {% elif item.type == 'morning' %}
-                        Morning
-                        {% elif item.type == 'limit_up' %}
-                        Limit-Up
-                        {% else %}
-                        {{ item.type }}
-                        {% endif %}
-                    </span>
-                    <span class="timer" data-expires="{{ item.expires_at }}">
-                        {{ item.remaining_seconds }}s
-                    </span>
-                </div>
-                <div class="card-body">
-                    <h3>{{ item.title }}</h3>
-                </div>
-                <div class="card-footer">
-                    <a href="/confirm/{{ item.id }}" class="btn btn-primary">Confirm</a>
-                </div>
+        <!-- Holdings panel -->
+        <div class="panel">
+            <div class="panel-header">
+                <h3>当前持仓</h3>
+                <span class="badge" id="holdingsCount">0</span>
             </div>
-            {% endfor %}
+            <div id="holdingsContainer">
+                <div class="empty-state">加载中...</div>
+            </div>
         </div>
-        {% else %}
-        <div class="empty-state small">
-            <p>No pending confirmations</p>
+
+        <!-- Recommendations panel -->
+        <div class="panel">
+            <div class="panel-header">
+                <h3 id="recTitle">今日推荐 (Top 10)</h3>
+                <span class="badge" id="recCount">0</span>
+            </div>
+            <div id="recContainer">
+                <div class="empty-state">加载中...</div>
+            </div>
         </div>
-        {% endif %}
     </section>
 </div>
+
+<!-- Toast element -->
+<div class="toast" id="toast"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// Update countdown timers
-function updateTimers() {
-    document.querySelectorAll('.timer').forEach(el => {
-        const expires = new Date(el.dataset.expires);
-        const now = new Date();
-        const remaining = Math.max(0, Math.floor((expires - now) / 1000));
-        el.textContent = remaining + 's';
-        if (remaining <= 0) {
-            el.classList.add('expired');
-        } else if (remaining <= 30) {
-            el.classList.add('urgent');
-        }
-    });
-}
-setInterval(updateTimers, 1000);
-updateTimers();
+const TODAY = '{{ today }}';
 
-// Toggle cache scheduler
+function showToast(msg, type) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ' + type + ' show';
+    setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// --- Toggle cache scheduler ---
 async function toggleScheduler(el) {
     try {
         const resp = await fetch('/api/settings/cache-scheduler', {
@@ -148,12 +213,217 @@ async function toggleScheduler(el) {
             body: JSON.stringify({enabled: el.checked})
         });
         const data = await resp.json();
-        if (!data.success) {
-            el.checked = !el.checked;
-        }
-    } catch(e) {
-        el.checked = !el.checked;
+        if (!data.success) el.checked = !el.checked;
+    } catch(e) { el.checked = !el.checked; }
+}
+
+// --- Holdings ---
+
+async function loadHoldings() {
+    try {
+        const resp = await fetch('/api/trading/holdings');
+        const data = await resp.json();
+        renderHoldings(data.holdings || []);
+    } catch (e) {
+        document.getElementById('holdingsContainer').innerHTML =
+            '<div class="empty-state">加载持仓失败</div>';
     }
 }
+
+function renderHoldings(holdings) {
+    const el = document.getElementById('holdingsContainer');
+    document.getElementById('holdingsCount').textContent = holdings.length;
+
+    if (!holdings.length) {
+        el.innerHTML = '<div class="empty-state">无持仓</div>';
+        return;
+    }
+
+    let html = '<table class="trading-table"><thead><tr>' +
+        '<th>代码</th><th>名称</th><th>股数</th><th>买入价</th><th>买入日</th><th>操作</th>' +
+        '</tr></thead><tbody>';
+
+    for (const h of holdings) {
+        const qty = h.quantity || 0;
+        const qtyText = qty > 0 ? qty : 'N/A';
+        const entryPrice = h.entry_price ? h.entry_price.toFixed(2) : '-';
+        html += '<tr>' +
+            '<td class="code">' + esc(h.code) + '</td>' +
+            '<td>' + esc(h.name || '') + '</td>' +
+            '<td>' + qtyText + '</td>' +
+            '<td class="price">' + entryPrice + '</td>' +
+            '<td>' + esc(h.buy_date || '') + '</td>' +
+            '<td>';
+        if (qty > 0) {
+            html += '<button class="btn-sm btn-sell" onclick="doSell(\'' +
+                esc(h.code) + '\',\'' + esc(h.name || '') + '\',' + qty +
+                ',this)">卖出</button>';
+        }
+        html += '</td></tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+}
+
+async function doSell(code, name, quantity, btn) {
+    btn.disabled = true;
+    btn.textContent = '提交中...';
+    try {
+        const resp = await fetch('/api/trading/sell', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({stock_code: code, stock_name: name, quantity: quantity})
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(code + ' 卖出信号已推送', 'success');
+            setTimeout(loadHoldings, 1000);
+        } else {
+            showToast('卖出失败: ' + (data.detail || '未知错误'), 'error');
+            btn.disabled = false; btn.textContent = '卖出';
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+        btn.disabled = false; btn.textContent = '卖出';
+    }
+}
+
+// --- Recommendations ---
+
+async function loadRecommendations() {
+    const selectedDate = document.getElementById('tradeDatePicker').value;
+    const isToday = selectedDate === TODAY;
+    document.getElementById('dateHint').textContent = isToday ? '' : '历史数据 (仅查看)';
+    document.getElementById('recTitle').textContent =
+        (isToday ? '今日' : selectedDate) + ' 推荐 (Top 10)';
+
+    try {
+        const resp = await fetch('/api/trading/recommendations?date=' + selectedDate);
+        const data = await resp.json();
+        renderRecommendations(data.recommendations || [], isToday);
+    } catch (e) {
+        document.getElementById('recContainer').innerHTML =
+            '<div class="empty-state">加载推荐失败</div>';
+    }
+}
+
+function renderRecommendations(recs, isToday) {
+    const el = document.getElementById('recContainer');
+    document.getElementById('recCount').textContent = recs.length;
+
+    if (!recs.length) {
+        const msg = isToday
+            ? '今日扫描尚未执行 (09:38-10:00) 或无符合条件的推荐'
+            : '该日期无推荐数据';
+        el.innerHTML = '<div class="empty-state">' + msg + '</div>';
+        return;
+    }
+
+    let html = '<table class="trading-table"><thead><tr>' +
+        '<th>#</th><th>代码</th><th>名称</th><th>板块</th><th>开盘涨幅</th><th>建议买价</th>';
+    if (isToday) html += '<th>金额(元)</th><th>操作</th>';
+    html += '</tr></thead><tbody>';
+
+    for (let i = 0; i < recs.length; i++) {
+        const r = recs[i];
+        const gain = r.gain_from_open_pct != null ? r.gain_from_open_pct : 0;
+        const gainClass = gain >= 0 ? 'gain-pos' : 'gain-neg';
+        const gainText = (gain >= 0 ? '+' : '') + gain.toFixed(2) + '%';
+        const price = r.latest_price || 0;
+        const rowId = 'rec-' + i;
+
+        html += '<tr>' +
+            '<td>' + (r.rank || i + 1) + '</td>' +
+            '<td class="code">' + esc(r.stock_code) + '</td>' +
+            '<td>' + esc(r.stock_name || '') + '</td>' +
+            '<td>' + esc(r.board_name || '') + '</td>' +
+            '<td class="' + gainClass + '">' + gainText + '</td>' +
+            '<td class="price">' + price.toFixed(2) + '</td>';
+
+        if (isToday) {
+            html += '<td>' +
+                '<div class="amount-cell">' +
+                '<input type="number" class="amount-input" id="amt-' + rowId + '" ' +
+                'placeholder="金额" min="0" step="100" ' +
+                'oninput="onAmountInput(this,' + price + ',\'' + rowId + '\')">' +
+                '<span class="amount-unit">元</span>' +
+                '</div>' +
+                '<div class="error-hint" id="hint-' + rowId + '"></div>' +
+                '</td>' +
+                '<td>' +
+                '<button class="btn-sm btn-buy" id="btn-' + rowId + '" disabled ' +
+                'onclick="doBuy(\'' + esc(r.stock_code) + '\',\'' + esc(r.stock_name || '') +
+                '\',' + price + ',\'' + rowId + '\',this)">买入</button>' +
+                '</td>';
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+}
+
+function onAmountInput(input, price, rowId) {
+    const amount = parseFloat(input.value) || 0;
+    const lotCost = price * 100;
+    const lots = Math.floor(amount / lotCost);
+    const hintEl = document.getElementById('hint-' + rowId);
+    const btnEl = document.getElementById('btn-' + rowId);
+
+    if (amount > 0 && lots === 0) {
+        const minAmount = Math.ceil(lotCost);
+        hintEl.textContent = '金额不足交易1手 (最少 ' + minAmount + ' 元)';
+        hintEl.classList.add('visible');
+        input.value = minAmount;
+        btnEl.disabled = false;
+        btnEl.dataset.quantity = '100';
+    } else if (lots > 0) {
+        hintEl.classList.remove('visible');
+        btnEl.disabled = false;
+        btnEl.dataset.quantity = String(lots * 100);
+    } else {
+        hintEl.classList.remove('visible');
+        btnEl.disabled = true;
+        btnEl.dataset.quantity = '0';
+    }
+}
+
+async function doBuy(code, name, price, rowId, btn) {
+    const quantity = parseInt(btn.dataset.quantity) || 0;
+    if (quantity <= 0) return;
+
+    btn.disabled = true;
+    btn.textContent = '提交中...';
+    try {
+        const resp = await fetch('/api/trading/buy', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity, price: price })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(code + ' 买入 ' + (quantity / 100) + '手 信号已推送', 'success');
+            btn.textContent = '已推送';
+            setTimeout(loadHoldings, 2000);
+        } else {
+            showToast('买入失败: ' + (data.detail || '未知错误'), 'error');
+            btn.disabled = false; btn.textContent = '买入';
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+        btn.disabled = false; btn.textContent = '买入';
+    }
+}
+
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+// --- Init ---
+document.getElementById('tradeDatePicker').addEventListener('change', loadRecommendations);
+loadHoldings();
+loadRecommendations();
+setInterval(loadHoldings, 10000);
 </script>
 {% endblock %}

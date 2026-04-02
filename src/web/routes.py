@@ -64,9 +64,10 @@ def create_router() -> APIRouter:
 
     @router.get("/", response_class=HTMLResponse)
     async def index_page(request: Request):
-        """Main dashboard showing strategy status, positions, and pending confirmations."""
-        store = get_store(request)
-        pending = store.get_pending_list()
+        """Main dashboard with status cards + trading module."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
         templates = request.app.state.templates
 
         # Get iQuant connection status
@@ -96,14 +97,15 @@ def create_router() -> APIRouter:
             }
         )
 
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+
         return templates.TemplateResponse(
             "index.html",
             {
                 "request": request,
-                "pending": pending,
-                "count": len(pending),
                 "iquant_status": iquant_status,
                 "scheduler": scheduler_status,
+                "today": today,
             },
         )
 
@@ -2288,25 +2290,15 @@ def create_trade_backtest_router() -> APIRouter:
 
 
 def create_trading_router() -> APIRouter:
-    """Router for the dashboard trading module (buy/sell + recommendations)."""
+    """Router for the dashboard trading module (buy/sell + recommendations).
+
+    API-only — the trading UI is embedded in the main dashboard (index.html).
+    """
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     router = APIRouter(tags=["trading"])
     BEIJING_TZ = ZoneInfo("Asia/Shanghai")
-
-    @router.get("/trading", response_class=HTMLResponse)
-    async def trading_page(request: Request):
-        """Trading page with holdings + recommendations."""
-        templates = request.app.state.templates
-        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
-        return templates.TemplateResponse(
-            "trading.html",
-            {
-                "request": request,
-                "today": today,
-            },
-        )
 
     @router.get("/api/trading/holdings")
     async def get_holdings(request: Request) -> dict:
