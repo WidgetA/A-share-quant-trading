@@ -1508,7 +1508,7 @@ async def _run_intraday_monitor(state: dict) -> None:
     from zoneinfo import ZoneInfo
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    SCAN_TIME = time(9, 40)
+    SCAN_TIME = time(9, 39)
 
     state["running"] = True
     logger.info("Intraday momentum monitor started")

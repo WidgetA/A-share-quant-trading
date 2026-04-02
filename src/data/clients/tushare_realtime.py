@@ -282,7 +282,7 @@ class TushareRealtimeClient:
                 if " " in t:
                     t = t.split(" ")[-1]
                 hhmm = t.replace(":", "")[:4]
-                if hhmm <= "0940":
+                if hhmm <= "0939":
                     early_bars.append(r)
 
         if early_bars:

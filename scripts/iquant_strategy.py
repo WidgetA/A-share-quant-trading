@@ -93,8 +93,8 @@ def handlebar(ContextInfo):
             else:
                 print("[SELL SKIP %s] %s — 拿不到开盘价，保持持仓" % (bar_date, code))
 
-    # ─── BUY: 09:40 bar，用 order_value 按金额买入 ───
-    if bar_time == "09:40" and bar_date not in _bt["scanned"]:
+    # ─── BUY: 09:39 bar，用 order_value 按金额买入 ───
+    if bar_time == "09:39" and bar_date not in _bt["scanned"]:
         _bt["scanned"][bar_date] = True
         if _bt["holding"]:
             return

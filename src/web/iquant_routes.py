@@ -707,7 +707,7 @@ def create_iquant_router() -> APIRouter:
 
         Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
         """
-        SCAN_WINDOW = (time(9, 38), time(10, 0))
+        SCAN_WINDOW = (time(9, 39), time(10, 0))
 
         logger.info("V15 signal scheduler started")
 
