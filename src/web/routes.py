@@ -2335,7 +2335,26 @@ def create_trading_router() -> APIRouter:
             return {"holdings": []}
 
         broker_pos = iquant_rtr._get_broker_positions()
-        holdings = [{"code": pos["code"], "quantity": pos.get("volume", 0)} for pos in broker_pos]
+        # Filter out sold positions (volume=0)
+        active = [p for p in broker_pos if p.get("volume", 0) > 0]
+
+        # Look up company names from fundamentals DB
+        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
+        name_map: dict[str, str] = {}
+        if fundamentals_db and fundamentals_db.is_connected:
+            codes = [p["code"] for p in active]
+            if codes:
+                fund_map = await fundamentals_db.batch_get_fundamentals(codes)
+                name_map = {c: f.company_name for c, f in fund_map.items()}
+
+        holdings = [
+            {
+                "code": pos["code"],
+                "name": name_map.get(pos["code"], ""),
+                "quantity": pos.get("volume", 0),
+            }
+            for pos in active
+        ]
         return {"holdings": holdings}
 
     @router.get("/api/trading/recommendations")
@@ -2382,6 +2401,36 @@ def create_trading_router() -> APIRouter:
             "price_type": "limit" if price else "market",
             "latest_price": float(price) if price else 0.0,
             "reason": "Dashboard手动买入",
+            "manual": True,
+        }
+
+        pushed = iquant_rtr._push_order(signal)
+        return {"success": True, "signal_id": pushed.get("id"), "quantity": quantity}
+
+    @router.post("/api/trading/sell")
+    async def submit_sell(request: Request) -> dict:
+        """Push a SELL signal into iQuant pending queue."""
+        body = await request.json()
+        stock_code = body.get("stock_code", "")
+        stock_name = body.get("stock_name", "")
+        quantity = int(body.get("quantity", 0))
+
+        if not stock_code or quantity <= 0 or quantity % 100 != 0:
+            raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
+
+        iquant_rtr = getattr(request.app.state, "iquant_router", None)
+        if not iquant_rtr or not hasattr(iquant_rtr, "_push_order"):
+            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+
+        signal = {
+            "type": "sell",
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "quantity": quantity,
+            "price": None,
+            "price_type": "market",
+            "latest_price": 0.0,
+            "reason": "Dashboard手动卖出",
             "manual": True,
         }
 

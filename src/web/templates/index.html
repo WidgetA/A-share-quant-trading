@@ -60,6 +60,9 @@
 .btn-buy { background: #d32f2f; color: white; }
 .btn-buy:hover { background: #b71c1c; }
 .btn-buy:disabled { background: #ccc; cursor: not-allowed; }
+.btn-sell { background: #1976d2; color: white; }
+.btn-sell:hover { background: #1565c0; }
+.btn-sell:disabled { background: #ccc; cursor: not-allowed; }
 
 /* Error hint */
 .error-hint { color: #d32f2f; font-size: 0.75rem; display: none; margin-top: 2px; }
@@ -240,19 +243,47 @@ function renderHoldings(holdings) {
     }
 
     let html = '<table class="trading-table"><thead><tr>' +
-        '<th>代码</th><th>股数</th>' +
+        '<th>代码</th><th>名称</th><th>股数</th><th>操作</th>' +
         '</tr></thead><tbody>';
 
     for (const h of holdings) {
         const qty = h.quantity || 0;
-        const qtyText = qty > 0 ? qty : 'N/A';
         html += '<tr>' +
             '<td class="code">' + esc(h.code) + '</td>' +
-            '<td>' + qtyText + '</td>' +
+            '<td>' + esc(h.name || '') + '</td>' +
+            '<td>' + qty + '</td>' +
+            '<td><button class="btn-sm btn-sell" ' +
+            'onclick="doSell(\'' + esc(h.code) + '\',\'' + esc(h.name || '') + '\',' + qty + ',this)">卖出</button></td>' +
             '</tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
+}
+
+async function doSell(code, name, quantity, btn) {
+    if (!confirm('确认市价卖出 ' + code + ' ' + name + ' ' + quantity + '股?')) return;
+
+    btn.disabled = true;
+    btn.textContent = '提交中...';
+    try {
+        const resp = await fetch('/api/trading/sell', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(code + ' 卖出 ' + (quantity / 100) + '手 信号已推送', 'success');
+            btn.textContent = '已推送';
+            setTimeout(loadHoldings, 2000);
+        } else {
+            showToast('卖出失败: ' + (data.detail || '未知错误'), 'error');
+            btn.disabled = false; btn.textContent = '卖出';
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+        btn.disabled = false; btn.textContent = '卖出';
+    }
 }
 
 // --- Recommendations ---
