@@ -3,11 +3,10 @@
 iQuant 实盘下单脚本 — 轮询服务端 /pending-signals, 用 passorder() 执行。
 
 在 iQuant (QMT) 1 分钟 K 线实盘模式下运行。
-流程:
-  1. 启动时查账户余额, 报告服务端 (飞书通知)
-  2. 每根 bar 调用 /pending-signals 获取待执行信号
-  3. 按信号调用 passorder() 下单
-  4. 下单后调用 /ack-signal 确认
+
+两个独立循环:
+  - 状态线程 (30s): 心跳 + 同步持仓/余额 → 与交易时段无关
+  - handlebar (盘中): 轮询 /pending-signals → passorder() 下单
 
 下单方式 (统一 passorder):
   - 买入: 市价 1101 (最优五档即时成交剩余撤销)
@@ -23,18 +22,16 @@ import urllib.request
 API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "20f4b05bed1fe28e3c808dabaa5fa37f"
 
-_state = {"last_poll_ts": 0, "reported": False, "fields_printed": False, "pos_fields_printed": False, "init_notified": False}
+_state = {
+    "accID": "",
+    "last_poll_ts": 0,
+    "startup_reported": False,
+    "fields_printed": False,
+    "pos_fields_printed": False,
+}
 
 
-def _heartbeat_loop():
-    """Background thread: send heartbeat every 30s, independent of handlebar."""
-    while True:
-        try:
-            _api_call("/heartbeat", "POST")
-        except Exception as e:
-            print("[HEARTBEAT ERR] %s" % e)
-        time.sleep(30)
-
+# ── HTTP helpers ──────────────────────────────────────────────
 
 def _api_call(endpoint, method="GET", body=None):
     url = API_BASE + endpoint
@@ -45,6 +42,8 @@ def _api_call(endpoint, method="GET", body=None):
     return json.loads(resp.read().decode("utf-8"))
 
 
+# ── Broker query helpers (use accID, not ContextInfo) ─────────
+
 def _iquant_code(code):
     """转为 iQuant 格式: 601398 -> 601398.SH"""
     if "." in code:
@@ -52,13 +51,12 @@ def _iquant_code(code):
     return code + (".SH" if code[0] in "65" else ".SZ")
 
 
-def _get_available_cash(ContextInfo):
+def _get_available_cash(accID):
     """查询可用资金。柜台未连接时返回 0。"""
     try:
-        acct = get_trade_detail_data(ContextInfo.accID, 'stock', 'account')
+        acct = get_trade_detail_data(accID, 'stock', 'account')
         if acct:
             obj = acct[0]
-            # 首次成功时打印字段名, 方便排查
             if not _state["fields_printed"]:
                 _state["fields_printed"] = True
                 attrs = [a for a in dir(obj) if a.startswith('m_')]
@@ -71,10 +69,10 @@ def _get_available_cash(ContextInfo):
     return 0
 
 
-def _get_position_volume(ContextInfo, code):
+def _get_position_volume(accID, code):
     """查询某只股票的可卖数量。"""
     try:
-        positions = get_trade_detail_data(ContextInfo.accID, 'stock', 'position')
+        positions = get_trade_detail_data(accID, 'stock', 'position')
         for pos in (positions or []):
             pos_code = pos.m_strInstrumentID
             if pos_code == code or _iquant_code(pos_code.split(".")[0]) == code:
@@ -84,15 +82,14 @@ def _get_position_volume(ContextInfo, code):
     return 0
 
 
-def _get_all_positions(ContextInfo):
+def _get_all_positions(accID):
     """查询券商全部持仓, 返回 [{code, volume}]。柜台未连接时返回空列表。"""
     try:
-        positions = get_trade_detail_data(ContextInfo.accID, 'stock', 'position')
+        positions = get_trade_detail_data(accID, 'stock', 'position')
         if not positions:
             return []
         result = []
         for pos in positions:
-            # 首次成功时打印全部字段名+值, 方便排查
             if not _state["pos_fields_printed"]:
                 _state["pos_fields_printed"] = True
                 attrs = [a for a in dir(pos) if a.startswith('m_')]
@@ -100,7 +97,6 @@ def _get_all_positions(ContextInfo):
                 for a in attrs:
                     print("[POS]   %s = %s" % (a, getattr(pos, a, '?')))
             code = pos.m_strInstrumentID.split(".")[0]
-            # m_nVolume=总持仓, m_nCanUseVolume=可卖(T+1才有)
             volume = int(getattr(pos, 'm_nVolume', 0) or pos.m_nCanUseVolume)
             result.append({"code": code, "volume": volume})
         return result
@@ -109,15 +105,44 @@ def _get_all_positions(ContextInfo):
     return []
 
 
-def _sync_positions(ContextInfo):
-    """查询券商持仓并上报服务端。"""
-    positions = _get_all_positions(ContextInfo)
-    try:
-        _api_call("/sync-positions", "POST", {"positions": positions})
-        print("[SYNC] positions=%d" % len(positions))
-    except Exception as e:
-        print("[SYNC ERR] %s" % e)
+# ── State sync thread (independent of trading hours) ─────────
 
+def _state_sync_loop():
+    """Every 30s: heartbeat + sync positions + cash to server (no Feishu)."""
+    accID = _state["accID"]
+    while True:
+        positions = _get_all_positions(accID)
+        cash = _get_available_cash(accID)
+
+        body = {"positions": positions, "available_cash": cash}
+        try:
+            _api_call("/heartbeat", "POST", body)
+        except Exception as e:
+            print("[STATE SYNC ERR] %s" % e)
+
+        # One-time startup Feishu notification
+        if not _state["startup_reported"]:
+            _state["startup_reported"] = True
+            if cash > 0:
+                try:
+                    _api_call("/report-status", "POST", {"available_cash": cash})
+                    print("[STATUS] startup reported, cash=%.2f" % cash)
+                except Exception as e:
+                    print("[STATUS ERR] %s" % e)
+            else:
+                try:
+                    _api_call("/report-trade", "POST", {
+                        "message": "iQuant脚本已启动，当前券商柜台未连接（非交易时段或柜台尚未开启），余额暂时无法查询。柜台连通后将自动推送余额。",
+                        "stock_code": "", "stock_name": "", "reason": "",
+                    })
+                    print("[STATUS] startup notified (no cash yet)")
+                except Exception as e:
+                    print("[STATUS NOTIFY ERR] %s" % e)
+
+        time.sleep(30)
+
+
+# ── Trade execution helpers ───────────────────────────────────
 
 def _report_trade(msg, signal):
     """上报成交到服务端 (触发飞书通知)。"""
@@ -145,13 +170,13 @@ def _execute_signal(ContextInfo, signal):
     code = _iquant_code(signal["stock_code"])
     sig_type = signal["type"]
     is_manual = signal.get("manual", False)
+    accID = ContextInfo.accID
 
     if sig_type == "buy":
         if is_manual:
             quantity = signal.get("quantity", 100)
         else:
-            # V15: 可用资金 * 95% / 最新价, 取整到 100 股
-            cash = _get_available_cash(ContextInfo)
+            cash = _get_available_cash(accID)
             price = signal.get("latest_price", 0)
             if cash <= 0 or price <= 0:
                 msg = "V15买入失败: cash=%.2f price=%.2f" % (cash, price)
@@ -169,10 +194,10 @@ def _execute_signal(ContextInfo, signal):
         price_type_str = signal.get("price_type", "market")
 
         if price_type_str == "limit" and price > 0:
-            passorder(23, 11, ContextInfo.accID, code, 11, price, quantity, "", 2, "", ContextInfo)
+            passorder(23, 11, accID, code, 11, price, quantity, "", 2, "", ContextInfo)
             msg = "买入 %s %d股 限价%.2f" % (code, quantity, price)
         else:
-            passorder(23, 1101, ContextInfo.accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
+            passorder(23, 1101, accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
             msg = "买入 %s %d股 市价" % (code, quantity)
         print("[BUY] %s" % msg)
         _report_trade(msg, signal)
@@ -181,8 +206,7 @@ def _execute_signal(ContextInfo, signal):
         if is_manual:
             quantity = signal.get("quantity", 100)
         else:
-            # V15: 查持仓可卖数量
-            quantity = _get_position_volume(ContextInfo, code)
+            quantity = _get_position_volume(accID, code)
             if quantity <= 0:
                 print("[V15 SELL] %s no position, skip" % code)
                 return False
@@ -191,10 +215,10 @@ def _execute_signal(ContextInfo, signal):
         price_type_str = signal.get("price_type", "market")
 
         if price_type_str == "limit" and price > 0:
-            passorder(24, 11, ContextInfo.accID, code, 11, price, quantity, "", 2, "", ContextInfo)
+            passorder(24, 11, accID, code, 11, price, quantity, "", 2, "", ContextInfo)
             msg = "卖出 %s %d股 限价%.2f" % (code, quantity, price)
         else:
-            passorder(24, 1101, ContextInfo.accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
+            passorder(24, 1101, accID, code, 5, -1, quantity, "", 2, "", ContextInfo)
             msg = "卖出 %s %d股 市价" % (code, quantity)
         print("[SELL] %s" % msg)
         _report_trade(msg, signal)
@@ -213,55 +237,22 @@ def _ack_signal(signal_id):
         return False
 
 
+# ── QMT entry points ─────────────────────────────────────────
+
 def init(ContextInfo):
     ContextInfo.set_account("410015160653")
     ContextInfo.accID = "410015160653"
+    _state["accID"] = ContextInfo.accID
     print("[INIT] iQuant live trading script started")
     print("[INIT] API_BASE = %s" % API_BASE)
-    # Start heartbeat thread (daemon=True so it dies with the main process)
-    t = threading.Thread(target=_heartbeat_loop, daemon=True)
+    t = threading.Thread(target=_state_sync_loop, daemon=True)
     t.start()
-    print("[INIT] heartbeat thread started")
+    print("[INIT] state sync thread started")
 
 
 def handlebar(ContextInfo):
+    """Trading only — poll signals and execute orders."""
     now = time.time()
-
-    # 首次 handlebar: 推飞书说脚本已启动 + 同步持仓
-    if not _state["init_notified"]:
-        _state["init_notified"] = True
-        _sync_positions(ContextInfo)
-        cash = _get_available_cash(ContextInfo)
-        if cash > 0:
-            _state["reported"] = True
-            try:
-                _api_call("/report-status", "POST", {"available_cash": cash})
-                print("[STATUS] startup reported, cash=%.2f" % cash)
-            except Exception as e:
-                print("[STATUS ERR] %s" % e)
-        else:
-            try:
-                _api_call("/report-trade", "POST", {
-                    "message": "iQuant脚本已启动，当前券商柜台未连接（非交易时段或柜台尚未开启），余额暂时无法查询。柜台连通后将自动推送余额。",
-                    "stock_code": "", "stock_name": "", "reason": "",
-                })
-                print("[STATUS] startup notified (no cash yet)")
-            except Exception as e:
-                print("[STATUS NOTIFY ERR] %s" % e)
-
-    # 余额未上报时, 每60s重试查余额
-    if not _state["reported"]:
-        if now - _state.get("last_status_ts", 0) >= 60:
-            _state["last_status_ts"] = now
-            cash = _get_available_cash(ContextInfo)
-            if cash > 0:
-                _state["reported"] = True
-                print("[STATUS] available_cash=%.2f — reporting" % cash)
-                try:
-                    _api_call("/report-status", "POST", {"available_cash": cash})
-                    print("[STATUS] reported to server")
-                except Exception as e:
-                    print("[STATUS ERR] %s" % e)
 
     # 节流: 每30秒最多轮询一次
     if now - _state.get("last_poll_ts", 0) < 30:
@@ -275,10 +266,7 @@ def handlebar(ContextInfo):
         print("[BAR ERR] %s" % e)
         return
 
-    print("[BAR] time=%s barpos=%d real_time=%.0f" % (bar_time, ContextInfo.barpos, now))
-
-    # 同步券商持仓到服务端
-    _sync_positions(ContextInfo)
+    print("[BAR] time=%s barpos=%d" % (bar_time, ContextInfo.barpos))
 
     try:
         result = _api_call("/pending-signals")

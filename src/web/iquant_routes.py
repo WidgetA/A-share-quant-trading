@@ -764,13 +764,22 @@ def create_iquant_router() -> APIRouter:
     # --- Endpoints ---
 
     @router.post("/heartbeat")
-    async def heartbeat(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Lightweight heartbeat — update last_poll_time only.
+    async def heartbeat(
+        request: Request,
+        api_key: str = Depends(_verify_api_key),
+    ) -> dict:
+        """Heartbeat + silent state sync (no Feishu).
 
         Called by a dedicated thread in iQuant script every 30s,
         independent of handlebar / trading hours.
+        Accepts optional positions and cash to keep dashboard up-to-date.
         """
+        body = await request.json()
         _state["last_poll_time"] = datetime.now(BEIJING_TZ)
+        if "positions" in body:
+            _state["broker_positions"] = body["positions"]
+        if "available_cash" in body:
+            _state["available_cash"] = body["available_cash"]
         return {"status": "ok"}
 
     @router.get("/ping")
