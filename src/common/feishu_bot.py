@@ -354,7 +354,7 @@ Limit-up (skipped):
         time_str = now.strftime("%Y-%m-%d %H:%M")
 
         lines = [
-            f"[V15] 每日扫描报告 ({time_str})",
+            f"[测试服] 每日扫描报告 ({time_str})",
             (
                 f"初筛: {scan_result.initial_gainers_count}只 | "
                 f"热门板块: {scan_result.hot_board_count}个 | "

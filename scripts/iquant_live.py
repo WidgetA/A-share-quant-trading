@@ -220,14 +220,14 @@ def _execute_signal(ContextInfo, signal):
             cash = _get_available_cash(accID)
             price = signal.get("latest_price", 0)
             if cash <= 0 or price <= 0:
-                msg = "V15买入失败: cash=%.2f price=%.2f" % (cash, price)
-                print("[V15 BUY ERR] %s" % msg)
+                msg = "买入失败: cash=%.2f price=%.2f" % (cash, price)
+                print("[BUY ERR] %s" % msg)
                 _report_error(msg)
                 return False
             quantity = int(cash * 0.95 / price / 100) * 100
             if quantity < 100:
                 msg = "余额不足买1手: cash=%.2f price=%.2f 需要>=%.2f" % (cash, price, price * 100)
-                print("[V15 BUY ERR] %s" % msg)
+                print("[BUY ERR] %s" % msg)
                 _report_error(msg)
                 return False
 
@@ -249,7 +249,7 @@ def _execute_signal(ContextInfo, signal):
         else:
             quantity = _get_position_volume(accID, code)
             if quantity <= 0:
-                print("[V15 SELL] %s no position, skip" % code)
+                print("[SELL] %s no position, skip" % code)
                 return False
 
         price = signal.get("price", 0)
