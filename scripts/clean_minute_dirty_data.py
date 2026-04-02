@@ -20,7 +20,6 @@ BATCH_SIZE = 100  # stay well under ~200 row DELETE limit
 
 async def main() -> None:
     import asyncpg
-
     from src.data.clients.greptime_db import _no_reset_connection_class
 
     pool = await asyncpg.create_pool(
