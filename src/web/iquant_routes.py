@@ -645,7 +645,10 @@ def create_iquant_router() -> APIRouter:
 
                 # --- Clear stale broker data when offline ---
                 last_poll = _state.get("last_poll_time")
-                if last_poll is None or (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS:
+                is_offline = last_poll is None or (
+                    (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS
+                )
+                if is_offline:
                     if _state["broker_positions"] or _state.get("available_cash", 0) > 0:
                         logger.info("V15: iQuant offline — clearing broker positions/cash")
                         _state["broker_positions"] = []
@@ -741,7 +744,8 @@ def create_iquant_router() -> APIRouter:
         for i, sig in enumerate(_state["pending_signals"]):
             if sig.get("id") == signal_id:
                 removed = _state["pending_signals"].pop(i)
-                logger.info(f"Signal cancelled from dashboard: {removed.get('stock_code')} (id={signal_id})")
+                code = removed.get("stock_code")
+                logger.info(f"Signal cancelled: {code} (id={signal_id})")
                 return True
         return False
 
