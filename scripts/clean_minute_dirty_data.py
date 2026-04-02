@@ -20,7 +20,11 @@ BATCH_SIZE = 100  # stay well under ~200 row DELETE limit
 
 async def main() -> None:
     import asyncpg
-    from src.data.clients.greptime_db import _no_reset_connection_class
+
+    # Inline — GreptimeDB doesn't support RESET ALL / DEALLOCATE ALL
+    class _NoResetConn(asyncpg.Connection):
+        async def reset(self, *, timeout=None):  # type: ignore[override]
+            pass
 
     pool = await asyncpg.create_pool(
         host="greptimedb",
@@ -29,7 +33,7 @@ async def main() -> None:
         user="greptime",
         min_size=1,
         max_size=1,
-        connection_class=_no_reset_connection_class(),
+        connection_class=_NoResetConn,
     )
 
     async with pool.acquire() as conn:
