@@ -210,18 +210,29 @@ GreptimeDB 是 LSM-tree 存储引擎，数据分 memtable（内存）和 SST 文
 **旧 SST 文件中的行没有新列**。直接 INSERT 同 PK 的行（upsert），新列的值只存在于 memtable。
 当 memtable flush 到 SST 并与旧 SST 合并时，**旧行会覆盖新列的值**，导致新列回退到 NULL。
 
-正确做法：**DELETE 旧行 → INSERT 新行 → FLUSH**
+正确做法：**DELETE → FLUSH（持久化 tombstone）→ INSERT → FLUSH（持久化新数据）**
+
+大量行（3000+）时，单次 FLUSH 不够：memtable 在 INSERT 过程中可能自动刷盘，
+tombstone 和新行分到不同 SST，旧数据在 merge 时赢回来。**必须两次 FLUSH**。
 
 ```python
 # ❌ 错误：纯 upsert — flush 后新列值丢失
 await db.execute(f"INSERT INTO t{cols} VALUES {val}")
 
-# ✅ 正确：DELETE + INSERT + FLUSH
+# ❌ 错误：DELETE + INSERT + 单次 FLUSH — 3000+ 行时部分数据仍丢失
 for code in codes:
     await db.execute(f"DELETE FROM t WHERE stock_code='{code}' AND ts={ts_ms}")
 for code in codes:
     await db.execute(f"INSERT INTO t{cols} VALUES {val_map[code]}")
 await db.execute("ADMIN FLUSH_TABLE('t')")
+
+# ✅ 正确：DELETE → FLUSH → INSERT → FLUSH（两次刷盘）
+for code in codes:
+    await db.execute(f"DELETE FROM t WHERE stock_code='{code}' AND ts={ts_ms}")
+await db.execute("ADMIN FLUSH_TABLE('t')")  # tombstone 落盘
+for code in codes:
+    await db.execute(f"INSERT INTO t{cols} VALUES {val_map[code]}")
+await db.execute("ADMIN FLUSH_TABLE('t')")  # 新数据落盘
 ```
 
 ### 批量写入规则
