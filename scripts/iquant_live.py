@@ -22,7 +22,7 @@ import urllib.request
 API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "20f4b05bed1fe28e3c808dabaa5fa37f"
 
-_state = {"last_poll_ts": 0, "reported": False, "fields_printed": False, "init_notified": False}
+_state = {"last_poll_ts": 0, "reported": False, "fields_printed": False, "pos_fields_printed": False, "init_notified": False}
 
 
 def _api_call(endpoint, method="GET", body=None):
@@ -71,6 +71,39 @@ def _get_position_volume(ContextInfo, code):
     except Exception as e:
         print("[POS ERR] %s" % e)
     return 0
+
+
+def _get_all_positions(ContextInfo):
+    """查询券商全部持仓, 返回 [{code, volume}]。柜台未连接时返回空列表。"""
+    try:
+        positions = get_trade_detail_data(ContextInfo.accID, 'stock', 'position')
+        if not positions:
+            return []
+        result = []
+        for pos in positions:
+            # 首次成功时打印字段名, 方便排查
+            if not _state["pos_fields_printed"]:
+                _state["pos_fields_printed"] = True
+                attrs = [a for a in dir(pos) if a.startswith('m_')]
+                print("[POS] fields: %s" % attrs)
+            code = pos.m_strInstrumentID.split(".")[0]
+            volume = int(pos.m_nCanUseVolume)
+            if volume > 0:
+                result.append({"code": code, "volume": volume})
+        return result
+    except Exception as e:
+        print("[POS ALL ERR] %s" % e)
+    return []
+
+
+def _sync_positions(ContextInfo):
+    """查询券商持仓并上报服务端。"""
+    positions = _get_all_positions(ContextInfo)
+    try:
+        _api_call("/sync-positions", "POST", {"positions": positions})
+        print("[SYNC] positions=%d" % len(positions))
+    except Exception as e:
+        print("[SYNC ERR] %s" % e)
 
 
 def _report_trade(msg, signal):
@@ -177,9 +210,10 @@ def init(ContextInfo):
 def handlebar(ContextInfo):
     now = time.time()
 
-    # 首次 handlebar: 推飞书说脚本已启动
+    # 首次 handlebar: 推飞书说脚本已启动 + 同步持仓
     if not _state["init_notified"]:
         _state["init_notified"] = True
+        _sync_positions(ContextInfo)
         cash = _get_available_cash(ContextInfo)
         if cash > 0:
             _state["reported"] = True
@@ -225,6 +259,9 @@ def handlebar(ContextInfo):
         return
 
     print("[BAR] time=%s barpos=%d real_time=%.0f" % (bar_time, ContextInfo.barpos, now))
+
+    # 同步券商持仓到服务端
+    _sync_positions(ContextInfo)
 
     try:
         result = _api_call("/pending-signals")

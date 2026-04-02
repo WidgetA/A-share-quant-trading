@@ -248,6 +248,7 @@ def create_iquant_router() -> APIRouter:
         "pending_signals": [],  # signals waiting for iQuant to execute
         "executed_signals": [],  # acked signals (history)
         "holdings": [],  # V15: [{code, name, buy_date, entry_price, marked_sell_today, early_exit}]
+        "broker_positions": [],  # Actual broker positions: [{code, volume}]
         "scheduler_task": None,
         "universe_cache": None,
         "backtest_cache": None,  # injected from app.py after GreptimeDB connect
@@ -786,7 +787,7 @@ def create_iquant_router() -> APIRouter:
             "connected": connected,
             "last_poll_time": last_poll_str,
             "gap_seconds": round(gap_seconds) if gap_seconds is not None else None,
-            "holdings_count": len(_state["holdings"]),
+            "holdings_count": len(_state["broker_positions"]),
             "pending_count": len(_state["pending_signals"]),
         }
 
@@ -1085,6 +1086,18 @@ def create_iquant_router() -> APIRouter:
         logger.error(f"iQuant report-error: {error_msg}")
         await _notify_feishu_error("iQuant执行异常", error_msg)
         return {"success": True}
+
+    @router.post("/sync-positions")
+    async def sync_positions(
+        request: Request,
+        api_key: str = Depends(_verify_api_key),
+    ) -> dict:
+        """Receive actual broker positions from iQuant script."""
+        body = await request.json()
+        positions = body.get("positions", [])
+        _state["broker_positions"] = positions
+        logger.info(f"iQuant sync-positions: {len(positions)} positions")
+        return {"success": True, "count": len(positions)}
 
     @router.get("/holdings")
     async def holdings(api_key: str = Depends(_verify_api_key)) -> dict:
