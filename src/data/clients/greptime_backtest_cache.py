@@ -745,10 +745,19 @@ class GreptimeBacktestCache:
             f"{minute_count} minute stocks out of {total} downloaded"
         )
 
-        # Data integrity validation
+        # Data integrity validation — send results via progress_cb so frontend sees them
         integrity_warnings = await self.validate_integrity()
         for w in integrity_warnings:
             logger.warning(f"Data integrity: {w}")
+        if progress_cb:
+            await _maybe_await(
+                progress_cb(
+                    "post_integrity",
+                    len(integrity_warnings),
+                    0,
+                    "\n".join(integrity_warnings) if integrity_warnings else "",
+                )
+            )
 
     async def _download_daily_tsanghi(
         self,

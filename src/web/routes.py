@@ -399,6 +399,10 @@ def create_momentum_router() -> APIRouter:
                 return f"下载分钟线数据: {current}/{total} 只"
             elif phase == "download":
                 return f"下载完成: 共 {total} 只股票"
+            elif phase == "post_integrity":
+                if current == 0:
+                    return "下载后完整性检查通过"
+                return f"下载后完整性检查: {current} 个警告"
             return f"{phase}: {current}/{total}"
 
         async def download_stream():
@@ -433,6 +437,29 @@ def create_momentum_router() -> APIRouter:
                     overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
                 elif phase == "minute":
                     overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
+                elif phase == "post_integrity":
+                    # Push a post-download integrity report so the frontend shows it
+                    warnings = [w for w in detail.split("\n") if w] if detail else []
+                    if warnings:
+                        queue.put_nowait(
+                            {
+                                "type": "integrity_report",
+                                "issues": [
+                                    {"level": "warning", "message": w, "count": 0, "samples": []}
+                                    for w in warnings
+                                ],
+                                "message": f"下载后完整性检查: {len(warnings)} 个警告",
+                            }
+                        )
+                    else:
+                        queue.put_nowait(
+                            {
+                                "type": "integrity_report",
+                                "issues": [],
+                                "message": "下载后完整性检查通过",
+                            }
+                        )
+                    return  # already pushed to queue, skip normal progress message
                 else:
                     overall = 1.0
                 queue.put_nowait(
