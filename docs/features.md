@@ -681,12 +681,21 @@ await engine.stop()
 | 扫描无推荐 | Scan returns None | 通知今日无符合条件股票 |
 | 扫描/跳空失败 | Exception | 完整错误堆栈 |
 
+**Dashboard Recommendations (On-Demand Compute)**:
+- `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 V15 scan results
+- **Cache-first**: checks PostgreSQL `V15ScanDB` first; computes on-demand if empty
+- **Past dates**: uses GreptimeDB cache (`_build_snapshots_from_cache` + `GreptimeHistoricalAdapter`), ~1-3s
+- **Today**: uses Tushare `batch_get_early_quotes` (rt_min_daily 9:30-9:40 data) + `IQuantHistoricalAdapter`, ~30-60s (only after 09:39)
+- Computed results are persisted to V15ScanDB for subsequent cache hits
+- iQuant scheduler (09:39-10:00) also writes results via same V15ScanDB; on-demand compute is a fallback when scheduler misses
+
 **Key Files**:
 - `src/strategy/strategies/v15_scanner.py` — V15 7-layer funnel + V3 regression scoring
 - `src/web/iquant_routes.py` — iQuant API router with T+2 scheduler + monitoring
 - `src/web/app.py` — GreptimeDB cache injection into iQuant router
 - `src/data/clients/iquant_historical_adapter.py` — Historical data adapter (duck-types IFinDHttpClient)
 - `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
+- `src/data/database/v15_scan_db.py` — PostgreSQL persistence for scan results
 
 **Differences from STR-004**:
 - Pure parametric (no LLM board relevance filter)

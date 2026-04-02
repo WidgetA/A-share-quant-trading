@@ -86,7 +86,45 @@ async def startup():
     iquant_rtr._start_monitoring()  # ...this never runs!
 ```
 
+## QMT API Thread Safety
+
+QMT's `get_trade_detail_data` and `passorder` **only work on the main thread**. Calling from `threading.Thread` silently returns empty results (no exception).
+
+```python
+# FORBIDDEN: QMT API from background thread
+def _heartbeat_loop():
+    while True:
+        positions = get_trade_detail_data(accID, 'stock', 'position')  # Always []!
+        cash = get_trade_detail_data(accID, 'stock', 'account')        # Always []!
+        send_to_server(positions, cash)
+        time.sleep(30)
+
+# CORRECT: Main thread queries broker → shared dict → background thread sends HTTP
+_state = {"positions": [], "cash": 0}
+
+def handlebar(ContextInfo):          # main thread
+    _state["positions"] = _get_all_positions(accID)
+    _state["cash"] = _get_available_cash(accID)
+
+def _state_sync_loop():              # background thread
+    while True:
+        _api_call("/heartbeat", "POST", {    # pure HTTP, no QMT API
+            "positions": _state["positions"],
+            "available_cash": _state["cash"],
+        })
+        time.sleep(30)
+```
+
+After trade execution, **immediately** refresh and sync:
+```python
+if success:
+    _ack_signal(sig_id)
+    _refresh_broker_state()   # re-query broker (main thread)
+    _sync_state_now()         # push to server immediately
+```
+
 ## Past Incidents
 
 - **momentum_quality_filter.py**: Used fail-open pattern — API failure → no filtering → bad trades went through undetected. L2/L3 filters showed +0.00% because they silently did nothing.
 - **app.py startup ordering** (2026-03-18): `run_audit()` was unprotected before `_start_monitoring()` — audit crash silently skipped monitoring startup, no heartbeat alerts sent all day.
+- **iQuant heartbeat thread** (2026-04-02): Moved `get_trade_detail_data` to background thread → silently returned empty → dashboard showed 0 positions after deploy. Fix: QMT API calls stay on main thread, background thread only does HTTP.

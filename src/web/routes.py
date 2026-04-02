@@ -1231,6 +1231,172 @@ async def _build_snapshots_from_cache(cache, date_str: str) -> dict:
     return snapshots
 
 
+def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
+    """Convert V15ScanResult.all_scored to the same dict format as V15ScanDB.query()."""
+
+    def _f(val):
+        return round(float(val), 4) if val is not None else None
+
+    top = scan_result.all_scored[:n]
+    return [
+        {
+            "trade_date": date_str,
+            "rank": i + 1,
+            "stock_code": s.stock_code,
+            "stock_name": s.stock_name,
+            "board_name": s.board_name,
+            "v3_score": _f(s.v3_score),
+            "open_price": _f(s.open_price),
+            "prev_close": _f(s.prev_close),
+            "latest_price": _f(s.latest_price),
+            "gain_from_open_pct": _f(s.gain_from_open_pct),
+            "turnover_amp": _f(s.turnover_amp),
+            "consecutive_up_days": s.consecutive_up_days,
+            "trend_10d": _f(s.trend_10d),
+            "final_candidates": scan_result.final_candidates,
+        }
+        for i, s in enumerate(top)
+    ]
+
+
+async def _compute_v15_scan(date_str: str, fundamentals_db, backtest_cache):
+    """Compute V15 scan on-demand. Returns (recs_list, V15ScanResult | None).
+
+    Two paths:
+    - Past dates: GreptimeDB cache (fast, ~1-3s)
+    - Today: Tushare batch_get_early_quotes (slow, ~30-60s, only after 09:39)
+    """
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from src.data.sources.local_concept_mapper import LocalConceptMapper
+    from src.strategy.strategies.v15_scanner import V15Scanner
+
+    beijing_tz = ZoneInfo("Asia/Shanghai")
+    today_str = datetime.now(beijing_tz).strftime("%Y-%m-%d")
+    is_today = date_str == today_str
+
+    if is_today:
+        return await _compute_v15_scan_today(date_str, fundamentals_db, backtest_cache, beijing_tz)
+
+    # --- Past date: use GreptimeDB cache (same as backtest) ---
+    if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
+        raise ValueError("GreptimeDB 缓存未就绪，无法计算历史推荐")
+
+    from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
+
+    price_snapshots = await _build_snapshots_from_cache(backtest_cache, date_str)
+    if not price_snapshots:
+        return [], None
+
+    trade_date = date.fromisoformat(date_str)
+    adapter = GreptimeHistoricalAdapter(backtest_cache)
+    concept_mapper = LocalConceptMapper()
+    scanner = V15Scanner(
+        historical_adapter=adapter,
+        fundamentals_db=fundamentals_db,
+        concept_mapper=concept_mapper,
+    )
+    result = await scanner.scan(price_snapshots, trade_date=trade_date)
+    recs = _scan_result_to_recs(date_str, result, n=10)
+    return recs, result
+
+
+async def _compute_v15_scan_today(date_str, fundamentals_db, backtest_cache, beijing_tz):
+    """Today path: Tushare rt_min_daily early quotes + IQuantHistoricalAdapter."""
+    from datetime import datetime, timedelta
+
+    from src.common.config import get_tushare_token
+    from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
+    from src.data.clients.tushare_realtime import TushareRealtimeClient
+    from src.data.sources.local_concept_mapper import LocalConceptMapper
+    from src.strategy.filters.stock_filter import create_main_board_only_filter
+    from src.strategy.models import PriceSnapshot
+    from src.strategy.strategies.v15_scanner import V15Scanner
+
+    now_bj = datetime.now(beijing_tz)
+
+    # Weekday check
+    if now_bj.weekday() >= 5:
+        day_name = "周六" if now_bj.weekday() == 5 else "周日"
+        raise ValueError(f"今天是{day_name}，A股不开市")
+
+    # Time guard
+    if now_bj.hour < 9 or (now_bj.hour == 9 and now_bj.minute < 39):
+        raise ValueError("今日扫描需在 09:39 之后执行（早盘数据尚未就绪）")
+
+    # Universe
+    stock_filter = create_main_board_only_filter()
+    all_codes = await fundamentals_db.get_all_stock_codes()
+    universe = [c for c in all_codes if stock_filter.is_allowed(c)]
+    logger.info(f"On-demand scan: universe has {len(universe)} codes")
+
+    # Tushare early quotes (9:30-9:40)
+    tushare_token = get_tushare_token()
+    tushare = TushareRealtimeClient(token=tushare_token)
+    await tushare.start()
+    try:
+        quotes = await tushare.batch_get_early_quotes(universe)
+        logger.info(f"On-demand scan: got {len(quotes)} early quotes")
+
+        if not quotes:
+            return [], None
+
+        # prev_close from GreptimeDB cache (look back 1-7 days)
+        if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
+            raise ValueError("GreptimeDB 缓存未就绪，无法获取昨收价")
+
+        today = now_bj.date()
+        prev_daily: dict = {}
+        for days_back in range(1, 8):
+            prev_date = today - timedelta(days=days_back)
+            prev_date_str = prev_date.strftime("%Y-%m-%d")
+            prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
+            if prev_daily:
+                logger.info(
+                    f"On-demand scan: prev_close from {prev_date_str} ({len(prev_daily)} stocks)"
+                )
+                break
+
+        # Build PriceSnapshots
+        price_snapshots: dict[str, PriceSnapshot] = {}
+        for code, q in quotes.items():
+            if not q.is_trading:
+                continue
+            cached_day = prev_daily.get(code)
+            prev_close = cached_day.close if cached_day else 0.0
+            if prev_close <= 0:
+                continue
+            price_snapshots[code] = PriceSnapshot(
+                stock_code=code,
+                stock_name="",
+                open_price=q.open_price,
+                prev_close=prev_close,
+                latest_price=q.early_close,
+                early_volume=q.early_volume,
+                high_price=q.early_high,
+                low_price=q.early_low,
+            )
+
+        if not price_snapshots:
+            raise ValueError("构建快照为空，请检查 Tushare 和 GreptimeDB 缓存")
+
+        adapter = IQuantHistoricalAdapter(tushare)
+        concept_mapper = LocalConceptMapper()
+        scanner = V15Scanner(
+            historical_adapter=adapter,
+            fundamentals_db=fundamentals_db,
+            concept_mapper=concept_mapper,
+            stock_filter=stock_filter,
+        )
+        result = await scanner.scan(price_snapshots)
+    finally:
+        await tushare.stop()
+
+    recs = _scan_result_to_recs(date_str, result, n=10)
+    return recs, result
+
+
 def _calc_net_return_pct(buy_price: float, sell_price: float) -> float:
     """Calculate net return percentage after transaction costs (assuming 1 lot = 100 shares)."""
     shares = 100
@@ -2359,22 +2525,34 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/recommendations")
     async def get_recommendations(request: Request, date: str | None = None) -> dict:
-        """Get top-10 recommendations from V15ScanDB for a given date."""
-        from src.data.database.v15_scan_db import create_v15_scan_db_from_config
+        """Get top-10 recommendations by computing V15 scan on-demand.
 
+        Past dates use GreptimeDB cache (~1-3s).
+        Today uses Tushare rt_min_daily (~30-60s, only after 09:39).
+        No DB caching — strategy is actively being iterated.
+        """
         if date is None:
             date = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
-        v15db = create_v15_scan_db_from_config()
+        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
+        backtest_cache = getattr(request.app.state, "backtest_cache", None)
+
+        if not fundamentals_db:
+            return {"date": date, "recommendations": [], "error": "基本面数据库未就绪"}
+
         try:
-            await v15db.connect()
-            rows = await v15db.query(start_date=date, end_date=date, limit=10)
-            return {"date": date, "recommendations": rows}
-        except Exception as e:
-            logger.error(f"V15ScanDB query failed: {e}")
+            recs, _scan_result = await _compute_v15_scan(
+                date_str=date,
+                fundamentals_db=fundamentals_db,
+                backtest_cache=backtest_cache,
+            )
+        except (MinuteDataMissingError, ValueError) as e:
             return {"date": date, "recommendations": [], "error": str(e)}
-        finally:
-            await v15db.close()
+        except Exception as e:
+            logger.error(f"On-demand V15 scan failed for {date}: {e}", exc_info=True)
+            return {"date": date, "recommendations": [], "error": str(e)}
+
+        return {"date": date, "recommendations": recs}
 
     @router.post("/api/trading/buy")
     async def submit_buy(request: Request) -> dict:

@@ -167,7 +167,7 @@
         </div>
 
         <!-- Holdings panel -->
-        <div class="panel">
+        <div class="panel" id="holdingsPanel">
             <div class="panel-header">
                 <h3>当前持仓</h3>
                 <span class="badge" id="holdingsCount">0</span>
@@ -252,12 +252,19 @@ function renderHoldings(holdings) {
             '<td class="code">' + esc(h.code) + '</td>' +
             '<td>' + esc(h.name || '') + '</td>' +
             '<td>' + qty + '</td>' +
-            '<td><button class="btn-sm btn-sell" ' +
-            'onclick="doSell(\'' + esc(h.code) + '\',\'' + esc(h.name || '') + '\',' + qty + ',this)">卖出</button></td>' +
+            '<td><button class="btn-sm btn-sell" data-code="' + esc(h.code) +
+            '" data-name="' + esc(h.name || '') + '" data-qty="' + qty + '">卖出</button></td>' +
             '</tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
+
+    // Bind sell buttons via event delegation (avoids inline onclick issues)
+    el.querySelectorAll('.btn-sell').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            doSell(btn.dataset.code, btn.dataset.name, parseInt(btn.dataset.qty) || 0, btn);
+        });
+    });
 }
 
 async function doSell(code, name, quantity, btn) {
@@ -271,16 +278,27 @@ async function doSell(code, name, quantity, btn) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity })
         });
+        if (!resp.ok) {
+            const errText = await resp.text();
+            let detail = '未知错误';
+            try { detail = JSON.parse(errText).detail || errText; } catch(_) { detail = errText; }
+            console.error('[doSell] server error:', resp.status, detail);
+            showToast('卖出失败(' + resp.status + '): ' + detail, 'error');
+            btn.disabled = false; btn.textContent = '卖出';
+            return;
+        }
         const data = await resp.json();
         if (data.success) {
             showToast(code + ' 卖出 ' + (quantity / 100) + '手 信号已推送', 'success');
             btn.textContent = '已推送';
             setTimeout(loadHoldings, 2000);
         } else {
+            console.error('[doSell] not success:', data);
             showToast('卖出失败: ' + (data.detail || '未知错误'), 'error');
             btn.disabled = false; btn.textContent = '卖出';
         }
     } catch (e) {
+        console.error('[doSell] fetch error:', e);
         showToast('请求失败: ' + e.message, 'error');
         btn.disabled = false; btn.textContent = '卖出';
     }
@@ -292,15 +310,21 @@ async function loadRecommendations() {
     const selectedDate = document.getElementById('tradeDatePicker').value;
     const isToday = selectedDate === TODAY;
     document.getElementById('dateHint').textContent = isToday ? '' : '历史数据 (仅查看)';
+    document.getElementById('holdingsPanel').style.display = isToday ? '' : 'none';
     document.getElementById('recTitle').textContent =
         (isToday ? '今日' : selectedDate) + ' 推荐 (Top 10)';
+
+    // Show loading state (on-demand compute may take 30-60s for today)
+    document.getElementById('recContainer').innerHTML =
+        '<div class="empty-state">正在计算推荐...</div>';
+    document.getElementById('recCount').textContent = '...';
 
     try {
         const resp = await fetch('/api/trading/recommendations?date=' + selectedDate);
         const data = await resp.json();
         if (data.error) {
             document.getElementById('recContainer').innerHTML =
-                '<div class="empty-state" style="color:#d32f2f;">查询失败: ' + esc(data.error) + '</div>';
+                '<div class="empty-state" style="color:#d32f2f;">' + esc(data.error) + '</div>';
             document.getElementById('recCount').textContent = '0';
             return;
         }
