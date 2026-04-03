@@ -35,9 +35,7 @@ class MinuteDataMissingError(Exception):
 # ── Snapshot builders ────────────────────────────────────────
 
 
-async def build_snapshots_from_cache(
-    cache: Any, date_str: str
-) -> dict[str, Any]:
+async def build_snapshots_from_cache(cache: Any, date_str: str) -> dict[str, Any]:
     """Build PriceSnapshot dict from GreptimeBacktestCache for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
@@ -167,9 +165,7 @@ async def _build_live_snapshots(
                 f"V15 live scan: failed to get prev_close for {prev_trade_date} "
                 f"from both GreptimeDB cache and tsanghi API"
             )
-        logger.info(
-            f"V15 live scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks"
-        )
+        logger.info(f"V15 live scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
     else:
         # Look back 1-7 days in GreptimeDB cache
         if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
@@ -182,8 +178,7 @@ async def _build_live_snapshots(
             prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
             if prev_daily:
                 logger.info(
-                    f"V15 live scan: prev_close from {prev_date_str} "
-                    f"({len(prev_daily)} stocks)"
+                    f"V15 live scan: prev_close from {prev_date_str} ({len(prev_daily)} stocks)"
                 )
                 break
 

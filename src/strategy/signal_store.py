@@ -123,9 +123,7 @@ class SignalStore:
     def push(self, signal: Signal) -> Signal:
         """Add signal to pending queue."""
         self._pending.append(signal)
-        logger.info(
-            f"Signal pushed: {signal.type} {signal.stock_code} (id={signal.id})"
-        )
+        logger.info(f"Signal pushed: {signal.type} {signal.stock_code} (id={signal.id})")
         return signal
 
     def push_dict(self, data: dict[str, Any], now: datetime | None = None) -> Signal:
@@ -209,9 +207,7 @@ class SignalStore:
             age_minutes = (now - sig.pushed_at).total_seconds() / 60
             if age_minutes >= self.EXPIRY_MINUTES:
                 expired.append(sig)
-                logger.error(
-                    f"Signal expired: {sig.stock_code} ({age_minutes:.0f}min), removed"
-                )
+                logger.error(f"Signal expired: {sig.stock_code} ({age_minutes:.0f}min), removed")
             else:
                 still_pending.append(sig)
         self._pending = still_pending

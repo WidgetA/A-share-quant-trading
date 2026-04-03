@@ -770,9 +770,7 @@ def create_iquant_router() -> APIRouter:
         found = signal_store.ack(body.signal_id, now=now)
 
         if not found:
-            raise HTTPException(
-                status_code=404, detail=f"Signal {body.signal_id} not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Signal {body.signal_id} not found")
 
         wire = found.to_wire_dict()
         await _notify_feishu_ack(wire)

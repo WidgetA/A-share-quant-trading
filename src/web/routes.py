@@ -1154,8 +1154,6 @@ def create_momentum_router() -> APIRouter:
 # ==================== Helper Functions ====================
 
 
-
-
 def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
     """Convert V15ScanResult.all_scored to the same dict format as V15ScanDB.query()."""
 
