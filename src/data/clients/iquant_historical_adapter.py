@@ -32,12 +32,12 @@ class IQuantHistoricalAdapter:
         """
         Args:
             realtime_client: Duck-typed realtime client for real-time data delegation.
-                Must implement as_ifind_format(stock_codes, indicators) -> dict.
+                Must implement as_standard_quote_format(stock_codes, indicators) -> dict.
                 Typically TushareRealtimeClient or SinaRealtimeClient.
         """
-        if not hasattr(realtime_client, "as_ifind_format"):
+        if not hasattr(realtime_client, "as_standard_quote_format"):
             raise TypeError(
-                "realtime_client must implement as_ifind_format(). "
+                "realtime_client must implement as_standard_quote_format(). "
                 "Use TushareRealtimeClient or SinaRealtimeClient."
             )
         self._realtime = realtime_client
@@ -85,7 +85,7 @@ class IQuantHistoricalAdapter:
         # Download any missing dates
         await self._ensure_daily_range(start_date, end_date)
 
-        # Build iFinD-format response from in-memory data
+        # Build standard-format response from in-memory data
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         indicator_list = [ind.strip() for ind in indicators.split(",")]
         tables: list[dict[str, Any]] = []
@@ -184,7 +184,7 @@ class IQuantHistoricalAdapter:
     ) -> dict[str, Any]:
         """Delegate to realtime client (Tushare or Sina)."""
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
-        return await self._realtime.as_ifind_format(code_list, indicators)
+        return await self._realtime.as_standard_quote_format(code_list, indicators)
 
     async def high_frequency(
         self,

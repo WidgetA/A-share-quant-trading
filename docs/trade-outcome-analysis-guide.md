@@ -53,7 +53,6 @@ Scanner 日志按 Step 编号输出，关键步骤：
 
 | 文件 | 内容 | 格式 |
 |------|------|------|
-| `data/board_relevance_cache.json` | LLM 板块相关度判断结果 | `{"板块名::股票代码": {"level": "高/中/低", "reason": "..."}}` |
 | `data/board_constituents.json` | 板块成分股映射 | `{"板块名": ["代码1", "代码2", ...]}` |
 | `data/sectors.json` | THS 板块名称列表 | 概念/行业/地域板块 |
 
@@ -80,12 +79,12 @@ snap = await cache.get_940_price("600519", "2024-06-01")
 
 ### 2.4 行情数据接口
 
-| 数据 | iFinD 接口 | 替代方案 |
-|------|-----------|---------|
-| 9:30-9:40 分钟线 | `high_frequency(Interval=1)` | tsanghi `/5min` |
-| 实时快照 | `real_time_quotation` | Tushare `rt_min_daily` |
-| 日线历史 | `cmd_history_quotation` | tsanghi `/daily` |
-| 全天分钟线(复盘) | `high_frequency(09:30~15:00)` | tsanghi `/5min` |
+| 数据 | 数据源 |
+|------|--------|
+| 9:30-9:40 分钟线 | tsanghi `/5min` via GreptimeDB |
+| 实时快照 | Tushare `rt_min_daily` |
+| 日线历史 | tsanghi `/daily` via GreptimeDB |
+| 全天分钟线(复盘) | tsanghi `/5min` via GreptimeDB |
 
 ---
 
@@ -111,21 +110,10 @@ WHERE trade_date = '2026-02-26';
 - 卖出价是次日开盘价 `next_day_open`
 - 关注模式：冲高回落？持续下跌？尾盘拉升但次日低开？
 
-**iFinD 方式：**
-```python
-await ifind.high_frequency(
-    codes="600519.SH",
-    indicators="close,volume,high,low",
-    start_time="2026-02-26 09:30:00",
-    end_time="2026-02-26 15:00:00",
-    function_para={"Interval": "1"}
-)
-```
-
 **Web 接口方式：**
 ```
 POST /api/momentum/loss-analysis
-Body: {"losing_trades": [...], "data_source": "ifind"}
+Body: {"losing_trades": [...]}
 返回: stock_day_trend (全天1分钟线) + LLM分析
 ```
 
@@ -149,23 +137,9 @@ composite = Z(gain_from_open) + Z(turnover_amp) - cup_days * 0.3 + leader_bonus
 - `cup_days` = max(0, consecutive_up_days - 1)，连涨 >= 2 天开始惩罚
 - `leader_bonus` = 0.5（板块内 gain_from_open 最高且板块 >= 2 只候选时）
 
-### Step 4: 检查板块相关度
+### Step 4: 检查板块归属合理性
 
-查看 `data/board_relevance_cache.json`：
-
-```json
-{
-  "工业互联网::603709": {"level": "低", "reason": "中源家居主营沙发家具，与工业互联网无直接关联"},
-  "工业互联网::000938": {"level": "高", "reason": "紫光股份主营ICT基础设施，是工业互联网核心标的"}
-}
-```
-
-**判断标准：**
-- `"高"` — 主营业务直接相关，板块核心标的
-- `"中"` — 有一定关联但非核心（保留）
-- `"低"` — 主营与板块无关（过滤掉）
-
-如果缓存中没有该 stock-board 对，说明是新组合，下次扫描时会触发 LLM 调用。
+确认股票主营业务与所属概念板块是否相关。如果一只票的主营与板块无关（蹭概念），这是潜在的亏损信号。
 
 ### Step 5: 检查过滤器是否起作用
 
@@ -200,11 +174,10 @@ POST /api/momentum/combined-analysis
 
 ## 四、常见亏损模式
 
-### 模式 A：蹭概念股（已通过 Step 5.7 解决）
+### 模式 A：蹭概念股
 
 **特征：** 股票主营业务与所属概念板块无关
 **案例：** 中源家居(603709) 被归入"工业互联网" — 主营沙发
-**诊断：** 查 `board_relevance_cache.json`，level 应为 "低"
 **根因：** 同花顺板块归类过于宽泛，很多票只是"沾边"
 
 ### 模式 B：冲高回落
@@ -273,9 +246,7 @@ POST /api/momentum/combined-analysis
 | `src/strategy/strategies/momentum_sector_scanner.py` | 主扫描器，Step 1-7 全流程 |
 | `src/strategy/filters/momentum_quality_filter.py` | Step 5.5 动量质量过滤 |
 | `src/strategy/filters/reversal_factor_filter.py` | Step 5.6 冲高回落过滤 |
-| `src/strategy/filters/board_relevance_filter.py` | Step 5.7 LLM 板块相关度过滤 |
 | `src/data/database/momentum_scan_db.py` | 推荐记录数据库读写 |
 | `src/web/routes.py` | Web API 路由（含 loss-analysis） |
 | `scripts/analyze_funnel.py` | 漏斗分析脚本 |
-| `data/board_relevance_cache.json` | 板块相关度缓存 |
 | `data/board_constituents.json` | 板块成分股映射 |

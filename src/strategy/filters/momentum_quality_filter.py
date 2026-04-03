@@ -89,16 +89,16 @@ class MomentumQualityFilter:
     Fail-fast: if historical data unavailable, raises error to halt trading.
 
     Usage:
-        filter = MomentumQualityFilter(ifind_client)
+        filter = MomentumQualityFilter(historical_client)
         kept, assessments = await filter.filter_stocks(selected, snapshots, trade_date)
     """
 
     def __init__(
         self,
-        ifind_client: HistoricalDataProvider,
+        historical_client: HistoricalDataProvider,
         config: MomentumQualityConfig | None = None,
     ):
-        self._ifind = ifind_client
+        self._historical = historical_client
         self._config = config or MomentumQualityConfig()
 
     async def filter_stocks(
@@ -286,7 +286,7 @@ class MomentumQualityFilter:
             codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
 
             try:
-                data = await self._ifind.history_quotes(
+                data = await self._historical.history_quotes(
                     codes=codes_str,
                     indicators="close,volume",
                     start_date=start.strftime("%Y-%m-%d"),

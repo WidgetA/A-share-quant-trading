@@ -66,36 +66,6 @@
         </div>
     </section>
 
-    <!-- Aliyun DashScope API Key Section -->
-    <section class="settings-section">
-        <div class="settings-card">
-            <h3>阿里云 DashScope API Key</h3>
-            <p class="settings-desc">用于板块相关度 LLM 过滤 (Step 5.7) 和公告内容提取。模型: qwen-plus</p>
-
-            <!-- Current Status -->
-            <div class="token-status" id="aliyunStatus">
-                <span class="token-status-label">当前状态：</span>
-                <span class="token-status-value" id="aliyunStatusValue">加载中...</span>
-            </div>
-
-            <!-- Key Input -->
-            <div class="form-group">
-                <label for="aliyunInput">API Key</label>
-                <input type="text" id="aliyunInput" class="token-input"
-                    placeholder="粘贴阿里云 DashScope API Key (sk-...)..." style="font-family: monospace;">
-            </div>
-
-            <!-- Actions -->
-            <div class="token-actions">
-                <button class="btn btn-secondary" onclick="testAliyunKey()" id="aliyunTestBtn">验证 Key</button>
-                <button class="btn btn-primary" onclick="saveAliyunKey()" id="aliyunSaveBtn">保存</button>
-            </div>
-
-            <!-- Result Message -->
-            <div class="token-message hidden" id="aliyunMessage"></div>
-        </div>
-    </section>
-
     <!-- Cache Scheduler Toggle -->
     <section class="settings-section">
         <div class="settings-card">
@@ -225,11 +195,6 @@ function loadTsanghiStatus() { loadKeyStatus('/api/settings/tsanghi-token', 'tsa
 function testTsanghiToken() { testKey('/api/settings/tsanghi-token/test', 'tsanghiInput', 'tsanghiMessage', 'tsanghiTestBtn', '验证 Token'); }
 function saveTsanghiToken() { saveKey('/api/settings/tsanghi-token', 'tsanghiInput', 'tsanghiMessage', 'tsanghiSaveBtn', loadTsanghiStatus); }
 
-// Aliyun
-function loadAliyunStatus() { loadKeyStatus('/api/settings/aliyun-key', 'aliyunStatusValue'); }
-function testAliyunKey() { testKey('/api/settings/aliyun-key/test', 'aliyunInput', 'aliyunMessage', 'aliyunTestBtn', '验证 Key'); }
-function saveAliyunKey() { saveKey('/api/settings/aliyun-key', 'aliyunInput', 'aliyunMessage', 'aliyunSaveBtn', loadAliyunStatus); }
-
 // iQuant
 function loadIquantStatus() { loadKeyStatus('/api/settings/iquant-key', 'iquantStatusValue'); }
 function generateIquantKey() {
@@ -268,7 +233,6 @@ async function toggleCacheScheduler(el) {
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
-loadAliyunStatus();
 loadIquantStatus();
 </script>
 {% endblock %}

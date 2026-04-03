@@ -531,8 +531,7 @@ await engine.stop()
 6. **Step 5 — Gain Filter**: Select constituents with 9:40 gain from open >0.56%, main board, non-ST
 7. **Step 5.5 — Momentum Quality Filter**: Remove stocks with abnormal early volume. Upper bound: turnover_amp > 3.0x (冲高回落 risk, based on 9-month study: >3x → avg return negative, win rate 42.9%). Lower bound: turnover_amp < 0.4x (缩量弱势, based on fine-grained sweep across 5/7/15/20d windows: Bootstrap median 0.42~0.47x, kept-group return +0.020% improvement). Turnover amp = early_volume (9:40 cumulative) / (avg_daily_volume × 0.125). Also computes trend_pct, consecutive_up_days, avg_daily_volume for Step 6
 8. **Step 5.6 — Reversal Factor Filter**: Remove stocks showing 冲高回落 at 9:40 — early fade (gave back >70% of intraday surge from high) OR price position in bottom 25% of 10-min range
-9. **Step 5.7 — Board Relevance Filter (LLM)**: Use Aliyun DashScope (qwen-plus) to judge whether each stock's main business is truly related to its assigned board. Filter out "低" (low) relevance stocks. Results permanently cached in `data/board_relevance_cache.json`. **TODO**: 当前仅靠 LLM 知识判断，未提供经营范围数据；后续需接入公司经营范围数据源以提高准确度。
-10. **Step 6 — Recommend (推股)**: Across all candidates:
+9. **Step 6 — Recommend (推股)**: Across all candidates:
    - Exclude stocks already at limit-up (9:40 price ≥ prev_close × 1.10)
    - Composite score = +Z(gain_from_open) + Z(turnover_amp) - cup_penalty - trend_penalty + leader_bonus
    - 涨幅靠前 + 量能充足 = 板块龙头优先（翻转自旧公式，旧公式选最弱票导致连续亏损）
@@ -552,7 +551,6 @@ await engine.stop()
 - `src/strategy/strategies/v15_scanner.py` — Core V15 scanner logic (7-layer funnel + V3 scoring)
 - `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: volume filter (turnover_amp bounds)
 - `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
-- `src/strategy/filters/board_relevance_filter.py` — Step 5.7: LLM 板块相关度过滤
 - `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping (reads local JSON)
 - `data/sectors.json` — THS concept board name list (390 boards)
 - `data/board_constituents.json` — Board → constituent stocks mapping (pre-downloaded)
@@ -691,9 +689,12 @@ await engine.stop()
 
 **Key Files**:
 - `src/strategy/strategies/v15_scanner.py` — V15 7-layer funnel + V3 regression scoring
-- `src/web/iquant_routes.py` — iQuant API router with T+2 scheduler + monitoring
+- `src/strategy/signal_store.py` — In-memory signal queue (push/poll/ack/expire lifecycle)
+- `src/strategy/v15_strategy_service.py` — Stateless V15 scan service (backtest + live, consolidates 3 duplicate scan paths)
+- `src/web/iquant_routes.py` — iQuant communication + monitoring (~750 lines, extracted strategy logic)
+- `src/web/routes.py` — Dashboard routes, delegates scan to V15StrategyService
 - `src/web/app.py` — GreptimeDB cache injection into iQuant router
-- `src/data/clients/iquant_historical_adapter.py` — Historical data adapter (duck-types IFinDHttpClient)
+- `src/data/clients/iquant_historical_adapter.py` — Historical data adapter
 - `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
 - `src/data/database/v15_scan_db.py` — PostgreSQL persistence for scan results
 

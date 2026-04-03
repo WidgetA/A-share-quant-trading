@@ -1,10 +1,9 @@
 # === MODULE PURPOSE ===
 # Fetches real-time A-share price data from Sina Finance (新浪财经).
-# Used exclusively by the iQuant subsystem; the main online system uses iFinD.
+# Used by the iQuant subsystem for real-time quotation.
 
 # === DEPENDENCIES ===
 # - httpx: Async HTTP client for Sina hq API
-# - No iFinD or shared resources — fully isolated
 
 # === KEY CONCEPTS ===
 # - Sina hq API: GET https://hq.sinajs.cn/list=sh600519,sz000001
@@ -62,8 +61,7 @@ class SinaRealtimeClient:
     """
     Fetches real-time A-share quotes from Sina Finance.
 
-    Replaces iFinD real_time_quotation for the iQuant subsystem.
-    Sina returns volume in shares (股), matching iFinD convention.
+    Sina returns volume in shares (股), matching system convention.
 
     Fail-fast: network errors raise SinaRealtimeError (no fallback).
 
@@ -202,11 +200,11 @@ class SinaRealtimeClient:
 
         return all_quotes
 
-    async def as_ifind_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
+    async def as_standard_quote_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
         """
-        Fetch quotes and return in iFinD real_time_quotation response format.
+        Fetch quotes and return in standard quotation response format.
 
-        Returns data in the expected real_time_quotation response format
+        Returns data in the expected response format
         for IQuantHistoricalAdapter compatibility.
 
         Args:
@@ -227,13 +225,13 @@ class SinaRealtimeClient:
             if not quote.is_trading:
                 continue
 
-            # Map iFinD indicator names to SinaQuote fields
+            # Map indicator names to SinaQuote fields
             table_data: dict[str, list] = {}
             for ind in indicator_list:
                 val = self._quote_to_indicator(quote, ind)
                 table_data[ind] = [val]
 
-            # Convert bare code to iFinD thscode format
+            # Convert bare code to thscode format
             suffix = ".SH" if bare_code.startswith("6") else ".SZ"
             tables.append({"thscode": f"{bare_code}{suffix}", "table": table_data})
 
@@ -298,7 +296,7 @@ class SinaRealtimeClient:
 
     @staticmethod
     def _quote_to_indicator(quote: SinaQuote, indicator: str) -> float | None:
-        """Map iFinD indicator name to SinaQuote field value."""
+        """Map indicator name to SinaQuote field value."""
         mapping = {
             "open": quote.open_price,
             "preClose": quote.prev_close,

@@ -1311,15 +1311,6 @@ async def _get_trading_calendar(start_date, end_date) -> list:
     return days
 
 
-def _create_board_relevance_filter_global():
-    """Module-level factory for BoardRelevanceFilter. Raises on failure."""
-    from src.strategy.filters.board_relevance_filter import (
-        create_board_relevance_filter,
-    )
-
-    return create_board_relevance_filter()
-
-
 async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict | None:
     """Execute a single momentum scan using Tushare + V15Scanner.
 
@@ -1864,94 +1855,6 @@ def create_settings_router() -> APIRouter:
         except httpx.HTTPError as e:
             return {"success": False, "message": f"HTTP 请求失败: {e}"}
 
-    # === ALIYUN DASHSCOPE API KEY ===
-
-    @router.get("/api/settings/aliyun-key")
-    async def get_aliyun_key_status():
-        """Get current Aliyun DashScope API key status (masked)."""
-        from src.common.config import get_aliyun_api_key, get_aliyun_api_key_source
-
-        source = get_aliyun_api_key_source()
-        source_labels = {
-            "web_ui": "Web UI (当前会话)",
-            "persisted_file": "Web UI (已持久化)",
-            "env_var": "环境变量",
-            "secrets_yaml": "secrets.yaml",
-            "not_configured": "未配置",
-        }
-
-        try:
-            key = get_aliyun_api_key()
-            if len(key) > 20:
-                masked = key[:8] + "..." + key[-8:]
-            else:
-                masked = "***"
-            return {
-                "configured": True,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": masked,
-                "token_length": len(key),
-            }
-        except ValueError:
-            return {
-                "configured": False,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": "",
-                "token_length": 0,
-            }
-
-    @router.post("/api/settings/aliyun-key")
-    async def update_aliyun_key(body: TokenUpdateRequest):
-        """Save a new Aliyun DashScope API key."""
-        from src.common.config import set_aliyun_api_key
-
-        key = body.token.strip()
-        if not key:
-            raise HTTPException(status_code=400, detail="API Key 不能为空")
-
-        set_aliyun_api_key(key)
-        return {
-            "success": True,
-            "message": "API Key 已保存，板块相关度过滤将使用此 key",
-        }
-
-    @router.post("/api/settings/aliyun-key/test")
-    async def test_aliyun_key(body: TokenUpdateRequest):
-        """Test an Aliyun DashScope API key with a simple chat call."""
-        import httpx
-
-        key = body.token.strip()
-        if not key:
-            raise HTTPException(status_code=400, detail="API Key 不能为空")
-
-        try:
-            base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    f"{base}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "qwen-plus",
-                        "messages": [{"role": "user", "content": "回复OK"}],
-                        "max_tokens": 10,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                return {"success": True, "message": f"验证成功，模型回复: {content}"}
-        except httpx.TimeoutException:
-            return {"success": False, "message": "请求超时，请检查网络连接"}
-        except httpx.HTTPStatusError as e:
-            return {"success": False, "message": f"API 验证失败 (HTTP {e.response.status_code})"}
-        except Exception as e:
-            return {"success": False, "message": f"验证失败: {e}"}
-
     # === CACHE SCHEDULER TOGGLE ===
 
     @router.get("/api/settings/cache-scheduler")
@@ -1979,20 +1882,16 @@ def create_settings_router() -> APIRouter:
     async def get_all_keys_status():
         """Get status of all API keys needed for live trading."""
         from src.common.config import (
-            get_aliyun_api_key_source,
             get_iquant_key_source,
             get_tsanghi_token_source,
         )
 
         iquant_ok = get_iquant_key_source() != "not_configured"
         tsanghi_ok = get_tsanghi_token_source() != "not_configured"
-        aliyun_src = get_aliyun_api_key_source()
-        aliyun_ok = aliyun_src != "not_configured"
 
         return {
             "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
             "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
-            "aliyun": {"configured": aliyun_ok, "source": aliyun_src},
         }
 
     return router

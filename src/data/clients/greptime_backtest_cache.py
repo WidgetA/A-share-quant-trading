@@ -1579,7 +1579,7 @@ class GreptimeHistoricalAdapter:
         end_date: str,
         function_para: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Return cached daily data in iFinD history_quotes format."""
+        """Return cached daily data in history_quotes format."""
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         indicator_list = [ind.strip() for ind in indicators.split(",")]
         tables: list[dict[str, Any]] = []
@@ -1639,7 +1639,7 @@ class GreptimeHistoricalAdapter:
         end_time: str,
         function_para: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Return cached minute data in iFinD high_frequency format."""
+        """Return cached minute data in high_frequency format."""
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         tables: list[dict[str, Any]] = []
         date_str = start_time.split(" ")[0]

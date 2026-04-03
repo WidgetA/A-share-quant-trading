@@ -57,7 +57,6 @@ All config is in `docker-compose.yml`. Key variables:
 | Variable | Description |
 |----------|-------------|
 | `DB_HOST/PORT/USER/PASSWORD/NAME` | PolarDB connection |
-| `SILICONFLOW_API_KEY` | LLM for board relevance |
 | `FEISHU_APP_ID/SECRET/CHAT_ID` | Alert notifications |
 | `GREPTIME_HOST/PORT` | GreptimeDB backtest cache (default: greptimedb:4003) |
 | `WEB_BASE_URL` | Public URL for the web UI |

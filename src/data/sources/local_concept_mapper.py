@@ -4,7 +4,7 @@
 #   - data/sectors.json        (THS concept board names)
 #   - data/board_constituents.json  (board → constituent stocks)
 #
-# Replaces ConceptMapper (iFinD iwencai) and AkshareConceptMapper (东财 API).
+# Replaces legacy ConceptMapper and AkshareConceptMapper (东财 API).
 
 # === DEPENDENCIES ===
 # - board_filter: Reuses junk board filtering

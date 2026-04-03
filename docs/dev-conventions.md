@@ -128,12 +128,13 @@ A-share-quant-trading/
 │   │   ├── models.py        # Shared data models (PriceSnapshot, etc.)
 │   │   ├── base.py          # Base strategy interface
 │   │   ├── signals.py       # Signal types
+│   │   ├── signal_store.py  # In-memory signal queue (push/poll/ack/expire)
+│   │   ├── v15_strategy_service.py  # Stateless V15 scan (backtest + live)
 │   │   ├── strategies/
 │   │   │   └── v15_scanner.py  # V15 7-layer funnel + V3 scoring
 │   │   └── filters/         # Stock/quality filters
 │   │       ├── momentum_quality_filter.py  # Volume filter
 │   │       ├── reversal_factor_filter.py   # 冲高回落 filter
-│   │       ├── board_relevance_filter.py   # LLM board relevance
 │   │       └── stock_filter.py             # Exchange filter
 │   ├── trading/             # Trading module
 │   │   ├── position_manager.py  # Slot-based position management
@@ -146,7 +147,8 @@ A-share-quant-trading/
 │   │   │   ├── tushare_realtime.py         # Tushare realtime quotes
 │   │   │   └── sina_realtime.py            # Sina realtime (fallback)
 │   │   ├── database/        # Database layers
-│   │   │   └── fundamentals_db.py  # Stock fundamentals reader
+│   │   │   ├── fundamentals_db.py  # Stock fundamentals reader
+│   │   │   └── v15_scan_db.py     # V15 scan results persistence
 │   │   ├── services/
 │   │   │   └── cache_scheduler.py  # 3am daily cache gap-fill
 │   │   └── sources/
@@ -154,7 +156,7 @@ A-share-quant-trading/
 │   ├── web/                 # Web UI
 │   │   ├── app.py           # FastAPI application
 │   │   ├── routes.py        # Main routes + backtest + settings
-│   │   ├── iquant_routes.py # iQuant live trading API
+│   │   ├── iquant_routes.py # iQuant communication + monitoring
 │   │   └── templates/       # Jinja2 templates
 │   └── common/              # Shared utilities
 │       ├── config.py        # Configuration + credential management

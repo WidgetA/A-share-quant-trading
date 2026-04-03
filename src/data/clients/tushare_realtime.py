@@ -4,7 +4,6 @@
 
 # === DEPENDENCIES ===
 # - httpx: Async HTTP client for Tushare Pro REST API
-# - No iFinD or shared resources — fully isolated
 
 # === KEY CONCEPTS ===
 # - Tushare Pro API: POST http://api.tushare.pro with JSON body
@@ -62,7 +61,7 @@ class TushareRealtimeClient:
 
     Two modes:
     1. batch_get_quotes(): Uses rt_min (batch, 1 bar/stock) for current snapshot.
-       Used by as_ifind_format() for realtime quotation adapter.
+       Used by as_standard_quote_format() for realtime quotation adapter.
     2. batch_get_early_quotes(): Uses rt_min_daily (per-stock, all bars) and
        aggregates 9:30-9:40 bars. Used by V15 scan which needs stable early data.
 
@@ -315,9 +314,9 @@ class TushareRealtimeClient:
     # Response format adapter (used by IQuantHistoricalAdapter)
     # ------------------------------------------------------------------
 
-    async def as_ifind_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
+    async def as_standard_quote_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
         """
-        Fetch quotes and return in iFinD real_time_quotation response format.
+        Fetch quotes and return in standard quotation response format.
 
         Uses rt_min (batch, current snapshot) for real-time quotes.
         """
@@ -439,7 +438,7 @@ class TushareRealtimeClient:
 
     @staticmethod
     def _quote_to_indicator(quote: TushareQuote, indicator: str) -> float | None:
-        """Map iFinD indicator name to TushareQuote field value."""
+        """Map indicator name to TushareQuote field value."""
         mapping: dict[str, float] = {
             "open": quote.open_price,
             "latest": quote.latest_price,

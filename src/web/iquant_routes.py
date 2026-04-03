@@ -88,7 +88,7 @@ class BacktestScanRequest(BaseModel):
     """Request body for /api/iquant/backtest-scan."""
 
     trade_date: str  # YYYY-MM-DD
-    data_source: str = "tsanghi"  # "tsanghi" or "ifind"
+    data_source: str = "tsanghi"
 
 
 # --- Feishu notification helpers ---
