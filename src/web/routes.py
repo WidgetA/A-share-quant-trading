@@ -99,7 +99,7 @@ def create_router() -> APIRouter:
 
         today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
-        return templates.TemplateResponse(
+        resp = templates.TemplateResponse(
             "index.html",
             {
                 "request": request,
@@ -108,6 +108,8 @@ def create_router() -> APIRouter:
                 "today": today,
             },
         )
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     @router.get("/confirm/{confirm_id}", response_class=HTMLResponse)
     async def confirm_page(request: Request, confirm_id: str):

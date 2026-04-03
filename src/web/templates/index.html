@@ -463,7 +463,7 @@ function esc(s) {
 let _statusFetchErrors = 0;
 async function loadIquantStatus() {
     try {
-        const resp = await fetch('/api/iquant/status?_t=' + Date.now());
+        const resp = await fetch('/api/iquant/status', {cache: 'no-store'});
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const d = await resp.json();
         _statusFetchErrors = 0;
