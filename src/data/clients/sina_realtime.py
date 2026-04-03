@@ -200,7 +200,9 @@ class SinaRealtimeClient:
 
         return all_quotes
 
-    async def as_standard_quote_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
+    async def as_standard_quote_format(
+        self, stock_codes: list[str], indicators: str
+    ) -> dict[str, Any]:
         """
         Fetch quotes and return in standard quotation response format.
 

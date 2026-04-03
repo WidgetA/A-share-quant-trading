@@ -314,7 +314,9 @@ class TushareRealtimeClient:
     # Response format adapter (used by IQuantHistoricalAdapter)
     # ------------------------------------------------------------------
 
-    async def as_standard_quote_format(self, stock_codes: list[str], indicators: str) -> dict[str, Any]:
+    async def as_standard_quote_format(
+        self, stock_codes: list[str], indicators: str
+    ) -> dict[str, Any]:
         """
         Fetch quotes and return in standard quotation response format.
 
