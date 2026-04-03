@@ -107,7 +107,8 @@ def _get_all_positions(accID):
                     print("[POS]   %s = %s" % (a, getattr(pos, a, '?')))
             code = pos.m_strInstrumentID.split(".")[0]
             volume = int(getattr(pos, 'm_nVolume', 0) or pos.m_nCanUseVolume)
-            result.append({"code": code, "volume": volume})
+            if volume > 0:
+                result.append({"code": code, "volume": volume})
         return result
     except Exception as e:
         print("[POS ALL ERR] %s\n%s" % (e, traceback.format_exc()))

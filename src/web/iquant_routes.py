@@ -693,7 +693,7 @@ def create_iquant_router() -> APIRouter:
             "connected": connected,
             "last_poll_time": last_poll_str,
             "gap_seconds": round(gap_seconds) if gap_seconds is not None else None,
-            "holdings_count": len(_state["broker_positions"]) if connected else 0,
+            "holdings_count": sum(1 for p in _state["broker_positions"] if p.get("volume", 0) > 0) if connected else 0,
             "pending_count": len(_state["pending_signals"]),
             "available_cash": _state.get("available_cash", 0) if connected else 0,
         }
