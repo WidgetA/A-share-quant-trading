@@ -29,6 +29,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
@@ -398,7 +399,7 @@ def create_iquant_router() -> APIRouter:
 
     # --- Monitoring helpers ---
 
-    HEARTBEAT_TIMEOUT_SECONDS = 90  # consider offline after this many seconds without heartbeat
+    HEARTBEAT_TIMEOUT_SECONDS = 60  # consider offline after this many seconds without heartbeat
     TRADING_HOURS = (time(9, 30), time(15, 0))
 
     async def _check_signal_timeout(now_bj: datetime) -> None:
@@ -1029,8 +1030,11 @@ def create_iquant_router() -> APIRouter:
         }
 
     @router.get("/status")
-    async def iquant_status() -> dict:
+    async def iquant_status() -> JSONResponse:
         """Public iQuant connection status (no auth required)."""
-        return _get_status()
+        return JSONResponse(
+            content=_get_status(),
+            headers={"Cache-Control": "no-store"},
+        )
 
     return router

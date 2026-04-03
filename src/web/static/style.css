@@ -199,6 +199,11 @@ footer {
     color: #2e7d32;
 }
 
+.status-indicator.unstable {
+    background: #fff3cd;
+    color: #856404;
+}
+
 .status-indicator.stopped,
 .status-indicator.offline {
     background: #ffcdd2;

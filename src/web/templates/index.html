@@ -460,20 +460,48 @@ function esc(s) {
 }
 
 // --- iQuant Status Polling ---
+let _statusFetchErrors = 0;
 async function loadIquantStatus() {
     try {
-        const resp = await fetch('/api/iquant/status');
+        const resp = await fetch('/api/iquant/status?_t=' + Date.now());
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const d = await resp.json();
+        _statusFetchErrors = 0;
         const ind = document.getElementById('iquantIndicator');
-        ind.textContent = d.connected ? '在线' : '离线';
-        ind.className = 'status-indicator ' + (d.connected ? 'online' : 'offline');
-        document.getElementById('iquantHeartbeat').textContent =
-            d.last_poll_time ? d.last_poll_time.substring(11) : '从未连接';
+        const gap = d.gap_seconds;
+        let label, cls;
+        if (gap === null || gap === undefined) {
+            label = '离线'; cls = 'offline';
+        } else if (gap < 35) {
+            label = '在线'; cls = 'online';
+        } else if (gap < 60) {
+            label = '不稳定'; cls = 'unstable';
+        } else {
+            label = '离线'; cls = 'offline';
+        }
+        ind.textContent = label;
+        ind.className = 'status-indicator ' + cls;
+        // Show relative time for heartbeat
+        let hbText = '从未连接';
+        if (d.last_poll_time && gap !== null && gap !== undefined) {
+            if (gap < 60) hbText = Math.round(gap) + '秒前';
+            else if (gap < 3600) hbText = Math.round(gap / 60) + '分钟前';
+            else hbText = d.last_poll_time.substring(11);
+        }
+        document.getElementById('iquantHeartbeat').textContent = hbText;
         document.getElementById('iquantCash').textContent =
             d.available_cash > 0 ? d.available_cash.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
         document.getElementById('iquantHoldings').textContent = d.holdings_count || '--';
         document.getElementById('iquantPending').textContent = d.pending_count;
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+        _statusFetchErrors++;
+        if (_statusFetchErrors >= 2) {
+            const ind = document.getElementById('iquantIndicator');
+            ind.textContent = '连接异常';
+            ind.className = 'status-indicator offline';
+            document.getElementById('iquantHeartbeat').textContent = '请求失败';
+        }
+    }
 }
 
 // --- Pending Signals Queue ---
@@ -548,7 +576,7 @@ loadRecommendations();
 loadIquantStatus();
 loadPendingSignals();
 setInterval(loadHoldings, 10000);
-setInterval(loadIquantStatus, 10000);
+setInterval(loadIquantStatus, 5000);
 setInterval(loadPendingSignals, 5000);
 </script>
 {% endblock %}

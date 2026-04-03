@@ -19,6 +19,8 @@ import urllib.request
 API_BASE = "http://8.159.150.224:8000/api/iquant"
 API_KEY = "20f4b05bed1fe28e3c808dabaa5fa37f"
 
+_stop_event = threading.Event()
+
 _state = {
     "accID": "",
     "last_poll_ts": 0,
@@ -143,10 +145,9 @@ def _sync_state_now():
 def _state_sync_loop():
     """Every 30s: send heartbeat + current _state to server.
 
-    Wrapped in outer try/except to survive ANY exception — if the inner
-    loop somehow breaks, we log and restart after a short delay.
+    Stops when _stop_event is set (main loop exited = strategy stopped).
     """
-    while True:
+    while not _stop_event.is_set():
         try:
             _state["last_sync_attempt"] = time.time()
             body = {
@@ -184,11 +185,12 @@ def _state_sync_loop():
                     except Exception as e:
                         print("[STATUS NOTIFY ERR] %s" % e)
 
-            time.sleep(30)
+            _stop_event.wait(30)  # interruptible sleep
         except Exception as e:
-            # Catch-all: don't let the thread die
             print("[SYNC THREAD CRASH] %s — retrying in 10s" % e)
-            time.sleep(10)
+            _stop_event.wait(10)
+
+    print("[SYNC] stop event received, heartbeat thread exiting")
 
 
 # ── Trade execution helpers ───────────────────────────────────
@@ -347,61 +349,72 @@ def init(ContextInfo):
 
 
 def _main_loop(ContextInfo):
-    """Main-thread loop: poll signals every POLL_INTERVAL, refresh broker state periodically."""
+    """Main-thread loop: poll signals every POLL_INTERVAL, refresh broker state periodically.
+
+    When this loop exits (strategy stopped by QMT), _stop_event is set
+    so the heartbeat thread also stops — preventing ghost "在线" status.
+    """
     last_broker_refresh = time.time()
     poll_count = 0
 
-    while True:
-        try:
-            now = time.time()
+    # Reset stop event in case of restart
+    _stop_event.clear()
 
-            # Watchdog: restart sync thread if dead or stuck
-            sync_thread = _state.get("sync_thread")
-            last_attempt = _state.get("last_sync_attempt", 0)
-            if sync_thread is None or not sync_thread.is_alive() or (now - last_attempt > 120):
-                reason = "dead" if (sync_thread and not sync_thread.is_alive()) else "stuck/missing"
-                print("[WATCHDOG] sync thread %s — restarting" % reason)
-                _start_sync_thread()
-
-            # Refresh broker state every BROKER_REFRESH_INTERVAL
-            if now - last_broker_refresh >= BROKER_REFRESH_INTERVAL:
-                _refresh_broker_state()
-                last_broker_refresh = now
-
-            # Poll for pending signals
+    try:
+        while True:
             try:
-                result = _api_call("/pending-signals")
-            except Exception as e:
-                print("[POLL ERR] %s" % e)
+                now = time.time()
+
+                # Watchdog: restart sync thread if dead or stuck
+                sync_thread = _state.get("sync_thread")
+                last_attempt = _state.get("last_sync_attempt", 0)
+                if sync_thread is None or not sync_thread.is_alive() or (now - last_attempt > 120):
+                    reason = "dead" if (sync_thread and not sync_thread.is_alive()) else "stuck/missing"
+                    print("[WATCHDOG] sync thread %s — restarting" % reason)
+                    _start_sync_thread()
+
+                # Refresh broker state every BROKER_REFRESH_INTERVAL
+                if now - last_broker_refresh >= BROKER_REFRESH_INTERVAL:
+                    _refresh_broker_state()
+                    last_broker_refresh = now
+
+                # Poll for pending signals
+                try:
+                    result = _api_call("/pending-signals")
+                except Exception as e:
+                    print("[POLL ERR] %s" % e)
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+                signals = result.get("signals", [])
+                poll_count += 1
+
+                # Log every 60th poll (~5min) to avoid spam
+                if poll_count % 60 == 1:
+                    print("[POLL #%d] signals=%d pos=%d cash=%.0f" % (
+                        poll_count, len(signals), len(_state["positions"]), _state["cash"]))
+
+                if signals:
+                    print("[POLL] found %d pending signal(s)" % len(signals))
+                    for signal in signals:
+                        sig_id = signal.get("id", "?")
+                        try:
+                            success = _execute_signal(ContextInfo, signal)
+                            if success:
+                                _ack_signal(sig_id)
+                                _refresh_broker_state()
+                                last_broker_refresh = time.time()
+                                _sync_state_now()
+                        except Exception as e:
+                            print("[EXEC ERR] signal %s: %s" % (sig_id, e))
+
                 time.sleep(POLL_INTERVAL)
-                continue
 
-            signals = result.get("signals", [])
-            poll_count += 1
-
-            # Log every 60th poll (~5min) to avoid spam
-            if poll_count % 60 == 1:
-                print("[POLL #%d] signals=%d pos=%d cash=%.0f" % (
-                    poll_count, len(signals), len(_state["positions"]), _state["cash"]))
-
-            if signals:
-                print("[POLL] found %d pending signal(s)" % len(signals))
-                for signal in signals:
-                    sig_id = signal.get("id", "?")
-                    try:
-                        success = _execute_signal(ContextInfo, signal)
-                        if success:
-                            _ack_signal(sig_id)
-                            _refresh_broker_state()
-                            last_broker_refresh = time.time()
-                            _sync_state_now()
-                    except Exception as e:
-                        print("[EXEC ERR] signal %s: %s" % (sig_id, e))
-
-            time.sleep(POLL_INTERVAL)
-
-        except Exception as e:
-            print("[MAIN LOOP ERR] %s — continuing in %ds" % (e, POLL_INTERVAL))
-            time.sleep(POLL_INTERVAL)
+            except Exception as e:
+                print("[MAIN LOOP ERR] %s — continuing in %ds" % (e, POLL_INTERVAL))
+                time.sleep(POLL_INTERVAL)
+    finally:
+        print("[MAIN LOOP] exiting — stopping heartbeat thread")
+        _stop_event.set()
 
 
