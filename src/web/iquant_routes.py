@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-import uuid
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -211,11 +210,13 @@ def create_iquant_router() -> APIRouter:
     """
     router = APIRouter(prefix="/api/iquant", tags=["iquant"])
 
+    from src.strategy.signal_store import SignalStore
+
+    signal_store = SignalStore()
+
     # Isolated state (not shared with main app.state)
     _state: dict[str, Any] = {
         "initialized": False,
-        "pending_signals": [],  # signals waiting for iQuant to execute
-        "executed_signals": [],  # acked signals (history)
         "broker_positions": [],  # Actual broker positions: [{code, volume}]
         "scheduler_task": None,
         "universe_cache": None,
@@ -328,19 +329,6 @@ def create_iquant_router() -> APIRouter:
 
     router._inject_cache = _inject_cache  # type: ignore[attr-defined]
 
-    # --- Signal helpers ---
-
-    def _push_signal(signal: dict) -> None:
-        """Add a signal to the pending queue."""
-        now = datetime.now(BEIJING_TZ)
-        signal.setdefault("id", str(uuid.uuid4())[:8])
-        signal.setdefault("created_at", now.strftime("%H:%M:%S"))
-        signal["pushed_at"] = now  # datetime for timeout tracking (not serialized)
-        _state["pending_signals"].append(signal)
-        logger.info(
-            f"V15 signal pushed: {signal['type']} {signal['stock_code']} (id={signal['id']})"
-        )
-
     # --- Universe ---
 
     async def _get_universe() -> list[str]:
@@ -356,95 +344,29 @@ def create_iquant_router() -> APIRouter:
         logger.info(f"V15 universe cached: {len(codes)} codes")
         return codes
 
-    # --- V15 scan logic ---
+    # --- V15 scan (delegates to strategy service) ---
 
     async def _run_v15_scan() -> dict[str, Any] | None:
-        """Run V15 scan via Tushare + V15Scanner. Returns recommendation dict or None."""
-        from src.strategy.models import PriceSnapshot
-        from src.strategy.strategies.v15_scanner import V15Scanner, V15ScoredStock
+        """Run V15 scan via strategy service. Returns recommendation dict or None."""
+        from src.strategy.v15_strategy_service import run_v15_live
 
         universe = await _get_universe()
-        if not universe:
-            raise RuntimeError("Universe is empty")
-
-        rt_client = _state["realtime_client"]
-        quotes = await rt_client.batch_get_early_quotes(universe)
-        logger.info(f"V15 scan: Tushare rt_min_daily returned {len(quotes)} quotes")
-
-        if not quotes:
-            return None
-
-        # Get prev_close (previous trading day's close).
-        # L6.5 limit-up check needs real prev_close — NEVER approximate with open_price
-        # because gap-up stocks would get wrong limit price.
-        prev_closes: dict[str, float] = {}
-        today = datetime.now(BEIJING_TZ).date()
         calendar = await _get_trade_calendar()
-        prev_dates = [d for d in calendar if d < today]
-        if not prev_dates:
-            raise RuntimeError("V15 scan: no previous trading day found in calendar")
-        prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
 
-        # Source 1: GreptimeDB cache (instant SQL query)
-        cache = _state.get("backtest_cache")
-        if cache and cache.is_ready:
-            all_daily = await cache.get_all_codes_with_daily(prev_trade_date)
-            for code, daily in all_daily.items():
-                close_val = daily.close
-                if close_val and close_val > 0:
-                    prev_closes[code] = close_val
-
-        # Source 2: tsanghi API fallback (2 calls for XSHG+XSHE)
-        # Use API if cache coverage < 80% of live quotes (partial cache is dangerous)
-        if len(prev_closes) < len(quotes) * 0.8:
-            from src.data.clients.tsanghi_client import TsanghiClient
-
-            ts_client = TsanghiClient()
-            await ts_client.start()
-            try:
-                for exchange in ("XSHG", "XSHE"):
-                    records = await ts_client.daily_latest(exchange, prev_trade_date)
-                    for row in records:
-                        ticker = str(row.get("ticker", ""))
-                        close_val = row.get("close")
-                        if ticker and len(ticker) == 6 and close_val:
-                            prev_closes[ticker] = float(close_val)
-            finally:
-                await ts_client.stop()
-
-        if not prev_closes:
-            raise RuntimeError(
-                f"V15 scan: failed to get prev_close for {prev_trade_date} "
-                f"from both OSS cache and tsanghi API"
-            )
-        logger.info(f"V15 scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
-
-        # Build PriceSnapshot dict
-        price_snapshots: dict[str, PriceSnapshot] = {}
-        for code, quote in quotes.items():
-            if not quote.is_trading:
-                continue
-            price_snapshots[code] = PriceSnapshot(
-                stock_code=code,
-                stock_name="",
-                open_price=quote.open_price,
-                prev_close=prev_closes.get(code, 0.0),
-                latest_price=quote.early_close,
-                early_volume=quote.early_volume,
-                high_price=quote.early_high,
-                low_price=quote.early_low,
-            )
-
-        scanner = V15Scanner(
+        scan_result = await run_v15_live(
+            realtime_client=_state["realtime_client"],
             historical_adapter=_state["historical_adapter"],
             fundamentals_db=_state["fundamentals_db"],
             concept_mapper=_state["concept_mapper"],
+            universe=universe,
+            backtest_cache=_state.get("backtest_cache"),
+            trade_calendar=calendar,
+            stock_filter=_state.get("stock_filter"),
         )
 
-        scan_result = await scanner.scan(price_snapshots)
         today = datetime.now(BEIJING_TZ).date()
 
-        # Persist top-5 scored stocks (non-critical, never blocks trading)
+        # Persist top-10 scored stocks (non-critical, never blocks trading)
         if scan_result.all_scored and _state.get("v15_scan_db"):
             try:
                 await _state["v15_scan_db"].save_top_n(
@@ -456,7 +378,7 @@ def create_iquant_router() -> APIRouter:
         # Push top-5 report to Feishu (non-critical)
         await _notify_feishu_v15_top5(scan_result)
 
-        rec: V15ScoredStock | None = scan_result.recommended
+        rec = scan_result.recommended
         if not rec:
             return None
 
@@ -476,57 +398,36 @@ def create_iquant_router() -> APIRouter:
 
     # --- Monitoring helpers ---
 
-    SIGNAL_TIMEOUT_MINUTES = 5  # alert if signal not acked within this time
-    SIGNAL_EXPIRY_MINUTES = 10  # auto-expire signal after this time (no execution)
     HEARTBEAT_TIMEOUT_SECONDS = 90  # consider offline after this many seconds without heartbeat
     TRADING_HOURS = (time(9, 30), time(15, 0))
 
     async def _check_signal_timeout(now_bj: datetime) -> None:
-        """Alert if any pending signal has not been acked within SIGNAL_TIMEOUT_MINUTES."""
-        for sig in _state["pending_signals"]:
-            pushed_at = sig.get("pushed_at")
-            if not pushed_at:
-                continue
-            age_minutes = (now_bj - pushed_at).total_seconds() / 60
-            # Only alert once per signal (mark it)
-            if age_minutes >= SIGNAL_TIMEOUT_MINUTES and not sig.get("_timeout_alerted"):
-                sig["_timeout_alerted"] = True
-                direction = "买入" if sig["type"] == "buy" else "卖出"
-                detail = (
-                    f"{direction}信号未执行!\n"
-                    f"股票: {sig['stock_code']} {sig.get('stock_name', '')}\n"
-                    f"推送时间: {sig.get('created_at', '')}\n"
-                    f"已等待: {age_minutes:.0f}分钟\n"
-                    f"可能原因: iQuant/QMT掉线或未运行"
-                )
-                logger.error(f"V15 signal timeout: {sig['stock_code']} ({age_minutes:.0f}min)")
-                await _notify_feishu_error("信号超时未执行", detail)
+        """Alert if any pending signal has not been acked within timeout."""
+        for sig in signal_store.get_timed_out(now_bj):
+            direction = "买入" if sig.type == "buy" else "卖出"
+            age = (now_bj - sig.pushed_at).total_seconds() / 60 if sig.pushed_at else 0
+            detail = (
+                f"{direction}信号未执行!\n"
+                f"股票: {sig.stock_code} {sig.stock_name}\n"
+                f"推送时间: {sig.created_at}\n"
+                f"已等待: {age:.0f}分钟\n"
+                f"可能原因: iQuant/QMT掉线或未运行"
+            )
+            await _notify_feishu_error("信号超时未执行", detail)
 
     async def _expire_stale_signals(now_bj: datetime) -> None:
-        """Remove signals older than SIGNAL_EXPIRY_MINUTES. Alert + discard."""
-        still_pending: list[dict] = []
-        for sig in _state["pending_signals"]:
-            pushed_at = sig.get("pushed_at")
-            if not pushed_at:
-                still_pending.append(sig)
-                continue
-            age_minutes = (now_bj - pushed_at).total_seconds() / 60
-            if age_minutes >= SIGNAL_EXPIRY_MINUTES:
-                direction = "买入" if sig["type"] == "buy" else "卖出"
-                detail = (
-                    f"{direction}信号已过期作废!\n"
-                    f"股票: {sig['stock_code']} {sig.get('stock_name', '')}\n"
-                    f"推送时间: {sig.get('created_at', '')}\n"
-                    f"过期时长: {age_minutes:.0f}分钟\n"
-                    f"信号已自动移除，如需交易请手动下单"
-                )
-                logger.error(
-                    f"V15 signal expired: {sig['stock_code']} ({age_minutes:.0f}min), removed"
-                )
-                await _notify_feishu_error("信号过期作废", detail)
-            else:
-                still_pending.append(sig)
-        _state["pending_signals"] = still_pending
+        """Remove expired signals and alert."""
+        for sig in signal_store.expire_stale(now_bj):
+            direction = "买入" if sig.type == "buy" else "卖出"
+            age = (now_bj - sig.pushed_at).total_seconds() / 60 if sig.pushed_at else 0
+            detail = (
+                f"{direction}信号已过期作废!\n"
+                f"股票: {sig.stock_code} {sig.stock_name}\n"
+                f"推送时间: {sig.created_at}\n"
+                f"过期时长: {age:.0f}分钟\n"
+                f"信号已自动移除，如需交易请手动下单"
+            )
+            await _notify_feishu_error("信号过期作废", detail)
 
     async def _check_heartbeat(now_bj: datetime, last_alert_ts: float) -> float:
         """Alert if iQuant has not polled during trading hours.
@@ -698,7 +599,7 @@ def create_iquant_router() -> APIRouter:
                 if connected
                 else 0
             ),
-            "pending_count": len(_state["pending_signals"]),
+            "pending_count": signal_store.pending_count,
             "available_cash": _state.get("available_cash", 0) if connected else 0,
         }
 
@@ -725,42 +626,21 @@ def create_iquant_router() -> APIRouter:
         Same as /manual-order but callable internally without HTTP.
         Returns the signal dict with assigned ID.
         """
-        _push_signal(signal)
-        return _state["pending_signals"][-1]
+        now = datetime.now(BEIJING_TZ)
+        pushed = signal_store.push_dict(signal, now=now)
+        return pushed.to_wire_dict()
 
     router._push_order = _push_order  # type: ignore[attr-defined]
 
     def _get_pending_signals() -> list[dict]:
         """Return pending signals for dashboard display."""
-        results = []
-        for sig in _state["pending_signals"]:
-            results.append(
-                {
-                    "id": sig.get("id", ""),
-                    "type": sig.get("type", ""),
-                    "stock_code": sig.get("stock_code", ""),
-                    "stock_name": sig.get("stock_name", ""),
-                    "quantity": sig.get("quantity", 0),
-                    "price_type": sig.get("price_type", "market"),
-                    "price": sig.get("price"),
-                    "reason": sig.get("reason", ""),
-                    "created_at": sig.get("created_at", ""),
-                    "manual": sig.get("manual", False),
-                }
-            )
-        return results
+        return signal_store.get_pending_dicts()
 
     router._get_pending_signals = _get_pending_signals  # type: ignore[attr-defined]
 
     def _cancel_signal(signal_id: str) -> bool:
         """Remove a signal from pending queue. Returns True if found."""
-        for i, sig in enumerate(_state["pending_signals"]):
-            if sig.get("id") == signal_id:
-                removed = _state["pending_signals"].pop(i)
-                code = removed.get("stock_code")
-                logger.info(f"Signal cancelled: {code} (id={signal_id})")
-                return True
-        return False
+        return signal_store.cancel(signal_id)
 
     router._cancel_signal = _cancel_signal  # type: ignore[attr-defined]
 
@@ -858,7 +738,7 @@ def create_iquant_router() -> APIRouter:
             "status": "ok",
             "service": "iquant-v15",
             "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "pending_count": len(_state["pending_signals"]),
+            "pending_count": signal_store.pending_count,
             "broker_positions": len(_state["broker_positions"]),
         }
 
@@ -870,12 +750,7 @@ def create_iquant_router() -> APIRouter:
         """
         now = datetime.now(BEIJING_TZ)
         _state["last_poll_time"] = now
-        expiry_seconds = SIGNAL_EXPIRY_MINUTES * 60
-        active = [
-            s
-            for s in _state["pending_signals"]
-            if not s.get("pushed_at") or (now - s["pushed_at"]).total_seconds() < expiry_seconds
-        ]
+        active = signal_store.get_active_wire(now)
         return {
             "signals": active,
             "count": len(active),
@@ -891,23 +766,18 @@ def create_iquant_router() -> APIRouter:
         For BUY signals: stock is added to holdings with entry_price.
         For SELL signals: stock is removed from holdings.
         """
-        signal_id = body.signal_id
-        found = None
-        for i, sig in enumerate(_state["pending_signals"]):
-            if sig["id"] == signal_id:
-                found = _state["pending_signals"].pop(i)
-                break
+        now = datetime.now(BEIJING_TZ)
+        found = signal_store.ack(body.signal_id, now=now)
 
         if not found:
-            raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Signal {body.signal_id} not found"
+            )
 
-        found["acked_at"] = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
-        _state["executed_signals"].append(found)
+        wire = found.to_wire_dict()
+        await _notify_feishu_ack(wire)
 
-        logger.info(f"V15: {found['type'].upper()} acked {found['stock_code']}")
-        await _notify_feishu_ack(found)
-
-        return {"success": True, "signal": found}
+        return {"success": True, "signal": wire}
 
     @router.post("/report-status")
     async def report_status(
@@ -1016,17 +886,20 @@ def create_iquant_router() -> APIRouter:
         if body.price_type == "limit" and (body.price is None or body.price <= 0):
             raise HTTPException(status_code=400, detail="limit order requires positive price")
 
-        signal = {
-            "type": body.direction,
-            "stock_code": body.stock_code,
-            "stock_name": "",
-            "quantity": body.quantity,
-            "price": body.price,
-            "price_type": body.price_type,
-            "reason": body.reason,
-            "manual": True,
-        }
-        _push_signal(signal)
+        now = datetime.now(BEIJING_TZ)
+        sig = signal_store.push_dict(
+            {
+                "type": body.direction,
+                "stock_code": body.stock_code,
+                "stock_name": "",
+                "quantity": body.quantity,
+                "price": body.price,
+                "price_type": body.price_type,
+                "reason": body.reason,
+                "manual": True,
+            },
+            now=now,
+        )
 
         logger.info(
             f"Manual order pushed: {body.direction} {body.stock_code} "
@@ -1035,7 +908,7 @@ def create_iquant_router() -> APIRouter:
 
         return {
             "success": True,
-            "signal": _state["pending_signals"][-1],
+            "signal": sig.to_wire_dict(),
             "message": "Signal pushed. iQuant will pick it up on next /pending-signals poll.",
         }
 
@@ -1107,10 +980,10 @@ def create_iquant_router() -> APIRouter:
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
         """Run V15 scan for a specific historical date."""
-        from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.v15_scanner import V15Scanner
-        from src.web.routes import MinuteDataMissingError, _build_snapshots_from_cache
+        from src.strategy.v15_strategy_service import (
+            MinuteDataMissingError,
+            run_v15_backtest,
+        )
 
         try:
             trade_date = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
@@ -1119,40 +992,29 @@ def create_iquant_router() -> APIRouter:
 
         await _ensure_resources()
 
-        if body.data_source == "tsanghi":
-            bt_cache = getattr(request.app.state, "backtest_cache", None)
-            if not bt_cache or not bt_cache.is_ready:
-                raise HTTPException(
-                    status_code=503,
-                    detail="GreptimeDB 缓存未连接。请先在 web 页面的回测页下载数据。",
-                )
-
-            date_key = trade_date.strftime("%Y-%m-%d")
-            try:
-                price_snapshots = await _build_snapshots_from_cache(bt_cache, date_key)
-            except MinuteDataMissingError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-
-            if not price_snapshots:
-                return {"recommendation": None, "reason": f"No data for {date_key}"}
-
-            adapter = GreptimeHistoricalAdapter(bt_cache)
-        else:
+        if body.data_source != "tsanghi":
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported data_source: {body.data_source}. Use 'tsanghi'.",
             )
 
-        concept_mapper = LocalConceptMapper()
-        scanner = V15Scanner(
-            historical_adapter=adapter,
-            fundamentals_db=_state["fundamentals_db"],
-            concept_mapper=concept_mapper,
-        )
+        bt_cache = getattr(request.app.state, "backtest_cache", None)
+        if not bt_cache or not bt_cache.is_ready:
+            raise HTTPException(
+                status_code=503,
+                detail="GreptimeDB 缓存未连接。请先在 web 页面的回测页下载数据。",
+            )
 
-        scan_result = await scanner.scan(price_snapshots, trade_date=trade_date)
+        try:
+            scan_result = await run_v15_backtest(
+                backtest_cache=bt_cache,
+                fundamentals_db=_state["fundamentals_db"],
+                trade_date=trade_date,
+            )
+        except MinuteDataMissingError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
         rec = scan_result.recommended
-
         if not rec:
             return {"recommendation": None, "reason": "No recommendation for this date"}
 

@@ -589,9 +589,10 @@ def create_momentum_router() -> APIRouter:
     async def run_backtest(request: Request, body: BacktestScanRequest) -> dict:
         """Run V15 strategy scan for a specific date using backtest cache."""
         from src.common.feishu_bot import FeishuBot
-        from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.v15_scanner import V15Scanner
+        from src.strategy.v15_strategy_service import (
+            MinuteDataMissingError,
+            run_v15_backtest,
+        )
 
         try:
             trade_date = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
@@ -608,31 +609,24 @@ def create_momentum_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
         try:
-            date_key = trade_date.strftime("%Y-%m-%d")
             try:
-                price_snapshots = await _build_snapshots_from_cache(cache, date_key)
+                result = await run_v15_backtest(
+                    backtest_cache=cache,
+                    fundamentals_db=fundamentals_db,
+                    trade_date=trade_date,
+                )
             except MinuteDataMissingError as e:
                 return {
                     "success": False,
                     "trade_date": body.trade_date,
                     "error": str(e),
                 }
-            if not price_snapshots:
+            if not result.recommended and not result.all_scored:
                 return {
                     "success": False,
                     "trade_date": body.trade_date,
-                    "error": f"沧海缓存中无 {date_key} 的日线数据",
+                    "error": f"沧海缓存中无 {trade_date.strftime('%Y-%m-%d')} 的日线数据",
                 }
-
-            adapter = GreptimeHistoricalAdapter(cache)
-            concept_mapper = LocalConceptMapper()
-            scanner = V15Scanner(
-                historical_adapter=adapter,
-                fundamentals_db=fundamentals_db,
-                concept_mapper=concept_mapper,
-            )
-
-            result = await scanner.scan(price_snapshots, trade_date=trade_date)
 
             rec = result.recommended
             response_data: dict[str, Any] = {
@@ -724,9 +718,10 @@ def create_momentum_router() -> APIRouter:
         import math
         from datetime import datetime
 
-        from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
-        from src.data.sources.local_concept_mapper import LocalConceptMapper
-        from src.strategy.strategies.v15_scanner import V15Scanner
+        from src.strategy.v15_strategy_service import (
+            MinuteDataMissingError,
+            run_v15_backtest,
+        )
 
         try:
             start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
@@ -745,7 +740,6 @@ def create_momentum_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
         fundamentals_db = _get_fundamentals_db(request)
-        adapter = GreptimeHistoricalAdapter(backtest_cache)
 
         async def event_stream():
             def sse(data: dict) -> str:
@@ -793,7 +787,6 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-                concept_mapper = LocalConceptMapper()
                 capital = body.initial_capital
                 day_results: list[dict] = []
 
@@ -812,26 +805,18 @@ def create_momentum_router() -> APIRouter:
                     )
 
                     try:
-                        date_key = trade_date.strftime("%Y-%m-%d")
                         try:
-                            price_snapshots = await _build_snapshots_from_cache(
-                                backtest_cache,
-                                date_key,
+                            scan_result = await run_v15_backtest(
+                                backtest_cache=backtest_cache,
+                                fundamentals_db=fundamentals_db,
+                                trade_date=trade_date,
                             )
                         except MinuteDataMissingError as e:
-                            price_snapshots = {}
-                            price_err = str(e)
-                        else:
-                            price_err = (
-                                "" if price_snapshots else f"沧海缓存中无 {date_key} 的日线数据"
-                            )
-
-                        if not price_snapshots:
                             day_results.append(
                                 {
                                     "trade_date": str(trade_date),
                                     "has_trade": False,
-                                    "skip_reason": price_err or "无价格数据",
+                                    "skip_reason": str(e),
                                     "capital": round(capital, 2),
                                 }
                             )
@@ -839,18 +824,32 @@ def create_momentum_router() -> APIRouter:
                                 {
                                     "type": "day_skip",
                                     "trade_date": str(trade_date),
-                                    "reason": price_err or "无价格数据",
+                                    "reason": str(e),
                                 }
                             )
                             await asyncio.sleep(0.05)
                             continue
 
-                        scanner = V15Scanner(
-                            historical_adapter=adapter,
-                            fundamentals_db=fundamentals_db,
-                            concept_mapper=concept_mapper,
-                        )
-                        scan_result = await scanner.scan(price_snapshots, trade_date=trade_date)
+                        # Empty result means no data for that date
+                        if not scan_result.recommended and not scan_result.all_scored:
+                            date_key = trade_date.strftime("%Y-%m-%d")
+                            day_results.append(
+                                {
+                                    "trade_date": str(trade_date),
+                                    "has_trade": False,
+                                    "skip_reason": f"沧海缓存中无 {date_key} 的日线数据",
+                                    "capital": round(capital, 2),
+                                }
+                            )
+                            yield sse(
+                                {
+                                    "type": "day_skip",
+                                    "trade_date": str(trade_date),
+                                    "reason": f"沧海缓存中无 {date_key} 的日线数据",
+                                }
+                            )
+                            await asyncio.sleep(0.05)
+                            continue
 
                         rec = scan_result.recommended
 
@@ -995,8 +994,6 @@ def create_momentum_router() -> APIRouter:
                         )
                         await asyncio.sleep(0.05)
                         continue
-
-                    concept_mapper.clear_cache()
 
                 # === Summary ===
                 trade_results = [d for d in day_results if d.get("has_trade")]
@@ -1157,78 +1154,6 @@ def create_momentum_router() -> APIRouter:
 # ==================== Helper Functions ====================
 
 
-class MinuteDataMissingError(Exception):
-    """Raised when minute data coverage is insufficient for reliable backtest."""
-
-    pass
-
-
-async def _build_snapshots_from_cache(cache, date_str: str) -> dict:
-    """Build PriceSnapshot dict from GreptimeBacktestCache for a given date.
-
-    Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
-    Local filtering: open_gain_pct > -0.5% (same as iwencai query).
-
-    Raises:
-        MinuteDataMissingError: if minute data coverage < 50% of daily candidates.
-    """
-    from src.strategy.models import PriceSnapshot
-
-    all_daily = await cache.get_all_codes_with_daily(date_str)
-    snapshots: dict[str, PriceSnapshot] = {}
-
-    if not all_daily:
-        logger.warning(f"_build_snapshots_from_cache: no data for date_str='{date_str}'")
-        return snapshots
-
-    daily_candidates = 0
-    minute_hits = 0
-
-    for code, day in all_daily.items():
-        if day.is_suspended:
-            continue
-
-        open_price = day.open
-        prev_close = day.preClose
-        if prev_close <= 0 or open_price <= 0:
-            continue
-
-        open_gain = (open_price - prev_close) / prev_close * 100
-        if open_gain < -0.5:
-            continue
-
-        daily_candidates += 1
-
-        data_940 = await cache.get_940_price(code, date_str)
-        if not data_940:
-            continue
-
-        minute_hits += 1
-        latest_price, cum_vol, max_high, min_low = data_940
-
-        if latest_price <= 0:
-            continue
-
-        snapshots[code] = PriceSnapshot(
-            stock_code=code,
-            stock_name="",
-            open_price=open_price,
-            prev_close=prev_close,
-            latest_price=latest_price,
-            early_volume=cum_vol,
-            high_price=max_high,
-            low_price=min_low,
-        )
-
-    # Trading safety: halt if minute data is severely insufficient
-    if daily_candidates > 0 and minute_hits < daily_candidates * 0.5:
-        coverage_pct = round(minute_hits / daily_candidates * 100, 1)
-        raise MinuteDataMissingError(
-            f"{date_str} 分钟数据严重不足: 仅 {minute_hits}/{daily_candidates} 只股票有分钟数据 "
-            f"(覆盖率 {coverage_pct}%)。请先补充下载分钟数据，否则回测结果不可靠。"
-        )
-
-    return snapshots
 
 
 def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
@@ -1263,136 +1188,74 @@ async def _compute_v15_scan(date_str: str, fundamentals_db, backtest_cache):
     """Compute V15 scan on-demand. Returns (recs_list, V15ScanResult | None).
 
     Two paths:
-    - Past dates: GreptimeDB cache (fast, ~1-3s)
-    - Today: Tushare batch_get_early_quotes (slow, ~30-60s, only after 09:39)
+    - Past dates: GreptimeDB cache via strategy service (fast, ~1-3s)
+    - Today: Tushare batch_get_early_quotes via strategy service (slow, ~30-60s)
     """
     from datetime import date, datetime
     from zoneinfo import ZoneInfo
 
-    from src.data.sources.local_concept_mapper import LocalConceptMapper
-    from src.strategy.strategies.v15_scanner import V15Scanner
+    from src.strategy.v15_strategy_service import run_v15_backtest, run_v15_live
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    today_str = datetime.now(beijing_tz).strftime("%Y-%m-%d")
+    now_bj = datetime.now(beijing_tz)
+    today_str = now_bj.strftime("%Y-%m-%d")
     is_today = date_str == today_str
 
-    if is_today:
-        return await _compute_v15_scan_today(date_str, fundamentals_db, backtest_cache, beijing_tz)
+    if not is_today:
+        # --- Past date: use GreptimeDB cache ---
+        if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
+            raise ValueError("GreptimeDB 缓存未就绪，无法计算历史推荐")
 
-    # --- Past date: use GreptimeDB cache (same as backtest) ---
-    if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
-        raise ValueError("GreptimeDB 缓存未就绪，无法计算历史推荐")
+        trade_date = date.fromisoformat(date_str)
+        result = await run_v15_backtest(
+            backtest_cache=backtest_cache,
+            fundamentals_db=fundamentals_db,
+            trade_date=trade_date,
+        )
+        if not result.recommended and not result.all_scored:
+            return [], None
+        recs = _scan_result_to_recs(date_str, result, n=10)
+        return recs, result
 
-    from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
+    # --- Today: live Tushare quotes ---
+    if now_bj.weekday() >= 5:
+        day_name = "周六" if now_bj.weekday() == 5 else "周日"
+        raise ValueError(f"今天是{day_name}，A股不开市")
 
-    price_snapshots = await _build_snapshots_from_cache(backtest_cache, date_str)
-    if not price_snapshots:
-        return [], None
-
-    trade_date = date.fromisoformat(date_str)
-    adapter = GreptimeHistoricalAdapter(backtest_cache)
-    concept_mapper = LocalConceptMapper()
-    scanner = V15Scanner(
-        historical_adapter=adapter,
-        fundamentals_db=fundamentals_db,
-        concept_mapper=concept_mapper,
-    )
-    result = await scanner.scan(price_snapshots, trade_date=trade_date)
-    recs = _scan_result_to_recs(date_str, result, n=10)
-    return recs, result
-
-
-async def _compute_v15_scan_today(date_str, fundamentals_db, backtest_cache, beijing_tz):
-    """Today path: Tushare rt_min_daily early quotes + IQuantHistoricalAdapter."""
-    from datetime import datetime, timedelta
+    if now_bj.hour < 9 or (now_bj.hour == 9 and now_bj.minute < 39):
+        raise ValueError("今日扫描需在 09:39 之后执行（早盘数据尚未就绪）")
 
     from src.common.config import get_tushare_token
     from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
     from src.data.clients.tushare_realtime import TushareRealtimeClient
     from src.data.sources.local_concept_mapper import LocalConceptMapper
     from src.strategy.filters.stock_filter import create_main_board_only_filter
-    from src.strategy.models import PriceSnapshot
-    from src.strategy.strategies.v15_scanner import V15Scanner
 
-    now_bj = datetime.now(beijing_tz)
-
-    # Weekday check
-    if now_bj.weekday() >= 5:
-        day_name = "周六" if now_bj.weekday() == 5 else "周日"
-        raise ValueError(f"今天是{day_name}，A股不开市")
-
-    # Time guard
-    if now_bj.hour < 9 or (now_bj.hour == 9 and now_bj.minute < 39):
-        raise ValueError("今日扫描需在 09:39 之后执行（早盘数据尚未就绪）")
-
-    # Universe
     stock_filter = create_main_board_only_filter()
     all_codes = await fundamentals_db.get_all_stock_codes()
     universe = [c for c in all_codes if stock_filter.is_allowed(c)]
     logger.info(f"On-demand scan: universe has {len(universe)} codes")
 
-    # Tushare early quotes (9:30-9:40)
     tushare_token = get_tushare_token()
     tushare = TushareRealtimeClient(token=tushare_token)
     await tushare.start()
     try:
-        quotes = await tushare.batch_get_early_quotes(universe)
-        logger.info(f"On-demand scan: got {len(quotes)} early quotes")
-
-        if not quotes:
-            return [], None
-
-        # prev_close from GreptimeDB cache (look back 1-7 days)
-        if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
-            raise ValueError("GreptimeDB 缓存未就绪，无法获取昨收价")
-
-        today = now_bj.date()
-        prev_daily: dict = {}
-        for days_back in range(1, 8):
-            prev_date = today - timedelta(days=days_back)
-            prev_date_str = prev_date.strftime("%Y-%m-%d")
-            prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
-            if prev_daily:
-                logger.info(
-                    f"On-demand scan: prev_close from {prev_date_str} ({len(prev_daily)} stocks)"
-                )
-                break
-
-        # Build PriceSnapshots
-        price_snapshots: dict[str, PriceSnapshot] = {}
-        for code, q in quotes.items():
-            if not q.is_trading:
-                continue
-            cached_day = prev_daily.get(code)
-            prev_close = cached_day.close if cached_day else 0.0
-            if prev_close <= 0:
-                continue
-            price_snapshots[code] = PriceSnapshot(
-                stock_code=code,
-                stock_name="",
-                open_price=q.open_price,
-                prev_close=prev_close,
-                latest_price=q.early_close,
-                early_volume=q.early_volume,
-                high_price=q.early_high,
-                low_price=q.early_low,
-            )
-
-        if not price_snapshots:
-            raise ValueError("构建快照为空，请检查 Tushare 和 GreptimeDB 缓存")
-
         adapter = IQuantHistoricalAdapter(tushare)
         concept_mapper = LocalConceptMapper()
-        scanner = V15Scanner(
+        result = await run_v15_live(
+            realtime_client=tushare,
             historical_adapter=adapter,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
+            universe=universe,
+            backtest_cache=backtest_cache,
             stock_filter=stock_filter,
         )
-        result = await scanner.scan(price_snapshots)
     finally:
         await tushare.stop()
 
+    if not result.recommended and not result.all_scored:
+        return [], None
     recs = _scan_result_to_recs(date_str, result, n=10)
     return recs, result
 
@@ -2546,9 +2409,13 @@ def create_trading_router() -> APIRouter:
                 fundamentals_db=fundamentals_db,
                 backtest_cache=backtest_cache,
             )
-        except (MinuteDataMissingError, ValueError) as e:
+        except ValueError as e:
             return {"date": date, "recommendations": [], "error": str(e)}
         except Exception as e:
+            from src.strategy.v15_strategy_service import MinuteDataMissingError
+
+            if isinstance(e, MinuteDataMissingError):
+                return {"date": date, "recommendations": [], "error": str(e)}
             logger.error(f"On-demand V15 scan failed for {date}: {e}", exc_info=True)
             return {"date": date, "recommendations": [], "error": str(e)}
 
