@@ -1,10 +1,10 @@
 # === MODULE PURPOSE ===
-# V15 strategy service: data preparation + strategy invocation.
+# Momentum strategy service: data preparation + strategy invocation.
 # Consolidates scan logic previously duplicated in iquant_routes.py and routes.py.
 #
 # === DESIGN PRINCIPLES ===
 # - Stateless: all dependencies passed as arguments
-# - Returns V15ScanResult (raw strategy output), caller decides what to do next
+# - Returns MomentumScanResult (raw strategy output), caller decides what to do next
 # - No signal pushing, no notifications — that's the trigger layer's job
 # - Two paths: backtest (cache) and live (realtime quotes)
 
@@ -119,7 +119,7 @@ async def _build_live_snapshots(
     from src.strategy.models import PriceSnapshot
 
     quotes = await realtime_client.batch_get_early_quotes(universe)
-    logger.info(f"V15 live scan: got {len(quotes)} early quotes")
+    logger.info(f"Momentum live scan: got {len(quotes)} early quotes")
 
     if not quotes:
         return {}
@@ -132,7 +132,7 @@ async def _build_live_snapshots(
         # Exact previous trading day from calendar
         prev_dates = [d for d in trade_calendar if d < today]
         if not prev_dates:
-            raise RuntimeError("V15 live scan: no previous trading day in calendar")
+            raise RuntimeError("Momentum live scan: no previous trading day in calendar")
         prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
 
         # Source 1: GreptimeDB cache
@@ -162,14 +162,14 @@ async def _build_live_snapshots(
 
         if not prev_closes:
             raise RuntimeError(
-                f"V15 live scan: failed to get prev_close for {prev_trade_date} "
+                f"Momentum live scan: failed to get prev_close for {prev_trade_date} "
                 f"from both GreptimeDB cache and tsanghi API"
             )
-        logger.info(f"V15 live scan: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
+        logger.info(f"Momentum live: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
     else:
         # Look back 1-7 days in GreptimeDB cache
         if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
-            raise RuntimeError("V15 live scan: GreptimeDB cache not ready for prev_close")
+            raise RuntimeError("Momentum live scan: GreptimeDB cache not ready for prev_close")
 
         prev_daily: dict = {}
         for days_back in range(1, 8):
@@ -178,7 +178,7 @@ async def _build_live_snapshots(
             prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
             if prev_daily:
                 logger.info(
-                    f"V15 live scan: prev_close from {prev_date_str} ({len(prev_daily)} stocks)"
+                    f"Momentum live: prev_close from {prev_date_str} ({len(prev_daily)} stocks)"
                 )
                 break
 
@@ -212,36 +212,36 @@ async def _build_live_snapshots(
 # ── Strategy runners ─────────────────────────────────────────
 
 
-async def run_v15_backtest(
+async def run_momentum_backtest(
     backtest_cache: Any,
     fundamentals_db: FundamentalsDB,
     trade_date: date,
     concept_mapper: LocalConceptMapper | None = None,
     stock_filter: StockFilter | None = None,
 ) -> Any:
-    """Run V15 scan using historical cache data.
+    """Run Momentum scan using historical cache data.
 
-    Returns V15ScanResult.
+    Returns MomentumScanResult.
 
     Raises:
         MinuteDataMissingError: if minute data coverage < 50%.
     """
     from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
     from src.data.sources.local_concept_mapper import LocalConceptMapper as LCM
-    from src.strategy.strategies.v15_scanner import V15Scanner
+    from src.strategy.strategies.momentum_scanner import MomentumScanner
 
     date_str = trade_date.strftime("%Y-%m-%d")
     price_snapshots = await build_snapshots_from_cache(backtest_cache, date_str)
 
     if not price_snapshots:
         # Return empty result — caller decides how to handle
-        from src.strategy.strategies.v15_scanner import V15ScanResult
+        from src.strategy.strategies.momentum_scanner import MomentumScanResult
 
-        return V15ScanResult()
+        return MomentumScanResult()
 
     adapter = GreptimeHistoricalAdapter(backtest_cache)
     mapper = concept_mapper or LCM()
-    scanner = V15Scanner(
+    scanner = MomentumScanner(
         historical_adapter=adapter,
         fundamentals_db=fundamentals_db,
         concept_mapper=mapper,
@@ -251,7 +251,7 @@ async def run_v15_backtest(
     return await scanner.scan(price_snapshots, trade_date=trade_date)
 
 
-async def run_v15_live(
+async def run_momentum_live(
     realtime_client: Any,
     historical_adapter: HistoricalDataProvider,
     fundamentals_db: FundamentalsDB,
@@ -261,29 +261,29 @@ async def run_v15_live(
     trade_calendar: list[date] | None = None,
     stock_filter: StockFilter | None = None,
 ) -> Any:
-    """Run V15 scan using live Tushare quotes.
+    """Run Momentum scan using live Tushare quotes.
 
     Args:
         realtime_client: TushareRealtimeClient for fetching early quotes.
-        historical_adapter: For V15Scanner's historical data needs.
+        historical_adapter: For MomentumScanner's historical data needs.
         fundamentals_db: For ST detection.
         concept_mapper: For board ↔ stock mapping.
         universe: Stock codes to scan.
         backtest_cache: GreptimeBacktestCache for prev_close lookup.
         trade_calendar: Trading day calendar. If provided, uses exact prev_trade_date
             for prev_close. Otherwise looks back 1-7 days in cache.
-        stock_filter: Optional stock filter for V15Scanner.
+        stock_filter: Optional stock filter for MomentumScanner.
 
     Returns:
-        V15ScanResult.
+        MomentumScanResult.
 
     Raises:
         RuntimeError: on data issues (trading safety: fail fast).
     """
-    from src.strategy.strategies.v15_scanner import V15Scanner
+    from src.strategy.strategies.momentum_scanner import MomentumScanner
 
     if not universe:
-        raise RuntimeError("V15 live scan: universe is empty")
+        raise RuntimeError("Momentum live scan: universe is empty")
 
     price_snapshots = await _build_live_snapshots(
         realtime_client=realtime_client,
@@ -293,11 +293,11 @@ async def run_v15_live(
     )
 
     if not price_snapshots:
-        from src.strategy.strategies.v15_scanner import V15ScanResult
+        from src.strategy.strategies.momentum_scanner import MomentumScanResult
 
-        return V15ScanResult()
+        return MomentumScanResult()
 
-    scanner = V15Scanner(
+    scanner = MomentumScanner(
         historical_adapter=historical_adapter,
         fundamentals_db=fundamentals_db,
         concept_mapper=concept_mapper,

@@ -1,5 +1,5 @@
 # === MODULE PURPOSE ===
-# PostgreSQL persistence for V15 daily scan top-N scored stocks.
+# PostgreSQL persistence for daily scan top-N scored stocks.
 # Stores the highest-scoring candidates each day for post-hoc analysis.
 # Does NOT record whether a stock was actually traded.
 
@@ -18,14 +18,14 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 if TYPE_CHECKING:
-    from src.strategy.strategies.v15_scanner import V15ScoredStock
+    from src.strategy.strategies.momentum_scanner import MomentumScoredStock
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class V15ScanDBConfig:
-    """Configuration for V15 scan database."""
+class MomentumScanDBConfig:
+    """Configuration for momentum scan database."""
 
     host: str = "localhost"
     port: int = 5432
@@ -66,10 +66,10 @@ ON {schema}.v15_scan_stocks(trade_date DESC);
 """
 
 
-class V15ScanDB:
-    """Async PostgreSQL store for V15 daily scan top-N stocks."""
+class MomentumScanDB:
+    """Async PostgreSQL store for daily scan top-N stocks."""
 
-    def __init__(self, config: V15ScanDBConfig):
+    def __init__(self, config: MomentumScanDBConfig):
         self._config = config
         self._pool: asyncpg.Pool | None = None
         self._is_connected = False
@@ -90,7 +90,7 @@ class V15ScanDB:
         )
         await self._create_tables()
         self._is_connected = True
-        logger.info("V15ScanDB connected to PostgreSQL")
+        logger.info("MomentumScanDB connected to PostgreSQL")
 
     async def close(self) -> None:
         if self._pool:
@@ -107,13 +107,13 @@ class V15ScanDB:
     @property
     def _db_pool(self) -> asyncpg.Pool:
         if not self._is_connected or not self._pool:
-            raise RuntimeError("V15ScanDB is not connected. Call connect() first.")
+            raise RuntimeError("MomentumScanDB is not connected. Call connect() first.")
         return self._pool
 
     async def save_top_n(
         self,
         trade_date: date,
-        scored_stocks: list["V15ScoredStock"],
+        scored_stocks: list["MomentumScoredStock"],
         final_candidates: int,
         n: int = 5,
     ) -> int:
@@ -155,7 +155,7 @@ class V15ScanDB:
                             final_candidates,
                         )
 
-        logger.info(f"V15ScanDB: saved top-{len(top)} for {trade_date}")
+        logger.info(f"MomentumScanDB: saved top-{len(top)} for {trade_date}")
         return len(top)
 
     async def query(
@@ -219,8 +219,8 @@ class V15ScanDB:
         ]
 
 
-def create_v15_scan_db_from_config() -> V15ScanDB:
-    """Create V15ScanDB from database-config.yaml."""
+def create_momentum_scan_db_from_config() -> MomentumScanDB:
+    """Create MomentumScanDB from database-config.yaml."""
     from src.common.config import load_config
 
     config = load_config("config/database-config.yaml")
@@ -239,8 +239,8 @@ def create_v15_scan_db_from_config() -> V15ScanDB:
             return os.environ.get(var_name, default)
         return value
 
-    return V15ScanDB(
-        V15ScanDBConfig(
+    return MomentumScanDB(
+        MomentumScanDBConfig(
             host=resolve_env(db_config.get("host", "localhost")),
             port=int(resolve_env(db_config.get("port", 5432))),
             database=resolve_env(db_config.get("database", "messages")),

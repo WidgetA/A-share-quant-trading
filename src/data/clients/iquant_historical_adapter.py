@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Historical data adapter for the monitor/live scan subsystem.
-# Implements HistoricalDataProvider protocol for V15Scanner.
+# Implements HistoricalDataProvider protocol for MomentumScanner.
 #
 # === DATA FLOW ===
 # - history_quotes(): Downloads from tsanghi daily_latest API (per-date batch).

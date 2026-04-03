@@ -63,7 +63,7 @@ class TushareRealtimeClient:
     1. batch_get_quotes(): Uses rt_min (batch, 1 bar/stock) for current snapshot.
        Used by as_standard_quote_format() for realtime quotation adapter.
     2. batch_get_early_quotes(): Uses rt_min_daily (per-stock, all bars) and
-       aggregates 9:30-9:40 bars. Used by V15 scan which needs stable early data.
+       aggregates 9:30-9:40 bars. Used by momentum scan which needs stable early data.
 
     NOTE: preClose is NOT available from either endpoint.
     The caller must supplement it from historical cache.

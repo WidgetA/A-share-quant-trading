@@ -7,12 +7,12 @@
 # Push-based: server runs background tasks that produce signals at the right time.
 # iQuant polls /pending-signals every bar, executes immediately, then acks.
 #
-# === V15 STRATEGY ===
+# === MOMENTUM STRATEGY ===
 # NOTE: Auto buy/sell signal pushing is DISABLED. Scheduler only scans + reports.
 #       Manual orders via /manual-order endpoint still work.
 # Signal flow (T+2 adaptive sell):
 #   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
-#   09:39-10:00  → SCAN: run V15 7-layer funnel → Feishu report (no auto BUY)
+#   09:39-10:00  → SCAN: run momentum 7-layer funnel → Feishu report (no auto BUY)
 #   14:50-14:58  → SELL: log marked holdings (no auto SELL)
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
 #
@@ -134,16 +134,16 @@ async def _notify_feishu_ack(signal: dict) -> None:
         logger.warning("Failed to send Feishu ack notification", exc_info=True)
 
 
-async def _notify_feishu_v15_top5(scan_result) -> None:
-    """Send V15 top-5 scored report to Feishu. Best-effort, never raises."""
+async def _notify_feishu_top5(scan_result) -> None:
+    """Send momentum top-5 scored report to Feishu. Best-effort, never raises."""
     try:
         from src.common.feishu_bot import FeishuBot
 
         bot = FeishuBot()
         if bot.is_configured():
-            await bot.send_v15_top5_report(scan_result)
+            await bot.send_top5_report(scan_result)
     except Exception:
-        logger.warning("Failed to send Feishu V15 top-5 report", exc_info=True)
+        logger.warning("Failed to send Feishu top-5 report", exc_info=True)
 
 
 async def _notify_feishu_signal(signal: dict) -> None:
@@ -202,11 +202,11 @@ def _count_trading_days(calendar: list[date], from_date: date, to_date: date) ->
 
 
 def create_iquant_router() -> APIRouter:
-    """Create the iQuant API router with V15 strategy.
+    """Create the iQuant API router with momentum strategy.
 
-    V15 signal scheduler:
+    Signal scheduler:
     - 09:25-09:35: GAP CHECK (T+1 gap <-3% → early sell, T+2 → sell)
-    - 09:39-10:00: V15 SCAN (if no holdings → BUY signal)
+    - 09:39-10:00: MOMENTUM SCAN (if no holdings → BUY signal)
     - 14:50-14:58: SELL (push sell signals for marked holdings)
     """
     router = APIRouter(prefix="/api/iquant", tags=["iquant"])
@@ -237,7 +237,7 @@ def create_iquant_router() -> APIRouter:
         from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
         from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-        from src.data.database.v15_scan_db import create_v15_scan_db_from_config
+        from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
@@ -249,7 +249,7 @@ def create_iquant_router() -> APIRouter:
             await _notify_feishu_error(
                 "Tushare连接失败",
                 f"Tushare实时行情客户端启动失败\n错误: {e}\n"
-                f"V15交易功能不可用，请检查Tushare token和网络",
+                f"交易功能不可用，请检查Tushare token和网络",
             )
             raise
         _state["realtime_client"] = tushare
@@ -260,23 +260,23 @@ def create_iquant_router() -> APIRouter:
         except Exception as e:
             await _notify_feishu_error(
                 "数据库连接失败",
-                f"PostgreSQL基本面数据库连接失败\n错误: {e}\nV15交易功能不可用，请检查数据库配置",
+                f"PostgreSQL基本面数据库连接失败\n错误: {e}\n交易功能不可用，请检查数据库配置",
             )
             raise
         _state["fundamentals_db"] = fdb
 
-        # V15 scan history DB (non-critical — log and continue on failure)
+        # Momentum scan history DB (non-critical — log and continue on failure)
         try:
-            v15db = create_v15_scan_db_from_config()
-            await v15db.connect()
-            _state["v15_scan_db"] = v15db
+            scan_db = create_momentum_scan_db_from_config()
+            await scan_db.connect()
+            _state["momentum_scan_db"] = scan_db
         except Exception as e:
-            logger.warning(f"V15ScanDB init failed (scan history disabled): {e}")
-            _state["v15_scan_db"] = None
+            logger.warning(f"MomentumScanDB init failed (scan history disabled): {e}")
+            _state["momentum_scan_db"] = None
 
         _state["historical_adapter"] = IQuantHistoricalAdapter(tushare)
         _state["concept_mapper"] = LocalConceptMapper()
-        # V15 filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
+        # Stock filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
         _state["stock_filter"] = StockFilter(
             StockFilterConfig(
                 exclude_bse=True,
@@ -296,11 +296,11 @@ def create_iquant_router() -> APIRouter:
             )
             raise
 
-        # Start V15 background scheduler
+        # Start momentum background scheduler
         _state["scheduler_task"] = asyncio.create_task(_signal_scheduler())
 
         _state["initialized"] = True
-        logger.info("V15 iQuant resources initialized + scheduler started")
+        logger.info("Momentum iQuant resources initialized + scheduler started")
         return _state
 
     async def _cleanup_resources() -> None:
@@ -316,7 +316,7 @@ def create_iquant_router() -> APIRouter:
         if fdb:
             await fdb.close()
         _state["initialized"] = False
-        logger.info("V15 iQuant resources cleaned up")
+        logger.info("Momentum iQuant resources cleaned up")
 
     router._iquant_cleanup = _cleanup_resources  # type: ignore[attr-defined]
     router._iquant_init = _ensure_resources  # type: ignore[attr-defined]
@@ -326,14 +326,14 @@ def create_iquant_router() -> APIRouter:
     def _inject_cache(cache: Any) -> None:
         """Inject GreptimeDB backtest cache for preClose lookups."""
         _state["backtest_cache"] = cache
-        logger.info("V15: GreptimeDB backtest cache injected")
+        logger.info("Momentum: GreptimeDB backtest cache injected")
 
     router._inject_cache = _inject_cache  # type: ignore[attr-defined]
 
     # --- Universe ---
 
     async def _get_universe() -> list[str]:
-        """Get stock codes for V15 universe (main board + SME, cached)."""
+        """Get stock codes for momentum universe (main board + SME, cached)."""
         if _state["universe_cache"]:
             return _state["universe_cache"]
 
@@ -342,19 +342,19 @@ def create_iquant_router() -> APIRouter:
         stock_filter = _state["stock_filter"]
         codes = [c for c in all_codes if stock_filter.is_allowed(c)]
         _state["universe_cache"] = codes
-        logger.info(f"V15 universe cached: {len(codes)} codes")
+        logger.info(f"Momentum universe cached: {len(codes)} codes")
         return codes
 
-    # --- V15 scan (delegates to strategy service) ---
+    # --- Momentum scan (delegates to strategy service) ---
 
-    async def _run_v15_scan() -> dict[str, Any] | None:
-        """Run V15 scan via strategy service. Returns recommendation dict or None."""
-        from src.strategy.v15_strategy_service import run_v15_live
+    async def _run_momentum_scan() -> dict[str, Any] | None:
+        """Run momentum scan via strategy service. Returns recommendation dict or None."""
+        from src.strategy.momentum_strategy_service import run_momentum_live
 
         universe = await _get_universe()
         calendar = await _get_trade_calendar()
 
-        scan_result = await run_v15_live(
+        scan_result = await run_momentum_live(
             realtime_client=_state["realtime_client"],
             historical_adapter=_state["historical_adapter"],
             fundamentals_db=_state["fundamentals_db"],
@@ -368,16 +368,16 @@ def create_iquant_router() -> APIRouter:
         today = datetime.now(BEIJING_TZ).date()
 
         # Persist top-10 scored stocks (non-critical, never blocks trading)
-        if scan_result.all_scored and _state.get("v15_scan_db"):
+        if scan_result.all_scored and _state.get("momentum_scan_db"):
             try:
-                await _state["v15_scan_db"].save_top_n(
+                await _state["momentum_scan_db"].save_top_n(
                     today, scan_result.all_scored, scan_result.final_candidates, n=10
                 )
             except Exception as e:
-                logger.warning(f"V15ScanDB save failed: {e}")
+                logger.warning(f"MomentumScanDB save failed: {e}")
 
         # Push top-5 report to Feishu (non-critical)
-        await _notify_feishu_v15_top5(scan_result)
+        await _notify_feishu_top5(scan_result)
 
         rec = scan_result.recommended
         if not rec:
@@ -459,7 +459,7 @@ def create_iquant_router() -> APIRouter:
         if last_poll is None:
             # Never polled — alert after 09:33 (give 3min for startup)
             if ex_time >= time(9, 33):
-                logger.error("V15 heartbeat: iQuant has NEVER polled today")
+                logger.error("Heartbeat: iQuant has NEVER polled today")
                 await _notify_feishu_error(
                     "iQuant未连接",
                     "iQuant脚本今天从未连接服务器\n请检查QMT是否已启动并运行iquant_live.py",
@@ -469,9 +469,7 @@ def create_iquant_router() -> APIRouter:
             gap_minutes = (now_bj - last_poll).total_seconds() / 60
             if (now_bj - last_poll).total_seconds() >= HEARTBEAT_TIMEOUT_SECONDS:
                 last_str = last_poll.strftime("%H:%M:%S")
-                logger.error(
-                    f"V15 heartbeat: iQuant offline {gap_minutes:.0f}min (last={last_str})"
-                )
+                logger.error(f"Heartbeat: iQuant offline {gap_minutes:.0f}min (last={last_str})")
                 await _notify_feishu_error(
                     "iQuant掉线",
                     f"iQuant已失联 {gap_minutes:.0f} 分钟\n"
@@ -499,11 +497,11 @@ def create_iquant_router() -> APIRouter:
             f"日期: {now_bj.strftime('%Y-%m-%d %H:%M')}",
             f"iQuant状态: {poll_status}",
             f"券商持仓: {len(broker_pos)}只",
-            "今日将执行V15扫描(09:39-10:00)",
+            "今日将执行动量扫描(09:39-10:00)",
         ]
 
         msg = "\n".join(lines)
-        logger.info("V15 readiness report sent")
+        logger.info("Readiness report sent")
 
         try:
             from src.common.feishu_bot import FeishuBot
@@ -525,7 +523,7 @@ def create_iquant_router() -> APIRouter:
         readiness_done_date = ""
         heartbeat_alert_ts: float = 0
 
-        logger.info("V15 monitoring scheduler started")
+        logger.info("Monitoring scheduler started")
 
         try:
             while True:
@@ -553,7 +551,7 @@ def create_iquant_router() -> APIRouter:
                     )
                     if is_offline:
                         if _state["broker_positions"] or _state.get("available_cash", 0) > 0:
-                            logger.info("V15: iQuant offline — clearing broker positions/cash")
+                            logger.info("iQuant offline — clearing broker positions/cash")
                             _state["broker_positions"] = []
                             _state["available_cash"] = 0
 
@@ -564,12 +562,12 @@ def create_iquant_router() -> APIRouter:
                 except asyncio.CancelledError:
                     raise  # propagate for clean shutdown
                 except Exception as e:
-                    logger.error(f"V15 monitoring iteration error: {e}", exc_info=True)
+                    logger.error(f"Monitoring iteration error: {e}", exc_info=True)
 
                 await asyncio.sleep(30)
 
         except asyncio.CancelledError:
-            logger.info("V15 monitoring scheduler stopped")
+            logger.info("Monitoring scheduler stopped")
 
     def _start_monitoring() -> None:
         """Start the monitoring scheduler. Safe to call at any time."""
@@ -645,19 +643,19 @@ def create_iquant_router() -> APIRouter:
 
     router._cancel_signal = _cancel_signal  # type: ignore[attr-defined]
 
-    # --- V15 Background scheduler (trading operations only) ---
+    # --- Momentum background scheduler (trading operations only) ---
 
     async def _signal_scheduler() -> None:
-        """V15 trading scheduler — scan only.
+        """Momentum trading scheduler — scan only.
 
         Trading window:
-        - SCAN (09:39-10:00): Run V15 scan → push Feishu report
+        - SCAN (09:39-10:00): Run momentum scan → push Feishu report
 
         Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
         """
         SCAN_WINDOW = (time(9, 39), time(10, 0))
 
-        logger.info("V15 signal scheduler started")
+        logger.info("Momentum signal scheduler started")
 
         scan_done_date = ""
 
@@ -676,22 +674,22 @@ def create_iquant_router() -> APIRouter:
                     scan_done_date = ex_date
 
                     try:
-                        rec = await _run_v15_scan()
+                        rec = await _run_momentum_scan()
                         if rec:
                             logger.info(
-                                f"V15: scan recommends {rec['stock_code']} "
+                                f"Momentum: scan recommends {rec['stock_code']} "
                                 f"(auto-trading disabled, no signal pushed)"
                             )
                         else:
-                            logger.info("V15 scan: no recommendation today")
+                            logger.info("Momentum scan: no recommendation today")
                             await _notify_feishu_error(
-                                "V15扫描结果",
-                                "今日V15扫描完成，无符合条件的推荐股票",
+                                "动量扫描结果",
+                                "今日动量扫描完成，无符合条件的推荐股票",
                             )
                     except Exception as e:
                         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                        logger.error(f"V15 scan failed: {error_detail}")
-                        await _notify_feishu_error("V15扫描失败", error_detail)
+                        logger.error(f"Momentum scan failed: {error_detail}")
+                        await _notify_feishu_error("动量扫描失败", error_detail)
 
                 # Scan deadline
                 if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
@@ -700,13 +698,13 @@ def create_iquant_router() -> APIRouter:
                 await asyncio.sleep(120 if scan_done_date == ex_date else 30)
 
         except asyncio.CancelledError:
-            logger.info("V15 signal scheduler stopped")
+            logger.info("Momentum signal scheduler stopped")
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.critical(f"V15 signal scheduler CRASHED: {error_detail}")
+            logger.critical(f"Signal scheduler CRASHED: {error_detail}")
             await _notify_feishu_error(
-                "V15交易调度器崩溃",
-                f"信号调度器意外退出!\n{error_detail}\nV15今日将无法自动交易，请立即检查",
+                "交易调度器崩溃",
+                f"信号调度器意外退出!\n{error_detail}\n今日将无法自动交易，请立即检查",
             )
 
     # --- Endpoints ---
@@ -737,7 +735,7 @@ def create_iquant_router() -> APIRouter:
         now = datetime.now(BEIJING_TZ)
         return {
             "status": "ok",
-            "service": "iquant-v15",
+            "service": "iquant-momentum",
             "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "pending_count": signal_store.pending_count,
             "broker_positions": len(_state["broker_positions"]),
@@ -866,7 +864,7 @@ def create_iquant_router() -> APIRouter:
     ) -> dict:
         """Push a manual BUY/SELL signal for live trading tests.
 
-        The signal enters the same pending queue as V15 signals.
+        The signal enters the same pending queue as momentum signals.
         iQuant polls /pending-signals and executes via passorder().
 
         Example: POST /api/iquant/manual-order
@@ -913,11 +911,11 @@ def create_iquant_router() -> APIRouter:
 
     @router.post("/trigger-scan")
     async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Manually trigger V15 scan + Feishu top-5 report (bypasses time window)."""
+        """Manually trigger momentum scan + Feishu top-5 report (bypasses time window)."""
         await _ensure_resources()
 
         try:
-            rec = await _run_v15_scan()
+            rec = await _run_momentum_scan()
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
@@ -931,7 +929,7 @@ def create_iquant_router() -> APIRouter:
 
     @router.get("/universe")
     async def universe(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Return all stock codes in V15 universe (cached)."""
+        """Return all stock codes in momentum universe (cached)."""
         await _ensure_resources()
         codes = await _get_universe()
         return {"codes": codes, "count": len(codes)}
@@ -968,7 +966,7 @@ def create_iquant_router() -> APIRouter:
             }
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
-            logger.error(f"V15 quote failed: {error_detail}")
+            logger.error(f"Quote failed: {error_detail}")
             await _notify_feishu_error("行情获取失败", error_detail)
             raise HTTPException(status_code=500, detail=error_detail)
 
@@ -978,10 +976,10 @@ def create_iquant_router() -> APIRouter:
         body: BacktestScanRequest,
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
-        """Run V15 scan for a specific historical date."""
-        from src.strategy.v15_strategy_service import (
+        """Run momentum scan for a specific historical date."""
+        from src.strategy.momentum_strategy_service import (
             MinuteDataMissingError,
-            run_v15_backtest,
+            run_momentum_backtest,
         )
 
         try:
@@ -1005,7 +1003,7 @@ def create_iquant_router() -> APIRouter:
             )
 
         try:
-            scan_result = await run_v15_backtest(
+            scan_result = await run_momentum_backtest(
                 backtest_cache=bt_cache,
                 fundamentals_db=_state["fundamentals_db"],
                 trade_date=trade_date,

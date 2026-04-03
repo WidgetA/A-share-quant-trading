@@ -28,7 +28,7 @@ if TYPE_CHECKING:
         ScanResult,
         SelectedStock,
     )
-    from src.strategy.strategies.v15_scanner import V15ScanResult
+    from src.strategy.strategies.momentum_scanner import MomentumScanResult
 
 from src.common.config import get_feishu_config
 
@@ -344,12 +344,12 @@ Limit-up (skipped):
 
         return await self.send_message("\n".join(lines))
 
-    async def send_v15_top5_report(
+    async def send_top5_report(
         self,
-        scan_result: V15ScanResult,
+        scan_result: MomentumScanResult,
         scan_time: datetime | None = None,
     ) -> bool:
-        """Send V15 scanner top-5 scored candidates to Feishu."""
+        """Send momentum scanner top-5 scored candidates to Feishu."""
         now = scan_time or datetime.now(BEIJING_TZ)
         time_str = now.strftime("%Y-%m-%d %H:%M")
 

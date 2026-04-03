@@ -149,7 +149,7 @@ def create_app(
         iquant_rtr = getattr(app.state, "iquant_router", None)
         if iquant_rtr and hasattr(iquant_rtr, "_start_monitoring"):
             iquant_rtr._start_monitoring()
-            logger.info("iQuant V15 monitoring scheduler started")
+            logger.info("iQuant monitoring scheduler started")
 
         # Run trading safety audit at startup → notify Feishu if CRITICAL
         try:

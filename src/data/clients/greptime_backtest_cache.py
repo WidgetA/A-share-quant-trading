@@ -1,7 +1,7 @@
 # === MODULE PURPOSE ===
 # Backtest data cache backed by GreptimeDB (replaces pickle+OSS TsanghiBacktestCache).
 # Provides GreptimeBacktestCache for async read/write/download and
-# GreptimeHistoricalAdapter implementing HistoricalDataProvider for V15Scanner.
+# GreptimeHistoricalAdapter implementing HistoricalDataProvider for MomentumScanner.
 #
 # === KEY CONCEPTS ===
 # - All reads go through SQL via asyncpg (PostgreSQL wire protocol, port 4003)
@@ -1547,7 +1547,7 @@ class GreptimeBacktestCache:
 
 
 # ---------------------------------------------------------------------------
-# Historical adapter for V15Scanner (backtest mode)
+# Historical adapter for MomentumScanner (backtest mode)
 # ---------------------------------------------------------------------------
 
 

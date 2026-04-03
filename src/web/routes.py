@@ -11,7 +11,7 @@
 # GET  /api/positions        - Get current positions (JSON)
 #
 # === MOMENTUM BACKTEST ENDPOINTS ===
-# POST /api/momentum/backtest          - Run single-day V15 scan (JSON)
+# POST /api/momentum/backtest          - Run single-day momentum scan (JSON)
 # POST /api/momentum/combined-analysis - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status    - Get intraday monitor status (JSON)
 # POST /api/momentum/tsanghi-prepare   - Pre-download tsanghi cache (SSE)
@@ -262,7 +262,7 @@ def _parse_selection(confirm_type: str, selection: Any, data: dict) -> Any:
 
 
 class BacktestScanRequest(BaseModel):
-    """Request body for single-day V15 scan."""
+    """Request body for single-day momentum scan."""
 
     trade_date: str  # YYYY-MM-DD format
     notify: bool = False  # Send Feishu notification
@@ -585,15 +585,15 @@ def create_momentum_router() -> APIRouter:
             return {"success": True, "message": "取消请求已发送"}
         return {"success": False, "message": "没有正在进行的下载"}
 
-    # === Single-day V15 scan ===
+    # === Single-day momentum scan ===
 
     @router.post("/api/momentum/backtest")
     async def run_backtest(request: Request, body: BacktestScanRequest) -> dict:
-        """Run V15 strategy scan for a specific date using backtest cache."""
+        """Run momentum strategy scan for a specific date using backtest cache."""
         from src.common.feishu_bot import FeishuBot
-        from src.strategy.v15_strategy_service import (
+        from src.strategy.momentum_strategy_service import (
             MinuteDataMissingError,
-            run_v15_backtest,
+            run_momentum_backtest,
         )
 
         try:
@@ -612,7 +612,7 @@ def create_momentum_router() -> APIRouter:
 
         try:
             try:
-                result = await run_v15_backtest(
+                result = await run_momentum_backtest(
                     backtest_cache=cache,
                     fundamentals_db=fundamentals_db,
                     trade_date=trade_date,
@@ -673,7 +673,7 @@ def create_momentum_router() -> APIRouter:
                 if bot.is_configured():
                     from src.strategy.models import RecommendedStock
 
-                    # Adapt V15ScoredStock to RecommendedStock for Feishu
+                    # Adapt MomentumScoredStock to RecommendedStock for Feishu
                     adapted_rec = RecommendedStock(
                         stock_code=rec.stock_code,
                         stock_name=rec.stock_name,
@@ -708,21 +708,21 @@ def create_momentum_router() -> APIRouter:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"V15 backtest error: {e}", exc_info=True)
+            logger.error(f"Momentum backtest error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
 
     # === Range backtest with capital simulation ===
 
     @router.post("/api/momentum/combined-analysis")
     async def run_combined_analysis(request: Request, body: RangeBacktestRequest):
-        """Run V15 range backtest with capital simulation (SSE streaming)."""
+        """Run momentum range backtest with capital simulation (SSE streaming)."""
         import json
         import math
         from datetime import datetime
 
-        from src.strategy.v15_strategy_service import (
+        from src.strategy.momentum_strategy_service import (
             MinuteDataMissingError,
-            run_v15_backtest,
+            run_momentum_backtest,
         )
 
         try:
@@ -808,7 +808,7 @@ def create_momentum_router() -> APIRouter:
 
                     try:
                         try:
-                            scan_result = await run_v15_backtest(
+                            scan_result = await run_momentum_backtest(
                                 backtest_cache=backtest_cache,
                                 fundamentals_db=fundamentals_db,
                                 trade_date=trade_date,
@@ -1157,7 +1157,7 @@ def create_momentum_router() -> APIRouter:
 
 
 def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
-    """Convert V15ScanResult.all_scored to the same dict format as V15ScanDB.query()."""
+    """Convert MomentumScanResult.all_scored to the same dict format as MomentumScanDB.query()."""
 
     def _f(val):
         return round(float(val), 4) if val is not None else None
@@ -1184,8 +1184,8 @@ def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
     ]
 
 
-async def _compute_v15_scan(date_str: str, fundamentals_db, backtest_cache):
-    """Compute V15 scan on-demand. Returns (recs_list, V15ScanResult | None).
+async def _compute_momentum_scan(date_str: str, fundamentals_db, backtest_cache):
+    """Compute momentum scan on-demand. Returns (recs_list, MomentumScanResult | None).
 
     Two paths:
     - Past dates: GreptimeDB cache via strategy service (fast, ~1-3s)
@@ -1194,7 +1194,7 @@ async def _compute_v15_scan(date_str: str, fundamentals_db, backtest_cache):
     from datetime import date, datetime
     from zoneinfo import ZoneInfo
 
-    from src.strategy.v15_strategy_service import run_v15_backtest, run_v15_live
+    from src.strategy.momentum_strategy_service import run_momentum_backtest, run_momentum_live
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
     now_bj = datetime.now(beijing_tz)
@@ -1207,7 +1207,7 @@ async def _compute_v15_scan(date_str: str, fundamentals_db, backtest_cache):
             raise ValueError("GreptimeDB 缓存未就绪，无法计算历史推荐")
 
         trade_date = date.fromisoformat(date_str)
-        result = await run_v15_backtest(
+        result = await run_momentum_backtest(
             backtest_cache=backtest_cache,
             fundamentals_db=fundamentals_db,
             trade_date=trade_date,
@@ -1242,7 +1242,7 @@ async def _compute_v15_scan(date_str: str, fundamentals_db, backtest_cache):
     try:
         adapter = IQuantHistoricalAdapter(tushare)
         concept_mapper = LocalConceptMapper()
-        result = await run_v15_live(
+        result = await run_momentum_live(
             realtime_client=tushare,
             historical_adapter=adapter,
             fundamentals_db=fundamentals_db,
@@ -1312,7 +1312,7 @@ async def _get_trading_calendar(start_date, end_date) -> list:
 
 
 async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict | None:
-    """Execute a single momentum scan using Tushare + V15Scanner.
+    """Execute a single momentum scan using Tushare + MomentumScanner.
 
     Returns result_entry dict on success, None on failure.
     """
@@ -1327,10 +1327,10 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
     from src.data.sources.local_concept_mapper import LocalConceptMapper
     from src.strategy.filters.stock_filter import create_main_board_only_filter
     from src.strategy.models import PriceSnapshot
-    from src.strategy.strategies.v15_scanner import V15Scanner
+    from src.strategy.strategies.momentum_scanner import MomentumScanner
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    logger.info("Monitor scan starting (tushare + V15Scanner)")
+    logger.info("Monitor scan starting (tushare + MomentumScanner)")
 
     start_time = time_module.monotonic()
 
@@ -1420,7 +1420,7 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
 
         adapter = IQuantHistoricalAdapter(tushare)
         concept_mapper = LocalConceptMapper()
-        scanner = V15Scanner(
+        scanner = MomentumScanner(
             historical_adapter=adapter,
             fundamentals_db=fundamentals_db,
             concept_mapper=concept_mapper,
@@ -1521,7 +1521,7 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
 async def _run_intraday_monitor(state: dict) -> None:
     """Background task: intraday momentum monitor.
 
-    Runs every trading day at ~9:40, executes V15 scan, sends Feishu notification.
+    Runs every trading day at ~9:40, executes momentum scan, sends Feishu notification.
     """
     import asyncio
     from datetime import datetime, time, timedelta
@@ -2287,7 +2287,7 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/recommendations")
     async def get_recommendations(request: Request, date: str | None = None) -> dict:
-        """Get top-10 recommendations by computing V15 scan on-demand.
+        """Get top-10 recommendations by computing momentum scan on-demand.
 
         Past dates use GreptimeDB cache (~1-3s).
         Today uses Tushare rt_min_daily (~30-60s, only after 09:39).
@@ -2303,7 +2303,7 @@ def create_trading_router() -> APIRouter:
             return {"date": date, "recommendations": [], "error": "基本面数据库未就绪"}
 
         try:
-            recs, _scan_result = await _compute_v15_scan(
+            recs, _scan_result = await _compute_momentum_scan(
                 date_str=date,
                 fundamentals_db=fundamentals_db,
                 backtest_cache=backtest_cache,
@@ -2311,11 +2311,11 @@ def create_trading_router() -> APIRouter:
         except ValueError as e:
             return {"date": date, "recommendations": [], "error": str(e)}
         except Exception as e:
-            from src.strategy.v15_strategy_service import MinuteDataMissingError
+            from src.strategy.momentum_strategy_service import MinuteDataMissingError
 
             if isinstance(e, MinuteDataMissingError):
                 return {"date": date, "recommendations": [], "error": str(e)}
-            logger.error(f"On-demand V15 scan failed for {date}: {e}", exc_info=True)
+            logger.error(f"On-demand momentum scan failed for {date}: {e}", exc_info=True)
             return {"date": date, "recommendations": [], "error": str(e)}
 
         return {"date": date, "recommendations": recs}

@@ -321,7 +321,7 @@ if bot.is_configured():
 | `GET /api/iquant/status` | GET | iQuant connection status (no auth) |
 | `GET /api/momentum/tsanghi-cache-status` | GET | Tsanghi cache status (polling) |
 | `POST /api/momentum/tsanghi-prepare` | POST | Download tsanghi data (SSE stream) |
-| `POST /api/momentum/backtest` | POST | Single-day V15 scan |
+| `POST /api/momentum/backtest` | POST | Single-day momentum scan |
 | `POST /api/momentum/combined-analysis` | POST | Range backtest (SSE stream) |
 
 **Configuration** (Environment Variables):
@@ -548,7 +548,7 @@ await engine.stop()
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
 
 **Key Files**:
-- `src/strategy/strategies/v15_scanner.py` — Core V15 scanner logic (7-layer funnel + V3 scoring)
+- `src/strategy/strategies/momentum_scanner.py` — Core momentum scanner logic (7-layer funnel + V3 scoring)
 - `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: volume filter (turnover_amp bounds)
 - `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
 - `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping (reads local JSON)
@@ -580,7 +580,7 @@ await engine.stop()
 - [x] StockFilter: add `exclude_sme` + `create_main_board_only_filter()`
 - [x] FundamentalsDB: read-only access to stock_fundamentals table
 - [x] LocalConceptMapper: local JSON-based stock-to-board and board-to-stock lookups
-- [x] V15Scanner: 7-layer funnel + V3 regression scoring (replaced MomentumSectorScanner)
+- [x] MomentumScanner: 7-layer funnel + V3 regression scoring (replaced MomentumSectorScanner)
 - [x] MomentumQualityFilter: Step 5.5 volume filter (turnover_amp bounds)
 - [x] ReversalFactorFilter: Step 5.6 冲高回落 filter (early fade + price position)
 - [x] Feishu notification: `send_momentum_scan_result()` with recommendation
@@ -600,13 +600,13 @@ await engine.stop()
 
 ---
 
-### [STR-005] V15 Live Trading Interface (iQuant API)
+### [STR-005] Momentum Live Trading Interface (iQuant API)
 
 **Status**: In Progress
 
-**Description**: Live trading interface for V15 momentum board scanning strategy, deployed as a set of HTTP API endpoints (iQuant API). QMT polls these endpoints for buy/sell signals and acknowledges execution. Uses T+2 adaptive sell with T+1 early exit on large gap-down.
+**Description**: Live trading interface for momentum board scanning strategy, deployed as a set of HTTP API endpoints (iQuant API). QMT polls these endpoints for buy/sell signals and acknowledges execution. Uses T+2 adaptive sell with T+1 early exit on large gap-down.
 
-**Strategy: V15 Seven-Layer Parametric Funnel + V3 Regression Scoring**
+**Strategy: Seven-Layer Parametric Funnel + V3 Regression Scoring**
 
 | Layer | Name | Logic |
 |-------|------|-------|
@@ -642,7 +642,7 @@ await engine.stop()
 | Window | Time | Action |
 |--------|------|--------|
 | GAP_CHECK | 09:25-09:35 | Check holdings: T+1 gap → early exit; T+2 → mark sell |
-| SCAN | 09:39-10:00 | If no holdings → run V15 scan → push BUY signal |
+| SCAN | 09:39-10:00 | If no holdings → run momentum scan → push BUY signal |
 | SELL | 14:50-14:58 | Push SELL signal for all marked holdings |
 
 **Signal Flow**:
@@ -680,23 +680,23 @@ await engine.stop()
 | 扫描/跳空失败 | Exception | 完整错误堆栈 |
 
 **Dashboard Recommendations (On-Demand Compute)**:
-- `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 V15 scan results
-- **Cache-first**: checks PostgreSQL `V15ScanDB` first; computes on-demand if empty
+- `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 momentum scan results
+- **Cache-first**: checks PostgreSQL `MomentumScanDB` first; computes on-demand if empty
 - **Past dates**: uses GreptimeDB cache (`_build_snapshots_from_cache` + `GreptimeHistoricalAdapter`), ~1-3s
 - **Today**: uses Tushare `batch_get_early_quotes` (rt_min_daily 9:30-9:40 data) + `IQuantHistoricalAdapter`, ~30-60s (only after 09:39)
-- Computed results are persisted to V15ScanDB for subsequent cache hits
-- iQuant scheduler (09:39-10:00) also writes results via same V15ScanDB; on-demand compute is a fallback when scheduler misses
+- Computed results are persisted to MomentumScanDB for subsequent cache hits
+- iQuant scheduler (09:39-10:00) also writes results via same MomentumScanDB; on-demand compute is a fallback when scheduler misses
 
 **Key Files**:
-- `src/strategy/strategies/v15_scanner.py` — V15 7-layer funnel + V3 regression scoring
+- `src/strategy/strategies/momentum_scanner.py` — Momentum 7-layer funnel + V3 regression scoring
 - `src/strategy/signal_store.py` — In-memory signal queue (push/poll/ack/expire lifecycle)
-- `src/strategy/v15_strategy_service.py` — Stateless V15 scan service (backtest + live, consolidates 3 duplicate scan paths)
+- `src/strategy/momentum_strategy_service.py` — Stateless momentum scan service (backtest + live, consolidates 3 duplicate scan paths)
 - `src/web/iquant_routes.py` — iQuant communication + monitoring (~750 lines, extracted strategy logic)
-- `src/web/routes.py` — Dashboard routes, delegates scan to V15StrategyService
+- `src/web/routes.py` — Dashboard routes, delegates scan to MomentumStrategyService
 - `src/web/app.py` — GreptimeDB cache injection into iQuant router
 - `src/data/clients/iquant_historical_adapter.py` — Historical data adapter
 - `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
-- `src/data/database/v15_scan_db.py` — PostgreSQL persistence for scan results
+- `src/data/database/momentum_scan_db.py` — PostgreSQL persistence for scan results
 
 **Differences from STR-004**:
 - Pure parametric (no LLM board relevance filter)
@@ -708,12 +708,12 @@ await engine.stop()
 - Single position only (STR-004's backtest also holds 1 stock but uses different position management)
 
 **Checklist**:
-- [x] V15Scanner: 7-layer funnel + V3 scoring
+- [x] MomentumScanner: 7-layer funnel + V3 scoring
 - [x] iQuant routes: T+2 adaptive scheduler with three windows
 - [x] Holdings persistence to JSON file
 - [x] Trade calendar via Tushare trade_cal
 - [x] GreptimeDB cache injection from app.py
-- [x] Feishu notification with V15 prefix
+- [x] Feishu notification
 - [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
 - [ ] Unit tests
 - [ ] Production deployment verification

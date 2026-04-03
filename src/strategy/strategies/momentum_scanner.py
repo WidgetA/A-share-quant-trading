@@ -1,5 +1,5 @@
 # === MODULE PURPOSE ===
-# V15 live trading scanner: 7-layer funnel from raw universe to single best stock.
+# Momentum live trading scanner: 7-layer funnel from raw universe to single best stock.
 # Primary scanner used for both backtest and live trading.
 # No LLM filter, no negative news checker. Pure parametric funnel + V3 regression scoring.
 #
@@ -19,7 +19,7 @@
 # - IQuantHistoricalAdapter: history_quotes (close + volume, 37+ trading days)
 # - LocalConceptMapper: board ↔ stock mapping
 # - FundamentalsDB: ST detection
-# - ReversalFactorFilter: reused with V15-specific config
+# - ReversalFactorFilter: reused with momentum-specific config
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class V15ScoredStock:
+class MomentumScoredStock:
     """A stock scored by V3 regression."""
 
     stock_code: str
@@ -69,11 +69,11 @@ class V15ScoredStock:
 
 
 @dataclass
-class V15ScanResult:
-    """Complete result of a V15 scan."""
+class MomentumScanResult:
+    """Complete result of a Momentum scan."""
 
-    recommended: V15ScoredStock | None = None
-    all_scored: list[V15ScoredStock] = field(default_factory=list)
+    recommended: MomentumScoredStock | None = None
+    all_scored: list[MomentumScoredStock] = field(default_factory=list)
     initial_gainers_count: int = 0
     hot_board_count: int = 0
     l4_count: int = 0
@@ -92,14 +92,14 @@ class _L4Stock:
     board_name: str  # will be corrected to best board later
 
 
-# ── V15 Scanner ──────────────────────────────────────────────
+# ── Momentum Scanner ──────────────────────────────────────────────
 
 
-class V15Scanner:
-    """V15 momentum board scanning strategy — 7-layer funnel + V3 scoring.
+class MomentumScanner:
+    """Momentum momentum board scanning strategy — 7-layer funnel + V3 scoring.
 
     Usage:
-        scanner = V15Scanner(historical_adapter, fundamentals_db)
+        scanner = MomentumScanner(historical_adapter, fundamentals_db)
         result = await scanner.scan(price_snapshots)
         if result.recommended:
             print(result.recommended.stock_code, result.recommended.v3_score)
@@ -150,7 +150,7 @@ class V15Scanner:
         self._hist = historical_adapter
         self._fdb = fundamentals_db
         self._mapper = concept_mapper or LocalConceptMapper()
-        # V15: main board + SME, exclude ChiNext + STAR + BSE
+        # Momentum: main board + SME, exclude ChiNext + STAR + BSE
         self._filter = stock_filter or StockFilter(
             StockFilterConfig(
                 exclude_bse=True,
@@ -173,7 +173,7 @@ class V15Scanner:
         self,
         price_snapshots: dict[str, PriceSnapshot],
         trade_date: date | None = None,
-    ) -> V15ScanResult:
+    ) -> MomentumScanResult:
         """Run the 7-layer pipeline on 9:40 snapshots.
 
         Args:
@@ -183,9 +183,9 @@ class V15Scanner:
                 Defaults to today for live mode; pass explicit date for backtest.
 
         Returns:
-            V15ScanResult with recommended stock (or None).
+            MomentumScanResult with recommended stock (or None).
         """
-        result = V15ScanResult()
+        result = MomentumScanResult()
 
         # L1: gain filter + main board + non-ST + price floor
         gainers = await self._l1_gain_filter(price_snapshots)
@@ -508,9 +508,9 @@ class V15Scanner:
         snapshots: dict[str, PriceSnapshot],
         hist: dict[str, dict],
         avg_market_open_gain: float,
-    ) -> list[V15ScoredStock]:
+    ) -> list[MomentumScoredStock]:
         """Score all candidates with V3 regression, return sorted descending."""
-        scored: list[V15ScoredStock] = []
+        scored: list[MomentumScoredStock] = []
 
         for s in selected:
             snap = snapshots.get(s.stock_code)
@@ -546,7 +546,7 @@ class V15Scanner:
             )
 
             scored.append(
-                V15ScoredStock(
+                MomentumScoredStock(
                     stock_code=s.stock_code,
                     stock_name=s.stock_name,
                     board_name=s.board_name,

@@ -39,7 +39,7 @@ class Signal:
     pushed_at: datetime | None = None  # for timeout tracking
     acked_at: str | None = None  # HH:MM:SS when acked
 
-    # V15-specific fields (buy signals from scanner)
+    # Scanner-specific fields (buy signals from momentum scanner)
     latest_price: float = 0.0
     board_name: str = ""
     v3_score: float = 0.0
@@ -65,7 +65,7 @@ class Signal:
             "manual": self.manual,
             "created_at": self.created_at,
         }
-        # Include V15 fields only if set (backward compat)
+        # Include scanner fields only if set (backward compat)
         if self.latest_price:
             d["latest_price"] = self.latest_price
         if self.board_name:

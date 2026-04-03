@@ -2,7 +2,7 @@
 # This file configures database connections for the strategy platform.
 
 database:
-  # V15 scan history (uses 'trading' schema)
+  # Momentum scan history (uses 'trading' schema)
   trading:
     host: "${DB_HOST:localhost}"
     port: ${DB_PORT:5432}

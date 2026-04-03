@@ -129,9 +129,9 @@ A-share-quant-trading/
 │   │   ├── base.py          # Base strategy interface
 │   │   ├── signals.py       # Signal types
 │   │   ├── signal_store.py  # In-memory signal queue (push/poll/ack/expire)
-│   │   ├── v15_strategy_service.py  # Stateless V15 scan (backtest + live)
+│   │   ├── momentum_strategy_service.py  # Stateless momentum scan (backtest + live)
 │   │   ├── strategies/
-│   │   │   └── v15_scanner.py  # V15 7-layer funnel + V3 scoring
+│   │   │   └── momentum_scanner.py  # Momentum 7-layer funnel + V3 scoring
 │   │   └── filters/         # Stock/quality filters
 │   │       ├── momentum_quality_filter.py  # Volume filter
 │   │       ├── reversal_factor_filter.py   # 冲高回落 filter
@@ -148,7 +148,7 @@ A-share-quant-trading/
 │   │   │   └── sina_realtime.py            # Sina realtime (fallback)
 │   │   ├── database/        # Database layers
 │   │   │   ├── fundamentals_db.py  # Stock fundamentals reader
-│   │   │   └── v15_scan_db.py     # V15 scan results persistence
+│   │   │   └── momentum_scan_db.py  # Momentum scan results persistence
 │   │   ├── services/
 │   │   │   └── cache_scheduler.py  # 3am daily cache gap-fill
 │   │   └── sources/
