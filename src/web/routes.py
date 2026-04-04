@@ -1341,9 +1341,7 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
         logger.warning(f"Monitor: 今天是{day_name}，A股不开市")
         raise RuntimeError(f"今天是{day_name}，A股不开市，无法扫描")
     try:
-        cal = await _get_trading_calendar(
-            now_bj.date(), now_bj.date() + timedelta(days=1)
-        )
+        cal = await _get_trading_calendar(now_bj.date(), now_bj.date() + timedelta(days=1))
         if not cal:
             logger.warning(f"Monitor: {now_bj.date()} is a holiday, A股不开市")
             raise RuntimeError(f"今天是节假日({now_bj.date()})，A股不开市，无法扫描")
@@ -1554,9 +1552,7 @@ async def _run_intraday_monitor(state: dict) -> None:
                 await asyncio.sleep(3600)
                 continue
             try:
-                cal = await _get_trading_calendar(
-                    now.date(), now.date() + timedelta(days=1)
-                )
+                cal = await _get_trading_calendar(now.date(), now.date() + timedelta(days=1))
                 if not cal:
                     logger.info(f"Monitor: {now.date()} is not a trading day, skipping")
                     await asyncio.sleep(3600)

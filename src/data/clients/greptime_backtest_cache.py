@@ -1477,9 +1477,7 @@ class GreptimeBacktestCache:
         Dates with abnormally few stocks (< _MIN_STOCKS_PER_DAY) are excluded
         so they get re-downloaded on next resume.
         """
-        rows = await self._db.fetch(
-            "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts"
-        )
+        rows = await self._db.fetch("SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts")
         if not rows:
             return set()
 
