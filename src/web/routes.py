@@ -1334,12 +1334,23 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
 
     start_time = time_module.monotonic()
 
-    # Quick weekday check
+    # Quick trading day check (weekends + holidays)
     now_bj = datetime.now(beijing_tz)
     if now_bj.weekday() >= 5:
         day_name = "周六" if now_bj.weekday() == 5 else "周日"
         logger.warning(f"Monitor: 今天是{day_name}，A股不开市")
         raise RuntimeError(f"今天是{day_name}，A股不开市，无法扫描")
+    try:
+        cal = await _get_trading_calendar(
+            now_bj.date(), now_bj.date() + timedelta(days=1)
+        )
+        if not cal:
+            logger.warning(f"Monitor: {now_bj.date()} is a holiday, A股不开市")
+            raise RuntimeError(f"今天是节假日({now_bj.date()})，A股不开市，无法扫描")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.warning(f"Trade calendar check failed, proceeding: {e}")
 
     fundamentals_db = state.get("fundamentals_db")
     if not fundamentals_db:
@@ -1538,10 +1549,20 @@ async def _run_intraday_monitor(state: dict) -> None:
             now = datetime.now(beijing_tz)
             current_time = now.time()
 
-            # Only run on weekdays
+            # Skip non-trading days (weekends + holidays)
             if now.weekday() >= 5:
                 await asyncio.sleep(3600)
                 continue
+            try:
+                cal = await _get_trading_calendar(
+                    now.date(), now.date() + timedelta(days=1)
+                )
+                if not cal:
+                    logger.info(f"Monitor: {now.date()} is not a trading day, skipping")
+                    await asyncio.sleep(3600)
+                    continue
+            except Exception as e:
+                logger.warning(f"Trade calendar check failed, proceeding: {e}")
 
             # Before scan time — wait
             if current_time < SCAN_TIME:

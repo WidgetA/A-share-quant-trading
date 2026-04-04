@@ -665,6 +665,21 @@ def create_iquant_router() -> APIRouter:
                 ex_date = now_bj.strftime("%Y-%m-%d")
                 ex_time = now_bj.time().replace(second=0, microsecond=0)
 
+                # --- Skip non-trading days (weekends + holidays) ---
+                if now_bj.weekday() >= 5:
+                    await asyncio.sleep(3600)
+                    continue
+                try:
+                    cal = await _get_trade_calendar()
+                    if now_bj.date() not in cal:
+                        if scan_done_date != ex_date:
+                            logger.info(f"Momentum: {ex_date} is not a trading day")
+                            scan_done_date = ex_date
+                        await asyncio.sleep(3600)
+                        continue
+                except Exception as e:
+                    logger.warning(f"Trade calendar check failed, proceeding: {e}")
+
                 # --- SCAN: 09:39-10:00 ---
                 if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
                     if not _state["initialized"]:
