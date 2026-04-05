@@ -494,170 +494,155 @@ class ModelTrainingScheduler:
             _TOTAL_FEE_PCT,
         )
 
-        try:
-            # Get daily OHLCV data for this date
-            daily_data = await cache.get_daily_data(trade_date)
-            if not daily_data or len(daily_data) < 50:
-                return None
+        date_str = trade_date.strftime("%Y-%m-%d")
 
-            # Need forward return: find the close price _FORWARD_DAYS later
-            date_idx = None
-            for i, d in enumerate(all_dates):
-                if d == trade_date:
-                    date_idx = i
-                    break
-            if date_idx is None or date_idx + _FORWARD_DAYS >= len(all_dates):
-                return None  # Can't compute forward return
-
-            future_date = all_dates[date_idx + _FORWARD_DAYS]
-            future_data = await cache.get_daily_data(future_date)
-            if not future_data:
-                return None
-
-            # Build {code: close} maps
-            today_close = {}
-            today_records = {}
-            for row in daily_data:
-                code = row["stock_code"]
-                if row.get("is_suspended"):
-                    continue
-                close = row.get("close", 0)
-                if close > 0:
-                    today_close[code] = close
-                    today_records[code] = row
-
-            future_close = {}
-            for row in future_data:
-                code = row["stock_code"]
-                close = row.get("close", 0)
-                if close > 0:
-                    future_close[code] = close
-
-            # Compute forward returns and labels
-            codes_with_return = []
-            returns = []
-            for code in today_close:
-                if code in future_close:
-                    ret = (future_close[code] / today_close[code] - 1) * 100 - _TOTAL_FEE_PCT
-                    codes_with_return.append(code)
-                    returns.append(ret)
-
-            if len(codes_with_return) < 20:
-                return None
-
-            # Bucket into quintiles
-            sorted_returns = sorted(returns)
-            bin_size = len(sorted_returns) / _LABEL_BINS
-            labels = []
-            for ret in returns:
-                for b in range(_LABEL_BINS):
-                    threshold_idx = min(int((b + 1) * bin_size), len(sorted_returns) - 1)
-                    if ret <= sorted_returns[threshold_idx]:
-                        labels.append(b)
-                        break
-                else:
-                    labels.append(_LABEL_BINS - 1)
-
-            # Build feature vectors (simplified: use available OHLCV data)
-            features = []
-            valid_labels = []
-            for i, code in enumerate(codes_with_return):
-                row = today_records.get(code)
-                if not row:
-                    continue
-                fv = self._extract_features_from_row(row, daily_data)
-                if fv is not None:
-                    features.append(fv)
-                    valid_labels.append(labels[i])
-
-            if not features:
-                return None
-
-            return {
-                "features": features,
-                "labels": valid_labels,
-                "group_size": len(features),
-            }
-        except Exception as e:
-            logger.warning("Failed to process day %s: %s", trade_date, e)
+        # Get daily OHLCV data: dict[stock_code, DailyBar]
+        daily_map = await cache.get_all_codes_with_daily(date_str)
+        if not daily_map or len(daily_map) < 50:
             return None
 
-    def _extract_features_from_row(self, row: dict, all_rows: list[dict]) -> list[float] | None:
-        """Extract 76 features from a daily OHLCV row.
+        # Need forward return: find the close price _FORWARD_DAYS later
+        date_idx = None
+        for i, d in enumerate(all_dates):
+            if d == trade_date:
+                date_idx = i
+                break
+        if date_idx is None or date_idx + _FORWARD_DAYS >= len(all_dates):
+            return None  # Can't compute forward return
 
-        This is a simplified feature extraction that uses available OHLCV data.
-        Full feature extraction (using minute data, indicators, etc.) would be done
-        via MLScanner.compute_raw_features() when all required data is available.
+        future_date = all_dates[date_idx + _FORWARD_DAYS]
+        future_str = future_date.strftime("%Y-%m-%d")
+        future_map = await cache.get_all_codes_with_daily(future_str)
+        if not future_map:
+            return None
+
+        # Build {code: close} maps, skip suspended stocks
+        today_close: dict[str, float] = {}
+        for code, bar in daily_map.items():
+            if bar.is_suspended:
+                continue
+            if bar.close > 0:
+                today_close[code] = bar.close
+
+        future_close: dict[str, float] = {}
+        for code, bar in future_map.items():
+            if bar.close > 0:
+                future_close[code] = bar.close
+
+        # Compute forward returns and labels
+        codes_with_return = []
+        returns = []
+        for code in today_close:
+            if code in future_close:
+                ret = (future_close[code] / today_close[code] - 1) * 100 - _TOTAL_FEE_PCT
+                codes_with_return.append(code)
+                returns.append(ret)
+
+        if len(codes_with_return) < 20:
+            return None
+
+        # Bucket into quintiles
+        sorted_returns = sorted(returns)
+        bin_size = len(sorted_returns) / _LABEL_BINS
+        labels = []
+        for ret in returns:
+            for b in range(_LABEL_BINS):
+                threshold_idx = min(int((b + 1) * bin_size), len(sorted_returns) - 1)
+                if ret <= sorted_returns[threshold_idx]:
+                    labels.append(b)
+                    break
+            else:
+                labels.append(_LABEL_BINS - 1)
+
+        # Build feature vectors from DailyBar objects
+        features = []
+        valid_labels = []
+        for i, code in enumerate(codes_with_return):
+            bar = daily_map.get(code)
+            if not bar:
+                continue
+            fv = self._extract_features_from_bar(bar)
+            if fv is not None:
+                features.append(fv)
+                valid_labels.append(labels[i])
+
+        if not features:
+            return None
+
+        return {
+            "features": features,
+            "labels": valid_labels,
+            "group_size": len(features),
+        }
+
+    def _extract_features_from_bar(self, bar) -> list[float] | None:
+        """Extract 76 features from a DailyBar NamedTuple.
 
         Returns 76-dimensional feature vector or None if data insufficient.
         """
         from src.strategy.strategies.ml_scanner import FEATURE_NAMES_RAW
 
-        try:
-            o = row.get("open", 0)
-            h = row.get("high", 0)
-            lo = row.get("low", 0)
-            c = row.get("close", 0)
-            vol = row.get("vol", 0)
+        o = bar.open
+        h = bar.high
+        lo = bar.low
+        c = bar.close
+        vol = bar.volume
 
-            if not all([o > 0, h > 0, lo > 0, c > 0]):
-                return None
-
-            # Compute basic features from OHLCV
-            raw = {}
-            raw["open_gain"] = (o / c - 1) * 100 if c > 0 else 0
-            raw["volume_amp"] = vol / 1e6 if vol else 0
-            raw["consecutive_up_days"] = 0  # Requires history
-            raw["trend_5d"] = 0
-            raw["trend_10d"] = 0
-            raw["avg_return_20d"] = 0
-            raw["volatility_20d"] = 0
-            raw["early_price_range"] = (h - lo) / o * 100 if o > 0 else 0
-            raw["market_open_gain"] = 0
-            raw["trend_consistency"] = 0
-            raw["gap"] = 0
-            raw["upper_shadow_ratio"] = (h - max(o, c)) / (h - lo) if h > lo else 0
-            raw["volume_ratio"] = 1.0
-
-            # Advanced features (defaults — require more history)
-            raw["open_position_consistency"] = 0
-            raw["volume_price_divergence"] = 0
-            raw["intraday_momentum_cont"] = (c - o) / (h - lo) if h > lo else 0
-            raw["volume_concentration"] = 0
-            raw["relative_strength"] = 0
-            raw["return_consistency"] = 0
-            raw["amplitude_decay"] = 0
-            raw["volume_stability"] = 0
-            raw["close_vs_vwap"] = 0
-            raw["volume_weighted_return"] = 0
-            raw["price_channel_position"] = 0
-            raw["up_day_ratio_20d"] = 0
-            raw["amplitude_20d"] = (h - lo) / o * 100 if o > 0 else 0
-            raw["volume_ratio_5d_20d"] = 1.0
-
-            # Cross features
-            raw["momentum_x_mean_reversion"] = raw["open_gain"] * raw["avg_return_20d"]
-            raw["trend_acceleration"] = raw["trend_5d"] - raw["trend_10d"]
-            raw["momentum_quality"] = raw["open_gain"] * raw["volume_amp"]
-            raw["volume_trend_interaction"] = raw["volume_ratio"] * raw["trend_5d"]
-            raw["gap_volume_interaction"] = raw["gap"] * raw["volume_amp"]
-            raw["strength_persistence"] = raw["relative_strength"] * raw["consecutive_up_days"]
-            raw["volatility_adj_return"] = (
-                raw["open_gain"] / raw["volatility_20d"] if raw["volatility_20d"] > 0 else 0
-            )
-            raw["volume_price_momentum"] = raw["volume_amp"] * raw["intraday_momentum_cont"]
-            raw["gap_reversion"] = raw["gap"] * raw["open_gain"]
-            raw["trend_volume_divergence"] = raw["trend_5d"] * (1 - raw["volume_ratio"])
-            raw["momentum_stability"] = raw["return_consistency"] * raw["trend_5d"]
-
-            # Build 38 raw + 38 z-scored (z-scores computed as 0 for single stock)
-            feature_vec = [raw.get(name, 0.0) for name in FEATURE_NAMES_RAW]
-            # Z-score placeholder (will be 0 when computed across full candidate pool)
-            z_scored = [0.0] * len(FEATURE_NAMES_RAW)
-            return feature_vec + z_scored
-
-        except Exception:
+        if not all([o > 0, h > 0, lo > 0, c > 0]):
             return None
+
+        # Compute basic features from OHLCV
+        raw = {}
+        raw["open_gain"] = (o / c - 1) * 100
+        raw["volume_amp"] = vol / 1e6 if vol else 0
+        raw["consecutive_up_days"] = 0  # Requires history
+        raw["trend_5d"] = 0
+        raw["trend_10d"] = 0
+        raw["avg_return_20d"] = 0
+        raw["volatility_20d"] = 0
+        raw["early_price_range"] = (h - lo) / o * 100
+        raw["market_open_gain"] = 0
+        raw["trend_consistency"] = 0
+        raw["gap"] = 0
+        raw["upper_shadow_ratio"] = (h - max(o, c)) / (h - lo) if h > lo else 0
+        raw["volume_ratio"] = 1.0
+
+        # Advanced features (defaults — require more history)
+        raw["open_position_consistency"] = 0
+        raw["volume_price_divergence"] = 0
+        raw["intraday_momentum_cont"] = (c - o) / (h - lo) if h > lo else 0
+        raw["volume_concentration"] = 0
+        raw["relative_strength"] = 0
+        raw["return_consistency"] = 0
+        raw["amplitude_decay"] = 0
+        raw["volume_stability"] = 0
+        raw["close_vs_vwap"] = 0
+        raw["volume_weighted_return"] = 0
+        raw["price_channel_position"] = 0
+        raw["up_day_ratio_20d"] = 0
+        raw["amplitude_20d"] = (h - lo) / o * 100
+        raw["volume_ratio_5d_20d"] = 1.0
+
+        # Cross features
+        raw["momentum_x_mean_reversion"] = raw["open_gain"] * raw["avg_return_20d"]
+        raw["trend_acceleration"] = raw["trend_5d"] - raw["trend_10d"]
+        raw["momentum_quality"] = raw["open_gain"] * raw["volume_amp"]
+        raw["volume_trend_interaction"] = raw["volume_ratio"] * raw["trend_5d"]
+        raw["gap_volume_interaction"] = raw["gap"] * raw["volume_amp"]
+        raw["strength_persistence"] = raw["relative_strength"] * raw["consecutive_up_days"]
+        raw["volatility_adj_return"] = (
+            raw["open_gain"] / raw["volatility_20d"] if raw["volatility_20d"] > 0 else 0
+        )
+        raw["volume_price_momentum"] = raw["volume_amp"] * raw["intraday_momentum_cont"]
+        raw["gap_reversion"] = raw["gap"] * raw["open_gain"]
+        raw["trend_volume_divergence"] = raw["trend_5d"] * (1 - raw["volume_ratio"])
+        raw["momentum_stability"] = raw["return_consistency"] * raw["trend_5d"]
+
+        # Build 38 raw + 38 z-scored (z-scores computed as 0 for single stock)
+        feature_vec = [raw.get(name, 0.0) for name in FEATURE_NAMES_RAW]
+        # Z-score placeholder (will be 0 when computed across full candidate pool)
+        z_scored = [0.0] * len(FEATURE_NAMES_RAW)
+        return feature_vec + z_scored
 
     async def _upload_to_s3(self, local_path: Path, s3_key: str, log_fn) -> str | None:
         """Upload model file to S3. Returns S3 URI or None."""
