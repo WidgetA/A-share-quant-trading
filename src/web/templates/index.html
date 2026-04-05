@@ -159,12 +159,6 @@
         <div class="status-card" id="modelCard">
             <div class="status-card-header">
                 <h3>模型管理</h3>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="finetuneToggle"
-                        {% if model_scheduler.enabled %}checked{% endif %}
-                        onchange="toggleFinetune(this)">
-                    <span class="toggle-slider"></span>
-                </label>
             </div>
             <div class="status-card-body">
                 <div class="status-card-row">
@@ -620,18 +614,6 @@ async function cancelSignal(signalId) {
 }
 
 // --- Model Management ---
-
-async function toggleFinetune(el) {
-    try {
-        const resp = await fetch('/api/settings/finetune-scheduler', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({enabled: el.checked})
-        });
-        const data = await resp.json();
-        if (!data.success) el.checked = !el.checked;
-    } catch(e) { el.checked = !el.checked; }
-}
 
 async function loadModelStatus() {
     try {

@@ -463,34 +463,6 @@ def set_cache_scheduler_enabled(enabled: bool) -> None:
     logger.info(f"Cache scheduler {'enabled' if enabled else 'disabled'} via web UI")
 
 
-# --- Finetune Scheduler Toggle ---
-
-_finetune_scheduler_enabled_override: bool | None = None
-FINETUNE_SCHEDULER_FILE = PROJECT_ROOT / "data" / "finetune_scheduler_enabled.txt"
-
-
-def get_finetune_scheduler_enabled() -> bool:
-    """Return whether the auto-finetune scheduler is enabled. Default: True."""
-    global _finetune_scheduler_enabled_override
-    if _finetune_scheduler_enabled_override is not None:
-        return _finetune_scheduler_enabled_override
-    if FINETUNE_SCHEDULER_FILE.exists():
-        val = FINETUNE_SCHEDULER_FILE.read_text(encoding="utf-8").strip().lower()
-        if val in ("false", "0", "off", "no"):
-            return False
-        return True
-    return True
-
-
-def set_finetune_scheduler_enabled(enabled: bool) -> None:
-    """Set finetune scheduler enabled state and persist to disk."""
-    global _finetune_scheduler_enabled_override
-    _finetune_scheduler_enabled_override = enabled
-    FINETUNE_SCHEDULER_FILE.parent.mkdir(parents=True, exist_ok=True)
-    FINETUNE_SCHEDULER_FILE.write_text(str(enabled).lower(), encoding="utf-8")
-    logger.info(f"Finetune scheduler {'enabled' if enabled else 'disabled'} via web UI")
-
-
 # --- S3 Config ---
 
 S3_CONFIG_FILE = PROJECT_ROOT / "data" / "s3_config.json"

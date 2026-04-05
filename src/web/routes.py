@@ -103,7 +103,6 @@ def create_router() -> APIRouter:
             model_sched.get_status()
             if model_sched
             else {
-                "enabled": False,
                 "next_run_time": None,
                 "last_run_time": None,
                 "last_run_result": None,
@@ -2595,19 +2594,5 @@ def create_model_router() -> APIRouter:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    @router.post("/api/settings/finetune-scheduler")
-    async def set_finetune_scheduler(request: Request) -> dict:
-        """Toggle auto-finetune scheduler on/off."""
-        from src.common.config import set_finetune_scheduler_enabled
-
-        body = await request.json()
-        enabled = bool(body.get("enabled", True))
-        set_finetune_scheduler_enabled(enabled)
-        return {
-            "success": True,
-            "enabled": enabled,
-            "message": f"自动微调已{'开启' if enabled else '关闭'}",
-        }
 
     return router

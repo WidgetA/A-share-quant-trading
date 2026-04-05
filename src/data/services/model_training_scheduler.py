@@ -92,11 +92,8 @@ class ModelTrainingScheduler:
 
     def get_status(self) -> dict:
         """Return scheduler status for dashboard display."""
-        from src.common.config import get_finetune_scheduler_enabled
-
         full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
         return {
-            "enabled": get_finetune_scheduler_enabled(),
             "next_run_time": self.next_run_time,
             "last_run_time": self.last_run_time,
             "last_run_result": self.last_run_result,
@@ -148,14 +145,6 @@ class ModelTrainingScheduler:
                 await asyncio.sleep(wait_secs)
 
                 run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
-
-                from src.common.config import get_finetune_scheduler_enabled
-
-                if not get_finetune_scheduler_enabled():
-                    self.last_run_time = run_time
-                    self.last_run_result = "skipped"
-                    self.last_run_message = "已关闭，跳过"
-                    continue
 
                 # Check if 20 trading days have passed since last finetune
                 last_date = _get_last_finetune_date()
