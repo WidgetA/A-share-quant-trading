@@ -19,6 +19,7 @@ from fastapi.templating import Jinja2Templates
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.web.iquant_routes import create_iquant_router
 from src.web.routes import (
+    create_model_router,
     create_momentum_router,
     create_router,
     create_settings_router,
@@ -85,6 +86,10 @@ def create_app(
     # Add trading module router (dashboard buy/sell)
     trading_router = create_trading_router()
     app.include_router(trading_router)
+
+    # Add model management router
+    model_router = create_model_router()
+    app.include_router(model_router)
 
     # Add iQuant API router (isolated from main system, lazily initialized)
     iquant_router = create_iquant_router()
@@ -186,6 +191,14 @@ def create_app(
         app.state.cache_scheduler_task = asyncio.create_task(cache_scheduler.run())
         logger.info("Cache scheduler started (3am daily)")
 
+        # Auto-start model training scheduler (finetune every 20 trading days)
+        from src.data.services.model_training_scheduler import ModelTrainingScheduler
+
+        model_scheduler = ModelTrainingScheduler(app.state)
+        app.state.model_scheduler = model_scheduler
+        app.state.model_scheduler_task = asyncio.create_task(model_scheduler.run())
+        logger.info("Model training scheduler started")
+
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
             "running": False,
@@ -218,6 +231,12 @@ def create_app(
         if cache_task and not cache_task.done():
             cache_task.cancel()
             logger.info("Cache scheduler stopped")
+
+        # Stop model training scheduler
+        model_task = getattr(app.state, "model_scheduler_task", None)
+        if model_task and not model_task.done():
+            model_task.cancel()
+            logger.info("Model training scheduler stopped")
 
         # Stop momentum monitor
         monitor_state = getattr(app.state, "momentum_monitor_state", None)

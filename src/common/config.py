@@ -463,6 +463,97 @@ def set_cache_scheduler_enabled(enabled: bool) -> None:
     logger.info(f"Cache scheduler {'enabled' if enabled else 'disabled'} via web UI")
 
 
+# --- Finetune Scheduler Toggle ---
+
+_finetune_scheduler_enabled_override: bool | None = None
+FINETUNE_SCHEDULER_FILE = PROJECT_ROOT / "data" / "finetune_scheduler_enabled.txt"
+
+
+def get_finetune_scheduler_enabled() -> bool:
+    """Return whether the auto-finetune scheduler is enabled. Default: True."""
+    global _finetune_scheduler_enabled_override
+    if _finetune_scheduler_enabled_override is not None:
+        return _finetune_scheduler_enabled_override
+    if FINETUNE_SCHEDULER_FILE.exists():
+        val = FINETUNE_SCHEDULER_FILE.read_text(encoding="utf-8").strip().lower()
+        if val in ("false", "0", "off", "no"):
+            return False
+        return True
+    return True
+
+
+def set_finetune_scheduler_enabled(enabled: bool) -> None:
+    """Set finetune scheduler enabled state and persist to disk."""
+    global _finetune_scheduler_enabled_override
+    _finetune_scheduler_enabled_override = enabled
+    FINETUNE_SCHEDULER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FINETUNE_SCHEDULER_FILE.write_text(str(enabled).lower(), encoding="utf-8")
+    logger.info(f"Finetune scheduler {'enabled' if enabled else 'disabled'} via web UI")
+
+
+# --- S3 Config ---
+
+S3_CONFIG_FILE = PROJECT_ROOT / "data" / "s3_config.json"
+
+
+def get_s3_config() -> dict[str, str]:
+    """Get S3 configuration. Priority: persisted file > env vars > secrets.yaml.
+
+    Returns:
+        Dict with keys: endpoint_url, access_key, secret_key, bucket.
+        Empty dict if not configured.
+    """
+    import json
+    import os
+
+    # 1. Persisted file
+    if S3_CONFIG_FILE.exists():
+        try:
+            config = json.loads(S3_CONFIG_FILE.read_text(encoding="utf-8"))
+            if config.get("endpoint_url") and config.get("bucket"):
+                return config
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 2. Environment variables
+    endpoint = os.environ.get("S3_ENDPOINT_URL", "")
+    access_key = os.environ.get("S3_ACCESS_KEY", "")
+    secret_key = os.environ.get("S3_SECRET_KEY", "")
+    bucket = os.environ.get("S3_BUCKET", "")
+    if endpoint and bucket:
+        return {
+            "endpoint_url": endpoint,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "bucket": bucket,
+        }
+
+    # 3. secrets.yaml
+    try:
+        secrets = load_secrets()
+        endpoint = secrets.get_str("s3.endpoint_url") or ""
+        if endpoint:
+            return {
+                "endpoint_url": endpoint,
+                "access_key": secrets.get_str("s3.access_key") or "",
+                "secret_key": secrets.get_str("s3.secret_key") or "",
+                "bucket": secrets.get_str("s3.bucket") or "",
+            }
+    except FileNotFoundError:
+        pass
+
+    return {}
+
+
+def set_s3_config(config: dict[str, str]) -> None:
+    """Persist S3 configuration to disk."""
+    import json
+
+    S3_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    S3_CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    logger.info("S3 config updated via web UI")
+
+
 def load_config(config_path: str | Path) -> Config:
     """
     Load configuration from a YAML file.

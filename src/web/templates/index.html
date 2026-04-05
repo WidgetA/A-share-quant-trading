@@ -154,6 +154,56 @@
                 {% endif %}
             </div>
         </div>
+
+        <!-- Model Management Card -->
+        <div class="status-card" id="modelCard">
+            <div class="status-card-header">
+                <h3>模型管理</h3>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="finetuneToggle"
+                        {% if model_scheduler.enabled %}checked{% endif %}
+                        onchange="toggleFinetune(this)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="status-card-body">
+                <div class="status-card-row">
+                    <span class="status-card-label">当前模型</span>
+                    <span class="status-card-value" id="modelName">{{ model_scheduler.current_model or '--' }}</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">下次微调</span>
+                    <span class="status-card-value" id="nextFinetune">{{ model_scheduler.next_run_time or '--' }}</span>
+                </div>
+                {% if model_scheduler.last_run_time %}
+                <div class="status-card-row">
+                    <span class="status-card-label">上次 {{ model_scheduler.last_run_time[5:] }}</span>
+                    <span class="status-card-value" id="lastTrainResult">
+                        {% if model_scheduler.last_run_result == 'success' %}
+                        <span style="color:#2e7d32;">成功</span>
+                        {% elif model_scheduler.last_run_result == 'skipped' %}
+                        <span style="color:#999;">跳过</span>
+                        {% elif model_scheduler.last_run_result == 'no_model' %}
+                        <span style="color:#f57c00;">无模型</span>
+                        {% elif model_scheduler.last_run_result == 'failed' %}
+                        <span style="color:#d32f2f;">失败</span>
+                        {% else %}
+                        --
+                        {% endif %}
+                    </span>
+                </div>
+                {% endif %}
+                <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+                    <button class="btn-sm btn-buy" id="btnFullTrain" onclick="startFullTrain()">全量训练</button>
+                    <button class="btn-sm btn-sell" id="btnFinetune" onclick="startFinetune()"
+                        {% if not model_scheduler.has_full_model %}disabled title="请先全量训练"{% endif %}>手动微调</button>
+                </div>
+                <div id="trainLogArea" style="display:none;margin-top:0.5rem;max-height:200px;overflow-y:auto;
+                    background:#f5f5f5;padding:0.5rem;border-radius:4px;font-size:0.75rem;font-family:monospace;
+                    white-space:pre-wrap;word-break:break-all;">
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Trading Module (left column + right column) -->
@@ -569,14 +619,110 @@ async function cancelSignal(signalId) {
     }
 }
 
+// --- Model Management ---
+
+async function toggleFinetune(el) {
+    try {
+        const resp = await fetch('/api/settings/finetune-scheduler', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: el.checked})
+        });
+        const data = await resp.json();
+        if (!data.success) el.checked = !el.checked;
+    } catch(e) { el.checked = !el.checked; }
+}
+
+async function loadModelStatus() {
+    try {
+        const resp = await fetch('/api/model/status', {cache: 'no-store'});
+        if (!resp.ok) return;
+        const d = await resp.json();
+        document.getElementById('modelName').textContent = d.current_model || '--';
+        document.getElementById('nextFinetune').textContent = d.next_run_time || '--';
+        const btn = document.getElementById('btnFinetune');
+        if (btn) {
+            btn.disabled = !d.has_full_model || d.training_in_progress;
+            if (!d.has_full_model) btn.title = '请先全量训练';
+        }
+        const btnFull = document.getElementById('btnFullTrain');
+        if (btnFull) btnFull.disabled = d.training_in_progress;
+        if (d.training_in_progress) {
+            document.getElementById('trainLogArea').style.display = 'block';
+        }
+    } catch (e) { /* ignore */ }
+}
+
+function _streamTraining(url, btnId) {
+    const logArea = document.getElementById('trainLogArea');
+    logArea.style.display = 'block';
+    logArea.textContent = '初始化...\n';
+    const btn = document.getElementById(btnId);
+    if (btn) btn.disabled = true;
+
+    fetch(url, {method: 'POST'}).then(response => {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        function read() {
+            reader.read().then(({done, value}) => {
+                if (done) {
+                    if (btn) btn.disabled = false;
+                    loadModelStatus();
+                    return;
+                }
+                buffer += decoder.decode(value, {stream: true});
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.type === 'progress' || data.type === 'status') {
+                                logArea.textContent += data.message + '\n';
+                                logArea.scrollTop = logArea.scrollHeight;
+                            } else if (data.type === 'complete') {
+                                logArea.textContent += data.message + '\n';
+                                showToast(data.message, 'success');
+                            } else if (data.type === 'error') {
+                                logArea.textContent += '[错误] ' + data.message + '\n';
+                                showToast(data.message, 'error');
+                            }
+                        } catch(e) {}
+                    }
+                }
+                read();
+            });
+        }
+        read();
+    }).catch(e => {
+        logArea.textContent += '[连接失败] ' + e.message + '\n';
+        if (btn) btn.disabled = false;
+        showToast('请求失败: ' + e.message, 'error');
+    });
+}
+
+function startFullTrain() {
+    if (!confirm('确认开始全量训练？训练可能需要较长时间。')) return;
+    _streamTraining('/api/model/full-train', 'btnFullTrain');
+}
+
+function startFinetune() {
+    if (!confirm('确认开始手动微调？')) return;
+    _streamTraining('/api/model/finetune', 'btnFinetune');
+}
+
 // --- Init ---
 document.getElementById('tradeDatePicker').addEventListener('change', loadRecommendations);
 loadHoldings();
 loadRecommendations();
 loadIquantStatus();
 loadPendingSignals();
+loadModelStatus();
 setInterval(loadHoldings, 10000);
 setInterval(loadIquantStatus, 5000);
 setInterval(loadPendingSignals, 5000);
+setInterval(loadModelStatus, 5000);
 </script>
 {% endblock %}

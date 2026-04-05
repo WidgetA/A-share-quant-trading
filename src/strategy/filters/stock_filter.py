@@ -5,7 +5,7 @@
 # === KEY CONCEPTS ===
 # Stock code patterns by exchange:
 # - 上证主板 (Shanghai Main): 600xxx, 601xxx, 603xxx, 605xxx
-# - 深证主板 (Shenzhen Main): 000xxx, 001xxx
+# - 深证主板 (Shenzhen Main): 000xxx, 001xxx, 003xxx
 # - 中小板 (SME): 002xxx
 # - 创业板 (ChiNext/GEM): 300xxx - EXCLUDED
 # - 科创板 (STAR): 688xxx - Allowed by default
@@ -52,7 +52,7 @@ class StockFilter:
 
     Allowed exchanges by default:
         - 上证主板: 600xxx, 601xxx, 603xxx, 605xxx
-        - 深证主板: 000xxx, 001xxx
+        - 深证主板: 000xxx, 001xxx, 003xxx
         - 中小板: 002xxx
         - 科创板: 688xxx
 
@@ -77,8 +77,8 @@ class StockFilter:
     # Shanghai Main Board: 600xxx, 601xxx, 603xxx, 605xxx
     _SHANGHAI_MAIN_PATTERNS = [r"^60[0135]\d{3}$"]
 
-    # Shenzhen Main Board: 000xxx, 001xxx
-    _SHENZHEN_MAIN_PATTERNS = [r"^00[01]\d{3}$"]
+    # Shenzhen Main Board: 000xxx, 001xxx, 003xxx
+    _SHENZHEN_MAIN_PATTERNS = [r"^00[013]\d{3}$"]
 
     # SME Board (中小板): 002xxx
     _SME_PATTERNS = [r"^002\d{3}$"]

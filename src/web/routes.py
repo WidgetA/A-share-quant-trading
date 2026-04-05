@@ -97,6 +97,22 @@ def create_router() -> APIRouter:
             }
         )
 
+        # Get model training scheduler status
+        model_sched = getattr(request.app.state, "model_scheduler", None)
+        model_scheduler_status = (
+            model_sched.get_status()
+            if model_sched
+            else {
+                "enabled": False,
+                "next_run_time": None,
+                "last_run_time": None,
+                "last_run_result": None,
+                "last_run_message": None,
+                "has_full_model": False,
+                "current_model": None,
+            }
+        )
+
         today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
         resp = templates.TemplateResponse(
@@ -105,6 +121,7 @@ def create_router() -> APIRouter:
                 "request": request,
                 "iquant_status": iquant_status,
                 "scheduler": scheduler_status,
+                "model_scheduler": model_scheduler_status,
                 "today": today,
             },
         )
@@ -2422,5 +2439,175 @@ def create_trading_router() -> APIRouter:
         if not removed:
             raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
         return {"success": True, "signal_id": signal_id}
+
+    return router
+
+
+def create_model_router() -> APIRouter:
+    """Router for ML model management (training, fine-tuning, status)."""
+    import asyncio
+    import json
+
+    router = APIRouter(tags=["models"])
+
+    def _sse(data: dict) -> str:
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def _get_scheduler(request: Request):
+        scheduler = getattr(request.app.state, "model_scheduler", None)
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="模型调度器未就绪")
+        return scheduler
+
+    @router.get("/api/model/status")
+    async def get_model_status(request: Request) -> dict:
+        """Get model scheduler status for dashboard polling."""
+        scheduler = _get_scheduler(request)
+        return scheduler.get_status()
+
+    @router.get("/api/model/logs")
+    async def get_model_logs(request: Request) -> dict:
+        """Get recent training log lines."""
+        scheduler = _get_scheduler(request)
+        return {"logs": scheduler.training_log[-100:]}
+
+    @router.post("/api/model/full-train")
+    async def full_train(request: Request):
+        """Start full model training with SSE progress stream."""
+        scheduler = _get_scheduler(request)
+
+        if scheduler.training_in_progress:
+            return StreamingResponse(
+                iter([_sse({"type": "error", "message": "训练正在进行中"})]),
+                media_type="text/event-stream",
+            )
+
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        async def _run():
+            try:
+
+                async def _progress(msg: str):
+                    queue.put_nowait({"type": "progress", "message": msg})
+
+                result = await scheduler.run_full_training(progress_cb=_progress)
+                queue.put_nowait({"type": "result", "data": result})
+            except Exception as e:
+                queue.put_nowait({"type": "error", "message": str(e)[:200]})
+            finally:
+                queue.put_nowait(None)
+
+        async def event_stream():
+            task = asyncio.create_task(_run())
+            request.app.state.model_train_task = task
+            try:
+                yield _sse({"type": "status", "message": "全量训练开始..."})
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30)
+                    except asyncio.TimeoutError:
+                        yield _sse({"type": "heartbeat"})
+                        continue
+
+                    if event is None:
+                        break
+                    if event.get("type") == "error":
+                        yield _sse(event)
+                        return
+                    yield _sse(event)
+
+                yield _sse({"type": "complete", "message": "全量训练完成"})
+            except Exception as e:
+                logger.error(f"Full train SSE error: {e}", exc_info=True)
+                yield _sse({"type": "error", "message": str(e)[:200]})
+            finally:
+                request.app.state.model_train_task = None
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.post("/api/model/finetune")
+    async def finetune(request: Request):
+        """Start model fine-tuning with SSE progress stream."""
+        scheduler = _get_scheduler(request)
+
+        if scheduler.training_in_progress:
+            return StreamingResponse(
+                iter([_sse({"type": "error", "message": "训练正在进行中"})]),
+                media_type="text/event-stream",
+            )
+
+        from src.data.services.model_training_scheduler import FULL_MODEL_NAME, MODEL_DIR
+
+        full_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
+        if not full_path.exists():
+            return StreamingResponse(
+                iter([_sse({"type": "error", "message": "无全量训练模型，请先执行全量训练"})]),
+                media_type="text/event-stream",
+            )
+
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        async def _run():
+            try:
+
+                async def _progress(msg: str):
+                    queue.put_nowait({"type": "progress", "message": msg})
+
+                result = await scheduler.run_finetune(progress_cb=_progress)
+                queue.put_nowait({"type": "result", "data": result})
+            except Exception as e:
+                queue.put_nowait({"type": "error", "message": str(e)[:200]})
+            finally:
+                queue.put_nowait(None)
+
+        async def event_stream():
+            task = asyncio.create_task(_run())
+            request.app.state.model_finetune_task = task
+            try:
+                yield _sse({"type": "status", "message": "微调开始..."})
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30)
+                    except asyncio.TimeoutError:
+                        yield _sse({"type": "heartbeat"})
+                        continue
+
+                    if event is None:
+                        break
+                    if event.get("type") == "error":
+                        yield _sse(event)
+                        return
+                    yield _sse(event)
+
+                yield _sse({"type": "complete", "message": "微调完成"})
+            except Exception as e:
+                logger.error(f"Finetune SSE error: {e}", exc_info=True)
+                yield _sse({"type": "error", "message": str(e)[:200]})
+            finally:
+                request.app.state.model_finetune_task = None
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.post("/api/settings/finetune-scheduler")
+    async def set_finetune_scheduler(request: Request) -> dict:
+        """Toggle auto-finetune scheduler on/off."""
+        from src.common.config import set_finetune_scheduler_enabled
+
+        body = await request.json()
+        enabled = bool(body.get("enabled", True))
+        set_finetune_scheduler_enabled(enabled)
+        return {
+            "success": True,
+            "enabled": enabled,
+            "message": f"自动微调已{'开启' if enabled else '关闭'}",
+        }
 
     return router

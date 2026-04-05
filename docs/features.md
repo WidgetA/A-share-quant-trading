@@ -42,6 +42,7 @@
 | 0.11.3 | 2026-03-19 | - | SYS-005: Real-time download progress (asyncio.Queue SSE), descriptive Chinese logs, stop download button |
 | 0.12.1 | 2026-03-24 | - | SYS-005: Dashboard cache scheduler status card with toggle, next run time, last result display |
 | 0.12.2 | 2026-03-26 | - | SYS-005: Cache scheduler download timeout (4h/range), per-range Feishu progress, align manual/scheduler gap detection |
+| 0.13.0 | 2026-04-06 | - | STR-006: ML Scanner — 8-layer filter + LightGBM LambdaRank scoring, model management (train/finetune/S3/scheduler) |
 
 ---
 
@@ -717,6 +718,55 @@ await engine.stop()
 - [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
 - [ ] Unit tests
 - [ ] Production deployment verification
+
+---
+
+### [STR-006] ML Scanner Strategy (8-Layer Filter + LightGBM LambdaRank)
+
+**Status**: In Progress
+
+**Description**: New stock selection strategy replacing the momentum scanner. Uses an 8-layer parametric filter pipeline to narrow ~5000 stocks down to ~200 candidates, then scores them with a LightGBM LambdaRank model trained on historical forward returns.
+
+**ML Model Architecture**:
+- **Algorithm**: LightGBM LambdaRank (learning-to-rank)
+- **Features**: 76 dimensions = 38 raw (13 basic + 14 advanced + 11 cross) + 38 Z-score normalized
+- **Label**: 2-day forward return after fees (0.09%), bucketed into 5 quintiles (0-4) per day
+- **Training**: ~1 year data, ~200 candidates/day, ~57k training records
+- **Hyperparams**: 15 leaves, lr 0.05, 80% feature/sample fraction, L1=0.1, L2=1.0, max 500 rounds, early stop 50
+
+**Model Management**:
+- Dashboard card with full-train / manual finetune buttons + training log display
+- Auto finetune every 20 trading days at 3am (background scheduler, toggle on/off)
+- Pre-training data completeness check: 3 retry gap-fill attempts, abort with Feishu alert on failure
+- Model files saved locally (`data/models/`) and uploaded to S3
+- Fine-tune requires existing full-trained model (`full_latest.lgb`)
+- Feishu alerts for: training success/failure, S3 upload, data issues, scheduler status
+
+**Key Files**:
+- `src/strategy/strategies/ml_scanner.py` — 8-layer filter pipeline + feature engineering + LightGBM train/score
+- `src/data/services/model_training_scheduler.py` — Background scheduler (auto finetune every 20 days)
+- `src/common/s3_client.py` — S3-compatible upload/download (boto3)
+- `src/common/config.py` — S3 config + finetune scheduler toggle
+- `src/web/routes.py` — `create_model_router()` SSE endpoints for training
+- `src/web/templates/index.html` — Model management dashboard card
+
+**Dependencies**: `lightgbm>=4.0`, `boto3>=1.35.0`
+
+**Checklist**:
+- [x] MLScanner: 8-layer filter pipeline (Step 0-7)
+- [x] Feature engineering: 76 features (38 raw + 38 Z-scored)
+- [x] LightGBM LambdaRank train/score/save/load
+- [x] Fine-tune support (`init_model` param)
+- [x] ModelTrainingScheduler (every 20 trading days at 3am)
+- [x] S3 client for model upload/download
+- [x] Dashboard model management card (train/finetune buttons, log area, status)
+- [x] SSE streaming for training progress
+- [x] Feishu alerts for all training events
+- [x] Data completeness check with 3-retry gap-fill
+- [ ] Full training data pipeline (GreptimeDB → features → labels)
+- [ ] Sell strategy
+- [ ] Unit tests
+- [ ] Production deployment
 
 ---
 
