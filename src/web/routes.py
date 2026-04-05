@@ -1234,19 +1234,12 @@ async def _compute_momentum_scan(date_str: str, fundamentals_db, backtest_cache)
         return recs, result
 
     # --- Today: live Tushare quotes ---
-    try:
-        from datetime import timedelta
+    from src.data.clients.tushare_realtime import get_tushare_trade_calendar
 
-        cal = await _get_trading_calendar(now_bj.date(), now_bj.date() + timedelta(days=1))
-        if not cal:
-            raise ValueError(f"今天非交易日（{now_bj.strftime('%m/%d')}），A股不开市")
-    except ValueError:
-        raise
-    except Exception:
-        # calendar check failed, fall back to weekend check
-        if now_bj.weekday() >= 5:
-            day_name = "周六" if now_bj.weekday() == 5 else "周日"
-            raise ValueError(f"今天是{day_name}，A股不开市")
+    today_s = now_bj.strftime("%Y-%m-%d")
+    cal_dates = await get_tushare_trade_calendar(today_s, today_s)
+    if today_s not in cal_dates:
+        raise ValueError(f"今天非交易日（{now_bj.strftime('%m/%d')}），A股不开市")
 
     if now_bj.hour < 9 or (now_bj.hour == 9 and now_bj.minute < 39):
         raise ValueError("今日扫描需在 09:39 之后执行（早盘数据尚未就绪）")
