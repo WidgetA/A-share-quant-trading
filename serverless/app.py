@@ -399,7 +399,7 @@ def upload_to_s3(local_path: Path, s3_key: str, s3_config: dict) -> str | None:
 # ── Routes ─────────────────────────────────────────────────
 
 
-@app.route("/", defaults={"path": ""})
+@app.route("/", defaults={"path": ""}, methods=["GET", "POST", "PUT", "DELETE"])
 @app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE"])
 def handler(path):
     """Single entry point for serverless platform.
