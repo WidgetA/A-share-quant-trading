@@ -185,27 +185,21 @@ class GreptimeClient:
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
         async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
-            return await asyncio.wait_for(
-                conn.execute(sql), timeout=self._QUERY_TIMEOUT
-            )
+            return await asyncio.wait_for(conn.execute(sql), timeout=self._QUERY_TIMEOUT)
 
     async def fetch(self, sql: str) -> list[asyncpg.Record]:
         """Execute SELECT and return rows."""
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
         async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
-            return await asyncio.wait_for(
-                conn.fetch(sql), timeout=self._QUERY_TIMEOUT
-            )
+            return await asyncio.wait_for(conn.fetch(sql), timeout=self._QUERY_TIMEOUT)
 
     async def fetchrow(self, sql: str) -> asyncpg.Record | None:
         """Execute SELECT and return first row."""
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
         async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
-            return await asyncio.wait_for(
-                conn.fetchrow(sql), timeout=self._QUERY_TIMEOUT
-            )
+            return await asyncio.wait_for(conn.fetchrow(sql), timeout=self._QUERY_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
