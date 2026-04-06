@@ -497,7 +497,7 @@ class ModelTrainingScheduler:
         for attempt in range(1 + retries):
             try:
                 return await self._get_day_features_and_labels(cache, trade_date, all_dates)
-            except (asyncio.TimeoutError, TimeoutError) as e:
+            except (asyncio.TimeoutError, TimeoutError):
                 if attempt < retries:
                     logger.warning(
                         "查询超时 %s (第%d次重试)...", trade_date, attempt + 1

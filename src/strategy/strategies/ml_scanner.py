@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -1288,7 +1289,7 @@ class MLScanner:
             free_raw_data=False,
         )
 
-        callbacks = [lgb.log_evaluation(period=50)]
+        callbacks: list[Callable[..., Any]] = [lgb.log_evaluation(period=50)]
         valid_sets = [train_data]
         valid_names = ["train"]
 
