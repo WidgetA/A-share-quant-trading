@@ -164,7 +164,8 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         env:
           ACR_IMAGE: ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:${{ github.sha }}
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
         run: |
           npm install -g @serverless-devs/s
-          s config add --AccessKeyID ${{ secrets.ALIYUN_ACCESS_KEY_ID }} --AccessKeySecret ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }} -a default -f
-          cd serverless && s deploy -y --use-local
+          cd serverless && s deploy -y --use-local --skip-actions
