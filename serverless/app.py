@@ -19,7 +19,7 @@ import base64
 import logging
 import tempfile
 import time
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -307,7 +307,9 @@ def build_training_data(
             logger.warning("Skipped %d/%d dates (no data or no future date)", skipped, len(dates))
         return features, labels, groups
 
-    logger.info("Building training data: %d train dates, %d val dates", len(train_dates), len(val_dates))
+    logger.info(
+        "Building training data: %d train dates, %d val dates", len(train_dates), len(val_dates)
+    )
     train_features, train_labels, train_groups = _process_dates(train_dates)
     val_features, val_labels, val_groups = _process_dates(val_dates)
 
