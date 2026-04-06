@@ -7,10 +7,10 @@ resources:
     component: fc3
     props:
       region: cn-shanghai
-      functionName: ashare-mltrain
+      functionName: ashare_mltrain
       runtime: custom-container
       timeout: 600
-      memorySize: 2048
+      memorySize: 4096
       cpu: 1
       diskSize: 10240
       customContainerConfig:
