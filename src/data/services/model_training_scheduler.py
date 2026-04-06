@@ -328,6 +328,7 @@ class ModelTrainingScheduler:
 
         # Step 4: POST trigger to FC (FC will callback to fetch data)
         fc_url = get_fc_url()
+        assert fc_url, "FC URL not configured"  # guaranteed by _train() caller
         await _log("发送训练触发请求到 FC...")
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
