@@ -36,8 +36,13 @@ for d in DATES:
     for code in STOCK_CODES:
         if random.random() < 0.02:  # 2% chance suspended
             daily_data[d][code] = {
-                "open": 0, "high": 0, "low": 0, "close": 0,
-                "volume": 0, "amount": 0, "is_suspended": True,
+                "open": 0,
+                "high": 0,
+                "low": 0,
+                "close": 0,
+                "volume": 0,
+                "amount": 0,
+                "is_suspended": True,
             }
         else:
             daily_data[d][code] = random_bar(base_price=random.uniform(5, 50))

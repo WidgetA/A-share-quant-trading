@@ -318,7 +318,10 @@ def build_training_data(
 
     logger.info(
         "Dataset ready: train %d samples/%d days, val %d samples/%d days",
-        len(train_labels), len(train_groups), len(val_labels), len(val_groups),
+        len(train_labels),
+        len(train_groups),
+        len(val_labels),
+        len(val_groups),
     )
 
     return {
