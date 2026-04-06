@@ -159,3 +159,12 @@ jobs:
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:${{ github.sha }}
           cache-from: type=gha,scope=serverless
           cache-to: type=gha,mode=max,scope=serverless
+
+      - name: Deploy to FC via Serverless Devs
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          ACR_IMAGE: ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:${{ github.sha }}
+        run: |
+          npm install -g @serverless-devs/s
+          s config add --AccessKeyID ${{ secrets.ALIYUN_ACCESS_KEY_ID }} --AccessKeySecret ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }} -a default -f
+          cd serverless && s deploy -y --use-local

@@ -1,0 +1,26 @@
+edition: 3.0.0
+name: ml-training-serverless
+access: default
+
+resources:
+  ml-training:
+    component: fc3
+    props:
+      region: cn-shanghai
+      functionName: ashare-mltrain
+      runtime: custom-container
+      timeout: 600
+      memorySize: 2048
+      cpu: 1
+      diskSize: 512
+      customContainerConfig:
+        image: ${env.ACR_IMAGE}
+        port: 9000
+      triggers:
+        - triggerName: http-trigger
+          triggerType: http
+          triggerConfig:
+            methods:
+              - GET
+              - POST
+            authType: anonymous
