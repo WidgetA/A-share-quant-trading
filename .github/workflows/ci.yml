@@ -168,6 +168,7 @@ jobs:
           ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
         run: |
           npm install -g @serverless-devs/s
+          s config add --AccessKeyID "${ALIBABA_CLOUD_ACCESS_KEY_ID}" --AccessKeySecret "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}" -a default -f
           cd serverless
           sed -i "s|\${env.ACR_IMAGE}|${ACR_IMAGE}|g" s.yaml
           s deploy -y --use-local --skip-actions
