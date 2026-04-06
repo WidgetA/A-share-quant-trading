@@ -526,6 +526,37 @@ def set_s3_config(config: dict[str, str]) -> None:
     logger.info("S3 config updated via web UI")
 
 
+# --- FC (Serverless Training) URL ---
+
+FC_URL_FILE = PROJECT_ROOT / "data" / "fc_url.txt"
+
+
+def get_fc_url() -> str | None:
+    """Get FC serverless training endpoint URL.
+
+    Priority: persisted file > env var FC_ENDPOINT_URL.
+    Returns None if not configured.
+    """
+    import os
+
+    if FC_URL_FILE.exists():
+        try:
+            url = FC_URL_FILE.read_text(encoding="utf-8").strip()
+            if url:
+                return url
+        except OSError:
+            pass
+
+    return os.environ.get("FC_ENDPOINT_URL") or None
+
+
+def set_fc_url(url: str) -> None:
+    """Persist FC endpoint URL to disk."""
+    FC_URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FC_URL_FILE.write_text(url.strip(), encoding="utf-8")
+    logger.info("FC endpoint URL updated via web UI")
+
+
 def load_config(config_path: str | Path) -> Config:
     """
     Load configuration from a YAML file.

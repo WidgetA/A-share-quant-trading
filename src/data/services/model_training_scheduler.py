@@ -241,11 +241,208 @@ class ModelTrainingScheduler:
     ) -> dict:
         """Core training logic shared by full training and fine-tuning.
 
-        Args:
-            mode: "full" or "finetune".
-            init_model_path: Path to base model for fine-tuning.
-            progress_cb: Optional async callable(msg: str).
+        If FC endpoint is configured, trains remotely via serverless.
+        Otherwise falls back to local training.
         """
+        from src.common.config import get_fc_url
+
+        fc_url = get_fc_url()
+        if fc_url:
+            return await self._train_remote(mode, init_model_path, progress_cb)
+        return await self._train_local(mode, init_model_path, progress_cb)
+
+    async def _train_remote(
+        self,
+        mode: str,
+        init_model_path: Path | None = None,
+        progress_cb=None,
+    ) -> dict:
+        """Train via FC serverless endpoint."""
+        import base64
+
+        import httpx
+
+        from src.common.config import get_fc_url, get_s3_config
+
+        label = "全量训练" if mode == "full" else "微调"
+
+        async def _log(msg: str):
+            self._append_log(msg)
+            if progress_cb:
+                await progress_cb(msg)
+
+        await _log(f"{label}开始 (远程FC)")
+        await _notify_feishu(f"[模型训练] {label}开始 (远程FC)")
+
+        # Step 1: Data completeness check
+        await _log("检查数据完整性...")
+        data_ok = await self._check_data_completeness(progress_cb=_log)
+        if not data_ok:
+            error = "数据不完整，已尝试补全3次仍失败"
+            await _log(f"中止: {error}")
+            await _notify_feishu(f"[模型{label}] {error}，跳过本次{label}")
+            return {"error": error}
+
+        # Step 2: Export raw OHLCV data as JSON
+        await _log("导出训练数据...")
+        try:
+            daily_data = await self._export_daily_data(mode=mode, progress_cb=_log)
+        except Exception as e:
+            error = f"导出数据失败: {e}"
+            await _log(error)
+            await _notify_feishu(f"[模型{label}] {error}")
+            return {"error": error}
+
+        await _log(f"数据导出完成: {len(daily_data)} 天")
+
+        # Step 3: Build request payload
+        payload: dict = {"mode": mode, "daily_data": daily_data}
+
+        if init_model_path and init_model_path.exists():
+            model_bytes = init_model_path.read_bytes()
+            payload["init_model_b64"] = base64.b64encode(model_bytes).decode("ascii")
+            await _log(f"附加基准模型: {init_model_path.name} ({len(model_bytes)} bytes)")
+
+        s3_config = get_s3_config()
+        if s3_config:
+            payload["s3_config"] = s3_config
+
+        # Step 4: POST to FC endpoint
+        fc_url = get_fc_url()
+        await _log("发送训练请求到 FC...")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
+                resp = await client.post(fc_url, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+        except httpx.TimeoutException:
+            error = "FC 训练超时 (>600s)"
+            await _log(error)
+            await _notify_feishu(f"[模型{label}] {error}")
+            return {"error": error}
+        except Exception as e:
+            error = f"FC 请求失败: {e}"
+            await _log(error)
+            await _notify_feishu(f"[模型{label}] {error}")
+            return {"error": error}
+
+        if not result.get("success"):
+            error = f"FC 训练失败: {result.get('error', '未知错误')}"
+            await _log(error)
+            await _notify_feishu(f"[模型{label}] {error}")
+            return {"error": error}
+
+        # Step 5: Save returned model locally
+        fallback_name = f"{mode}_{datetime.now(BEIJING_TZ).strftime('%Y%m%d')}"
+        model_name = result.get("model_name", fallback_name)
+        rounds = result.get("rounds", 0)
+        model_b64 = result.get("model_b64", "")
+
+        if not model_b64:
+            error = "FC 返回无模型数据"
+            await _log(error)
+            return {"error": error}
+
+        model_bytes = base64.b64decode(model_b64)
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+        model_path = MODEL_DIR / f"{model_name}.lgb"
+        model_path.write_bytes(model_bytes)
+        await _log(f"模型已保存: {model_path.name} ({len(model_bytes)} bytes)")
+
+        if mode == "full":
+            latest_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
+            latest_path.write_bytes(model_bytes)
+            await _log(f"基准模型已保存: {latest_path.name}")
+
+        s3_uri = result.get("s3_uri")
+        elapsed = result.get("elapsed_seconds", 0)
+        n_samples = result.get("n_samples", 0)
+        n_days = result.get("n_days", 0)
+
+        await _notify_feishu(
+            f"[模型训练] {label}完成 (远程FC)\n"
+            f"模型: {model_name}.lgb\n迭代轮数: {rounds}\n"
+            f"样本数: {n_samples}, 天数: {n_days}\n"
+            f"耗时: {elapsed}s"
+        )
+
+        # Step 6: Update last finetune date
+        _set_last_finetune_date(datetime.now(BEIJING_TZ).date())
+
+        await _log(f"{label}全部完成 ({rounds}轮, {elapsed}s)")
+        return {
+            "model_name": model_name,
+            "model_path": str(model_path),
+            "s3_uri": s3_uri,
+            "rounds": rounds,
+        }
+
+    async def _export_daily_data(self, mode: str, progress_cb=None) -> dict:
+        """Export raw OHLCV from GreptimeDB as JSON for FC endpoint.
+
+        Returns: {date_str: {stock_code: {open, high, low, close, volume, amount, is_suspended}}}
+        """
+        cache = self._get_cache()
+        if cache is None or not cache.is_ready:
+            raise RuntimeError("backtest cache not available")
+
+        existing_dates = sorted(await cache._get_existing_daily_dates())
+        if mode == "finetune":
+            existing_dates = existing_dates[-120:]
+
+        if progress_cb:
+            await progress_cb(
+                f"可用日期: {len(existing_dates)} 天 ({existing_dates[0]}~{existing_dates[-1]})"
+            )
+
+        daily_data: dict[str, dict] = {}
+        for i, trade_date in enumerate(existing_dates):
+            if progress_cb and i % 20 == 0:
+                await progress_cb(f"导出数据: {i}/{len(existing_dates)} 天")
+
+            date_str = (
+                trade_date.strftime("%Y-%m-%d")
+                if hasattr(trade_date, "strftime")
+                else str(trade_date)
+            )
+            try:
+                bar_map = await cache.get_all_codes_with_daily(date_str)
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning("导出超时 %s, 跳过", date_str)
+                continue
+            except Exception:
+                logger.warning("导出异常 %s, 跳过", date_str, exc_info=True)
+                continue
+
+            if not bar_map:
+                continue
+
+            day_dict: dict[str, dict] = {}
+            for code, bar in bar_map.items():
+                day_dict[code] = {
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "amount": bar.amount,
+                    "is_suspended": bar.is_suspended,
+                }
+            daily_data[date_str] = day_dict
+
+        if not daily_data:
+            raise RuntimeError("无法导出任何交易日数据")
+
+        return daily_data
+
+    async def _train_local(
+        self,
+        mode: str,
+        init_model_path: Path | None = None,
+        progress_cb=None,
+    ) -> dict:
+        """Train locally (fallback when FC URL not configured)."""
         label = "全量训练" if mode == "full" else "微调"
 
         async def _log(msg: str):

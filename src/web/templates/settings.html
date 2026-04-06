@@ -83,6 +83,32 @@
         </div>
     </section>
 
+    <!-- FC Training Endpoint Section -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>FC 训练端点</h3>
+            <p class="settings-desc">阿里云函数计算 (FC) 的 Serverless ML 训练端点 URL。配置后模型训练将远程执行，不占用本机资源。</p>
+
+            <div class="token-status" id="fcStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="fcStatusValue">加载中...</span>
+            </div>
+
+            <div class="form-group">
+                <label for="fcInput">Endpoint URL</label>
+                <input type="text" id="fcInput" class="token-input"
+                    placeholder="https://xxx.cn-shanghai.fc.aliyuncs.com/..." style="font-family: monospace;">
+            </div>
+
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testFcUrl()" id="fcTestBtn">测试连接</button>
+                <button class="btn btn-primary" onclick="saveFcUrl()" id="fcSaveBtn">保存</button>
+            </div>
+
+            <div class="token-message hidden" id="fcMessage"></div>
+        </div>
+    </section>
+
     <!-- iQuant API Key Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -205,6 +231,11 @@ function generateIquantKey() {
 }
 function saveIquantKey() { saveKey('/api/settings/iquant-key', 'iquantInput', 'iquantMessage', 'iquantSaveBtn', loadIquantStatus, '，请将此 Key 填入 iQuant 脚本的 API_KEY 变量'); }
 
+// FC Training Endpoint
+function loadFcStatus() { loadKeyStatus('/api/settings/fc-url', 'fcStatusValue'); }
+function testFcUrl() { testKey('/api/settings/fc-url/test', 'fcInput', 'fcMessage', 'fcTestBtn', '测试连接'); }
+function saveFcUrl() { saveKey('/api/settings/fc-url', 'fcInput', 'fcMessage', 'fcSaveBtn', loadFcStatus); }
+
 // Cache Scheduler toggle
 async function loadCacheSchedulerStatus() {
     try {
@@ -234,5 +265,6 @@ loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
 loadIquantStatus();
+loadFcStatus();
 </script>
 {% endblock %}

@@ -1912,6 +1912,57 @@ def create_settings_router() -> APIRouter:
             "message": f"缓存定时更新已{'开启' if enabled else '关闭'}",
         }
 
+    # === FC TRAINING ENDPOINT URL ===
+
+    @router.get("/api/settings/fc-url")
+    async def get_fc_url_status():
+        from src.common.config import get_fc_url
+
+        url = get_fc_url()
+        if url:
+            # Mask middle of URL for display
+            masked = url[:20] + "..." + url[-10:] if len(url) > 35 else url
+            return {
+                "configured": True,
+                "masked_token": masked,
+                "token_length": len(url),
+                "source_label": "文件配置",
+            }
+        return {"configured": False}
+
+    @router.post("/api/settings/fc-url")
+    async def update_fc_url(request: Request):
+        from src.common.config import set_fc_url
+
+        body = await request.json()
+        url = (body.get("token") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="URL 不能为空")
+
+        set_fc_url(url)
+        return {"success": True, "message": "FC 训练端点已保存"}
+
+    @router.post("/api/settings/fc-url/test")
+    async def test_fc_url(request: Request):
+        import httpx
+
+        body = await request.json()
+        url = (body.get("token") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="URL 不能为空")
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url)
+                data = resp.json()
+                if data.get("status") == "ok":
+                    return {"success": True, "message": "FC 端点连接成功"}
+                return {"success": False, "message": f"意外响应: {data}"}
+        except httpx.TimeoutException:
+            return {"success": False, "message": "连接超时"}
+        except Exception as e:
+            return {"success": False, "message": f"连接失败: {e}"}
+
     # === ALL KEYS STATUS ===
 
     @router.get("/api/settings/keys-status")
