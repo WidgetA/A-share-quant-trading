@@ -147,7 +147,11 @@ class GreptimeClient:
     - statement_cache_size=0 (GreptimeDB doesn't support DEALLOCATE/PREPARE)
     - Connection pool for safe concurrent access (download + status polling)
     - Custom connection class with no-op reset (GreptimeDB doesn't support RESET ALL)
+    - All queries have a 60s timeout to prevent indefinite hangs
     """
+
+    _QUERY_TIMEOUT: float = 60.0  # seconds
+    _ACQUIRE_TIMEOUT: float = 30.0  # seconds
 
     def __init__(self, host: str, port: int, database: str = "public") -> None:
         self._host = host
@@ -180,22 +184,28 @@ class GreptimeClient:
         """Execute DDL/DML and return status string."""
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        async with self._pool.acquire() as conn:
-            return await conn.execute(sql)
+        async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
+            return await asyncio.wait_for(
+                conn.execute(sql), timeout=self._QUERY_TIMEOUT
+            )
 
     async def fetch(self, sql: str) -> list[asyncpg.Record]:
         """Execute SELECT and return rows."""
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        async with self._pool.acquire() as conn:
-            return await conn.fetch(sql)
+        async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
+            return await asyncio.wait_for(
+                conn.fetch(sql), timeout=self._QUERY_TIMEOUT
+            )
 
     async def fetchrow(self, sql: str) -> asyncpg.Record | None:
         """Execute SELECT and return first row."""
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        async with self._pool.acquire() as conn:
-            return await conn.fetchrow(sql)
+        async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
+            return await asyncio.wait_for(
+                conn.fetchrow(sql), timeout=self._QUERY_TIMEOUT
+            )
 
 
 # ---------------------------------------------------------------------------

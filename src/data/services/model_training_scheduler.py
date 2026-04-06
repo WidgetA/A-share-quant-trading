@@ -437,30 +437,40 @@ class ModelTrainingScheduler:
         val_labels_list: list[int] = []
         val_groups: list[int] = []
 
-        # Process each training date
+        # Process each training date (with retry on DB timeout)
+        skipped = 0
         for i, trade_date in enumerate(train_dates):
             if progress_cb and i % 20 == 0:
                 await progress_cb(f"处理训练数据: {i}/{len(train_dates)} 天")
 
-            day_data = await self._get_day_features_and_labels(cache, trade_date, existing_dates)
+            day_data = await self._fetch_day_with_retry(cache, trade_date, existing_dates)
             if day_data is None:
+                skipped += 1
                 continue
 
             all_features.extend(day_data["features"])
             all_labels.extend(day_data["labels"])
             all_groups.append(day_data["group_size"])
 
+        if skipped > 0:
+            logger.warning("训练数据: 跳过 %d/%d 天 (无数据或查询超时)", skipped, len(train_dates))
+
+        skipped = 0
         for i, trade_date in enumerate(val_set):
             if progress_cb and i % 10 == 0:
                 await progress_cb(f"处理验证数据: {i}/{len(val_set)} 天")
 
-            day_data = await self._get_day_features_and_labels(cache, trade_date, existing_dates)
+            day_data = await self._fetch_day_with_retry(cache, trade_date, existing_dates)
             if day_data is None:
+                skipped += 1
                 continue
 
             val_features.extend(day_data["features"])
             val_labels_list.extend(day_data["labels"])
             val_groups.append(day_data["group_size"])
+
+        if skipped > 0:
+            logger.warning("验证数据: 跳过 %d/%d 天 (无数据或查询超时)", skipped, len(val_set))
 
         if not all_features:
             raise RuntimeError("无法构建训练数据: 所有日期的特征提取失败")
@@ -479,6 +489,27 @@ class ModelTrainingScheduler:
             "val_labels": val_labels_list if val_labels_list else None,
             "val_groups": val_groups if val_groups else None,
         }
+
+    async def _fetch_day_with_retry(
+        self, cache, trade_date: date, all_dates: list[date], retries: int = 2
+    ) -> dict | None:
+        """Fetch day data with retry on timeout. Returns None after all retries fail."""
+        for attempt in range(1 + retries):
+            try:
+                return await self._get_day_features_and_labels(cache, trade_date, all_dates)
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                if attempt < retries:
+                    logger.warning(
+                        "查询超时 %s (第%d次重试)...", trade_date, attempt + 1
+                    )
+                    await asyncio.sleep(1)
+                else:
+                    logger.error("查询超时 %s, 已重试%d次, 跳过该天", trade_date, retries)
+                    return None
+            except Exception:
+                logger.error("获取 %s 数据异常, 跳过", trade_date, exc_info=True)
+                return None
+        return None  # unreachable, but makes type checker happy
 
     async def _get_day_features_and_labels(
         self, cache, trade_date: date, all_dates: list[date]
