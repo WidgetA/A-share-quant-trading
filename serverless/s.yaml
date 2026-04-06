@@ -12,7 +12,7 @@ resources:
       timeout: 600
       memorySize: 2048
       cpu: 1
-      diskSize: 512
+      diskSize: 10240
       customContainerConfig:
         image: ${env.ACR_IMAGE}
         port: 9000
