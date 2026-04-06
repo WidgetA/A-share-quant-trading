@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -37,7 +38,7 @@ STATIC_DIR = WEB_DIR / "static"
 
 def create_app(
     store: PendingConfirmationStore | None = None,
-    web_base_url: str = "http://localhost:8000",
+    web_base_url: str | None = None,
 ) -> FastAPI:
     """
     Create FastAPI application.
@@ -45,10 +46,13 @@ def create_app(
     Args:
         store: Pending confirmation store. Uses global singleton if not provided.
         web_base_url: Base URL for generating links in notifications.
+            Falls back to WEB_BASE_URL env var, then "http://localhost:8000".
 
     Returns:
         Configured FastAPI app.
     """
+    if web_base_url is None:
+        web_base_url = os.getenv("WEB_BASE_URL", "http://172.19.248.223:8000")
     app = FastAPI(
         title="A-Share Trading Confirmation",
         description="Web UI for trading signal confirmations",

@@ -1,21 +1,22 @@
 """Serverless ML training endpoint for A-share quant trading.
 
-Receives raw daily OHLCV data from GreptimeDB as JSON, builds training
-dataset (feature extraction + labeling), trains LightGBM LambdaRank model,
-and uploads the model to S3.
+Receives a callback URL from trading-service, fetches raw daily OHLCV data
+via streaming NDJSON, builds training dataset (feature extraction + labeling),
+trains LightGBM LambdaRank model, and uploads the model to S3.
 
 The caller (trading-service) only needs to:
 1. Check data completeness
-2. Export all daily OHLCV from GreptimeDB as JSON
-3. POST to the serverless endpoint with the data + S3 config
+2. POST trigger with callback_url + S3 config (no data in payload)
+3. Serve a streaming NDJSON endpoint for this service to pull data from
 
-This service handles everything else: feature extraction, train/val split,
-quintile labeling, model training, and S3 upload.
+This service handles everything else: data fetching, feature extraction,
+train/val split, quintile labeling, model training, and S3 upload.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import tempfile
 import time
@@ -23,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import requests as http_requests
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -334,6 +336,38 @@ def build_training_data(
     }
 
 
+# ── Data Fetching (callback to trading-service) ───────────
+
+
+def _fetch_training_data(callback_url: str) -> dict[str, dict[str, dict]]:
+    """Fetch NDJSON training data from trading-service streaming endpoint.
+
+    Returns: {date_str: {stock_code: {open, high, low, close, volume, amount, is_suspended}}}
+    """
+    daily_data: dict[str, dict[str, dict]] = {}
+
+    with http_requests.get(callback_url, stream=True, timeout=(10, 300)) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            obj = json.loads(line)
+            if obj.get("__meta__"):
+                logger.info(
+                    "Training data: %d days, range %s",
+                    obj.get("total_days"),
+                    obj.get("date_range"),
+                )
+                continue
+            daily_data[obj["date"]] = obj["stocks"]
+
+    if not daily_data:
+        raise ValueError("No data received from callback")
+
+    logger.info("Fetched %d days of training data via callback", len(daily_data))
+    return daily_data
+
+
 # ── S3 Upload ──────────────────────────────────────────────
 
 
@@ -386,27 +420,20 @@ def handler(path):
 def _handle_train():
     """Full ML training pipeline: data -> features -> train -> S3.
 
-    Request JSON:
+    Request JSON (callback mode — preferred):
     {
         "mode": "full" | "finetune",
-        "daily_data": {
-            "2024-01-02": {
-                "000001.SZ": {
-                    "open": 10.5, "high": 11.0, "low": 10.2,
-                    "close": 10.8, "volume": 1000000, "amount": 10800000,
-                    "is_suspended": false
-                },
-                ...
-            },
-            ...
-        },
-        "init_model_b64": "..." | null,     // base64 .lgb for finetune
-        "s3_config": {                      // optional
-            "endpoint_url": "https://...",
-            "access_key": "...",
-            "secret_key": "...",
-            "bucket": "..."
-        }
+        "callback_url": "https://trading-service/api/model/training-data?token=xxx",
+        "init_model_b64": "..." | null,
+        "s3_config": { ... }
+    }
+
+    Request JSON (legacy direct mode):
+    {
+        "mode": "full" | "finetune",
+        "daily_data": { ... },
+        "init_model_b64": "..." | null,
+        "s3_config": { ... }
     }
 
     Response JSON:
@@ -428,10 +455,21 @@ def _handle_train():
         return {"success": False, "error": "Empty or invalid JSON body"}, 400
 
     mode = data.get("mode", "full")
+
+    # Prefer callback mode (streaming from trading-service), fallback to direct data
+    callback_url = data.get("callback_url")
     daily_data = data.get("daily_data")
 
+    if callback_url:
+        logger.info("Fetching training data via callback: %s", callback_url[:80])
+        try:
+            daily_data = _fetch_training_data(callback_url)
+        except Exception as e:
+            logger.error("Callback fetch failed: %s", e, exc_info=True)
+            return {"success": False, "error": f"Callback fetch failed: {e}"}, 502
+
     if not daily_data:
-        return {"success": False, "error": "Missing daily_data"}, 400
+        return {"success": False, "error": "Missing daily_data and no callback_url"}, 400
 
     logger.info("Train request: mode=%s, %d dates", mode, len(daily_data))
 

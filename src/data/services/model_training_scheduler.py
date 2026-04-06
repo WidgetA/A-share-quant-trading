@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -89,6 +90,30 @@ class ModelTrainingScheduler:
         self.last_run_message: str | None = None
         self.training_in_progress: bool = False
         self.training_log: list[str] = []
+        self._training_tokens: dict[str, dict] = {}
+
+    def _generate_training_token(self, mode: str) -> str:
+        """Generate a one-time token for FC callback authentication."""
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(BEIJING_TZ)
+        self._training_tokens[token] = {"mode": mode, "created_at": now, "used": False}
+        # Clean up tokens older than 1 hour
+        cutoff = now - timedelta(hours=1)
+        self._training_tokens = {
+            k: v for k, v in self._training_tokens.items() if v["created_at"] > cutoff
+        }
+        return token
+
+    def validate_and_consume_token(self, token: str) -> str | None:
+        """Validate a training token. Returns mode if valid, None otherwise."""
+        info = self._training_tokens.get(token)
+        if not info or info["used"]:
+            return None
+        if datetime.now(BEIJING_TZ) - info["created_at"] > timedelta(hours=1):
+            del self._training_tokens[token]
+            return None
+        info["used"] = True
+        return info["mode"]
 
     def get_status(self) -> dict:
         """Return scheduler status for dashboard display."""
@@ -283,20 +308,14 @@ class ModelTrainingScheduler:
             await _notify_feishu(f"[模型{label}] {error}，跳过本次{label}")
             return {"error": error}
 
-        # Step 2: Export raw OHLCV data as JSON
-        await _log("导出训练数据...")
-        try:
-            daily_data = await self._export_daily_data(mode=mode, progress_cb=_log)
-        except Exception as e:
-            error = f"导出数据失败: {e}"
-            await _log(error)
-            await _notify_feishu(f"[模型{label}] {error}")
-            return {"error": error}
+        # Step 2: Generate callback URL for FC to pull data
+        token = self._generate_training_token(mode)
+        base_url = getattr(self._app_state, "web_base_url", "http://localhost:8000")
+        callback_url = f"{base_url}/api/model/training-data?token={token}"
+        await _log(f"回调URL已生成 ({base_url})")
 
-        await _log(f"数据导出完成: {len(daily_data)} 天")
-
-        # Step 3: Build request payload
-        payload: dict = {"mode": mode, "daily_data": daily_data}
+        # Step 3: Build lightweight payload (no daily_data!)
+        payload: dict = {"mode": mode, "callback_url": callback_url}
 
         if init_model_path and init_model_path.exists():
             model_bytes = init_model_path.read_bytes()
@@ -307,9 +326,9 @@ class ModelTrainingScheduler:
         if s3_config:
             payload["s3_config"] = s3_config
 
-        # Step 4: POST to FC endpoint
+        # Step 4: POST trigger to FC (FC will callback to fetch data)
         fc_url = get_fc_url()
-        await _log("发送训练请求到 FC...")
+        await _log("发送训练触发请求到 FC...")
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
                 resp = await client.post(fc_url, json=payload)
@@ -377,64 +396,6 @@ class ModelTrainingScheduler:
             "s3_uri": s3_uri,
             "rounds": rounds,
         }
-
-    async def _export_daily_data(self, mode: str, progress_cb=None) -> dict:
-        """Export raw OHLCV from GreptimeDB as JSON for FC endpoint.
-
-        Returns: {date_str: {stock_code: {open, high, low, close, volume, amount, is_suspended}}}
-        """
-        cache = self._get_cache()
-        if cache is None or not cache.is_ready:
-            raise RuntimeError("backtest cache not available")
-
-        existing_dates = sorted(await cache._get_existing_daily_dates())
-        if mode == "finetune":
-            existing_dates = existing_dates[-120:]
-
-        if progress_cb:
-            await progress_cb(
-                f"可用日期: {len(existing_dates)} 天 ({existing_dates[0]}~{existing_dates[-1]})"
-            )
-
-        daily_data: dict[str, dict] = {}
-        for i, trade_date in enumerate(existing_dates):
-            if progress_cb and i % 20 == 0:
-                await progress_cb(f"导出数据: {i}/{len(existing_dates)} 天")
-
-            date_str = (
-                trade_date.strftime("%Y-%m-%d")
-                if hasattr(trade_date, "strftime")
-                else str(trade_date)
-            )
-            try:
-                bar_map = await cache.get_all_codes_with_daily(date_str)
-            except (asyncio.TimeoutError, TimeoutError):
-                logger.warning("导出超时 %s, 跳过", date_str)
-                continue
-            except Exception:
-                logger.warning("导出异常 %s, 跳过", date_str, exc_info=True)
-                continue
-
-            if not bar_map:
-                continue
-
-            day_dict: dict[str, dict] = {}
-            for code, bar in bar_map.items():
-                day_dict[code] = {
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                    "amount": bar.amount,
-                    "is_suspended": bar.is_suspended,
-                }
-            daily_data[date_str] = day_dict
-
-        if not daily_data:
-            raise RuntimeError("无法导出任何交易日数据")
-
-        return daily_data
 
     async def _train_local(
         self,

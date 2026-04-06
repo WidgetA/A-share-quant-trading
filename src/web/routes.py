@@ -2649,4 +2649,69 @@ def create_model_router() -> APIRouter:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @router.get("/api/model/training-data")
+    async def stream_training_data(request: Request, token: str):
+        """Stream daily OHLCV as NDJSON for FC callback. Auth via one-time token."""
+        scheduler = _get_scheduler(request)
+        mode = scheduler.validate_and_consume_token(token)
+        if mode is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        cache = getattr(request.app.state, "backtest_cache", None)
+        if cache is None or not cache.is_ready:
+            raise HTTPException(status_code=503, detail="Backtest cache not available")
+
+        async def generate_ndjson():
+            existing_dates = sorted(await cache._get_existing_daily_dates())
+            if mode == "finetune":
+                existing_dates = existing_dates[-120:]
+
+            yield (
+                json.dumps(
+                    {
+                        "__meta__": True,
+                        "total_days": len(existing_dates),
+                        "date_range": [str(existing_dates[0]), str(existing_dates[-1])],
+                    }
+                )
+                + "\n"
+            )
+
+            for trade_date in existing_dates:
+                date_str = (
+                    trade_date.strftime("%Y-%m-%d")
+                    if hasattr(trade_date, "strftime")
+                    else str(trade_date)
+                )
+                try:
+                    bar_map = await cache.get_all_codes_with_daily(date_str)
+                except (asyncio.TimeoutError, TimeoutError):
+                    logger.warning("Stream export timeout %s, skip", date_str)
+                    continue
+                except Exception:
+                    logger.warning("Stream export error %s, skip", date_str, exc_info=True)
+                    continue
+
+                if not bar_map:
+                    continue
+
+                day_dict: dict[str, dict] = {}
+                for code, bar in bar_map.items():
+                    day_dict[code] = {
+                        "open": bar.open,
+                        "high": bar.high,
+                        "low": bar.low,
+                        "close": bar.close,
+                        "volume": bar.volume,
+                        "amount": bar.amount,
+                        "is_suspended": bar.is_suspended,
+                    }
+                yield json.dumps({"date": date_str, "stocks": day_dict}) + "\n"
+
+        return StreamingResponse(
+            generate_ndjson(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     return router
