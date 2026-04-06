@@ -117,3 +117,45 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy-serverless:
+    needs: [lint, test]
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/cleanup-v15-only') && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check serverless changes
+        id: changes
+        run: |
+          if git diff --name-only HEAD~1 HEAD | grep -q '^serverless/'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.changes.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Alibaba Cloud ACR
+        if: steps.changes.outputs.changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push serverless image
+        if: steps.changes.outputs.changed == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./serverless
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:latest
+            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:${{ github.sha }}
+          cache-from: type=gha,scope=serverless
+          cache-to: type=gha,mode=max,scope=serverless
