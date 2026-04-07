@@ -142,6 +142,22 @@ class LocalConceptMapper:
         """No-op for interface compatibility. Local data doesn't need clearing."""
         pass
 
+    def get_stock_name(self, stock_code: str) -> str:
+        """Look up stock name from board_constituents.json. Returns '' if unknown."""
+        self._ensure_loaded()
+        bare = _normalize_code(stock_code)
+        if not bare:
+            return ""
+        # Lazy-build reverse name map on first call
+        if not hasattr(self, "_code_to_name"):
+            name_map: dict[str, str] = {}
+            for _board, members in self._board_stocks.items():
+                for code, name in members:
+                    if code not in name_map and name:
+                        name_map[code] = name
+            self._code_to_name = name_map
+        return self._code_to_name.get(bare, "")
+
     async def get_stock_concepts(self, stock_code: str) -> list[str]:
         """Get concept boards that a stock belongs to (from local data)."""
         self._ensure_loaded()

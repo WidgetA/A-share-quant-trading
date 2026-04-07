@@ -340,13 +340,6 @@ def create_momentum_router() -> APIRouter:
             },
         )
 
-    def _get_fundamentals_db(request: Request):
-        """Get shared fundamentals DB from app.state."""
-        db = getattr(request.app.state, "fundamentals_db", None)
-        if db is None:
-            raise HTTPException(status_code=503, detail="基本面数据库未就绪")
-        return db
-
     # === Tsanghi cache endpoints ===
 
     @router.get("/api/momentum/tsanghi-cache-status")
@@ -2307,19 +2300,14 @@ def create_trading_router() -> APIRouter:
         # Filter out sold positions (volume=0)
         active = [p for p in broker_pos if p.get("volume", 0) > 0]
 
-        # Look up company names from fundamentals DB
-        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
-        name_map: dict[str, str] = {}
-        if fundamentals_db and fundamentals_db.is_connected:
-            codes = [p["code"] for p in active]
-            if codes:
-                fund_map = await fundamentals_db.batch_get_fundamentals(codes)
-                name_map = {c: f.company_name for c, f in fund_map.items()}
+        # Look up company names from local board_constituents.json
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
 
+        mapper = LocalConceptMapper()
         holdings = [
             {
                 "code": pos["code"],
-                "name": name_map.get(pos["code"], ""),
+                "name": mapper.get_stock_name(pos["code"]),
                 "quantity": pos.get("volume", 0),
             }
             for pos in active
@@ -2328,7 +2316,7 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/recommendations")
     async def get_recommendations(request: Request, date: str | None = None) -> dict:
-        """Get top-10 recommendations by computing momentum scan on-demand.
+        """Get top-10 recommendations by computing ML scan on-demand.
 
         Past dates use GreptimeDB cache (~1-3s).
         Today uses Tushare rt_min_daily (~30-60s, only after 09:39).
@@ -2342,11 +2330,7 @@ def create_trading_router() -> APIRouter:
         if not get_recommendations_enabled():
             return {"date": date, "recommendations": [], "error": "推荐功能已关闭"}
 
-        fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
         backtest_cache = getattr(request.app.state, "backtest_cache", None)
-
-        if not fundamentals_db:
-            return {"date": date, "recommendations": [], "error": "基本面数据库未就绪"}
 
         try:
             recs, _scan_result = await _compute_ml_scan(

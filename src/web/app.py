@@ -108,7 +108,6 @@ def create_app(
     async def startup():
         import asyncio
 
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
         from src.web.routes import _run_intraday_monitor
 
         logger.info("Web UI started")
@@ -125,16 +124,6 @@ def create_app(
                 git_commit=os.environ.get("GIT_COMMIT"),
                 git_branch=os.environ.get("GIT_BRANCH"),
             )
-
-        # Shared fundamentals DB connection pool
-        fundamentals_db = create_fundamentals_db_from_config()
-        try:
-            await fundamentals_db.connect()
-            app.state.fundamentals_db = fundamentals_db
-            logger.info("Shared fundamentals DB connected")
-        except Exception as e:
-            logger.error(f"Failed to connect shared fundamentals DB: {e}")
-            app.state.fundamentals_db = None
 
         # GreptimeDB backtest cache — single shared instance
         from src.data.clients.greptime_backtest_cache import create_backtest_cache_from_config
@@ -210,7 +199,6 @@ def create_app(
             "last_result": None,
             "today_results": [],
             "task": None,
-            "fundamentals_db": app.state.fundamentals_db,
             "_app_state": app.state,  # needed for backtest_cache access
         }
         task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
@@ -250,12 +238,6 @@ def create_app(
                 task.cancel()
             monitor_state["running"] = False
             logger.info("Intraday momentum monitor stopped")
-
-        # Close shared fundamentals DB
-        fundamentals_db = getattr(app.state, "fundamentals_db", None)
-        if fundamentals_db:
-            await fundamentals_db.close()
-            logger.info("Shared fundamentals DB closed")
 
         # Close GreptimeDB backtest cache
         backtest_cache = getattr(app.state, "backtest_cache", None)
