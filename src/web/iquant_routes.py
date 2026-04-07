@@ -12,7 +12,7 @@
 #       Manual orders via /manual-order endpoint still work.
 # Signal flow (T+2 adaptive sell):
 #   09:31-09:35  → GAP CHECK: T+1 gap < -3% → mark early sell; T+2 → mark sell
-#   09:39-10:00  → SCAN: run momentum 7-layer funnel → Feishu report (no auto BUY)
+#   09:39-10:00  → SCAN: run ML 8-layer filter + LightGBM scoring → Feishu report (no auto BUY)
 #   14:50-14:58  → SELL: log marked holdings (no auto SELL)
 #   iQuant       → polls /pending-signals → passorder() → POST /ack-signal
 #
@@ -202,7 +202,7 @@ def _count_trading_days(calendar: list[date], from_date: date, to_date: date) ->
 
 
 def create_iquant_router() -> APIRouter:
-    """Create the iQuant API router with momentum strategy.
+    """Create the iQuant API router with ML strategy.
 
     Signal scheduler:
     - 09:25-09:35: GAP CHECK (T+1 gap <-3% → early sell, T+2 → sell)
@@ -236,8 +236,6 @@ def create_iquant_router() -> APIRouter:
         from src.common.config import get_tushare_token
         from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
         from src.data.clients.tushare_realtime import TushareRealtimeClient
-        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-        from src.data.database.momentum_scan_db import create_momentum_scan_db_from_config
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
@@ -253,26 +251,6 @@ def create_iquant_router() -> APIRouter:
             )
             raise
         _state["realtime_client"] = tushare
-
-        fdb = create_fundamentals_db_from_config()
-        try:
-            await fdb.connect()
-        except Exception as e:
-            await _notify_feishu_error(
-                "数据库连接失败",
-                f"PostgreSQL基本面数据库连接失败\n错误: {e}\n交易功能不可用，请检查数据库配置",
-            )
-            raise
-        _state["fundamentals_db"] = fdb
-
-        # Momentum scan history DB (non-critical — log and continue on failure)
-        try:
-            scan_db = create_momentum_scan_db_from_config()
-            await scan_db.connect()
-            _state["momentum_scan_db"] = scan_db
-        except Exception as e:
-            logger.warning(f"MomentumScanDB init failed (scan history disabled): {e}")
-            _state["momentum_scan_db"] = None
 
         _state["historical_adapter"] = IQuantHistoricalAdapter(tushare)
         _state["concept_mapper"] = LocalConceptMapper()
@@ -300,7 +278,7 @@ def create_iquant_router() -> APIRouter:
         _state["scheduler_task"] = asyncio.create_task(_signal_scheduler())
 
         _state["initialized"] = True
-        logger.info("Momentum iQuant resources initialized + scheduler started")
+        logger.info("iQuant resources initialized + scheduler started")
         return _state
 
     async def _cleanup_resources() -> None:
@@ -312,11 +290,8 @@ def create_iquant_router() -> APIRouter:
         rt_client = _state.get("realtime_client")
         if rt_client:
             await rt_client.stop()
-        fdb = _state.get("fundamentals_db")
-        if fdb:
-            await fdb.close()
         _state["initialized"] = False
-        logger.info("Momentum iQuant resources cleaned up")
+        logger.info("iQuant resources cleaned up")
 
     router._iquant_cleanup = _cleanup_resources  # type: ignore[attr-defined]
     router._iquant_init = _ensure_resources  # type: ignore[attr-defined]
@@ -326,14 +301,14 @@ def create_iquant_router() -> APIRouter:
     def _inject_cache(cache: Any) -> None:
         """Inject GreptimeDB backtest cache for preClose lookups."""
         _state["backtest_cache"] = cache
-        logger.info("Momentum: GreptimeDB backtest cache injected")
+        logger.info("iQuant: GreptimeDB backtest cache injected")
 
     router._inject_cache = _inject_cache  # type: ignore[attr-defined]
 
     # --- Universe ---
 
     async def _get_universe() -> list[str]:
-        """Get stock codes for momentum universe (main board + SME, cached)."""
+        """Get stock codes for universe (main board + SME, cached)."""
         if _state["universe_cache"]:
             return _state["universe_cache"]
 
@@ -342,7 +317,7 @@ def create_iquant_router() -> APIRouter:
         stock_filter = _state["stock_filter"]
         codes = [c for c in all_codes if stock_filter.is_allowed(c)]
         _state["universe_cache"] = codes
-        logger.info(f"Momentum universe cached: {len(codes)} codes")
+        logger.info(f"iQuant universe cached: {len(codes)} codes")
         return codes
 
     # --- ML scan (delegates to strategy service) ---
@@ -628,13 +603,13 @@ def create_iquant_router() -> APIRouter:
 
     router._cancel_signal = _cancel_signal  # type: ignore[attr-defined]
 
-    # --- Momentum background scheduler (trading operations only) ---
+    # --- ML background scheduler (trading operations only) ---
 
     async def _signal_scheduler() -> None:
-        """Momentum trading scheduler — scan only.
+        """ML trading scheduler — scan only.
 
         Trading window:
-        - SCAN (09:39-10:00): Run momentum scan → push Feishu report
+        - SCAN (09:39-10:00): Run ML scan → push Feishu report
 
         Monitoring (heartbeat, timeout, readiness) runs in _monitoring_scheduler.
         """
@@ -658,7 +633,7 @@ def create_iquant_router() -> APIRouter:
                     cal = await _get_trade_calendar()
                     if now_bj.date() not in cal:
                         if scan_done_date != ex_date:
-                            logger.info(f"Momentum: {ex_date} is not a trading day")
+                            logger.info(f"iQuant: {ex_date} is not a trading day")
                             scan_done_date = ex_date
                         await asyncio.sleep(3600)
                         continue
@@ -671,7 +646,7 @@ def create_iquant_router() -> APIRouter:
                     from src.common.config import get_daily_scan_enabled
 
                     if not get_daily_scan_enabled():
-                        logger.info("Momentum: daily scan disabled, skipping")
+                        logger.info("iQuant: daily scan disabled, skipping")
                         scan_done_date = ex_date
                         await asyncio.sleep(120)
                         continue
@@ -744,7 +719,7 @@ def create_iquant_router() -> APIRouter:
         now = datetime.now(BEIJING_TZ)
         return {
             "status": "ok",
-            "service": "iquant-momentum",
+            "service": "iquant-ml",
             "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "pending_count": signal_store.pending_count,
             "broker_positions": len(_state["broker_positions"]),
@@ -873,7 +848,7 @@ def create_iquant_router() -> APIRouter:
     ) -> dict:
         """Push a manual BUY/SELL signal for live trading tests.
 
-        The signal enters the same pending queue as momentum signals.
+        The signal enters the same pending queue as ML scan signals.
         iQuant polls /pending-signals and executes via passorder().
 
         Example: POST /api/iquant/manual-order
@@ -938,7 +913,7 @@ def create_iquant_router() -> APIRouter:
 
     @router.get("/universe")
     async def universe(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Return all stock codes in momentum universe (cached)."""
+        """Return all stock codes in universe (cached)."""
         await _ensure_resources()
         codes = await _get_universe()
         return {"codes": codes, "count": len(codes)}
