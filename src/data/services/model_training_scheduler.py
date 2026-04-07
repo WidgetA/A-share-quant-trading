@@ -97,7 +97,7 @@ class ModelTrainingScheduler:
         """Generate a one-time token for FC callback authentication."""
         token = secrets.token_urlsafe(32)
         now = datetime.now(BEIJING_TZ)
-        self._training_tokens[token] = {"mode": mode, "created_at": now, "used": False}
+        self._training_tokens[token] = {"mode": mode, "created_at": now}
         # Clean up tokens older than 1 hour
         cutoff = now - timedelta(hours=1)
         self._training_tokens = {
@@ -106,25 +106,19 @@ class ModelTrainingScheduler:
         return token
 
     def validate_and_consume_token(self, token: str) -> str | None:
-        """Validate a training token. Returns mode if valid, None otherwise."""
-        logger.info(
-            "validate_token: token=%s, stored_tokens=%d, keys=%s",
-            token[:8],
-            len(self._training_tokens),
-            [k[:8] for k in self._training_tokens],
-        )
+        """Validate a training token. Returns mode if valid, None otherwise.
+
+        Data tokens are NOT consumed (FC async may retry the entire function).
+        They are protected by 1-hour expiry instead.
+        """
         info = self._training_tokens.get(token)
         if not info:
             logger.warning("validate_token: token %s NOT FOUND", token[:8])
-            return None
-        if info["used"]:
-            logger.warning("validate_token: token %s ALREADY USED", token[:8])
             return None
         if datetime.now(BEIJING_TZ) - info["created_at"] > timedelta(hours=1):
             del self._training_tokens[token]
             logger.warning("validate_token: token %s EXPIRED", token[:8])
             return None
-        info["used"] = True
         return info["mode"]
 
     def receive_training_result(self, token: str, result: dict) -> bool:

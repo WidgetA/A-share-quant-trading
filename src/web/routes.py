@@ -2773,27 +2773,12 @@ def create_model_router() -> APIRouter:
         scheduler = _get_scheduler(request)
         mode = scheduler.validate_and_consume_token(token)
         if mode is None:
-            info = scheduler._training_tokens.get(token)
-            if info is None:
-                reason = "NOT_FOUND"
-            elif info["used"]:
-                reason = "ALREADY_USED"
-            else:
-                reason = "UNKNOWN(found_but_rejected)"
             debug = (
-                f"[训练回调401] reason={reason}, token={token[:8]}..., "
+                f"[训练回调401] token={token[:8]}..., "
                 f"stored={len(scheduler._training_tokens)}, "
                 f"keys={[k[:8] for k in scheduler._training_tokens]}"
             )
             logger.warning(debug)
-            try:
-                from src.common.feishu_bot import FeishuBot
-
-                bot = FeishuBot()
-                if bot.is_configured():
-                    await bot.send_message(debug)
-            except Exception:
-                pass
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
         cache = getattr(request.app.state, "backtest_cache", None)
