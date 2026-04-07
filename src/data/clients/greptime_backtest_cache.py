@@ -1572,15 +1572,31 @@ class GreptimeBacktestCache:
     # ==================== Resume Helpers ====================
 
     async def _get_existing_daily_dates(self) -> set[date]:
-        """Get all dates that have daily data in DB.
+        """Get dates that have *sufficient* daily data in DB.
 
-        Uses a lightweight DISTINCT query instead of GROUP BY + COUNT
-        to avoid CPU-intensive full table scans on GreptimeDB.
+        A date is considered cached only if it has >= _MIN_STOCKS_PER_DAY
+        stocks.  Dates with fewer rows (partial downloads) are NOT
+        returned so that the resume logic will re-download them.
         """
-        rows = await self._db.fetch("SELECT DISTINCT ts FROM backtest_daily ORDER BY ts")
+        rows = await self._db.fetch(
+            "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts ORDER BY ts"
+        )
         if not rows:
             return set()
-        return {_ts_to_date(r["ts"]) for r in rows}
+        result: set[date] = set()
+        for r in rows:
+            cnt = int(r["cnt"])
+            if cnt >= _MIN_STOCKS_PER_DAY:
+                result.add(_ts_to_date(r["ts"]))
+            else:
+                d = _ts_to_date(r["ts"])
+                logger.warning(
+                    "Partial daily data for %s: %d stocks (need >=%d), will re-download",
+                    d,
+                    cnt,
+                    _MIN_STOCKS_PER_DAY,
+                )
+        return result
 
     async def _get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have *sufficient* minute data in the given range.
