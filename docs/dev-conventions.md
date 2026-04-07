@@ -85,7 +85,7 @@ Communication: Message Queue (Redis/ZeroMQ) for real-time decoupling
 |--------|---------------|------------|
 | **Strategy** | Signal generation, risk rules, position sizing | Yes - strategies can be updated during trading hours |
 | **Trading** | Order execution, position management, P&L tracking | Partial - receives strategy updates in real-time |
-| **Data/Info** | Market data (Tushare/tsanghi), fundamentals (PostgreSQL), boards (local JSON) | No - runs continuously |
+| **Data/Info** | Market data (Tushare/tsanghi), boards/stock names (local JSON), backtest cache (GreptimeDB) | No - runs continuously |
 
 ### Decoupling Requirements
 
@@ -146,9 +146,6 @@ A-share-quant-trading/
 │   │   │   ├── iquant_historical_adapter.py # Live historical adapter
 │   │   │   ├── tushare_realtime.py         # Tushare realtime quotes
 │   │   │   └── sina_realtime.py            # Sina realtime (fallback)
-│   │   ├── database/        # Database layers
-│   │   │   ├── fundamentals_db.py  # Stock fundamentals reader
-│   │   │   └── momentum_scan_db.py  # Momentum scan results persistence
 │   │   ├── services/
 │   │   │   └── cache_scheduler.py  # 3am daily cache gap-fill
 │   │   └── sources/
@@ -165,9 +162,9 @@ A-share-quant-trading/
 │       └── pending_store.py # Pending confirmation store
 ├── data/                    # Runtime data files
 │   ├── sectors.json         # THS board names
-│   └── board_constituents.json  # Board → stock mapping
+│   └── board_constituents.json  # Board → stock mapping + stock names
 ├── config/
-│   └── database-config.yaml # PostgreSQL connection config
+│   └── database-config.yaml # GreptimeDB connection config
 ├── scripts/
 │   ├── iquant_live.py       # iQuant live trading script
 │   └── audit_trading_safety.py  # Safety audit
@@ -195,12 +192,10 @@ Before starting any development task:
 |----------|--------|-----------|
 | Language | Python 3.11+ | Ecosystem, quant libraries |
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
-| Trading Data | PostgreSQL (trading schema) | Unified with messages DB |
-| Message Data | PostgreSQL (external, read-only) | Messages streamed by external collector |
 | Backtest Cache | GreptimeDB (asyncpg pgwire port 4003) | Time-series optimized, OSS object storage, no in-memory caching |
 | Config Format | YAML | Human-readable, supports hot-reload |
 | Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d), tsanghi (backtest daily + 5min, **max concurrency=2**) | A-share real-time and historical data |
-| PostgreSQL Client | asyncpg | Async PostgreSQL access |
+| GreptimeDB Client | asyncpg | Async PostgreSQL wire protocol access |
 
 ## GreptimeDB 操作规范（CRITICAL）
 

@@ -548,16 +548,14 @@ await engine.stop()
 - Price (backtest): tsanghi 沧海数据 (日线 + 5min bars for 9:40 price) via `GreptimeBacktestCache`
 - Price (live): Tushare Pro `rt_min_daily`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
-- Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
 
 **Key Files**:
-- `src/strategy/strategies/momentum_scanner.py` — Core momentum scanner logic (7-layer funnel + V3 scoring)
+- `src/strategy/strategies/momentum_scanner.py` — Legacy momentum scanner (replaced by ml_scanner.py in STR-006)
 - `src/strategy/filters/momentum_quality_filter.py` — Step 5.5: volume filter (turnover_amp bounds)
 - `src/strategy/filters/reversal_factor_filter.py` — Step 5.6: 冲高回落 filter
-- `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping (reads local JSON)
+- `src/data/sources/local_concept_mapper.py` — Stock ↔ concept board mapping + stock names (reads local JSON)
 - `data/sectors.json` — THS concept board name list (390 boards)
 - `data/board_constituents.json` — Board → constituent stocks mapping (pre-downloaded)
-- `src/data/database/fundamentals_db.py` — stock_fundamentals reader
 
 **Backtest Modes**:
 
@@ -665,7 +663,6 @@ await engine.stop()
 - Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
 - Historical data: GreptimeDB (`GreptimeBacktestCache`) via `IQuantHistoricalAdapter`
 - Board data: `LocalConceptMapper` (local JSON files)
-- Fundamentals (ST filter): PostgreSQL `stock_fundamentals` table
 - Trade calendar: Tushare `trade_cal` API (cached in memory)
 
 **Monitoring & Alerting** (Feishu notifications):
@@ -673,7 +670,7 @@ await engine.stop()
 | Alert | Trigger | Content |
 |-------|---------|---------|
 | 每日就绪报告 | 09:30 | iQuant连接状态、持仓数、今日计划(扫描/跳过) |
-| 买入/卖出信号推送 | Signal pushed | 股票代码、价格、板块、V3评分 |
+| 买入/卖出信号推送 | Signal pushed | 股票代码、价格、板块、ML评分 |
 | 信号执行确认 | Signal acked | 股票代码、价格、推送→执行时间差 |
 | 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
 | iQuant未连接 | 09:33 无心跳 | 提示检查QMT是否启动 |
@@ -683,23 +680,19 @@ await engine.stop()
 | 扫描/跳空失败 | Exception | 完整错误堆栈 |
 
 **Dashboard Recommendations (On-Demand Compute)**:
-- `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 momentum scan results
-- **Cache-first**: checks PostgreSQL `MomentumScanDB` first; computes on-demand if empty
-- **Past dates**: uses GreptimeDB cache (`_build_snapshots_from_cache` + `GreptimeHistoricalAdapter`), ~1-3s
-- **Today**: uses Tushare `batch_get_early_quotes` (rt_min_daily 9:30-9:40 data) + `IQuantHistoricalAdapter`, ~30-60s (only after 09:39)
-- Computed results are persisted to MomentumScanDB for subsequent cache hits
-- iQuant scheduler (09:39-10:00) also writes results via same MomentumScanDB; on-demand compute is a fallback when scheduler misses
+- `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 ML scan results
+- **Past dates**: uses GreptimeDB cache via `run_ml_backtest()`, ~1-3s
+- **Today**: uses Tushare `batch_get_early_quotes` via `run_ml_live()`, ~30-60s (only after 09:39)
+- No PostgreSQL persistence — computed on-demand each time
 
 **Key Files**:
-- `src/strategy/strategies/momentum_scanner.py` — Momentum 7-layer funnel + V3 regression scoring
+- `src/strategy/strategies/ml_scanner.py` — ML 8-layer filter + LightGBM LambdaRank scoring
+- `src/strategy/ml_strategy_service.py` — Stateless ML scan service (backtest + live)
 - `src/strategy/signal_store.py` — In-memory signal queue (push/poll/ack/expire lifecycle)
-- `src/strategy/momentum_strategy_service.py` — Stateless momentum scan service (backtest + live, consolidates 3 duplicate scan paths)
-- `src/web/iquant_routes.py` — iQuant communication + monitoring (~750 lines, extracted strategy logic)
-- `src/web/routes.py` — Dashboard routes, delegates scan to MomentumStrategyService
+- `src/web/iquant_routes.py` — iQuant communication + monitoring
+- `src/web/routes.py` — Dashboard routes, delegates scan to ml_strategy_service
 - `src/web/app.py` — GreptimeDB cache injection into iQuant router
 - `src/data/clients/iquant_historical_adapter.py` — Historical data adapter
-- `src/strategy/filters/reversal_factor_filter.py` — Reused for L6
-- `src/data/database/momentum_scan_db.py` — PostgreSQL persistence for scan results
 
 **Differences from STR-004**:
 - Pure parametric (no LLM board relevance filter)
