@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import math
 import statistics
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -258,31 +257,7 @@ assert len(FEATURE_NAMES_ALL) == 76  # noqa: S101
 
 # ── ML Constants ────────────────────────────────────────────
 
-_COMMISSION_RATE = 0.0002  # 万二 each way
-_STAMP_TAX_RATE = 0.0005  # 万五 sell only
-_TOTAL_FEE_PCT = (_COMMISSION_RATE * 2 + _STAMP_TAX_RATE) * 100  # 0.09%
-
-_LABEL_BINS = 5  # 0-4 quintile labels per day
-_FORWARD_DAYS = 2  # 2-day forward return for label
-
-_LGB_PARAMS: dict[str, Any] = {
-    "objective": "lambdarank",
-    "metric": "ndcg",
-    "eval_at": [5, 10],
-    "num_leaves": 15,
-    "learning_rate": 0.05,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 1,
-    "lambda_l1": 0.1,
-    "lambda_l2": 1.0,
-    "verbose": -1,
-}
-_MAX_BOOST_ROUNDS = 500
-_EARLY_STOPPING = 50
 _RETRAIN_INTERVAL_DAYS = 20  # retrain every 20 trading days
-_MIN_TRAIN_DAYS = 60  # minimum training days required
-_TRAIN_VAL_SPLIT = 0.8  # 80% train, 20% validation
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "models"
 
@@ -1217,113 +1192,7 @@ class MLScanner:
         )
         return result
 
-    # ── ML Training & Inference ─────────────────────────────
-
-    @staticmethod
-    def build_training_labels(
-        daily_returns: dict[date, list[tuple[str, float]]],
-    ) -> dict[date, dict[str, int]]:
-        """Bucket 2-day forward returns into quintile labels (0-4) per day.
-
-        Args:
-            daily_returns: {trade_date: [(code, net_return_pct), ...]}
-                where net_return_pct = gross 2-day return - fees.
-
-        Returns:
-            {trade_date: {code: label}} with label 0 = worst 20%, 4 = best 20%.
-        """
-        labels: dict[date, dict[str, int]] = {}
-
-        for trade_date, returns in daily_returns.items():
-            if len(returns) < _LABEL_BINS:
-                # Not enough candidates to create 5 buckets
-                labels[trade_date] = {code: 2 for code, _ in returns}
-                continue
-
-            # Sort by return, assign quintile labels
-            sorted_rets = sorted(returns, key=lambda x: x[1])
-            n = len(sorted_rets)
-            day_labels: dict[str, int] = {}
-            for rank, (code, _ret) in enumerate(sorted_rets):
-                # label = rank / n mapped to 0-4
-                day_labels[code] = min(int(rank / n * _LABEL_BINS), _LABEL_BINS - 1)
-            labels[trade_date] = day_labels
-
-        return labels
-
-    @staticmethod
-    def train_model(
-        features: list[list[float]],
-        labels: list[int],
-        groups: list[int],
-        val_features: list[list[float]] | None = None,
-        val_labels: list[int] | None = None,
-        val_groups: list[int] | None = None,
-        init_model: Any | None = None,
-    ) -> Any:
-        """Train a LightGBM LambdaRank model.
-
-        Args:
-            features: N × 76 feature matrix (list of lists).
-            labels: N relevance labels (0-4).
-            groups: Number of candidates per day (sum = N).
-            val_features: Validation features (optional, for early stopping).
-            val_labels: Validation labels.
-            val_groups: Validation group sizes.
-            init_model: Existing lgb.Booster or model file path for fine-tuning.
-                        If None, trains from scratch.
-
-        Returns:
-            Trained lgb.Booster instance.
-
-        Raises:
-            ImportError: If lightgbm is not installed.
-        """
-        import lightgbm as lgb
-
-        train_data = lgb.Dataset(
-            features,
-            label=labels,
-            group=groups,
-            feature_name=FEATURE_NAMES_ALL,
-            free_raw_data=False,
-        )
-
-        callbacks: list[Callable[..., Any]] = [lgb.log_evaluation(period=50)]
-        valid_sets = [train_data]
-        valid_names = ["train"]
-
-        if val_features and val_labels and val_groups:
-            val_data = lgb.Dataset(
-                val_features,
-                label=val_labels,
-                group=val_groups,
-                feature_name=FEATURE_NAMES_ALL,
-                free_raw_data=False,
-            )
-            valid_sets.append(val_data)
-            valid_names.append("val")
-            callbacks.append(lgb.early_stopping(_EARLY_STOPPING))
-
-        booster = lgb.train(
-            _LGB_PARAMS,
-            train_data,
-            num_boost_round=_MAX_BOOST_ROUNDS,
-            valid_sets=valid_sets,
-            valid_names=valid_names,
-            callbacks=callbacks,
-            init_model=init_model,
-        )
-
-        mode = "fine-tuned" if init_model else "trained"
-        logger.info(
-            "train_model: %s LambdaRank with %d rounds, %d samples, %d groups",
-            mode,
-            booster.current_iteration(),
-            len(labels),
-            len(groups),
-        )
-        return booster
+    # ── ML Inference ────────────────────────────────────────
 
     @staticmethod
     def score_candidates(
@@ -1363,23 +1232,6 @@ class MLScanner:
             ranked=[(code, float(score)) for code, score in ranked],
             feature_importance=importance,
         )
-
-    @staticmethod
-    def save_model(model: Any, name: str) -> Path:
-        """Save trained model to disk.
-
-        Args:
-            model: Trained lgb.Booster.
-            name: Model filename (without extension).
-
-        Returns:
-            Path to saved model file.
-        """
-        _MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        path = _MODEL_DIR / f"{name}.lgb"
-        model.save_model(str(path))
-        logger.info("save_model: saved to %s", path)
-        return path
 
     @staticmethod
     def load_model(name: str) -> Any:

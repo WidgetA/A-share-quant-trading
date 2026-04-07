@@ -43,6 +43,7 @@
 | 0.12.1 | 2026-03-24 | - | SYS-005: Dashboard cache scheduler status card with toggle, next run time, last result display |
 | 0.12.2 | 2026-03-26 | - | SYS-005: Cache scheduler download timeout (4h/range), per-range Feishu progress, align manual/scheduler gap detection |
 | 0.13.0 | 2026-04-06 | - | STR-006: ML Scanner — 8-layer filter + LightGBM LambdaRank scoring, model management (train/finetune/S3/scheduler) |
+| 0.13.1 | 2026-04-07 | - | STR-006: FC serverless async training (X-Fc-Invocation-Type: Async), remove local training code |
 
 ---
 
@@ -735,35 +736,38 @@ await engine.stop()
 - **Hyperparams**: 15 leaves, lr 0.05, 80% feature/sample fraction, L1=0.1, L2=1.0, max 500 rounds, early stop 50
 
 **Model Management**:
+- Training runs on Alibaba Cloud FC serverless (async invocation, `X-Fc-Invocation-Type: Async`)
+- Flow: trading-service triggers FC → FC fetches data via callback → trains → POSTs result back
 - Dashboard card with full-train / manual finetune buttons + training log display
 - Auto finetune every 20 trading days at 3am (background scheduler, toggle on/off)
 - Pre-training data completeness check: 3 retry gap-fill attempts, abort with Feishu alert on failure
-- Model files saved locally (`data/models/`) and uploaded to S3
-- Fine-tune requires existing full-trained model (`full_latest.lgb`)
+- Model files saved locally (`data/models/`) and uploaded to S3 (by FC)
+- Fine-tune: FC downloads init model from S3, no local training code
 - Feishu alerts for: training success/failure, S3 upload, data issues, scheduler status
 
 **Key Files**:
-- `src/strategy/strategies/ml_scanner.py` — 8-layer filter pipeline + feature engineering + LightGBM train/score
-- `src/data/services/model_training_scheduler.py` — Background scheduler (auto finetune every 20 days)
+- `src/strategy/strategies/ml_scanner.py` — 8-layer filter pipeline + feature engineering + model inference
+- `src/data/services/model_training_scheduler.py` — Scheduler + FC async orchestration (trigger/callback/save)
+- `serverless/app.py` — FC serverless training endpoint (LightGBM train, S3 upload, result callback)
 - `src/common/s3_client.py` — S3-compatible upload/download (boto3)
-- `src/common/config.py` — S3 config + finetune scheduler toggle
-- `src/web/routes.py` — `create_model_router()` SSE endpoints for training
+- `src/common/config.py` — S3 config + FC URL + finetune scheduler toggle
+- `src/web/routes.py` — `create_model_router()` SSE endpoints + FC callback endpoints
 - `src/web/templates/index.html` — Model management dashboard card
 
-**Dependencies**: `lightgbm>=4.0`, `boto3>=1.35.0`
+**Dependencies**: `lightgbm>=4.0` (FC only), `boto3>=1.35.0`
 
 **Checklist**:
 - [x] MLScanner: 8-layer filter pipeline (Step 0-7)
 - [x] Feature engineering: 76 features (38 raw + 38 Z-scored)
-- [x] LightGBM LambdaRank train/score/save/load
-- [x] Fine-tune support (`init_model` param)
+- [x] LightGBM LambdaRank scoring (inference via load_model + score_candidates)
+- [x] FC serverless training (full train + finetune, async invocation)
+- [x] FC result callback architecture (data token + result token)
 - [x] ModelTrainingScheduler (every 20 trading days at 3am)
 - [x] S3 client for model upload/download
 - [x] Dashboard model management card (train/finetune buttons, log area, status)
 - [x] SSE streaming for training progress
 - [x] Feishu alerts for all training events
 - [x] Data completeness check with 3-retry gap-fill
-- [ ] Full training data pipeline (GreptimeDB → features → labels)
 - [ ] Sell strategy
 - [ ] Unit tests
 - [ ] Production deployment
