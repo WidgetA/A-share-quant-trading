@@ -147,10 +147,10 @@ class GreptimeClient:
     - statement_cache_size=0 (GreptimeDB doesn't support DEALLOCATE/PREPARE)
     - Connection pool for safe concurrent access (download + status polling)
     - Custom connection class with no-op reset (GreptimeDB doesn't support RESET ALL)
-    - All queries have a 60s timeout to prevent indefinite hangs
+    - All queries have a 120s timeout to prevent indefinite hangs
     """
 
-    _QUERY_TIMEOUT: float = 60.0  # seconds
+    _QUERY_TIMEOUT: float = 120.0  # seconds
     _ACQUIRE_TIMEOUT: float = 30.0  # seconds
 
     def __init__(self, host: str, port: int, database: str = "public") -> None:
