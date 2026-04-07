@@ -682,6 +682,15 @@ def create_iquant_router() -> APIRouter:
 
                 # --- SCAN: 09:39-10:00 ---
                 if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
+                    # Respect daily scan toggle
+                    from src.common.config import get_daily_scan_enabled
+
+                    if not get_daily_scan_enabled():
+                        logger.info("Momentum: daily scan disabled, skipping")
+                        scan_done_date = ex_date
+                        await asyncio.sleep(120)
+                        continue
+
                     if not _state["initialized"]:
                         await asyncio.sleep(10)
                         continue
