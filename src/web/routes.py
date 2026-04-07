@@ -698,15 +698,9 @@ def create_momentum_router() -> APIRouter:
             if not result.recommended and not result.all_scored:
                 ds = trade_date.strftime("%Y-%m-%d")
                 if result.skip_reason == "no_daily_data":
-                    msg = (
-                        f"沧海缓存中无 {ds} 的日线数据"
-                        f"（非交易日或数据缺失，请尝试补充下载）"
-                    )
+                    msg = f"沧海缓存中无 {ds} 的日线数据（非交易日或数据缺失，请尝试补充下载）"
                 elif result.skip_reason:
-                    msg = (
-                        f"{ds} 日线有数据但无有效候选股"
-                        f" ({result.skip_reason})"
-                    )
+                    msg = f"{ds} 日线有数据但无有效候选股 ({result.skip_reason})"
                 else:
                     msg = f"{ds} 扫描完成但无推荐结果"
                 return {
