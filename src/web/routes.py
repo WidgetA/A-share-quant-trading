@@ -351,11 +351,57 @@ def create_momentum_router() -> APIRouter:
 
     @router.get("/api/momentum/tsanghi-cache-status")
     async def tsanghi_cache_status(request: Request):
-        """Return backtest cache state for frontend polling."""
+        """Return backtest cache state as SSE stream with per-query progress."""
         cache = getattr(request.app.state, "backtest_cache", None)
         if cache is None:
-            return {"status": "empty"}
-        return await cache.get_cache_status()
+
+            async def _empty():
+                yield f"data: {json.dumps({'type': 'result', 'status': 'empty'})}\n\n"
+
+            return StreamingResponse(_empty(), media_type="text/event-stream")
+
+        # Check in-memory cache first (60s TTL) — return instantly
+        import time as _time
+
+        if cache._cache_status_result and (
+            _time.monotonic() - cache._cache_status_ts
+        ) < cache._CACHE_STATUS_TTL:
+
+            async def _cached():
+                yield f"data: {json.dumps({'type': 'result', **cache._cache_status_result}, ensure_ascii=False)}\n\n"
+
+            return StreamingResponse(_cached(), media_type="text/event-stream")
+
+        progress_queue: asyncio.Queue[str] = asyncio.Queue()
+        result_holder: list[dict] = []
+
+        async def _on_step(msg: str) -> None:
+            await progress_queue.put(msg)
+
+        async def _run_queries() -> None:
+            try:
+                result = await cache.get_cache_status_streaming(on_step=_on_step)
+                # Update the cache
+                cache._cache_status_result = result
+                cache._cache_status_ts = _time.monotonic()
+                result_holder.append(result)
+            except Exception as e:
+                result_holder.append({"status": "error", "error": str(e)})
+            finally:
+                await progress_queue.put(None)  # sentinel
+
+        async def _stream():
+            task = asyncio.create_task(_run_queries())
+            while True:
+                msg = await progress_queue.get()
+                if msg is None:
+                    break
+                yield f"data: {json.dumps({'type': 'step', 'message': msg}, ensure_ascii=False)}\n\n"
+            await task
+            r = result_holder[0] if result_holder else {"status": "error"}
+            yield f"data: {json.dumps({'type': 'result', **r}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
 
     @router.post("/api/momentum/tsanghi-prepare")
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):

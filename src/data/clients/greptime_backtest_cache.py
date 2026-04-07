@@ -657,8 +657,7 @@ class GreptimeBacktestCache:
     async def get_cache_status(self) -> dict:
         """Return cache status dict for the frontend status endpoint.
 
-        Results are cached in-memory for 60s to avoid hammering GreptimeDB
-        with 5 aggregate queries on every 30s poll from the backtest page.
+        Results are cached in-memory for 60s to avoid hammering GreptimeDB.
         """
         import time as _time
 
@@ -666,22 +665,44 @@ class GreptimeBacktestCache:
         if self._cache_status_result and (now - self._cache_status_ts) < self._CACHE_STATUS_TTL:
             return self._cache_status_result
 
+        result = await self.get_cache_status_streaming()
+        self._cache_status_result = result
+        self._cache_status_ts = now
+        return result
+
+    async def get_cache_status_streaming(
+        self,
+        on_step: Callable[[str], Any] | None = None,
+    ) -> dict:
+        """Query cache status with per-step progress callback.
+
+        ``on_step`` is called with a human-readable description before each
+        SQL query, e.g. ``on_step("查询日期范围...")``.  The caller can use
+        this to stream progress to the frontend.
+        """
+
+        async def _step(msg: str) -> None:
+            if on_step:
+                await _maybe_await(on_step(msg))
+
         if not self.is_ready:
             return {"status": "disconnected"}
 
+        await _step("查询日期范围...")
         db_start, db_end = await self.get_date_range()
         if db_start is None:
             return {"status": "empty"}
 
+        await _step("统计日线股票数...")
         daily_stocks = await self.get_daily_stock_count()
-        daily_days = await self.get_daily_date_count()
-        minute_stocks = await self.get_minute_stock_count()
-        # NOTE: find_minute_gaps() is intentionally excluded here.
-        # It runs GROUP BY on two large tables which OOMs GreptimeDB on
-        # the 1.58GB server. Gaps are only needed during download, not
-        # for status display.
 
-        result = {
+        await _step("统计日线天数...")
+        daily_days = await self.get_daily_date_count()
+
+        await _step("统计分钟线股票数...")
+        minute_stocks = await self.get_minute_stock_count()
+
+        return {
             "status": "ready",
             "start_date": str(db_start),
             "end_date": str(db_end),
@@ -691,9 +712,6 @@ class GreptimeBacktestCache:
             "minute_gaps": [],
             "has_gaps": False,
         }
-        self._cache_status_result = result
-        self._cache_status_ts = now
-        return result
 
     def invalidate_cache_status(self) -> None:
         """Force next get_cache_status() to re-query. Call after downloads."""

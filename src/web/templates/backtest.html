@@ -140,7 +140,8 @@
     <div class="cache-bar" id="cacheBar">
         <div class="cache-status">
             <span class="dot empty" id="cacheDot"></span>
-            <span id="cacheText">检查缓存状态...</span>
+            <span id="cacheText">点击右侧按钮检查缓存</span>
+            <button class="btn btn-secondary btn-sm" id="cacheCheckBtn" onclick="checkCacheStatus()" style="margin-left:0.5rem;padding:2px 10px;font-size:0.78rem;">检查状态</button>
         </div>
         <div class="cache-download-controls" id="cacheControls" style="display:none;">
             <input type="date" id="cacheStart" value="2024-01-01" title="起始日期" />
@@ -240,54 +241,72 @@ function switchTab(name) {
 // ========== Cache status ==========
 let _cacheStatusRunning = false;
 async function checkCacheStatus() {
-    // Prevent overlapping calls — this is the root cause of query pile-up
     if (_cacheStatusRunning) return;
     _cacheStatusRunning = true;
 
     const dot = document.getElementById('cacheDot');
     const text = document.getElementById('cacheText');
     const controls = document.getElementById('cacheControls');
-    const btn = document.getElementById('cacheDownloadBtn');
+    const dlBtn = document.getElementById('cacheDownloadBtn');
+    const checkBtn = document.getElementById('cacheCheckBtn');
 
     dot.className = 'dot loading';
-    text.textContent = '正在查询 GreptimeDB 缓存状态...';
+    text.textContent = '正在连接 GreptimeDB...';
+    checkBtn.disabled = true;
 
     try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 30000);
-        const r = await fetch('/api/momentum/tsanghi-cache-status', { signal: ctrl.signal });
-        clearTimeout(timer);
-        const d = await r.json();
+        const resp = await fetch('/api/momentum/tsanghi-cache-status');
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        if (d.status === 'ready') {
-            dot.className = 'dot ready';
-            const parts = [`日线 ${d.daily_stocks}只 ${d.daily_days}天`];
-            if (d.minute_stocks > 0) {
-                parts.push(`分钟线 ${d.minute_stocks}只`);
-            } else {
-                parts.push('分钟线 无');
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const d = JSON.parse(line.slice(6));
+                    if (d.type === 'step') {
+                        text.textContent = d.message;
+                    } else if (d.type === 'result') {
+                        _applyCacheResult(d, dot, text, controls, dlBtn);
+                    }
+                } catch(e) {}
             }
-            text.textContent = `缓存就绪: ${parts.join(', ')} (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
-            controls.style.display = '';
-            btn.textContent = '补充下载';
-        } else if (d.status === 'loading') {
-            dot.className = 'dot loading';
-            text.textContent = '缓存加载中...';
-            controls.style.display = 'none';
-        } else {
-            dot.className = 'dot empty';
-            text.textContent = '缓存未加载';
-            controls.style.display = '';
-            btn.textContent = '下载数据';
         }
     } catch(e) {
-        const msg = e.name === 'AbortError'
-            ? '查询超时 (GreptimeDB CPU 繁忙，请稍后重试)'
-            : '无法连接服务器: ' + e.message;
-        text.textContent = msg;
+        text.textContent = '无法连接服务器: ' + e.message;
         dot.className = 'dot empty';
     } finally {
         _cacheStatusRunning = false;
+        checkBtn.disabled = false;
+    }
+}
+
+function _applyCacheResult(d, dot, text, controls, dlBtn) {
+    if (d.status === 'ready') {
+        dot.className = 'dot ready';
+        const parts = [`日线 ${d.daily_stocks}只 ${d.daily_days}天`];
+        parts.push(d.minute_stocks > 0 ? `分钟线 ${d.minute_stocks}只` : '分钟线 无');
+        text.textContent = `缓存就绪: ${parts.join(', ')} (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
+        controls.style.display = '';
+        dlBtn.textContent = '补充下载';
+    } else if (d.status === 'loading') {
+        dot.className = 'dot loading';
+        text.textContent = '缓存加载中...';
+        controls.style.display = 'none';
+    } else if (d.status === 'error') {
+        dot.className = 'dot empty';
+        text.textContent = '查询出错: ' + (d.error || '未知');
+    } else {
+        dot.className = 'dot empty';
+        text.textContent = '缓存未加载';
+        controls.style.display = '';
+        dlBtn.textContent = '下载数据';
     }
 }
 
@@ -672,7 +691,7 @@ function renderCsvResult(d) {
     const ago = new Date(); ago.setDate(ago.getDate() - 30);
     document.getElementById('rangeStart').value = ago.toISOString().slice(0, 10);
 
-    checkCacheStatus();
+    // Don't auto-check — user clicks "检查状态" button
 })();
 </script>
 {% endblock %}
