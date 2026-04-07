@@ -225,6 +225,7 @@ class MLScanResult:
     layer_counts: dict[str, int] = field(default_factory=dict)
     hot_board_count: int = 0
     final_candidates: int = 0
+    skip_reason: str = ""  # why empty: "no_daily_data" | "no_snapshots" | ""
 
 
 # ── Feature Constants ───────────────────────────────────────

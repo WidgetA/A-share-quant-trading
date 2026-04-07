@@ -878,17 +878,20 @@ class GreptimeBacktestCache:
         await tushare_client.start()
 
         try:
-            # Resume: check which dates already exist in DB
+            # Resume: check which dates already exist in DB.
+            # NOTE: Do NOT jump dl_start past max(existing_dates) — that
+            # skips over any gaps (missing trading days within the cached
+            # range).  The per-date check below (line "if current in
+            # existing_dates") already skips cached days efficiently.
             existing_dates = await self._get_existing_daily_dates()
+
             if existing_dates:
-                latest_cached = max(existing_dates)
-                if latest_cached >= dl_start:
-                    skipped = (latest_cached - dl_start).days + 1
-                    dl_start = latest_cached + timedelta(days=1)
-                    logger.warning(
-                        f"Daily resume: skipping {skipped} days "
-                        f"(cached up to {latest_cached}), starting from {dl_start}"
-                    )
+                logger.info(
+                    "Daily resume: %d dates cached (%s ~ %s), will skip them individually",
+                    len(existing_dates),
+                    min(existing_dates),
+                    max(existing_dates),
+                )
 
             if progress_cb:
                 skipped = len(existing_dates)

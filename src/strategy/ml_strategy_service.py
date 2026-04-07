@@ -158,7 +158,7 @@ async def run_ml_backtest(
     all_daily = await backtest_cache.get_all_codes_with_daily(date_str)
     if not all_daily:
         logger.warning("ML backtest: no daily data for %s", date_str)
-        return MLScanResult(model_name=model_name)
+        return MLScanResult(model_name=model_name, skip_reason="no_daily_data")
 
     # Step 2: Get 37d history before trade_date
     # Go back ~60 calendar days to ensure ≥37 trading days
@@ -240,7 +240,12 @@ async def run_ml_backtest(
     )
 
     if not snapshots:
-        return MLScanResult(model_name=model_name)
+        reason = (
+            f"no_snapshots (daily={len(all_daily)}, "
+            f"candidates={daily_candidates}, "
+            f"minute_hits={minute_hits})"
+        )
+        return MLScanResult(model_name=model_name, skip_reason=reason)
 
     return await scanner.scan(snapshots, trade_date, model_name)
 

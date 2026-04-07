@@ -696,10 +696,23 @@ def create_momentum_router() -> APIRouter:
                     "error": str(e),
                 }
             if not result.recommended and not result.all_scored:
+                ds = trade_date.strftime("%Y-%m-%d")
+                if result.skip_reason == "no_daily_data":
+                    msg = (
+                        f"沧海缓存中无 {ds} 的日线数据"
+                        f"（非交易日或数据缺失，请尝试补充下载）"
+                    )
+                elif result.skip_reason:
+                    msg = (
+                        f"{ds} 日线有数据但无有效候选股"
+                        f" ({result.skip_reason})"
+                    )
+                else:
+                    msg = f"{ds} 扫描完成但无推荐结果"
                 return {
                     "success": False,
                     "trade_date": body.trade_date,
-                    "error": f"沧海缓存中无 {trade_date.strftime('%Y-%m-%d')} 的日线数据",
+                    "error": msg,
                 }
 
             rec = result.recommended
@@ -876,11 +889,17 @@ def create_momentum_router() -> APIRouter:
                         # Empty result means no data for that date
                         if not scan_result.recommended and not scan_result.all_scored:
                             date_key = trade_date.strftime("%Y-%m-%d")
+                            reason = scan_result.skip_reason or "no_data"
+                            skip_msg = (
+                                f"沧海缓存中无 {date_key} 的日线数据"
+                                if reason == "no_daily_data"
+                                else f"{date_key} 无有效候选股 ({reason})"
+                            )
                             day_results.append(
                                 {
                                     "trade_date": str(trade_date),
                                     "has_trade": False,
-                                    "skip_reason": f"沧海缓存中无 {date_key} 的日线数据",
+                                    "skip_reason": skip_msg,
                                     "capital": round(capital, 2),
                                 }
                             )
@@ -888,7 +907,7 @@ def create_momentum_router() -> APIRouter:
                                 {
                                     "type": "day_skip",
                                     "trade_date": str(trade_date),
-                                    "reason": f"沧海缓存中无 {date_key} 的日线数据",
+                                    "reason": skip_msg,
                                 }
                             )
                             await asyncio.sleep(0.05)
