@@ -206,9 +206,9 @@ class GreptimeClient:
 # Main cache class
 # ---------------------------------------------------------------------------
 
-# Integrity thresholds (same as old TsanghiBacktestCache)
+# Integrity thresholds
 _MIN_EXPECTED_STOCKS = 2500
-_MAX_EXPECTED_STOCKS = 5000
+_MAX_EXPECTED_STOCKS = 5500
 _MIN_STOCKS_PER_DAY = 1000
 _MIN_MINUTE_COVERAGE = 0.5
 
