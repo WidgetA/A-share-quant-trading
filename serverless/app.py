@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import requests as http_requests
 from flask import Flask, request
 
@@ -485,8 +486,8 @@ def _handle_train():
 
     # ── Step 2: Build LightGBM datasets ──
     train_data = lgb.Dataset(
-        features,
-        label=labels,
+        np.array(features, dtype=np.float32),
+        label=np.array(labels, dtype=np.int32),
         group=groups,
         feature_name=FEATURE_NAMES_ALL,
         free_raw_data=False,
@@ -498,8 +499,8 @@ def _handle_train():
 
     if dataset["val_features"]:
         val_data = lgb.Dataset(
-            dataset["val_features"],
-            label=dataset["val_labels"],
+            np.array(dataset["val_features"], dtype=np.float32),
+            label=np.array(dataset["val_labels"], dtype=np.int32),
             group=dataset["val_groups"],
             feature_name=FEATURE_NAMES_ALL,
             free_raw_data=False,
