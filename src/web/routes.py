@@ -2443,8 +2443,13 @@ def create_trading_router() -> APIRouter:
         Today uses Tushare rt_min_daily (~30-60s, only after 09:39).
         No DB caching — strategy is actively being iterated.
         """
+        from src.common.config import get_recommendations_enabled
+
         if date is None:
             date = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+
+        if not get_recommendations_enabled():
+            return {"date": date, "recommendations": [], "error": "推荐功能已关闭"}
 
         fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
         backtest_cache = getattr(request.app.state, "backtest_cache", None)
