@@ -475,6 +475,8 @@ def _handle_train():
     logger.info("Train request: mode=%s, %d dates", mode, len(daily_data))
 
     # ── Step 1: Build training dataset ──
+    logger.info("Step 1/4: Building training dataset...")
+    t_step = time.time()
     try:
         dataset = build_training_data(daily_data, mode)
     except ValueError as e:
@@ -483,8 +485,14 @@ def _handle_train():
     features = dataset["features"]
     labels = dataset["labels"]
     groups = dataset["groups"]
+    logger.info(
+        "Step 1/4 done: %d samples, %d days (%.1fs)",
+        len(labels), len(groups), time.time() - t_step,
+    )
 
     # ── Step 2: Build LightGBM datasets ──
+    logger.info("Step 2/4: Creating LightGBM datasets...")
+    t_step = time.time()
     train_data = lgb.Dataset(
         np.array(features, dtype=np.float32),
         label=np.array(labels, dtype=np.int32),
@@ -492,6 +500,7 @@ def _handle_train():
         feature_name=FEATURE_NAMES_ALL,
         free_raw_data=False,
     )
+    logger.info("Step 2/4 done (%.1fs)", time.time() - t_step)
 
     callbacks = [lgb.log_evaluation(period=50)]
     valid_sets = [train_data]
@@ -510,6 +519,7 @@ def _handle_train():
         callbacks.append(lgb.early_stopping(EARLY_STOPPING))
 
     # ── Step 3: Load init model for fine-tuning ──
+    logger.info("Step 3/4: Preparing init model...")
     init_model = None
     init_model_b64 = data.get("init_model_b64")
     tmp_init = None
@@ -523,6 +533,11 @@ def _handle_train():
         logger.info("Fine-tuning from base model (%d bytes)", len(model_bytes))
 
     # ── Step 4: Train ──
+    logger.info(
+        "Step 4/4: Training LightGBM (max %d rounds, early_stop=%d)...",
+        MAX_BOOST_ROUNDS, EARLY_STOPPING,
+    )
+    t_step = time.time()
     try:
         booster = lgb.train(
             LGB_PARAMS,
@@ -538,8 +553,9 @@ def _handle_train():
             Path(tmp_init.name).unlink(missing_ok=True)
 
     rounds = booster.current_iteration()
+    logger.info("Step 4/4 done: %d rounds (%.1fs)", rounds, time.time() - t_step)
     elapsed = time.time() - t0
-    logger.info("Training complete: %d rounds in %.1fs", rounds, elapsed)
+    logger.info("Training complete: %d rounds in %.1fs total", rounds, elapsed)
 
     # ── Step 5: Save model to temp file ──
     today_str = datetime.now(BEIJING_TZ).strftime("%Y%m%d")
