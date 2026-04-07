@@ -487,7 +487,9 @@ def _handle_train():
     groups = dataset["groups"]
     logger.info(
         "Step 1/4 done: %d samples, %d days (%.1fs)",
-        len(labels), len(groups), time.time() - t_step,
+        len(labels),
+        len(groups),
+        time.time() - t_step,
     )
 
     # ── Step 2: Build LightGBM datasets ──
@@ -535,7 +537,8 @@ def _handle_train():
     # ── Step 4: Train ──
     logger.info(
         "Step 4/4: Training LightGBM (max %d rounds, early_stop=%d)...",
-        MAX_BOOST_ROUNDS, EARLY_STOPPING,
+        MAX_BOOST_ROUNDS,
+        EARLY_STOPPING,
     )
     t_step = time.time()
     try:
