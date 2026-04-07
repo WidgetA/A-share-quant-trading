@@ -368,7 +368,8 @@ def create_momentum_router() -> APIRouter:
         ) < cache._CACHE_STATUS_TTL:
 
             async def _cached():
-                yield f"data: {json.dumps({'type': 'result', **cache._cache_status_result}, ensure_ascii=False)}\n\n"
+                payload = {"type": "result", **cache._cache_status_result}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(_cached(), media_type="text/event-stream")
 
