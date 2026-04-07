@@ -650,8 +650,22 @@ class GreptimeBacktestCache:
 
     # ==================== Status for UI ====================
 
+    _cache_status_result: dict | None = None
+    _cache_status_ts: float = 0.0
+    _CACHE_STATUS_TTL = 60.0  # seconds
+
     async def get_cache_status(self) -> dict:
-        """Return cache status dict for the frontend status endpoint."""
+        """Return cache status dict for the frontend status endpoint.
+
+        Results are cached in-memory for 60s to avoid hammering GreptimeDB
+        with 5 aggregate queries on every 30s poll from the backtest page.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._cache_status_result and (now - self._cache_status_ts) < self._CACHE_STATUS_TTL:
+            return self._cache_status_result
+
         if not self.is_ready:
             return {"status": "disconnected"}
 
@@ -665,7 +679,7 @@ class GreptimeBacktestCache:
         minute_gaps = await self.find_minute_gaps()
         gap_ranges = [[str(s), str(e)] for s, e in minute_gaps]
 
-        return {
+        result = {
             "status": "ready",
             "start_date": str(db_start),
             "end_date": str(db_end),
@@ -675,6 +689,13 @@ class GreptimeBacktestCache:
             "minute_gaps": gap_ranges,
             "has_gaps": len(gap_ranges) > 0,
         }
+        self._cache_status_result = result
+        self._cache_status_ts = now
+        return result
+
+    def invalidate_cache_status(self) -> None:
+        """Force next get_cache_status() to re-query. Call after downloads."""
+        self._cache_status_result = None
 
     # ==================== Download Methods ====================
 
@@ -741,6 +762,8 @@ class GreptimeBacktestCache:
         total = len(stock_codes)
         if progress_cb:
             await _maybe_await(progress_cb("download", total, total, ""))
+
+        self.invalidate_cache_status()
 
         daily_count = await self.get_daily_stock_count()
         minute_count = await self.get_minute_stock_count()

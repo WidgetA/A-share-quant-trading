@@ -239,13 +239,17 @@ function switchTab(name) {
 
 // ========== Cache status ==========
 async function checkCacheStatus() {
+    const dot = document.getElementById('cacheDot');
+    const text = document.getElementById('cacheText');
+    const controls = document.getElementById('cacheControls');
+    const btn = document.getElementById('cacheDownloadBtn');
+
+    dot.className = 'dot loading';
+    text.textContent = '正在查询 GreptimeDB 缓存状态...';
+
     try {
         const r = await fetch('/api/momentum/tsanghi-cache-status');
         const d = await r.json();
-        const dot = document.getElementById('cacheDot');
-        const text = document.getElementById('cacheText');
-        const controls = document.getElementById('cacheControls');
-        const btn = document.getElementById('cacheDownloadBtn');
 
         if (d.status === 'ready') {
             dot.className = 'dot ready';
