@@ -290,10 +290,13 @@ async function loadHoldings() {
 
 function renderHoldings(holdings) {
     const el = document.getElementById('holdingsContainer');
-    document.getElementById('holdingsCount').textContent = holdings.length;
+    document.getElementById('holdingsCount').textContent =
+        holdings.length ? holdings.length : (_iquantOnline ? '0' : '--');
 
     if (!holdings.length) {
-        el.innerHTML = '<div class="empty-state">无持仓</div>';
+        el.innerHTML = _iquantOnline
+            ? '<div class="empty-state">无持仓</div>'
+            : '<div class="empty-state">iQuant 离线，无法获取持仓</div>';
         return;
     }
 
@@ -504,6 +507,7 @@ function esc(s) {
 }
 
 // --- iQuant Status Polling ---
+let _iquantOnline = false;
 let _statusFetchErrors = 0;
 async function loadIquantStatus() {
     try {
@@ -523,6 +527,7 @@ async function loadIquantStatus() {
         } else {
             label = '离线'; cls = 'offline';
         }
+        _iquantOnline = cls === 'online' || cls === 'unstable';
         ind.textContent = label;
         ind.className = 'status-indicator ' + cls;
         // Show relative time for heartbeat
@@ -540,6 +545,7 @@ async function loadIquantStatus() {
     } catch (e) {
         _statusFetchErrors++;
         if (_statusFetchErrors >= 2) {
+            _iquantOnline = false;
             const ind = document.getElementById('iquantIndicator');
             ind.textContent = '连接异常';
             ind.className = 'status-indicator offline';
