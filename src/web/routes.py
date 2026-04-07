@@ -2702,22 +2702,23 @@ def create_model_router() -> APIRouter:
         if model_dir.exists():
             for f in sorted(model_dir.glob("*.lgb"), key=lambda p: p.stat().st_mtime, reverse=True):
                 stat = f.stat()
-                models.append({
-                    "name": f.stem,
-                    "file": f.name,
-                    "size_kb": round(stat.st_size / 1024, 1),
-                    "modified": datetime.fromtimestamp(
-                        stat.st_mtime, tz=ZoneInfo("Asia/Shanghai")
-                    ).strftime("%Y-%m-%d %H:%M:%S"),
-                })
+                models.append(
+                    {
+                        "name": f.stem,
+                        "file": f.name,
+                        "size_kb": round(stat.st_size / 1024, 1),
+                        "modified": datetime.fromtimestamp(
+                            stat.st_mtime, tz=ZoneInfo("Asia/Shanghai")
+                        ).strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
 
         return {
             "model_dir": str(model_dir),
             "models": models,
             "default": "full_latest",
             "has_default": (
-                (model_dir / "full_latest.lgb").exists()
-                if model_dir.exists() else False
+                (model_dir / "full_latest.lgb").exists() if model_dir.exists() else False
             ),
         }
 

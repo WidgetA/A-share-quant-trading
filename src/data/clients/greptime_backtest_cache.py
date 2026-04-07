@@ -318,9 +318,7 @@ class GreptimeBacktestCache:
             )
         return result
 
-    async def get_multi_day_history(
-        self, start_date: str, end_date: str
-    ) -> dict[str, list[tuple]]:
+    async def get_multi_day_history(self, start_date: str, end_date: str) -> dict[str, list[tuple]]:
         """Get daily OHLCV for ALL non-suspended stocks across a date range.
 
         Single SQL query, no memory caching. Volume is converted from
@@ -362,7 +360,10 @@ class GreptimeBacktestCache:
 
         logger.info(
             "get_multi_day_history: %s..%s → %d stocks, %d total bars",
-            start_date, end_date, len(result), len(rows),
+            start_date,
+            end_date,
+            len(result),
+            len(rows),
         )
         return result
 

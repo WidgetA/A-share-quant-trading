@@ -276,10 +276,7 @@ Limit-up (skipped):
         layer_counts = scan_result.layer_counts
         lines = [
             f"ML选股报告 ({time_str})",
-            (
-                f"热门板块: {scan_result.hot_board_count}个 | "
-                f"最终: {scan_result.final_candidates}只"
-            ),
+            (f"热门板块: {scan_result.hot_board_count}个 | 最终: {scan_result.final_candidates}只"),
         ]
 
         # Layer funnel if available

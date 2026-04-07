@@ -75,9 +75,7 @@ async def run_ml_live(
         return MLScanResult(model_name=model_name)
 
     # Step 3: Resolve prev_close
-    prev_closes = await _resolve_prev_close(
-        backtest_cache, trade_calendar, today, len(quotes)
-    )
+    prev_closes = await _resolve_prev_close(backtest_cache, trade_calendar, today, len(quotes))
 
     if not prev_closes:
         raise RuntimeError("ML live scan: failed to get any prev_close data")
@@ -103,30 +101,26 @@ async def run_ml_live(
 
     logger.info(
         "ML live scan: history %s..%s → %d stocks",
-        start_37d, prev_trade_date, len(history_bars),
+        start_37d,
+        prev_trade_date,
+        len(history_bars),
     )
 
     # Step 5: Build snapshots
-    snapshot_result = MLScanner.build_snapshots(
-        universe.codes, prev_closes, quotes, history_bars
-    )
+    snapshot_result = MLScanner.build_snapshots(universe.codes, prev_closes, quotes, history_bars)
 
     if not snapshot_result.snapshots:
         return MLScanResult(model_name=model_name)
 
     # Step 6: Fetch suspended stocks (for data quality alerts)
     try:
-        suspended = await realtime_client.fetch_suspended_stocks(
-            today.strftime("%Y%m%d")
-        )
+        suspended = await realtime_client.fetch_suspended_stocks(today.strftime("%Y%m%d"))
     except Exception:
         logger.warning("ML live scan: failed to fetch suspended stocks", exc_info=True)
         suspended = set()
 
     # Step 7: Run full scan pipeline
-    return await scanner.scan(
-        snapshot_result.snapshots, today, model_name, suspended
-    )
+    return await scanner.scan(snapshot_result.snapshots, today, model_name, suspended)
 
 
 # ── Backtest scan ──────────────────────────────────────────
@@ -239,7 +233,10 @@ async def run_ml_backtest(
 
     logger.info(
         "ML backtest %s: %d snapshots from %d daily (%d with minute data)",
-        date_str, len(snapshots), daily_candidates, minute_hits,
+        date_str,
+        len(snapshots),
+        daily_candidates,
+        minute_hits,
     )
 
     if not snapshots:
@@ -294,9 +291,7 @@ async def _resolve_prev_close(
             finally:
                 await ts_client.stop()
 
-        logger.info(
-            "ML live: prev_close (%s): %d stocks", prev_trade_date, len(prev_closes)
-        )
+        logger.info("ML live: prev_close (%s): %d stocks", prev_trade_date, len(prev_closes))
     else:
         # Look back 1-7 days in GreptimeDB cache
         if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
@@ -310,7 +305,8 @@ async def _resolve_prev_close(
             if prev_daily:
                 logger.info(
                     "ML live: prev_close from %s (%d stocks)",
-                    prev_date_str, len(prev_daily),
+                    prev_date_str,
+                    len(prev_daily),
                 )
                 break
 
@@ -324,9 +320,7 @@ async def _resolve_prev_close(
     return prev_closes
 
 
-def _get_prev_trade_date(
-    trade_calendar: list[date] | None, today: date
-) -> date:
+def _get_prev_trade_date(trade_calendar: list[date] | None, today: date) -> date:
     """Get the previous trading day."""
     if trade_calendar:
         prev_dates = [d for d in trade_calendar if d < today]
@@ -340,9 +334,7 @@ def _get_prev_trade_date(
     return today - timedelta(days=1)
 
 
-def _get_history_start_date(
-    trade_calendar: list[date] | None, today: date, days: int = 50
-) -> date:
+def _get_history_start_date(trade_calendar: list[date] | None, today: date, days: int = 50) -> date:
     """Get start date for history fetch (enough for 37 trading days).
 
     We request 50 calendar days back to ensure ≥37 trading days.
