@@ -55,7 +55,7 @@ async def run_ml_live(
         RuntimeError: on data issues (trading safety: fail fast).
         FileNotFoundError: if model file doesn't exist.
     """
-    from src.strategy.strategies.ml_scanner import DailyBar, MLScanResult, MLScanner
+    from src.strategy.strategies.ml_scanner import DailyBar, MLScanner, MLScanResult
 
     today = datetime.now(BEIJING_TZ).date()
     scanner = MLScanner(concept_mapper)
@@ -97,8 +97,8 @@ async def run_ml_live(
     history_bars: dict[str, list[DailyBar]] = {}
     for code, bars in history_raw.items():
         history_bars[code] = [
-            DailyBar(date=d, open=o, high=h, low=l, close=c, volume=v)
-            for d, o, h, l, c, v in bars
+            DailyBar(date=d, open=o, high=h, low=lo, close=c, volume=v)
+            for d, o, h, lo, c, v in bars
         ]
 
     logger.info(
@@ -155,7 +155,7 @@ async def run_ml_backtest(
         MinuteDataMissingError: if minute data coverage < 50%.
         FileNotFoundError: if model file doesn't exist.
     """
-    from src.strategy.strategies.ml_scanner import DailyBar, MLScanResult, MLScanner
+    from src.strategy.strategies.ml_scanner import DailyBar, MLScanner, MLScanResult
 
     scanner = MLScanner(concept_mapper)
     date_str = trade_date.strftime("%Y-%m-%d")
@@ -176,8 +176,8 @@ async def run_ml_backtest(
     history_bars: dict[str, list[DailyBar]] = {}
     for code, bars in history_raw.items():
         history_bars[code] = [
-            DailyBar(date=d, open=o, high=h, low=l, close=c, volume=v)
-            for d, o, h, l, c, v in bars
+            DailyBar(date=d, open=o, high=h, low=lo, close=c, volume=v)
+            for d, o, h, lo, c, v in bars
         ]
 
     # Step 3: Build StockSnapshot for each stock using daily + minute data

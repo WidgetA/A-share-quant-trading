@@ -1368,7 +1368,7 @@ class MLScanner:
 
         # ML scoring: features → model → rank
         features = MLScanner.compute_all_features(
-            list(final_codes), snapshots, prep.indicators
+            set(final_codes), snapshots, prep.indicators
         )
         model = MLScanner.load_model(model_name)
         scoring = MLScanner.score_candidates(model, features)

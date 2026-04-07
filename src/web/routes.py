@@ -2706,14 +2706,19 @@ def create_model_router() -> APIRouter:
                     "name": f.stem,
                     "file": f.name,
                     "size_kb": round(stat.st_size / 1024, 1),
-                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S"),
+                    "modified": datetime.fromtimestamp(
+                        stat.st_mtime, tz=ZoneInfo("Asia/Shanghai")
+                    ).strftime("%Y-%m-%d %H:%M:%S"),
                 })
 
         return {
             "model_dir": str(model_dir),
             "models": models,
             "default": "full_latest",
-            "has_default": (model_dir / "full_latest.lgb").exists() if model_dir.exists() else False,
+            "has_default": (
+                (model_dir / "full_latest.lgb").exists()
+                if model_dir.exists() else False
+            ),
         }
 
     return router

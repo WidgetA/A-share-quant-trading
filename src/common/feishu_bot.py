@@ -23,11 +23,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 if TYPE_CHECKING:
-    from src.strategy.models import (
-        RecommendedStock,
-        ScanResult,
-        SelectedStock,
-    )
     from src.strategy.strategies.ml_scanner import MLScanResult
 
 from src.common.config import get_feishu_config
