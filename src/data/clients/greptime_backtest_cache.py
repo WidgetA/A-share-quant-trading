@@ -1257,28 +1257,27 @@ class GreptimeBacktestCache:
     # ==================== Internal Write Helpers ====================
 
     async def _write_daily(self, ts_ms: int, records: list[tuple[str, dict]]) -> None:
-        """INSERT daily records for a single date, batched to avoid silent failure."""
+        """INSERT daily records for a single date, one row at a time.
+
+        GreptimeDB silently drops data when batch INSERT exceeds ~200 rows.
+        Single-row INSERT is safe and GreptimeDB handles WAL efficiently.
+        """
         if not records:
             return
-        values = []
-        for code, rec in records:
-            tr = rec["turnover_ratio"]
-            tr_str = str(tr) if tr is not None else "NULL"
-            suspended = "true" if rec.get("is_suspended") else "false"
-            values.append(
-                f"('{code}',{ts_ms},"
-                f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
-                f"{rec['pre_close']},{rec['volume']},{rec['amount']},{tr_str},{suspended})"
-            )
         cols = (
             "(stock_code,ts,open_price,high_price,low_price,close_price,"
             "pre_close,vol,amount,turnover_ratio,is_suspended)"
         )
-        batch_size = 200
-        for bi in range(0, len(values), batch_size):
-            batch = values[bi : bi + batch_size]
-            sql = f"INSERT INTO backtest_daily{cols} VALUES " + ",".join(batch)
-            await self._db.execute(sql)
+        for code, rec in records:
+            tr = rec["turnover_ratio"]
+            tr_str = str(tr) if tr is not None else "NULL"
+            suspended = "true" if rec.get("is_suspended") else "false"
+            val = (
+                f"('{code}',{ts_ms},"
+                f"{rec['open']},{rec['high']},{rec['low']},{rec['close']},"
+                f"{rec['pre_close']},{rec['volume']},{rec['amount']},{tr_str},{suspended})"
+            )
+            await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
 
     async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
