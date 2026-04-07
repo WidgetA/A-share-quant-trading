@@ -599,7 +599,9 @@ def create_momentum_router() -> APIRouter:
                     cancel_event.set()
                     queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
                 except Exception as e:
-                    queue.put_nowait({"type": "error", "message": str(e)[:200]})
+                    err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    logger.error(f"Cache download failed: {err_msg}", exc_info=True)
+                    queue.put_nowait({"type": "error", "message": err_msg[:300]})
 
             download_task = asyncio.create_task(_run_download())
             request.app.state.cache_download_task = download_task
