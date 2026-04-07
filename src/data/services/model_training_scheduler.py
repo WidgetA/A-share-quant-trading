@@ -357,7 +357,7 @@ class ModelTrainingScheduler:
                 resp = await client.post(
                     fc_url,
                     json=payload,
-                    headers={"X-Fc-Async": "true"},
+                    headers={"X-Fc-Invocation-Type": "Async"},
                 )
                 if resp.status_code not in (200, 202):
                     self._pending_results.pop(result_token, None)
