@@ -238,7 +238,12 @@ function switchTab(name) {
 }
 
 // ========== Cache status ==========
+let _cacheStatusRunning = false;
 async function checkCacheStatus() {
+    // Prevent overlapping calls — this is the root cause of query pile-up
+    if (_cacheStatusRunning) return;
+    _cacheStatusRunning = true;
+
     const dot = document.getElementById('cacheDot');
     const text = document.getElementById('cacheText');
     const controls = document.getElementById('cacheControls');
@@ -248,7 +253,10 @@ async function checkCacheStatus() {
     text.textContent = '正在查询 GreptimeDB 缓存状态...';
 
     try {
-        const r = await fetch('/api/momentum/tsanghi-cache-status');
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 30000);
+        const r = await fetch('/api/momentum/tsanghi-cache-status', { signal: ctrl.signal });
+        clearTimeout(timer);
         const d = await r.json();
 
         if (d.status === 'ready') {
@@ -273,7 +281,13 @@ async function checkCacheStatus() {
             btn.textContent = '下载数据';
         }
     } catch(e) {
-        document.getElementById('cacheText').textContent = '无法连接服务器';
+        const msg = e.name === 'AbortError'
+            ? '查询超时 (GreptimeDB CPU 繁忙，请稍后重试)'
+            : '无法连接服务器: ' + e.message;
+        text.textContent = msg;
+        dot.className = 'dot empty';
+    } finally {
+        _cacheStatusRunning = false;
     }
 }
 
