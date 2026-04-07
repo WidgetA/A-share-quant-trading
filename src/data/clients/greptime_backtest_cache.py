@@ -462,6 +462,12 @@ class GreptimeBacktestCache:
         if end_date > db_end:
             gaps.append((db_end + timedelta(days=1), end_date))
 
+        # Internal daily-data gaps (dates with too few stocks = partial download)
+        partial_dates = await self._find_partial_daily_dates()
+        for d in partial_dates:
+            if start_date <= d <= end_date:
+                gaps.append((d, d))
+
         # Internal minute-data gaps
         for gap_start, gap_end in await self.find_minute_gaps():
             clipped_start = max(gap_start, start_date)
@@ -1570,6 +1576,17 @@ class GreptimeBacktestCache:
                     pass
 
     # ==================== Resume Helpers ====================
+
+    async def _find_partial_daily_dates(self) -> list[date]:
+        """Find dates with > 0 but < _MIN_STOCKS_PER_DAY daily rows.
+
+        These are partial downloads that should be re-downloaded.
+        """
+        rows = await self._db.fetch(
+            "SELECT ts, COUNT(*) as cnt FROM backtest_daily "
+            f"GROUP BY ts HAVING COUNT(*) < {_MIN_STOCKS_PER_DAY}"
+        )
+        return [_ts_to_date(r["ts"]) for r in rows if int(r["cnt"]) > 0]
 
     async def _get_existing_daily_dates(self) -> set[date]:
         """Get dates that have *sufficient* daily data in DB.
