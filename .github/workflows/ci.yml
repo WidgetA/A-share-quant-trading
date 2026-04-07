@@ -154,6 +154,8 @@ jobs:
         with:
           context: ./serverless
           push: true
+          provenance: false
+          platforms: linux/amd64
           tags: |
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:latest
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:${{ github.sha }}
