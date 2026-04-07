@@ -676,8 +676,10 @@ class GreptimeBacktestCache:
         daily_stocks = await self.get_daily_stock_count()
         daily_days = await self.get_daily_date_count()
         minute_stocks = await self.get_minute_stock_count()
-        minute_gaps = await self.find_minute_gaps()
-        gap_ranges = [[str(s), str(e)] for s, e in minute_gaps]
+        # NOTE: find_minute_gaps() is intentionally excluded here.
+        # It runs GROUP BY on two large tables which OOMs GreptimeDB on
+        # the 1.58GB server. Gaps are only needed during download, not
+        # for status display.
 
         result = {
             "status": "ready",
@@ -686,8 +688,8 @@ class GreptimeBacktestCache:
             "daily_stocks": daily_stocks,
             "daily_days": daily_days,
             "minute_stocks": minute_stocks,
-            "minute_gaps": gap_ranges,
-            "has_gaps": len(gap_ranges) > 0,
+            "minute_gaps": [],
+            "has_gaps": False,
         }
         self._cache_status_result = result
         self._cache_status_ts = now
