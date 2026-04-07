@@ -456,31 +456,53 @@ def _handle_train():
         return {"success": False, "error": "Empty or invalid JSON body"}, 400
 
     mode = data.get("mode", "full")
+    result_callback_url = data.get("result_callback_url")
 
+    # Run training and deliver result via callback
+    result = _run_training(data, mode, lgb, t0)
+    _deliver_result(result_callback_url, result)
+    return result
+
+
+def _deliver_result(result_callback_url: str | None, result: dict) -> None:
+    """POST training result to trading-service callback URL."""
+    if not result_callback_url:
+        return
+    try:
+        resp = http_requests.post(result_callback_url, json=result, timeout=30)
+        logger.info("Result callback: HTTP %d", resp.status_code)
+    except Exception as e:
+        logger.error("Result callback failed: %s", e)
+
+
+def _run_training(data: dict, mode: str, lgb, t0: float) -> dict:
+    """Execute the full training pipeline. Always returns a result dict."""
+    try:
+        return _run_training_inner(data, mode, lgb, t0)
+    except Exception as e:
+        logger.error("Training failed: %s", e, exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+def _run_training_inner(data: dict, mode: str, lgb, t0: float) -> dict:
+    """Inner training logic that may raise exceptions."""
     # Prefer callback mode (streaming from trading-service), fallback to direct data
     callback_url = data.get("callback_url")
     daily_data = data.get("daily_data")
 
     if callback_url:
         logger.info("Fetching training data via callback: %s", callback_url[:80])
-        try:
-            daily_data = _fetch_training_data(callback_url)
-        except Exception as e:
-            logger.error("Callback fetch failed: %s", e, exc_info=True)
-            return {"success": False, "error": f"Callback fetch failed: {e}"}, 502
+        daily_data = _fetch_training_data(callback_url)
 
     if not daily_data:
-        return {"success": False, "error": "Missing daily_data and no callback_url"}, 400
+        return {"success": False, "error": "Missing daily_data and no callback_url"}
 
     logger.info("Train request: mode=%s, %d dates", mode, len(daily_data))
 
     # ── Step 1: Build training dataset ──
     logger.info("Step 1/4: Building training dataset...")
     t_step = time.time()
-    try:
-        dataset = build_training_data(daily_data, mode)
-    except ValueError as e:
-        return {"success": False, "error": str(e)}, 400
+    dataset = build_training_data(daily_data, mode)
 
     features = dataset["features"]
     labels = dataset["labels"]

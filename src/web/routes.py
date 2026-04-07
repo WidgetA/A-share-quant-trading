@@ -2832,4 +2832,14 @@ def create_model_router() -> APIRouter:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @router.post("/api/model/training-result")
+    async def receive_training_result(request: Request, token: str):
+        """Receive async training result from FC callback."""
+        scheduler = _get_scheduler(request)
+        body = await request.json()
+        accepted = scheduler.receive_training_result(token, body)
+        if not accepted:
+            raise HTTPException(status_code=401, detail="Invalid or unknown token")
+        return {"status": "accepted"}
+
     return router

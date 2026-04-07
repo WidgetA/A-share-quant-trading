@@ -91,6 +91,7 @@ class ModelTrainingScheduler:
         self.training_in_progress: bool = False
         self.training_log: list[str] = []
         self._training_tokens: dict[str, dict] = {}
+        self._pending_results: dict[str, dict] = {}  # token -> {"event", "result"}
 
     def _generate_training_token(self, mode: str) -> str:
         """Generate a one-time token for FC callback authentication."""
@@ -114,6 +115,17 @@ class ModelTrainingScheduler:
             return None
         info["used"] = True
         return info["mode"]
+
+    def receive_training_result(self, token: str, result: dict) -> bool:
+        """Receive async training result from FC callback. Returns True if accepted."""
+        pending = self._pending_results.get(token)
+        if not pending:
+            logger.warning("Unknown result token: %s", token[:8])
+            return False
+        pending["result"] = result
+        pending["event"].set()
+        logger.info("Training result received for token %s", token[:8])
+        return True
 
     def get_status(self) -> dict:
         """Return scheduler status for dashboard display."""
@@ -308,14 +320,24 @@ class ModelTrainingScheduler:
             await _notify_feishu(f"[模型{label}] {error}，跳过本次{label}")
             return {"error": error}
 
-        # Step 2: Generate callback URL for FC to pull data
-        token = self._generate_training_token(mode)
+        # Step 2: Generate callback URLs for FC
         base_url = getattr(self._app_state, "web_base_url", "http://localhost:8000")
-        callback_url = f"{base_url}/api/model/training-data?token={token}"
+        data_token = self._generate_training_token(mode)
+        callback_url = f"{base_url}/api/model/training-data?token={data_token}"
+        result_token = self._generate_training_token(mode)
+        result_callback_url = f"{base_url}/api/model/training-result?token={result_token}"
         await _log(f"回调URL已生成 ({base_url})")
 
+        # Prepare async event for result delivery
+        event = asyncio.Event()
+        self._pending_results[result_token] = {"event": event, "result": None}
+
         # Step 3: Build lightweight payload (no daily_data!)
-        payload: dict = {"mode": mode, "callback_url": callback_url}
+        payload: dict = {
+            "mode": mode,
+            "callback_url": callback_url,
+            "result_callback_url": result_callback_url,
+        }
 
         if init_model_path and init_model_path.exists():
             model_bytes = init_model_path.read_bytes()
@@ -326,24 +348,46 @@ class ModelTrainingScheduler:
         if s3_config:
             payload["s3_config"] = s3_config
 
-        # Step 4: POST trigger to FC (FC will callback to fetch data)
+        # Step 4: POST async trigger to FC
         fc_url = get_fc_url()
         assert fc_url, "FC URL not configured"  # guaranteed by _train() caller
-        await _log("发送训练触发请求到 FC...")
+        await _log("发送异步训练请求到 FC...")
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
-                resp = await client.post(fc_url, json=payload)
-                resp.raise_for_status()
-                result = resp.json()
-        except httpx.TimeoutException:
-            error = "FC 训练超时 (>600s)"
-            await _log(error)
-            await _notify_feishu(f"[模型{label}] {error}")
-            return {"error": error}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                resp = await client.post(
+                    fc_url,
+                    json=payload,
+                    headers={"X-Fc-Async": "true"},
+                )
+                if resp.status_code not in (200, 202):
+                    self._pending_results.pop(result_token, None)
+                    error = f"FC 触发失败: HTTP {resp.status_code}"
+                    await _log(error)
+                    await _notify_feishu(f"[模型{label}] {error}")
+                    return {"error": error}
         except Exception as e:
+            self._pending_results.pop(result_token, None)
             error = f"FC 请求失败: {e}"
             await _log(error)
             await _notify_feishu(f"[模型{label}] {error}")
+            return {"error": error}
+
+        await _log("FC 已接受训练任务，等待训练完成...")
+
+        # Wait for FC to call back with result
+        try:
+            await asyncio.wait_for(event.wait(), timeout=900)
+        except asyncio.TimeoutError:
+            error = "FC 训练超时 (>900s 未收到回调)"
+            await _log(error)
+            await _notify_feishu(f"[模型{label}] {error}")
+            return {"error": error}
+        finally:
+            result = self._pending_results.pop(result_token, {}).get("result")
+
+        if not result:
+            error = "FC 回调结果为空"
+            await _log(error)
             return {"error": error}
 
         if not result.get("success"):
