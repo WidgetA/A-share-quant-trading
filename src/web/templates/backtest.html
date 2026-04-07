@@ -673,7 +673,6 @@ function renderCsvResult(d) {
     document.getElementById('rangeStart').value = ago.toISOString().slice(0, 10);
 
     checkCacheStatus();
-    setInterval(checkCacheStatus, 30000);
 })();
 </script>
 {% endblock %}
