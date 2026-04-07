@@ -463,6 +463,34 @@ def set_cache_scheduler_enabled(enabled: bool) -> None:
     logger.info(f"Cache scheduler {'enabled' if enabled else 'disabled'} via web UI")
 
 
+# --- Daily Scan Toggle ---
+
+_daily_scan_enabled_override: bool | None = None
+DAILY_SCAN_FILE = PROJECT_ROOT / "data" / "daily_scan_enabled.txt"
+
+
+def get_daily_scan_enabled() -> bool:
+    """Return whether the daily scan is enabled. Default: True."""
+    global _daily_scan_enabled_override
+    if _daily_scan_enabled_override is not None:
+        return _daily_scan_enabled_override
+    if DAILY_SCAN_FILE.exists():
+        val = DAILY_SCAN_FILE.read_text(encoding="utf-8").strip().lower()
+        if val in ("false", "0", "off", "no"):
+            return False
+        return True
+    return True
+
+
+def set_daily_scan_enabled(enabled: bool) -> None:
+    """Set daily scan enabled state and persist to disk."""
+    global _daily_scan_enabled_override
+    _daily_scan_enabled_override = enabled
+    DAILY_SCAN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DAILY_SCAN_FILE.write_text(str(enabled).lower(), encoding="utf-8")
+    logger.info(f"Daily scan {'enabled' if enabled else 'disabled'} via web UI")
+
+
 # --- S3 Config ---
 
 S3_CONFIG_FILE = PROJECT_ROOT / "data" / "s3_config.json"

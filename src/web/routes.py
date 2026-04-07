@@ -114,6 +114,16 @@ def create_router() -> APIRouter:
 
         today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
+        # Get daily scan status
+        from src.common.config import get_daily_scan_enabled
+
+        monitor_state = getattr(request.app.state, "momentum_monitor_state", {})
+        daily_scan_status = {
+            "enabled": get_daily_scan_enabled(),
+            "running": monitor_state.get("running", False),
+            "last_scan_time": monitor_state.get("last_scan_time"),
+        }
+
         resp = templates.TemplateResponse(
             "index.html",
             {
@@ -121,6 +131,7 @@ def create_router() -> APIRouter:
                 "iquant_status": iquant_status,
                 "scheduler": scheduler_status,
                 "model_scheduler": model_scheduler_status,
+                "daily_scan": daily_scan_status,
                 "today": today,
             },
         )
@@ -1566,6 +1577,15 @@ async def _run_intraday_monitor(state: dict) -> None:
             now = datetime.now(beijing_tz)
             current_time = now.time()
 
+            # Check if daily scan is enabled
+            from src.common.config import get_daily_scan_enabled
+
+            if not get_daily_scan_enabled():
+                state["scan_enabled"] = False
+                await asyncio.sleep(30)
+                continue
+            state["scan_enabled"] = True
+
             # Skip non-trading days (weekends + holidays)
             if now.weekday() >= 5:
                 await asyncio.sleep(3600)
@@ -1910,6 +1930,27 @@ def create_settings_router() -> APIRouter:
             "success": True,
             "enabled": enabled,
             "message": f"缓存定时更新已{'开启' if enabled else '关闭'}",
+        }
+
+    # === DAILY SCAN TOGGLE ===
+
+    @router.get("/api/settings/daily-scan")
+    async def get_daily_scan_status():
+        from src.common.config import get_daily_scan_enabled
+
+        return {"enabled": get_daily_scan_enabled()}
+
+    @router.post("/api/settings/daily-scan")
+    async def set_daily_scan_status(request: Request):
+        from src.common.config import set_daily_scan_enabled
+
+        body = await request.json()
+        enabled = bool(body.get("enabled", True))
+        set_daily_scan_enabled(enabled)
+        return {
+            "success": True,
+            "enabled": enabled,
+            "message": f"每日扫描已{'开启' if enabled else '关闭'}",
         }
 
     # === FC TRAINING ENDPOINT URL ===

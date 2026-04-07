@@ -116,6 +116,33 @@
             </div>
         </div>
 
+        <!-- Daily Scan Toggle -->
+        <div class="status-card">
+            <div class="status-card-header">
+                <h3>每日扫描</h3>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dailyScanToggle"
+                        {% if daily_scan.enabled %}checked{% endif %}
+                        onchange="toggleDailyScan(this)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="status-card-body">
+                <div class="status-card-row">
+                    <span class="status-card-label">状态</span>
+                    <span class="status-card-value" id="dailyScanStatus">{{ '已开启' if daily_scan.enabled else '已关闭' }}</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">扫描窗口</span>
+                    <span class="status-card-value">09:39 - 09:50</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">上次扫描</span>
+                    <span class="status-card-value" id="lastScanTime">{{ daily_scan.last_scan_time or '--' }}</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Cache Scheduler Status -->
         <div class="status-card">
             <div class="status-card-header">
@@ -260,6 +287,24 @@ function showToast(msg, type) {
     t.textContent = msg;
     t.className = 'toast ' + type + ' show';
     setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// --- Toggle daily scan ---
+async function toggleDailyScan(el) {
+    try {
+        const resp = await fetch('/api/settings/daily-scan', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: el.checked})
+        });
+        const data = await resp.json();
+        if (data.success) {
+            document.getElementById('dailyScanStatus').textContent = el.checked ? '已开启' : '已关闭';
+            showToast(data.message, 'success');
+        } else {
+            el.checked = !el.checked;
+        }
+    } catch(e) { el.checked = !el.checked; }
 }
 
 // --- Toggle cache scheduler ---
