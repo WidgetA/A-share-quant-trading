@@ -1521,32 +1521,13 @@ class GreptimeBacktestCache:
     async def _get_existing_daily_dates(self) -> set[date]:
         """Get all dates that have daily data in DB.
 
-        Dates with abnormally few stocks (< _MIN_STOCKS_PER_DAY) are excluded
-        so they get re-downloaded on next resume.
+        Uses a lightweight DISTINCT query instead of GROUP BY + COUNT
+        to avoid CPU-intensive full table scans on GreptimeDB.
         """
-        rows = await self._db.fetch("SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts")
+        rows = await self._db.fetch("SELECT DISTINCT ts FROM backtest_daily ORDER BY ts")
         if not rows:
             return set()
-
-        counts = [int(r["cnt"]) for r in rows]
-        median_count = sorted(counts)[len(counts) // 2]
-
-        complete_dates: set[date] = set()
-        incomplete_dates: list[str] = []
-        for r in rows:
-            d = _ts_to_date(r["ts"])
-            cnt = int(r["cnt"])
-            if cnt < _MIN_STOCKS_PER_DAY and median_count > _MIN_STOCKS_PER_DAY:
-                incomplete_dates.append(f"{d}({cnt})")
-            else:
-                complete_dates.add(d)
-
-        if incomplete_dates:
-            logger.warning(
-                f"Daily resume: {len(incomplete_dates)} incomplete date(s) "
-                f"will be re-downloaded: {', '.join(incomplete_dates[:5])}"
-            )
-        return complete_dates
+        return {_ts_to_date(r["ts"]) for r in rows}
 
     async def _get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have *sufficient* minute data in the given range.
