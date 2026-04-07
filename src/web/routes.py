@@ -372,7 +372,7 @@ def create_momentum_router() -> APIRouter:
 
             return StreamingResponse(_cached(), media_type="text/event-stream")
 
-        progress_queue: asyncio.Queue[str] = asyncio.Queue()
+        progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
         result_holder: list[dict] = []
 
         async def _on_step(msg: str) -> None:
@@ -381,7 +381,6 @@ def create_momentum_router() -> APIRouter:
         async def _run_queries() -> None:
             try:
                 result = await cache.get_cache_status_streaming(on_step=_on_step)
-                # Update the cache
                 cache._cache_status_result = result
                 cache._cache_status_ts = _time.monotonic()
                 result_holder.append(result)
@@ -396,10 +395,12 @@ def create_momentum_router() -> APIRouter:
                 msg = await progress_queue.get()
                 if msg is None:
                     break
-                yield f"data: {json.dumps({'type': 'step', 'message': msg}, ensure_ascii=False)}\n\n"
+                evt = {"type": "step", "message": msg}
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             await task
             r = result_holder[0] if result_holder else {"status": "error"}
-            yield f"data: {json.dumps({'type': 'result', **r}, ensure_ascii=False)}\n\n"
+            payload = {"type": "result", **r}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
