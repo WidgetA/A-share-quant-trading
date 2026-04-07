@@ -115,7 +115,7 @@ def create_router() -> APIRouter:
         today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
         # Get daily scan status
-        from src.common.config import get_daily_scan_enabled
+        from src.common.config import get_daily_scan_enabled, get_recommendations_enabled
 
         monitor_state = getattr(request.app.state, "momentum_monitor_state", {})
         daily_scan_status = {
@@ -132,6 +132,7 @@ def create_router() -> APIRouter:
                 "scheduler": scheduler_status,
                 "model_scheduler": model_scheduler_status,
                 "daily_scan": daily_scan_status,
+                "recommendations_enabled": get_recommendations_enabled(),
                 "today": today,
             },
         )
@@ -1951,6 +1952,27 @@ def create_settings_router() -> APIRouter:
             "success": True,
             "enabled": enabled,
             "message": f"每日扫描已{'开启' if enabled else '关闭'}",
+        }
+
+    # === RECOMMENDATIONS TOGGLE ===
+
+    @router.get("/api/settings/recommendations")
+    async def get_recommendations_status():
+        from src.common.config import get_recommendations_enabled
+
+        return {"enabled": get_recommendations_enabled()}
+
+    @router.post("/api/settings/recommendations")
+    async def set_recommendations_status(request: Request):
+        from src.common.config import set_recommendations_enabled
+
+        body = await request.json()
+        enabled = bool(body.get("enabled", True))
+        set_recommendations_enabled(enabled)
+        return {
+            "success": True,
+            "enabled": enabled,
+            "message": f"今日推荐已{'开启' if enabled else '关闭'}",
         }
 
     # === FC TRAINING ENDPOINT URL ===

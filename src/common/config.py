@@ -491,6 +491,34 @@ def set_daily_scan_enabled(enabled: bool) -> None:
     logger.info(f"Daily scan {'enabled' if enabled else 'disabled'} via web UI")
 
 
+# --- Recommendations Toggle ---
+
+_recommendations_enabled_override: bool | None = None
+RECOMMENDATIONS_FILE = PROJECT_ROOT / "data" / "recommendations_enabled.txt"
+
+
+def get_recommendations_enabled() -> bool:
+    """Return whether the recommendations panel is enabled. Default: True."""
+    global _recommendations_enabled_override
+    if _recommendations_enabled_override is not None:
+        return _recommendations_enabled_override
+    if RECOMMENDATIONS_FILE.exists():
+        val = RECOMMENDATIONS_FILE.read_text(encoding="utf-8").strip().lower()
+        if val in ("false", "0", "off", "no"):
+            return False
+        return True
+    return True
+
+
+def set_recommendations_enabled(enabled: bool) -> None:
+    """Set recommendations enabled state and persist to disk."""
+    global _recommendations_enabled_override
+    _recommendations_enabled_override = enabled
+    RECOMMENDATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RECOMMENDATIONS_FILE.write_text(str(enabled).lower(), encoding="utf-8")
+    logger.info(f"Recommendations {'enabled' if enabled else 'disabled'} via web UI")
+
+
 # --- S3 Config ---
 
 S3_CONFIG_FILE = PROJECT_ROOT / "data" / "s3_config.json"

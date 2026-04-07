@@ -252,7 +252,15 @@
         <div class="panel">
             <div class="panel-header">
                 <h3 id="recTitle">今日推荐 (Top 10)</h3>
-                <span class="badge" id="recCount">0</span>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="recToggle"
+                            {% if recommendations_enabled %}checked{% endif %}
+                            onchange="toggleRecommendations(this)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="badge" id="recCount">0</span>
+                </div>
             </div>
             <div id="recContainer">
                 <div class="empty-state">加载中...</div>
@@ -407,9 +415,41 @@ async function doSell(code, name, quantity, btn) {
     }
 }
 
+// --- Toggle recommendations ---
+async function toggleRecommendations(el) {
+    try {
+        const resp = await fetch('/api/settings/recommendations', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: el.checked})
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(data.message, 'success');
+            if (el.checked) {
+                loadRecommendations();
+            } else {
+                document.getElementById('recContainer').innerHTML =
+                    '<div class="empty-state">推荐功能已关闭</div>';
+                document.getElementById('recCount').textContent = '--';
+            }
+        } else {
+            el.checked = !el.checked;
+        }
+    } catch(e) { el.checked = !el.checked; }
+}
+
 // --- Recommendations ---
 
 async function loadRecommendations() {
+    // Skip if toggle is off
+    if (!document.getElementById('recToggle').checked) {
+        document.getElementById('recContainer').innerHTML =
+            '<div class="empty-state">推荐功能已关闭</div>';
+        document.getElementById('recCount').textContent = '--';
+        return;
+    }
+
     const selectedDate = document.getElementById('tradeDatePicker').value;
     const isToday = selectedDate === TODAY;
     document.getElementById('dateHint').textContent = isToday ? '' : '历史数据 (仅查看)';
