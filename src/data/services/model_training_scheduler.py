@@ -332,17 +332,13 @@ class ModelTrainingScheduler:
         event = asyncio.Event()
         self._pending_results[result_token] = {"event": event, "result": None}
 
-        # Step 3: Build lightweight payload (no daily_data!)
+        # Step 3: Build lightweight payload (no daily_data, no model bytes!)
+        # FC downloads init model from S3 directly for finetune
         payload: dict = {
             "mode": mode,
             "callback_url": callback_url,
             "result_callback_url": result_callback_url,
         }
-
-        if init_model_path and init_model_path.exists():
-            model_bytes = init_model_path.read_bytes()
-            payload["init_model_b64"] = base64.b64encode(model_bytes).decode("ascii")
-            await _log(f"附加基准模型: {init_model_path.name} ({len(model_bytes)} bytes)")
 
         s3_config = get_s3_config()
         if s3_config:

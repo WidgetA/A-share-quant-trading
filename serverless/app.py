@@ -372,8 +372,8 @@ def _fetch_training_data(callback_url: str) -> dict[str, dict[str, dict]]:
 # ── S3 Upload ──────────────────────────────────────────────
 
 
-def upload_to_s3(local_path: Path, s3_key: str, s3_config: dict) -> str | None:
-    """Upload file to S3. Returns S3 URI or None."""
+def _get_s3_client(s3_config: dict):
+    """Create boto3 S3 client from config. Returns (client, bucket) or (None, None)."""
     import boto3
 
     endpoint_url = s3_config.get("endpoint_url", "")
@@ -382,8 +382,7 @@ def upload_to_s3(local_path: Path, s3_key: str, s3_config: dict) -> str | None:
     bucket = s3_config.get("bucket", "")
 
     if not all([endpoint_url, access_key, secret_key, bucket]):
-        logger.warning("S3 config incomplete, skipping upload")
-        return None
+        return None, None
 
     client = boto3.client(
         "s3",
@@ -391,6 +390,31 @@ def upload_to_s3(local_path: Path, s3_key: str, s3_config: dict) -> str | None:
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
     )
+    return client, bucket
+
+
+def download_from_s3(s3_key: str, local_path: Path, s3_config: dict) -> bool:
+    """Download file from S3. Returns True if successful."""
+    client, bucket = _get_s3_client(s3_config)
+    if not client:
+        logger.warning("S3 config incomplete, skipping download")
+        return False
+    try:
+        client.download_file(bucket, s3_key, str(local_path))
+        logger.info("Downloaded s3://%s/%s -> %s", bucket, s3_key, local_path.name)
+        return True
+    except Exception as e:
+        logger.warning("S3 download failed for %s: %s", s3_key, e)
+        return False
+
+
+def upload_to_s3(local_path: Path, s3_key: str, s3_config: dict) -> str | None:
+    """Upload file to S3. Returns S3 URI or None."""
+    client, bucket = _get_s3_client(s3_config)
+    if not client:
+        logger.warning("S3 config incomplete, skipping upload")
+        return None
+
     client.upload_file(str(local_path), bucket, s3_key)
     uri = f"s3://{bucket}/{s3_key}"
     logger.info("Uploaded %s -> %s", local_path.name, uri)
@@ -545,16 +569,19 @@ def _run_training_inner(data: dict, mode: str, lgb, t0: float) -> dict:
     # ── Step 3: Load init model for fine-tuning ──
     logger.info("Step 3/4: Preparing init model...")
     init_model = None
-    init_model_b64 = data.get("init_model_b64")
     tmp_init = None
+    s3_config = data.get("s3_config")
 
-    if init_model_b64:
-        model_bytes = base64.b64decode(init_model_b64)
+    if mode == "finetune" and s3_config:
         tmp_init = tempfile.NamedTemporaryFile(suffix=".lgb", delete=False)
-        tmp_init.write(model_bytes)
         tmp_init.close()
-        init_model = tmp_init.name
-        logger.info("Fine-tuning from base model (%d bytes)", len(model_bytes))
+        if download_from_s3("models/full_latest.lgb", Path(tmp_init.name), s3_config):
+            init_model = tmp_init.name
+            logger.info("Downloaded init model from S3")
+        else:
+            Path(tmp_init.name).unlink(missing_ok=True)
+            tmp_init = None
+            logger.warning("No init model found in S3, training from scratch")
 
     # ── Step 4: Train ──
     logger.info(
