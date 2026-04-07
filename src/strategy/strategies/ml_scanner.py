@@ -198,6 +198,35 @@ class TrainingRecord:
     label: int  # 0-4 quintile (assigned per day)
 
 
+@dataclass
+class MLScoredStock:
+    """One scored stock from ML inference."""
+
+    stock_code: str
+    stock_name: str  # from board_constituents.json
+    board_name: str  # best hot board
+    ml_score: float  # LightGBM LambdaRank prediction
+    open_price: float
+    prev_close: float
+    latest_price: float
+    gain_pct: float  # (latest - prev_close) / prev_close × 100
+    early_gain_pct: float  # (latest - open) / open × 100
+    turnover_amp: float
+
+
+@dataclass
+class MLScanResult:
+    """Complete output of ML scan pipeline."""
+
+    recommended: MLScoredStock | None = None  # top-1 ranked stock
+    all_scored: list[MLScoredStock] = field(default_factory=list)  # top-10
+    feature_importance: dict[str, float] = field(default_factory=dict)
+    model_name: str = ""
+    layer_counts: dict[str, int] = field(default_factory=dict)
+    hot_board_count: int = 0
+    final_candidates: int = 0
+
+
 # ── Feature Constants ───────────────────────────────────────
 
 # 13 basic + 14 advanced + 11 cross = 38 raw features
@@ -1255,3 +1284,134 @@ class MLScanner:
         booster = lgb.Booster(model_file=str(path))
         logger.info("load_model: loaded from %s", path)
         return booster
+
+    # ── Full Scan Pipeline ──────────────────────────────────
+
+    async def scan(
+        self,
+        snapshots: dict[str, StockSnapshot],
+        today: date,
+        model_name: str = "full_latest",
+        suspended: set[str] | None = None,
+    ) -> MLScanResult:
+        """Run full 8-layer filter + ML scoring pipeline.
+
+        Args:
+            snapshots: {code: StockSnapshot} from build_snapshots().
+            today: Current trading date.
+            model_name: Model file name (without .lgb extension).
+            suspended: Today's suspended stock codes (for board data alerts).
+
+        Returns:
+            MLScanResult with ranked recommendations.
+
+        Raises:
+            FileNotFoundError: If model file doesn't exist.
+            ImportError: If lightgbm is not installed.
+        """
+        layer_counts: dict[str, int] = {"L0_snapshots": len(snapshots)}
+
+        # Step 0: Build universe (for board mapping)
+        universe = await self.build_universe()
+        layer_counts["L0_universe"] = len(universe.codes)
+
+        # Build code → name lookup from universe board_stocks
+        code_name: dict[str, str] = {}
+        for members in universe.board_stocks.values():
+            for code, name in members:
+                if code not in code_name:
+                    code_name[code] = name
+
+        # Preprocess: compute indicators + IPO filter
+        prep = MLScanner.preprocess(snapshots, today)
+        layer_counts["L1_after_preprocess"] = len(prep.indicators)
+
+        # Step 2: Hot board filter
+        hot = MLScanner.filter_hot_boards(
+            universe.board_stocks,
+            snapshots,
+            set(prep.indicators.keys()),
+            suspended or set(),
+        )
+        layer_counts["L2_hot_boards"] = len(hot.qualified_codes)
+
+        # Step 3: Early gain filter
+        gain_codes = MLScanner.filter_by_early_gain(hot.qualified_codes, snapshots)
+        layer_counts["L3_early_gain"] = len(gain_codes)
+
+        # Step 4: Price filter
+        price_codes = MLScanner.filter_by_price(gain_codes, snapshots)
+        layer_counts["L4_price"] = len(price_codes)
+
+        # Step 5: Volume amplification filter
+        vol_result = MLScanner.filter_by_volume(price_codes, snapshots, prep.indicators)
+        layer_counts["L5_volume"] = len(vol_result.passed_codes)
+
+        # Step 6: Surge ratio filter
+        surge_codes = MLScanner.filter_by_surge_ratio(
+            vol_result.passed_codes, snapshots, prep.indicators
+        )
+        layer_counts["L6_surge"] = len(surge_codes)
+
+        # Step 7: Upper shadow filter
+        final_codes = MLScanner.filter_by_upper_shadow(surge_codes, snapshots)
+        layer_counts["L7_final"] = len(final_codes)
+
+        if not final_codes:
+            logger.info("scan: no candidates after filtering, returning empty result")
+            return MLScanResult(
+                layer_counts=layer_counts,
+                hot_board_count=len(hot.hot_boards),
+                final_candidates=0,
+                model_name=model_name,
+            )
+
+        # ML scoring: features → model → rank
+        features = MLScanner.compute_all_features(
+            list(final_codes), snapshots, prep.indicators
+        )
+        model = MLScanner.load_model(model_name)
+        scoring = MLScanner.score_candidates(model, features)
+
+        # Build MLScoredStock list from ranked results
+        all_scored: list[MLScoredStock] = []
+        for code, score in scoring.ranked:
+            snap = snapshots[code]
+            ind = prep.indicators.get(code)
+            amp = 0.0
+            if ind and ind.avg_volume_37d > 0:
+                expected = ind.avg_volume_37d * MLScanner._EARLY_SESSION_RATIO
+                amp = snap.early_volume / expected if expected > 0 else 0.0
+
+            all_scored.append(
+                MLScoredStock(
+                    stock_code=code,
+                    stock_name=code_name.get(code, ""),
+                    board_name=hot.best_board.get(code, ""),
+                    ml_score=score,
+                    open_price=snap.open_price,
+                    prev_close=snap.prev_close,
+                    latest_price=snap.latest_price,
+                    gain_pct=snap.gain_pct,
+                    early_gain_pct=snap.early_gain_pct,
+                    turnover_amp=round(amp, 4),
+                )
+            )
+
+        logger.info(
+            "scan: %d final candidates, top=%s (%.4f), model=%s",
+            len(all_scored),
+            all_scored[0].stock_code if all_scored else "-",
+            all_scored[0].ml_score if all_scored else 0.0,
+            model_name,
+        )
+
+        return MLScanResult(
+            recommended=all_scored[0] if all_scored else None,
+            all_scored=all_scored[:10],
+            feature_importance=scoring.feature_importance,
+            model_name=model_name,
+            layer_counts=layer_counts,
+            hot_board_count=len(hot.hot_boards),
+            final_candidates=len(final_codes),
+        )

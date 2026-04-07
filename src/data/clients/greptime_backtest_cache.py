@@ -318,6 +318,54 @@ class GreptimeBacktestCache:
             )
         return result
 
+    async def get_multi_day_history(
+        self, start_date: str, end_date: str
+    ) -> dict[str, list[tuple]]:
+        """Get daily OHLCV for ALL non-suspended stocks across a date range.
+
+        Single SQL query, no memory caching. Volume is converted from
+        手 (lots) to 股 (shares) at read time (×100).
+
+        Args:
+            start_date: Start date (YYYY-MM-DD), inclusive.
+            end_date: End date (YYYY-MM-DD), inclusive.
+
+        Returns:
+            {code: [(date, open, high, low, close, volume_in_shares), ...]}
+            sorted by date ascending per stock.
+        """
+        start_ms = _date_to_epoch_ms(_parse_date_str(start_date))
+        end_ms = _date_to_epoch_ms(_parse_date_str(end_date))
+        rows = await self._db.fetch(
+            f"SELECT stock_code, ts, open_price, high_price, low_price, "
+            f"close_price, vol "
+            f"FROM backtest_daily "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+            f"AND (is_suspended IS NULL OR is_suspended = false) "
+            f"ORDER BY stock_code, ts"
+        )
+
+        result: dict[str, list[tuple]] = {}
+        for r in rows:
+            code = r["stock_code"]
+            bar = (
+                _ts_to_date(r["ts"]),
+                float(r["open_price"]),
+                float(r["high_price"]),
+                float(r["low_price"]),
+                float(r["close_price"]),
+                float(r["vol"]) * 100,  # 手 → 股
+            )
+            if code not in result:
+                result[code] = []
+            result[code].append(bar)
+
+        logger.info(
+            "get_multi_day_history: %s..%s → %d stocks, %d total bars",
+            start_date, end_date, len(result), len(rows),
+        )
+        return result
+
     async def get_stock_codes(self) -> list[str]:
         """Get all unique stock codes in daily table."""
         rows = await self._db.fetch(

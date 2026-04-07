@@ -498,14 +498,14 @@ function renderSingleResult(d) {
     if (d.scored_stocks && d.scored_stocks.length > 0) {
         html += '<div class="result-card"><h4>评分排名</h4>';
         html += '<table class="result-table"><thead><tr>';
-        html += '<th>排名</th><th>代码</th><th>名称</th><th>板块</th><th class="num">V3分</th><th class="num">开盘涨幅</th><th class="num">换手振幅</th><th class="num">9:40价</th>';
+        html += '<th>排名</th><th>代码</th><th>名称</th><th>板块</th><th class="num">ML分</th><th class="num">盘中涨幅</th><th class="num">换手振幅</th><th class="num">9:40价</th>';
         html += '</tr></thead><tbody>';
         d.scored_stocks.forEach((s, i) => {
             const isRec = d.recommended_stock && s.stock_code === d.recommended_stock.stock_code;
             html += `<tr class="${isRec ? 'recommended-row' : ''}">`;
             html += `<td>${i+1}</td><td>${s.stock_code}</td><td>${s.stock_name}</td><td>${s.board_name}</td>`;
-            html += `<td class="num">${s.v3_score.toFixed(4)}</td>`;
-            html += `<td class="num ${s.gain_from_open_pct >= 0 ? 'positive' : 'negative'}">${s.gain_from_open_pct.toFixed(2)}%</td>`;
+            html += `<td class="num">${s.ml_score.toFixed(4)}</td>`;
+            html += `<td class="num ${s.early_gain_pct >= 0 ? 'positive' : 'negative'}">${s.early_gain_pct.toFixed(2)}%</td>`;
             html += `<td class="num">${s.turnover_amp.toFixed(2)}x</td>`;
             html += `<td class="num">${s.latest_price.toFixed(2)}</td>`;
             html += '</tr>';
@@ -516,7 +516,7 @@ function renderSingleResult(d) {
     if (d.recommended_stock) {
         const r = d.recommended_stock;
         html += `<div class="result-card" style="border-left: 3px solid #ff9800;"><h4>推荐: ${r.stock_name} (${r.stock_code})</h4>`;
-        html += `<p>板块: ${r.board_name} | V3分: ${r.v3_score.toFixed(4)} | 9:40价: ${r.latest_price.toFixed(2)} | 涨幅: ${r.gain_from_open_pct.toFixed(2)}%</p></div>`;
+        html += `<p>板块: ${r.board_name} | ML分: ${r.ml_score.toFixed(4)} | 9:40价: ${r.latest_price.toFixed(2)} | 涨幅: ${r.early_gain_pct.toFixed(2)}%</p></div>`;
     } else {
         html += '<div class="result-card"><p style="color:#888;">该日无推荐股票</p></div>';
     }

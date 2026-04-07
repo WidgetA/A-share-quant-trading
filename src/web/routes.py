@@ -667,11 +667,12 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/backtest")
     async def run_backtest(request: Request, body: BacktestScanRequest) -> dict:
-        """Run momentum strategy scan for a specific date using backtest cache."""
+        """Run ML strategy scan for a specific date using backtest cache."""
         from src.common.feishu_bot import FeishuBot
-        from src.strategy.momentum_strategy_service import (
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.ml_strategy_service import (
             MinuteDataMissingError,
-            run_momentum_backtest,
+            run_ml_backtest,
         )
 
         try:
@@ -682,17 +683,17 @@ def create_momentum_router() -> APIRouter:
                 detail=f"日期格式错误: {body.trade_date}，请使用 YYYY-MM-DD",
             )
 
-        fundamentals_db = _get_fundamentals_db(request)
-
         cache = getattr(request.app.state, "backtest_cache", None)
         if not cache or not cache.is_ready:
             raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
+        concept_mapper = LocalConceptMapper()
+
         try:
             try:
-                result = await run_momentum_backtest(
+                result = await run_ml_backtest(
                     backtest_cache=cache,
-                    fundamentals_db=fundamentals_db,
+                    concept_mapper=concept_mapper,
                     trade_date=trade_date,
                 )
             except MinuteDataMissingError as e:
@@ -712,19 +713,16 @@ def create_momentum_router() -> APIRouter:
             response_data: dict[str, Any] = {
                 "success": True,
                 "trade_date": body.trade_date,
-                "initial_gainers": result.initial_gainers_count,
                 "hot_boards": result.hot_board_count,
-                "l4_count": result.l4_count,
-                "l5_count": result.l5_count,
-                "l6_count": result.l6_count,
                 "final_candidates": result.final_candidates,
+                "layer_counts": result.layer_counts,
                 "scored_stocks": [
                     {
                         "stock_code": s.stock_code,
                         "stock_name": s.stock_name,
                         "board_name": s.board_name,
-                        "v3_score": round(s.v3_score, 4),
-                        "gain_from_open_pct": round(s.gain_from_open_pct, 2),
+                        "ml_score": round(s.ml_score, 4),
+                        "early_gain_pct": round(s.early_gain_pct, 2),
                         "turnover_amp": round(s.turnover_amp, 2),
                         "latest_price": round(s.latest_price, 2),
                     }
@@ -734,8 +732,8 @@ def create_momentum_router() -> APIRouter:
                     "stock_code": rec.stock_code,
                     "stock_name": rec.stock_name,
                     "board_name": rec.board_name,
-                    "v3_score": round(rec.v3_score, 4),
-                    "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
+                    "ml_score": round(rec.ml_score, 4),
+                    "early_gain_pct": round(rec.early_gain_pct, 2),
                     "turnover_amp": round(rec.turnover_amp, 2),
                     "open_price": round(rec.open_price, 2),
                     "prev_close": round(rec.prev_close, 2),
@@ -749,36 +747,7 @@ def create_momentum_router() -> APIRouter:
             if body.notify and rec:
                 bot = FeishuBot()
                 if bot.is_configured():
-                    from src.strategy.models import RecommendedStock
-
-                    # Adapt MomentumScoredStock to RecommendedStock for Feishu
-                    adapted_rec = RecommendedStock(
-                        stock_code=rec.stock_code,
-                        stock_name=rec.stock_name,
-                        board_name=rec.board_name,
-                        board_stock_count=result.final_candidates,
-                        open_gain_pct=round(
-                            (rec.open_price - rec.prev_close) / rec.prev_close * 100
-                            if rec.prev_close > 0
-                            else 0,
-                            2,
-                        ),
-                        pe_ttm=0.0,
-                        board_avg_pe=0.0,
-                        open_price=rec.open_price,
-                        prev_close=rec.prev_close,
-                        latest_price=rec.latest_price,
-                        gain_from_open_pct=rec.gain_from_open_pct,
-                        turnover_amp=rec.turnover_amp,
-                        composite_score=rec.v3_score,
-                    )
-                    await bot.send_momentum_scan_result(
-                        selected_stocks=[],
-                        hot_boards={},
-                        initial_gainer_count=result.initial_gainers_count,
-                        scan_time=result.scan_time,
-                        recommended_stock=adapted_rec,
-                    )
+                    await bot.send_ml_top5_report(result)
                     response_data["feishu_sent"] = True
 
             return response_data
@@ -786,7 +755,7 @@ def create_momentum_router() -> APIRouter:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Momentum backtest error: {e}", exc_info=True)
+            logger.error(f"ML backtest error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
 
     # === Range backtest with capital simulation ===
@@ -798,9 +767,10 @@ def create_momentum_router() -> APIRouter:
         import math
         from datetime import datetime
 
-        from src.strategy.momentum_strategy_service import (
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.ml_strategy_service import (
             MinuteDataMissingError,
-            run_momentum_backtest,
+            run_ml_backtest,
         )
 
         try:
@@ -819,7 +789,7 @@ def create_momentum_router() -> APIRouter:
         if not backtest_cache or not backtest_cache.is_ready:
             raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
-        fundamentals_db = _get_fundamentals_db(request)
+        concept_mapper = LocalConceptMapper()
 
         async def event_stream():
             def sse(data: dict) -> str:
@@ -886,9 +856,9 @@ def create_momentum_router() -> APIRouter:
 
                     try:
                         try:
-                            scan_result = await run_momentum_backtest(
+                            scan_result = await run_ml_backtest(
                                 backtest_cache=backtest_cache,
-                                fundamentals_db=fundamentals_db,
+                                concept_mapper=concept_mapper,
                                 trade_date=trade_date,
                             )
                         except MinuteDataMissingError as e:
@@ -939,12 +909,9 @@ def create_momentum_router() -> APIRouter:
                             "has_trade": False,
                             "capital": round(capital, 2),
                             "funnel": {
-                                "l1": scan_result.initial_gainers_count,
-                                "l3": scan_result.hot_board_count,
-                                "l4": scan_result.l4_count,
-                                "l5": scan_result.l5_count,
-                                "l6": scan_result.l6_count,
+                                "hot_boards": scan_result.hot_board_count,
                                 "final": scan_result.final_candidates,
+                                **scan_result.layer_counts,
                             },
                         }
 
@@ -1012,14 +979,11 @@ def create_momentum_router() -> APIRouter:
                                         "return_pct": round(trade_return_pct, 2),
                                         "capital_before": round(capital_before, 2),
                                         "capital": round(capital, 2),
-                                        "v3_score": round(rec.v3_score, 4),
+                                        "ml_score": round(rec.ml_score, 4),
                                         "funnel": {
-                                            "l1": scan_result.initial_gainers_count,
-                                            "l3": scan_result.hot_board_count,
-                                            "l4": scan_result.l4_count,
-                                            "l5": scan_result.l5_count,
-                                            "l6": scan_result.l6_count,
+                                            "hot_boards": scan_result.hot_board_count,
                                             "final": scan_result.final_candidates,
+                                            **scan_result.layer_counts,
                                         },
                                     }
                                 else:
@@ -1235,7 +1199,7 @@ def create_momentum_router() -> APIRouter:
 
 
 def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
-    """Convert MomentumScanResult.all_scored to the same dict format as MomentumScanDB.query()."""
+    """Convert MLScanResult.all_scored to recommendation dicts."""
 
     def _f(val):
         return round(float(val), 4) if val is not None else None
@@ -1248,22 +1212,21 @@ def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
             "stock_code": s.stock_code,
             "stock_name": s.stock_name,
             "board_name": s.board_name,
-            "v3_score": _f(s.v3_score),
+            "ml_score": _f(s.ml_score),
             "open_price": _f(s.open_price),
             "prev_close": _f(s.prev_close),
             "latest_price": _f(s.latest_price),
-            "gain_from_open_pct": _f(s.gain_from_open_pct),
+            "gain_pct": _f(s.gain_pct),
+            "early_gain_pct": _f(s.early_gain_pct),
             "turnover_amp": _f(s.turnover_amp),
-            "consecutive_up_days": s.consecutive_up_days,
-            "trend_10d": _f(s.trend_10d),
             "final_candidates": scan_result.final_candidates,
         }
         for i, s in enumerate(top)
     ]
 
 
-async def _compute_momentum_scan(date_str: str, fundamentals_db, backtest_cache):
-    """Compute momentum scan on-demand. Returns (recs_list, MomentumScanResult | None).
+async def _compute_ml_scan(date_str: str, backtest_cache):
+    """Compute ML scan on-demand. Returns (recs_list, MLScanResult | None).
 
     Two paths:
     - Past dates: GreptimeDB cache via strategy service (fast, ~1-3s)
@@ -1272,12 +1235,14 @@ async def _compute_momentum_scan(date_str: str, fundamentals_db, backtest_cache)
     from datetime import date, datetime
     from zoneinfo import ZoneInfo
 
-    from src.strategy.momentum_strategy_service import run_momentum_backtest, run_momentum_live
+    from src.data.sources.local_concept_mapper import LocalConceptMapper
+    from src.strategy.ml_strategy_service import run_ml_backtest, run_ml_live
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
     now_bj = datetime.now(beijing_tz)
     today_str = now_bj.strftime("%Y-%m-%d")
     is_today = date_str == today_str
+    concept_mapper = LocalConceptMapper()
 
     if not is_today:
         # --- Past date: use GreptimeDB cache ---
@@ -1285,9 +1250,9 @@ async def _compute_momentum_scan(date_str: str, fundamentals_db, backtest_cache)
             raise ValueError("GreptimeDB 缓存未就绪，无法计算历史推荐")
 
         trade_date = date.fromisoformat(date_str)
-        result = await run_momentum_backtest(
+        result = await run_ml_backtest(
             backtest_cache=backtest_cache,
-            fundamentals_db=fundamentals_db,
+            concept_mapper=concept_mapper,
             trade_date=trade_date,
         )
         if not result.recommended and not result.all_scored:
@@ -1307,30 +1272,16 @@ async def _compute_momentum_scan(date_str: str, fundamentals_db, backtest_cache)
         raise ValueError("今日扫描需在 09:39 之后执行（早盘数据尚未就绪）")
 
     from src.common.config import get_tushare_token
-    from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
     from src.data.clients.tushare_realtime import TushareRealtimeClient
-    from src.data.sources.local_concept_mapper import LocalConceptMapper
-    from src.strategy.filters.stock_filter import create_main_board_only_filter
-
-    stock_filter = create_main_board_only_filter()
-    all_codes = await fundamentals_db.get_all_stock_codes()
-    universe = [c for c in all_codes if stock_filter.is_allowed(c)]
-    logger.info(f"On-demand scan: universe has {len(universe)} codes")
 
     tushare_token = get_tushare_token()
     tushare = TushareRealtimeClient(token=tushare_token)
     await tushare.start()
     try:
-        adapter = IQuantHistoricalAdapter(tushare)
-        concept_mapper = LocalConceptMapper()
-        result = await run_momentum_live(
+        result = await run_ml_live(
             realtime_client=tushare,
-            historical_adapter=adapter,
-            fundamentals_db=fundamentals_db,
-            concept_mapper=concept_mapper,
-            universe=universe,
             backtest_cache=backtest_cache,
-            stock_filter=stock_filter,
+            concept_mapper=concept_mapper,
         )
     finally:
         await tushare.stop()
@@ -1393,7 +1344,7 @@ async def _get_trading_calendar(start_date, end_date) -> list:
 
 
 async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict | None:
-    """Execute a single momentum scan using Tushare + MomentumScanner.
+    """Execute a single ML scan using Tushare + MLScanner.
 
     Returns result_entry dict on success, None on failure.
     """
@@ -1403,15 +1354,12 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
 
     from src.common.config import get_tushare_token
     from src.common.feishu_bot import FeishuBot
-    from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
     from src.data.clients.tushare_realtime import TushareRealtimeClient
     from src.data.sources.local_concept_mapper import LocalConceptMapper
-    from src.strategy.filters.stock_filter import create_main_board_only_filter
-    from src.strategy.models import PriceSnapshot
-    from src.strategy.strategies.momentum_scanner import MomentumScanner
+    from src.strategy.ml_strategy_service import run_ml_live
 
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    logger.info("Monitor scan starting (tushare + MomentumScanner)")
+    logger.info("Monitor scan starting (ML scanner)")
 
     start_time = time_module.monotonic()
 
@@ -1431,92 +1379,19 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
     except Exception as e:
         logger.warning(f"Trade calendar check failed, proceeding: {e}")
 
-    fundamentals_db = state.get("fundamentals_db")
-    if not fundamentals_db:
-        logger.error("Monitor: fundamentals DB not available")
-        return None
-
-    # Get universe
-    stock_filter = create_main_board_only_filter()
-    cache_ready = backtest_cache and getattr(backtest_cache, "is_ready", False)
-    if cache_ready:
-        all_codes = await backtest_cache.get_stock_codes()
-        if all_codes:
-            logger.info(f"Monitor: universe from GreptimeDB cache ({len(all_codes)} codes)")
-        else:
-            all_codes = await fundamentals_db.get_all_stock_codes()
-            logger.info(f"Monitor: universe from PG ({len(all_codes)} codes)")
-    else:
-        all_codes = await fundamentals_db.get_all_stock_codes()
-        logger.info(f"Monitor: universe from PG ({len(all_codes)} codes)")
-    universe = [c for c in all_codes if stock_filter.is_allowed(c)]
-    logger.info(f"Monitor: universe has {len(universe)} codes")
+    if not (backtest_cache and getattr(backtest_cache, "is_ready", False)):
+        raise RuntimeError("GreptimeDB 缓存未连接，无法进行扫描。请先下载回测数据。")
 
     tushare_token = get_tushare_token()
     tushare = TushareRealtimeClient(token=tushare_token)
     await tushare.start()
     try:
-        quotes = await tushare.batch_get_quotes(universe)
-        logger.info(f"Monitor: got {len(quotes)} quotes")
-
-        # Supplement preClose from GreptimeDB cache
-        if not (backtest_cache and getattr(backtest_cache, "is_ready", False)):
-            raise RuntimeError("GreptimeDB 缓存未连接，无法进行扫描。请先下载回测数据。")
-
-        today = datetime.now(beijing_tz).date()
-        prev_daily: dict = {}
-        for days_back in range(1, 8):
-            prev_date = today - timedelta(days=days_back)
-            prev_date_str = prev_date.strftime("%Y-%m-%d")
-            prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
-            if prev_daily:
-                logger.info(
-                    f"Monitor: preClose from cache date {prev_date_str} ({len(prev_daily)} stocks)"
-                )
-                break
-
-        price_snapshots: dict[str, PriceSnapshot] = {}
-        skipped_no_prev = 0
-        for code, q in quotes.items():
-            if not q.is_trading:
-                continue
-            cached_day = prev_daily.get(code)
-            prev_close = cached_day.close if cached_day else 0.0
-            if prev_close <= 0:
-                skipped_no_prev += 1
-                continue
-            price_snapshots[code] = PriceSnapshot(
-                stock_code=code,
-                stock_name="",
-                open_price=q.open_price,
-                prev_close=prev_close,
-                latest_price=q.latest_price,
-                early_volume=q.volume,
-                high_price=q.high_price,
-                low_price=q.low_price,
-            )
-
-        if skipped_no_prev:
-            logger.warning(f"Monitor: skipped {skipped_no_prev} stocks (no preClose in cache)")
-
-        if not price_snapshots:
-            not_trading = sum(1 for q in quotes.values() if not q.is_trading)
-            raise RuntimeError(
-                f"盘中扫描数据异常：构建快照为空。"
-                f"quotes={len(quotes)}, 停牌/无数据={not_trading}, "
-                f"缺prev_close={skipped_no_prev}, prev_daily={len(prev_daily)}。"
-                f"请检查Tushare数据和GreptimeDB缓存是否正常。"
-            )
-
-        adapter = IQuantHistoricalAdapter(tushare)
         concept_mapper = LocalConceptMapper()
-        scanner = MomentumScanner(
-            historical_adapter=adapter,
-            fundamentals_db=fundamentals_db,
+        scan_result = await run_ml_live(
+            realtime_client=tushare,
+            backtest_cache=backtest_cache,
             concept_mapper=concept_mapper,
-            stock_filter=stock_filter,
         )
-        scan_result = await scanner.scan(price_snapshots)
     finally:
         await tushare.stop()
 
@@ -1526,20 +1401,17 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
     rec = scan_result.recommended
     result_entry = {
         "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
-        "initial_gainers": scan_result.initial_gainers_count,
         "hot_boards": scan_result.hot_board_count,
-        "l4_count": scan_result.l4_count,
-        "l5_count": scan_result.l5_count,
-        "l6_count": scan_result.l6_count,
         "final_candidates": scan_result.final_candidates,
+        "layer_counts": scan_result.layer_counts,
         "elapsed_seconds": round(elapsed, 1),
         "scored_top5": [
             {
                 "stock_code": s.stock_code,
                 "stock_name": s.stock_name,
                 "board_name": s.board_name,
-                "v3_score": round(s.v3_score, 4),
-                "gain_from_open_pct": round(s.gain_from_open_pct, 2),
+                "ml_score": round(s.ml_score, 4),
+                "early_gain_pct": round(s.early_gain_pct, 2),
             }
             for s in scan_result.all_scored[:5]
         ],
@@ -1547,8 +1419,8 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
             "stock_code": rec.stock_code,
             "stock_name": rec.stock_name,
             "board_name": rec.board_name,
-            "v3_score": round(rec.v3_score, 4),
-            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
+            "ml_score": round(rec.ml_score, 4),
+            "early_gain_pct": round(rec.early_gain_pct, 2),
             "turnover_amp": round(rec.turnover_amp, 2),
             "latest_price": round(rec.latest_price, 2),
         }
@@ -1562,41 +1434,10 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
 
     # Send Feishu notification
     bot = FeishuBot()
-    if bot.is_configured() and rec:
-        from src.strategy.models import RecommendedStock, ScanResult
-
-        adapted_rec = RecommendedStock(
-            stock_code=rec.stock_code,
-            stock_name=rec.stock_name,
-            board_name=rec.board_name,
-            board_stock_count=scan_result.final_candidates,
-            open_gain_pct=round(
-                (rec.open_price - rec.prev_close) / rec.prev_close * 100
-                if rec.prev_close > 0
-                else 0,
-                2,
-            ),
-            pe_ttm=0.0,
-            board_avg_pe=0.0,
-            open_price=rec.open_price,
-            prev_close=rec.prev_close,
-            latest_price=rec.latest_price,
-            gain_from_open_pct=rec.gain_from_open_pct,
-            turnover_amp=rec.turnover_amp,
-            composite_score=rec.v3_score,
-        )
-        adapted_result = ScanResult(
-            initial_gainers=[],
-            hot_boards={},
-            recommended_stock=adapted_rec,
-        )
-        await bot.send_daily_pick_report(
-            scan_result=adapted_result,
-            elapsed_seconds=elapsed,
-            scan_time=scan_time,
-        )
-        logger.info("Monitor: Feishu daily pick report sent")
-    elif not bot.is_configured():
+    if bot.is_configured():
+        await bot.send_ml_top5_report(scan_result, scan_time=scan_time)
+        logger.info("Monitor: Feishu ML scan report sent")
+    else:
         logger.warning(
             "Monitor: Feishu bot NOT configured — set FEISHU_APP_ID, "
             "FEISHU_APP_SECRET, FEISHU_CHAT_ID environment variables"
@@ -2508,19 +2349,18 @@ def create_trading_router() -> APIRouter:
             return {"date": date, "recommendations": [], "error": "基本面数据库未就绪"}
 
         try:
-            recs, _scan_result = await _compute_momentum_scan(
+            recs, _scan_result = await _compute_ml_scan(
                 date_str=date,
-                fundamentals_db=fundamentals_db,
                 backtest_cache=backtest_cache,
             )
         except ValueError as e:
             return {"date": date, "recommendations": [], "error": str(e)}
         except Exception as e:
-            from src.strategy.momentum_strategy_service import MinuteDataMissingError
+            from src.strategy.ml_strategy_service import MinuteDataMissingError
 
             if isinstance(e, MinuteDataMissingError):
                 return {"date": date, "recommendations": [], "error": str(e)}
-            logger.error(f"On-demand momentum scan failed for {date}: {e}", exc_info=True)
+            logger.error(f"On-demand ML scan failed for {date}: {e}", exc_info=True)
             return {"date": date, "recommendations": [], "error": str(e)}
 
         return {"date": date, "recommendations": recs}
@@ -2847,5 +2687,33 @@ def create_model_router() -> APIRouter:
         if not accepted:
             raise HTTPException(status_code=401, detail="Invalid or unknown token")
         return {"status": "accepted"}
+
+    @router.get("/api/ml/model-info")
+    async def get_model_info():
+        """List available ML models and their metadata."""
+        from datetime import datetime
+        from pathlib import Path
+        from zoneinfo import ZoneInfo
+
+        model_dir = Path(__file__).resolve().parent.parent / "strategy" / "strategies"
+        model_dir = model_dir.parent.parent / "data" / "models"
+
+        models = []
+        if model_dir.exists():
+            for f in sorted(model_dir.glob("*.lgb"), key=lambda p: p.stat().st_mtime, reverse=True):
+                stat = f.stat()
+                models.append({
+                    "name": f.stem,
+                    "file": f.name,
+                    "size_kb": round(stat.st_size / 1024, 1),
+                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S"),
+                })
+
+        return {
+            "model_dir": str(model_dir),
+            "models": models,
+            "default": "full_latest",
+            "has_default": (model_dir / "full_latest.lgb").exists() if model_dir.exists() else False,
+        }
 
     return router

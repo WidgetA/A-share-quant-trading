@@ -134,16 +134,16 @@ async def _notify_feishu_ack(signal: dict) -> None:
         logger.warning("Failed to send Feishu ack notification", exc_info=True)
 
 
-async def _notify_feishu_top5(scan_result) -> None:
-    """Send momentum top-5 scored report to Feishu. Best-effort, never raises."""
+async def _notify_feishu_ml_top5(scan_result) -> None:
+    """Send ML scan top-5 report to Feishu. Best-effort, never raises."""
     try:
         from src.common.feishu_bot import FeishuBot
 
         bot = FeishuBot()
         if bot.is_configured():
-            await bot.send_top5_report(scan_result)
+            await bot.send_ml_top5_report(scan_result)
     except Exception:
-        logger.warning("Failed to send Feishu top-5 report", exc_info=True)
+        logger.warning("Failed to send Feishu ML top-5 report", exc_info=True)
 
 
 async def _notify_feishu_signal(signal: dict) -> None:
@@ -163,7 +163,7 @@ async def _notify_feishu_signal(signal: dict) -> None:
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
             lines.append(f"价格: {signal.get('latest_price', '-')}")
-            lines.append(f"V3评分: {signal.get('v3_score', '-')}")
+            lines.append(f"ML评分: {signal.get('ml_score', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
         lines.append(f"时间: {signal.get('created_at', '')}")
@@ -345,39 +345,23 @@ def create_iquant_router() -> APIRouter:
         logger.info(f"Momentum universe cached: {len(codes)} codes")
         return codes
 
-    # --- Momentum scan (delegates to strategy service) ---
+    # --- ML scan (delegates to strategy service) ---
 
-    async def _run_momentum_scan() -> dict[str, Any] | None:
-        """Run momentum scan via strategy service. Returns recommendation dict or None."""
-        from src.strategy.momentum_strategy_service import run_momentum_live
+    async def _run_ml_scan() -> dict[str, Any] | None:
+        """Run ML scan via strategy service. Returns recommendation dict or None."""
+        from src.strategy.ml_strategy_service import run_ml_live
 
-        universe = await _get_universe()
         calendar = await _get_trade_calendar()
 
-        scan_result = await run_momentum_live(
+        scan_result = await run_ml_live(
             realtime_client=_state["realtime_client"],
-            historical_adapter=_state["historical_adapter"],
-            fundamentals_db=_state["fundamentals_db"],
-            concept_mapper=_state["concept_mapper"],
-            universe=universe,
             backtest_cache=_state.get("backtest_cache"),
+            concept_mapper=_state["concept_mapper"],
             trade_calendar=calendar,
-            stock_filter=_state.get("stock_filter"),
         )
 
-        today = datetime.now(BEIJING_TZ).date()
-
-        # Persist top-10 scored stocks (non-critical, never blocks trading)
-        if scan_result.all_scored and _state.get("momentum_scan_db"):
-            try:
-                await _state["momentum_scan_db"].save_top_n(
-                    today, scan_result.all_scored, scan_result.final_candidates, n=10
-                )
-            except Exception as e:
-                logger.warning(f"MomentumScanDB save failed: {e}")
-
         # Push top-5 report to Feishu (non-critical)
-        await _notify_feishu_top5(scan_result)
+        await _notify_feishu_ml_top5(scan_result)
 
         rec = scan_result.recommended
         if not rec:
@@ -390,9 +374,10 @@ def create_iquant_router() -> APIRouter:
             "open_price": round(rec.open_price, 4),
             "prev_close": round(rec.prev_close, 4),
             "latest_price": round(rec.latest_price, 4),
-            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
+            "gain_pct": round(rec.gain_pct, 2),
+            "early_gain_pct": round(rec.early_gain_pct, 2),
             "turnover_amp": round(rec.turnover_amp, 4),
-            "v3_score": round(rec.v3_score, 6),
+            "ml_score": round(rec.ml_score, 6),
             "hot_board_count": scan_result.hot_board_count,
             "final_candidates": scan_result.final_candidates,
         }
@@ -655,7 +640,7 @@ def create_iquant_router() -> APIRouter:
         """
         SCAN_WINDOW = (time(9, 39), time(10, 0))
 
-        logger.info("Momentum signal scheduler started")
+        logger.info("ML signal scheduler started")
 
         scan_done_date = ""
 
@@ -698,22 +683,22 @@ def create_iquant_router() -> APIRouter:
                     scan_done_date = ex_date
 
                     try:
-                        rec = await _run_momentum_scan()
+                        rec = await _run_ml_scan()
                         if rec:
                             logger.info(
-                                f"Momentum: scan recommends {rec['stock_code']} "
+                                f"ML scan: recommends {rec['stock_code']} "
                                 f"(auto-trading disabled, no signal pushed)"
                             )
                         else:
-                            logger.info("Momentum scan: no recommendation today")
+                            logger.info("ML scan: no recommendation today")
                             await _notify_feishu_error(
-                                "动量扫描结果",
-                                "今日动量扫描完成，无符合条件的推荐股票",
+                                "ML扫描结果",
+                                "今日ML扫描完成，无符合条件的推荐股票",
                             )
                     except Exception as e:
                         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                        logger.error(f"Momentum scan failed: {error_detail}")
-                        await _notify_feishu_error("动量扫描失败", error_detail)
+                        logger.error(f"ML scan failed: {error_detail}")
+                        await _notify_feishu_error("ML扫描失败", error_detail)
 
                 # Scan deadline
                 if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
@@ -722,7 +707,7 @@ def create_iquant_router() -> APIRouter:
                 await asyncio.sleep(120 if scan_done_date == ex_date else 30)
 
         except asyncio.CancelledError:
-            logger.info("Momentum signal scheduler stopped")
+            logger.info("ML signal scheduler stopped")
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             logger.critical(f"Signal scheduler CRASHED: {error_detail}")
@@ -935,11 +920,11 @@ def create_iquant_router() -> APIRouter:
 
     @router.post("/trigger-scan")
     async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Manually trigger momentum scan + Feishu top-5 report (bypasses time window)."""
+        """Manually trigger ML scan + Feishu top-5 report (bypasses time window)."""
         await _ensure_resources()
 
         try:
-            rec = await _run_momentum_scan()
+            rec = await _run_ml_scan()
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
@@ -1000,10 +985,10 @@ def create_iquant_router() -> APIRouter:
         body: BacktestScanRequest,
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
-        """Run momentum scan for a specific historical date."""
-        from src.strategy.momentum_strategy_service import (
+        """Run ML scan for a specific historical date."""
+        from src.strategy.ml_strategy_service import (
             MinuteDataMissingError,
-            run_momentum_backtest,
+            run_ml_backtest,
         )
 
         try:
@@ -1027,9 +1012,9 @@ def create_iquant_router() -> APIRouter:
             )
 
         try:
-            scan_result = await run_momentum_backtest(
+            scan_result = await run_ml_backtest(
                 backtest_cache=bt_cache,
-                fundamentals_db=_state["fundamentals_db"],
+                concept_mapper=_state["concept_mapper"],
                 trade_date=trade_date,
             )
         except MinuteDataMissingError as e:
@@ -1047,7 +1032,7 @@ def create_iquant_router() -> APIRouter:
                 "latest_price": round(rec.latest_price, 4),
                 "open_price": round(rec.open_price, 4),
                 "prev_close": round(rec.prev_close, 4),
-                "composite_score": round(rec.v3_score, 4),
+                "ml_score": round(rec.ml_score, 4),
             }
         }
 

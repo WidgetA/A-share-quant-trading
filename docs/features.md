@@ -44,6 +44,7 @@
 | 0.12.2 | 2026-03-26 | - | SYS-005: Cache scheduler download timeout (4h/range), per-range Feishu progress, align manual/scheduler gap detection |
 | 0.13.0 | 2026-04-06 | - | STR-006: ML Scanner — 8-layer filter + LightGBM LambdaRank scoring, model management (train/finetune/S3/scheduler) |
 | 0.13.1 | 2026-04-07 | - | STR-006: FC serverless async training (X-Fc-Invocation-Type: Async), remove local training code |
+| 0.13.2 | 2026-04-08 | - | STR-006: Wire up ML inference — replace V15 momentum scan with LightGBM scoring (live + backtest) |
 
 ---
 
@@ -749,6 +750,7 @@ await engine.stop()
 - `src/strategy/strategies/ml_scanner.py` — 8-layer filter pipeline + feature engineering + model inference
 - `src/data/services/model_training_scheduler.py` — Scheduler + FC async orchestration (trigger/callback/save)
 - `serverless/app.py` — FC serverless training endpoint (LightGBM train, S3 upload, result callback)
+- `src/strategy/ml_strategy_service.py` — Stateless runners: `run_ml_live()` + `run_ml_backtest()`
 - `src/common/s3_client.py` — S3-compatible upload/download (boto3)
 - `src/common/config.py` — S3 config + FC URL + finetune scheduler toggle
 - `src/web/routes.py` — `create_model_router()` SSE endpoints + FC callback endpoints
@@ -768,6 +770,12 @@ await engine.stop()
 - [x] SSE streaming for training progress
 - [x] Feishu alerts for all training events
 - [x] Data completeness check with 3-retry gap-fill
+- [x] Live inference: 9:39 scan via `ml_strategy_service.run_ml_live()` → `MLScanner.scan()` → LightGBM scoring
+- [x] Backtest inference: `run_ml_backtest()` from GreptimeDB cache
+- [x] `MLScanResult` / `MLScoredStock` dataclasses for structured output
+- [x] Feishu ML top-5 report (`send_ml_top5_report`)
+- [x] `/api/ml/model-info` endpoint for model listing
+- [x] V15 momentum scan fully replaced in iquant_routes + routes
 - [ ] Sell strategy
 - [ ] Unit tests
 - [ ] Production deployment

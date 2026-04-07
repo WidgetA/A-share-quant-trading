@@ -28,7 +28,7 @@ if TYPE_CHECKING:
         ScanResult,
         SelectedStock,
     )
-    from src.strategy.strategies.momentum_scanner import MomentumScanResult
+    from src.strategy.strategies.ml_scanner import MLScanResult
 
 from src.common.config import get_feishu_config
 
@@ -269,107 +269,36 @@ Limit-up (skipped):
 
         return await self.send_message(message)
 
-    async def send_momentum_scan_result(
+    async def send_ml_top5_report(
         self,
-        selected_stocks: list[SelectedStock],
-        hot_boards: dict[str, list[str]],
-        initial_gainer_count: int,
+        scan_result: MLScanResult,
         scan_time: datetime | None = None,
-        recommended_stock: RecommendedStock | None = None,
     ) -> bool:
-        """
-        Send momentum sector strategy scan result.
-
-        Args:
-            selected_stocks: List of SelectedStock (from strategy.models).
-            hot_boards: Dict of board_name → list of initial gainer codes.
-            initial_gainer_count: Number of stocks that passed initial >5% filter.
-            scan_time: When the scan was performed.
-            recommended_stock: RecommendedStock (the top pick), or None.
-
-        Returns:
-            True if sent successfully, False otherwise.
-        """
+        """Send ML scanner top-5 scored candidates to Feishu."""
         now = scan_time or datetime.now(BEIJING_TZ)
         time_str = now.strftime("%Y-%m-%d %H:%M")
 
+        layer_counts = scan_result.layer_counts
         lines = [
-            f"📊 动量板块策略选股 ({time_str})",
-            f"初筛: {initial_gainer_count}只(9:40 vs 开盘>0.56%) | 热门板块: {len(hot_boards)}个",
-            "",
-        ]
-
-        if not selected_stocks:
-            lines.append("未筛选到符合条件的股票")
-            return await self.send_message("\n".join(lines))
-
-        # Group selected stocks by board
-        board_stocks: dict[str, list] = {}
-        for stock in selected_stocks:
-            board = stock.board_name
-            if board not in board_stocks:
-                board_stocks[board] = []
-            board_stocks[board].append(stock)
-
-        for board_name, stocks in board_stocks.items():
-            gainer_count = len(hot_boards.get(board_name, []))
-            lines.append(f"🔥 {board_name} ({gainer_count}只触发)")
-            for s in stocks:
-                pe_diff = s.pe_ttm - s.board_avg_pe
-                pe_sign = "+" if pe_diff >= 0 else ""
-                lines.append(
-                    f"  ✅ {s.stock_code} {s.stock_name}  "
-                    f"涨幅{s.open_gain_pct:+.1f}%  "
-                    f"PE {s.pe_ttm:.1f} (均值{s.board_avg_pe:.1f} {pe_sign}{pe_diff:.1f})"
-                )
-            lines.append("")
-
-        lines.append(f"共选出 {len(selected_stocks)} 只标的")
-
-        # Recommendation section
-        if recommended_stock:
-            rec = recommended_stock
-            lines.append("")
-            lines.append(f"⭐ 推荐: {rec.stock_code} {rec.stock_name}")
-            lines.append(f"  板块: {rec.board_name} (选出{rec.board_stock_count}只，为最多板块)")
-            lines.append(
-                f"  盘中涨幅: {rec.gain_from_open_pct:+.2f}%  "
-                f"换手放大: {rec.turnover_amp:.1f}x  "
-                f"综合得分: {rec.composite_score:+.2f}"
-            )
-            lines.append(f"  开盘涨幅: {rec.open_gain_pct:+.1f}%  PE: {rec.pe_ttm:.1f}")
-        else:
-            lines.append("")
-            lines.append("⭐ 推荐: 无 (今日无符合条件的推荐标的)")
-
-        return await self.send_message("\n".join(lines))
-
-    async def send_top5_report(
-        self,
-        scan_result: MomentumScanResult,
-        scan_time: datetime | None = None,
-    ) -> bool:
-        """Send momentum scanner top-5 scored candidates to Feishu."""
-        now = scan_time or datetime.now(BEIJING_TZ)
-        time_str = now.strftime("%Y-%m-%d %H:%M")
-
-        lines = [
-            f"[测试服] 每日扫描报告 ({time_str})",
+            f"ML选股报告 ({time_str})",
             (
-                f"初筛: {scan_result.initial_gainers_count}只 | "
                 f"热门板块: {scan_result.hot_board_count}个 | "
-                f"L5: {scan_result.l5_count} | L6: {scan_result.l6_count} | "
                 f"最终: {scan_result.final_candidates}只"
             ),
         ]
+
+        # Layer funnel if available
+        if layer_counts:
+            funnel_parts = [f"{k}:{v}" for k, v in layer_counts.items()]
+            lines.append(f"漏斗: {' → '.join(funnel_parts)}")
 
         rec = scan_result.recommended
         if rec:
             lines.append("")
             lines.append(f"推荐: {rec.stock_code} {rec.stock_name}")
             lines.append(
-                f"  板块: {rec.board_name} | V3: {rec.v3_score:+.4f} | "
-                f"盘中涨: {rec.gain_from_open_pct:+.2f}% | "
+                f"  板块: {rec.board_name} | ML: {rec.ml_score:.4f} | "
+                f"盘中涨: {rec.early_gain_pct:+.2f}% | "
                 f"换手放大: {rec.turnover_amp:.2f}x"
             )
         else:
@@ -383,72 +312,9 @@ Limit-up (skipped):
             for i, s in enumerate(scored[:5]):
                 lines.append(
                     f"{i + 1}. {s.stock_code} {s.stock_name}  "
-                    f"V3={s.v3_score:+.4f}  {s.board_name}  "
-                    f"涨{s.gain_from_open_pct:+.2f}%  "
-                    f"换手{s.turnover_amp:.2f}x  "
-                    f"连涨{s.consecutive_up_days}天"
+                    f"ML={s.ml_score:.4f}  {s.board_name}  "
+                    f"涨{s.early_gain_pct:+.2f}%  "
+                    f"换手{s.turnover_amp:.2f}x"
                 )
-
-        return await self.send_message("\n".join(lines))
-
-    async def send_daily_pick_report(
-        self,
-        scan_result: ScanResult,
-        elapsed_seconds: float,
-        scan_time: datetime | None = None,
-    ) -> bool:
-        """
-        Send comprehensive daily momentum pick report.
-
-        Includes: recommendation, top 5 by score, hot boards, timing.
-        """
-        now = scan_time or datetime.now(BEIJING_TZ)
-        time_str = now.strftime("%Y-%m-%d %H:%M")
-
-        lines = [
-            f"📊 每日动量选股报告 ({time_str})",
-            f"⏱️ 计算用时: {elapsed_seconds:.1f}秒",
-            (
-                f"初筛: {len(scan_result.initial_gainers)}只 | "
-                f"入选: {len(scan_result.selected_stocks)}只 | "
-                f"热门板块: {len(scan_result.hot_boards)}个"
-            ),
-        ]
-
-        rec = scan_result.recommended_stock
-        if rec:
-            lines.append("")
-            lines.append(f"⭐ 今日推荐买入: {rec.stock_code} {rec.stock_name}")
-            lines.append(
-                f"板块: {rec.board_name} | 得分: {rec.composite_score:+.2f} | "
-                f"盘中涨: {rec.gain_from_open_pct:+.2f}%"
-            )
-            lines.append(
-                f"换手放大: {rec.turnover_amp:.1f}x | "
-                f"开盘涨: {rec.open_gain_pct:+.1f}% | "
-                f"现价: {rec.latest_price:.2f}"
-            )
-        else:
-            lines.append("")
-            lines.append("⭐ 今日无推荐标的")
-
-        # Top 5 scored candidates
-        scored = scan_result.scored_candidates
-        if scored:
-            lines.append("")
-            lines.append("📈 得分前5名:")
-            for i, c in enumerate(scored[:5]):
-                lines.append(
-                    f"{i + 1}. {c.stock_code} {c.stock_name}  "
-                    f"{c.composite_score:+.2f}  {c.board_name}  "
-                    f"涨{c.gain_from_open_pct:+.2f}%"
-                )
-
-        # Hot boards summary
-        if scan_result.hot_boards:
-            lines.append("")
-            sorted_boards = sorted(scan_result.hot_boards.items(), key=lambda x: -len(x[1]))
-            board_parts = [f"{name}({len(codes)}只)" for name, codes in sorted_boards[:8]]
-            lines.append(f"🔥 热门板块: {' | '.join(board_parts)}")
 
         return await self.send_message("\n".join(lines))

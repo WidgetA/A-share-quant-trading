@@ -497,7 +497,7 @@ function renderRecommendations(recs, isToday) {
 
     for (let i = 0; i < recs.length; i++) {
         const r = recs[i];
-        const gain = r.gain_from_open_pct != null ? r.gain_from_open_pct : 0;
+        const gain = r.early_gain_pct != null ? r.early_gain_pct : (r.gain_from_open_pct != null ? r.gain_from_open_pct : 0);
         const gainClass = gain >= 0 ? 'gain-pos' : 'gain-neg';
         const gainText = (gain >= 0 ? '+' : '') + gain.toFixed(2) + '%';
         const price = r.latest_price || 0;
