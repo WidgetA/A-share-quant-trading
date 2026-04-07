@@ -432,13 +432,14 @@ def create_momentum_router() -> APIRouter:
         if not body.force:
             gaps = await cache.missing_ranges(start_date, end_date)
             if not gaps:
-                status = await cache.get_cache_status()
+                d_count = await cache.get_daily_stock_count()
+                m_count = await cache.get_minute_stock_count()
 
                 async def cached_stream():
                     msg = {
                         "type": "complete",
-                        "daily_count": status.get("daily_stocks", 0),
-                        "minute_count": status.get("minute_stocks", 0),
+                        "daily_count": d_count,
+                        "minute_count": m_count,
                         "cached": True,
                     }
                     yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
@@ -588,13 +589,13 @@ def create_momentum_router() -> APIRouter:
                             }
                         )
 
-                    await cache.download_prices(
+                    counts = await cache.download_prices(
                         start_date,
                         end_date,
                         progress_cb=on_progress,
                         cancel_event=cancel_event,
                     )
-                    queue.put_nowait(None)  # sentinel: success
+                    queue.put_nowait({"type": "_done", **counts})  # sentinel
                 except asyncio.CancelledError:
                     cancel_event.set()
                     queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
@@ -622,23 +623,21 @@ def create_momentum_router() -> APIRouter:
                         yield _sse({"type": "heartbeat"})
                         continue
 
-                    if event is None:
-                        break  # download done
+                    if event.get("type") == "_done":
+                        yield _sse(
+                            {
+                                "type": "complete",
+                                "daily_count": event.get("daily_count", 0),
+                                "minute_count": event.get("minute_count", 0),
+                                "cached": False,
+                            }
+                        )
+                        break
                     if event.get("type") in ("error", "cancelled"):
                         yield _sse(event)
                         return
 
                     yield _sse(event)
-
-                status = await cache.get_cache_status()
-                yield _sse(
-                    {
-                        "type": "complete",
-                        "daily_count": status.get("daily_stocks", 0),
-                        "minute_count": status.get("minute_stocks", 0),
-                        "cached": False,
-                    }
-                )
             except Exception as e:
                 logger.error(f"Cache download error: {e}", exc_info=True)
                 yield _sse({"type": "error", "message": str(e)[:200]})

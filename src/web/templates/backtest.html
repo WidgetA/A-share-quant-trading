@@ -409,7 +409,13 @@ function startCacheDownloadFromUI() {
                         progText.textContent = '100%';
                         const src = d.cached ? '(来自缓存)' : '(已下载)';
                         dlLog(`完成 ${src} — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
-                        setTimeout(checkCacheStatus, 1000);
+                        // Update cache bar directly from complete event data
+                        const dot = document.getElementById('cacheDot');
+                        const text = document.getElementById('cacheText');
+                        dot.className = 'dot ready';
+                        text.textContent = `缓存就绪: 日线 ${d.daily_count}只, 分钟线 ${d.minute_count}只`;
+                        document.getElementById('cacheControls').style.display = '';
+                        document.getElementById('cacheDownloadBtn').textContent = '补充下载';
                     }
                     if (d.type === 'cancelled') {
                         dlLog(d.message, 'log-warn');

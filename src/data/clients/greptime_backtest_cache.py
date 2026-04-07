@@ -725,7 +725,7 @@ class GreptimeBacktestCache:
         end_date: date,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker | None = None,
-    ) -> None:
+    ) -> dict[str, int]:
         """Download daily + minute data for all main-board stocks.
 
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
@@ -791,6 +791,7 @@ class GreptimeBacktestCache:
             f"Download complete: {daily_count} daily stocks, "
             f"{minute_count} minute stocks out of {total} downloaded"
         )
+        return {"daily_count": daily_count, "minute_count": minute_count}
 
         # Data integrity validation — send results via progress_cb so frontend sees them
         integrity_warnings = await self.validate_integrity()
