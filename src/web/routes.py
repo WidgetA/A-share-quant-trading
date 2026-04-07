@@ -363,9 +363,10 @@ def create_momentum_router() -> APIRouter:
         # Check in-memory cache first (60s TTL) — return instantly
         import time as _time
 
-        if cache._cache_status_result and (
-            _time.monotonic() - cache._cache_status_ts
-        ) < cache._CACHE_STATUS_TTL:
+        if (
+            cache._cache_status_result
+            and (_time.monotonic() - cache._cache_status_ts) < cache._CACHE_STATUS_TTL
+        ):
 
             async def _cached():
                 payload = {"type": "result", **cache._cache_status_result}
