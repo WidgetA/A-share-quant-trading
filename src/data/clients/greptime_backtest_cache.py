@@ -1230,6 +1230,31 @@ class GreptimeBacktestCache:
         # Filter out stocks that are fully suspended (no active trading day)
         # — they have no 5min bars from tsanghi and would be re-downloaded forever.
         active_codes = await self._get_active_daily_codes(check_start, end_date)
+
+        # --- Diagnostic: show active_codes count on web ---
+        start_ms = _date_to_epoch_ms(check_start)
+        end_ms = _date_to_epoch_ms(end_date)
+        diag_parts = [f"active_codes={len(active_codes)}"]
+        for label, cond in [
+            ("无过滤", ""),
+            ("vol>0", " AND vol > 0"),
+            ("NOT susp", " AND NOT is_suspended"),
+            ("susp=false", " AND is_suspended = false"),
+        ]:
+            try:
+                dr = await self._db.fetchrow(
+                    f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily "
+                    f"WHERE ts >= {start_ms} AND ts <= {end_ms}{cond}"
+                )
+                diag_parts.append(f"{label}={int(dr['cnt']) if dr else -1}")
+            except Exception as e:
+                diag_parts.append(f"{label}=ERR:{e}")
+        diag_msg = " | ".join(diag_parts)
+        logger.info(f"pgwire diag: {diag_msg}")
+        if progress_cb:
+            await _maybe_await(progress_cb("minute_resume", 0, 0, f"[诊断] {diag_msg}"))
+        # --- End diagnostic ---
+
         total_before = len(codes)
         codes = [c for c in codes if c in active_codes]
         suspended_count = total_before - len(codes)

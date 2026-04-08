@@ -456,6 +456,8 @@ def create_momentum_router() -> APIRouter:
                     return f"日线 {current}/{total}: {detail}"
                 return f"下载日线数据: {current}/{total} 天"
             elif phase == "minute_resume":
+                if detail:
+                    return detail
                 remaining = total - current
                 if current > 0:
                     return f"分钟线已缓存 {current}/{total} 只，需下载 {remaining} 只"
