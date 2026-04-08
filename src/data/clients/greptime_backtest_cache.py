@@ -945,7 +945,7 @@ class GreptimeBacktestCache:
                     dl_start.strftime("%Y-%m-%d"),
                     end_date.strftime("%Y-%m-%d"),
                 )
-                trading_dates: set[date] = {_parse_date_str(d) for d in trade_cal_strs}
+                trading_dates: set[date] | None = {_parse_date_str(d) for d in trade_cal_strs}
                 logger.info(f"Trade calendar: {len(trading_dates)} trading days in range")
             except Exception as e:
                 logger.warning(f"Trade calendar fetch failed: {e}, will check all dates")
