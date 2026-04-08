@@ -906,6 +906,20 @@ class GreptimeBacktestCache:
             # Backfill: fix existing dates with is_suspended IS NULL
             await self._backfill_is_suspended(tushare_client, progress_cb, cancel_event)
 
+            # Fetch trade calendar to skip weekends/holidays
+            from src.data.clients.tushare_realtime import get_tushare_trade_calendar
+
+            try:
+                trade_cal_strs = await get_tushare_trade_calendar(
+                    dl_start.strftime("%Y-%m-%d"),
+                    end_date.strftime("%Y-%m-%d"),
+                )
+                trading_dates: set[date] = {_parse_date_str(d) for d in trade_cal_strs}
+                logger.info(f"Trade calendar: {len(trading_dates)} trading days in range")
+            except Exception as e:
+                logger.warning(f"Trade calendar fetch failed: {e}, will check all dates")
+                trading_dates = None  # fallback: check every day
+
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
 
@@ -921,6 +935,11 @@ class GreptimeBacktestCache:
 
                 date_str = current.strftime("%Y-%m-%d")
                 ts_ms = _date_to_epoch_ms(current)
+
+                # Skip non-trading days (weekends/holidays) via trade calendar
+                if trading_dates is not None and current not in trading_dates:
+                    current += timedelta(days=1)
+                    continue
 
                 # Skip dates already in cache
                 if current in existing_dates:
@@ -1639,7 +1658,8 @@ class GreptimeBacktestCache:
         daily_rows = await self._db.fetch(
             f"SELECT stock_code, COUNT(*) as cnt FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND is_suspended = false AND vol > 0 GROUP BY stock_code"
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
+            f"GROUP BY stock_code"
         )
 
         minute_counts = {r["stock_code"]: int(r["cnt"]) for r in minute_rows}
@@ -1670,7 +1690,7 @@ class GreptimeBacktestCache:
         rows = await self._db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND is_suspended = false AND vol > 0"
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
         )
         return {r["stock_code"] for r in rows}
 
