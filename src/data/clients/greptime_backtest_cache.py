@@ -1121,9 +1121,86 @@ class GreptimeBacktestCache:
 
                 if day_records:
                     trading_days_found += 1
-                    # INSERT this day's data and FLUSH to persist to OSS
+                    # INSERT this day's data, FLUSH, then verify+retry
                     await self._write_daily(ts_ms, day_records)
                     await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+
+                    # Verify: count persisted rows for this date
+                    expected = len(day_records)
+                    verify_row = await self._db.fetchrow(
+                        f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = {ts_ms}"
+                    )
+                    actual = int(verify_row["cnt"]) if verify_row else 0
+
+                    if actual < expected:
+                        # Find which codes are missing and retry
+                        persisted_rows = await self._db.fetch(
+                            f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}"
+                        )
+                        persisted_codes = {r["stock_code"] for r in persisted_rows}
+                        missing = [(c, rec) for c, rec in day_records if c not in persisted_codes]
+                        logger.warning(
+                            f"Daily verify {date_str}: {actual}/{expected} persisted, "
+                            f"retrying {len(missing)} missing rows"
+                        )
+                        if progress_cb:
+                            await _maybe_await(
+                                progress_cb(
+                                    "daily",
+                                    (current - dl_start).days + 1,
+                                    total_days,
+                                    f"{date_str} 验证缺失 {len(missing)} 只, 重试中...",
+                                )
+                            )
+                        for retry_attempt in range(1, 4):  # max 3 retries
+                            await self._write_daily(ts_ms, missing)
+                            await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+                            re_check = await self._db.fetchrow(
+                                f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = {ts_ms}"
+                            )
+                            new_actual = int(re_check["cnt"]) if re_check else 0
+                            if new_actual >= expected:
+                                logger.info(
+                                    f"Daily verify {date_str}: retry #{retry_attempt} OK "
+                                    f"({new_actual}/{expected})"
+                                )
+                                if progress_cb:
+                                    await _maybe_await(
+                                        progress_cb(
+                                            "daily",
+                                            (current - dl_start).days + 1,
+                                            total_days,
+                                            f"{date_str} 重试#{retry_attempt}成功 ✓",
+                                        )
+                                    )
+                                break
+                            # Refresh missing list for next retry
+                            persisted_rows = await self._db.fetch(
+                                f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}"
+                            )
+                            persisted_codes = {r["stock_code"] for r in persisted_rows}
+                            missing = [
+                                (c, rec) for c, rec in day_records if c not in persisted_codes
+                            ]
+                            logger.warning(
+                                f"Daily verify {date_str}: retry #{retry_attempt} "
+                                f"still missing {len(missing)}, {new_actual}/{expected}"
+                            )
+                        else:
+                            logger.error(
+                                f"Daily verify {date_str}: FAILED after 3 retries, "
+                                f"{new_actual}/{expected}"
+                            )
+                            if progress_cb:
+                                await _maybe_await(
+                                    progress_cb(
+                                        "daily",
+                                        (current - dl_start).days + 1,
+                                        total_days,
+                                        f"{date_str} ⚠ 3次重试后仍缺 {expected - new_actual} 只",
+                                    )
+                                )
+
                     # Update prev_close_map for next day
                     for code, rec_data in day_records:
                         prev_close_map[code] = rec_data["close"]
@@ -1132,7 +1209,9 @@ class GreptimeBacktestCache:
                     elapsed = (current - dl_start).days + 1
                     stocks_today = len(day_records)
                     await _maybe_await(
-                        progress_cb("daily", elapsed, total_days, f"{date_str} ({stocks_today}只)")
+                        progress_cb(
+                            "daily", elapsed, total_days, f"{date_str} ({stocks_today}只) ✓"
+                        )
                     )
 
                 current += timedelta(days=1)
@@ -1260,15 +1339,88 @@ class GreptimeBacktestCache:
                 results = await asyncio.gather(*[_fetch_one(c) for c in batch])
 
                 has_writes = False
+                # Track what we wrote for verification
+                written_stocks: dict[str, dict[str, tuple]] = {}
                 for code, day_data in results:
                     if day_data:
                         await self._write_minute(code, day_data)
+                        written_stocks[code] = day_data
                         has_writes = True
                     done += 1
 
                 # FLUSH once per batch to persist to OSS
                 if has_writes:
                     await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
+
+                    # Verify: check which codes actually have data in DB
+                    start_ms = _date_to_epoch_ms(dl_start)
+                    end_ms = _date_to_epoch_ms(end_date)
+                    verify_rows = await self._db.fetch(
+                        f"SELECT DISTINCT stock_code FROM backtest_minute "
+                        f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+                        f"AND stock_code IN ({','.join(repr(c) for c in written_stocks)})"
+                    )
+                    persisted_codes = {r["stock_code"] for r in verify_rows}
+                    missing_codes = [c for c in written_stocks if c not in persisted_codes]
+
+                    if missing_codes:
+                        logger.warning(
+                            f"Minute verify batch {i // batch_size + 1}: "
+                            f"{len(persisted_codes)}/{len(written_stocks)} persisted, "
+                            f"retrying {len(missing_codes)} missing"
+                        )
+                        if progress_cb:
+                            await _maybe_await(
+                                progress_cb(
+                                    "minute",
+                                    done,
+                                    total,
+                                    f"验证缺失 {len(missing_codes)} 只, 重试中...",
+                                )
+                            )
+                        for retry_attempt in range(1, 4):
+                            for mc in missing_codes:
+                                await self._write_minute(mc, written_stocks[mc])
+                            await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
+                            re_verify = await self._db.fetch(
+                                f"SELECT DISTINCT stock_code FROM backtest_minute "
+                                f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+                                f"AND stock_code IN ({','.join(repr(c) for c in missing_codes)})"
+                            )
+                            re_persisted = {r["stock_code"] for r in re_verify}
+                            still_missing = [c for c in missing_codes if c not in re_persisted]
+                            if not still_missing:
+                                logger.info(
+                                    f"Minute verify batch: retry #{retry_attempt} OK, "
+                                    f"all {len(missing_codes)} recovered"
+                                )
+                                if progress_cb:
+                                    await _maybe_await(
+                                        progress_cb(
+                                            "minute", done, total, f"重试#{retry_attempt}成功 ✓"
+                                        )
+                                    )
+                                break
+                            missing_codes = still_missing
+                            logger.warning(
+                                f"Minute verify: retry #{retry_attempt} "
+                                f"still missing {len(still_missing)}"
+                            )
+                        else:
+                            logger.error(
+                                f"Minute verify: FAILED after 3 retries, "
+                                f"still missing {len(missing_codes)}: "
+                                f"{missing_codes[:10]}"
+                            )
+                            if progress_cb:
+                                await _maybe_await(
+                                    progress_cb(
+                                        "minute",
+                                        done,
+                                        total,
+                                        f"⚠ 3次重试后仍缺 {len(missing_codes)} 只",
+                                    )
+                                )
 
                 if progress_cb:
                     await _maybe_await(progress_cb("minute", done, total, ""))
@@ -1520,33 +1672,94 @@ class GreptimeBacktestCache:
                 )
             await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
 
-            # Verify: this date should have 0 NULL is_suspended now
-            verify = await self._db.fetch(
-                f"SELECT COUNT(*) FROM backtest_daily WHERE ts = {ts_ms} AND is_suspended IS NULL"
-            )
-            null_remaining = verify[0][0] if verify else -1
-            if null_remaining > 0:
-                msg = (
-                    f"[缓存回填] DELETE+INSERT+FLUSH 后仍失败\n"
-                    f"日期 {date_str}: 处理 {upserted} 行后"
-                    f"仍有 {null_remaining} 行 is_suspended=NULL"
+            # Verify + retry: this date should have 0 NULL is_suspended
+            for _verify_attempt in range(4):  # 1 initial check + 3 retries
+                verify = await self._db.fetch(
+                    f"SELECT COUNT(*) FROM backtest_daily "
+                    f"WHERE ts = {ts_ms} AND is_suspended IS NULL"
                 )
-                logger.error(msg)
-                try:
-                    from src.common.feishu_bot import FeishuBot
+                null_remaining = verify[0][0] if verify else -1
 
-                    bot = FeishuBot()
-                    if bot.is_configured():
-                        await bot.send_message(msg)
-                except Exception:  # safety: ignore — 通知失败不阻断下载
-                    pass
-            else:
-                logger.info(
-                    f"Backfill {date_str}: {upserted} rows OK (suspended={len(suspended_codes)})"
-                )
+                if null_remaining <= 0:
+                    logger.info(
+                        f"Backfill {date_str}: {upserted} rows OK "
+                        f"(suspended={len(suspended_codes)})"
+                    )
+                    break
+
+                if _verify_attempt < 3:
+                    # Retry: re-read NULL rows and re-do DELETE→FLUSH→INSERT→FLUSH
+                    logger.warning(
+                        f"Backfill {date_str}: {null_remaining} rows still NULL, "
+                        f"retry #{_verify_attempt + 1}"
+                    )
+                    if progress_cb:
+                        await _maybe_await(
+                            progress_cb(
+                                "backfill",
+                                idx,
+                                len(dates_to_fix),
+                                f"{date_str} 验证失败, 重试#{_verify_attempt + 1}...",
+                            )
+                        )
+                    # Re-read remaining NULL rows
+                    retry_rows = await self._db.fetch(
+                        f"SELECT stock_code, open_price, high_price, low_price, "
+                        f"close_price, pre_close, vol, amount, turnover_ratio "
+                        f"FROM backtest_daily WHERE ts = {ts_ms} AND is_suspended IS NULL"
+                    )
+                    for rr in retry_rows:
+                        rr_code = rr["stock_code"]
+                        await self._db.execute(
+                            f"DELETE FROM backtest_daily "
+                            f"WHERE stock_code = '{rr_code}' AND ts = {ts_ms}"
+                        )
+                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+                    for rr in retry_rows:
+                        rr_code = rr["stock_code"]
+                        is_susp = rr_code in suspended_codes
+                        if is_susp:
+                            pre_c = float(rr["pre_close"]) if rr["pre_close"] else 0.0
+                            fill = pre_c if pre_c > 0 else 0.0
+                            val = (
+                                f"('{rr_code}',{ts_ms},"
+                                f"{fill},{fill},{fill},{fill},"
+                                f"{pre_c},0.0,0.0,NULL,true)"
+                            )
+                        else:
+                            tr_v = rr["turnover_ratio"]
+                            tr_s = str(tr_v) if tr_v is not None else "NULL"
+                            val = (
+                                f"('{rr_code}',{ts_ms},"
+                                f"{float(rr['open_price'])},"
+                                f"{float(rr['high_price'])},"
+                                f"{float(rr['low_price'])},"
+                                f"{float(rr['close_price'])},"
+                                f"{float(rr['pre_close']) if rr['pre_close'] else 0.0},"
+                                f"{float(rr['vol']) if rr['vol'] else 0.0},"
+                                f"{float(rr['amount']) if rr['amount'] else 0.0},"
+                                f"{tr_s},false)"
+                            )
+                        await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
+                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+                else:
+                    # Final attempt failed
+                    msg = (
+                        f"[缓存回填] 3次重试后仍失败\n"
+                        f"日期 {date_str}: 仍有 {null_remaining} 行 is_suspended=NULL"
+                    )
+                    logger.error(msg)
+                    try:
+                        from src.common.feishu_bot import FeishuBot
+
+                        bot = FeishuBot()
+                        if bot.is_configured():
+                            await bot.send_message(msg)
+                    except Exception:
+                        pass
 
             if progress_cb:
-                status = "✓" if null_remaining == 0 else f"⚠ {null_remaining} NULL"
+                status = "✓" if null_remaining <= 0 else f"⚠ {null_remaining} NULL"
                 await _maybe_await(
                     progress_cb(
                         "backfill",

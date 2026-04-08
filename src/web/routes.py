@@ -468,7 +468,7 @@ def create_momentum_router() -> APIRouter:
                 return f"正在下载: {detail} ({current}/{total} 已完成)"
             elif phase == "minute":
                 if detail:
-                    return f"分钟线 {current}/{total} 已写入"
+                    return f"分钟线 {current}/{total}: {detail}"
                 return f"下载分钟线数据: {current}/{total} 只"
             elif phase == "download":
                 return f"下载完成: 共 {total} 只股票"
