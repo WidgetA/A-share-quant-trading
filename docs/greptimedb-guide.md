@@ -257,4 +257,4 @@ If using asyncpg/psycopg:
 4. **Natural upsert** — same (stock_code, ts) = last write wins, no special syntax needed
 5. **No in-app caching** — all reads go through SQL, let GreptimeDB manage memory
 6. **No memory limits** — GreptimeDB handles resource management internally
-7. **No transactions needed** — each INSERT is independently persisted via WAL
+7. **No transactions needed** — each INSERT is independent, but must `ADMIN FLUSH_TABLE` after writes to persist to OSS (WAL is on `/tmp`, not durable)

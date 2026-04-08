@@ -197,61 +197,52 @@ Before starting any development task:
 | Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d), tsanghi (backtest daily + 5min, **max concurrency=2**) | A-share real-time and historical data |
 | GreptimeDB Client | asyncpg | Async PostgreSQL wire protocol access |
 
-## GreptimeDB 操作规范（CRITICAL）
+## GreptimeDB Rules (CRITICAL)
 
-GreptimeDB 是 LSM-tree 存储引擎，数据分 memtable（内存）和 SST 文件（磁盘）两层。
-理解这个分层对正确写入数据至关重要。
+GreptimeDB is an LSM-tree engine. Write path: INSERT → memtable + WAL → FLUSH → SST (persisted to OSS).
 
-### ALTER TABLE 新增列后更新旧行
+### Core Rule: FLUSH After Every Write
 
-**旧 SST 文件中的行没有新列**。直接 INSERT 同 PK 的行（upsert），新列的值只存在于 memtable。
-当 memtable flush 到 SST 并与旧 SST 合并时，**旧行会覆盖新列的值**，导致新列回退到 NULL。
-
-正确做法：**DELETE → FLUSH（持久化 tombstone）→ INSERT → FLUSH（持久化新数据）**
-
-大量行（3000+）时，单次 FLUSH 不够：memtable 在 INSERT 过程中可能自动刷盘，
-tombstone 和新行分到不同 SST，旧数据在 merge 时赢回来。**必须两次 FLUSH**。
+**Data is only durable after FLUSH to SST.** WAL is on `/tmp` (lost on container rebuild). `auto_flush_interval=1m` is a fallback, not a guarantee.
 
 ```python
-# ❌ 错误：纯 upsert — flush 后新列值丢失
+# ✅ Correct: explicit FLUSH after writes
 await db.execute(f"INSERT INTO t{cols} VALUES {val}")
-
-# ❌ 错误：DELETE + INSERT + 单次 FLUSH — 3000+ 行时部分数据仍丢失
-for code in codes:
-    await db.execute(f"DELETE FROM t WHERE stock_code='{code}' AND ts={ts_ms}")
-for code in codes:
-    await db.execute(f"INSERT INTO t{cols} VALUES {val_map[code]}")
 await db.execute("ADMIN FLUSH_TABLE('t')")
 
-# ✅ 正确：DELETE → FLUSH → INSERT → FLUSH（两次刷盘）
+# ✅ Batch writes: FLUSH once after all INSERTs (not per row)
+for code, rec in records:
+    await db.execute(f"INSERT INTO t{cols} VALUES {val}")
+await db.execute("ADMIN FLUSH_TABLE('t')")  # one FLUSH is enough
+```
+
+Applies to **all write scenarios**: download, backfill, repair — no exceptions.
+
+### ALTER TABLE Add Column: DELETE → FLUSH → INSERT → FLUSH
+
+Old SST rows lack the new column. Plain upsert gets overwritten by old SST on merge. Must delete old rows first, FLUSH each step.
+
+```python
 for code in codes:
     await db.execute(f"DELETE FROM t WHERE stock_code='{code}' AND ts={ts_ms}")
-await db.execute("ADMIN FLUSH_TABLE('t')")  # tombstone 落盘
+await db.execute("ADMIN FLUSH_TABLE('t')")  # persist tombstones
 for code in codes:
     await db.execute(f"INSERT INTO t{cols} VALUES {val_map[code]}")
-await db.execute("ADMIN FLUSH_TABLE('t')")  # 新数据落盘
+await db.execute("ADMIN FLUSH_TABLE('t')")  # persist new data
 ```
 
-### 批量写入规则
+### Batch Write Limits
 
-| 操作 | 可靠上限 | 超过后果 |
-|------|---------|---------|
-| 单条 INSERT (VALUES 1 行) | 无限制 | — |
-| 批量 INSERT (VALUES N 行) | ~200 行 | 静默丢数据 |
-| 批量 DELETE (IN 子句) | ~200 code | 未验证，建议同上 |
+| Operation | Safe limit | Beyond |
+|-----------|-----------|--------|
+| Single-row INSERT (1 VALUES row) | Unlimited | — |
+| Multi-row INSERT (N VALUES rows) | ~200 rows | Silent data loss |
 
-### ADMIN 管理命令
+### Connection Pool
 
-```sql
-ADMIN FLUSH_TABLE('backtest_daily')    -- memtable → SST，确保写入持久化
-ADMIN COMPACT_TABLE('backtest_daily')  -- 合并 SST 文件，回收空间
-```
-
-### 连接池注意事项
-
-- 必须用 `asyncpg.create_pool(min_size=0, max_size=3, statement_cache_size=0)`
-- 必须自定义连接类禁用 `reset()`（GreptimeDB 不支持 `RESET ALL` / `DEALLOCATE ALL`）
-- 单连接不支持并发操作，必须用连接池
+- Must use `asyncpg.create_pool(min_size=0, max_size=3, statement_cache_size=0)`
+- Must override `reset()` to no-op (GreptimeDB doesn't support `RESET ALL` / `DEALLOCATE ALL`)
+- Single connection doesn't support concurrent ops — must use pool
 
 ## Environment Management (uv)
 

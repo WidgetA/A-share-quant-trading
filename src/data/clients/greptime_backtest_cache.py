@@ -6,7 +6,7 @@
 # === KEY CONCEPTS ===
 # - All reads go through SQL via asyncpg (PostgreSQL wire protocol, port 4003)
 # - Natural upsert: same (stock_code, ts) = last write wins
-# - No transactions needed — each INSERT is independently persisted via WAL
+# - No transactions needed — each INSERT is independent, but FLUSH required to persist to OSS
 # - Volume stored in 手 (lots) — adapter converts ×100 at read time
 # - Data sources: tsanghi (daily OHLCV + 5-min bars for 9:40 snapshot)
 #
@@ -786,7 +786,7 @@ class GreptimeBacktestCache:
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
         Phase 2 — 5-min bars via tsanghi REST API (per-stock, for 9:40 snapshot).
 
-        Data is written directly to GreptimeDB (each INSERT persisted independently).
+        Data is written to GreptimeDB with FLUSH after each batch to persist to OSS.
         """
         # Extra history for lookback (preClose needs 1 day, QualityFilter needs ~30 days)
         dl_start = start_date - timedelta(days=60)
@@ -1102,8 +1102,9 @@ class GreptimeBacktestCache:
 
                 if day_records:
                     trading_days_found += 1
-                    # INSERT this day's data immediately
+                    # INSERT this day's data and FLUSH to persist to OSS
                     await self._write_daily(ts_ms, day_records)
+                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
                     # Update prev_close_map for next day
                     for code, rec_data in day_records:
                         prev_close_map[code] = rec_data["close"]
@@ -1239,10 +1240,16 @@ class GreptimeBacktestCache:
 
                 results = await asyncio.gather(*[_fetch_one(c) for c in batch])
 
+                has_writes = False
                 for code, day_data in results:
                     if day_data:
                         await self._write_minute(code, day_data)
+                        has_writes = True
                     done += 1
+
+                # FLUSH once per batch to persist to OSS
+                if has_writes:
+                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
 
                 if progress_cb:
                     await _maybe_await(progress_cb("minute", done, total, ""))
@@ -1260,7 +1267,7 @@ class GreptimeBacktestCache:
         """INSERT daily records for a single date, one row at a time.
 
         GreptimeDB silently drops data when batch INSERT exceeds ~200 rows.
-        Single-row INSERT is safe and GreptimeDB handles WAL efficiently.
+        Caller must FLUSH after calling this method to persist to OSS.
         """
         if not records:
             return
@@ -1282,7 +1289,7 @@ class GreptimeBacktestCache:
     async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
     ) -> None:
-        """INSERT minute data for a single stock, batched to avoid silent failure."""
+        """INSERT minute data for a single stock. Caller must FLUSH after."""
         if not min_data:
             return
         values = []
