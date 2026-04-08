@@ -8,7 +8,7 @@
 # - Natural upsert: same (stock_code, ts) = last write wins
 # - No transactions needed — each INSERT is independent, but FLUSH required to persist to OSS
 # - Volume stored in 手 (lots) — adapter converts ×100 at read time
-# - Data sources: tsanghi (daily OHLCV + 5-min bars for 9:40 snapshot)
+# - Data sources: tsanghi (daily OHLCV), Fake Tushare (1-min bars for 9:40 snapshot)
 #
 # === TABLES ===
 # backtest_daily:  stock_code(TAG), ts(TIME INDEX), open_price, high_price,
@@ -784,7 +784,7 @@ class GreptimeBacktestCache:
         """Download daily + minute data for all main-board stocks.
 
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
-        Phase 2 — 5-min bars via tsanghi REST API (per-stock, for 9:40 snapshot).
+        Phase 2 — 1-min bars via Fake Tushare stk_mins API (per-stock, for 9:40 snapshot).
 
         Data is written to GreptimeDB with FLUSH after each batch to persist to OSS.
         """
@@ -802,7 +802,7 @@ class GreptimeBacktestCache:
             cancel_event,
         )
 
-        # Phase 2: Minute data from tsanghi 5min
+        # Phase 2: Minute data from Fake Tushare 1min
         # Always use full stock list from DB — daily download only returns codes
         # from newly downloaded dates, which can be a tiny subset when most dates
         # are already cached.
@@ -813,7 +813,7 @@ class GreptimeBacktestCache:
         # Collect per-stock reasons for missing minute data across all phases
         all_no_data_reasons: dict[str, str] = {}
         if stock_codes:
-            reasons = await self._download_minute_tsanghi(
+            reasons = await self._download_minute(
                 stock_codes,
                 dl_start,
                 end_date,
@@ -830,7 +830,7 @@ class GreptimeBacktestCache:
                 if cancel_event and cancel_event.is_set():
                     break
                 logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
-                reasons = await self._download_minute_tsanghi(
+                reasons = await self._download_minute(
                     stock_codes,
                     gap_start,
                     gap_end,
@@ -853,7 +853,7 @@ class GreptimeBacktestCache:
 
         # Re-run the same resume check that decides what to download.
         # If it says 0 stocks to download, verification passes.
-        # Must use dl_start (not start_date) to match what _download_minute_tsanghi uses.
+        # Must use dl_start (not start_date) to match what _download_minute uses.
         active_codes = await self._get_active_daily_codes(dl_start, end_date)
         existing_minute = await self._get_existing_minute_codes(dl_start, end_date)
         would_download = [c for c in active_codes if c not in existing_minute]
@@ -959,9 +959,9 @@ class GreptimeBacktestCache:
             lines.append("【缺失原因统计】")
             for reason, count in reason_counts.most_common():
                 label = {
-                    "api_empty": "tsanghi返回空数据",
-                    "api_error": "tsanghi API报错",
-                    "no_0935_0940": "有数据但无09:35/09:40",
+                    "api_empty": "API返回空数据",
+                    "api_error": "API报错",
+                    "no_0931_0940": "有数据但无09:31~09:40",
                     "unknown_exchange": "无法识别交易所",
                     "cancelled": "用户取消",
                 }.get(reason, reason)
@@ -986,9 +986,9 @@ class GreptimeBacktestCache:
             if reason_key == "unknown":
                 continue  # already shown above as missing_unknown
             label = {
-                "api_empty": "tsanghi返回空数据",
-                "api_error": "tsanghi API报错",
-                "no_0935_0940": "有数据但无09:35/09:40",
+                "api_empty": "API返回空数据",
+                "api_error": "API报错",
+                "no_0931_0940": "有数据但无09:31~09:40",
                 "unknown_exchange": "无法识别交易所",
                 "cancelled": "用户取消",
             }.get(reason_key, reason_key)
@@ -1365,7 +1365,7 @@ class GreptimeBacktestCache:
             await client.stop()
             await tushare_client.stop()
 
-    async def _download_minute_tsanghi(
+    async def _download_minute(
         self,
         codes: list[str],
         dl_start: date,
@@ -1373,12 +1373,17 @@ class GreptimeBacktestCache:
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
     ) -> dict[str, str]:
-        """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB.
+        """Download 1-min bars from Fake Tushare and INSERT 9:40 snapshots to GreptimeDB.
+
+        Uses stk_mins API (tushare.xyz) with 1min granularity.
+        Aggregates 09:31~09:40 bars into a single 9:40 snapshot per day.
 
         Returns dict of {stock_code: reason} for stocks with no minute data.
-        Reasons: cancelled, unknown_exchange, api_error, api_empty, no_0935_0940.
         """
-        from src.data.clients.tsanghi_client import TsanghiClient, bare_code_to_exchange
+        from src.data.clients.fake_tushare_client import (
+            FakeTushareClient,
+            bare_code_to_ts_code,
+        )
 
         # Resume: check which codes already have minute data.
         # Use dl_start (not start_date) — must match the download range,
@@ -1386,7 +1391,7 @@ class GreptimeBacktestCache:
         # would be re-downloaded every time.
         existing_codes = await self._get_existing_minute_codes(dl_start, end_date)
         # Filter out stocks that are fully suspended (no active trading day)
-        # — they have no 5min bars from tsanghi and would be re-downloaded forever.
+        # — they have no minute bars and would be re-downloaded forever.
         active_codes = await self._get_active_daily_codes(dl_start, end_date)
 
         total_before = len(codes)
@@ -1406,35 +1411,40 @@ class GreptimeBacktestCache:
         if not codes_to_download:
             return {}
 
-        client = TsanghiClient()
+        client = FakeTushareClient()
         await client.start()
 
         try:
             total = len(codes_to_download)
             done = 0
-            start_str = dl_start.strftime("%Y-%m-%d")
-            end_str = end_date.strftime("%Y-%m-%d")
-            sem = asyncio.Semaphore(2)  # tsanghi API max concurrency
+            start_str = dl_start.strftime("%Y-%m-%d") + " 09:00:00"
+            end_str = end_date.strftime("%Y-%m-%d") + " 15:00:00"
+            sem = asyncio.Semaphore(2)  # conservative concurrency
 
             # Track why each stock has no minute data:
             # key=stock_code, value=reason string
             no_data_reasons: dict[str, str] = {}
 
             async def _fetch_one(code: str) -> tuple[str, dict[str, tuple] | None]:
-                """Fetch 5min bars for one stock, aggregate to 9:40 snapshots."""
+                """Fetch 1min bars for one stock, aggregate to 9:40 snapshots."""
                 if cancel_event and cancel_event.is_set():
                     no_data_reasons[code] = "cancelled"
                     return code, None
 
                 try:
-                    exchange = bare_code_to_exchange(code)
+                    ts_code = bare_code_to_ts_code(code)
                 except ValueError:
                     no_data_reasons[code] = "unknown_exchange"
                     return code, None
 
                 async with sem:
                     try:
-                        bars = await client.five_min(exchange, code, start_str, end_str)
+                        bars = await client.stk_mins(
+                            ts_code,
+                            freq="1min",
+                            start_date=start_str,
+                            end_date=end_str,
+                        )
                     except RuntimeError as e:
                         no_data_reasons[code] = f"api_error: {e}"
                         return code, None
@@ -1443,34 +1453,36 @@ class GreptimeBacktestCache:
                     no_data_reasons[code] = "api_empty"
                     return code, None
 
-                # Aggregate 09:35 + 09:40 bars per day into 9:40 snapshot
+                # Aggregate 09:31~09:40 (first 10 minutes) per day into 9:40 snapshot
+                # trade_time format: "2026-04-07 09:35:00"
                 day_data: dict[str, tuple[float, float, float, float]] = {}
                 bar_count = len(bars)
                 bar_times: set[str] = set()
                 for bar in bars:
-                    dt_str = str(bar.get("date", ""))
-                    if len(dt_str) < 16:
+                    trade_time = str(bar.get("trade_time", ""))
+                    if len(trade_time) < 16:
                         continue
-                    bar_date = dt_str[:10]  # "yyyy-mm-dd"
-                    bar_time = dt_str[11:16]  # "hh:mm"
+                    bar_date = trade_time[:10]
+                    bar_time = trade_time[11:16]
                     bar_times.add(bar_time)
 
-                    if bar_time not in ("09:35", "09:40"):
+                    # Only aggregate 09:31 ~ 09:40
+                    if bar_time < "09:31" or bar_time > "09:40":
                         continue
 
                     try:
                         h = float(bar["high"])
                         lo = float(bar["low"])
                         c = float(bar["close"])
-                        # Volume in 手 → convert to 股
-                        v = float(bar.get("volume", 0)) * 100
+                        # vol is in 股 (shares), returned as string
+                        v = float(bar.get("vol", 0))
                     except (ValueError, TypeError, KeyError):
                         continue
 
                     if bar_date in day_data:
                         prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
                         day_data[bar_date] = (
-                            c,  # close of latest bar (9:40)
+                            c,  # close of latest bar (09:40)
                             prev_v + v,  # cumulative volume in 股
                             max(prev_h, h),
                             min(prev_l, lo),
@@ -1479,9 +1491,8 @@ class GreptimeBacktestCache:
                         day_data[bar_date] = (c, v, h, lo)
 
                 if not day_data:
-                    # Got bars but none matched 09:35/09:40
                     sample_times = sorted(bar_times)[:5]
-                    no_data_reasons[code] = f"no_0935_0940: {bar_count}bars, times={sample_times}"
+                    no_data_reasons[code] = f"no_0931_0940: {bar_count}bars, times={sample_times}"
                     return code, None
 
                 return code, day_data
@@ -1584,7 +1595,7 @@ class GreptimeBacktestCache:
                     await _maybe_await(progress_cb("minute", done, total, detail))
 
                 if done % 200 == 0:
-                    logger.info(f"tsanghi minute: {done}/{total} stocks processed")
+                    logger.info(f"minute download: {done}/{total} stocks processed")
 
             # Log summary of no-data reasons
             if no_data_reasons:
@@ -1592,11 +1603,11 @@ class GreptimeBacktestCache:
 
                 reason_counts = Counter(r.split(":")[0] for r in no_data_reasons.values())
                 logger.info(
-                    f"tsanghi minute: {len(no_data_reasons)} stocks have no data — "
+                    f"minute download: {len(no_data_reasons)} stocks have no data — "
                     f"{dict(reason_counts)}"
                 )
 
-            logger.info(f"tsanghi minute download done: {done}/{total} stocks")
+            logger.info(f"minute download done: {done}/{total} stocks")
         finally:
             await client.stop()
 
@@ -2027,8 +2038,8 @@ class GreptimeBacktestCache:
         """Get stock codes that have any minute data in the given range.
 
         A stock is considered cached if it has at least 1 row in backtest_minute.
-        This avoids infinite re-download loops for stocks where tsanghi has no
-        5-min data (API returns empty) — they'd never reach coverage thresholds.
+        This avoids infinite re-download loops for stocks where the API has no
+        minute data (returns empty) — they'd never reach coverage thresholds.
         """
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
@@ -2042,8 +2053,8 @@ class GreptimeBacktestCache:
     async def _get_active_daily_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have at least one non-suspended trading day.
 
-        Stocks fully suspended/delisted in the range have no 5min bars from
-        tsanghi and should be excluded from minute download.
+        Stocks fully suspended/delisted in the range have no minute bars and
+        should be excluded from minute download.
         """
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
