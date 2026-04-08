@@ -815,7 +815,6 @@ class GreptimeBacktestCache:
                 stock_codes,
                 dl_start,
                 end_date,
-                resume_check_start=start_date,
                 progress_cb=progress_cb,
                 cancel_event=cancel_event,
             )
@@ -850,8 +849,9 @@ class GreptimeBacktestCache:
 
         # Re-run the same resume check that decides what to download.
         # If it says 0 stocks to download, verification passes.
-        active_codes = await self._get_active_daily_codes(start_date, end_date)
-        existing_minute = await self._get_existing_minute_codes(start_date, end_date)
+        # Must use dl_start (not start_date) to match what _download_minute_tsanghi uses.
+        active_codes = await self._get_active_daily_codes(dl_start, end_date)
+        existing_minute = await self._get_existing_minute_codes(dl_start, end_date)
         would_download = [c for c in active_codes if c not in existing_minute]
 
         self.invalidate_cache_status()
@@ -1248,19 +1248,20 @@ class GreptimeBacktestCache:
         codes: list[str],
         dl_start: date,
         end_date: date,
-        resume_check_start: date | None = None,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
     ) -> None:
         """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB."""
         from src.data.clients.tsanghi_client import TsanghiClient, bare_code_to_exchange
 
-        # Resume: check which codes already have minute data
-        check_start = resume_check_start or dl_start
-        existing_codes = await self._get_existing_minute_codes(check_start, end_date)
+        # Resume: check which codes already have minute data.
+        # Use dl_start (not start_date) — must match the download range,
+        # otherwise stocks with minute data only in the lookback period
+        # would be re-downloaded every time.
+        existing_codes = await self._get_existing_minute_codes(dl_start, end_date)
         # Filter out stocks that are fully suspended (no active trading day)
         # — they have no 5min bars from tsanghi and would be re-downloaded forever.
-        active_codes = await self._get_active_daily_codes(check_start, end_date)
+        active_codes = await self._get_active_daily_codes(dl_start, end_date)
 
         total_before = len(codes)
         codes = [c for c in codes if c in active_codes]
