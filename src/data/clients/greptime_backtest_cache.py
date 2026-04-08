@@ -339,7 +339,7 @@ class GreptimeBacktestCache:
             f"close_price, vol "
             f"FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND (is_suspended IS NULL OR is_suspended = false) "
+            f"AND NOT is_suspended "
             f"ORDER BY stock_code, ts"
         )
 
@@ -1854,7 +1854,7 @@ class GreptimeBacktestCache:
         daily_rows = await self._db.fetch(
             f"SELECT stock_code, COUNT(*) as cnt FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
+            f"AND NOT is_suspended AND vol > 0 "
             f"GROUP BY stock_code"
         )
 
@@ -1883,10 +1883,37 @@ class GreptimeBacktestCache:
         """
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
+
+        # Diagnostic: test different boolean filter syntaxes through pgwire
+        # GreptimeDB pgwire may handle boolean comparisons differently from HTTP API
+        diag_base = (
+            f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
+        )
+        for label, condition in [
+            ("no filter", ""),
+            ("vol>0 only", " AND vol > 0"),
+            ("is_suspended=false", " AND is_suspended = false"),
+            ("NOT is_suspended", " AND NOT is_suspended"),
+            ("is_suspended!=true", " AND is_suspended != true"),
+            ("full filter", " AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"),
+            ("NOT is_suspended + vol", " AND NOT is_suspended AND vol > 0"),
+        ]:
+            try:
+                r = await self._db.fetchrow(diag_base + condition)
+                cnt = int(r["cnt"]) if r else -1
+                logger.info(f"_get_active_daily_codes diag [{label}]: {cnt}")
+            except Exception as e:
+                logger.warning(f"_get_active_daily_codes diag [{label}]: ERROR {e}")
+
+        # Use the filter syntax that works through pgwire
         rows = await self._db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
+            f"AND NOT is_suspended AND vol > 0"
+        )
+        logger.info(
+            f"_get_active_daily_codes: {len(rows)} stocks (range {start_date} ~ {end_date})"
         )
         return {r["stock_code"] for r in rows}
 
