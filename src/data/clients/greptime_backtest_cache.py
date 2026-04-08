@@ -1131,8 +1131,9 @@ class GreptimeBacktestCache:
                         f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = {ts_ms}"
                     )
                     actual = int(verify_row["cnt"]) if verify_row else 0
+                    verify_ok = actual >= expected
 
-                    if actual < expected:
+                    if not verify_ok:
                         # Find which codes are missing and retry
                         persisted_rows = await self._db.fetch(
                             f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}"
@@ -1164,15 +1165,7 @@ class GreptimeBacktestCache:
                                     f"Daily verify {date_str}: retry #{retry_attempt} OK "
                                     f"({new_actual}/{expected})"
                                 )
-                                if progress_cb:
-                                    await _maybe_await(
-                                        progress_cb(
-                                            "daily",
-                                            (current - dl_start).days + 1,
-                                            total_days,
-                                            f"{date_str} 重试#{retry_attempt}成功 ✓",
-                                        )
-                                    )
+                                verify_ok = True
                                 break
                             # Refresh missing list for next retry
                             persisted_rows = await self._db.fetch(
@@ -1186,33 +1179,27 @@ class GreptimeBacktestCache:
                                 f"Daily verify {date_str}: retry #{retry_attempt} "
                                 f"still missing {len(missing)}, {new_actual}/{expected}"
                             )
-                        else:
+                        if not verify_ok:
                             logger.error(
                                 f"Daily verify {date_str}: FAILED after 3 retries, "
                                 f"{new_actual}/{expected}"
                             )
-                            if progress_cb:
-                                await _maybe_await(
-                                    progress_cb(
-                                        "daily",
-                                        (current - dl_start).days + 1,
-                                        total_days,
-                                        f"{date_str} ⚠ 3次重试后仍缺 {expected - new_actual} 只",
-                                    )
-                                )
+
+                    # Show final result only after verify
+                    if progress_cb:
+                        elapsed = (current - dl_start).days + 1
+                        stocks_today = len(day_records)
+                        if verify_ok:
+                            status = f"{date_str} ({stocks_today}只) 已验证 ✓"
+                        else:
+                            status = (
+                                f"{date_str} ⚠ 刷盘验证失败, 预期{expected}只 实际{new_actual}只"
+                            )
+                        await _maybe_await(progress_cb("daily", elapsed, total_days, status))
 
                     # Update prev_close_map for next day
                     for code, rec_data in day_records:
                         prev_close_map[code] = rec_data["close"]
-
-                if progress_cb:
-                    elapsed = (current - dl_start).days + 1
-                    stocks_today = len(day_records)
-                    await _maybe_await(
-                        progress_cb(
-                            "daily", elapsed, total_days, f"{date_str} ({stocks_today}只) ✓"
-                        )
-                    )
 
                 current += timedelta(days=1)
 
@@ -1348,7 +1335,8 @@ class GreptimeBacktestCache:
                         has_writes = True
                     done += 1
 
-                # FLUSH once per batch to persist to OSS
+                # FLUSH once per batch to persist to OSS, then verify
+                batch_verify_ok = True
                 if has_writes:
                     await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
 
@@ -1364,6 +1352,7 @@ class GreptimeBacktestCache:
                     missing_codes = [c for c in written_stocks if c not in persisted_codes]
 
                     if missing_codes:
+                        batch_verify_ok = False
                         logger.warning(
                             f"Minute verify batch {i // batch_size + 1}: "
                             f"{len(persisted_codes)}/{len(written_stocks)} persisted, "
@@ -1394,36 +1383,30 @@ class GreptimeBacktestCache:
                                     f"Minute verify batch: retry #{retry_attempt} OK, "
                                     f"all {len(missing_codes)} recovered"
                                 )
-                                if progress_cb:
-                                    await _maybe_await(
-                                        progress_cb(
-                                            "minute", done, total, f"重试#{retry_attempt}成功 ✓"
-                                        )
-                                    )
+                                batch_verify_ok = True
                                 break
                             missing_codes = still_missing
                             logger.warning(
                                 f"Minute verify: retry #{retry_attempt} "
                                 f"still missing {len(still_missing)}"
                             )
-                        else:
+                        if not batch_verify_ok:
                             logger.error(
                                 f"Minute verify: FAILED after 3 retries, "
                                 f"still missing {len(missing_codes)}: "
                                 f"{missing_codes[:10]}"
                             )
-                            if progress_cb:
-                                await _maybe_await(
-                                    progress_cb(
-                                        "minute",
-                                        done,
-                                        total,
-                                        f"⚠ 3次重试后仍缺 {len(missing_codes)} 只",
-                                    )
-                                )
 
+                # Show final result only after verify
                 if progress_cb:
-                    await _maybe_await(progress_cb("minute", done, total, ""))
+                    if has_writes:
+                        if batch_verify_ok:
+                            detail = f"{len(written_stocks)}只 已验证 ✓"
+                        else:
+                            detail = f"⚠ 刷盘验证失败, 缺 {len(missing_codes)} 只"
+                    else:
+                        detail = ""
+                    await _maybe_await(progress_cb("minute", done, total, detail))
 
                 if done % 200 == 0:
                     logger.info(f"tsanghi minute: {done}/{total} stocks processed")
