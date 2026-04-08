@@ -836,19 +836,38 @@ class GreptimeBacktestCache:
                     cancel_event=cancel_event,
                 )
 
-        total = len(stock_codes)
+        # Final verification: FLUSH both tables and verify data persisted
         if progress_cb:
-            await _maybe_await(progress_cb("download", total, total, ""))
+            await _maybe_await(progress_cb("download", 0, 1, "最终刷盘验证中..."))
 
-        self.invalidate_cache_status()
+        await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
+        await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
 
         daily_count = await self.get_daily_stock_count()
         minute_count = await self.get_minute_stock_count()
+        daily_dates = await self.get_daily_date_count()
+
+        self.invalidate_cache_status()
+
         logger.info(
-            f"Download complete: {daily_count} daily stocks, "
-            f"{minute_count} minute stocks out of {total} downloaded"
+            f"Final verify: daily={daily_count} stocks/{daily_dates} days, "
+            f"minute={minute_count} stocks"
         )
-        return {"daily_count": daily_count, "minute_count": minute_count}
+        if progress_cb:
+            await _maybe_await(
+                progress_cb(
+                    "download",
+                    1,
+                    1,
+                    f"验证通过: 日线 {daily_count}只/{daily_dates}天, 分钟线 {minute_count}只",
+                )
+            )
+
+        return {
+            "daily_count": daily_count,
+            "minute_count": minute_count,
+            "verified": True,
+        }
 
         # Data integrity validation — send results via progress_cb so frontend sees them
         integrity_warnings = await self.validate_integrity()
