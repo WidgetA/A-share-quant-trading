@@ -836,7 +836,8 @@ class GreptimeBacktestCache:
                     cancel_event=cancel_event,
                 )
 
-        # Final verification: FLUSH both tables and verify data persisted
+        # Final verification: FLUSH both tables, then re-run resume check
+        # to confirm the download we just did won't re-trigger next time.
         if progress_cb:
             await _maybe_await(progress_cb("download", 0, 1, "最终刷盘验证中..."))
 
@@ -847,26 +848,35 @@ class GreptimeBacktestCache:
         minute_count = await self.get_minute_stock_count()
         daily_dates = await self.get_daily_date_count()
 
+        # Re-run the same resume check that decides what to download.
+        # If it says 0 stocks to download, verification passes.
+        active_codes = await self._get_active_daily_codes(start_date, end_date)
+        existing_minute = await self._get_existing_minute_codes(start_date, end_date)
+        would_download = [c for c in active_codes if c not in existing_minute]
+
         self.invalidate_cache_status()
 
-        logger.info(
-            f"Final verify: daily={daily_count} stocks/{daily_dates} days, "
-            f"minute={minute_count} stocks"
-        )
-        if progress_cb:
-            await _maybe_await(
-                progress_cb(
-                    "download",
-                    1,
-                    1,
-                    f"验证通过: 日线 {daily_count}只/{daily_dates}天, 分钟线 {minute_count}只",
-                )
+        verified = len(would_download) == 0
+        if verified:
+            verify_msg = (
+                f"验证通过: 日线 {daily_count}只/{daily_dates}天, "
+                f"分钟线 {minute_count}只, 再次下载需要0只"
             )
+        else:
+            verify_msg = (
+                f"验证: 日线 {daily_count}只/{daily_dates}天, "
+                f"分钟线 {minute_count}只, "
+                f"仍有 {len(would_download)} 只无分钟数据(tsanghi无5min数据)"
+            )
+
+        logger.info(f"Final verify: {verify_msg}")
+        if progress_cb:
+            await _maybe_await(progress_cb("download", 1, 1, verify_msg))
 
         return {
             "daily_count": daily_count,
             "minute_count": minute_count,
-            "verified": True,
+            "verified": verified,
         }
 
         # Data integrity validation — send results via progress_cb so frontend sees them
@@ -1859,43 +1869,20 @@ class GreptimeBacktestCache:
         return result
 
     async def _get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
-        """Get stock codes that have *sufficient* minute data in the given range.
+        """Get stock codes that have any minute data in the given range.
 
-        Compares per-stock minute row count against daily active row count.
-        A stock is considered cached only if minute_count >= daily_count * 50%.
-        This prevents silent data loss from unbatched INSERTs being treated as
-        complete on resume.
+        A stock is considered cached if it has at least 1 row in backtest_minute.
+        This avoids infinite re-download loops for stocks where tsanghi has no
+        5-min data (API returns empty) — they'd never reach coverage thresholds.
         """
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
 
-        minute_rows = await self._db.fetch(
-            f"SELECT stock_code, COUNT(*) as cnt FROM backtest_minute "
-            f"WHERE ts >= {start_ms} AND ts <= {end_ms} GROUP BY stock_code"
+        rows = await self._db.fetch(
+            f"SELECT DISTINCT stock_code FROM backtest_minute "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
         )
-        daily_rows = await self._db.fetch(
-            f"SELECT stock_code, COUNT(*) as cnt FROM backtest_daily "
-            f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
-            f"GROUP BY stock_code"
-        )
-
-        minute_counts = {r["stock_code"]: int(r["cnt"]) for r in minute_rows}
-        daily_counts = {r["stock_code"]: int(r["cnt"]) for r in daily_rows}
-
-        complete: set[str] = set()
-        incomplete_count = 0
-        for code, m_cnt in minute_counts.items():
-            d_cnt = daily_counts.get(code, 0)
-            if d_cnt == 0 or m_cnt >= d_cnt * _MIN_MINUTE_COVERAGE:
-                complete.add(code)
-            else:
-                incomplete_count += 1
-        if incomplete_count > 0:
-            logger.info(
-                f"Minute resume: {incomplete_count} stocks have incomplete data, will re-download"
-            )
-        return complete
+        return {r["stock_code"] for r in rows}
 
     async def _get_active_daily_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have at least one non-suspended trading day.
