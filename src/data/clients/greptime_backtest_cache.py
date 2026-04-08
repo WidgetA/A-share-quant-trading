@@ -810,14 +810,17 @@ class GreptimeBacktestCache:
         if not stock_codes:
             logger.warning("No stock codes in DB, skipping minute download")
 
+        # Collect stocks where tsanghi has no 5min data at all
+        no_data_codes: set[str] = set()
         if stock_codes:
-            await self._download_minute_tsanghi(
+            nd = await self._download_minute_tsanghi(
                 stock_codes,
                 dl_start,
                 end_date,
                 progress_cb=progress_cb,
                 cancel_event=cancel_event,
             )
+            no_data_codes.update(nd)
 
         # Phase 3: Verify minute coverage, re-download gap ranges
         minute_gaps = await self.find_minute_gaps()
@@ -827,13 +830,14 @@ class GreptimeBacktestCache:
                 if cancel_event and cancel_event.is_set():
                     break
                 logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
-                await self._download_minute_tsanghi(
+                nd = await self._download_minute_tsanghi(
                     stock_codes,
                     gap_start,
                     gap_end,
                     progress_cb=progress_cb,
                     cancel_event=cancel_event,
                 )
+                no_data_codes.update(nd)
 
         # Final verification: FLUSH both tables, then re-run resume check
         # to confirm the download we just did won't re-trigger next time.
@@ -848,25 +852,29 @@ class GreptimeBacktestCache:
         daily_dates = await self.get_daily_date_count()
 
         # Re-run the same resume check that decides what to download.
-        # If it says 0 stocks to download, verification passes.
+        # Exclude stocks where tsanghi genuinely has no 5min data — those will
+        # never have minute data no matter how many retries, so they shouldn't
+        # count as verification failures.
         # Must use dl_start (not start_date) to match what _download_minute_tsanghi uses.
         active_codes = await self._get_active_daily_codes(dl_start, end_date)
         existing_minute = await self._get_existing_minute_codes(dl_start, end_date)
-        would_download = [c for c in active_codes if c not in existing_minute]
+        would_download = [
+            c for c in active_codes if c not in existing_minute and c not in no_data_codes
+        ]
 
         self.invalidate_cache_status()
 
         verified = len(would_download) == 0
+        no_data_count = len(no_data_codes)
         if verified:
-            verify_msg = (
-                f"验证通过: 日线 {daily_count}只/{daily_dates}天, "
-                f"分钟线 {minute_count}只, 再次下载需要0只"
-            )
+            verify_msg = f"验证通过: 日线 {daily_count}只/{daily_dates}天, 分钟线 {minute_count}只"
+            if no_data_count:
+                verify_msg += f", {no_data_count}只tsanghi无5min数据(已排除)"
         else:
             verify_msg = (
-                f"验证: 日线 {daily_count}只/{daily_dates}天, "
+                f"验证失败: 日线 {daily_count}只/{daily_dates}天, "
                 f"分钟线 {minute_count}只, "
-                f"仍有 {len(would_download)} 只无分钟数据(tsanghi无5min数据)"
+                f"仍有 {len(would_download)} 只数据丢失"
             )
 
         logger.info(f"Final verify: {verify_msg}")
@@ -1251,8 +1259,12 @@ class GreptimeBacktestCache:
         end_date: date,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
-    ) -> None:
-        """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB."""
+    ) -> set[str]:
+        """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB.
+
+        Returns set of stock codes for which tsanghi returned no 5min data
+        (so they can be excluded from final verification).
+        """
         from src.data.clients.tsanghi_client import TsanghiClient, bare_code_to_exchange
 
         # Resume: check which codes already have minute data.
@@ -1279,7 +1291,7 @@ class GreptimeBacktestCache:
             await _maybe_await(progress_cb("minute_resume", len(existing_codes), len(codes), ""))
 
         if not codes_to_download:
-            return
+            return set()
 
         client = TsanghiClient()
         await client.start()
@@ -1345,6 +1357,9 @@ class GreptimeBacktestCache:
 
                 return code, day_data if day_data else None
 
+            # Track stocks where tsanghi returned no 5min data at all
+            no_data_codes: set[str] = set()
+
             # Process in batches to control memory and provide progress
             batch_size = 50
             for i in range(0, total, batch_size):
@@ -1367,6 +1382,8 @@ class GreptimeBacktestCache:
                         await self._write_minute(code, day_data)
                         written_stocks[code] = day_data
                         has_writes = True
+                    else:
+                        no_data_codes.add(code)
                     done += 1
 
                 # FLUSH once per batch to persist to OSS, then verify
@@ -1445,9 +1462,16 @@ class GreptimeBacktestCache:
                 if done % 200 == 0:
                     logger.info(f"tsanghi minute: {done}/{total} stocks processed")
 
+            if no_data_codes:
+                logger.info(
+                    f"tsanghi minute: {len(no_data_codes)} stocks have no 5min data "
+                    f"(e.g. {sorted(no_data_codes)[:5]})"
+                )
             logger.info(f"tsanghi minute download done: {done}/{total} stocks")
         finally:
             await client.stop()
+
+        return no_data_codes
 
     # ==================== Internal Write Helpers ====================
 
