@@ -780,7 +780,7 @@ class GreptimeBacktestCache:
         end_date: date,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, int | bool | str]:
         """Download daily + minute data for all main-board stocks.
 
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
