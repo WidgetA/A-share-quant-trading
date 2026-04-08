@@ -1658,7 +1658,8 @@ class GreptimeBacktestCache:
         daily_rows = await self._db.fetch(
             f"SELECT stock_code, COUNT(*) as cnt FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND vol > 0 GROUP BY stock_code"
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
+            f"GROUP BY stock_code"
         )
 
         minute_counts = {r["stock_code"]: int(r["cnt"]) for r in minute_rows}
@@ -1689,7 +1690,7 @@ class GreptimeBacktestCache:
         rows = await self._db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND vol > 0"
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
         )
         return {r["stock_code"] for r in rows}
 
