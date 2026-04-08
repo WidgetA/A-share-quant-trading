@@ -339,7 +339,7 @@ class GreptimeBacktestCache:
             f"close_price, vol "
             f"FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND NOT is_suspended "
+            f"AND (is_suspended = false OR is_suspended IS NULL) "
             f"ORDER BY stock_code, ts"
         )
 
@@ -803,10 +803,12 @@ class GreptimeBacktestCache:
         )
 
         # Phase 2: Minute data from tsanghi 5min
-        # If daily resume skipped most days, stock_codes may be empty/small.
-        # Fall back to all codes in DB so minute data still gets downloaded.
+        # Always use full stock list from DB — daily download only returns codes
+        # from newly downloaded dates, which can be a tiny subset when most dates
+        # are already cached.
+        stock_codes = await self.get_stock_codes()
         if not stock_codes:
-            stock_codes = await self.get_stock_codes()
+            logger.warning("No stock codes in DB, skipping minute download")
 
         if stock_codes:
             await self._download_minute_tsanghi(
@@ -1230,30 +1232,6 @@ class GreptimeBacktestCache:
         # Filter out stocks that are fully suspended (no active trading day)
         # — they have no 5min bars from tsanghi and would be re-downloaded forever.
         active_codes = await self._get_active_daily_codes(check_start, end_date)
-
-        # --- Diagnostic: show active_codes count on web ---
-        start_ms = _date_to_epoch_ms(check_start)
-        end_ms = _date_to_epoch_ms(end_date)
-        diag_parts = [f"active_codes={len(active_codes)}"]
-        for label, cond in [
-            ("无过滤", ""),
-            ("vol>0", " AND vol > 0"),
-            ("NOT susp", " AND NOT is_suspended"),
-            ("susp=false", " AND is_suspended = false"),
-        ]:
-            try:
-                dr = await self._db.fetchrow(
-                    f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily "
-                    f"WHERE ts >= {start_ms} AND ts <= {end_ms}{cond}"
-                )
-                diag_parts.append(f"{label}={int(dr['cnt']) if dr else -1}")
-            except Exception as e:
-                diag_parts.append(f"{label}=ERR:{e}")
-        diag_msg = " | ".join(diag_parts)
-        logger.info(f"pgwire diag: {diag_msg}")
-        if progress_cb:
-            await _maybe_await(progress_cb("minute_resume", 0, 0, f"[诊断] {diag_msg}"))
-        # --- End diagnostic ---
 
         total_before = len(codes)
         codes = [c for c in codes if c in active_codes]
@@ -1879,7 +1857,7 @@ class GreptimeBacktestCache:
         daily_rows = await self._db.fetch(
             f"SELECT stock_code, COUNT(*) as cnt FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND NOT is_suspended AND vol > 0 "
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
             f"GROUP BY stock_code"
         )
 
@@ -1908,37 +1886,10 @@ class GreptimeBacktestCache:
         """
         start_ms = _date_to_epoch_ms(start_date)
         end_ms = _date_to_epoch_ms(end_date)
-
-        # Diagnostic: test different boolean filter syntaxes through pgwire
-        # GreptimeDB pgwire may handle boolean comparisons differently from HTTP API
-        diag_base = (
-            f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily "
-            f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
-        )
-        for label, condition in [
-            ("no filter", ""),
-            ("vol>0 only", " AND vol > 0"),
-            ("is_suspended=false", " AND is_suspended = false"),
-            ("NOT is_suspended", " AND NOT is_suspended"),
-            ("is_suspended!=true", " AND is_suspended != true"),
-            ("full filter", " AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"),
-            ("NOT is_suspended + vol", " AND NOT is_suspended AND vol > 0"),
-        ]:
-            try:
-                r = await self._db.fetchrow(diag_base + condition)
-                cnt = int(r["cnt"]) if r else -1
-                logger.info(f"_get_active_daily_codes diag [{label}]: {cnt}")
-            except Exception as e:
-                logger.warning(f"_get_active_daily_codes diag [{label}]: ERROR {e}")
-
-        # Use the filter syntax that works through pgwire
         rows = await self._db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-            f"AND NOT is_suspended AND vol > 0"
-        )
-        logger.info(
-            f"_get_active_daily_codes: {len(rows)} stocks (range {start_date} ~ {end_date})"
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
         )
         return {r["stock_code"] for r in rows}
 
