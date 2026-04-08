@@ -877,6 +877,7 @@ class GreptimeBacktestCache:
             "daily_count": daily_count,
             "minute_count": minute_count,
             "verified": verified,
+            "verify_msg": verify_msg,
         }
 
         # Data integrity validation — send results via progress_cb so frontend sees them

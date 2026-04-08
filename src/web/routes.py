@@ -625,6 +625,7 @@ def create_momentum_router() -> APIRouter:
                                 "daily_count": event.get("daily_count", 0),
                                 "minute_count": event.get("minute_count", 0),
                                 "verified": event.get("verified", False),
+                                "verify_msg": event.get("verify_msg", ""),
                                 "cached": False,
                             }
                         )

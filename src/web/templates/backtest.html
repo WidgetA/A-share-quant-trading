@@ -407,9 +407,13 @@ function startCacheDownloadFromUI() {
                     if (d.type === 'complete') {
                         fill.style.width = '100%';
                         progText.textContent = '100%';
-                        const verified = d.verified ? '已验证' : '未验证';
-                        const src = d.cached ? '(来自缓存)' : `(已下载, ${verified})`;
-                        dlLog(`完成 ${src} — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
+                        if (d.cached) {
+                            dlLog(`完成 (来自缓存) — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
+                        } else if (d.verified) {
+                            dlLog(`完成 (已下载, 已验证) — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
+                        } else {
+                            dlLog(`下载完成但验证未通过 — ${d.verify_msg || '部分股票分钟数据缺失'}`, 'log-warn');
+                        }
                         // Update cache bar directly from complete event data
                         const dot = document.getElementById('cacheDot');
                         const text = document.getElementById('cacheText');
