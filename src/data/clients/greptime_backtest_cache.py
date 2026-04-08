@@ -810,14 +810,17 @@ class GreptimeBacktestCache:
         if not stock_codes:
             logger.warning("No stock codes in DB, skipping minute download")
 
+        # Collect per-stock reasons for missing minute data across all phases
+        all_no_data_reasons: dict[str, str] = {}
         if stock_codes:
-            await self._download_minute_tsanghi(
+            reasons = await self._download_minute_tsanghi(
                 stock_codes,
                 dl_start,
                 end_date,
                 progress_cb=progress_cb,
                 cancel_event=cancel_event,
             )
+            all_no_data_reasons.update(reasons)
 
         # Phase 3: Verify minute coverage, re-download gap ranges
         minute_gaps = await self.find_minute_gaps()
@@ -827,13 +830,14 @@ class GreptimeBacktestCache:
                 if cancel_event and cancel_event.is_set():
                     break
                 logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
-                await self._download_minute_tsanghi(
+                reasons = await self._download_minute_tsanghi(
                     stock_codes,
                     gap_start,
                     gap_end,
                     progress_cb=progress_cb,
                     cancel_event=cancel_event,
                 )
+                all_no_data_reasons.update(reasons)
 
         # Final verification: FLUSH both tables, then re-run resume check
         # to confirm the download we just did won't re-trigger next time.
@@ -856,22 +860,52 @@ class GreptimeBacktestCache:
 
         self.invalidate_cache_status()
 
+        # Classify missing stocks by reason
+        from collections import Counter
+
+        missing_with_reason = []
+        missing_unknown = []  # data was downloaded but didn't persist
+        for code in would_download:
+            reason = all_no_data_reasons.get(code)
+            if reason:
+                missing_with_reason.append((code, reason))
+            else:
+                missing_unknown.append(code)
+
+        reason_counts = Counter(r.split(":")[0] for _, r in missing_with_reason)
+
         verified = len(would_download) == 0
         if verified:
-            verify_msg = (
-                f"验证通过: 日线 {daily_count}只/{daily_dates}天, "
-                f"分钟线 {minute_count}只, 再次下载需要0只"
-            )
+            verify_msg = f"验证通过: 日线 {daily_count}只/{daily_dates}天, 分钟线 {minute_count}只"
         else:
-            verify_msg = (
-                f"验证: 日线 {daily_count}只/{daily_dates}天, "
-                f"分钟线 {minute_count}只, "
-                f"仍有 {len(would_download)} 只无分钟数据(tsanghi无5min数据)"
-            )
+            parts = [
+                f"日线 {daily_count}只/{daily_dates}天",
+                f"分钟线 {minute_count}只",
+                f"缺失 {len(would_download)} 只",
+            ]
+            if reason_counts:
+                reason_strs = [f"{k}={v}" for k, v in reason_counts.items()]
+                parts.append(f"原因: {', '.join(reason_strs)}")
+            if missing_unknown:
+                parts.append(f"数据丢失(刷盘失败): {len(missing_unknown)}只")
+            verify_msg = " | ".join(parts)
 
         logger.info(f"Final verify: {verify_msg}")
         if progress_cb:
             await _maybe_await(progress_cb("download", 1, 1, verify_msg))
+
+        # Send detailed missing report to Feishu
+        if would_download:
+            await self._send_missing_minute_report(
+                would_download,
+                all_no_data_reasons,
+                missing_unknown,
+                daily_count,
+                minute_count,
+                daily_dates,
+                dl_start,
+                end_date,
+            )
 
         return {
             "daily_count": daily_count,
@@ -893,6 +927,93 @@ class GreptimeBacktestCache:
                     "\n".join(integrity_warnings) if integrity_warnings else "",
                 )
             )
+
+    async def _send_missing_minute_report(
+        self,
+        would_download: list[str],
+        no_data_reasons: dict[str, str],
+        missing_unknown: list[str],
+        daily_count: int,
+        minute_count: int,
+        daily_dates: int,
+        dl_start: date,
+        end_date: date,
+    ) -> None:
+        """Send a Feishu message listing all stocks missing minute data and why."""
+        from collections import Counter
+
+        from src.common.feishu_bot import FeishuBot
+
+        reason_counts = Counter(r.split(":")[0] for r in no_data_reasons.values() if r)
+
+        lines = [
+            "📊 分钟线缺失报告",
+            f"日期范围: {dl_start} ~ {end_date}",
+            f"日线: {daily_count}只/{daily_dates}天 | 分钟线: {minute_count}只",
+            f"缺失: {len(would_download)}只",
+            "",
+        ]
+
+        # Group by reason
+        if reason_counts:
+            lines.append("【缺失原因统计】")
+            for reason, count in reason_counts.most_common():
+                label = {
+                    "api_empty": "tsanghi返回空数据",
+                    "api_error": "tsanghi API报错",
+                    "no_0935_0940": "有数据但无09:35/09:40",
+                    "unknown_exchange": "无法识别交易所",
+                    "cancelled": "用户取消",
+                }.get(reason, reason)
+                lines.append(f"  {label}: {count}只")
+            lines.append("")
+
+        if missing_unknown:
+            lines.append(f"【数据丢失(下载成功但刷盘后消失)】{len(missing_unknown)}只:")
+            lines.append(", ".join(sorted(missing_unknown)[:50]))
+            if len(missing_unknown) > 50:
+                lines.append(f"  ...及其他 {len(missing_unknown) - 50} 只")
+            lines.append("")
+
+        # List stocks by reason category (up to 50 per category)
+        by_reason: dict[str, list[str]] = {}
+        for code in would_download:
+            reason = no_data_reasons.get(code, "unknown")
+            key = reason.split(":")[0]
+            by_reason.setdefault(key, []).append(code)
+
+        for reason_key, codes in sorted(by_reason.items()):
+            if reason_key == "unknown":
+                continue  # already shown above as missing_unknown
+            label = {
+                "api_empty": "tsanghi返回空数据",
+                "api_error": "tsanghi API报错",
+                "no_0935_0940": "有数据但无09:35/09:40",
+                "unknown_exchange": "无法识别交易所",
+                "cancelled": "用户取消",
+            }.get(reason_key, reason_key)
+            lines.append(f"【{label}】{len(codes)}只:")
+            lines.append(", ".join(sorted(codes)[:50]))
+            if len(codes) > 50:
+                lines.append(f"  ...及其他 {len(codes) - 50} 只")
+
+            # For no_0935_0940, show sample detail
+            if reason_key == "no_0935_0940":
+                samples = [
+                    (c, no_data_reasons[c]) for c in sorted(codes)[:3] if c in no_data_reasons
+                ]
+                for c, detail in samples:
+                    lines.append(f"  例: {c} → {detail}")
+            lines.append("")
+
+        message = "\n".join(lines)
+        logger.info(f"Missing minute report:\n{message}")
+
+        bot = FeishuBot()
+        if bot.is_configured():
+            await bot.send_message(message)
+        else:
+            logger.warning("Feishu bot not configured, missing minute report not sent")
 
     async def _download_daily_tsanghi(
         self,
@@ -1251,8 +1372,12 @@ class GreptimeBacktestCache:
         end_date: date,
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
-    ) -> None:
-        """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB."""
+    ) -> dict[str, str]:
+        """Download 5-min bars from tsanghi and INSERT 9:40 snapshots to GreptimeDB.
+
+        Returns dict of {stock_code: reason} for stocks with no minute data.
+        Reasons: cancelled, unknown_exchange, api_error, api_empty, no_0935_0940.
+        """
         from src.data.clients.tsanghi_client import TsanghiClient, bare_code_to_exchange
 
         # Resume: check which codes already have minute data.
@@ -1279,7 +1404,7 @@ class GreptimeBacktestCache:
             await _maybe_await(progress_cb("minute_resume", len(existing_codes), len(codes), ""))
 
         if not codes_to_download:
-            return
+            return {}
 
         client = TsanghiClient()
         await client.start()
@@ -1291,34 +1416,44 @@ class GreptimeBacktestCache:
             end_str = end_date.strftime("%Y-%m-%d")
             sem = asyncio.Semaphore(2)  # tsanghi API max concurrency
 
+            # Track why each stock has no minute data:
+            # key=stock_code, value=reason string
+            no_data_reasons: dict[str, str] = {}
+
             async def _fetch_one(code: str) -> tuple[str, dict[str, tuple] | None]:
                 """Fetch 5min bars for one stock, aggregate to 9:40 snapshots."""
                 if cancel_event and cancel_event.is_set():
+                    no_data_reasons[code] = "cancelled"
                     return code, None
 
                 try:
                     exchange = bare_code_to_exchange(code)
                 except ValueError:
+                    no_data_reasons[code] = "unknown_exchange"
                     return code, None
 
                 async with sem:
                     try:
                         bars = await client.five_min(exchange, code, start_str, end_str)
                     except RuntimeError as e:
-                        logger.debug(f"tsanghi 5min({code}): {e}")
+                        no_data_reasons[code] = f"api_error: {e}"
                         return code, None
 
                 if not bars:
+                    no_data_reasons[code] = "api_empty"
                     return code, None
 
                 # Aggregate 09:35 + 09:40 bars per day into 9:40 snapshot
                 day_data: dict[str, tuple[float, float, float, float]] = {}
+                bar_count = len(bars)
+                bar_times: set[str] = set()
                 for bar in bars:
                     dt_str = str(bar.get("date", ""))
                     if len(dt_str) < 16:
                         continue
                     bar_date = dt_str[:10]  # "yyyy-mm-dd"
                     bar_time = dt_str[11:16]  # "hh:mm"
+                    bar_times.add(bar_time)
 
                     if bar_time not in ("09:35", "09:40"):
                         continue
@@ -1343,7 +1478,13 @@ class GreptimeBacktestCache:
                     else:
                         day_data[bar_date] = (c, v, h, lo)
 
-                return code, day_data if day_data else None
+                if not day_data:
+                    # Got bars but none matched 09:35/09:40
+                    sample_times = sorted(bar_times)[:5]
+                    no_data_reasons[code] = f"no_0935_0940: {bar_count}bars, times={sample_times}"
+                    return code, None
+
+                return code, day_data
 
             # Process in batches to control memory and provide progress
             batch_size = 50
@@ -1445,9 +1586,21 @@ class GreptimeBacktestCache:
                 if done % 200 == 0:
                     logger.info(f"tsanghi minute: {done}/{total} stocks processed")
 
+            # Log summary of no-data reasons
+            if no_data_reasons:
+                from collections import Counter
+
+                reason_counts = Counter(r.split(":")[0] for r in no_data_reasons.values())
+                logger.info(
+                    f"tsanghi minute: {len(no_data_reasons)} stocks have no data — "
+                    f"{dict(reason_counts)}"
+                )
+
             logger.info(f"tsanghi minute download done: {done}/{total} stocks")
         finally:
             await client.stop()
+
+        return no_data_reasons
 
     # ==================== Internal Write Helpers ====================
 
