@@ -257,7 +257,6 @@ def create_router() -> APIRouter:
         """
         import asyncio
         import io
-        import traceback
 
         tasks = [t for t in asyncio.all_tasks() if not t.done()]
         out: list[dict] = []
