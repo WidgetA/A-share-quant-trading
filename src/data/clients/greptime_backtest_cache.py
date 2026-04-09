@@ -822,6 +822,27 @@ class GreptimeBacktestCache:
             )
             all_no_data_reasons.update(reasons)
 
+        # Phase 3: FLUSH once to persist Phase 2 data, then check for gaps
+        if stock_codes:
+            await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
+            minute_gaps = await self.find_minute_gaps()
+            if minute_gaps:
+                logger.info(
+                    f"Minute gaps found after download: {len(minute_gaps)} ranges, backfilling"
+                )
+                for gap_start, gap_end in minute_gaps:
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
+                    reasons = await self._download_minute(
+                        stock_codes,
+                        gap_start,
+                        gap_end,
+                        progress_cb=progress_cb,
+                        cancel_event=cancel_event,
+                    )
+                    all_no_data_reasons.update(reasons)
+
         # Final verification: FLUSH both tables, then re-run resume check
         # to confirm the download we just did won't re-trigger next time.
         if progress_cb:
