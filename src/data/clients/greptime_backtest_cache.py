@@ -1455,10 +1455,10 @@ class GreptimeBacktestCache:
                         day_data[bar_date] = (c, v, h, lo)
                 return day_data
 
-            # Batch API calls: comma-separated ts_codes, 5 stocks per request
-            # to reduce 3000+ individual calls to ~630.
+            # Batch API calls: comma-separated ts_codes, 20 stocks per request
+            # to reduce 3000+ individual calls to ~160.
             # Rate limit: 200 req/min sustained, so 0.5s delay between requests.
-            api_batch_size = 5
+            api_batch_size = 20
             for i in range(0, total, api_batch_size):
                 if cancel_event and cancel_event.is_set():
                     logger.info("Minute download cancelled by user")
@@ -1489,7 +1489,7 @@ class GreptimeBacktestCache:
                         freq="1min",
                         start_date=start_str,
                         end_date=end_str,
-                        limit=1000000,
+                        limit=5000000,
                     )
                 except RuntimeError as e:
                     for code in ts_to_bare.values():
