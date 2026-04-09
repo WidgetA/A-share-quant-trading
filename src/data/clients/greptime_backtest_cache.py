@@ -829,26 +829,6 @@ class GreptimeBacktestCache:
             )
             all_no_data_reasons.update(reasons)
 
-        # Phase 3: check for gaps
-        if stock_codes:
-            minute_gaps = await self.find_minute_gaps()
-            if minute_gaps:
-                logger.info(
-                    f"Minute gaps found after download: {len(minute_gaps)} ranges, backfilling"
-                )
-                for gap_start, gap_end in minute_gaps:
-                    if cancel_event and cancel_event.is_set():
-                        break
-                    logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
-                    reasons = await self._download_minute(
-                        stock_codes,
-                        gap_start,
-                        gap_end,
-                        progress_cb=progress_cb,
-                        cancel_event=cancel_event,
-                    )
-                    all_no_data_reasons.update(reasons)
-
         # Final verification: re-run resume check to confirm download won't re-trigger.
         if progress_cb:
             await _maybe_await(progress_cb("download", 0, 1, "最终验证中..."))
