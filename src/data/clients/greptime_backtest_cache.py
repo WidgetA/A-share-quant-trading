@@ -1495,6 +1495,15 @@ class GreptimeBacktestCache:
                     for code in ts_to_bare.values():
                         no_data_reasons[code] = f"api_error: {e}"
                         done += 1
+                    if progress_cb:
+                        await _maybe_await(
+                            progress_cb(
+                                "minute",
+                                done,
+                                total,
+                                f"API错误{len(ts_to_bare)}只: {e}",
+                            )
+                        )
                     await asyncio.sleep(0.5)
                     continue
 
@@ -1506,24 +1515,32 @@ class GreptimeBacktestCache:
                         grouped[ts].append(bar)
 
                 # Aggregate and write each stock
-                batch_written = 0
+                batch_ok = 0
+                batch_empty = 0
                 for ts_code, code in ts_to_bare.items():
                     code_bars = grouped.get(ts_code, [])
                     if not code_bars:
                         no_data_reasons[code] = "api_empty"
+                        batch_empty += 1
                         done += 1
                         continue
                     day_data = _aggregate_bars(code_bars)
                     if not day_data:
                         no_data_reasons[code] = f"no_0931_0940: {len(code_bars)}bars"
+                        batch_empty += 1
                         done += 1
                         continue
                     await self._write_minute(code, day_data)
-                    batch_written += 1
+                    batch_ok += 1
                     done += 1
 
                 if progress_cb:
-                    detail = f"{batch_written}只" if batch_written else ""
+                    parts = []
+                    if batch_ok:
+                        parts.append(f"写入{batch_ok}只")
+                    if batch_empty:
+                        parts.append(f"无数据{batch_empty}只")
+                    detail = ", ".join(parts) if parts else ""
                     await _maybe_await(progress_cb("minute", done, total, detail))
 
                 # Rate limit: stay under 200 req/min

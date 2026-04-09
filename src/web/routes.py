@@ -475,11 +475,11 @@ def create_momentum_router() -> APIRouter:
                     return f"回填 {current}/{total}: {detail}"
                 return f"回填停牌标记: {current}/{total} 天"
             elif phase == "minute_active":
-                return f"正在下载: {detail} ({current}/{total} 已完成)"
+                return f"正在请求: {detail} 起 ({current}/{total} 已完成)"
             elif phase == "minute":
                 if detail:
                     return f"分钟线 {current}/{total}: {detail}"
-                return f"下载分钟线数据: {current}/{total} 只"
+                return f"分钟线 {current}/{total}"
             elif phase == "download":
                 return f"下载完成: 共 {total} 只股票"
             elif phase == "post_integrity":
