@@ -259,9 +259,7 @@ class GreptimeClient:
 
         t_acquire = time.monotonic()
         try:
-            conn = await asyncio.wait_for(
-                self._pool.acquire(), timeout=self._ACQUIRE_TIMEOUT
-            )
+            conn = await asyncio.wait_for(self._pool.acquire(), timeout=self._ACQUIRE_TIMEOUT)
         except (asyncio.TimeoutError, TimeoutError) as e:
             elapsed = time.monotonic() - t_acquire
             raise RuntimeError(
