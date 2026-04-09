@@ -317,6 +317,11 @@ class GreptimeBacktestStorage:
       - Knowing about business windows or trading calendars
     """
 
+    # Concurrency for stock_list bulk INSERTs. Must not exceed
+    # GreptimeClient pool max_size (3) to avoid acquire contention
+    # with the status-polling background loop.
+    _INSERT_WORKERS: int = 3
+
     def __init__(self, host: str = "localhost", port: int = 4003, database: str = "public") -> None:
         self.db = GreptimeClient(host, port, database)
 
@@ -775,20 +780,43 @@ class GreptimeBacktestStorage:
         codes: list[str],
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> None:
-        """INSERT stock_list rows for a date (one INSERT per code).
+        """INSERT stock_list rows for a date.
 
-        ``on_progress(done, total)`` is awaited every 200 rows so the caller
-        can surface intra-date progress to the UI (otherwise 5k+ INSERTs look
-        like a hang).
+        Splits the code list into ``_INSERT_WORKERS`` interleaved chunks and
+        runs them concurrently with ``asyncio.gather``. Each chunk uses its
+        own pooled asyncpg connection (a single connection cannot multiplex
+        queries), giving us roughly N× the per-row throughput of a sequential
+        loop without batching multiple rows into one INSERT.
+
+        ``on_progress(done, total)`` is awaited approximately every 200 rows
+        so the caller can surface intra-date progress to the UI; ``done`` is
+        the global cross-chunk count.
         """
         ts_ms = date_to_epoch_ms(day)
         total = len(codes)
-        for i, code in enumerate(codes, start=1):
-            await self.db.execute(
-                f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
-            )
-            if on_progress is not None and (i % 200 == 0 or i == total):
-                await on_progress(i, total)
+        if total == 0:
+            return
+
+        done = 0
+        last_reported = 0
+
+        async def _insert_chunk(chunk: list[str]) -> None:
+            nonlocal done, last_reported
+            for code in chunk:
+                await self.db.execute(
+                    f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
+                )
+                done += 1
+                # Single-threaded asyncio: the read+compare+assign below is
+                # atomic between awaits, so two chunks can never both fire the
+                # same threshold.
+                if on_progress is not None and (done - last_reported >= 200 or done == total):
+                    last_reported = done
+                    await on_progress(done, total)
+
+        n_workers = min(self._INSERT_WORKERS, total)
+        chunks = [codes[i::n_workers] for i in range(n_workers)]
+        await asyncio.gather(*[_insert_chunk(c) for c in chunks])
 
     # ==================== Audits ====================
 
