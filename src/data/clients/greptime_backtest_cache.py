@@ -1875,10 +1875,10 @@ class GreptimeBacktestCache:
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
     ) -> None:
-        """Sync stock_list table using stock_basic (3 API calls for L/D/P).
+        """Sync stock_list table from Tushare bak_basic (1 call per date).
 
-        Fetches all stocks with list_date/delist_date, then computes which
-        stocks should exist on each trading date. Skips dates already synced.
+        bak_basic returns the authoritative per-date listed stock universe.
+        Skips dates already in the table (idempotent).
         """
         existing = await self._get_existing_stock_list_dates()
         to_sync = [d for d in trading_dates if d not in existing]
@@ -1893,27 +1893,17 @@ class GreptimeBacktestCache:
             len(existing),
         )
 
-        # 3 API calls total: fetch all stocks with list_date/delist_date
-        if progress_cb:
-            await _maybe_await(progress_cb("stock_list", 0, len(to_sync), "拉取全市场股票列表..."))
-        all_stocks = await tushare_client.fetch_all_stocks_with_dates()
-        logger.info("stock_list: fetched %d stocks from stock_basic", len(all_stocks))
-
         for i, td in enumerate(to_sync):
             if cancel_event and cancel_event.is_set():
                 logger.info("stock_list sync cancelled")
                 return
 
-            td_str = td.strftime("%Y%m%d")
+            date_str = td.strftime("%Y%m%d")
             ts_ms = _date_to_epoch_ms(td)
 
-            # list_date <= td AND (delist_date is None OR delist_date > td)
-            codes = [
-                code for code, ld, dd in all_stocks if ld <= td_str and (dd is None or dd > td_str)
-            ]
-
+            codes = await tushare_client.fetch_bak_basic(date_str)
             if not codes:
-                logger.warning("stock_list: 0 codes for %s", td)
+                logger.warning("stock_list: bak_basic returned 0 codes for %s", date_str)
                 continue
 
             for code in codes:

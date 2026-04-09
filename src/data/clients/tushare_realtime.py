@@ -604,44 +604,6 @@ class TushareRealtimeClient:
 
         return codes
 
-    async def fetch_all_stocks_with_dates(
-        self,
-    ) -> list[tuple[str, str, str | None]]:
-        """Fetch ALL stocks (L+D+P) with list_date and delist_date.
-
-        Returns:
-            List of (bare_code, list_date_YYYYMMDD, delist_date_YYYYMMDD_or_None).
-            3 API calls total (one per list_status).
-        """
-        result: list[tuple[str, str, str | None]] = []
-        statuses = ("L", "D", "P")
-        for idx, status in enumerate(statuses):
-            # Rate limit: wait 31s before 2nd/3rd call
-            if idx > 0:
-                await asyncio.sleep(31)
-            data = await self._api_call(
-                "stock_basic",
-                {"list_status": status},
-                fields="ts_code,list_date,delist_date",
-            )
-            fields = data.get("data", {}).get("fields", [])
-            items = data.get("data", {}).get("items", [])
-            if not fields or not items:
-                continue
-            ts_idx = fields.index("ts_code")
-            ld_idx = fields.index("list_date")
-            dd_idx = fields.index("delist_date")
-            for row in items:
-                ts_code = str(row[ts_idx])
-                bare = ts_code.split(".")[0]
-                if len(bare) != 6:
-                    continue
-                list_date = str(row[ld_idx]) if row[ld_idx] else ""
-                delist_date = str(row[dd_idx]) if row[dd_idx] else None
-                if list_date:
-                    result.append((bare, list_date, delist_date))
-        return result
-
     async def fetch_bak_basic(self, trade_date: str) -> list[str]:
         """Fetch all listed stock codes for a given date via Tushare bak_basic.
 
