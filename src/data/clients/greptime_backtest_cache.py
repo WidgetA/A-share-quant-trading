@@ -1140,12 +1140,14 @@ class GreptimeBacktestCache:
                     raise
 
                 seen_codes: set[str] = set()  # track codes from tsanghi
+                failed_exchanges: list[str] = []
 
                 for exchange in ("XSHG", "XSHE"):
                     try:
                         records = await client.daily_latest(exchange, date_str)
                     except RuntimeError as e:
-                        logger.debug(f"tsanghi daily_latest({exchange}, {date_str}): {e}")
+                        failed_exchanges.append(exchange)
+                        logger.warning(f"tsanghi daily_latest({exchange}, {date_str}) FAILED: {e}")
                         continue
 
                     if not records:
@@ -1204,6 +1206,23 @@ class GreptimeBacktestCache:
                                 )
                             )
                         all_stock_codes.add(ticker)
+
+                # Report exchange failures
+                if failed_exchanges:
+                    if progress_cb:
+                        elapsed = (current - dl_start).days + 1
+                        await _maybe_await(
+                            progress_cb(
+                                "daily",
+                                elapsed,
+                                total_days,
+                                f"{date_str} ⚠ API失败: {','.join(failed_exchanges)}",
+                            )
+                        )
+                    if len(failed_exchanges) == 2:
+                        logger.error(f"Daily {date_str}: BOTH exchanges failed, skipping")
+                        current += timedelta(days=1)
+                        continue
 
                 # Stocks in Tushare suspend list but NOT in tsanghi response
                 # (tsanghi may omit suspended stocks entirely)
