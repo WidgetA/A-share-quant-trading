@@ -214,6 +214,10 @@ class GreptimeClient:
 
     _QUERY_TIMEOUT: float = 120.0
     _ACQUIRE_TIMEOUT: float = 30.0
+    # Slow query watchdog: any SQL still running after this many seconds
+    # gets a logger.warning printed (and again every interval). Used to
+    # diagnose hangs where asyncpg's C extension swallows CancelledError.
+    _SLOW_QUERY_WARN_SEC: float = 30.0
 
     def __init__(self, host: str, port: int, database: str = "public") -> None:
         self._host = host
@@ -270,8 +274,31 @@ class GreptimeClient:
             ) from e
 
         acquire_elapsed = time.monotonic() - t_acquire
+        t_query = time.monotonic()
+
+        async def _slow_query_watchdog() -> None:
+            """Periodically warn about a still-running SQL.
+
+            Runs as a sibling task. Cancelled when the query finishes (or
+            times out via wait_for). asyncpg's C extension can hang on
+            socket recv and ignore CancelledError, so this is the only
+            reliable way to surface "stuck on SQL X" to the operator.
+            """
+            try:
+                while True:
+                    await asyncio.sleep(self._SLOW_QUERY_WARN_SEC)
+                    elapsed = time.monotonic() - t_query
+                    logger.warning(
+                        "SQL still running after %.0fs: op=%s sql=%r",
+                        elapsed,
+                        op_name,
+                        sql_preview,
+                    )
+            except asyncio.CancelledError:
+                return
+
+        watchdog = asyncio.create_task(_slow_query_watchdog())
         try:
-            t_query = time.monotonic()
             try:
                 return await asyncio.wait_for(runner(conn), timeout=self._QUERY_TIMEOUT)
             except (asyncio.TimeoutError, TimeoutError) as e:
@@ -283,6 +310,11 @@ class GreptimeClient:
                     f"op={op_name} sql={sql_preview!r}"
                 ) from e
         finally:
+            watchdog.cancel()
+            try:
+                await watchdog
+            except (asyncio.CancelledError, Exception):
+                pass
             await self._pool.release(conn)
 
     async def execute(self, sql: str) -> str:
@@ -316,11 +348,6 @@ class GreptimeBacktestStorage:
       - Sending notifications
       - Knowing about business windows or trading calendars
     """
-
-    # Concurrency for stock_list bulk INSERTs. Must not exceed
-    # GreptimeClient pool max_size (3) to avoid acquire contention
-    # with the status-polling background loop.
-    _INSERT_WORKERS: int = 3
 
     def __init__(self, host: str = "localhost", port: int = 4003, database: str = "public") -> None:
         self.db = GreptimeClient(host, port, database)
@@ -780,43 +807,25 @@ class GreptimeBacktestStorage:
         codes: list[str],
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> None:
-        """INSERT stock_list rows for a date.
+        """INSERT stock_list rows for a date (one INSERT per code, sequential).
 
-        Splits the code list into ``_INSERT_WORKERS`` interleaved chunks and
-        runs them concurrently with ``asyncio.gather``. Each chunk uses its
-        own pooled asyncpg connection (a single connection cannot multiplex
-        queries), giving us roughly N× the per-row throughput of a sequential
-        loop without batching multiple rows into one INSERT.
+        Was briefly parallelized across 3 connections (ff5c102) but that
+        introduced an unexplained hang where INSERTs stopped without any
+        CPU/memory pressure on GreptimeDB. Reverted to single-connection
+        sequential until the root cause is understood.
 
-        ``on_progress(done, total)`` is awaited approximately every 200 rows
-        so the caller can surface intra-date progress to the UI; ``done`` is
-        the global cross-chunk count.
+        ``on_progress(done, total)`` is awaited every 200 rows so the caller
+        can surface intra-date progress to the UI (otherwise 5k+ INSERTs look
+        like a hang).
         """
         ts_ms = date_to_epoch_ms(day)
         total = len(codes)
-        if total == 0:
-            return
-
-        done = 0
-        last_reported = 0
-
-        async def _insert_chunk(chunk: list[str]) -> None:
-            nonlocal done, last_reported
-            for code in chunk:
-                await self.db.execute(
-                    f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
-                )
-                done += 1
-                # Single-threaded asyncio: the read+compare+assign below is
-                # atomic between awaits, so two chunks can never both fire the
-                # same threshold.
-                if on_progress is not None and (done - last_reported >= 200 or done == total):
-                    last_reported = done
-                    await on_progress(done, total)
-
-        n_workers = min(self._INSERT_WORKERS, total)
-        chunks = [codes[i::n_workers] for i in range(n_workers)]
-        await asyncio.gather(*[_insert_chunk(c) for c in chunks])
+        for i, code in enumerate(codes, start=1):
+            await self.db.execute(
+                f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
+            )
+            if on_progress is not None and (i % 200 == 0 or i == total):
+                await on_progress(i, total)
 
     # ==================== Audits ====================
 

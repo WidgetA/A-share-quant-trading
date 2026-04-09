@@ -348,6 +348,9 @@ class CachePipeline:
         for i, td in enumerate(to_sync):
             self._raise_if_cancelled(cancel_event, "stock_list sync cancelled")
 
+            # Pre-step status: if a hang happens, the LAST status line on the
+            # frontend tells you exactly which side stalled (API vs DB).
+            await self.reporter.status(f"stock_list {td}: → 调用 bak_basic API ...")
             t_fetch = time.monotonic()
             codes = await self.metadata_source.fetch_listed_stocks(td)
             fetch_elapsed = time.monotonic() - t_fetch
@@ -367,6 +370,9 @@ class CachePipeline:
                     f"{_td} 写入 {done}/{total}",
                 )
 
+            await self.reporter.status(
+                f"stock_list {td}: ← API {fetch_elapsed:.2f}s, → 写入 GreptimeDB {len(codes)} 行 ..."
+            )
             t_insert = time.monotonic()
             await self.storage.insert_stock_list_codes(td, codes, on_progress=_on_insert)
             insert_elapsed = time.monotonic() - t_insert
