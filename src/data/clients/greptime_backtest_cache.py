@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS backtest_minute (
 )
 """
 
+_CREATE_STOCK_LIST_SQL = """
+CREATE TABLE IF NOT EXISTS stock_list (
+    stock_code STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (stock_code)
+)
+"""
+
 
 def _date_to_epoch_ms(d: date) -> int:
     """Convert date to epoch milliseconds (midnight UTC)."""
@@ -235,6 +243,7 @@ class GreptimeBacktestCache:
         await self._db.start()
         await self._db.execute(_CREATE_DAILY_SQL)
         await self._db.execute(_CREATE_MINUTE_SQL)
+        await self._db.execute(_CREATE_STOCK_LIST_SQL)
         # Add is_suspended column if missing (CREATE IF NOT EXISTS won't alter)
         try:
             await self._db.execute("ALTER TABLE backtest_daily ADD COLUMN is_suspended BOOLEAN")
@@ -527,6 +536,20 @@ class GreptimeBacktestCache:
         if total_stocks > 0 and minute_stocks < total_stocks * _MIN_MINUTE_COVERAGE:
             pct = minute_stocks / total_stocks * 100
             warnings.append(f"分钟线覆盖率不足: {minute_stocks}/{total_stocks} ({pct:.0f}%)")
+
+        # 4. Stock list vs daily gaps
+        daily_gaps = await self._audit_daily_gaps()
+        if daily_gaps:
+            sample = [f"{d}({act}/{exp})" for d, exp, act in daily_gaps[:5]]
+            suffix = f" ...+{len(daily_gaps) - 5}天" if len(daily_gaps) > 5 else ""
+            warnings.append(f"日线缺失: {len(daily_gaps)}天 {', '.join(sample)}{suffix}")
+
+        # 5. Daily vs minute gaps (non-suspended)
+        minute_gaps = await self._audit_minute_gaps()
+        if minute_gaps:
+            sample = [f"{d}({act}/{exp})" for d, exp, act in minute_gaps[:5]]
+            suffix = f" ...+{len(minute_gaps) - 5}天" if len(minute_gaps) > 5 else ""
+            warnings.append(f"分钟线缺失: {len(minute_gaps)}天 {', '.join(sample)}{suffix}")
 
         return warnings
 
@@ -1312,6 +1335,21 @@ class GreptimeBacktestCache:
                 f"tsanghi daily download: {len(all_stock_codes)} stocks, "
                 f"{trading_days_found} trading days in [{dl_start} ~ {end_date}]"
             )
+
+            # Sync stock_list from bak_basic (authoritative stock list per date)
+            if trading_dates:
+                await self._sync_stock_list(
+                    tushare_client,
+                    sorted(trading_dates),
+                    progress_cb,
+                    cancel_event,
+                )
+
+            # Audit & backfill: detect dates where daily data is incomplete
+            await self._backfill_daily_gaps(
+                client, tushare_client, progress_cb, cancel_event
+            )
+
             return sorted(all_stock_codes)
         finally:
             await client.stop()
@@ -1767,6 +1805,282 @@ class GreptimeBacktestCache:
                     await notifier.send_message(msg)
                 except Exception:
                     pass
+
+    # ==================== Stock List Sync & Audit ====================
+
+    async def _get_existing_stock_list_dates(self) -> set[date]:
+        """Get dates that already have stock_list data in DB."""
+        rows = await self._db.fetch(
+            "SELECT DISTINCT ts FROM stock_list"
+        )
+        return {_ts_to_date(r["ts"]) for r in rows}
+
+    async def _sync_stock_list(
+        self,
+        tushare_client: Any,
+        trading_dates: list[date],
+        progress_cb: Callable[[str, int, int, str], Any] | None = None,
+        cancel_event: _CancelChecker = None,
+    ) -> None:
+        """Sync stock_list table from Tushare bak_basic for each trading date.
+
+        Skips dates already in the table (idempotent).
+        Each row = (stock_code, ts) meaning this stock was listed on this date.
+        """
+        existing = await self._get_existing_stock_list_dates()
+        to_sync = [d for d in trading_dates if d not in existing]
+
+        if not to_sync:
+            logger.info("stock_list: all %d dates already synced", len(trading_dates))
+            return
+
+        logger.info(
+            "stock_list: syncing %d dates (%d already cached)",
+            len(to_sync), len(existing),
+        )
+
+        for i, td in enumerate(to_sync):
+            if cancel_event and cancel_event.is_set():
+                logger.info("stock_list sync cancelled")
+                return
+
+            date_str = td.strftime("%Y%m%d")
+            ts_ms = _date_to_epoch_ms(td)
+
+            codes = await tushare_client.fetch_bak_basic(date_str)
+            if not codes:
+                logger.warning("stock_list: bak_basic returned 0 codes for %s", date_str)
+                continue
+
+            # Single-row INSERT (GreptimeDB upserts on (stock_code, ts))
+            for code in codes:
+                await self._db.execute(
+                    f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
+                )
+
+            if progress_cb:
+                await _maybe_await(
+                    progress_cb("stock_list", i + 1, len(to_sync), f"{td} ({len(codes)}只)")
+                )
+
+            logger.info("stock_list: %s → %d codes", td, len(codes))
+
+        logger.info("stock_list: sync complete, %d dates added", len(to_sync))
+
+    async def _audit_daily_gaps(self) -> list[tuple[date, int, int]]:
+        """Compare stock_list vs backtest_daily per date. Return dates with gaps.
+
+        Returns:
+            [(date, expected_count, actual_count), ...] where actual < expected.
+        """
+        # stock_list counts per date
+        sl_rows = await self._db.fetch(
+            "SELECT ts, COUNT(*) as cnt FROM stock_list GROUP BY ts ORDER BY ts"
+        )
+        if not sl_rows:
+            return []
+
+        expected: dict[date, int] = {
+            _ts_to_date(r["ts"]): int(r["cnt"]) for r in sl_rows
+        }
+
+        # backtest_daily counts per date
+        daily_rows = await self._db.fetch(
+            "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts ORDER BY ts"
+        )
+        actual: dict[date, int] = {
+            _ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows
+        }
+
+        gaps = []
+        for d, exp in expected.items():
+            act = actual.get(d, 0)
+            if act < exp:
+                gaps.append((d, exp, act))
+
+        if gaps:
+            logger.info(
+                "audit_daily_gaps: %d/%d dates have gaps (e.g. %s: %d/%d)",
+                len(gaps), len(expected),
+                gaps[0][0], gaps[0][2], gaps[0][1],
+            )
+        else:
+            logger.info("audit_daily_gaps: all %d dates complete", len(expected))
+
+        return gaps
+
+    async def _audit_minute_gaps(self) -> list[tuple[date, int, int]]:
+        """Compare non-suspended daily vs backtest_minute per date.
+
+        Expected minute count = non-suspended stocks with volume in backtest_daily.
+        Actual minute count = rows in backtest_minute.
+
+        Returns:
+            [(date, expected_count, actual_count), ...] where actual < expected.
+        """
+        # Non-suspended daily counts per date
+        daily_rows = await self._db.fetch(
+            "SELECT ts, COUNT(*) as cnt FROM backtest_daily "
+            "WHERE (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
+            "GROUP BY ts ORDER BY ts"
+        )
+        if not daily_rows:
+            return []
+
+        expected: dict[date, int] = {
+            _ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows
+        }
+
+        # backtest_minute counts per date
+        minute_rows = await self._db.fetch(
+            "SELECT ts, COUNT(*) as cnt FROM backtest_minute "
+            "GROUP BY ts ORDER BY ts"
+        )
+        actual: dict[date, int] = {
+            _ts_to_date(r["ts"]): int(r["cnt"]) for r in minute_rows
+        }
+
+        gaps = []
+        for d, exp in expected.items():
+            act = actual.get(d, 0)
+            if act < exp:
+                gaps.append((d, exp, act))
+
+        if gaps:
+            logger.info(
+                "audit_minute_gaps: %d/%d dates have gaps (e.g. %s: %d/%d)",
+                len(gaps), len(expected),
+                gaps[0][0], gaps[0][2], gaps[0][1],
+            )
+        else:
+            logger.info("audit_minute_gaps: all %d dates complete", len(expected))
+
+        return gaps
+
+    async def _backfill_daily_gaps(
+        self,
+        tsanghi_client: Any,
+        tushare_client: Any,
+        progress_cb: Callable[[str, int, int, str], Any] | None = None,
+        cancel_event: _CancelChecker = None,
+    ) -> int:
+        """Backfill dates where backtest_daily has fewer stocks than stock_list.
+
+        For each gap date:
+        1. Query existing stock_codes in backtest_daily for that date
+        2. Re-download from tsanghi daily_latest (XSHG + XSHE)
+        3. INSERT only stocks not already present (upsert is safe)
+
+        Returns:
+            Number of dates backfilled.
+        """
+        gaps = await self._audit_daily_gaps()
+        if not gaps:
+            return 0
+
+        logger.info("backfill_daily_gaps: %d dates to backfill", len(gaps))
+        backfilled = 0
+
+        # Need prev_close for suspended stock fill
+        prev_close_map = await self._get_latest_closes()
+
+        for i, (gap_date, expected, actual) in enumerate(gaps):
+            if cancel_event and cancel_event.is_set():
+                logger.info("daily backfill cancelled")
+                break
+
+            date_str = gap_date.strftime("%Y-%m-%d")
+            ts_ms = _date_to_epoch_ms(gap_date)
+
+            # Get existing codes for this date
+            existing_rows = await self._db.fetch(
+                f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}"
+            )
+            existing_codes = {r["stock_code"] for r in existing_rows}
+
+            # Re-fetch from tsanghi
+            new_records: list[tuple[str, dict]] = []
+
+            # Fetch suspended stocks for this date
+            suspended_codes: set[str] = set()
+            try:
+                suspended_codes = await tushare_client.fetch_suspended_stocks(
+                    gap_date.strftime("%Y%m%d")
+                )
+            except Exception as e:
+                logger.warning(
+                    "backfill: suspend_d failed for %s: %s, skipping date", date_str, e
+                )
+                continue
+
+            for exchange in ("XSHG", "XSHE"):
+                try:
+                    records = await tsanghi_client.daily_latest(exchange, date_str)
+                except RuntimeError as e:
+                    logger.warning("backfill: tsanghi %s %s failed: %s", exchange, date_str, e)
+                    continue
+
+                if not records:
+                    continue
+
+                for rec in records:
+                    ticker = str(rec.get("ticker", ""))
+                    if not ticker or len(ticker) != 6:
+                        continue
+                    if ticker in existing_codes:
+                        continue  # already in DB
+
+                    o = rec.get("open")
+                    c = rec.get("close")
+                    is_susp = ticker in suspended_codes
+
+                    if is_susp:
+                        fill_price = prev_close_map.get(ticker, 0.0)
+                        new_records.append((ticker, {
+                            "open": fill_price, "high": fill_price,
+                            "low": fill_price, "close": fill_price,
+                            "pre_close": prev_close_map.get(ticker, 0.0),
+                            "volume": 0.0, "amount": 0.0,
+                            "turnover_ratio": None, "is_suspended": True,
+                        }))
+                    elif o is None or c is None:
+                        continue
+                    else:
+                        new_records.append((ticker, {
+                            "open": float(o),
+                            "high": float(rec.get("high", o)),
+                            "low": float(rec.get("low", o)),
+                            "close": float(c),
+                            "pre_close": prev_close_map.get(ticker, 0.0),
+                            "volume": float(rec.get("volume", 0)),
+                            "amount": 0.0,
+                            "turnover_ratio": None, "is_suspended": False,
+                        }))
+
+            if new_records:
+                await self._write_daily(ts_ms, new_records)
+                logger.info(
+                    "backfill: %s added %d stocks (was %d, expected %d)",
+                    date_str, len(new_records), actual, expected,
+                )
+
+            # Update prev_close_map with newly written closes
+            for code, rec in new_records:
+                if rec.get("close") and rec["close"] > 0:
+                    prev_close_map[code] = rec["close"]
+
+            backfilled += 1
+            if progress_cb:
+                await _maybe_await(
+                    progress_cb(
+                        "daily_backfill", i + 1, len(gaps),
+                        f"{date_str} +{len(new_records)}只"
+                        f" ({actual}→{actual + len(new_records)}/{expected})",
+                    )
+                )
+
+        logger.info("backfill_daily_gaps: done, %d dates backfilled", backfilled)
+        return backfilled
 
     # ==================== Resume Helpers ====================
 

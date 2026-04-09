@@ -604,6 +604,40 @@ class TushareRealtimeClient:
 
         return codes
 
+    async def fetch_bak_basic(self, trade_date: str) -> list[str]:
+        """Fetch all listed stock codes for a given date via Tushare bak_basic.
+
+        This is the authoritative stock list for any historical trading date
+        (from 2016). Used as the ground truth for cache completeness audits.
+
+        Args:
+            trade_date: YYYYMMDD format
+
+        Returns:
+            List of bare 6-digit stock codes listed on that date.
+        """
+        data = await self._api_call(
+            "bak_basic",
+            {"trade_date": trade_date},
+            fields="ts_code",
+        )
+
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+
+        if not fields or not items:
+            return []
+
+        idx = fields.index("ts_code")
+        codes: list[str] = []
+        for row in items:
+            ts_code = str(row[idx])
+            bare = ts_code.split(".")[0]
+            if len(bare) == 6:
+                codes.append(bare)
+
+        return codes
+
     @staticmethod
     def _to_ts_code(bare_code: str) -> str:
         """Convert bare code to Tushare format: 600519 -> 600519.SH."""
@@ -665,5 +699,30 @@ async def get_tushare_suspended_stocks(trade_date: str, token: str | None = None
     await client.start()
     try:
         return await client.fetch_suspended_stocks(td)
+    finally:
+        await client.stop()
+
+
+async def get_bak_basic_stocks(trade_date: str, token: str | None = None) -> list[str]:
+    """Standalone helper to fetch all listed stock codes for a date via bak_basic.
+
+    Args:
+        trade_date: YYYY-MM-DD format (converted internally to YYYYMMDD)
+        token: Tushare token. If None, reads from config.
+
+    Returns:
+        List of bare 6-digit stock codes listed on that date.
+    """
+    if token is None:
+        from src.common.config import get_tushare_token
+
+        token = get_tushare_token()
+
+    td = trade_date.replace("-", "")
+
+    client = TushareRealtimeClient(token=token)
+    await client.start()
+    try:
+        return await client.fetch_bak_basic(td)
     finally:
         await client.stop()

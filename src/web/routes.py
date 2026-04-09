@@ -525,6 +525,14 @@ def create_momentum_router() -> APIRouter:
                 if detail:
                     return f"回填 {current}/{total}: {detail}"
                 return f"回填停牌标记: {current}/{total} 天"
+            elif phase == "stock_list":
+                if detail:
+                    return f"同步股票列表 {current}/{total}: {detail}"
+                return f"同步股票列表: {current}/{total} 天"
+            elif phase == "daily_backfill":
+                if detail:
+                    return f"日线补全 {current}/{total}: {detail}"
+                return f"日线补全: {current}/{total} 天"
             elif phase == "minute_active":
                 return f"正在请求: {detail} 起 ({current}/{total} 已完成)"
             elif phase == "minute":
@@ -562,9 +570,13 @@ def create_momentum_router() -> APIRouter:
                 elif phase == "daily_resume":
                     overall = 0.1
                 elif phase == "backfill":
-                    overall = 0.1 + 0.05 * (current / total) if total > 0 else 0.1
+                    overall = 0.1 + 0.02 * (current / total) if total > 0 else 0.1
+                elif phase == "stock_list":
+                    overall = 0.12 + 0.02 * (current / total) if total > 0 else 0.12
+                elif phase == "daily_backfill":
+                    overall = 0.14 + 0.02 * (current / total) if total > 0 else 0.14
                 elif phase == "daily":
-                    overall = 0.15 + 0.05 * (current / total) if total > 0 else 0.15
+                    overall = 0.16 + 0.04 * (current / total) if total > 0 else 0.16
                 elif phase == "minute_resume":
                     overall = 0.2
                 elif phase == "minute_active":
