@@ -550,9 +550,16 @@ def create_momentum_router() -> APIRouter:
 
         async def download_stream():
             import threading
+            import time
+
+            # Watchdog: force-cancel the download if there's no progress for this many
+            # seconds. asyncpg's C extension can hang on socket recv during a flush
+            # storm and ignore CancelledError, so we surface the silence to the user.
+            NO_PROGRESS_TIMEOUT_SEC = 600  # 10 minutes
 
             queue: asyncio.Queue[dict | None] = asyncio.Queue()
             cancel_event = threading.Event()
+            last_event_at = [time.monotonic()]  # mutable holder for the watchdog
 
             # Cancel any existing download task
             prev_task = getattr(request.app.state, "cache_download_task", None)
@@ -564,6 +571,7 @@ def create_momentum_router() -> APIRouter:
                     pass
 
             def on_progress(phase: str, current: int, total: int, detail: str = ""):
+                last_event_at[0] = time.monotonic()
                 if phase == "status":
                     queue.put_nowait({"type": "status", "message": detail})
                     return
@@ -676,17 +684,74 @@ def create_momentum_router() -> APIRouter:
                         cancel_event=cancel_event,
                     )
                     queue.put_nowait({"type": "_done", **counts})  # sentinel
+                    try:
+                        await pipeline.reporter.notify_download_lifecycle(
+                            "completed",
+                            f"日期: {body.start_date} ~ {body.end_date}",
+                            f"日线: {counts.get('daily_count', 0)} 只 | "
+                            f"分钟线: {counts.get('minute_count', 0)} 只",
+                        )
+                    except Exception:
+                        logger.warning("Failed to send download completion notice", exc_info=True)
                 except asyncio.CancelledError:
                     cancel_event.set()
                     queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
+                    try:
+                        await pipeline.reporter.notify_download_lifecycle(
+                            "cancelled", f"日期: {body.start_date} ~ {body.end_date}"
+                        )
+                    except Exception:
+                        logger.warning("Failed to send cancel notice", exc_info=True)
+                    raise
                 except Exception as e:
                     err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                     logger.error(f"Cache download failed: {err_msg}", exc_info=True)
                     queue.put_nowait({"type": "error", "message": err_msg[:300]})
+                    try:
+                        await pipeline.reporter.notify_download_lifecycle(
+                            "error", f"日期: {body.start_date} ~ {body.end_date}", err_msg
+                        )
+                    except Exception:
+                        logger.warning("Failed to send error notice", exc_info=True)
+
+            # Notify start (best effort, don't block download)
+            try:
+                await pipeline.reporter.notify_download_lifecycle(
+                    "started", f"日期: {body.start_date} ~ {body.end_date}"
+                )
+            except Exception:
+                logger.warning("Failed to send start notice", exc_info=True)
 
             download_task = asyncio.create_task(_run_download())
             request.app.state.cache_download_task = download_task
             request.app.state.cache_download_cancel = cancel_event
+
+            def _on_task_done(task: asyncio.Task) -> None:
+                """Guarantee a sentinel reaches the SSE loop even if _run_download
+                exits abnormally (e.g. CancelledError swallowed by asyncpg, or any
+                bare exception that escaped the try/except).
+                """
+                try:
+                    exc = task.exception()
+                except (asyncio.CancelledError, asyncio.InvalidStateError):
+                    exc = None
+                if exc is not None:
+                    err_msg = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                    logger.error("Cache download task died unexpectedly: %s", err_msg, exc_info=exc)
+                    queue.put_nowait(
+                        {
+                            "type": "error",
+                            "message": f"任务异常退出: {err_msg[:280]}",
+                            "_silent_death": True,
+                        }
+                    )
+                else:
+                    # Task ended cleanly. If no _done sentinel was already pushed
+                    # (e.g. cancelled without producing one), the SSE loop will
+                    # detect task.done() in its heartbeat path and surface it.
+                    queue.put_nowait({"type": "_task_finished"})
+
+            download_task.add_done_callback(_on_task_done)
 
             try:
                 yield _sse(
@@ -700,8 +765,54 @@ def create_momentum_router() -> APIRouter:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=30)
                     except asyncio.TimeoutError:
+                        # Heartbeat path: must check for silent task death and watchdog timeout.
+                        silent = time.monotonic() - last_event_at[0]
+                        if download_task.done() and queue.empty():
+                            # Task finished without sending _done — surface as error.
+                            logger.error(
+                                "Cache download task ended without _done sentinel "
+                                "(silent death after %.0fs)",
+                                silent,
+                            )
+                            try:
+                                await pipeline.reporter.notify_download_lifecycle(
+                                    "silent_death",
+                                    f"日期: {body.start_date} ~ {body.end_date}",
+                                    f"任务在无 _done 信号情况下结束 (静默 {silent:.0f}s)",
+                                )
+                            except Exception:
+                                logger.warning("Failed to send silent_death notice", exc_info=True)
+                            msg = f"下载任务异常退出 (静默 {silent:.0f}s)，请查看服务端日志"
+                            yield _sse({"type": "error", "message": msg})
+                            return
+                        if silent >= NO_PROGRESS_TIMEOUT_SEC:
+                            logger.error(
+                                "Cache download watchdog: no progress for %.0fs, force-cancelling",
+                                silent,
+                            )
+                            cancel_event.set()
+                            download_task.cancel()
+                            try:
+                                await pipeline.reporter.notify_download_lifecycle(
+                                    "watchdog_timeout",
+                                    f"日期: {body.start_date} ~ {body.end_date}",
+                                    f"已 {silent:.0f}s 无进度更新，强制终止下载",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to send watchdog_timeout notice", exc_info=True
+                                )
+                            yield _sse(
+                                {
+                                    "type": "error",
+                                    "message": f"下载卡死: {silent:.0f}s 无进度，已强制终止",
+                                }
+                            )
+                            return
                         yield _sse({"type": "heartbeat"})
                         continue
+
+                    last_event_at[0] = time.monotonic()
 
                     if event.get("type") == "_done":
                         yield _sse(
@@ -715,6 +826,20 @@ def create_momentum_router() -> APIRouter:
                             }
                         )
                         break
+                    if event.get("type") == "_task_finished":
+                        # Task ended cleanly via done_callback. If no _done was already
+                        # processed, this is an unexpected exit (cancelled, etc).
+                        if download_task.cancelled():
+                            yield _sse({"type": "cancelled", "message": "下载已取消"})
+                        else:
+                            logger.error("Cache download task ended without _done sentinel")
+                            yield _sse(
+                                {
+                                    "type": "error",
+                                    "message": "下载任务异常结束，请查看服务端日志",
+                                }
+                            )
+                        return
                     if event.get("type") in ("error", "cancelled"):
                         yield _sse(event)
                         return

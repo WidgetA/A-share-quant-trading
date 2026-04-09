@@ -162,6 +162,43 @@ class CacheProgressReporter:
             f"已跳过: {sample}{extra}"
         )
 
+    async def notify_download_lifecycle(
+        self, stage: str, message: str = "", detail: str = ""
+    ) -> None:
+        """Emit a Feishu notification for download lifecycle transitions.
+
+        Stages:
+            - started: download task created
+            - completed: download finished successfully
+            - error: download raised an exception
+            - cancelled: user cancelled the download
+            - silent_death: download task ended without producing a sentinel
+            - watchdog_timeout: no progress for the configured silence window
+        """
+        emoji = {
+            "started": "🚀",
+            "completed": "✅",
+            "error": "❌",
+            "cancelled": "⏸️",
+            "silent_death": "💀",
+            "watchdog_timeout": "⏰",
+        }.get(stage, "ℹ️")
+        title = {
+            "started": "[缓存下载] 开始",
+            "completed": "[缓存下载] 完成",
+            "error": "[缓存下载] 错误",
+            "cancelled": "[缓存下载] 已取消",
+            "silent_death": "[缓存下载] 任务异常退出",
+            "watchdog_timeout": "[缓存下载] 卡死强制终止",
+        }.get(stage, f"[缓存下载] {stage}")
+
+        lines = [f"{emoji} {title}"]
+        if message:
+            lines.append(message)
+        if detail:
+            lines.append(detail[:500])
+        await self._send_feishu("\n".join(lines))
+
     async def notify_backfill_summary(self, fixed_dates: int, null_remaining: int) -> None:
         if null_remaining > 0:
             await self._send_feishu(
