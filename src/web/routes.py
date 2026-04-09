@@ -246,6 +246,40 @@ def create_router() -> APIRouter:
             "build_time": os.environ.get("BUILD_TIME", "unknown"),
         }
 
+    @router.get("/api/debug/tasks")
+    async def api_debug_tasks(request: Request) -> dict:
+        """Dump all asyncio tasks with their current stack frames.
+
+        Used to diagnose hangs where the download pipeline stops emitting
+        progress events without any error, timeout, or watchdog warning.
+        The response is ALSO written to the app logger so it shows up in
+        docker logs — use whichever is easier to read.
+        """
+        import asyncio
+        import io
+        import traceback
+
+        tasks = [t for t in asyncio.all_tasks() if not t.done()]
+        out: list[dict] = []
+        text_lines: list[str] = [f"=== asyncio task dump: {len(tasks)} tasks ==="]
+        for t in tasks:
+            name = t.get_name()
+            coro = t.get_coro()
+            coro_name = getattr(coro, "__qualname__", repr(coro))
+            buf = io.StringIO()
+            try:
+                t.print_stack(file=buf)
+            except Exception as e:
+                buf.write(f"<print_stack failed: {e}>\n")
+            stack = buf.getvalue()
+            out.append({"name": name, "coro": coro_name, "stack": stack})
+            text_lines.append(f"\n--- task name={name} coro={coro_name} ---\n{stack}")
+
+        # Also log it so user can see via `docker-compose logs trading-service`
+        logger.warning("\n".join(text_lines))
+
+        return {"count": len(tasks), "tasks": out}
+
     @router.get("/api/pending")
     async def api_pending_list(request: Request) -> dict:
         """List all pending confirmations."""
