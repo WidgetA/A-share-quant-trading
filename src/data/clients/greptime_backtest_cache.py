@@ -6,7 +6,7 @@
 # === KEY CONCEPTS ===
 # - All reads go through SQL via asyncpg (PostgreSQL wire protocol, port 4003)
 # - Natural upsert: same (stock_code, ts) = last write wins
-# - No transactions needed — each INSERT is independent, but FLUSH required to persist to OSS
+# - No transactions needed — each INSERT is independent (GreptimeDB handles flush internally)
 # - Volume stored in 手 (lots) — adapter converts ×100 at read time
 # - Data sources: tsanghi (daily OHLCV), Tushare Pro stk_mins (1-min bars for 9:40 snapshot)
 #
@@ -786,10 +786,17 @@ class GreptimeBacktestCache:
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
         Phase 2 — 1-min bars via Tushare Pro stk_mins API (per-stock, for 9:40 snapshot).
 
-        Data is written to GreptimeDB with FLUSH after each batch to persist to OSS.
+        Data is written to GreptimeDB (flush handled internally by the database).
         """
         # Extra history for lookback (preClose needs 1 day, QualityFilter needs ~30 days)
         dl_start = start_date - timedelta(days=60)
+
+        # Compact existing SST files before writing new data
+        for tbl in ("backtest_daily", "backtest_minute"):
+            try:
+                await self._db.execute(f"ADMIN COMPACT_TABLE('{tbl}')")
+            except Exception:
+                logger.debug(f"COMPACT_TABLE('{tbl}') skipped (table may not exist yet)")
 
         if progress_cb:
             await _maybe_await(progress_cb("init", 0, 0, ""))
@@ -822,9 +829,8 @@ class GreptimeBacktestCache:
             )
             all_no_data_reasons.update(reasons)
 
-        # Phase 3: FLUSH once to persist Phase 2 data, then check for gaps
+        # Phase 3: check for gaps
         if stock_codes:
-            await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
             minute_gaps = await self.find_minute_gaps()
             if minute_gaps:
                 logger.info(
@@ -843,13 +849,9 @@ class GreptimeBacktestCache:
                     )
                     all_no_data_reasons.update(reasons)
 
-        # Final verification: FLUSH both tables, then re-run resume check
-        # to confirm the download we just did won't re-trigger next time.
+        # Final verification: re-run resume check to confirm download won't re-trigger.
         if progress_cb:
-            await _maybe_await(progress_cb("download", 0, 1, "最终刷盘验证中..."))
-
-        await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-        await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
+            await _maybe_await(progress_cb("download", 0, 1, "最终验证中..."))
 
         daily_count = await self.get_daily_stock_count()
         minute_count = await self.get_minute_stock_count()
@@ -1299,80 +1301,12 @@ class GreptimeBacktestCache:
 
                 if day_records:
                     trading_days_found += 1
-                    # INSERT this day's data, FLUSH, then verify+retry
                     await self._write_daily(ts_ms, day_records)
-                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
 
-                    # Verify: count persisted rows for this date
-                    expected = len(day_records)
-                    verify_row = await self._db.fetchrow(
-                        f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = {ts_ms}"
-                    )
-                    actual = int(verify_row["cnt"]) if verify_row else 0
-                    verify_ok = actual >= expected
-
-                    if not verify_ok:
-                        # Find which codes are missing and retry
-                        persisted_rows = await self._db.fetch(
-                            f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}"
-                        )
-                        persisted_codes = {r["stock_code"] for r in persisted_rows}
-                        missing = [(c, rec) for c, rec in day_records if c not in persisted_codes]
-                        logger.warning(
-                            f"Daily verify {date_str}: {actual}/{expected} persisted, "
-                            f"retrying {len(missing)} missing rows"
-                        )
-                        if progress_cb:
-                            await _maybe_await(
-                                progress_cb(
-                                    "daily",
-                                    (current - dl_start).days + 1,
-                                    total_days,
-                                    f"{date_str} 验证缺失 {len(missing)} 只, 重试中...",
-                                )
-                            )
-                        for retry_attempt in range(1, 4):  # max 3 retries
-                            await self._write_daily(ts_ms, missing)
-                            await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-                            re_check = await self._db.fetchrow(
-                                f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts = {ts_ms}"
-                            )
-                            new_actual = int(re_check["cnt"]) if re_check else 0
-                            if new_actual >= expected:
-                                logger.info(
-                                    f"Daily verify {date_str}: retry #{retry_attempt} OK "
-                                    f"({new_actual}/{expected})"
-                                )
-                                verify_ok = True
-                                break
-                            # Refresh missing list for next retry
-                            persisted_rows = await self._db.fetch(
-                                f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}"
-                            )
-                            persisted_codes = {r["stock_code"] for r in persisted_rows}
-                            missing = [
-                                (c, rec) for c, rec in day_records if c not in persisted_codes
-                            ]
-                            logger.warning(
-                                f"Daily verify {date_str}: retry #{retry_attempt} "
-                                f"still missing {len(missing)}, {new_actual}/{expected}"
-                            )
-                        if not verify_ok:
-                            logger.error(
-                                f"Daily verify {date_str}: FAILED after 3 retries, "
-                                f"{new_actual}/{expected}"
-                            )
-
-                    # Show final result only after verify
                     if progress_cb:
                         elapsed = (current - dl_start).days + 1
                         stocks_today = len(day_records)
-                        if verify_ok:
-                            status = f"{date_str} ({stocks_today}只) 已验证 ✓"
-                        else:
-                            status = (
-                                f"{date_str} ⚠ 刷盘验证失败, 预期{expected}只 实际{new_actual}只"
-                            )
+                        status = f"{date_str} ({stocks_today}只) ✓"
                         await _maybe_await(progress_cb("daily", elapsed, total_days, status))
 
                     # Update prev_close_map for next day
@@ -1590,7 +1524,6 @@ class GreptimeBacktestCache:
         """INSERT daily records for a single date, one row at a time.
 
         GreptimeDB silently drops data when batch INSERT exceeds ~200 rows.
-        Caller must FLUSH after calling this method to persist to OSS.
         """
         if not records:
             return
@@ -1612,7 +1545,7 @@ class GreptimeBacktestCache:
     async def _write_minute(
         self, code: str, min_data: dict[str, tuple[float, float, float, float]]
     ) -> None:
-        """INSERT minute data for a single stock. Caller must FLUSH after."""
+        """INSERT minute data for a single stock."""
         if not min_data:
             return
         values = []
@@ -1734,44 +1667,19 @@ class GreptimeBacktestCache:
                     "tr": r["turnover_ratio"],
                 }
 
-            # ALTER TABLE 新增列的旧行在 SST 中没有该列，纯 upsert
-            # 在 memtable flush 后会被旧 SST 覆盖。
-            # 必须 DELETE 旧行 → INSERT 新行 → FLUSH 才能持久化。
+            # DELETE old rows then INSERT with new columns
             cols = (
                 "(stock_code,ts,open_price,high_price,low_price,close_price,"
                 "pre_close,vol,amount,turnover_ratio,is_suspended)"
             )
 
-            # Step 1: DELETE all NULL rows for this date
-            if progress_cb:
-                await _maybe_await(
-                    progress_cb(
-                        "backfill",
-                        idx,
-                        len(dates_to_fix),
-                        f"{date_str} DELETE {len(db_codes)} 行...",
-                    )
-                )
+            # Step 1: DELETE all rows for this date
             for code in db_codes:
                 await self._db.execute(
                     f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
                 )
 
-            # FLUSH after DELETE — persist tombstones to SST before INSERT,
-            # otherwise memtable auto-flush during INSERT may split tombstones
-            # and new rows into different SSTs, letting old data win on merge.
-            await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-
             # Step 2: INSERT fresh rows with is_suspended set
-            if progress_cb:
-                await _maybe_await(
-                    progress_cb(
-                        "backfill",
-                        idx,
-                        len(dates_to_fix),
-                        f"{date_str} INSERT {len(db_codes)} 行...",
-                    )
-                )
             upserted = 0
             for code, rec in db_codes.items():
                 if code in suspended_codes:
@@ -1812,112 +1720,17 @@ class GreptimeBacktestCache:
                 await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
                 upserted += 1
 
-            # Step 3: FLUSH to persist (prevent old SST from overwriting)
+            logger.info(
+                f"Backfill {date_str}: {upserted} rows "
+                f"(suspended={len(suspended_codes)})"
+            )
             if progress_cb:
-                await _maybe_await(
-                    progress_cb(
-                        "backfill",
-                        idx,
-                        len(dates_to_fix),
-                        f"{date_str} FLUSH {upserted} 行...",
-                    )
-                )
-            await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-
-            # Verify + retry: this date should have 0 NULL is_suspended
-            for _verify_attempt in range(4):  # 1 initial check + 3 retries
-                verify = await self._db.fetch(
-                    f"SELECT COUNT(*) FROM backtest_daily "
-                    f"WHERE ts = {ts_ms} AND is_suspended IS NULL"
-                )
-                null_remaining = verify[0][0] if verify else -1
-
-                if null_remaining <= 0:
-                    logger.info(
-                        f"Backfill {date_str}: {upserted} rows OK "
-                        f"(suspended={len(suspended_codes)})"
-                    )
-                    break
-
-                if _verify_attempt < 3:
-                    # Retry: re-read NULL rows and re-do DELETE→FLUSH→INSERT→FLUSH
-                    logger.warning(
-                        f"Backfill {date_str}: {null_remaining} rows still NULL, "
-                        f"retry #{_verify_attempt + 1}"
-                    )
-                    if progress_cb:
-                        await _maybe_await(
-                            progress_cb(
-                                "backfill",
-                                idx,
-                                len(dates_to_fix),
-                                f"{date_str} 验证失败, 重试#{_verify_attempt + 1}...",
-                            )
-                        )
-                    # Re-read remaining NULL rows
-                    retry_rows = await self._db.fetch(
-                        f"SELECT stock_code, open_price, high_price, low_price, "
-                        f"close_price, pre_close, vol, amount, turnover_ratio "
-                        f"FROM backtest_daily WHERE ts = {ts_ms} AND is_suspended IS NULL"
-                    )
-                    for rr in retry_rows:
-                        rr_code = rr["stock_code"]
-                        await self._db.execute(
-                            f"DELETE FROM backtest_daily "
-                            f"WHERE stock_code = '{rr_code}' AND ts = {ts_ms}"
-                        )
-                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-                    for rr in retry_rows:
-                        rr_code = rr["stock_code"]
-                        is_susp = rr_code in suspended_codes
-                        if is_susp:
-                            pre_c = float(rr["pre_close"]) if rr["pre_close"] else 0.0
-                            fill = pre_c if pre_c > 0 else 0.0
-                            val = (
-                                f"('{rr_code}',{ts_ms},"
-                                f"{fill},{fill},{fill},{fill},"
-                                f"{pre_c},0.0,0.0,NULL,true)"
-                            )
-                        else:
-                            tr_v = rr["turnover_ratio"]
-                            tr_s = str(tr_v) if tr_v is not None else "NULL"
-                            val = (
-                                f"('{rr_code}',{ts_ms},"
-                                f"{float(rr['open_price'])},"
-                                f"{float(rr['high_price'])},"
-                                f"{float(rr['low_price'])},"
-                                f"{float(rr['close_price'])},"
-                                f"{float(rr['pre_close']) if rr['pre_close'] else 0.0},"
-                                f"{float(rr['vol']) if rr['vol'] else 0.0},"
-                                f"{float(rr['amount']) if rr['amount'] else 0.0},"
-                                f"{tr_s},false)"
-                            )
-                        await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
-                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_daily')")
-                else:
-                    # Final attempt failed
-                    msg = (
-                        f"[缓存回填] 3次重试后仍失败\n"
-                        f"日期 {date_str}: 仍有 {null_remaining} 行 is_suspended=NULL"
-                    )
-                    logger.error(msg)
-                    try:
-                        from src.common.feishu_bot import FeishuBot
-
-                        bot = FeishuBot()
-                        if bot.is_configured():
-                            await bot.send_message(msg)
-                    except Exception:
-                        pass
-
-            if progress_cb:
-                status = "✓" if null_remaining <= 0 else f"⚠ {null_remaining} NULL"
                 await _maybe_await(
                     progress_cb(
                         "backfill",
                         idx + 1,
                         len(dates_to_fix),
-                        f"{date_str} {status} ({upserted}行, 停牌{len(suspended_codes)}只)",
+                        f"{date_str} ✓ ({upserted}行, 停牌{len(suspended_codes)}只)",
                     )
                 )
 
