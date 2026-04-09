@@ -1103,6 +1103,15 @@ class GreptimeBacktestCache:
                 if progress_cb:
                     await _maybe_await(progress_cb("daily", 0, 0, f"⚠ 交易日历获取失败: {e}"))
 
+            # Sync stock_list BEFORE daily download so backfill knows expected counts
+            if trading_dates:
+                await self._sync_stock_list(
+                    tushare_client,
+                    sorted(trading_dates),
+                    progress_cb,
+                    cancel_event,
+                )
+
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
 
@@ -1354,15 +1363,6 @@ class GreptimeBacktestCache:
                 f"tsanghi daily download: {len(all_stock_codes)} stocks, "
                 f"{trading_days_found} trading days in [{dl_start} ~ {end_date}]"
             )
-
-            # Sync stock_list from bak_basic (authoritative stock list per date)
-            if trading_dates:
-                await self._sync_stock_list(
-                    tushare_client,
-                    sorted(trading_dates),
-                    progress_cb,
-                    cancel_event,
-                )
 
             # Audit & backfill: detect dates where daily data is incomplete
             await self._backfill_daily_gaps(client, tushare_client, progress_cb, cancel_event)
