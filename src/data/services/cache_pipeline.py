@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections import Counter
 from datetime import date, timedelta
 from typing import Any
@@ -347,19 +348,45 @@ class CachePipeline:
         for i, td in enumerate(to_sync):
             self._raise_if_cancelled(cancel_event, "stock_list sync cancelled")
 
+            t_fetch = time.monotonic()
             codes = await self.metadata_source.fetch_listed_stocks(td)
+            fetch_elapsed = time.monotonic() - t_fetch
             if not codes:
                 logger.warning(
-                    "stock_list: bak_basic returned 0 codes for %s",
+                    "stock_list: bak_basic returned 0 codes for %s (fetch %.2fs)",
                     td.strftime("%Y%m%d"),
+                    fetch_elapsed,
                 )
                 continue
 
-            await self.storage.insert_stock_list_codes(td, codes)
+            async def _on_insert(done: int, total: int, _td: date = td, _i: int = i) -> None:
+                await self.reporter.progress(
+                    Phase.STOCK_LIST,
+                    _i + 1,
+                    len(to_sync),
+                    f"{_td} 写入 {done}/{total}",
+                )
+
+            t_insert = time.monotonic()
+            await self.storage.insert_stock_list_codes(td, codes, on_progress=_on_insert)
+            insert_elapsed = time.monotonic() - t_insert
+            ms_per_row = (insert_elapsed * 1000.0) / max(len(codes), 1)
+
             await self.reporter.progress(
-                Phase.STOCK_LIST, i + 1, len(to_sync), f"{td} ({len(codes)}只)"
+                Phase.STOCK_LIST,
+                i + 1,
+                len(to_sync),
+                f"{td} ({len(codes)}只, fetch {fetch_elapsed:.1f}s, "
+                f"insert {insert_elapsed:.1f}s/{ms_per_row:.1f}ms/row)",
             )
-            logger.info("stock_list: %s → %d codes", td, len(codes))
+            logger.info(
+                "stock_list: %s → %d codes (fetch %.2fs, insert %.2fs, %.1f ms/row)",
+                td,
+                len(codes),
+                fetch_elapsed,
+                insert_elapsed,
+                ms_per_row,
+            )
 
         logger.info("stock_list: sync complete, %d dates added", len(to_sync))
 

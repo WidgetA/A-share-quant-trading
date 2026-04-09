@@ -38,7 +38,7 @@ import calendar
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, NamedTuple
+from typing import Any, Awaitable, Callable, NamedTuple
 
 import asyncpg
 
@@ -769,13 +769,26 @@ class GreptimeBacktestStorage:
         )
         await self.db.execute(f"INSERT INTO backtest_minute{cols} VALUES {val}")
 
-    async def insert_stock_list_codes(self, day: date, codes: list[str]) -> None:
-        """INSERT stock_list rows for a date (one INSERT per code)."""
+    async def insert_stock_list_codes(
+        self,
+        day: date,
+        codes: list[str],
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> None:
+        """INSERT stock_list rows for a date (one INSERT per code).
+
+        ``on_progress(done, total)`` is awaited every 200 rows so the caller
+        can surface intra-date progress to the UI (otherwise 5k+ INSERTs look
+        like a hang).
+        """
         ts_ms = date_to_epoch_ms(day)
-        for code in codes:
+        total = len(codes)
+        for i, code in enumerate(codes, start=1):
             await self.db.execute(
                 f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
             )
+            if on_progress is not None and (i % 200 == 0 or i == total):
+                await on_progress(i, total)
 
     # ==================== Audits ====================
 
