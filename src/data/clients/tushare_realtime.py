@@ -614,12 +614,16 @@ class TushareRealtimeClient:
             3 API calls total (one per list_status).
         """
         result: list[tuple[str, str, str | None]] = []
-        for status in ("L", "D", "P"):
+        statuses = ("L", "D", "P")
+        for idx, status in enumerate(statuses):
             data = await self._api_call(
                 "stock_basic",
                 {"list_status": status},
                 fields="ts_code,list_date,delist_date",
             )
+            # Rate limit: wait 31s between calls
+            if idx < len(statuses) - 1:
+                await asyncio.sleep(31)
             fields = data.get("data", {}).get("fields", [])
             items = data.get("data", {}).get("items", [])
             if not fields or not items:
