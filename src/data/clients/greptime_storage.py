@@ -192,14 +192,32 @@ CREATE TABLE IF NOT EXISTS stock_list (
 
 
 class _GreptimeConnection(asyncpg.Connection):
-    """asyncpg connection subclass that disables reset for GreptimeDB.
+    """asyncpg connection subclass tailored for GreptimeDB.
 
-    GreptimeDB does not support RESET ALL / DEALLOCATE ALL which asyncpg
-    runs when returning connections to the pool. Override to no-op.
+    GreptimeDB's PostgreSQL wire protocol compatibility is incomplete in
+    two places that the pool exercises on every release/recycle:
+
+    1. `reset()` issues `RESET ALL` / `DEALLOCATE ALL`, which GreptimeDB
+       rejects. Override to a no-op.
+    2. `close()` sends a Terminate message and then `await`s the server
+       to close the socket. GreptimeDB never closes the socket, so
+       `close()` hangs forever. This is what asyncpg calls from
+       `PoolConnectionHolder.release()` once `max_queries` (default
+       50000) is exceeded — and since we do ~5000 INSERTs per date for
+       stock_list, the pool trips that threshold after ~10 dates and
+       silently wedges the whole download. Override `close()` to force
+       a `terminate()` (TCP reset, no handshake) instead.
     """
 
     async def reset(self, *, timeout: float | None = None) -> None:  # type: ignore[override]
         pass
+
+    async def close(self, *, timeout: float | None = None) -> None:  # type: ignore[override]
+        # Do NOT call super().close() — it sends a PG Terminate message
+        # and waits for the server socket to close, which hangs forever
+        # against GreptimeDB. terminate() just does a TCP reset.
+        if not self.is_closed():
+            self.terminate()
 
 
 class GreptimeClient:
@@ -226,6 +244,11 @@ class GreptimeClient:
         self._pool: asyncpg.Pool | None = None
 
     async def start(self) -> None:
+        # Note: asyncpg's `max_queries` (default 50000) triggers connection
+        # recycling via `close()`, which used to hang forever on GreptimeDB
+        # because the server ignores the PG Terminate handshake. That is
+        # fixed at the root in `_GreptimeConnection.close()` — we no longer
+        # need to override `max_queries` here.
         self._pool = await asyncpg.create_pool(
             host=self._host,
             port=self._port,
@@ -235,22 +258,6 @@ class GreptimeClient:
             max_size=3,
             statement_cache_size=0,
             connection_class=_GreptimeConnection,
-            # CRITICAL: disable connection recycling.
-            #
-            # asyncpg's default is max_queries=50000 — after that many
-            # queries on a single connection, `pool.release()` tries to
-            # close the connection with `await self._con.close(timeout=None)`
-            # which sends a Terminate message and awaits the server's
-            # socket close. GreptimeDB does not honor asyncpg's Terminate
-            # handshake the way PostgreSQL does, so the close() call hangs
-            # forever — and since release() is the FIRST thing that runs
-            # after our slow-SQL watchdog is already cancelled in the
-            # _run() finally block, there is zero visibility: no watchdog
-            # warning, no wait_for timeout, just total silence.
-            #
-            # Downloading stock_list + daily does on the order of 10^5–10^6
-            # INSERTs per full run, so 10**9 is effectively "never recycle".
-            max_queries=10**9,
         )
 
     async def stop(self) -> None:
@@ -331,11 +338,13 @@ class GreptimeClient:
                 await watchdog
             except (asyncio.CancelledError, Exception):
                 pass
-            # Defensive timeout: historically `pool.release()` has hung
-            # indefinitely on GreptimeDB when asyncpg tried to recycle a
-            # worn-out connection (see max_queries note in `start()`).
-            # Even with that path disabled, surface any future hang as a
-            # loud error instead of an invisible 13-minute stall.
+            # Belt-and-suspenders: `pool.release()` previously hung
+            # indefinitely on GreptimeDB because asyncpg's default
+            # `close()` (called during connection recycling) waits for
+            # a Terminate handshake the server never completes. That is
+            # now fixed in `_GreptimeConnection.close()`, but we still
+            # wrap release() in a short timeout so any future regression
+            # surfaces as a loud error instead of silent wedge.
             try:
                 await asyncio.wait_for(self._pool.release(conn), timeout=10.0)
             except (asyncio.TimeoutError, TimeoutError):
