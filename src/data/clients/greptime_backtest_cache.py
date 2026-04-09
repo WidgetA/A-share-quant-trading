@@ -1346,9 +1346,7 @@ class GreptimeBacktestCache:
                 )
 
             # Audit & backfill: detect dates where daily data is incomplete
-            await self._backfill_daily_gaps(
-                client, tushare_client, progress_cb, cancel_event
-            )
+            await self._backfill_daily_gaps(client, tushare_client, progress_cb, cancel_event)
 
             return sorted(all_stock_codes)
         finally:
@@ -1810,9 +1808,7 @@ class GreptimeBacktestCache:
 
     async def _get_existing_stock_list_dates(self) -> set[date]:
         """Get dates that already have stock_list data in DB."""
-        rows = await self._db.fetch(
-            "SELECT DISTINCT ts FROM stock_list"
-        )
+        rows = await self._db.fetch("SELECT DISTINCT ts FROM stock_list")
         return {_ts_to_date(r["ts"]) for r in rows}
 
     async def _sync_stock_list(
@@ -1836,7 +1832,8 @@ class GreptimeBacktestCache:
 
         logger.info(
             "stock_list: syncing %d dates (%d already cached)",
-            len(to_sync), len(existing),
+            len(to_sync),
+            len(existing),
         )
 
         for i, td in enumerate(to_sync):
@@ -1880,17 +1877,13 @@ class GreptimeBacktestCache:
         if not sl_rows:
             return []
 
-        expected: dict[date, int] = {
-            _ts_to_date(r["ts"]): int(r["cnt"]) for r in sl_rows
-        }
+        expected: dict[date, int] = {_ts_to_date(r["ts"]): int(r["cnt"]) for r in sl_rows}
 
         # backtest_daily counts per date
         daily_rows = await self._db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts ORDER BY ts"
         )
-        actual: dict[date, int] = {
-            _ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows
-        }
+        actual: dict[date, int] = {_ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows}
 
         gaps = []
         for d, exp in expected.items():
@@ -1901,8 +1894,11 @@ class GreptimeBacktestCache:
         if gaps:
             logger.info(
                 "audit_daily_gaps: %d/%d dates have gaps (e.g. %s: %d/%d)",
-                len(gaps), len(expected),
-                gaps[0][0], gaps[0][2], gaps[0][1],
+                len(gaps),
+                len(expected),
+                gaps[0][0],
+                gaps[0][2],
+                gaps[0][1],
             )
         else:
             logger.info("audit_daily_gaps: all %d dates complete", len(expected))
@@ -1927,18 +1923,13 @@ class GreptimeBacktestCache:
         if not daily_rows:
             return []
 
-        expected: dict[date, int] = {
-            _ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows
-        }
+        expected: dict[date, int] = {_ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows}
 
         # backtest_minute counts per date
         minute_rows = await self._db.fetch(
-            "SELECT ts, COUNT(*) as cnt FROM backtest_minute "
-            "GROUP BY ts ORDER BY ts"
+            "SELECT ts, COUNT(*) as cnt FROM backtest_minute GROUP BY ts ORDER BY ts"
         )
-        actual: dict[date, int] = {
-            _ts_to_date(r["ts"]): int(r["cnt"]) for r in minute_rows
-        }
+        actual: dict[date, int] = {_ts_to_date(r["ts"]): int(r["cnt"]) for r in minute_rows}
 
         gaps = []
         for d, exp in expected.items():
@@ -1949,8 +1940,11 @@ class GreptimeBacktestCache:
         if gaps:
             logger.info(
                 "audit_minute_gaps: %d/%d dates have gaps (e.g. %s: %d/%d)",
-                len(gaps), len(expected),
-                gaps[0][0], gaps[0][2], gaps[0][1],
+                len(gaps),
+                len(expected),
+                gaps[0][0],
+                gaps[0][2],
+                gaps[0][1],
             )
         else:
             logger.info("audit_minute_gaps: all %d dates complete", len(expected))
@@ -2008,9 +2002,7 @@ class GreptimeBacktestCache:
                     gap_date.strftime("%Y%m%d")
                 )
             except Exception as e:
-                logger.warning(
-                    "backfill: suspend_d failed for %s: %s, skipping date", date_str, e
-                )
+                logger.warning("backfill: suspend_d failed for %s: %s, skipping date", date_str, e)
                 continue
 
             for exchange in ("XSHG", "XSHE"):
@@ -2036,32 +2028,50 @@ class GreptimeBacktestCache:
 
                     if is_susp:
                         fill_price = prev_close_map.get(ticker, 0.0)
-                        new_records.append((ticker, {
-                            "open": fill_price, "high": fill_price,
-                            "low": fill_price, "close": fill_price,
-                            "pre_close": prev_close_map.get(ticker, 0.0),
-                            "volume": 0.0, "amount": 0.0,
-                            "turnover_ratio": None, "is_suspended": True,
-                        }))
+                        new_records.append(
+                            (
+                                ticker,
+                                {
+                                    "open": fill_price,
+                                    "high": fill_price,
+                                    "low": fill_price,
+                                    "close": fill_price,
+                                    "pre_close": prev_close_map.get(ticker, 0.0),
+                                    "volume": 0.0,
+                                    "amount": 0.0,
+                                    "turnover_ratio": None,
+                                    "is_suspended": True,
+                                },
+                            )
+                        )
                     elif o is None or c is None:
                         continue
                     else:
-                        new_records.append((ticker, {
-                            "open": float(o),
-                            "high": float(rec.get("high", o)),
-                            "low": float(rec.get("low", o)),
-                            "close": float(c),
-                            "pre_close": prev_close_map.get(ticker, 0.0),
-                            "volume": float(rec.get("volume", 0)),
-                            "amount": 0.0,
-                            "turnover_ratio": None, "is_suspended": False,
-                        }))
+                        new_records.append(
+                            (
+                                ticker,
+                                {
+                                    "open": float(o),
+                                    "high": float(rec.get("high", o)),
+                                    "low": float(rec.get("low", o)),
+                                    "close": float(c),
+                                    "pre_close": prev_close_map.get(ticker, 0.0),
+                                    "volume": float(rec.get("volume", 0)),
+                                    "amount": 0.0,
+                                    "turnover_ratio": None,
+                                    "is_suspended": False,
+                                },
+                            )
+                        )
 
             if new_records:
                 await self._write_daily(ts_ms, new_records)
                 logger.info(
                     "backfill: %s added %d stocks (was %d, expected %d)",
-                    date_str, len(new_records), actual, expected,
+                    date_str,
+                    len(new_records),
+                    actual,
+                    expected,
                 )
 
             # Update prev_close_map with newly written closes
@@ -2073,7 +2083,9 @@ class GreptimeBacktestCache:
             if progress_cb:
                 await _maybe_await(
                     progress_cb(
-                        "daily_backfill", i + 1, len(gaps),
+                        "daily_backfill",
+                        i + 1,
+                        len(gaps),
                         f"{date_str} +{len(new_records)}只"
                         f" ({actual}→{actual + len(new_records)}/{expected})",
                     )
