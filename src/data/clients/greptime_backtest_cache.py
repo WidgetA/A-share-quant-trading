@@ -591,6 +591,10 @@ class GreptimeBacktestCache:
                     samples.append(f"{sr['stock_code']}@{d}")
             except Exception:
                 pass  # sample fetch is best-effort
+            # For error-level issues, provide actionable DELETE + FLUSH SQL
+            delete_sql = ""
+            if level == "error":
+                delete_sql = f"DELETE FROM {table} WHERE {where};\nADMIN FLUSH_TABLE('{table}')"
             issues.append(
                 {
                     "level": level,
@@ -598,6 +602,7 @@ class GreptimeBacktestCache:
                     "message": message_tpl.format(cnt=cnt),
                     "count": cnt,
                     "samples": samples,
+                    "delete_sql": delete_sql,
                 }
             )
 
