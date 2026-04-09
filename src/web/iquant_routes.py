@@ -221,7 +221,7 @@ def create_iquant_router() -> APIRouter:
         "broker_positions": [],  # Actual broker positions: [{code, volume}]
         "scheduler_task": None,
         "universe_cache": None,
-        "backtest_cache": None,  # injected from app.py after GreptimeDB connect
+        "storage": None,  # injected from app.py after GreptimeDB connect
         # --- Monitoring ---
         "last_poll_time": None,  # datetime: last time iQuant polled /pending-signals
     }
@@ -296,14 +296,14 @@ def create_iquant_router() -> APIRouter:
     router._iquant_cleanup = _cleanup_resources  # type: ignore[attr-defined]
     router._iquant_init = _ensure_resources  # type: ignore[attr-defined]
 
-    # --- Cache injection (called from app.py after GreptimeDB connect) ---
+    # --- Storage injection (called from app.py after GreptimeDB connect) ---
 
-    def _inject_cache(cache: Any) -> None:
-        """Inject GreptimeDB backtest cache for preClose lookups."""
-        _state["backtest_cache"] = cache
-        logger.info("iQuant: GreptimeDB backtest cache injected")
+    def _inject_storage(storage: Any) -> None:
+        """Inject GreptimeDB storage for preClose / minute lookups."""
+        _state["storage"] = storage
+        logger.info("iQuant: GreptimeDB storage injected")
 
-    router._inject_cache = _inject_cache  # type: ignore[attr-defined]
+    router._inject_storage = _inject_storage  # type: ignore[attr-defined]
 
     # --- Universe ---
 
@@ -330,7 +330,7 @@ def create_iquant_router() -> APIRouter:
 
         scan_result = await run_ml_live(
             realtime_client=_state["realtime_client"],
-            backtest_cache=_state.get("backtest_cache"),
+            storage=_state.get("storage"),
             concept_mapper=_state["concept_mapper"],
             trade_calendar=calendar,
         )
@@ -979,8 +979,8 @@ def create_iquant_router() -> APIRouter:
                 detail=f"Unsupported data_source: {body.data_source}. Use 'tsanghi'.",
             )
 
-        bt_cache = getattr(request.app.state, "backtest_cache", None)
-        if not bt_cache or not bt_cache.is_ready:
+        storage = getattr(request.app.state, "storage", None)
+        if not storage or not storage.is_ready:
             raise HTTPException(
                 status_code=503,
                 detail="GreptimeDB 缓存未连接。请先在 web 页面的回测页下载数据。",
@@ -988,7 +988,7 @@ def create_iquant_router() -> APIRouter:
 
         try:
             scan_result = await run_ml_backtest(
-                backtest_cache=bt_cache,
+                storage=storage,
                 concept_mapper=_state["concept_mapper"],
                 trade_date=trade_date,
             )

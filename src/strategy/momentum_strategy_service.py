@@ -35,8 +35,8 @@ class MinuteDataMissingError(Exception):
 # ── Snapshot builders ────────────────────────────────────────
 
 
-async def build_snapshots_from_cache(cache: Any, date_str: str) -> dict[str, Any]:
-    """Build PriceSnapshot dict from GreptimeBacktestCache for a given date.
+async def build_snapshots_from_storage(storage: Any, date_str: str) -> dict[str, Any]:
+    """Build PriceSnapshot dict from GreptimeBacktestStorage for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
@@ -46,11 +46,11 @@ async def build_snapshots_from_cache(cache: Any, date_str: str) -> dict[str, Any
     """
     from src.strategy.models import PriceSnapshot
 
-    all_daily = await cache.get_all_codes_with_daily(date_str)
+    all_daily = await storage.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
 
     if not all_daily:
-        logger.warning(f"build_snapshots_from_cache: no data for date_str='{date_str}'")
+        logger.warning(f"build_snapshots_from_storage: no data for date_str='{date_str}'")
         return snapshots
 
     daily_candidates = 0
@@ -71,14 +71,13 @@ async def build_snapshots_from_cache(cache: Any, date_str: str) -> dict[str, Any
 
         daily_candidates += 1
 
-        data_940 = await cache.get_940_price(code, date_str)
-        if not data_940:
+        snapshot = await storage.get_minute_snapshot(code, date_str)
+        if snapshot is None:
             continue
 
         minute_hits += 1
-        latest_price, cum_vol, max_high, min_low = data_940
 
-        if latest_price <= 0:
+        if snapshot.close <= 0:
             continue
 
         snapshots[code] = PriceSnapshot(
@@ -86,10 +85,10 @@ async def build_snapshots_from_cache(cache: Any, date_str: str) -> dict[str, Any
             stock_name="",
             open_price=open_price,
             prev_close=prev_close,
-            latest_price=latest_price,
-            early_volume=cum_vol,
-            high_price=max_high,
-            low_price=min_low,
+            latest_price=snapshot.close,
+            early_volume=snapshot.cum_volume,
+            high_price=snapshot.max_high,
+            low_price=snapshot.min_low,
         )
 
     # Trading safety: halt if minute data is severely insufficient
@@ -107,14 +106,14 @@ async def build_snapshots_from_cache(cache: Any, date_str: str) -> dict[str, Any
 async def _build_live_snapshots(
     realtime_client: Any,
     universe: list[str],
-    backtest_cache: Any,
+    storage: Any,
     trade_calendar: list[date] | None = None,
 ) -> dict[str, Any]:
     """Build PriceSnapshot dict from live Tushare quotes + prev_close.
 
     Two prev_close strategies:
     - With trade_calendar: exact previous trading day → GreptimeDB → tsanghi fallback
-    - Without trade_calendar: look back 1-7 days in GreptimeDB cache
+    - Without trade_calendar: look back 1-7 days in GreptimeDB storage
     """
     from src.strategy.models import PriceSnapshot
 
@@ -135,15 +134,15 @@ async def _build_live_snapshots(
             raise RuntimeError("Momentum live scan: no previous trading day in calendar")
         prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
 
-        # Source 1: GreptimeDB cache
-        if backtest_cache and getattr(backtest_cache, "is_ready", False):
-            all_daily = await backtest_cache.get_all_codes_with_daily(prev_trade_date)
+        # Source 1: GreptimeDB storage
+        if storage and getattr(storage, "is_ready", False):
+            all_daily = await storage.get_all_codes_with_daily(prev_trade_date)
             for code, daily in all_daily.items():
                 close_val = daily.close
                 if close_val and close_val > 0:
                     prev_closes[code] = close_val
 
-        # Source 2: tsanghi API fallback (if cache coverage < 80%)
+        # Source 2: tsanghi API fallback (if storage coverage < 80%)
         if len(prev_closes) < len(quotes) * 0.8:
             from src.data.clients.tsanghi_client import TsanghiClient
 
@@ -163,19 +162,19 @@ async def _build_live_snapshots(
         if not prev_closes:
             raise RuntimeError(
                 f"Momentum live scan: failed to get prev_close for {prev_trade_date} "
-                f"from both GreptimeDB cache and tsanghi API"
+                f"from both GreptimeDB storage and tsanghi API"
             )
         logger.info(f"Momentum live: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
     else:
-        # Look back 1-7 days in GreptimeDB cache
-        if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
-            raise RuntimeError("Momentum live scan: GreptimeDB cache not ready for prev_close")
+        # Look back 1-7 days in GreptimeDB storage
+        if not storage or not getattr(storage, "is_ready", False):
+            raise RuntimeError("Momentum live scan: GreptimeDB storage not ready for prev_close")
 
         prev_daily: dict = {}
         for days_back in range(1, 8):
             prev_date = today - timedelta(days=days_back)
             prev_date_str = prev_date.strftime("%Y-%m-%d")
-            prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
+            prev_daily = await storage.get_all_codes_with_daily(prev_date_str)
             if prev_daily:
                 logger.info(
                     f"Momentum live: prev_close from {prev_date_str} ({len(prev_daily)} stocks)"
@@ -213,25 +212,25 @@ async def _build_live_snapshots(
 
 
 async def run_momentum_backtest(
-    backtest_cache: Any,
+    storage: Any,
     fundamentals_db: FundamentalsDB,
     trade_date: date,
     concept_mapper: LocalConceptMapper | None = None,
     stock_filter: StockFilter | None = None,
 ) -> Any:
-    """Run Momentum scan using historical cache data.
+    """Run Momentum scan using historical storage data.
 
     Returns MomentumScanResult.
 
     Raises:
         MinuteDataMissingError: if minute data coverage < 50%.
     """
-    from src.data.clients.greptime_backtest_cache import GreptimeHistoricalAdapter
+    from src.data.clients.greptime_historical_adapter import GreptimeHistoricalAdapter
     from src.data.sources.local_concept_mapper import LocalConceptMapper as LCM
     from src.strategy.strategies.momentum_scanner import MomentumScanner
 
     date_str = trade_date.strftime("%Y-%m-%d")
-    price_snapshots = await build_snapshots_from_cache(backtest_cache, date_str)
+    price_snapshots = await build_snapshots_from_storage(storage, date_str)
 
     if not price_snapshots:
         # Return empty result — caller decides how to handle
@@ -239,7 +238,7 @@ async def run_momentum_backtest(
 
         return MomentumScanResult()
 
-    adapter = GreptimeHistoricalAdapter(backtest_cache)
+    adapter = GreptimeHistoricalAdapter(storage)
     mapper = concept_mapper or LCM()
     scanner = MomentumScanner(
         historical_adapter=adapter,
@@ -257,7 +256,7 @@ async def run_momentum_live(
     fundamentals_db: FundamentalsDB,
     concept_mapper: LocalConceptMapper,
     universe: list[str],
-    backtest_cache: Any | None = None,
+    storage: Any | None = None,
     trade_calendar: list[date] | None = None,
     stock_filter: StockFilter | None = None,
 ) -> Any:
@@ -269,9 +268,9 @@ async def run_momentum_live(
         fundamentals_db: For ST detection.
         concept_mapper: For board ↔ stock mapping.
         universe: Stock codes to scan.
-        backtest_cache: GreptimeBacktestCache for prev_close lookup.
+        storage: GreptimeBacktestStorage for prev_close lookup.
         trade_calendar: Trading day calendar. If provided, uses exact prev_trade_date
-            for prev_close. Otherwise looks back 1-7 days in cache.
+            for prev_close. Otherwise looks back 1-7 days in storage.
         stock_filter: Optional stock filter for MomentumScanner.
 
     Returns:
@@ -288,7 +287,7 @@ async def run_momentum_live(
     price_snapshots = await _build_live_snapshots(
         realtime_client=realtime_client,
         universe=universe,
-        backtest_cache=backtest_cache,
+        storage=storage,
         trade_calendar=trade_calendar,
     )
 

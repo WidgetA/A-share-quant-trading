@@ -137,38 +137,6 @@ class TsanghiClient:
             params["end_date"] = end_date
         return await self._get(url, params)
 
-    async def five_min(
-        self,
-        exchange: str,
-        ticker: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-    ) -> list[dict]:
-        """Fetch 5-min OHLCV for a single stock.
-
-        Args:
-            exchange: "XSHG" or "XSHE"
-            ticker: Bare stock code, e.g. "600519"
-            start_date: "YYYY-MM-DD" (optional, default last month)
-            end_date: "YYYY-MM-DD" (optional, default latest)
-
-        Returns:
-            List of dicts with keys: ticker, date, open, high, low, close, volume.
-            date format: "yyyy-mm-dd hh:mm:ss" (datetime string).
-            Volume is in 手 (lots). Caller converts ×100 at read time.
-
-        Note:
-            start_date to end_date max span is 1 year.
-            Default limit=1000; we set limit=100000 to get all bars.
-        """
-        url = f"{self.BASE_URL}/{exchange}/5min"
-        params: dict[str, Any] = {"ticker": ticker, "order": 1, "limit": 100000}
-        if start_date:
-            params["start_date"] = start_date
-        if end_date:
-            params["end_date"] = end_date
-        return await self._get(url, params)
-
     async def shares(
         self,
         exchange: str,

@@ -1,5 +1,5 @@
 # === MODULE PURPOSE ===
-# Background scheduler that auto-fills missing dates in GreptimeDB backtest cache.
+# Background scheduler that auto-fills missing dates in GreptimeDB storage.
 # Runs daily at 3am Beijing time: checks for gaps from 2024-01-01 to yesterday,
 # downloads missing dates into GreptimeDB.
 
@@ -68,8 +68,11 @@ class CacheScheduler:
         self.last_run_result: str | None = None  # "success" | "failed" | "skipped" | "no_gaps"
         self.last_run_message: str | None = None
 
-    def _get_cache(self):
-        return getattr(self._app_state, "backtest_cache", None)
+    def _get_storage(self):
+        return getattr(self._app_state, "storage", None)
+
+    def _get_pipeline(self):
+        return getattr(self._app_state, "pipeline", None)
 
     def get_status(self) -> dict:
         """Return scheduler status for dashboard display."""
@@ -145,9 +148,10 @@ class CacheScheduler:
         Returns:
             dict with keys: gaps_found, dates_downloaded, error (if any)
         """
-        cache = self._get_cache()
-        if cache is None or not cache.is_ready:
-            msg = "backtest_cache not available, skipping gap check"
+        storage = self._get_storage()
+        pipeline = self._get_pipeline()
+        if storage is None or pipeline is None or not storage.is_ready:
+            msg = "GreptimeDB storage/pipeline not available, skipping gap check"
             logger.warning(msg)
             return {"gaps_found": 0, "dates_downloaded": 0, "error": msg}
 
@@ -156,12 +160,12 @@ class CacheScheduler:
         if not all_trading_days:
             return {"gaps_found": 0, "dates_downloaded": 0, "error": "No trading days found"}
 
-        # Find dates missing from cache (query existing dates from GreptimeDB)
-        existing_dates = await cache._get_existing_daily_dates()
+        # Find dates missing from storage (query existing dates from GreptimeDB)
+        existing_dates = await storage.get_existing_daily_dates()
         missing = [d for d in all_trading_days if d not in existing_dates]
 
         # Also check for minute data gaps (daily exists but minute sparse/missing)
-        minute_gaps = await cache.find_minute_gaps()
+        minute_gaps = await storage.find_minute_gaps()
 
         if not missing and not minute_gaps:
             logger.info("CacheScheduler: no gaps found, cache is complete")
@@ -199,7 +203,7 @@ class CacheScheduler:
 
         # Pre-download integrity check
         try:
-            integrity_issues = await cache.check_data_integrity()
+            integrity_issues = await storage.check_data_integrity()
             if integrity_issues:
                 error_issues = [i for i in integrity_issues if i["level"] == "error"]
                 if error_issues:
@@ -229,7 +233,7 @@ class CacheScheduler:
                         )
 
                 await asyncio.wait_for(
-                    cache.download_prices(range_start, range_end, _progress),
+                    pipeline.download_prices(range_start, range_end, progress_cb=_progress),
                     timeout=DOWNLOAD_TIMEOUT_SECONDS,
                 )
                 range_days = len(await _get_trading_calendar(range_start, range_end))
@@ -263,10 +267,10 @@ class CacheScheduler:
         )
 
         # Re-check minute gaps after download to see if they're resolved
-        remaining_minute_gaps = await cache.find_minute_gaps()
+        remaining_minute_gaps = await storage.find_minute_gaps()
 
         # Data integrity validation
-        integrity_warnings = await cache.validate_integrity()
+        integrity_warnings = await storage.validate_integrity()
 
         failed_ranges = total_ranges - total_downloaded
         if failed_ranges > 0 or remaining_minute_gaps or integrity_warnings:

@@ -404,8 +404,8 @@ def create_momentum_router() -> APIRouter:
     @router.get("/api/momentum/tsanghi-cache-status")
     async def tsanghi_cache_status(request: Request):
         """Return backtest cache state as SSE stream with per-query progress."""
-        cache = getattr(request.app.state, "backtest_cache", None)
-        if cache is None:
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
 
             async def _empty():
                 yield f"data: {json.dumps({'type': 'result', 'status': 'empty'})}\n\n"
@@ -416,12 +416,12 @@ def create_momentum_router() -> APIRouter:
         import time as _time
 
         if (
-            cache._cache_status_result
-            and (_time.monotonic() - cache._cache_status_ts) < cache._CACHE_STATUS_TTL
+            storage._cache_status_result
+            and (_time.monotonic() - storage._cache_status_ts) < storage._CACHE_STATUS_TTL
         ):
 
             async def _cached():
-                payload = {"type": "result", **cache._cache_status_result}
+                payload = {"type": "result", **storage._cache_status_result}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(_cached(), media_type="text/event-stream")
@@ -434,9 +434,9 @@ def create_momentum_router() -> APIRouter:
 
         async def _run_queries() -> None:
             try:
-                result = await cache.get_cache_status_streaming(on_step=_on_step)
-                cache._cache_status_result = result
-                cache._cache_status_ts = _time.monotonic()
+                result = await storage.get_cache_status_streaming(on_step=_on_step)
+                storage._cache_status_result = result
+                storage._cache_status_ts = _time.monotonic()
                 result_holder.append(result)
             except Exception as e:
                 result_holder.append({"status": "error", "error": str(e)})
@@ -476,16 +476,17 @@ def create_momentum_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误")
 
-        cache = getattr(request.app.state, "backtest_cache", None)
-        if cache is None:
+        storage = getattr(request.app.state, "storage", None)
+        pipeline = getattr(request.app.state, "pipeline", None)
+        if storage is None or pipeline is None:
             raise HTTPException(status_code=503, detail="GreptimeDB 缓存未连接")
 
         # Check if already covered (boundaries + minute gaps)
         if not body.force:
-            gaps = await cache.missing_ranges(start_date, end_date)
+            gaps = await storage.missing_ranges(start_date, end_date)
             if not gaps:
-                d_count = await cache.get_daily_stock_count()
-                m_count = await cache.get_minute_stock_count()
+                d_count = await storage.get_daily_stock_count()
+                m_count = await storage.get_minute_stock_count()
 
                 async def cached_stream():
                     msg = {
@@ -621,7 +622,7 @@ def create_momentum_router() -> APIRouter:
                 try:
                     # Pre-download integrity check
                     on_progress("integrity_check", 0, 1, "开始检查...")
-                    issues = await cache.check_data_integrity()
+                    issues = await storage.check_data_integrity()
                     on_progress("integrity_check", 1, 1, "检查完成")
                     if issues:
                         error_count = sum(1 for i in issues if i["level"] == "error")
@@ -665,7 +666,7 @@ def create_momentum_router() -> APIRouter:
                             }
                         )
 
-                    counts = await cache.download_prices(
+                    counts = await pipeline.download_prices(
                         start_date,
                         end_date,
                         progress_cb=on_progress,
@@ -761,8 +762,8 @@ def create_momentum_router() -> APIRouter:
                 detail=f"日期格式错误: {body.trade_date}，请使用 YYYY-MM-DD",
             )
 
-        cache = getattr(request.app.state, "backtest_cache", None)
-        if not cache or not cache.is_ready:
+        storage = getattr(request.app.state, "storage", None)
+        if not storage or not storage.is_ready:
             raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
         concept_mapper = LocalConceptMapper()
@@ -770,7 +771,7 @@ def create_momentum_router() -> APIRouter:
         try:
             try:
                 result = await run_ml_backtest(
-                    backtest_cache=cache,
+                    storage=storage,
                     concept_mapper=concept_mapper,
                     trade_date=trade_date,
                 )
@@ -870,8 +871,8 @@ def create_momentum_router() -> APIRouter:
         if body.initial_capital < 1000:
             raise HTTPException(status_code=400, detail="起始资金不能低于 1000 元")
 
-        backtest_cache = getattr(request.app.state, "backtest_cache", None)
-        if not backtest_cache or not backtest_cache.is_ready:
+        storage = getattr(request.app.state, "storage", None)
+        if not storage or not storage.is_ready:
             raise HTTPException(status_code=400, detail="请先预下载回测数据")
 
         concept_mapper = LocalConceptMapper()
@@ -942,7 +943,7 @@ def create_momentum_router() -> APIRouter:
                     try:
                         try:
                             scan_result = await run_ml_backtest(
-                                backtest_cache=backtest_cache,
+                                storage=storage,
                                 concept_mapper=concept_mapper,
                                 trade_date=trade_date,
                             )
@@ -1013,7 +1014,7 @@ def create_momentum_router() -> APIRouter:
 
                             # Get T+1 open from cache
                             next_date_key = next_trade_date.strftime("%Y-%m-%d")
-                            next_day_data = await backtest_cache.get_daily(
+                            next_day_data = await storage.get_daily(
                                 rec.stock_code,
                                 next_date_key,
                             )
@@ -1211,9 +1212,9 @@ def create_momentum_router() -> APIRouter:
     async def trigger_monitor_scan(request: Request) -> dict:
         """Manually trigger a momentum scan right now (any time of day)."""
         monitor_state = _get_monitor_state(request)
-        backtest_cache = getattr(request.app.state, "backtest_cache", None)
+        storage = getattr(request.app.state, "storage", None)
         try:
-            result = await _execute_monitor_scan(monitor_state, backtest_cache=backtest_cache)
+            result = await _execute_monitor_scan(monitor_state, storage=storage)
             if result is None:
                 return {"success": False, "message": "扫描未产生结果"}
             return {"success": True, "result": result}
@@ -1226,7 +1227,7 @@ def create_momentum_router() -> APIRouter:
     @router.get("/api/cache/status")
     async def cache_scheduler_status(request: Request) -> dict:
         """Return cache scheduler status and coverage info."""
-        cache = getattr(request.app.state, "backtest_cache", None)
+        storage = getattr(request.app.state, "storage", None)
         scheduler_task = getattr(request.app.state, "cache_scheduler_task", None)
         scheduler = getattr(request.app.state, "cache_scheduler", None)
 
@@ -1242,7 +1243,7 @@ def create_momentum_router() -> APIRouter:
             }
         )
 
-        if not cache or not cache.is_ready:
+        if not storage or not storage.is_ready:
             return {
                 "cache_ready": False,
                 "start_date": None,
@@ -1255,9 +1256,9 @@ def create_momentum_router() -> APIRouter:
                 **scheduler_info,
             }
 
-        db_start, db_end = await cache.get_date_range()
-        daily_count = await cache.get_daily_stock_count()
-        minute_count = await cache.get_minute_stock_count()
+        db_start, db_end = await storage.get_date_range()
+        daily_count = await storage.get_daily_stock_count()
+        minute_count = await storage.get_minute_stock_count()
         return {
             "cache_ready": True,
             "start_date": str(db_start) if db_start else None,
@@ -1275,8 +1276,8 @@ def create_momentum_router() -> APIRouter:
         """Manually trigger the cache gap-fill process."""
         from src.data.services.cache_scheduler import CacheScheduler
 
-        cache = getattr(request.app.state, "backtest_cache", None)
-        if not cache:
+        storage = getattr(request.app.state, "storage", None)
+        if not storage:
             raise HTTPException(503, "GreptimeDB 缓存未连接")
 
         scheduler = CacheScheduler(request.app.state)
@@ -1316,7 +1317,7 @@ def _scan_result_to_recs(date_str: str, scan_result, n: int = 10) -> list[dict]:
     ]
 
 
-async def _compute_ml_scan(date_str: str, backtest_cache):
+async def _compute_ml_scan(date_str: str, storage):
     """Compute ML scan on-demand. Returns (recs_list, MLScanResult | None).
 
     Two paths:
@@ -1337,12 +1338,12 @@ async def _compute_ml_scan(date_str: str, backtest_cache):
 
     if not is_today:
         # --- Past date: use GreptimeDB cache ---
-        if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
+        if not storage or not getattr(storage, "is_ready", False):
             raise ValueError("GreptimeDB 缓存未就绪，无法计算历史推荐")
 
         trade_date = date.fromisoformat(date_str)
         result = await run_ml_backtest(
-            backtest_cache=backtest_cache,
+            storage=storage,
             concept_mapper=concept_mapper,
             trade_date=trade_date,
         )
@@ -1371,7 +1372,7 @@ async def _compute_ml_scan(date_str: str, backtest_cache):
     try:
         result = await run_ml_live(
             realtime_client=tushare,
-            backtest_cache=backtest_cache,
+            storage=storage,
             concept_mapper=concept_mapper,
         )
     finally:
@@ -1434,7 +1435,7 @@ async def _get_trading_calendar(start_date, end_date) -> list:
     return days
 
 
-async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict | None:
+async def _execute_monitor_scan(state: dict, storage: Any = None) -> dict | None:
     """Execute a single ML scan using Tushare + MLScanner.
 
     Returns result_entry dict on success, None on failure.
@@ -1470,7 +1471,7 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
     except Exception as e:
         logger.warning(f"Trade calendar check failed, proceeding: {e}")
 
-    if not (backtest_cache and getattr(backtest_cache, "is_ready", False)):
+    if not (storage and getattr(storage, "is_ready", False)):
         raise RuntimeError("GreptimeDB 缓存未连接，无法进行扫描。请先下载回测数据。")
 
     tushare_token = get_tushare_token()
@@ -1480,7 +1481,7 @@ async def _execute_monitor_scan(state: dict, backtest_cache: Any = None) -> dict
         concept_mapper = LocalConceptMapper()
         scan_result = await run_ml_live(
             realtime_client=tushare,
-            backtest_cache=backtest_cache,
+            storage=storage,
             concept_mapper=concept_mapper,
         )
     finally:
@@ -1605,8 +1606,8 @@ async def _run_intraday_monitor(state: dict) -> None:
             logger.info("Monitor: entering scan window")
             try:
                 app_state = state.get("_app_state")
-                backtest_cache = getattr(app_state, "backtest_cache", None) if app_state else None
-                result = await _execute_monitor_scan(state, backtest_cache=backtest_cache)
+                storage = getattr(app_state, "storage", None) if app_state else None
+                result = await _execute_monitor_scan(state, storage=storage)
                 if result is None:
                     logger.warning("Monitor scan returned None (no result)")
                     try:
@@ -2087,8 +2088,8 @@ def create_trade_backtest_router() -> APIRouter:
         if not rows_raw:
             raise HTTPException(400, "CSV 中没有交易记录")
 
-        backtest_cache = getattr(request.app.state, "backtest_cache", None)
-        if backtest_cache is None or not backtest_cache.is_ready:
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not storage.is_ready:
             raise HTTPException(503, "GreptimeDB 缓存未连接，请稍后再试")
 
         all_dates: list[str] = []
@@ -2101,11 +2102,11 @@ def create_trade_backtest_router() -> APIRouter:
         csv_start = date.fromisoformat(all_dates[0])
         csv_end = date.fromisoformat(all_dates[-1])
 
-        if not await backtest_cache.covers_range(csv_start, csv_end):
-            db_start, db_end = await backtest_cache.get_date_range()
+        if not await storage.covers_range(csv_start, csv_end):
+            db_start, db_end = await storage.get_date_range()
             cache_start = str(db_start) if db_start else "无"
             cache_end = str(db_end) if db_end else "无"
-            gaps = await backtest_cache.missing_ranges(csv_start, csv_end)
+            gaps = await storage.missing_ranges(csv_start, csv_end)
             gap_strs = [f"{s}~{e}" for s, e in gaps] if gaps else [f"{csv_start}~{csv_end}"]
             return {
                 "needs_cache_update": True,
@@ -2151,8 +2152,8 @@ def create_trade_backtest_router() -> APIRouter:
                 buy_date = buy_time[:10]
                 sell_date = sell_time[:10]
 
-                buy_day = await backtest_cache.get_daily(code, buy_date)
-                sell_day = await backtest_cache.get_daily(code, sell_date)
+                buy_day = await storage.get_daily(code, buy_date)
+                sell_day = await storage.get_daily(code, sell_date)
                 if not buy_day or buy_day.open is None:
                     raise HTTPException(
                         400,
@@ -2428,12 +2429,12 @@ def create_trading_router() -> APIRouter:
         if not get_recommendations_enabled():
             return {"date": date, "recommendations": [], "error": "推荐功能已关闭"}
 
-        backtest_cache = getattr(request.app.state, "backtest_cache", None)
+        storage = getattr(request.app.state, "storage", None)
 
         try:
             recs, _scan_result = await _compute_ml_scan(
                 date_str=date,
-                backtest_cache=backtest_cache,
+                storage=storage,
             )
         except ValueError as e:
             return {"date": date, "recommendations": [], "error": str(e)}
@@ -2703,12 +2704,12 @@ def create_model_router() -> APIRouter:
             logger.warning(debug)
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-        cache = getattr(request.app.state, "backtest_cache", None)
-        if cache is None or not cache.is_ready:
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not storage.is_ready:
             raise HTTPException(status_code=503, detail="Backtest cache not available")
 
         async def generate_ndjson():
-            existing_dates = sorted(await cache._get_existing_daily_dates())
+            existing_dates = sorted(await storage.get_existing_daily_dates())
             if mode == "finetune":
                 existing_dates = existing_dates[-120:]
 
@@ -2730,7 +2731,7 @@ def create_model_router() -> APIRouter:
                     else str(trade_date)
                 )
                 try:
-                    bar_map = await cache.get_all_codes_with_daily(date_str)
+                    bar_map = await storage.get_all_codes_with_daily(date_str)
                 except (asyncio.TimeoutError, TimeoutError):
                     logger.warning("Stream export timeout %s, skip", date_str)
                     continue

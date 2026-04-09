@@ -63,16 +63,16 @@ Scanner 日志按 Step 编号输出，关键步骤：
 | 文件 | 内容 | 来源 |
 |------|------|------|
 | GreptimeDB `backtest_daily` 表 | 日线 OHLCV（主板全量） | tsanghi 日线 |
-| GreptimeDB `backtest_minute` 表 | 9:40 快照（close_940, cum_volume, max_high, min_low） | tsanghi 5 分钟线 |
+| GreptimeDB `backtest_minute` 表 | 9:40 快照（close_940, cum_volume, max_high, min_low） | Tushare Pro `stk_mins` 1 分钟线，由 `EarlyWindowAggregator` 聚合 09:31~09:40 |
 
 **加载方式（asyncpg）：**
 ```python
-# 通过 GreptimeBacktestCache 读取
-cache = app.state.backtest_cache
-bar = await cache.get_daily("600519", "2024-06-01")
+# 通过 GreptimeBacktestStorage 读取
+storage = app.state.storage
+bar = await storage.get_daily("600519", "2024-06-01")
 # bar = {"open": ..., "high": ..., "low": ..., "close": ..., "volume": ..., ...}
-snap = await cache.get_940_price("600519", "2024-06-01")
-# snap = (close_940, cum_volume, max_high, min_low)
+snap = await storage.get_minute_snapshot("600519", "2024-06-01")
+# snap.close / snap.cum_volume / snap.max_high / snap.min_low
 ```
 
 > **历史**: v0.12.0 之前使用 pickle 文件 (`experiment_turnover_amp_cache.pkl`)，已迁移至 GreptimeDB。
@@ -81,10 +81,10 @@ snap = await cache.get_940_price("600519", "2024-06-01")
 
 | 数据 | 数据源 |
 |------|--------|
-| 9:30-9:40 分钟线 | tsanghi `/5min` via GreptimeDB |
+| 9:30-9:40 分钟线 | Tushare Pro `stk_mins` 1min（聚合后）via GreptimeDB |
 | 实时快照 | Tushare `rt_min_daily` |
 | 日线历史 | tsanghi `/daily` via GreptimeDB |
-| 全天分钟线(复盘) | tsanghi `/5min` via GreptimeDB |
+| 全天分钟线(复盘) | Tushare Pro `stk_mins` 1min via GreptimeDB |
 
 ---
 

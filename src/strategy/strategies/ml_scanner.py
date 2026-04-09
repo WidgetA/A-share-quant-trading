@@ -21,7 +21,7 @@
 # - board_filter: junk board definitions (used internally by LocalConceptMapper)
 # - ST detection: via stock name (contains "ST") from board_constituents.json
 # - TushareRealtimeClient: rt_min_daily (9:40 snapshot) + prev_close + suspended
-# - GreptimeBacktestCache: 37-day historical OHLCV (backtest_daily table)
+# - GreptimeBacktestStorage: 37-day historical OHLCV (backtest_daily table)
 
 from __future__ import annotations
 

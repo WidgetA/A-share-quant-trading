@@ -125,22 +125,39 @@ def create_app(
                 git_branch=os.environ.get("GIT_BRANCH"),
             )
 
-        # GreptimeDB backtest cache — single shared instance
-        from src.data.clients.greptime_backtest_cache import create_backtest_cache_from_config
+        # GreptimeDB storage + cache pipeline — wired here so the dependency
+        # graph (storage → sources → aggregator → reporter → pipeline) lives
+        # in one place. Routes / schedulers consume them via app.state.
+        from src.data.clients.greptime_storage import create_storage_from_config
+        from src.data.services.cache_pipeline import CachePipeline
+        from src.data.services.cache_progress_reporter import CacheProgressReporter
+        from src.data.sources.tsanghi_daily_source import TsanghiDailySource
+        from src.data.sources.tushare_metadata_source import TushareMetadataSource
+        from src.data.sources.tushare_minute_source import TushareMinuteSource
+        from src.strategy.aggregators import EarlyWindowAggregator
 
-        backtest_cache = create_backtest_cache_from_config()
+        storage = create_storage_from_config()
         try:
-            await backtest_cache.start()
-            app.state.backtest_cache = backtest_cache
-            logger.info("GreptimeDB backtest cache connected")
+            await storage.start()
+            app.state.storage = storage
+            app.state.pipeline = CachePipeline(
+                storage=storage,
+                daily_source=TsanghiDailySource(),
+                minute_source=TushareMinuteSource(),
+                metadata_source=TushareMetadataSource(),
+                minute_aggregator=EarlyWindowAggregator(),
+                reporter=CacheProgressReporter(),
+            )
+            logger.info("GreptimeDB storage + cache pipeline ready")
 
-            # Inject shared cache into iQuant router
+            # Inject shared storage into iQuant router
             iquant_rtr = getattr(app.state, "iquant_router", None)
-            if iquant_rtr and hasattr(iquant_rtr, "_inject_cache"):
-                iquant_rtr._inject_cache(backtest_cache)
+            if iquant_rtr and hasattr(iquant_rtr, "_inject_storage"):
+                iquant_rtr._inject_storage(storage)
         except Exception as e:
-            logger.error(f"Failed to connect GreptimeDB backtest cache: {e}")
-            app.state.backtest_cache = None
+            logger.error(f"Failed to connect GreptimeDB storage: {e}")
+            app.state.storage = None
+            app.state.pipeline = None
 
         # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
         # CRITICAL: must start before anything else — safety monitoring cannot be skipped
@@ -199,7 +216,7 @@ def create_app(
             "last_result": None,
             "today_results": [],
             "task": None,
-            "_app_state": app.state,  # needed for backtest_cache access
+            "_app_state": app.state,  # needed for storage access
         }
         task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
         app.state.momentum_monitor_state["task"] = task
@@ -239,11 +256,11 @@ def create_app(
             monitor_state["running"] = False
             logger.info("Intraday momentum monitor stopped")
 
-        # Close GreptimeDB backtest cache
-        backtest_cache = getattr(app.state, "backtest_cache", None)
-        if backtest_cache:
-            await backtest_cache.stop()
-            logger.info("GreptimeDB backtest cache closed")
+        # Close GreptimeDB storage pool
+        storage = getattr(app.state, "storage", None)
+        if storage:
+            await storage.stop()
+            logger.info("GreptimeDB storage closed")
 
         # Cleanup iQuant isolated resources
         iquant_rtr = getattr(app.state, "iquant_router", None)

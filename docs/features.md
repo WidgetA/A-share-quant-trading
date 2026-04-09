@@ -545,7 +545,7 @@ await engine.stop()
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest): tsanghi 沧海数据 (日线 + 5min bars for 9:40 price) via `GreptimeBacktestCache`
+- Price (backtest): 日线 from tsanghi 沧海数据, 9:40 快照 from Tushare Pro `stk_mins` 1min (聚合 09:31~09:40 by `EarlyWindowAggregator`), via `GreptimeBacktestStorage` + `CachePipeline`
 - Price (live): Tushare Pro `rt_min_daily`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 
@@ -661,7 +661,7 @@ await engine.stop()
 
 **Data Sources**:
 - Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
-- Historical data: GreptimeDB (`GreptimeBacktestCache`) via `IQuantHistoricalAdapter`
+- Historical data: GreptimeDB (`GreptimeBacktestStorage`) via `IQuantHistoricalAdapter`
 - Board data: `LocalConceptMapper` (local JSON files)
 - Trade calendar: Tushare `trade_cal` API (cached in memory)
 

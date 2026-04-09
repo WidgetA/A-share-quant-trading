@@ -6,7 +6,7 @@
 # - Stateless: all dependencies passed as arguments
 # - Returns MLScanResult (raw strategy output), caller decides what to do next
 # - No signal pushing, no notifications — that's the trigger layer's job
-# - Two paths: backtest (cache) and live (realtime quotes)
+# - Two paths: backtest (storage) and live (realtime quotes)
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class MinuteDataMissingError(Exception):
 
 async def run_ml_live(
     realtime_client: Any,
-    backtest_cache: Any,
+    storage: Any,
     concept_mapper: LocalConceptMapper,
     trade_calendar: list[date] | None = None,
     model_name: str = "full_latest",
@@ -43,7 +43,7 @@ async def run_ml_live(
 
     Args:
         realtime_client: TushareRealtimeClient for fetching early quotes.
-        backtest_cache: GreptimeBacktestCache for prev_close + 37d history.
+        storage: GreptimeBacktestStorage for prev_close + 37d history.
         concept_mapper: For board ↔ stock mapping.
         trade_calendar: Trading day calendar.
         model_name: Which model to load (default "full_latest").
@@ -75,18 +75,18 @@ async def run_ml_live(
         return MLScanResult(model_name=model_name)
 
     # Step 3: Resolve prev_close
-    prev_closes = await _resolve_prev_close(backtest_cache, trade_calendar, today, len(quotes))
+    prev_closes = await _resolve_prev_close(storage, trade_calendar, today, len(quotes))
 
     if not prev_closes:
         raise RuntimeError("ML live scan: failed to get any prev_close data")
 
     # Step 4: Fetch 37d history from GreptimeDB
-    if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
-        raise RuntimeError("ML live scan: GreptimeDB cache not ready for history")
+    if not storage or not getattr(storage, "is_ready", False):
+        raise RuntimeError("ML live scan: GreptimeDB storage not ready for history")
 
     prev_trade_date = _get_prev_trade_date(trade_calendar, today)
     start_37d = _get_history_start_date(trade_calendar, today, days=50)
-    history_raw = await backtest_cache.get_multi_day_history(
+    history_raw = await storage.get_multi_day_history(
         start_37d.strftime("%Y-%m-%d"),
         prev_trade_date.strftime("%Y-%m-%d"),
     )
@@ -127,17 +127,17 @@ async def run_ml_live(
 
 
 async def run_ml_backtest(
-    backtest_cache: Any,
+    storage: Any,
     concept_mapper: LocalConceptMapper,
     trade_date: date,
     model_name: str = "full_latest",
 ) -> Any:
-    """Run ML scan using historical cache data.
+    """Run ML scan using historical storage data.
 
-    Builds StockSnapshot from GreptimeDB daily + minute cache.
+    Builds StockSnapshot from GreptimeDB daily + minute storage.
 
     Args:
-        backtest_cache: GreptimeBacktestCache.
+        storage: GreptimeBacktestStorage.
         concept_mapper: For board ↔ stock mapping.
         trade_date: The trading date to backtest.
         model_name: Which model to load.
@@ -155,7 +155,7 @@ async def run_ml_backtest(
     date_str = trade_date.strftime("%Y-%m-%d")
 
     # Step 1: Get daily data for trade_date (for prev_close + open + suspended check)
-    all_daily = await backtest_cache.get_all_codes_with_daily(date_str)
+    all_daily = await storage.get_all_codes_with_daily(date_str)
     if not all_daily:
         logger.warning("ML backtest: no daily data for %s", date_str)
         return MLScanResult(model_name=model_name, skip_reason="no_daily_data")
@@ -164,7 +164,7 @@ async def run_ml_backtest(
     # Go back ~60 calendar days to ensure ≥37 trading days
     start_history = (trade_date - timedelta(days=60)).strftime("%Y-%m-%d")
     prev_day = (trade_date - timedelta(days=1)).strftime("%Y-%m-%d")
-    history_raw = await backtest_cache.get_multi_day_history(start_history, prev_day)
+    history_raw = await storage.get_multi_day_history(start_history, prev_day)
 
     # Convert to ml_scanner.DailyBar
     history_bars: dict[str, list[DailyBar]] = {}
@@ -198,14 +198,13 @@ async def run_ml_backtest(
         daily_candidates += 1
 
         # Get 9:40 minute data
-        data_940 = await backtest_cache.get_940_price(code, date_str)
-        if not data_940:
+        snapshot = await storage.get_minute_snapshot(code, date_str)
+        if snapshot is None:
             continue
 
         minute_hits += 1
-        latest_price, cum_vol, max_high, min_low = data_940
 
-        if latest_price <= 0:
+        if snapshot.close <= 0:
             continue
 
         # Get history for this stock
@@ -215,10 +214,10 @@ async def run_ml_backtest(
             stock_code=code,
             prev_close=prev_close,
             open_price=open_price,
-            latest_price=latest_price,
-            high_940=max_high,
-            low_940=min_low,
-            early_volume=cum_vol,
+            latest_price=snapshot.close,
+            high_940=snapshot.max_high,
+            low_940=snapshot.min_low,
+            early_volume=snapshot.cum_volume,
             history=hist,
         )
 
@@ -254,7 +253,7 @@ async def run_ml_backtest(
 
 
 async def _resolve_prev_close(
-    backtest_cache: Any,
+    storage: Any,
     trade_calendar: list[date] | None,
     today: date,
     quote_count: int,
@@ -271,15 +270,15 @@ async def _resolve_prev_close(
             raise RuntimeError("ML live scan: no previous trading day in calendar")
         prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
 
-        # Source 1: GreptimeDB cache
-        if backtest_cache and getattr(backtest_cache, "is_ready", False):
-            all_daily = await backtest_cache.get_all_codes_with_daily(prev_trade_date)
+        # Source 1: GreptimeDB storage
+        if storage and getattr(storage, "is_ready", False):
+            all_daily = await storage.get_all_codes_with_daily(prev_trade_date)
             for code, daily in all_daily.items():
                 close_val = daily.close
                 if close_val and close_val > 0:
                     prev_closes[code] = close_val
 
-        # Source 2: tsanghi API fallback (if cache coverage < 80%)
+        # Source 2: tsanghi API fallback (if storage coverage < 80%)
         if len(prev_closes) < quote_count * 0.8:
             from src.data.clients.tsanghi_client import TsanghiClient
 
@@ -298,15 +297,15 @@ async def _resolve_prev_close(
 
         logger.info("ML live: prev_close (%s): %d stocks", prev_trade_date, len(prev_closes))
     else:
-        # Look back 1-7 days in GreptimeDB cache
-        if not backtest_cache or not getattr(backtest_cache, "is_ready", False):
-            raise RuntimeError("ML live scan: GreptimeDB cache not ready for prev_close")
+        # Look back 1-7 days in GreptimeDB storage
+        if not storage or not getattr(storage, "is_ready", False):
+            raise RuntimeError("ML live scan: GreptimeDB storage not ready for prev_close")
 
         prev_daily: dict = {}
         for days_back in range(1, 8):
             prev_date = today - timedelta(days=days_back)
             prev_date_str = prev_date.strftime("%Y-%m-%d")
-            prev_daily = await backtest_cache.get_all_codes_with_daily(prev_date_str)
+            prev_daily = await storage.get_all_codes_with_daily(prev_date_str)
             if prev_daily:
                 logger.info(
                     "ML live: prev_close from %s (%d stocks)",

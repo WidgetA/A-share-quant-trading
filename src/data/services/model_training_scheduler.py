@@ -161,8 +161,8 @@ class ModelTrainingScheduler:
             self.training_log = self.training_log[-100:]
         logger.info("ModelTraining: %s", msg)
 
-    def _get_cache(self):
-        return getattr(self._app_state, "backtest_cache", None)
+    def _get_storage(self):
+        return getattr(self._app_state, "storage", None)
 
     async def run(self) -> None:
         """Main loop: sleep until 3am, check if 20 trading days elapsed, run finetune."""
@@ -443,14 +443,14 @@ class ModelTrainingScheduler:
 
         Returns True if data is good enough to train.
         """
-        cache = self._get_cache()
-        if cache is None or not cache.is_ready:
+        storage = self._get_storage()
+        if storage is None or not storage.is_ready:
             if progress_cb:
-                await progress_cb("backtest cache 不可用")
+                await progress_cb("GreptimeDB storage 不可用")
             return False
 
         for attempt in range(1, MAX_DATA_FIX_ATTEMPTS + 1):
-            issues = await cache.check_data_integrity()
+            issues = await storage.check_data_integrity()
             error_issues = [i for i in issues if i["level"] == "error"]
 
             if not error_issues:

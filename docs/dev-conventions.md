@@ -132,6 +132,8 @@ A-share-quant-trading/
 │   │   ├── momentum_strategy_service.py  # Stateless momentum scan (backtest + live)
 │   │   ├── strategies/
 │   │   │   └── momentum_scanner.py  # Momentum 7-layer funnel + V3 scoring
+│   │   ├── aggregators/     # Business-defined minute aggregation (injected into pipeline)
+│   │   │   └── early_window_aggregator.py  # 09:31~09:40 early-window snapshot
 │   │   └── filters/         # Stock/quality filters
 │   │       ├── momentum_quality_filter.py  # Volume filter
 │   │       ├── reversal_factor_filter.py   # 冲高回落 filter
@@ -141,15 +143,22 @@ A-share-quant-trading/
 │   │   ├── holding_tracker.py   # Overnight holding tracking
 │   │   └── repository.py       # Trading DB repository
 │   ├── data/                # Data module
-│   │   ├── clients/         # Data source adapters
-│   │   │   ├── greptime_backtest_cache.py   # Backtest cache (GreptimeDB)
-│   │   │   ├── iquant_historical_adapter.py # Live historical adapter
-│   │   │   ├── tushare_realtime.py         # Tushare realtime quotes
-│   │   │   └── sina_realtime.py            # Sina realtime (fallback)
-│   │   ├── services/
-│   │   │   └── cache_scheduler.py  # 3am daily cache gap-fill
-│   │   └── sources/
-│   │       └── local_concept_mapper.py  # Board ↔ stock mapping
+│   │   ├── clients/         # Storage + read-only adapters (no upstream API calls)
+│   │   │   ├── greptime_storage.py            # Pure GreptimeDB storage (CRUD only)
+│   │   │   ├── greptime_historical_adapter.py # Read-only adapter (HistoricalDataProvider Protocol)
+│   │   │   ├── iquant_historical_adapter.py   # Live historical adapter
+│   │   │   ├── tushare_realtime.py            # Tushare realtime quotes
+│   │   │   └── sina_realtime.py               # Sina realtime (fallback)
+│   │   ├── sources/         # Upstream API wrappers (one source per feed)
+│   │   │   ├── tsanghi_daily_source.py        # tsanghi daily_latest
+│   │   │   ├── tushare_minute_source.py       # Tushare stk_mins (1min bars)
+│   │   │   ├── tushare_metadata_source.py     # Tushare bak_basic / suspend_d / trade_cal
+│   │   │   └── local_concept_mapper.py        # Board ↔ stock mapping
+│   │   └── services/        # Orchestration / scheduling
+│   │       ├── cache_pipeline.py            # Storage write orchestration (sources → aggregator → storage)
+│   │       ├── cache_progress_reporter.py   # Phase enum + Feishu notifications
+│   │       ├── cache_scheduler.py           # 3am daily storage gap-fill
+│   │       └── model_training_scheduler.py  # ML model finetune scheduler
 │   ├── web/                 # Web UI
 │   │   ├── app.py           # FastAPI application
 │   │   ├── routes.py        # Main routes + backtest + settings
@@ -194,7 +203,7 @@ Before starting any development task:
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
 | Backtest Cache | GreptimeDB (asyncpg pgwire port 4003) | Time-series optimized, OSS object storage, no in-memory caching |
 | Config Format | YAML | Human-readable, supports hot-reload |
-| Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d), tsanghi (backtest daily + 5min, **max concurrency=2**) | A-share real-time and historical data |
+| Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d + `stk_mins` 1min for backtest minute), tsanghi (backtest daily, **max concurrency=2**) | A-share real-time and historical data |
 | GreptimeDB Client | asyncpg | Async PostgreSQL wire protocol access |
 
 ## GreptimeDB Rules (CRITICAL)

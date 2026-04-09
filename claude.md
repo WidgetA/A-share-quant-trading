@@ -77,8 +77,8 @@ Rules:
 
 | Purpose | Source | Adapter |
 |---------|--------|---------|
-| Backtest (daily) | 沧海数据 tsanghi | `GreptimeHistoricalAdapter` / `GreptimeBacktestCache` |
-| Backtest (minute) | Tushare Pro `stk_mins` 1min | via `GreptimeBacktestCache` + `TushareRealtimeClient` |
+| Backtest (daily) | 沧海数据 tsanghi | `GreptimeHistoricalAdapter` / `GreptimeBacktestStorage` + `CachePipeline` |
+| Backtest (minute) | Tushare Pro `stk_mins` 1min | via `GreptimeBacktestStorage` + `CachePipeline` |
 | Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
 | Live (historical) | GreptimeDB | `IQuantHistoricalAdapter` |
 | Board/concept + stock names | Local JSON files | `LocalConceptMapper` |
