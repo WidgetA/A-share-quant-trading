@@ -217,9 +217,7 @@ def create_router() -> APIRouter:
     async def greptimedb_dashboard_root(request: Request):
         return await _greptimedb_proxy(request, "dashboard")
 
-    @router.api_route(
-        "/dashboard/{path:path}", methods=["GET", "POST", "PUT", "DELETE"]
-    )
+    @router.api_route("/dashboard/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     async def greptimedb_dashboard(request: Request, path: str):
         return await _greptimedb_proxy(request, f"dashboard/{path}")
 
