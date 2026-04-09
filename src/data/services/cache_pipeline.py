@@ -371,7 +371,8 @@ class CachePipeline:
                 )
 
             await self.reporter.status(
-                f"stock_list {td}: ← API {fetch_elapsed:.2f}s, → 写入 GreptimeDB {len(codes)} 行 ..."
+                f"stock_list {td}: ← API {fetch_elapsed:.2f}s, "
+                f"→ 写入 GreptimeDB {len(codes)} 行 ..."
             )
             t_insert = time.monotonic()
             await self.storage.insert_stock_list_codes(td, codes, on_progress=_on_insert)
