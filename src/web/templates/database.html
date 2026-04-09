@@ -49,26 +49,32 @@
 <div class="db-frame-container">
     <div class="db-frame-toolbar">
         <span>GreptimeDB Dashboard</span>
-        <a href="{{ greptimedb_url }}" target="_blank">在新窗口打开 ↗</a>
+        <a id="dbOpenLink" href="#" target="_blank">在新窗口打开 ↗</a>
         <span class="db-status" id="dbStatus">检测中...</span>
     </div>
-    <iframe id="dbFrame" src="{{ greptimedb_url }}"></iframe>
+    <iframe id="dbFrame"></iframe>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 (function() {
-    const statusEl = document.getElementById('dbStatus');
-    const frame = document.getElementById('dbFrame');
+    // Use same hostname as the browser is accessing, with GreptimeDB port
+    var dbPort = {{ greptimedb_port }};
+    var dbBase = window.location.protocol + '//' + window.location.hostname + ':' + dbPort;
+    var dashUrl = dbBase + '/dashboard';
+    var healthUrl = dbBase + '/health';
 
-    // Check if GreptimeDB is reachable
-    fetch('{{ greptimedb_health_url }}', {mode: 'no-cors', cache: 'no-store'})
-        .then(() => {
+    document.getElementById('dbFrame').src = dashUrl;
+    document.getElementById('dbOpenLink').href = dashUrl;
+
+    var statusEl = document.getElementById('dbStatus');
+    fetch(healthUrl, {mode: 'no-cors', cache: 'no-store'})
+        .then(function() {
             statusEl.textContent = '已连接';
             statusEl.className = 'db-status ok';
         })
-        .catch(() => {
+        .catch(function() {
             statusEl.textContent = '无法连接';
             statusEl.className = 'db-status err';
         });
