@@ -822,23 +822,6 @@ class GreptimeBacktestCache:
             )
             all_no_data_reasons.update(reasons)
 
-        # Phase 3: Verify minute coverage, re-download gap ranges
-        minute_gaps = await self.find_minute_gaps()
-        if minute_gaps and stock_codes:
-            logger.info(f"Minute gaps found after download: {len(minute_gaps)} ranges, backfilling")
-            for gap_start, gap_end in minute_gaps:
-                if cancel_event and cancel_event.is_set():
-                    break
-                logger.info(f"Backfilling minute gap: {gap_start} ~ {gap_end}")
-                reasons = await self._download_minute(
-                    stock_codes,
-                    gap_start,
-                    gap_end,
-                    progress_cb=progress_cb,
-                    cancel_event=cancel_event,
-                )
-                all_no_data_reasons.update(reasons)
-
         # Final verification: FLUSH both tables, then re-run resume check
         # to confirm the download we just did won't re-trigger next time.
         if progress_cb:
@@ -1511,87 +1494,15 @@ class GreptimeBacktestCache:
 
                 results = await asyncio.gather(*[_fetch_one(c) for c in batch])
 
-                has_writes = False
-                # Track what we wrote for verification
-                written_stocks: dict[str, dict[str, tuple]] = {}
+                batch_written = 0
                 for code, day_data in results:
                     if day_data:
                         await self._write_minute(code, day_data)
-                        written_stocks[code] = day_data
-                        has_writes = True
+                        batch_written += 1
                     done += 1
 
-                # FLUSH once per batch to persist to OSS, then verify
-                batch_verify_ok = True
-                if has_writes:
-                    await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
-
-                    # Verify: check which codes actually have data in DB
-                    start_ms = _date_to_epoch_ms(dl_start)
-                    end_ms = _date_to_epoch_ms(end_date)
-                    verify_rows = await self._db.fetch(
-                        f"SELECT DISTINCT stock_code FROM backtest_minute "
-                        f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-                        f"AND stock_code IN ({','.join(repr(c) for c in written_stocks)})"
-                    )
-                    persisted_codes = {r["stock_code"] for r in verify_rows}
-                    missing_codes = [c for c in written_stocks if c not in persisted_codes]
-
-                    if missing_codes:
-                        batch_verify_ok = False
-                        logger.warning(
-                            f"Minute verify batch {i // batch_size + 1}: "
-                            f"{len(persisted_codes)}/{len(written_stocks)} persisted, "
-                            f"retrying {len(missing_codes)} missing"
-                        )
-                        if progress_cb:
-                            await _maybe_await(
-                                progress_cb(
-                                    "minute",
-                                    done,
-                                    total,
-                                    f"验证缺失 {len(missing_codes)} 只, 重试中...",
-                                )
-                            )
-                        for retry_attempt in range(1, 4):
-                            for mc in missing_codes:
-                                await self._write_minute(mc, written_stocks[mc])
-                            await self._db.execute("ADMIN FLUSH_TABLE('backtest_minute')")
-                            re_verify = await self._db.fetch(
-                                f"SELECT DISTINCT stock_code FROM backtest_minute "
-                                f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
-                                f"AND stock_code IN ({','.join(repr(c) for c in missing_codes)})"
-                            )
-                            re_persisted = {r["stock_code"] for r in re_verify}
-                            still_missing = [c for c in missing_codes if c not in re_persisted]
-                            if not still_missing:
-                                logger.info(
-                                    f"Minute verify batch: retry #{retry_attempt} OK, "
-                                    f"all {len(missing_codes)} recovered"
-                                )
-                                batch_verify_ok = True
-                                break
-                            missing_codes = still_missing
-                            logger.warning(
-                                f"Minute verify: retry #{retry_attempt} "
-                                f"still missing {len(still_missing)}"
-                            )
-                        if not batch_verify_ok:
-                            logger.error(
-                                f"Minute verify: FAILED after 3 retries, "
-                                f"still missing {len(missing_codes)}: "
-                                f"{missing_codes[:10]}"
-                            )
-
-                # Show final result only after verify
                 if progress_cb:
-                    if has_writes:
-                        if batch_verify_ok:
-                            detail = f"{len(written_stocks)}只 已验证 ✓"
-                        else:
-                            detail = f"⚠ 刷盘验证失败, 缺 {len(missing_codes)} 只"
-                    else:
-                        detail = ""
+                    detail = f"{batch_written}只" if batch_written else ""
                     await _maybe_await(progress_cb("minute", done, total, detail))
 
                 if done % 200 == 0:
