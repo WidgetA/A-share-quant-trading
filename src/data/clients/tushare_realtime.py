@@ -390,6 +390,50 @@ class TushareRealtimeClient:
         return None
 
     # ------------------------------------------------------------------
+    # stk_mins: historical minute bars (for backtest cache)
+    # ------------------------------------------------------------------
+
+    async def stk_mins(
+        self,
+        ts_code: str,
+        freq: str = "1min",
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 100000,
+    ) -> list[dict[str, Any]]:
+        """Fetch historical minute OHLCV for one or more stocks.
+
+        Args:
+            ts_code: Tushare-style code(s), e.g. "600519.SH" or
+                     comma-separated "600519.SH,000001.SZ"
+            freq: "1min" or "5min"
+            start_date: "YYYY-MM-DD HH:MM:SS" (optional)
+            end_date: "YYYY-MM-DD HH:MM:SS" (optional)
+            limit: Max rows to return (default 100000)
+
+        Returns:
+            List of dicts with keys: ts_code, trade_time, open, close,
+            high, low, vol, amount.
+        """
+        params: dict[str, Any] = {
+            "ts_code": ts_code,
+            "freq": freq,
+            "limit": str(limit),
+        }
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+
+        data = await self._api_call("stk_mins", params)
+        raw = data.get("data")
+        if raw is None:
+            return []
+        fields = raw.get("fields", [])
+        items = raw.get("items", [])
+        return [dict(zip(fields, row)) for row in items]
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

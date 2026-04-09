@@ -78,14 +78,13 @@ Rules:
 | Purpose | Source | Adapter |
 |---------|--------|---------|
 | Backtest (daily) | 沧海数据 tsanghi | `GreptimeHistoricalAdapter` / `GreptimeBacktestCache` |
-| Backtest (minute) | 沧海数据 tsanghi 5min | via `GreptimeBacktestCache` |
+| Backtest (minute) | Tushare Pro `stk_mins` 1min | via `GreptimeBacktestCache` + `TushareRealtimeClient` |
 | Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
 | Live (historical) | GreptimeDB | `IQuantHistoricalAdapter` |
-| Fundamentals | PostgreSQL `stock_fundamentals` | `FundamentalsDB` |
-| Board/concept | Local JSON files | `LocalConceptMapper` |
+| Board/concept + stock names | Local JSON files | `LocalConceptMapper` |
 
 Rules:
-1. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
+1. **Non-trading data** has its own sources: local JSON for boards and stock names
 2. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
 3. **tsanghi max concurrency = 2** (paid plan limit) — hardcoded in `_DEFAULT_CONCURRENCY`
 4. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
@@ -97,8 +96,8 @@ Rules:
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
 | **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
-| **tsanghi** `/5min` | **手** (1手=100股) | ×100 at download time in `TsanghiBacktestCache` |
-| **Tushare** `rt_min_daily` | **股** | None |
+| **Tushare Pro** `stk_mins` | **股** | None (already in 股) |
+| **Tushare Pro** `rt_min_daily` | **股** | None |
 
 - Conversion at **adapter read layer**, not storage (raw cache keeps original values).
 - **Cross-verify**: `early_volume(10min) / avg_daily_volume` should be ~0.05-0.30. If >1.0, units are wrong.
@@ -110,8 +109,8 @@ Rules:
 - `src/data/sources/local_concept_mapper.py` — reads both files, builds forward+reverse index
 - **FORBIDDEN**: Runtime API calls for board data (no iwencai, no AkshareConceptMapper)
 
-## 11. Fundamentals Data — ALL from PostgreSQL
+## 11. Stock Names — from Local JSON
 
-- **All fundamentals (PE, growth, etc.) from PG table `stock_fundamentals`** — NEVER call iwencai/smart_stock_picking at runtime
-- Read methods in `src/data/database/fundamentals_db.py`
-- Fields: stock_code, company_name, pe_ttm, ps_ttm, pb, total_market_cap, roe, annual_revenue_yoy, quarterly_revenue_yoy, annual_net_profit_yoy, quarterly_net_profit_yoy, report_date_annual, report_date_quarterly, updated_at
+- Stock code → company name mapping: `LocalConceptMapper.get_stock_name(code)`
+- Source: `data/board_constituents.json` (same file used for board/concept data)
+- **No PostgreSQL dependency** — fundamentals_db was removed (ML scanner doesn't need PE/growth data)

@@ -10,7 +10,7 @@
     <section class="settings-section">
         <div class="settings-card">
             <h3>Tushare Pro Token</h3>
-            <p class="settings-desc">用于 Tushare Pro 实时行情 API（rt_min）。获取 token：<a href="https://tushare.pro" target="_blank">tushare.pro</a> → 个人主页 → 接口TOKEN</p>
+            <p class="settings-desc">用于 Tushare Pro 实时行情 + 历史分钟线 API。获取 token：<a href="https://tushare.pro" target="_blank">tushare.pro</a> → 个人主页 → 接口TOKEN</p>
 
             <!-- Current Status -->
             <div class="token-status" id="tushareStatus">
@@ -63,36 +63,6 @@
 
             <!-- Result Message -->
             <div class="token-message hidden" id="tsanghiMessage"></div>
-        </div>
-    </section>
-
-    <!-- Fake Tushare (历史分钟线) Token Section -->
-    <section class="settings-section">
-        <div class="settings-card">
-            <h3>历史分钟线 Token (Fake Tushare)</h3>
-            <p class="settings-desc">用于回测历史分钟线数据（stk_mins API）。独立于 Tushare Pro token。</p>
-
-            <!-- Current Status -->
-            <div class="token-status" id="fakeTushareStatus">
-                <span class="token-status-label">当前状态：</span>
-                <span class="token-status-value" id="fakeTushareStatusValue">加载中...</span>
-            </div>
-
-            <!-- Token Input -->
-            <div class="form-group">
-                <label for="fakeTushareInput">Token</label>
-                <input type="text" id="fakeTushareInput" class="token-input"
-                    placeholder="粘贴历史分钟线 token..." style="font-family: monospace;">
-            </div>
-
-            <!-- Actions -->
-            <div class="token-actions">
-                <button class="btn btn-secondary" onclick="testFakeTushareToken()" id="fakeTushareTestBtn">验证 Token</button>
-                <button class="btn btn-primary" onclick="saveFakeTushareToken()" id="fakeTushareSaveBtn">保存</button>
-            </div>
-
-            <!-- Result Message -->
-            <div class="token-message hidden" id="fakeTushareMessage"></div>
         </div>
     </section>
 
@@ -251,11 +221,6 @@ function loadTsanghiStatus() { loadKeyStatus('/api/settings/tsanghi-token', 'tsa
 function testTsanghiToken() { testKey('/api/settings/tsanghi-token/test', 'tsanghiInput', 'tsanghiMessage', 'tsanghiTestBtn', '验证 Token'); }
 function saveTsanghiToken() { saveKey('/api/settings/tsanghi-token', 'tsanghiInput', 'tsanghiMessage', 'tsanghiSaveBtn', loadTsanghiStatus); }
 
-// Fake Tushare (历史分钟线)
-function loadFakeTushareStatus() { loadKeyStatus('/api/settings/fake-tushare-token', 'fakeTushareStatusValue'); }
-function testFakeTushareToken() { testKey('/api/settings/fake-tushare-token/test', 'fakeTushareInput', 'fakeTushareMessage', 'fakeTushareTestBtn', '验证 Token'); }
-function saveFakeTushareToken() { saveKey('/api/settings/fake-tushare-token', 'fakeTushareInput', 'fakeTushareMessage', 'fakeTushareSaveBtn', loadFakeTushareStatus); }
-
 // iQuant
 function loadIquantStatus() { loadKeyStatus('/api/settings/iquant-key', 'iquantStatusValue'); }
 function generateIquantKey() {
@@ -299,7 +264,6 @@ async function toggleCacheScheduler(el) {
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
-loadFakeTushareStatus();
 loadIquantStatus();
 loadFcStatus();
 </script>

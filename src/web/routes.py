@@ -403,20 +403,12 @@ def create_momentum_router() -> APIRouter:
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
         """Pre-download backtest data as SSE stream (incremental)."""
         # Check tokens — most common misconfiguration on new servers
-        from src.common.config import (
-            get_fake_tushare_token_source,
-            get_tsanghi_token_source,
-        )
+        from src.common.config import get_tsanghi_token_source
 
         if get_tsanghi_token_source() == "not_configured":
             raise HTTPException(
                 status_code=503,
                 detail="沧海数据 token 未配置，请先在设置页面配置 tsanghi token",
-            )
-        if get_fake_tushare_token_source() == "not_configured":
-            raise HTTPException(
-                status_code=503,
-                detail="历史分钟线 token 未配置，请先在设置页面配置 Fake Tushare token",
             )
 
         try:
@@ -1809,104 +1801,6 @@ def create_settings_router() -> APIRouter:
                     return {
                         "success": True,
                         "message": f"Token 验证成功，获取到 {count} 条日线数据",
-                    }
-                else:
-                    msg = data.get("msg", "未知错误")
-                    return {
-                        "success": False,
-                        "message": f"Token 验证失败: {msg} (code={code})",
-                    }
-        except httpx.TimeoutException:
-            return {"success": False, "message": "请求超时，请检查网络连接"}
-        except httpx.HTTPError as e:
-            return {"success": False, "message": f"HTTP 请求失败: {e}"}
-
-    # === FAKE TUSHARE (历史分钟线) TOKEN ===
-
-    @router.get("/api/settings/fake-tushare-token")
-    async def get_fake_tushare_token_status():
-        """Get current Fake Tushare token status (masked)."""
-        from src.common.config import (
-            get_fake_tushare_token,
-            get_fake_tushare_token_source,
-        )
-
-        source = get_fake_tushare_token_source()
-        source_labels = {
-            "web_ui": "Web UI (当前会话)",
-            "persisted_file": "Web UI (已持久化)",
-            "env_var": "环境变量",
-            "secrets_yaml": "secrets.yaml",
-            "not_configured": "未配置",
-        }
-
-        try:
-            token = get_fake_tushare_token()
-            if len(token) > 20:
-                masked = token[:8] + "..." + token[-8:]
-            else:
-                masked = "***"
-            return {
-                "configured": True,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": masked,
-                "token_length": len(token),
-            }
-        except ValueError:
-            return {
-                "configured": False,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": "",
-                "token_length": 0,
-            }
-
-    @router.post("/api/settings/fake-tushare-token")
-    async def update_fake_tushare_token(body: TokenUpdateRequest):
-        """Save a new Fake Tushare token."""
-        from src.common.config import set_fake_tushare_token
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        set_fake_tushare_token(token)
-        return {"success": True, "message": "Token 已保存，历史分钟线将使用此 token"}
-
-    @router.post("/api/settings/fake-tushare-token/test")
-    async def test_fake_tushare_token(body: TokenUpdateRequest):
-        """Test a Fake Tushare token by fetching one stock's minute data."""
-        import httpx
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    "http://tushare.xyz",
-                    json={
-                        "api_name": "stk_mins",
-                        "token": token,
-                        "params": {
-                            "ts_code": "600519.SH",
-                            "freq": "1min",
-                            "limit": "5",
-                        },
-                        "fields": "",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                code = data.get("code")
-                if code == 0 and data.get("data", {}).get("items"):
-                    count = len(data["data"]["items"])
-                    return {
-                        "success": True,
-                        "message": f"Token 验证成功，获取到 {count} 条分钟线数据",
                     }
                 else:
                     msg = data.get("msg", "未知错误")

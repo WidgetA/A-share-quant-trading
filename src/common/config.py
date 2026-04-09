@@ -162,11 +162,6 @@ _tsanghi_token_override: str | None = None
 # Persistence file for Tsanghi token (survives container restarts)
 TSANGHI_TOKEN_FILE = PROJECT_ROOT / "data" / "tsanghi_token.txt"
 
-# Runtime override for Fake Tushare (tushare.xyz) token (set via web UI)
-_fake_tushare_token_override: str | None = None
-# Persistence file for Fake Tushare token (survives container restarts)
-FAKE_TUSHARE_TOKEN_FILE = PROJECT_ROOT / "data" / "fake_tushare_token.txt"
-
 
 def load_secrets() -> Config:
     """
@@ -434,74 +429,6 @@ def get_tsanghi_token_source() -> str:
     try:
         secrets = load_secrets()
         if secrets.get_str("tsanghi.token"):
-            return "secrets_yaml"
-    except FileNotFoundError:
-        pass
-    return "not_configured"
-
-
-# --- Fake Tushare (tushare.xyz) Token ---
-
-
-def get_fake_tushare_token() -> str:
-    """Get Fake Tushare (tushare.xyz) API token for historical minute data.
-
-    Priority: runtime override > persisted file > env var > secrets.yaml.
-    """
-    import os
-
-    if _fake_tushare_token_override:
-        return _fake_tushare_token_override
-
-    if FAKE_TUSHARE_TOKEN_FILE.exists():
-        token = FAKE_TUSHARE_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-
-    env_token = os.environ.get("FAKE_TUSHARE_TOKEN", "")
-    if env_token:
-        return env_token
-
-    try:
-        secrets = load_secrets()
-        token = secrets.get_str("fake_tushare.token")
-        if token:
-            return token
-    except FileNotFoundError:
-        pass
-
-    raise ValueError(
-        "Fake Tushare token not configured. "
-        "Set via web UI Settings page or FAKE_TUSHARE_TOKEN environment variable."
-    )
-
-
-def set_fake_tushare_token(token: str) -> None:
-    """Set Fake Tushare token at runtime and persist to disk."""
-    global _fake_tushare_token_override
-    _fake_tushare_token_override = token
-
-    FAKE_TUSHARE_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    FAKE_TUSHARE_TOKEN_FILE.write_text(token, encoding="utf-8")
-    logger.info("Fake Tushare token updated via web UI and persisted to disk")
-
-
-def get_fake_tushare_token_source() -> str:
-    """Return which source the current Fake Tushare token comes from."""
-    import os
-
-    if _fake_tushare_token_override:
-        return "web_ui"
-    if (
-        FAKE_TUSHARE_TOKEN_FILE.exists()
-        and FAKE_TUSHARE_TOKEN_FILE.read_text(encoding="utf-8").strip()
-    ):
-        return "persisted_file"
-    if os.environ.get("FAKE_TUSHARE_TOKEN", ""):
-        return "env_var"
-    try:
-        secrets = load_secrets()
-        if secrets.get_str("fake_tushare.token"):
             return "secrets_yaml"
     except FileNotFoundError:
         pass

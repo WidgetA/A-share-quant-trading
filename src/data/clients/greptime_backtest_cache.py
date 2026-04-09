@@ -8,7 +8,7 @@
 # - Natural upsert: same (stock_code, ts) = last write wins
 # - No transactions needed — each INSERT is independent, but FLUSH required to persist to OSS
 # - Volume stored in 手 (lots) — adapter converts ×100 at read time
-# - Data sources: tsanghi (daily OHLCV), Fake Tushare (1-min bars for 9:40 snapshot)
+# - Data sources: tsanghi (daily OHLCV), Tushare Pro stk_mins (1-min bars for 9:40 snapshot)
 #
 # === TABLES ===
 # backtest_daily:  stock_code(TAG), ts(TIME INDEX), open_price, high_price,
@@ -784,7 +784,7 @@ class GreptimeBacktestCache:
         """Download daily + minute data for all main-board stocks.
 
         Phase 1 — Daily OHLCV via tsanghi REST API (fast, batch per-date).
-        Phase 2 — 1-min bars via Fake Tushare stk_mins API (per-stock, for 9:40 snapshot).
+        Phase 2 — 1-min bars via Tushare Pro stk_mins API (per-stock, for 9:40 snapshot).
 
         Data is written to GreptimeDB with FLUSH after each batch to persist to OSS.
         """
@@ -802,7 +802,7 @@ class GreptimeBacktestCache:
             cancel_event,
         )
 
-        # Phase 2: Minute data from Fake Tushare 1min
+        # Phase 2: Minute data from Tushare Pro 1min
         # Always use full stock list from DB — daily download only returns codes
         # from newly downloaded dates, which can be a tiny subset when most dates
         # are already cached.
@@ -1398,17 +1398,15 @@ class GreptimeBacktestCache:
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
     ) -> dict[str, str]:
-        """Download 1-min bars from Fake Tushare and INSERT 9:40 snapshots to GreptimeDB.
+        """Download 1-min bars from Tushare Pro and INSERT 9:40 snapshots to GreptimeDB.
 
-        Uses stk_mins API (tushare.xyz) with 1min granularity.
+        Uses stk_mins API (api.tushare.pro) with 1min granularity.
         Aggregates 09:31~09:40 bars into a single 9:40 snapshot per day.
 
         Returns dict of {stock_code: reason} for stocks with no minute data.
         """
-        from src.data.clients.fake_tushare_client import (
-            FakeTushareClient,
-            bare_code_to_ts_code,
-        )
+        from src.common.config import get_tushare_token
+        from src.data.clients.tushare_realtime import TushareRealtimeClient
 
         # Resume: check which codes already have minute data.
         # Use dl_start (not start_date) — must match the download range,
@@ -1436,7 +1434,7 @@ class GreptimeBacktestCache:
         if not codes_to_download:
             return {}
 
-        client = FakeTushareClient()
+        client = TushareRealtimeClient(token=get_tushare_token())
         await client.start()
 
         try:
@@ -1494,7 +1492,7 @@ class GreptimeBacktestCache:
                 ts_to_bare: dict[str, str] = {}
                 for code in batch_codes:
                     try:
-                        ts_to_bare[bare_code_to_ts_code(code)] = code
+                        ts_to_bare[TushareRealtimeClient._to_ts_code(code)] = code
                     except ValueError:
                         no_data_reasons[code] = "unknown_exchange"
                         done += 1
@@ -1512,7 +1510,7 @@ class GreptimeBacktestCache:
                         end_date=end_str,
                         limit=5000000,
                     )
-                except RuntimeError as e:
+                except Exception as e:  # TushareRealtimeError or network
                     for code in ts_to_bare.values():
                         no_data_reasons[code] = f"api_error: {e}"
                         done += 1
