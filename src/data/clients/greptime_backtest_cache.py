@@ -1720,10 +1720,7 @@ class GreptimeBacktestCache:
                 await self._db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
                 upserted += 1
 
-            logger.info(
-                f"Backfill {date_str}: {upserted} rows "
-                f"(suspended={len(suspended_codes)})"
-            )
+            logger.info(f"Backfill {date_str}: {upserted} rows (suspended={len(suspended_codes)})")
             if progress_cb:
                 await _maybe_await(
                     progress_cb(
