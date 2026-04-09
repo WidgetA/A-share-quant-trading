@@ -1875,10 +1875,10 @@ class GreptimeBacktestCache:
         progress_cb: Callable[[str, int, int, str], Any] | None = None,
         cancel_event: _CancelChecker = None,
     ) -> None:
-        """Sync stock_list table from Tushare bak_basic for each trading date.
+        """Sync stock_list table using stock_basic (3 API calls for L/D/P).
 
-        Skips dates already in the table (idempotent).
-        Each row = (stock_code, ts) meaning this stock was listed on this date.
+        Fetches all stocks with list_date/delist_date, then computes which
+        stocks should exist on each trading date. Skips dates already synced.
         """
         existing = await self._get_existing_stock_list_dates()
         to_sync = [d for d in trading_dates if d not in existing]
@@ -1893,36 +1893,29 @@ class GreptimeBacktestCache:
             len(existing),
         )
 
-        # bak_basic API limit: 2 calls/min. Sleep 31s between calls.
+        # 3 API calls total: fetch all stocks with list_date/delist_date
+        if progress_cb:
+            await _maybe_await(progress_cb("stock_list", 0, len(to_sync), "拉取全市场股票列表..."))
+        all_stocks = await tushare_client.fetch_all_stocks_with_dates()
+        logger.info("stock_list: fetched %d stocks from stock_basic", len(all_stocks))
+
         for i, td in enumerate(to_sync):
             if cancel_event and cancel_event.is_set():
                 logger.info("stock_list sync cancelled")
                 return
 
-            date_str = td.strftime("%Y%m%d")
+            td_str = td.strftime("%Y%m%d")
             ts_ms = _date_to_epoch_ms(td)
 
-            # Rate-limit aware fetch with retry on 40203
-            codes: list[str] = []
-            for attempt in range(3):
-                try:
-                    codes = await tushare_client.fetch_bak_basic(date_str)
-                    break
-                except Exception as e:
-                    if "40203" in str(e):
-                        logger.warning(
-                            "stock_list: rate limited on %s, waiting 60s (attempt %d/3)",
-                            date_str,
-                            attempt + 1,
-                        )
-                        await asyncio.sleep(60)
-                    else:
-                        raise
+            # list_date <= td AND (delist_date is None OR delist_date > td)
+            codes = [
+                code for code, ld, dd in all_stocks if ld <= td_str and (dd is None or dd > td_str)
+            ]
+
             if not codes:
-                logger.warning("stock_list: bak_basic returned 0 codes for %s", date_str)
+                logger.warning("stock_list: 0 codes for %s", td)
                 continue
 
-            # Single-row INSERT (GreptimeDB upserts on (stock_code, ts))
             for code in codes:
                 await self._db.execute(
                     f"INSERT INTO stock_list(stock_code,ts) VALUES ('{code}',{ts_ms})"
@@ -1930,14 +1923,15 @@ class GreptimeBacktestCache:
 
             if progress_cb:
                 await _maybe_await(
-                    progress_cb("stock_list", i + 1, len(to_sync), f"{td} ({len(codes)}只)")
+                    progress_cb(
+                        "stock_list",
+                        i + 1,
+                        len(to_sync),
+                        f"{td} ({len(codes)}只)",
+                    )
                 )
 
             logger.info("stock_list: %s → %d codes", td, len(codes))
-
-            # Respect bak_basic rate limit: 2 calls/min
-            if i < len(to_sync) - 1:
-                await asyncio.sleep(31)
 
         logger.info("stock_list: sync complete, %d dates added", len(to_sync))
 
