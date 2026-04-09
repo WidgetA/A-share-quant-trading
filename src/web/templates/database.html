@@ -49,10 +49,10 @@
 <div class="db-frame-container">
     <div class="db-frame-toolbar">
         <span>GreptimeDB Dashboard</span>
-        <a href="/greptimedb-proxy/dashboard" target="_blank">在新窗口打开 ↗</a>
+        <a href="/dashboard" target="_blank">在新窗口打开 ↗</a>
         <span class="db-status" id="dbStatus">检测中...</span>
     </div>
-    <iframe id="dbFrame" src="/greptimedb-proxy/dashboard"></iframe>
+    <iframe id="dbFrame" src="/dashboard"></iframe>
 </div>
 {% endblock %}
 
@@ -60,7 +60,7 @@
 <script>
 (function() {
     var statusEl = document.getElementById('dbStatus');
-    fetch('/greptimedb-proxy/health', {cache: 'no-store'})
+    fetch('/health', {cache: 'no-store'})
         .then(function(r) {
             if (r.ok) {
                 statusEl.textContent = '已连接';

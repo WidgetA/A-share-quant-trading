@@ -177,11 +177,7 @@ def create_router() -> APIRouter:
         templates = request.app.state.templates
         return templates.TemplateResponse("database.html", {"request": request})
 
-    @router.api_route(
-        "/greptimedb-proxy/{path:path}",
-        methods=["GET", "POST", "PUT", "DELETE"],
-    )
-    async def greptimedb_proxy(request: Request, path: str):
+    async def _greptimedb_proxy(request: Request, path: str):
         """Reverse proxy to GreptimeDB HTTP port (Docker internal network)."""
         import os
 
@@ -214,6 +210,27 @@ def create_router() -> APIRouter:
                 if k.lower() not in ("transfer-encoding", "connection")
             },
         )
+
+    # Proxy GreptimeDB dashboard + all its sub-resources (JS/CSS/API)
+    # Must use /dashboard path so the SPA's internal asset references work
+    @router.api_route("/dashboard", methods=["GET", "POST", "PUT", "DELETE"])
+    async def greptimedb_dashboard_root(request: Request):
+        return await _greptimedb_proxy(request, "dashboard")
+
+    @router.api_route(
+        "/dashboard/{path:path}", methods=["GET", "POST", "PUT", "DELETE"]
+    )
+    async def greptimedb_dashboard(request: Request, path: str):
+        return await _greptimedb_proxy(request, f"dashboard/{path}")
+
+    # Proxy GreptimeDB API endpoints used by the dashboard
+    @router.api_route("/health", methods=["GET"])
+    async def greptimedb_health(request: Request):
+        return await _greptimedb_proxy(request, "health")
+
+    @router.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def greptimedb_v1_api(request: Request, path: str):
+        return await _greptimedb_proxy(request, f"v1/{path}")
 
     # ==================== API Endpoints ====================
 
