@@ -1579,6 +1579,9 @@ class GreptimeBacktestCache:
             return
         values = []
         for ds, (close_940, cum_vol, max_high, min_low) in min_data.items():
+            if close_940 <= 0:
+                logger.warning("skip minute %s@%s: close_940=%.2f", code, ds, close_940)
+                continue
             ts_ms = _date_to_epoch_ms(_parse_date_str(ds))
             values.append(f"('{code}',{ts_ms},{close_940},{cum_vol},{max_high},{min_low})")
         cols = "(stock_code,ts,close_940,cum_volume,max_high,min_low)"
