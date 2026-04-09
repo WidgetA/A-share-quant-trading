@@ -1423,108 +1423,115 @@ class GreptimeBacktestCache:
             done = 0
             start_str = dl_start.strftime("%Y-%m-%d") + " 09:00:00"
             end_str = end_date.strftime("%Y-%m-%d") + " 15:00:00"
-            sem = asyncio.Semaphore(2)  # conservative concurrency
 
             # Track why each stock has no minute data:
             # key=stock_code, value=reason string
             no_data_reasons: dict[str, str] = {}
 
-            async def _fetch_one(code: str) -> tuple[str, dict[str, tuple] | None]:
-                """Fetch 1min bars for one stock, aggregate to 9:40 snapshots."""
-                if cancel_event and cancel_event.is_set():
-                    no_data_reasons[code] = "cancelled"
-                    return code, None
-
-                try:
-                    ts_code = bare_code_to_ts_code(code)
-                except ValueError:
-                    no_data_reasons[code] = "unknown_exchange"
-                    return code, None
-
-                async with sem:
-                    try:
-                        bars = await client.stk_mins(
-                            ts_code,
-                            freq="1min",
-                            start_date=start_str,
-                            end_date=end_str,
-                        )
-                    except RuntimeError as e:
-                        no_data_reasons[code] = f"api_error: {e}"
-                        return code, None
-
-                if not bars:
-                    no_data_reasons[code] = "api_empty"
-                    return code, None
-
-                # Aggregate 09:31~09:40 (first 10 minutes) per day into 9:40 snapshot
-                # trade_time format: "2026-04-07 09:35:00"
+            def _aggregate_bars(
+                bars: list[dict],
+            ) -> dict[str, tuple[float, float, float, float]]:
+                """Aggregate 09:31~09:40 bars into per-day (close, vol, high, low)."""
                 day_data: dict[str, tuple[float, float, float, float]] = {}
-                bar_count = len(bars)
-                bar_times: set[str] = set()
                 for bar in bars:
                     trade_time = str(bar.get("trade_time", ""))
                     if len(trade_time) < 16:
                         continue
                     bar_date = trade_time[:10]
                     bar_time = trade_time[11:16]
-                    bar_times.add(bar_time)
-
-                    # Only aggregate 09:31 ~ 09:40
                     if bar_time < "09:31" or bar_time > "09:40":
                         continue
-
                     try:
                         h = float(bar["high"])
                         lo = float(bar["low"])
                         c = float(bar["close"])
-                        # vol is in 股 (shares), returned as string
                         v = float(bar.get("vol", 0))
                     except (ValueError, TypeError, KeyError):
                         continue
-
                     if bar_date in day_data:
                         prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
-                        day_data[bar_date] = (
-                            c,  # close of latest bar (09:40)
-                            prev_v + v,  # cumulative volume in 股
-                            max(prev_h, h),
-                            min(prev_l, lo),
-                        )
+                        day_data[bar_date] = (c, prev_v + v, max(prev_h, h), min(prev_l, lo))
                     else:
                         day_data[bar_date] = (c, v, h, lo)
+                return day_data
 
-                if not day_data:
-                    sample_times = sorted(bar_times)[:5]
-                    no_data_reasons[code] = f"no_0931_0940: {bar_count}bars, times={sample_times}"
-                    return code, None
-
-                return code, day_data
-
-            # Process in batches to control memory and provide progress
-            batch_size = 50
-            for i in range(0, total, batch_size):
+            # Batch API calls: comma-separated ts_codes, 5 stocks per request
+            # to reduce 3000+ individual calls to ~630.
+            # Rate limit: 200 req/min sustained, so 0.5s delay between requests.
+            api_batch_size = 5
+            for i in range(0, total, api_batch_size):
                 if cancel_event and cancel_event.is_set():
                     logger.info("Minute download cancelled by user")
                     raise asyncio.CancelledError()
 
-                batch = codes_to_download[i : i + batch_size]
+                batch_codes = codes_to_download[i : i + api_batch_size]
 
-                if progress_cb and batch:
-                    await _maybe_await(progress_cb("minute_active", done, total, batch[0]))
+                if progress_cb:
+                    await _maybe_await(
+                        progress_cb("minute_active", done, total, batch_codes[0])
+                    )
 
-                results = await asyncio.gather(*[_fetch_one(c) for c in batch])
+                # Convert bare codes to ts_codes, skip invalid ones
+                ts_to_bare: dict[str, str] = {}
+                for code in batch_codes:
+                    try:
+                        ts_to_bare[bare_code_to_ts_code(code)] = code
+                    except ValueError:
+                        no_data_reasons[code] = "unknown_exchange"
+                        done += 1
 
+                if not ts_to_bare:
+                    continue
+
+                # Single API call for multiple stocks
+                ts_codes_str = ",".join(ts_to_bare.keys())
+                try:
+                    bars = await client.stk_mins(
+                        ts_codes_str,
+                        freq="1min",
+                        start_date=start_str,
+                        end_date=end_str,
+                        limit=1000000,
+                    )
+                except RuntimeError as e:
+                    for code in ts_to_bare.values():
+                        no_data_reasons[code] = f"api_error: {e}"
+                        done += 1
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # Group response bars by ts_code
+                grouped: dict[str, list[dict]] = {ts: [] for ts in ts_to_bare}
+                for bar in bars:
+                    ts = str(bar.get("ts_code", ""))
+                    if ts in grouped:
+                        grouped[ts].append(bar)
+
+                # Aggregate and write each stock
                 batch_written = 0
-                for code, day_data in results:
-                    if day_data:
-                        await self._write_minute(code, day_data)
-                        batch_written += 1
+                for ts_code, code in ts_to_bare.items():
+                    code_bars = grouped.get(ts_code, [])
+                    if not code_bars:
+                        no_data_reasons[code] = "api_empty"
+                        done += 1
+                        continue
+                    day_data = _aggregate_bars(code_bars)
+                    if not day_data:
+                        no_data_reasons[code] = (
+                            f"no_0931_0940: {len(code_bars)}bars"
+                        )
+                        done += 1
+                        continue
+                    await self._write_minute(code, day_data)
+                    batch_written += 1
                     done += 1
 
                 if progress_cb:
                     detail = f"{batch_written}只" if batch_written else ""
                     await _maybe_await(progress_cb("minute", done, total, detail))
+
+                # Rate limit: stay under 200 req/min
+                await asyncio.sleep(0.5)
 
                 if done % 200 == 0:
                     logger.info(f"minute download: {done}/{total} stocks processed")

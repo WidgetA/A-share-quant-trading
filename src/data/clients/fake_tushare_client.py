@@ -20,7 +20,7 @@ from src.common.config import get_fake_tushare_token
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 30.0
+_DEFAULT_TIMEOUT = 60.0
 _MAX_RETRIES = 3
 
 
@@ -118,10 +118,11 @@ class FakeTushareClient:
         end_date: str | None = None,
         limit: int = 100000,
     ) -> list[dict]:
-        """Fetch minute-level OHLCV for a single stock.
+        """Fetch minute-level OHLCV for one or more stocks.
 
         Args:
-            ts_code: Tushare-style code, e.g. "600519.SH"
+            ts_code: Tushare-style code(s), e.g. "600519.SH" or
+                     comma-separated "600519.SH,000001.SZ"
             freq: "1min" or "5min"
             start_date: "YYYY-MM-DD HH:MM:SS" (optional)
             end_date: "YYYY-MM-DD HH:MM:SS" (optional)
