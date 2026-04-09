@@ -97,13 +97,15 @@ class TsanghiDailySource:
                 if not ticker or len(ticker) != 6:
                     continue
                 o = raw.get("open")
+                h = raw.get("high")
+                lo = raw.get("low")
                 c = raw.get("close")
                 records.append(
                     {
                         "ticker": ticker,
                         "open": float(o) if o is not None else None,
-                        "high": float(raw.get("high")) if raw.get("high") is not None else None,
-                        "low": float(raw.get("low")) if raw.get("low") is not None else None,
+                        "high": float(h) if h is not None else None,
+                        "low": float(lo) if lo is not None else None,
                         "close": float(c) if c is not None else None,
                         "volume": float(raw.get("volume", 0) or 0),
                     }

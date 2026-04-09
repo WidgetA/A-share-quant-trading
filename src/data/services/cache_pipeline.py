@@ -279,6 +279,7 @@ class CachePipeline:
             seen_codes.add(ticker)
             pre_close = prev_close_map.get(ticker, 0.0)
 
+            rec: dict[str, Any] | None
             if ticker in suspended_codes:
                 rec = _suspended_record(pre_close)
             else:
@@ -399,6 +400,7 @@ class CachePipeline:
                     continue
 
                 pre_close = prev_close_map.get(ticker, 0.0)
+                rec: dict[str, Any] | None
                 if ticker in suspended_codes:
                     rec = _suspended_record(pre_close)
                 else:
