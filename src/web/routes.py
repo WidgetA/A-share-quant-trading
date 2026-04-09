@@ -646,6 +646,19 @@ def create_momentum_router() -> APIRouter:
                                 "message": f"完整性检查: {', '.join(parts)}",
                             }
                         )
+                        # Error-level issues: halt download, user must fix manually
+                        if error_count:
+                            error_details = "; ".join(
+                                i["message"] for i in issues if i["level"] == "error"
+                            )
+                            queue.put_nowait(
+                                {
+                                    "type": "error",
+                                    "message": f"数据完整性检查失败，已停止下载。"
+                                    f"请人工处理后重试: {error_details}",
+                                }
+                            )
+                            return
                     else:
                         queue.put_nowait(
                             {
