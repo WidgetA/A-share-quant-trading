@@ -73,7 +73,7 @@ class TushareRealtimeClient:
 
     API_URL = "http://api.tushare.pro"
     BATCH_SIZE = 500  # rt_min: 1 row per stock, limit 1000
-    TIMEOUT = 30.0
+    TIMEOUT = 60.0
     MAX_CONCURRENCY = 40
     MAX_RETRIES = 3
     RETRY_BACKOFF = 1.0  # base seconds; doubles each attempt
@@ -616,14 +616,14 @@ class TushareRealtimeClient:
         result: list[tuple[str, str, str | None]] = []
         statuses = ("L", "D", "P")
         for idx, status in enumerate(statuses):
+            # Rate limit: wait 31s before 2nd/3rd call
+            if idx > 0:
+                await asyncio.sleep(31)
             data = await self._api_call(
                 "stock_basic",
                 {"list_status": status},
                 fields="ts_code,list_date,delist_date",
             )
-            # Rate limit: wait 31s between calls
-            if idx < len(statuses) - 1:
-                await asyncio.sleep(31)
             fields = data.get("data", {}).get("fields", [])
             items = data.get("data", {}).get("items", [])
             if not fields or not items:
