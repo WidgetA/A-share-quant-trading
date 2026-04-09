@@ -795,8 +795,8 @@ class GreptimeBacktestCache:
         for tbl in ("backtest_daily", "backtest_minute"):
             try:
                 await self._db.execute(f"ADMIN COMPACT_TABLE('{tbl}')")
-            except Exception:
-                logger.debug(f"COMPACT_TABLE('{tbl}') skipped (table may not exist yet)")
+            except asyncpg.UndefinedTableError:
+                logger.debug(f"COMPACT_TABLE('{tbl}') skipped (table not exist yet)")
 
         if progress_cb:
             await _maybe_await(progress_cb("init", 0, 0, ""))
