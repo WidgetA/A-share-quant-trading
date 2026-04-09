@@ -1893,6 +1893,7 @@ class GreptimeBacktestCache:
             len(existing),
         )
 
+        # bak_basic API limit: 2 calls/min. Sleep 31s between calls.
         for i, td in enumerate(to_sync):
             if cancel_event and cancel_event.is_set():
                 logger.info("stock_list sync cancelled")
@@ -1901,7 +1902,22 @@ class GreptimeBacktestCache:
             date_str = td.strftime("%Y%m%d")
             ts_ms = _date_to_epoch_ms(td)
 
-            codes = await tushare_client.fetch_bak_basic(date_str)
+            # Rate-limit aware fetch with retry on 40203
+            codes: list[str] = []
+            for attempt in range(3):
+                try:
+                    codes = await tushare_client.fetch_bak_basic(date_str)
+                    break
+                except Exception as e:
+                    if "40203" in str(e):
+                        logger.warning(
+                            "stock_list: rate limited on %s, waiting 60s (attempt %d/3)",
+                            date_str,
+                            attempt + 1,
+                        )
+                        await asyncio.sleep(60)
+                    else:
+                        raise
             if not codes:
                 logger.warning("stock_list: bak_basic returned 0 codes for %s", date_str)
                 continue
@@ -1918,6 +1934,10 @@ class GreptimeBacktestCache:
                 )
 
             logger.info("stock_list: %s → %d codes", td, len(codes))
+
+            # Respect bak_basic rate limit: 2 calls/min
+            if i < len(to_sync) - 1:
+                await asyncio.sleep(31)
 
         logger.info("stock_list: sync complete, %d dates added", len(to_sync))
 
