@@ -639,7 +639,6 @@ def create_momentum_router() -> APIRouter:
                                         "level": i["level"],
                                         "message": i["message"],
                                         "count": i["count"],
-                                        "samples": i.get("samples", []),
                                     }
                                     for i in issues
                                 ],
@@ -648,21 +647,12 @@ def create_momentum_router() -> APIRouter:
                         )
                         # Error-level issues: halt download, user must fix manually
                         if error_count:
-                            error_items = [i for i in issues if i["level"] == "error"]
-                            lines = ["数据完整性检查失败，已停止下载。请人工处理后重试:"]
-                            for ei in error_items:
-                                samples_str = (
-                                    f" (示例: {', '.join(ei['samples'])})"
-                                    if ei.get("samples")
-                                    else ""
-                                )
-                                lines.append(f"\n[问题] {ei['message']}{samples_str}")
-                                if ei.get("delete_sql"):
-                                    lines.append(f"[修复SQL]\n{ei['delete_sql']}")
+                            error_msgs = [i["message"] for i in issues if i["level"] == "error"]
                             queue.put_nowait(
                                 {
                                     "type": "error",
-                                    "message": "\n".join(lines),
+                                    "message": "数据完整性检查失败，已停止下载。"
+                                    "请人工处理后重试:\n\n" + "\n\n".join(error_msgs),
                                 }
                             )
                             return

@@ -572,37 +572,51 @@ class GreptimeBacktestCache:
         if total_stocks == 0:
             return issues
 
+        # Column sets to SELECT for each table so error logs show actual values
+        _detail_cols: dict[str, str] = {
+            "backtest_daily": (
+                "stock_code, ts, open_price, high_price, low_price, close_price, vol, is_suspended"
+            ),
+            "backtest_minute": ("stock_code, ts, close_940, cum_volume, max_high, min_low"),
+        }
+
         async def _count_and_sample(
             table: str, where: str, level: str, check: str, message_tpl: str
         ) -> None:
-            """Helper: COUNT + optional LIMIT-5 sample for one check."""
+            """Helper: COUNT + fetch ALL bad rows (up to 100) with full field values."""
             row = await self._db.fetchrow(f"SELECT COUNT(*) as cnt FROM {table} WHERE {where}")
             cnt = int(row["cnt"]) if row else 0
             if cnt == 0:
                 return
-            # Fetch sample rows for diagnosis
-            samples: list[str] = []
+            # Fetch all bad rows with full details (cap at 100)
+            details: list[str] = []
             try:
-                sample_rows = await self._db.fetch(
-                    f"SELECT stock_code, ts FROM {table} WHERE {where} LIMIT 5"
+                cols = _detail_cols.get(table, "stock_code, ts")
+                detail_rows = await self._db.fetch(
+                    f"SELECT {cols} FROM {table} WHERE {where} LIMIT 100"
                 )
-                for sr in sample_rows:
-                    d = _ts_to_date(sr["ts"])
-                    samples.append(f"{sr['stock_code']}@{d}")
+                for dr in detail_rows:
+                    d = _ts_to_date(dr["ts"])
+                    # Build "field=value" pairs for all columns except stock_code/ts
+                    parts = []
+                    for key in dr.keys():
+                        if key in ("stock_code", "ts"):
+                            continue
+                        parts.append(f"{key}={dr[key]}")
+                    details.append(f"  {dr['stock_code']}@{d}: {', '.join(parts)}")
             except Exception:
-                pass  # sample fetch is best-effort
-            # For error-level issues, provide actionable DELETE + FLUSH SQL
-            delete_sql = ""
-            if level == "error":
-                delete_sql = f"DELETE FROM {table} WHERE {where};\nADMIN FLUSH_TABLE('{table}')"
+                pass  # detail fetch is best-effort
+            msg = message_tpl.format(cnt=cnt)
+            if details:
+                msg += ":\n" + "\n".join(details)
+                if cnt > 100:
+                    msg += f"\n  ... 及其余 {cnt - 100} 条"
             issues.append(
                 {
                     "level": level,
                     "check": check,
-                    "message": message_tpl.format(cnt=cnt),
+                    "message": msg,
                     "count": cnt,
-                    "samples": samples,
-                    "delete_sql": delete_sql,
                 }
             )
 
