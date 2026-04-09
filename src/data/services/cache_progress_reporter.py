@@ -87,6 +87,18 @@ class CacheProgressReporter:
             return
         await _maybe_await(self._progress_cb(str(phase), current, total, detail))
 
+    async def status(self, message: str) -> None:
+        """Push a non-progress status line that bypasses front-end throttling.
+
+        Implemented as a progress event with the reserved ``status`` phase so
+        we don't have to widen the ``ProgressCallback`` protocol. ``routes``
+        recognises this phase and forwards it as a ``type=status`` SSE event,
+        which the front end always logs (no 10% throttle).
+        """
+        if self._progress_cb is None:
+            return
+        await _maybe_await(self._progress_cb("status", 0, 0, message))
+
     def with_progress_cb(self, progress_cb: ProgressCallback | None) -> "CacheProgressReporter":
         """Return a sibling reporter that shares the Feishu sink but uses a
         different progress callback.

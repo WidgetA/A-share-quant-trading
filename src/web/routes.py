@@ -564,6 +564,9 @@ def create_momentum_router() -> APIRouter:
                     pass
 
             def on_progress(phase: str, current: int, total: int, detail: str = ""):
+                if phase == "status":
+                    queue.put_nowait({"type": "status", "message": detail})
+                    return
                 if phase == "integrity_check":
                     overall = 0.01 + 0.04 * (current / total) if total > 0 else 0.01
                 elif phase == "init":

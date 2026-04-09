@@ -376,8 +376,12 @@ class CachePipeline:
                 Phase.STOCK_LIST,
                 i + 1,
                 len(to_sync),
-                f"{td} ({len(codes)}只, fetch {fetch_elapsed:.1f}s, "
-                f"insert {insert_elapsed:.1f}s/{ms_per_row:.1f}ms/row)",
+                f"{td} ({len(codes)}只)",
+            )
+            await self.reporter.status(
+                f"stock_list {td}: fetch={fetch_elapsed:.2f}s "
+                f"insert={insert_elapsed:.2f}s rows={len(codes)} "
+                f"per_row={ms_per_row:.1f}ms"
             )
             logger.info(
                 "stock_list: %s → %d codes (fetch %.2fs, insert %.2fs, %.1f ms/row)",
