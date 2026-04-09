@@ -1449,6 +1449,9 @@ class GreptimeBacktestCache:
                         v = float(bar.get("vol", 0))
                     except (ValueError, TypeError, KeyError):
                         continue
+                    # Tushare returns zero-OHLC bars for suspended/no-trade stocks
+                    if c <= 0 or h <= 0 or lo <= 0:
+                        continue
                     if bar_date in day_data:
                         prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
                         day_data[bar_date] = (c, prev_v + v, max(prev_h, h), min(prev_l, lo))
