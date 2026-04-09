@@ -1306,12 +1306,25 @@ class GreptimeBacktestCache:
                     if progress_cb:
                         elapsed = (current - dl_start).days + 1
                         stocks_today = len(day_records)
-                        status = f"{date_str} ({stocks_today}只) ✓"
+                        null_part = (
+                            f", {len(_null_data_codes)}只数据为空" if _null_data_codes else ""
+                        )
+                        status = f"{date_str} ({stocks_today}只{null_part}) ✓"
                         await _maybe_await(progress_cb("daily", elapsed, total_days, status))
 
                     # Update prev_close_map for next day
                     for code, rec_data in day_records:
                         prev_close_map[code] = rec_data["close"]
+                else:
+                    # API returned no usable records for this trading day
+                    if progress_cb:
+                        elapsed = (current - dl_start).days + 1
+                        null_part = (
+                            f", {len(_null_data_codes)}只数据为空" if _null_data_codes else ""
+                        )
+                        status = f"{date_str} ⚠ API返回0条记录{null_part}"
+                        await _maybe_await(progress_cb("daily", elapsed, total_days, status))
+                    logger.warning(f"Daily {date_str}: 0 usable records from tsanghi API")
 
                 current += timedelta(days=1)
 
