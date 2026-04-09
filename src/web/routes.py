@@ -171,6 +171,24 @@ def create_router() -> APIRouter:
         templates = request.app.state.templates
         return templates.TemplateResponse("backtest.html", {"request": request})
 
+    @router.get("/database", response_class=HTMLResponse)
+    async def database_page(request: Request):
+        """GreptimeDB dashboard embedded page."""
+        import os
+
+        greptimedb_host = os.getenv("GREPTIMEDB_HOST", "localhost")
+        greptimedb_http_port = os.getenv("GREPTIMEDB_HTTP_PORT", "4000")
+        base = f"http://{greptimedb_host}:{greptimedb_http_port}"
+        templates = request.app.state.templates
+        return templates.TemplateResponse(
+            "database.html",
+            {
+                "request": request,
+                "greptimedb_url": f"{base}/dashboard",
+                "greptimedb_health_url": f"{base}/health",
+            },
+        )
+
     # ==================== API Endpoints ====================
 
     @router.get("/api/status")

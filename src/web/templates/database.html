@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}数据库 - A-Share Trading{% endblock %}
+
+{% block head %}
+<style>
+    main {
+        padding: 0 !important;
+        max-width: 100% !important;
+    }
+    .db-frame-container {
+        width: 100%;
+        height: calc(100vh - 120px);
+        border: none;
+        display: flex;
+        flex-direction: column;
+    }
+    .db-frame-container iframe {
+        flex: 1;
+        width: 100%;
+        border: none;
+    }
+    .db-frame-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        background: var(--card-bg, #1e1e2e);
+        border-bottom: 1px solid var(--border-color, #333);
+        font-size: 0.85rem;
+    }
+    .db-frame-toolbar a {
+        color: var(--accent, #89b4fa);
+        text-decoration: none;
+    }
+    .db-frame-toolbar a:hover {
+        text-decoration: underline;
+    }
+    .db-status {
+        margin-left: auto;
+        color: var(--text-secondary, #888);
+    }
+    .db-status.ok { color: #a6e3a1; }
+    .db-status.err { color: #f38ba8; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="db-frame-container">
+    <div class="db-frame-toolbar">
+        <span>GreptimeDB Dashboard</span>
+        <a href="{{ greptimedb_url }}" target="_blank">在新窗口打开 ↗</a>
+        <span class="db-status" id="dbStatus">检测中...</span>
+    </div>
+    <iframe id="dbFrame" src="{{ greptimedb_url }}"></iframe>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const statusEl = document.getElementById('dbStatus');
+    const frame = document.getElementById('dbFrame');
+
+    // Check if GreptimeDB is reachable
+    fetch('{{ greptimedb_health_url }}', {mode: 'no-cors', cache: 'no-store'})
+        .then(() => {
+            statusEl.textContent = '已连接';
+            statusEl.className = 'db-status ok';
+        })
+        .catch(() => {
+            statusEl.textContent = '无法连接';
+            statusEl.className = 'db-status err';
+        });
+})();
+</script>
+{% endblock %}
