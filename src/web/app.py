@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -27,6 +28,26 @@ from src.web.routes import (
     create_trade_backtest_router,
     create_trading_router,
 )
+
+# Configure root logger so all project loggers (src.data.*, src.strategy.*, etc.)
+# emit to stdout. Without this, uvicorn only configures its own `uvicorn` /
+# `uvicorn.access` loggers, and every other `logging.getLogger(__name__)` call
+# in the codebase goes to a no-op handler — which silently swallowed the slow
+# SQL watchdog warnings we added to diagnose download hangs.
+#
+# Idempotent: if root already has handlers (e.g. when imported by pytest or
+# another entry point that already configured logging), do nothing.
+_root_logger = logging.getLogger()
+if not _root_logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    _root_logger.addHandler(_handler)
+    _root_logger.setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
 
