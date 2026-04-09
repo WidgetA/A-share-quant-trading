@@ -174,13 +174,45 @@ def create_router() -> APIRouter:
     @router.get("/database", response_class=HTMLResponse)
     async def database_page(request: Request):
         """GreptimeDB dashboard embedded page."""
+        templates = request.app.state.templates
+        return templates.TemplateResponse("database.html", {"request": request})
+
+    @router.api_route(
+        "/greptimedb-proxy/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE"],
+    )
+    async def greptimedb_proxy(request: Request, path: str):
+        """Reverse proxy to GreptimeDB HTTP port (Docker internal network)."""
         import os
 
-        greptimedb_port = int(os.getenv("GREPTIMEDB_HTTP_PORT", "4000"))
-        templates = request.app.state.templates
-        return templates.TemplateResponse(
-            "database.html",
-            {"request": request, "greptimedb_port": greptimedb_port},
+        import httpx
+
+        host = os.environ.get("GREPTIME_HOST", "localhost")
+        port = os.environ.get("GREPTIMEDB_HTTP_PORT", "4000")
+        target = f"http://{host}:{port}/{path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(
+                method=request.method,
+                url=target,
+                headers={
+                    k: v
+                    for k, v in request.headers.items()
+                    if k.lower() not in ("host", "connection")
+                },
+                content=await request.body(),
+            )
+
+        return StreamingResponse(
+            iter([resp.content]),
+            status_code=resp.status_code,
+            headers={
+                k: v
+                for k, v in resp.headers.items()
+                if k.lower() not in ("transfer-encoding", "connection")
+            },
         )
 
     # ==================== API Endpoints ====================
