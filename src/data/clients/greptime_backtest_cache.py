@@ -1076,6 +1076,8 @@ class GreptimeBacktestCache:
                 logger.info(f"Trade calendar: {len(trading_dates)} trading days in range")
             except Exception as e:
                 logger.warning(f"Trade calendar fetch failed: {e}, will check all dates")
+                if progress_cb:
+                    await _maybe_await(progress_cb("daily", 0, 0, f"⚠ 交易日历获取失败: {e}"))
 
             # Track preClose across days (for computing pre_close field)
             prev_close_map = await self._get_latest_closes()
