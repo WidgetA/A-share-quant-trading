@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, NamedTuple
 
@@ -241,23 +242,59 @@ class GreptimeClient:
     def is_connected(self) -> bool:
         return self._pool is not None and not self._pool._closed
 
-    async def execute(self, sql: str) -> str:
+    async def _run(
+        self, op_name: str, sql: str, runner: Callable[[asyncpg.Connection], Any]
+    ) -> Any:
+        """Run a DB op with explicit acquire/query timeout classification.
+
+        On timeout, raises RuntimeError carrying which phase (pool acquire vs
+        query execution) hung, the elapsed time, the configured limit, and the
+        SQL prefix. This lets the caller see exactly what timed out instead of
+        the bare `TimeoutError` produced by `asyncio.wait_for`.
+        """
         if not self._pool:
             raise RuntimeError("GreptimeClient not started")
-        async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
-            return await asyncio.wait_for(conn.execute(sql), timeout=self._QUERY_TIMEOUT)
+
+        sql_preview = sql.strip().replace("\n", " ")[:120]
+
+        t_acquire = time.monotonic()
+        try:
+            conn = await asyncio.wait_for(
+                self._pool.acquire(), timeout=self._ACQUIRE_TIMEOUT
+            )
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            elapsed = time.monotonic() - t_acquire
+            raise RuntimeError(
+                f"GreptimeDB pool.acquire timeout: "
+                f"elapsed={elapsed:.2f}s limit={self._ACQUIRE_TIMEOUT}s "
+                f"pool_size={self._pool.get_size()} pool_idle={self._pool.get_idle_size()} "
+                f"op={op_name} sql={sql_preview!r}"
+            ) from e
+
+        acquire_elapsed = time.monotonic() - t_acquire
+        try:
+            t_query = time.monotonic()
+            try:
+                return await asyncio.wait_for(runner(conn), timeout=self._QUERY_TIMEOUT)
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                query_elapsed = time.monotonic() - t_query
+                raise RuntimeError(
+                    f"GreptimeDB query timeout: "
+                    f"query_elapsed={query_elapsed:.2f}s limit={self._QUERY_TIMEOUT}s "
+                    f"acquire_elapsed={acquire_elapsed:.2f}s "
+                    f"op={op_name} sql={sql_preview!r}"
+                ) from e
+        finally:
+            await self._pool.release(conn)
+
+    async def execute(self, sql: str) -> str:
+        return await self._run("execute", sql, lambda c: c.execute(sql))
 
     async def fetch(self, sql: str) -> list[asyncpg.Record]:
-        if not self._pool:
-            raise RuntimeError("GreptimeClient not started")
-        async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
-            return await asyncio.wait_for(conn.fetch(sql), timeout=self._QUERY_TIMEOUT)
+        return await self._run("fetch", sql, lambda c: c.fetch(sql))
 
     async def fetchrow(self, sql: str) -> asyncpg.Record | None:
-        if not self._pool:
-            raise RuntimeError("GreptimeClient not started")
-        async with self._pool.acquire(timeout=self._ACQUIRE_TIMEOUT) as conn:
-            return await asyncio.wait_for(conn.fetchrow(sql), timeout=self._QUERY_TIMEOUT)
+        return await self._run("fetchrow", sql, lambda c: c.fetchrow(sql))
 
 
 # ---------------------------------------------------------------------------
