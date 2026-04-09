@@ -1577,11 +1577,20 @@ class GreptimeBacktestCache:
         """INSERT minute data for a single stock."""
         if not min_data:
             return
+        # Validate: garbage data must halt the download, not be silently skipped
+        garbage = [
+            (ds, close_940, cum_vol, max_high, min_low)
+            for ds, (close_940, cum_vol, max_high, min_low) in min_data.items()
+            if close_940 <= 0 or max_high <= 0 or min_low <= 0
+        ]
+        if garbage:
+            details = "; ".join(
+                f"{code}@{ds} close_940={c940} high={h} low={lo}" for ds, c940, _, h, lo in garbage
+            )
+            raise RuntimeError(f"分钟线垃圾数据，已停止下载。请人工确认后处理:\n{details}")
+
         values = []
         for ds, (close_940, cum_vol, max_high, min_low) in min_data.items():
-            if close_940 <= 0:
-                logger.warning("skip minute %s@%s: close_940=%.2f", code, ds, close_940)
-                continue
             ts_ms = _date_to_epoch_ms(_parse_date_str(ds))
             values.append(f"('{code}',{ts_ms},{close_940},{cum_vol},{max_high},{min_low})")
         cols = "(stock_code,ts,close_940,cum_volume,max_high,min_low)"
