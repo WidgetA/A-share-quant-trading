@@ -1467,9 +1467,7 @@ class GreptimeBacktestCache:
                 batch_codes = codes_to_download[i : i + api_batch_size]
 
                 if progress_cb:
-                    await _maybe_await(
-                        progress_cb("minute_active", done, total, batch_codes[0])
-                    )
+                    await _maybe_await(progress_cb("minute_active", done, total, batch_codes[0]))
 
                 # Convert bare codes to ts_codes, skip invalid ones
                 ts_to_bare: dict[str, str] = {}
@@ -1517,9 +1515,7 @@ class GreptimeBacktestCache:
                         continue
                     day_data = _aggregate_bars(code_bars)
                     if not day_data:
-                        no_data_reasons[code] = (
-                            f"no_0931_0940: {len(code_bars)}bars"
-                        )
+                        no_data_reasons[code] = f"no_0931_0940: {len(code_bars)}bars"
                         done += 1
                         continue
                     await self._write_minute(code, day_data)
