@@ -1416,6 +1416,23 @@ class GreptimeBacktestCache:
         if not codes_to_download:
             return {}
 
+        # Pre-load suspended (stock_code, date_str) pairs so we can
+        # skip suspended dates after aggregation instead of relying
+        # on zero-value heuristics.
+        start_ms = _date_to_epoch_ms(dl_start)
+        end_ms = _date_to_epoch_ms(end_date)
+        susp_rows = await self._db.fetch(
+            f"SELECT stock_code, ts FROM backtest_daily "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+            f"AND is_suspended = true"
+        )
+        suspended_pairs: set[tuple[str, str]] = set()
+        for sr in susp_rows:
+            d = _ts_to_date(sr["ts"])
+            suspended_pairs.add((sr["stock_code"], d))
+        if suspended_pairs:
+            logger.info(f"Minute: loaded {len(suspended_pairs)} suspended (stock,date) pairs")
+
         client = TushareRealtimeClient(token=get_tushare_token())
         await client.start()
 
@@ -1448,9 +1465,6 @@ class GreptimeBacktestCache:
                         c = float(bar["close"])
                         v = float(bar.get("vol", 0))
                     except (ValueError, TypeError, KeyError):
-                        continue
-                    # Tushare returns zero-OHLC bars for suspended/no-trade stocks
-                    if c <= 0 or h <= 0 or lo <= 0:
                         continue
                     if bar_date in day_data:
                         prev_c, prev_v, prev_h, prev_l = day_data[bar_date]
@@ -1531,6 +1545,15 @@ class GreptimeBacktestCache:
                     day_data = _aggregate_bars(code_bars)
                     if not day_data:
                         no_data_reasons[code] = f"no_0931_0940: {len(code_bars)}bars"
+                        batch_empty += 1
+                        done += 1
+                        continue
+                    # Remove suspended dates using is_suspended from daily table
+                    susp_dates = [d for d in day_data if (code, d) in suspended_pairs]
+                    for d in susp_dates:
+                        del day_data[d]
+                    if not day_data:
+                        no_data_reasons[code] = "all_dates_suspended"
                         batch_empty += 1
                         done += 1
                         continue
