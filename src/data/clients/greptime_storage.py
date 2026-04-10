@@ -1269,9 +1269,9 @@ class GreptimeBacktestStorage:
         await _count_and_sample(
             "backtest_daily",
             "is_suspended IS NULL",
-            "error",
+            "warning",  # pipeline auto-repairs via _backfill_is_suspended
             "null_is_suspended",
-            "日线: {cnt} 条记录 is_suspended 为 NULL（需要回填）",
+            "日线: {cnt} 条记录 is_suspended 为 NULL（将自动回填）",
         )
         await _count_and_sample(
             "backtest_daily",
