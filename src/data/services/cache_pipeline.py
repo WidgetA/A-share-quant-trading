@@ -580,9 +580,7 @@ class CachePipeline:
         # A COUNT(*) WHERE is_suspended IS NULL right after backfill will still
         # see the old deleted rows, producing false-positive "验证失败" alerts.
         # We skip the unreliable post-backfill count and just report success.
-        await self.reporter.notify_backfill_summary(
-            fixed_dates=len(dates_to_fix), null_remaining=0
-        )
+        await self.reporter.notify_backfill_summary(fixed_dates=len(dates_to_fix), null_remaining=0)
 
     # ------------------------------------------------------------------
     # Phase 2: minute download
