@@ -41,6 +41,7 @@ class Phase(str, Enum):
     MINUTE_RESUME = "minute_resume"
     MINUTE_ACTIVE = "minute_active"
     MINUTE = "minute"
+    MINUTE_BACKFILL = "minute_backfill"
     DOWNLOAD = "download"
 
     def __str__(self) -> str:  # ensure %s formatting yields the bare phase name

@@ -1075,6 +1075,97 @@ class GreptimeBacktestStorage:
             logger.info("audit_minute_gaps: all %d dates complete", len(expected))
         return gaps
 
+    async def audit_minute_gaps_in_range(
+        self, start_date: date, end_date: date
+    ) -> list[tuple[date, set[str]]]:
+        """Per-day audit returning the exact set of missing stocks for backfill.
+
+        For each trading day in ``[start_date, end_date]`` (inclusive), the
+        "expected" stock set is taken from non-suspended ``backtest_daily`` rows
+        with ``vol > 0``. The "actual" set is the distinct ``stock_code`` values
+        already present in ``backtest_minute`` for that day. Days where
+        ``actual`` covers ``expected`` are omitted entirely.
+
+        Three-step query plan keeps cost down on big tables:
+            1. one GROUP BY on daily to get expected COUNT per day
+            2. one COUNT(DISTINCT) per day on minute (cheap aggregate)
+            3. only for the days that fail the COUNT check we fetch the
+               concrete code lists, so worst-case = number of days with gaps.
+
+        Returns: ``[(day, missing_codes_set), ...]`` sorted by day. Empty list
+        if no gaps.
+        """
+        start_ms = date_to_epoch_ms(start_date)
+        end_ms = date_to_epoch_ms(end_date)
+
+        # Step 1: per-day expected COUNT from daily
+        daily_count_rows = await self.db.fetch(
+            f"SELECT ts, COUNT(*) as cnt FROM backtest_daily "
+            f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0 "
+            f"GROUP BY ts ORDER BY ts"
+        )
+        if not daily_count_rows:
+            return []
+        expected_cnt = {ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_count_rows}
+
+        # Step 2: per-day actual COUNT(DISTINCT stock_code) from minute
+        candidate_dates: list[date] = []
+        for d, exp in expected_cnt.items():
+            day_start = date_to_epoch_ms(d)
+            day_end = day_start + 86_400_000
+            row = await self.db.fetchrow(
+                f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute "
+                f"WHERE ts >= {day_start} AND ts < {day_end}"
+            )
+            act = int(row["cnt"]) if row else 0
+            if act < exp:
+                candidate_dates.append(d)
+
+        if not candidate_dates:
+            logger.info(
+                "audit_minute_gaps_in_range: %s~%s, %d days, all complete",
+                start_date,
+                end_date,
+                len(expected_cnt),
+            )
+            return []
+
+        # Step 3: only for the failing days, materialize expected & actual code
+        # sets and diff to get the exact missing codes.
+        gaps: list[tuple[date, set[str]]] = []
+        for d in candidate_dates:
+            day_start = date_to_epoch_ms(d)
+            day_end = day_start + 86_400_000
+
+            exp_rows = await self.db.fetch(
+                f"SELECT stock_code FROM backtest_daily "
+                f"WHERE ts = {day_start} "
+                f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
+            )
+            expected_set = {r["stock_code"] for r in exp_rows}
+
+            act_rows = await self.db.fetch(
+                f"SELECT DISTINCT stock_code FROM backtest_minute "
+                f"WHERE ts >= {day_start} AND ts < {day_end}"
+            )
+            actual_set = {r["stock_code"] for r in act_rows}
+
+            missing = expected_set - actual_set
+            if missing:
+                gaps.append((d, missing))
+
+        total_missing = sum(len(m) for _, m in gaps)
+        logger.info(
+            "audit_minute_gaps_in_range: %s~%s, %d/%d days have gaps, %d (day,code) entries",
+            start_date,
+            end_date,
+            len(gaps),
+            len(expected_cnt),
+            total_missing,
+        )
+        return gaps
+
     async def validate_integrity(self) -> list[str]:
         """Run high-level integrity checks. Returns list of warning messages."""
         warnings: list[str] = []

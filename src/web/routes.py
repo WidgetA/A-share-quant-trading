@@ -573,6 +573,10 @@ def create_momentum_router() -> APIRouter:
                 if detail:
                     return f"分钟线 {current}/{total}: {detail}"
                 return f"分钟线 {current}/{total}"
+            elif phase == "minute_backfill":
+                if detail:
+                    return f"分钟线补全 {current}/{total}: {detail}"
+                return f"分钟线补全: {current}/{total} 天"
             elif phase == "download":
                 return f"下载完成: 共 {total} 只股票"
             elif phase == "post_integrity":
@@ -625,9 +629,11 @@ def create_momentum_router() -> APIRouter:
                 elif phase == "minute_resume":
                     overall = 0.2
                 elif phase == "minute_active":
-                    overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
+                    overall = 0.2 + 0.7 * (current / total) if total > 0 else 0.2
                 elif phase == "minute":
-                    overall = 0.2 + 0.8 * (current / total) if total > 0 else 0.2
+                    overall = 0.2 + 0.7 * (current / total) if total > 0 else 0.2
+                elif phase == "minute_backfill":
+                    overall = 0.9 + 0.05 * (current / total) if total > 0 else 0.9
                 elif phase == "post_integrity":
                     # Push a post-download integrity report so the frontend shows it
                     warnings = [w for w in detail.split("\n") if w] if detail else []

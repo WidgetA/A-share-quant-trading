@@ -306,6 +306,17 @@ Adding a column via `ALTER TABLE` leaves the column NULL for every existing row.
 
 Database client does no in-memory caching. One row written = one row dropped from RAM. GreptimeDB manages its own cache. Do not add `deploy.resources.limits.memory` to the GreptimeDB container — let it manage its own working set.
 
+### Cache pipeline phase order
+
+`CachePipeline.download_prices()` runs the following phases in order. Resume / audit semantics are documented per-phase:
+
+| Phase | Resume granularity | Audit / backfill |
+|-------|--------------------|------------------|
+| `daily` | by **day** — `get_existing_daily_dates()` skips any date that has at least one row in `backtest_daily` | `_backfill_daily_gaps()` compares per-day COUNT(stock_list) vs COUNT(backtest_daily) and refetches the diff codes |
+| `minute` | by **stock** — `get_existing_minute_codes(start, end)` skips any code that has *any* bar in the range | `_backfill_minute_gaps()` runs `audit_minute_gaps_in_range()`: per day, diffs the active daily code set against the distinct minute code set, then refetches each missing `(day, code)` pair via single-day `stk_mins` requests |
+
+The two-phase minute design exists because Tushare's `stk_mins` is a per-stock API: the natural unit of one call is "one stock × range", so the main download uses per-stock resume for throughput. The per-day audit phase then catches any holes the coarse resume cannot detect — e.g. a stock that has bars on most days but is missing one transient-failure day.
+
 ## Environment Management (uv)
 
 ```bash
