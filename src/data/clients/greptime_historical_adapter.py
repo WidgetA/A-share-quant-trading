@@ -27,8 +27,8 @@ class GreptimeHistoricalAdapter:
     """Implements ``HistoricalDataProvider`` for backtest mode.
 
     Reads from ``GreptimeBacktestStorage`` and returns data in the
-    ``history_quotes`` / ``high_frequency`` response shape that the
-    scanner code already understands.
+    ``history_quotes`` response shape that the scanner code already
+    understands.
     """
 
     def __init__(self, storage: GreptimeBacktestStorage) -> None:
@@ -93,40 +93,6 @@ class GreptimeHistoricalAdapter:
                     indicator_data[ind].append(val)
 
             tables.append({"thscode": full_code, "table": {"time": time_vals, **indicator_data}})
-
-        return {"errorcode": 0, "tables": tables}
-
-    async def high_frequency(
-        self,
-        codes: str,
-        indicators: str,
-        start_time: str,
-        end_time: str,
-        function_para: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        """Return cached minute snapshot in ``high_frequency`` format."""
-        code_list = [c.strip() for c in codes.split(",") if c.strip()]
-        tables: list[dict[str, Any]] = []
-        date_str = start_time.split(" ")[0]
-
-        for full_code in code_list:
-            bare = full_code.split(".")[0]
-            snap = await self._storage.get_minute_snapshot(bare, date_str)
-            if snap is None:
-                continue
-
-            table: dict[str, list] = {}
-            for ind in indicators.split(","):
-                ind = ind.strip()
-                if ind == "close":
-                    table["close"] = [snap.close]
-                elif ind == "volume":
-                    table["volume"] = [snap.cum_volume]
-                elif ind == "high":
-                    table["high"] = [snap.max_high]
-                elif ind == "low":
-                    table["low"] = [snap.min_low]
-            tables.append({"thscode": full_code, "table": table})
 
         return {"errorcode": 0, "tables": tables}
 

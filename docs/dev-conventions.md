@@ -208,37 +208,83 @@ Before starting any development task:
 
 ## GreptimeDB Rules (CRITICAL)
 
-GreptimeDB is an LSM-tree engine. Write path: INSERT → memtable + WAL → FLUSH → SST (persisted to OSS).
+GreptimeDB exposes a PostgreSQL wire protocol on port 4003, but its compatibility is incomplete in places asyncpg's pool exercises every few thousand queries. The result is **silent hangs** that take hours to diagnose. The rules below encode hard-won lessons — do NOT skip any of them.
 
-### Core Rule: FLUSH After Every Write
+### asyncpg Connection Pool: Three Mandatory Overrides
 
-**Data is only durable after FLUSH to SST.** WAL is on `/tmp` (lost on container rebuild). `auto_flush_interval=1m` is a fallback, not a guarantee.
+GreptimeDB's PG protocol has three holes that asyncpg's pool will hit. Missing any one causes a silent wedge.
 
-```python
-# ✅ Correct: explicit FLUSH after writes
-await db.execute(f"INSERT INTO t{cols} VALUES {val}")
-await db.execute("ADMIN FLUSH_TABLE('t')")
+**1. `statement_cache_size=0`** — GreptimeDB does not support `PREPARE` / `DEALLOCATE`. asyncpg's default 1024-entry prepared-statement cache trips this on the first query.
 
-# ✅ Batch writes: FLUSH once after all INSERTs (not per row)
-for code, rec in records:
-    await db.execute(f"INSERT INTO t{cols} VALUES {val}")
-await db.execute("ADMIN FLUSH_TABLE('t')")  # one FLUSH is enough
-```
+**2. Override `Connection.reset()` → no-op** — asyncpg calls `reset()` when releasing a connection back to the pool. The default issues `RESET ALL` and `DEALLOCATE ALL`, both rejected by GreptimeDB.
 
-Applies to **all write scenarios**: download, backfill, repair — no exceptions.
+**3. Override `Connection.close()` → `terminate()`** — THE BIG ONE. asyncpg's pool recycles a connection after `max_queries` (default 50000) by calling `await connection.close()`. Default `close()` sends a PG `Terminate` message and **awaits the server's socket close**. GreptimeDB never closes the socket, so `close()` blocks forever. Symptom: download hangs at ~13 stock_list dates × ~5000 INSERTs each ≈ 65k queries. The hang is **completely invisible** because:
+- `asyncio.wait_for(runner)` already returned successfully
+- the slow-SQL watchdog was cancelled in the finally block
+- `pool.release()` itself has no timeout
 
-### ALTER TABLE Add Column: DELETE → FLUSH → INSERT → FLUSH
-
-Old SST rows lack the new column. Plain upsert gets overwritten by old SST on merge. Must delete old rows first, FLUSH each step.
+Fix: override `close()` to call `self.terminate()` (TCP reset, no handshake).
 
 ```python
-for code in codes:
-    await db.execute(f"DELETE FROM t WHERE stock_code='{code}' AND ts={ts_ms}")
-await db.execute("ADMIN FLUSH_TABLE('t')")  # persist tombstones
-for code in codes:
-    await db.execute(f"INSERT INTO t{cols} VALUES {val_map[code]}")
-await db.execute("ADMIN FLUSH_TABLE('t')")  # persist new data
+class _GreptimeConnection(asyncpg.Connection):
+    async def reset(self, *, timeout: float | None = None) -> None:
+        pass
+
+    async def close(self, *, timeout: float | None = None) -> None:
+        # Do NOT call super().close() — it sends a PG Terminate and waits
+        # for the server socket to close, which hangs forever on GreptimeDB.
+        if not self.is_closed():
+            self.terminate()
+
+await asyncpg.create_pool(
+    host=..., port=4003, user="greptime",
+    min_size=0, max_size=3,
+    statement_cache_size=0,
+    connection_class=_GreptimeConnection,
+)
 ```
+
+### Slow-Query Watchdog (Mandatory)
+
+asyncpg's C extension can hang on `socket.recv` and **swallow `CancelledError`**. Even if `asyncio.wait_for(..., timeout=120)` says the query timed out, the underlying syscall may still be blocked. To make hangs visible, run a sibling task that logs every 30s while the SQL is in flight:
+
+```python
+async def _slow_query_watchdog():
+    while True:
+        await asyncio.sleep(30)
+        logger.warning("SQL still running after %.0fs: op=%s sql=%r",
+                       time.monotonic() - t_query, op_name, sql_preview)
+```
+
+Without this, "the download hangs" is your only signal. With it, you get a per-30s log line naming the exact stuck SQL.
+
+### Classify acquire vs query timeout separately
+
+Wrap pool acquire and query execution in **separate** `wait_for()` blocks. When something hangs you must know whether the pool is exhausted (all 3 connections held) or the DB is genuinely stuck. A single combined timeout doesn't tell you which.
+
+```python
+conn = await asyncio.wait_for(pool.acquire(), timeout=30)
+try:
+    return await asyncio.wait_for(runner(conn), timeout=120)
+finally:
+    await asyncio.wait_for(pool.release(conn), timeout=10)  # belt-and-suspenders
+```
+
+### Belt-and-suspenders: `pool.release()` timeout
+
+Even with the `close()` fix, wrap `pool.release(conn)` in `wait_for(..., timeout=10)`. If a future regression reintroduces a release-time hang, log loudly and `conn.terminate()` instead of stalling silently.
+
+### Root logger must be configured at app startup
+
+uvicorn only attaches handlers to its own `uvicorn` / `uvicorn.access` loggers. Without explicit root-logger config, every `logging.getLogger(__name__).warning(...)` in the project is silently dropped — including the slow-SQL watchdog above. Add a `StreamHandler` to the root logger at app import time (idempotent for pytest).
+
+### Single connection ≠ pool
+
+`asyncpg.connect()` returns one connection that does **not** support concurrent ops. Two awaiters (e.g. download task + status poll) will hit `InterfaceError: another operation is in progress`. Always use `create_pool()`.
+
+### Reserved words: must double-quote
+
+`open`, `close`, `volume` are reserved in GreptimeDB's SQL parser. Use snake_case alternatives (`open_price`, `close_price`, `vol`) or always wrap in double quotes.
 
 ### Batch Write Limits
 
@@ -247,11 +293,18 @@ await db.execute("ADMIN FLUSH_TABLE('t')")  # persist new data
 | Single-row INSERT (1 VALUES row) | Unlimited | — |
 | Multi-row INSERT (N VALUES rows) | ~200 rows | Silent data loss |
 
-### Connection Pool
+GreptimeDB silently drops rows past ~200 in a multi-row INSERT. Always one INSERT per row, or batch ≤ 200 rows.
 
-- Must use `asyncpg.create_pool(min_size=0, max_size=3, statement_cache_size=0)`
-- Must override `reset()` to no-op (GreptimeDB doesn't support `RESET ALL` / `DEALLOCATE ALL`)
-- Single connection doesn't support concurrent ops — must use pool
+### ALTER TABLE: New Column Has NULL for Old Rows
+
+Adding a column via `ALTER TABLE` leaves the column NULL for every existing row. Two consequences:
+
+1. **WHERE clauses must tolerate NULL.** `WHERE is_suspended = false` excludes NULL rows. Use `WHERE (is_suspended = false OR is_suspended IS NULL)`, or backfill old rows before relying on the column for filtering.
+2. **To populate old rows**, DELETE then re-INSERT. Plain UPDATE has surprising semantics under LSM merge with partial column overwrites; the natural-upsert (last_row merge) of a fresh INSERT is the safe path.
+
+### No application-layer caching
+
+Database client does no in-memory caching. One row written = one row dropped from RAM. GreptimeDB manages its own cache. Do not add `deploy.resources.limits.memory` to the GreptimeDB container — let it manage its own working set.
 
 ## Environment Management (uv)
 

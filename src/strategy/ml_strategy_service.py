@@ -55,6 +55,7 @@ async def run_ml_live(
         RuntimeError: on data issues (trading safety: fail fast).
         FileNotFoundError: if model file doesn't exist.
     """
+    from src.strategy.aggregators import EarlyWindowAggregator, Snapshot
     from src.strategy.strategies.ml_scanner import DailyBar, MLScanner, MLScanResult
 
     today = datetime.now(BEIJING_TZ).date()
@@ -67,15 +68,37 @@ async def run_ml_live(
     if not universe_codes:
         raise RuntimeError("ML live scan: universe is empty")
 
-    # Step 2: Fetch realtime quotes (9:30-9:39 bars)
-    quotes = await realtime_client.batch_get_early_quotes(universe_codes)
-    logger.info("ML live scan: got %d early quotes", len(quotes))
+    # Step 2: Fetch raw 1-min bars from rt_min_daily, then aggregate the
+    # 09:31~09:40 window in the strategy layer (same code path as backtest).
+    bars_by_code = await realtime_client.batch_get_minute_bars(universe_codes)
+    logger.info("ML live scan: got bars for %d stocks", len(bars_by_code))
 
-    if not quotes:
+    if not bars_by_code:
+        return MLScanResult(model_name=model_name)
+
+    aggregator = EarlyWindowAggregator()
+    early_data: dict[str, tuple[float, Snapshot]] = {}
+    for code, bars in bars_by_code.items():
+        if not bars:
+            continue
+        try:
+            day_open = float(bars[0].get("open") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if day_open <= 0:
+            continue
+        snaps_by_day = aggregator.aggregate(bars)
+        if not snaps_by_day:
+            continue
+        # rt_min_daily returns bars for one trading day → exactly 1 entry.
+        snap = next(iter(snaps_by_day.values()))
+        early_data[code] = (day_open, snap)
+
+    if not early_data:
         return MLScanResult(model_name=model_name)
 
     # Step 3: Resolve prev_close
-    prev_closes = await _resolve_prev_close(storage, trade_calendar, today, len(quotes))
+    prev_closes = await _resolve_prev_close(storage, trade_calendar, today, len(early_data))
 
     if not prev_closes:
         raise RuntimeError("ML live scan: failed to get any prev_close data")
@@ -107,7 +130,9 @@ async def run_ml_live(
     )
 
     # Step 5: Build snapshots
-    snapshot_result = MLScanner.build_snapshots(universe.codes, prev_closes, quotes, history_bars)
+    snapshot_result = MLScanner.build_snapshots(
+        universe.codes, prev_closes, early_data, history_bars
+    )
 
     if not snapshot_result.snapshots:
         return MLScanResult(model_name=model_name)
@@ -149,6 +174,7 @@ async def run_ml_backtest(
         MinuteDataMissingError: if minute data coverage < 50%.
         FileNotFoundError: if model file doesn't exist.
     """
+    from src.strategy.aggregators import EarlyWindowAggregator
     from src.strategy.strategies.ml_scanner import DailyBar, MLScanner, MLScanResult
 
     scanner = MLScanner(concept_mapper)
@@ -174,51 +200,53 @@ async def run_ml_backtest(
             for d, o, h, lo, c, v in bars
         ]
 
-    # Step 3: Build StockSnapshot for each stock using daily + minute data
-    from src.strategy.strategies.ml_scanner import StockSnapshot
-
-    snapshots: dict[str, StockSnapshot] = {}
-    daily_candidates = 0
-    minute_hits = 0
-
+    # Step 3: Build candidate set from daily data (gap pre-filter)
+    candidates: dict[str, tuple[float, float]] = {}
     for code, day in all_daily.items():
         if day.is_suspended:
             continue
-
         open_price = day.open
         prev_close = day.preClose
         if prev_close <= 0 or open_price <= 0:
             continue
-
-        # Mild pre-filter: skip if open gap < -0.5%
-        open_gain = (open_price - prev_close) / prev_close * 100
-        if open_gain < -0.5:
+        if (open_price - prev_close) / prev_close * 100 < -0.5:
             continue
+        candidates[code] = (open_price, prev_close)
 
-        daily_candidates += 1
+    daily_candidates = len(candidates)
 
-        # Get 9:40 minute data
-        snapshot = await storage.get_minute_snapshot(code, date_str)
-        if snapshot is None:
+    # Step 4: Batch-fetch raw 1-min bars for all candidates and aggregate
+    # in-memory via EarlyWindowAggregator (strategy layer owns the window).
+    from src.strategy.strategies.ml_scanner import StockSnapshot
+
+    bars_by_code: dict[str, list[dict]] = {}
+    if candidates:
+        bars_by_code = await storage.get_minute_bars_for_codes_on_day(
+            list(candidates.keys()), trade_date
+        )
+    aggregator = EarlyWindowAggregator()
+
+    snapshots: dict[str, StockSnapshot] = {}
+    minute_hits = 0
+    for code, (open_price, prev_close) in candidates.items():
+        raw_bars = bars_by_code.get(code, [])
+        if not raw_bars:
             continue
-
+        snaps_by_day = aggregator.aggregate(raw_bars)
+        snap = snaps_by_day.get(date_str)
+        if snap is None or snap.close <= 0:
+            continue
         minute_hits += 1
-
-        if snapshot.close <= 0:
-            continue
-
-        # Get history for this stock
-        hist = history_bars.get(code, [])
 
         snapshots[code] = StockSnapshot(
             stock_code=code,
             prev_close=prev_close,
             open_price=open_price,
-            latest_price=snapshot.close,
-            high_940=snapshot.max_high,
-            low_940=snapshot.min_low,
-            early_volume=snapshot.cum_volume,
-            history=hist,
+            latest_price=snap.close,
+            high_940=snap.max_high,
+            low_940=snap.min_low,
+            early_volume=snap.cum_volume,
+            history=history_bars.get(code, []),
         )
 
     # Trading safety: halt if minute data is severely insufficient

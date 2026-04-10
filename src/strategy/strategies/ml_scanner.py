@@ -20,7 +20,8 @@
 # - StockFilter: exchange-based filtering
 # - board_filter: junk board definitions (used internally by LocalConceptMapper)
 # - ST detection: via stock name (contains "ST") from board_constituents.json
-# - TushareRealtimeClient: rt_min_daily (9:40 snapshot) + prev_close + suspended
+# - TushareRealtimeClient: rt_min_daily raw 1-min bars + prev_close + suspended
+# - EarlyWindowAggregator: aggregates raw bars into 09:31~09:40 Snapshot
 # - GreptimeBacktestStorage: 37-day historical OHLCV (backtest_daily table)
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from src.data.sources.local_concept_mapper import LocalConceptMapper
 from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
 if TYPE_CHECKING:
-    from src.data.clients.tushare_realtime import TushareQuote
+    from src.strategy.aggregators import Snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +420,7 @@ class MLScanner:
     def build_snapshots(
         universe_codes: set[str],
         prev_closes: dict[str, float],
-        realtime_quotes: dict[str, TushareQuote],
+        early_data: dict[str, tuple[float, Snapshot]],
         historical_bars: dict[str, list[DailyBar]],
     ) -> SnapshotResult:
         """Assemble StockSnapshot for each stock from three data sources.
@@ -430,7 +431,9 @@ class MLScanner:
         Args:
             universe_codes: Valid stock codes from build_universe().
             prev_closes: {code: close_price} from fetch_prev_closes (8:00).
-            realtime_quotes: {code: TushareQuote} from batch_get_early_quotes (9:39).
+            early_data: {code: (day_open_price, Snapshot)} where Snapshot is the
+                09:31~09:40 aggregation produced by ``EarlyWindowAggregator`` on
+                the raw 1-min bars returned by ``batch_get_minute_bars()``.
             historical_bars: {code: [DailyBar, ...]} from GreptimeDB (9:39).
 
         Returns:
@@ -439,7 +442,7 @@ class MLScanner:
         snapshots: dict[str, StockSnapshot] = {}
         prev_close_alerts: list[str] = []
         skipped_no_prev = 0
-        skipped_no_rt = 0
+        skipped_no_early = 0
         skipped_no_hist = 0
 
         for code in universe_codes:
@@ -450,9 +453,13 @@ class MLScanner:
             if pc <= 0:
                 prev_close_alerts.append(code)
                 continue
-            rt = realtime_quotes.get(code)
-            if rt is None or not rt.is_trading:
-                skipped_no_rt += 1
+            ed = early_data.get(code)
+            if ed is None:
+                skipped_no_early += 1
+                continue
+            open_price, snap = ed
+            if open_price <= 0 or snap.close <= 0:
+                skipped_no_early += 1
                 continue
             hist = historical_bars.get(code)
             if not hist:
@@ -462,11 +469,11 @@ class MLScanner:
             snapshots[code] = StockSnapshot(
                 stock_code=code,
                 prev_close=pc,
-                open_price=rt.open_price,
-                latest_price=rt.early_close if rt.early_close > 0 else rt.latest_price,
-                high_940=rt.early_high if rt.early_high > 0 else rt.high_price,
-                low_940=rt.early_low if rt.early_low > 0 else rt.low_price,
-                early_volume=rt.early_volume if rt.early_volume > 0 else rt.volume,
+                open_price=open_price,
+                latest_price=snap.close,
+                high_940=snap.max_high,
+                low_940=snap.min_low,
+                early_volume=snap.cum_volume,
                 history=hist,
             )
 
@@ -479,12 +486,12 @@ class MLScanner:
 
         logger.info(
             "build_snapshots: %d/%d stocks have complete data "
-            "(skipped: %d no prev_close, %d bad prev_close, %d no realtime, %d no history)",
+            "(skipped: %d no prev_close, %d bad prev_close, %d no early data, %d no history)",
             len(snapshots),
             len(universe_codes),
             skipped_no_prev,
             len(prev_close_alerts),
-            skipped_no_rt,
+            skipped_no_early,
             skipped_no_hist,
         )
         return SnapshotResult(

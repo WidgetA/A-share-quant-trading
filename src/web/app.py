@@ -155,7 +155,6 @@ def create_app(
         from src.data.sources.tsanghi_daily_source import TsanghiDailySource
         from src.data.sources.tushare_metadata_source import TushareMetadataSource
         from src.data.sources.tushare_minute_source import TushareMinuteSource
-        from src.strategy.aggregators import EarlyWindowAggregator
 
         storage = create_storage_from_config()
         try:
@@ -166,7 +165,6 @@ def create_app(
                 daily_source=TsanghiDailySource(),
                 minute_source=TushareMinuteSource(),
                 metadata_source=TushareMetadataSource(),
-                minute_aggregator=EarlyWindowAggregator(),
                 reporter=CacheProgressReporter(),
             )
             logger.info("GreptimeDB storage + cache pipeline ready")

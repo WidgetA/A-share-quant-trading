@@ -10,26 +10,31 @@
 # Provides:
 #   - GreptimeClient — async asyncpg pool to GreptimeDB (PG wire protocol, port 4003)
 #   - GreptimeBacktestStorage — schema, CRUD, range/gap detection, integrity audits
-#   - DailyBar / Snapshot DTOs
+#   - DailyBar / MinuteBar DTOs
 #
 # === TABLES ===
-# backtest_daily:  stock_code(TAG), ts(TIME INDEX), open_price, high_price,
-#                  low_price, close_price, pre_close, vol, amount, turnover_ratio,
-#                  is_suspended
-# backtest_minute: stock_code(TAG), ts(TIME INDEX), close_940, cum_volume,
-#                  max_high, min_low
-#                  NOTE: column names are historical — semantically these are
-#                  "early-window aggregation" fields whose meaning is defined by
-#                  the business-layer aggregator (src/strategy/aggregators/).
-#                  The storage layer treats them as opaque float columns.
+# backtest_daily:  stock_code(TAG), ts(TIME INDEX, day precision), open_price,
+#                  high_price, low_price, close_price, pre_close, vol, amount,
+#                  turnover_ratio, is_suspended
+# backtest_minute: stock_code(TAG), ts(TIME INDEX, minute precision), open_price,
+#                  high_price, low_price, close_price, vol, amount
+#                  ── RAW 1-min OHLCV bars. The storage layer stores upstream's
+#                  exact data with no business window applied. Strategies read
+#                  these bars and apply their own aggregation (early-window,
+#                  full-day VWAP, etc.) at query time.
 # stock_list:      stock_code(TAG), ts(TIME INDEX) — per-date authoritative
 #                  listed stock universe (from upstream metadata source).
 #
 # === CONVENTIONS ===
 # - All reads/writes via SQL through asyncpg
 # - Natural upsert: same (stock_code, ts) = last write wins
-# - One INSERT per row — GreptimeDB silently drops batch INSERTs >200 rows
-# - Volume stored in 手 (lots), upper layers convert ×100 at read time
+# - Daily volume stored in 手 (lots), adapter converts ×100 at read time
+# - Minute volume stored in 股 (shares); Tushare stk_mins is already in shares
+# - Batched multi-row INSERTs at most 100 rows (GreptimeDB silently drops >200)
+# - ts column convention: epoch ms with the timestamp string interpreted as
+#   naive UTC (i.e. "2026-04-09 09:31:00" → calendar.timegm(...)). Daily and
+#   minute tables share this convention so day-boundary math is trivial:
+#   `day_start_ms = date_to_epoch_ms(d); day_end_ms = day_start_ms + 86_400_000`
 
 from __future__ import annotations
 
@@ -72,13 +77,19 @@ class DailyBar(NamedTuple):
     is_suspended: bool = False
 
 
-class MinuteSnapshot(NamedTuple):
-    """Minute-window aggregated snapshot returned by storage reads."""
+class MinuteBar(NamedTuple):
+    """Raw 1-min OHLCV bar.
 
+    Volume is in 股 (shares) — Tushare stk_mins is already in shares so no
+    conversion is applied. Amount is in 元.
+    """
+
+    open: float
+    high: float
+    low: float
     close: float
-    cum_volume: float
-    max_high: float
-    min_low: float
+    vol: float
+    amount: float
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +110,22 @@ def epoch_ms_to_date(ms: int | float) -> date:
 def parse_date_str(date_str: str) -> date:
     """Parse YYYY-MM-DD string to date."""
     return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+
+def minute_str_to_epoch_ms(s: str) -> int:
+    """Parse 'YYYY-MM-DD HH:MM:SS' to epoch ms (treating string as naive UTC).
+
+    Matches the day-table convention: ``date_to_epoch_ms(date(2026,4,9))`` and
+    ``minute_str_to_epoch_ms("2026-04-09 00:00:00")`` return the same value.
+    Day boundary math therefore stays trivial.
+    """
+    dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    return calendar.timegm(dt.timetuple()) * 1000
+
+
+def epoch_ms_to_minute_str(ms: int | float) -> str:
+    """Inverse of minute_str_to_epoch_ms — returns 'YYYY-MM-DD HH:MM:SS'."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def ts_to_date(val: Any) -> date:
@@ -169,10 +196,12 @@ _CREATE_MINUTE_SQL = """
 CREATE TABLE IF NOT EXISTS backtest_minute (
     stock_code STRING,
     ts TIMESTAMP TIME INDEX,
-    close_940 FLOAT64,
-    cum_volume FLOAT64,
-    max_high FLOAT64,
-    min_low FLOAT64,
+    open_price FLOAT64,
+    high_price FLOAT64,
+    low_price FLOAT64,
+    close_price FLOAT64,
+    vol FLOAT64,
+    amount FLOAT64,
     PRIMARY KEY (stock_code)
 )
 """
@@ -574,22 +603,78 @@ class GreptimeBacktestStorage:
 
     # ==================== Minute reads ====================
 
-    async def get_minute_snapshot(self, code: str, date_str: str) -> MinuteSnapshot | None:
-        """Get the minute aggregation snapshot for a stock on a date."""
-        ms = date_to_epoch_ms(parse_date_str(date_str))
-        row = await self.db.fetchrow(
-            f"SELECT close_940, cum_volume, max_high, min_low "
+    async def get_minute_bars_for_day(self, code: str, day: date) -> list[dict[str, Any]]:
+        """Return all 1-min bars for one stock on one trading day, ordered by time.
+
+        Returned dict shape per bar (matches Tushare stk_mins so the existing
+        ``EarlyWindowAggregator`` can consume it directly):
+            {"trade_time": "YYYY-MM-DD HH:MM:SS", "open": float, "high": float,
+             "low": float, "close": float, "vol": float, "amount": float}
+        """
+        day_start = date_to_epoch_ms(day)
+        day_end = day_start + 86_400_000
+        rows = await self.db.fetch(
+            f"SELECT ts, open_price, high_price, low_price, close_price, vol, amount "
             f"FROM backtest_minute "
-            f"WHERE stock_code = '{code}' AND ts = {ms}"
+            f"WHERE stock_code = '{code}' AND ts >= {day_start} AND ts < {day_end} "
+            f"ORDER BY ts"
         )
-        if not row:
-            return None
-        return MinuteSnapshot(
-            close=float(row["close_940"]),
-            cum_volume=float(row["cum_volume"]),
-            max_high=float(row["max_high"]),
-            min_low=float(row["min_low"]),
+        return [
+            {
+                "trade_time": epoch_ms_to_minute_str(ts_to_epoch_ms(r["ts"])),
+                "open": float(r["open_price"]),
+                "high": float(r["high_price"]),
+                "low": float(r["low_price"]),
+                "close": float(r["close_price"]),
+                "vol": float(r["vol"]) if r["vol"] is not None else 0.0,
+                "amount": float(r["amount"]) if r["amount"] is not None else 0.0,
+            }
+            for r in rows
+        ]
+
+    async def get_minute_bars_for_codes_on_day(
+        self, codes: set[str] | list[str], day: date
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Batch read all 1-min bars for many stocks on one trading day.
+
+        Returns ``{code: [bar_dict, ...]}`` keyed by stock_code, with each bar
+        list ordered by ts ascending and shaped like ``get_minute_bars_for_day``.
+
+        Backtest scanners call this once per trade_date instead of doing
+        ``len(codes)`` round-trips through ``get_minute_bars_for_day``.
+        """
+        if not codes:
+            return {}
+        code_list = sorted(set(codes))
+        # Build IN-list. stock_code values come from upstream APIs (digits only)
+        # so straightforward quoting is safe — no SQL injection vector.
+        in_list = ",".join(f"'{c}'" for c in code_list)
+        day_start = date_to_epoch_ms(day)
+        day_end = day_start + 86_400_000
+        rows = await self.db.fetch(
+            f"SELECT stock_code, ts, open_price, high_price, low_price, "
+            f"close_price, vol, amount "
+            f"FROM backtest_minute "
+            f"WHERE ts >= {day_start} AND ts < {day_end} "
+            f"AND stock_code IN ({in_list}) "
+            f"ORDER BY stock_code, ts"
         )
+        out: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            code = r["stock_code"]
+            bars = out.setdefault(code, [])
+            bars.append(
+                {
+                    "trade_time": epoch_ms_to_minute_str(ts_to_epoch_ms(r["ts"])),
+                    "open": float(r["open_price"]),
+                    "high": float(r["high_price"]),
+                    "low": float(r["low_price"]),
+                    "close": float(r["close_price"]),
+                    "vol": float(r["vol"]) if r["vol"] is not None else 0.0,
+                    "amount": float(r["amount"]) if r["amount"] is not None else 0.0,
+                }
+            )
+        return out
 
     # ==================== Range / Gap Detection ====================
 
@@ -603,30 +688,33 @@ class GreptimeBacktestStorage:
     async def find_minute_gaps(self) -> list[tuple[date, date]]:
         """Find date ranges where daily exists but minute data is sparse/missing.
 
-        A date is a "gap" if daily_count > 100 and minute_count < 50% of daily_count.
+        A date is a "gap" if daily_count > 100 and the number of distinct
+        stocks with minute data on that day is < 50% of daily_count.
+
+        Note: minute_count here is "distinct stocks with bars on day d",
+        NOT raw row count — each stock contributes ~241 rows now.
         """
         daily_rows = await self.db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts"
         )
-        minute_rows = await self.db.fetch(
-            "SELECT ts, COUNT(*) as cnt FROM backtest_minute GROUP BY ts"
-        )
-
-        daily_counts: dict[int, int] = {}
-        for r in daily_rows:
-            daily_counts[ts_to_epoch_ms(r["ts"])] = int(r["cnt"])
-
-        minute_counts: dict[int, int] = {}
-        for r in minute_rows:
-            minute_counts[ts_to_epoch_ms(r["ts"])] = int(r["cnt"])
+        if not daily_rows:
+            return []
 
         gap_dates: list[date] = []
-        for ts_ms, daily_count in daily_counts.items():
+        for r in daily_rows:
+            daily_count = int(r["cnt"])
             if daily_count <= 100:
                 continue
-            minute_count = minute_counts.get(ts_ms, 0)
-            if minute_count < daily_count * _MIN_MINUTE_COVERAGE:
-                gap_dates.append(epoch_ms_to_date(ts_ms))
+            d = ts_to_date(r["ts"])
+            day_start = date_to_epoch_ms(d)
+            day_end = day_start + 86_400_000
+            row = await self.db.fetchrow(
+                f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute "
+                f"WHERE ts >= {day_start} AND ts < {day_end}"
+            )
+            minute_stocks = int(row["cnt"]) if row else 0
+            if minute_stocks < daily_count * _MIN_MINUTE_COVERAGE:
+                gap_dates.append(d)
 
         if not gap_dates:
             return []
@@ -680,12 +768,16 @@ class GreptimeBacktestStorage:
         return {ts_to_date(r["ts"]) for r in rows}
 
     async def get_existing_minute_codes(self, start_date: date, end_date: date) -> set[str]:
-        """Get stock codes that have any minute data in the given range."""
+        """Get stock codes that have any minute bar in the given (inclusive) range.
+
+        ``end_date`` is inclusive — minute rows have ts at HH:MM through the
+        trading day, so we extend the upper bound by one day to capture them.
+        """
         start_ms = date_to_epoch_ms(start_date)
-        end_ms = date_to_epoch_ms(end_date)
+        end_ms = date_to_epoch_ms(end_date) + 86_400_000
         rows = await self.db.fetch(
             f"SELECT DISTINCT stock_code FROM backtest_minute "
-            f"WHERE ts >= {start_ms} AND ts <= {end_ms}"
+            f"WHERE ts >= {start_ms} AND ts < {end_ms}"
         )
         return {r["stock_code"] for r in rows}
 
@@ -828,20 +920,58 @@ class GreptimeBacktestStorage:
             f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
 
-    async def insert_minute_snapshot(self, code: str, day: date, snapshot: MinuteSnapshot) -> None:
-        """INSERT one minute aggregation snapshot."""
-        if snapshot.close <= 0 or snapshot.max_high <= 0 or snapshot.min_low <= 0:
-            raise RuntimeError(
-                f"分钟线垃圾数据，已停止下载。请人工确认后处理: {code}@{day} "
-                f"close={snapshot.close} high={snapshot.max_high} low={snapshot.min_low}"
-            )
-        ts_ms = date_to_epoch_ms(day)
-        cols = "(stock_code,ts,close_940,cum_volume,max_high,min_low)"
-        val = (
-            f"('{code}',{ts_ms},"
-            f"{snapshot.close},{snapshot.cum_volume},{snapshot.max_high},{snapshot.min_low})"
-        )
-        await self.db.execute(f"INSERT INTO backtest_minute{cols} VALUES {val}")
+    # Stay well below GreptimeDB's silent 200-row batch INSERT cliff.
+    _MINUTE_INSERT_BATCH = 100
+
+    async def insert_minute_bars(self, code: str, bars: list[dict[str, Any]]) -> int:
+        """Insert raw 1-min bars for one stock. Returns the number of rows written.
+
+        Each bar dict must have ``trade_time`` (``YYYY-MM-DD HH:MM:SS``) plus
+        ``open``, ``high``, ``low``, ``close``, ``vol``, ``amount`` (as floats).
+
+        Bars are written in batches of 100 rows (multi-row VALUES) to amortize
+        round-trip cost while staying below GreptimeDB's ~200-row silent drop
+        threshold. Garbage rows (close/high/low <= 0 on a non-suspended bar)
+        raise immediately — the caller must filter suspended pairs first.
+        """
+        if not bars:
+            return 0
+
+        rows_sql: list[str] = []
+        for bar in bars:
+            try:
+                trade_time = str(bar["trade_time"])
+                o = float(bar["open"])
+                h = float(bar["high"])
+                lo = float(bar["low"])
+                c = float(bar["close"])
+                v = float(bar.get("vol") or 0.0)
+                amt = float(bar.get("amount") or 0.0)
+            except (KeyError, TypeError, ValueError) as e:
+                raise RuntimeError(
+                    f"分钟线字段缺失/格式错误，已停止下载: {code} bar={bar} err={e}"
+                ) from e
+
+            if c <= 0 or h <= 0 or lo <= 0:
+                raise RuntimeError(
+                    f"分钟线垃圾数据，已停止下载。请人工确认后处理: {code}@{trade_time} "
+                    f"open={o} high={h} low={lo} close={c}"
+                )
+            if h < lo:
+                raise RuntimeError(
+                    f"分钟线 high<low，已停止下载: {code}@{trade_time} high={h} low={lo}"
+                )
+
+            ts_ms = minute_str_to_epoch_ms(trade_time)
+            rows_sql.append(f"('{code}',{ts_ms},{o},{h},{lo},{c},{v},{amt})")
+
+        cols = "(stock_code,ts,open_price,high_price,low_price,close_price,vol,amount)"
+        written = 0
+        for i in range(0, len(rows_sql), self._MINUTE_INSERT_BATCH):
+            chunk = rows_sql[i : i + self._MINUTE_INSERT_BATCH]
+            await self.db.execute(f"INSERT INTO backtest_minute{cols} VALUES {','.join(chunk)}")
+            written += len(chunk)
+        return written
 
     async def insert_stock_list_codes(
         self,
@@ -906,9 +1036,11 @@ class GreptimeBacktestStorage:
         return gaps
 
     async def audit_minute_gaps(self) -> list[tuple[date, int, int]]:
-        """Compare non-suspended daily vs backtest_minute per date.
+        """Compare non-suspended daily vs backtest_minute distinct stocks per date.
 
         Returns: [(date, expected_count, actual_count), ...] where actual < expected.
+        ``actual`` here is "distinct stocks with bars on day d", not raw row count
+        (each stock contributes ~241 bar rows now).
         """
         daily_rows = await self.db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily "
@@ -918,13 +1050,15 @@ class GreptimeBacktestStorage:
         if not daily_rows:
             return []
         expected = {ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows}
-        minute_rows = await self.db.fetch(
-            "SELECT ts, COUNT(*) as cnt FROM backtest_minute GROUP BY ts ORDER BY ts"
-        )
-        actual = {ts_to_date(r["ts"]): int(r["cnt"]) for r in minute_rows}
         gaps: list[tuple[date, int, int]] = []
         for d, exp in expected.items():
-            act = actual.get(d, 0)
+            day_start = date_to_epoch_ms(d)
+            day_end = day_start + 86_400_000
+            row = await self.db.fetchrow(
+                f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute "
+                f"WHERE ts >= {day_start} AND ts < {day_end}"
+            )
+            act = int(row["cnt"]) if row else 0
             if act < exp:
                 gaps.append((d, exp, act))
 
@@ -1006,7 +1140,9 @@ class GreptimeBacktestStorage:
             "backtest_daily": (
                 "stock_code, ts, open_price, high_price, low_price, close_price, vol, is_suspended"
             ),
-            "backtest_minute": "stock_code, ts, close_940, cum_volume, max_high, min_low",
+            "backtest_minute": (
+                "stock_code, ts, open_price, high_price, low_price, close_price, vol, amount"
+            ),
         }
 
         async def _count_and_sample(
@@ -1110,31 +1246,32 @@ class GreptimeBacktestStorage:
         if minute_count > 0:
             await _count_and_sample(
                 "backtest_minute",
-                "close_940 <= 0",
+                "close_price <= 0 OR open_price <= 0 OR high_price <= 0 OR low_price <= 0",
                 "error",
-                "zero_close_940",
-                "分钟线: {cnt} 条记录 close_940 <= 0",
+                "zero_or_negative_minute_price",
+                "分钟线: {cnt} 条 OHLC 价格 <= 0",
             )
             await _count_and_sample(
                 "backtest_minute",
-                "max_high < min_low",
+                "high_price < low_price",
                 "error",
                 "minute_high_lt_low",
-                "分钟线: {cnt} 条记录 max_high < min_low",
+                "分钟线: {cnt} 条记录 high < low",
             )
             await _count_and_sample(
                 "backtest_minute",
-                "close_940 IS NULL OR cum_volume IS NULL OR max_high IS NULL OR min_low IS NULL",
+                "open_price IS NULL OR high_price IS NULL OR low_price IS NULL "
+                "OR close_price IS NULL",
                 "error",
-                "null_minute_fields",
-                "分钟线: {cnt} 条记录有 NULL 字段",
+                "null_minute_prices",
+                "分钟线: {cnt} 条记录 OHLC 字段为 NULL",
             )
             await _count_and_sample(
                 "backtest_minute",
-                "cum_volume < 0",
+                "vol < 0",
                 "error",
-                "negative_cum_volume",
-                "分钟线: {cnt} 条记录 cum_volume 为负数",
+                "negative_minute_vol",
+                "分钟线: {cnt} 条记录 vol 为负数",
             )
 
         return issues

@@ -1483,7 +1483,7 @@ async def _compute_ml_scan(date_str: str, storage):
 
     Two paths:
     - Past dates: GreptimeDB cache via strategy service (fast, ~1-3s)
-    - Today: Tushare batch_get_early_quotes via strategy service (slow, ~30-60s)
+    - Today: Tushare rt_min_daily raw bars via strategy service (slow, ~30-60s)
     """
     from datetime import date, datetime
     from zoneinfo import ZoneInfo

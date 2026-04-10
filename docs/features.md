@@ -682,7 +682,7 @@ await engine.stop()
 **Dashboard Recommendations (On-Demand Compute)**:
 - `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 ML scan results
 - **Past dates**: uses GreptimeDB cache via `run_ml_backtest()`, ~1-3s
-- **Today**: uses Tushare `batch_get_early_quotes` via `run_ml_live()`, ~30-60s (only after 09:39)
+- **Today**: uses Tushare `batch_get_minute_bars` (rt_min_daily) → `EarlyWindowAggregator` via `run_ml_live()`, ~30-60s (only after 09:39)
 - No PostgreSQL persistence — computed on-demand each time
 
 **Key Files**:

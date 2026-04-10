@@ -1,25 +1,19 @@
 # === MODULE PURPOSE ===
 # Aggregate raw 1-min bars into the per-day snapshot used by current strategies.
 #
-# This is BUSINESS LOGIC. The data pipeline only depends on
-# ``MinuteAggregatorProtocol``. If a future strategy needs a different window
-# (e.g. 09:30~09:45) or a different reduction (e.g. VWAP instead of cum_volume),
-# add a new aggregator implementation here — do NOT touch the data layer.
+# This is BUSINESS LOGIC. Strategy services call this directly at query time
+# against raw bars read from ``GreptimeBacktestStorage``. The data layer has
+# no knowledge of windows or reductions — if a future strategy needs a
+# different window (e.g. 09:30~09:45) or a different reduction (e.g. VWAP),
+# add a new aggregator here without touching the data layer.
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple, Protocol
+from typing import Any, NamedTuple
 
 
 class Snapshot(NamedTuple):
-    """Per-day aggregated minute snapshot.
-
-    Field names mirror the legacy ``backtest_minute`` columns:
-        close      → close_940
-        cum_volume → cum_volume
-        max_high   → max_high
-        min_low    → min_low
-    """
+    """Per-day aggregated minute snapshot for the early window."""
 
     close: float
     cum_volume: float
@@ -27,29 +21,19 @@ class Snapshot(NamedTuple):
     min_low: float
 
 
-class MinuteAggregatorProtocol(Protocol):
-    """Contract the data pipeline depends on.
-
-    Implementations consume a list of raw 1-min bar dicts (Tushare stk_mins
-    format: ``trade_time``, ``open``, ``high``, ``low``, ``close``, ``vol``)
-    and return one snapshot per trading day.
-    """
-
-    def aggregate(self, bars: list[dict[str, Any]]) -> dict[str, Snapshot]:
-        """Return ``{date_str: Snapshot}`` keyed by ``YYYY-MM-DD``."""
-        ...
-
-
 class EarlyWindowAggregator:
     """Aggregate the 09:31~09:40 window into one snapshot per day.
 
     Used by current momentum / ML strategies as the early-day signal source.
+    Consumes raw 1-min bar dicts in Tushare ``stk_mins`` format
+    (``trade_time``, ``open``, ``high``, ``low``, ``close``, ``vol``).
     """
 
     WINDOW_START = "09:31"
     WINDOW_END = "09:40"
 
     def aggregate(self, bars: list[dict[str, Any]]) -> dict[str, Snapshot]:
+        """Return ``{YYYY-MM-DD: Snapshot}`` for each day present in ``bars``."""
         out: dict[str, Snapshot] = {}
         for bar in bars:
             trade_time = str(bar.get("trade_time", ""))

@@ -186,17 +186,6 @@ class IQuantHistoricalAdapter:
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         return await self._realtime.as_standard_quote_format(code_list, indicators)
 
-    async def high_frequency(
-        self,
-        codes: str,
-        indicators: str,
-        start_time: str,
-        end_time: str,
-        function_para: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        """Not used in live mode — scanner uses real_time_quotation instead."""
-        return {"errorcode": 0, "tables": []}
-
     async def smart_stock_picking(
         self,
         search_string: str,

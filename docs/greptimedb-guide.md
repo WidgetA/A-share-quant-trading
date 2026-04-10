@@ -238,10 +238,25 @@ async with httpx.AsyncClient() as client:
 ```
 
 ### PostgreSQL Wire Protocol (port 4003) — Known Limitations
-If using asyncpg/psycopg:
-- **Not supported**: UNLISTEN, DEALLOCATE, RESET ALL, PREPARE, transactions
-- **Required asyncpg config**: `statement_cache_size=0`, `min_size=0`, custom connection class with noop reset
-- **Reserved words**: `open`, `close`, `volume` — must double-quote all column names
+
+GreptimeDB's PG wire compatibility is incomplete. Three issues hit asyncpg's pool every few thousand queries and **silently wedge** the whole client:
+
+| Issue | What asyncpg does | What GreptimeDB does | Required override |
+|-------|------------------|---------------------|-------------------|
+| `RESET ALL` / `DEALLOCATE ALL` | Calls `Connection.reset()` on every pool release | Rejects both | Override `reset()` → no-op |
+| `PREPARE` / `DEALLOCATE` | Caches up to 1024 prepared statements | Not supported | `statement_cache_size=0` |
+| `Terminate` handshake | `Connection.close()` sends Terminate and **awaits** the server socket close | Never closes the socket → hangs forever | Override `close()` → `terminate()` (TCP reset) |
+
+The `close()` issue is the killer: asyncpg's pool recycles a connection after `max_queries=50000`. For a stock_list write doing ~5000 INSERTs per date, the pool trips that threshold at ~13 dates, then `pool.release()` calls `close()` and silently hangs forever — no warning, no timeout.
+
+**Other rules:**
+- Not supported: `UNLISTEN`, `BEGIN` / `COMMIT` / `ROLLBACK`, transactions
+- A single `asyncpg.connect()` does not support concurrent ops — must use `create_pool(min_size=0, max_size=3)`
+- Reserved words: `open`, `close`, `volume` — must double-quote all column names, or use snake_case (`open_price`, `close_price`, `vol`)
+- Wrap `pool.acquire()`, query execution, and `pool.release()` in **separate** `asyncio.wait_for()` blocks so timeouts are classifiable
+- Run a slow-query watchdog task — asyncpg's C extension can swallow `CancelledError` on `socket.recv`, so a sibling `await asyncio.sleep(30)` warning loop is the only reliable way to surface a stuck SQL
+
+See `src/data/clients/greptime_storage.py:_GreptimeConnection` and `GreptimeClient._run` for the canonical implementation.
 
 ### Available PyPI Packages
 - `greptimedb-sqlalchemy` (v0.1.7) — SQLAlchemy connector, uses psycopg2 underneath (pgwire)
@@ -257,4 +272,5 @@ If using asyncpg/psycopg:
 4. **Natural upsert** — same (stock_code, ts) = last write wins, no special syntax needed
 5. **No in-app caching** — all reads go through SQL, let GreptimeDB manage memory
 6. **No memory limits** — GreptimeDB handles resource management internally
-7. **No transactions needed** — each INSERT is independent, but must `ADMIN FLUSH_TABLE` after writes to persist to OSS (WAL is on `/tmp`, not durable)
+7. **No transactions needed** — each INSERT is independent, last-row merge gives natural upsert
+8. **asyncpg pool requires custom connection class** — see "PostgreSQL Wire Protocol" above; missing any of the three overrides causes silent hangs

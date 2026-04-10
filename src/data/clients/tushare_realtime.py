@@ -13,6 +13,12 @@
 # - Volume (vol field) is in 股 (shares) for both endpoints
 # - preClose NOT available — must be supplemented by caller
 # - Fail-fast: API errors raise TushareRealtimeError (no silent fallback)
+#
+# === DATA / STRATEGY DECOUPLING ===
+# This module is the DATA LAYER. It returns raw bars in standard
+# Tushare ``stk_mins`` format (``trade_time``, ``open``, ``high``, ``low``,
+# ``close``, ``vol``, ``amount``). It does NOT aggregate any window — that
+# is the strategy layer's job (see ``src.strategy.aggregators``).
 
 from __future__ import annotations
 
@@ -34,7 +40,13 @@ class TushareRealtimeError(Exception):
 
 @dataclass
 class TushareQuote:
-    """Real-time snapshot for a single stock."""
+    """Real-time snapshot for a single stock from rt_min (1 bar/stock).
+
+    Pure full-day OHLCV — no strategy-window aggregation. Strategies that
+    need an early-window snapshot (e.g. 09:31~09:40) should fetch raw bars
+    via ``batch_get_minute_bars()`` and run an aggregator from
+    ``src.strategy.aggregators``.
+    """
 
     stock_code: str  # bare 6-digit code
     open_price: float  # day open (first bar's open)
@@ -43,11 +55,6 @@ class TushareQuote:
     low_price: float  # day low
     volume: float  # cumulative volume in shares (股)
     amount: float  # cumulative turnover in yuan
-    # 9:30-9:40 snapshot (aggregated from rt_min_daily bars)
-    early_close: float = 0.0  # last early bar's close (= 9:40 price)
-    early_high: float = 0.0  # max high in 9:30-9:40
-    early_low: float = 0.0  # min low in 9:30-9:40
-    early_volume: float = 0.0  # cumulative volume 9:30-9:40 in shares (股)
 
     @property
     def is_trading(self) -> bool:
@@ -62,8 +69,9 @@ class TushareRealtimeClient:
     Two modes:
     1. batch_get_quotes(): Uses rt_min (batch, 1 bar/stock) for current snapshot.
        Used by as_standard_quote_format() for realtime quotation adapter.
-    2. batch_get_early_quotes(): Uses rt_min_daily (per-stock, all bars) and
-       aggregates 9:30-9:40 bars. Used by momentum scan which needs stable early data.
+    2. batch_get_minute_bars(): Uses rt_min_daily (per-stock, all bars).
+       Returns RAW 1-min bars in stk_mins format. Strategy layer aggregates
+       whatever window it needs (e.g. via EarlyWindowAggregator).
 
     NOTE: preClose is NOT available from either endpoint.
     The caller must supplement it from historical cache.
@@ -182,22 +190,27 @@ class TushareRealtimeClient:
         return quotes
 
     # ------------------------------------------------------------------
-    # rt_min_daily: per-stock full-day bars, aggregated to early snapshot
+    # rt_min_daily: per-stock full-day raw 1-min bars
     # ------------------------------------------------------------------
 
-    async def batch_get_early_quotes(self, stock_codes: list[str]) -> dict[str, TushareQuote]:
+    async def batch_get_minute_bars(
+        self, stock_codes: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
         """
-        Fetch 9:30-9:40 aggregated snapshot for multiple stocks via rt_min_daily.
+        Fetch all 1-min bars for the current trading day via rt_min_daily.
 
         rt_min_daily returns ALL minute bars for the day (single stock per call).
-        This method aggregates bars with time <= 09:40 to produce stable early data
-        that is identical regardless of when the call is made.
+        This method returns RAW bars only — no window aggregation. Strategy
+        services aggregate whichever window they need (e.g. 09:31~09:40) via
+        ``src.strategy.aggregators.EarlyWindowAggregator``.
 
         Args:
             stock_codes: List of bare 6-digit codes
 
         Returns:
-            Dict: stock_code -> TushareQuote with early_* fields populated
+            Dict: stock_code -> list of bar dicts in standard stk_mins format
+                  (``trade_time``, ``open``, ``high``, ``low``, ``close``,
+                  ``vol``, ``amount``). Stocks with no data are omitted.
         """
         if not self._client:
             raise TushareRealtimeError("Client not started — call start() first")
@@ -205,10 +218,10 @@ class TushareRealtimeClient:
         if not stock_codes:
             return {}
 
-        all_quotes: dict[str, TushareQuote] = {}
+        all_bars: dict[str, list[dict[str, Any]]] = {}
         sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
 
-        async def _fetch_one(bare_code: str) -> tuple[str, TushareQuote | None]:
+        async def _fetch_one(bare_code: str) -> tuple[str, list[dict[str, Any]]]:
             ts_code = self._to_ts_code(bare_code)
             async with sem:
                 data = await self._api_call(
@@ -216,8 +229,7 @@ class TushareRealtimeClient:
                     {"ts_code": ts_code, "freq": "1MIN"},
                     fields="time,open,close,high,low,vol,amount",
                 )
-            quote = self._parse_rt_min_daily(bare_code, data)
-            return bare_code, quote
+            return bare_code, self._parse_rt_min_daily_bars(data)
 
         results = await asyncio.gather(
             *[_fetch_one(c) for c in stock_codes], return_exceptions=True
@@ -228,87 +240,50 @@ class TushareRealtimeClient:
                 raise result
             if isinstance(result, BaseException):
                 raise TushareRealtimeError(f"rt_min_daily failed: {result}") from result
-            bare_code, quote = result
-            if quote is not None:
-                all_quotes[bare_code] = quote
+            bare_code, bars = result
+            if bars:
+                all_bars[bare_code] = bars
 
-        logger.info(f"rt_min_daily: fetched {len(all_quotes)}/{len(stock_codes)} stocks")
-        return all_quotes
+        logger.info(f"rt_min_daily: fetched bars for {len(all_bars)}/{len(stock_codes)} stocks")
+        return all_bars
 
     @staticmethod
-    def _parse_rt_min_daily(bare_code: str, data: dict[str, Any]) -> TushareQuote | None:
-        """
-        Parse rt_min_daily response (all bars for one stock) into TushareQuote.
+    def _parse_rt_min_daily_bars(data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Parse rt_min_daily response into a list of raw 1-min bars.
 
-        Produces:
-        - Full-day aggregated OHLCV (open/latest/high/low/volume/amount)
-        - 9:30-9:40 early snapshot (early_close/early_high/early_low/early_volume)
+        Returns bars in standard Tushare ``stk_mins`` format so the same
+        downstream aggregator code works for both live and backtest paths:
+        ``{trade_time, open, high, low, close, vol, amount}``.
         """
         fields = data.get("data", {}).get("fields", [])
         items = data.get("data", {}).get("items", [])
 
         if not fields or not items:
-            return None
+            return []
 
         idx = {f: i for i, f in enumerate(fields)}
-        required = {"open", "close", "high", "low", "vol", "amount"}
+        required = {"time", "open", "close", "high", "low", "vol", "amount"}
         if not required.issubset(idx.keys()):
-            return None
+            return []
 
-        has_time = "time" in idx
+        bars: list[dict[str, Any]] = []
+        for row in items:
+            try:
+                bars.append(
+                    {
+                        "trade_time": row[idx["time"]],
+                        "open": row[idx["open"]],
+                        "high": row[idx["high"]],
+                        "low": row[idx["low"]],
+                        "close": row[idx["close"]],
+                        "vol": row[idx["vol"]],
+                        "amount": row[idx["amount"]],
+                    }
+                )
+            except IndexError:
+                continue
 
-        # Full-day aggregation
-        try:
-            first_open = items[0][idx["open"]]
-            last_close = items[-1][idx["close"]]
-            if not first_open or not last_close:
-                return None
-
-            max_high = max(r[idx["high"]] for r in items if r[idx["high"]] is not None)
-            min_low = min(r[idx["low"]] for r in items if r[idx["low"]] is not None)
-            total_vol = sum(r[idx["vol"]] for r in items if r[idx["vol"]] is not None)
-            total_amount = sum(r[idx["amount"]] for r in items if r[idx["amount"]] is not None)
-        except (ValueError, TypeError, IndexError) as e:
-            logger.warning(f"Failed to aggregate rt_min_daily for {bare_code}: {e}")
-            return None
-
-        # 9:30-9:40 early snapshot
-        early_bars = []
-        if has_time:
-            for r in items:
-                t = str(r[idx["time"]])
-                # Format: "2026-03-17 09:31:00"
-                if " " in t:
-                    t = t.split(" ")[-1]
-                hhmm = t.replace(":", "")[:4]
-                if hhmm <= "0939":
-                    early_bars.append(r)
-
-        if early_bars:
-            e_close = float(early_bars[-1][idx["close"]])
-            e_high = float(max(r[idx["high"]] for r in early_bars if r[idx["high"]] is not None))
-            e_low = float(min(r[idx["low"]] for r in early_bars if r[idx["low"]] is not None))
-            e_vol = float(sum(r[idx["vol"]] for r in early_bars if r[idx["vol"]] is not None))
-        else:
-            # Called before 9:30 or no time field — use whatever we have
-            e_close = float(last_close)
-            e_high = float(max_high) if max_high else 0.0
-            e_low = float(min_low) if min_low else 0.0
-            e_vol = float(total_vol)
-
-        return TushareQuote(
-            stock_code=bare_code,
-            open_price=float(first_open),
-            latest_price=float(last_close),
-            high_price=float(max_high) if max_high else 0.0,
-            low_price=float(min_low) if min_low else 0.0,
-            volume=float(total_vol),
-            amount=float(total_amount),
-            early_close=e_close,
-            early_high=e_high,
-            early_low=e_low,
-            early_volume=e_vol,
-        )
+        return bars
 
     # ------------------------------------------------------------------
     # Response format adapter (used by IQuantHistoricalAdapter)

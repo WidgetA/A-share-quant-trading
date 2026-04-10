@@ -2,15 +2,17 @@
 # Orchestration layer that downloads market data into the storage layer.
 #
 # Reads dependencies via constructor injection only:
-#   - storage:           where to put bytes
-#   - daily_source:      where to fetch daily OHLCV
-#   - minute_source:     where to fetch raw 1-min bars
-#   - metadata_source:   where to fetch trade calendar / suspensions / stock list
-#   - minute_aggregator: how to roll raw bars up into the snapshot we persist
-#   - reporter:          where to send progress + Feishu notifications
+#   - storage:         where to put bytes
+#   - daily_source:    where to fetch daily OHLCV
+#   - minute_source:   where to fetch raw 1-min bars
+#   - metadata_source: where to fetch trade calendar / suspensions / stock list
+#   - reporter:        where to send progress + Feishu notifications
 #
 # This file does NOT touch any network library directly. All upstream calls
 # go through the injected source classes.
+#
+# This file also does NOT know any business windows or aggregation rules —
+# raw 1-min bars are persisted as-is. Strategies aggregate at query time.
 
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ from collections import Counter
 from datetime import date, timedelta
 from typing import Any
 
-from src.data.clients.greptime_storage import GreptimeBacktestStorage, MinuteSnapshot
+from src.data.clients.greptime_storage import GreptimeBacktestStorage
 from src.data.services.cache_progress_reporter import (
     CacheProgressReporter,
     Phase,
@@ -31,7 +33,6 @@ from src.data.services.cache_progress_reporter import (
 from src.data.sources.tsanghi_daily_source import TsanghiDailySource
 from src.data.sources.tushare_metadata_source import TushareMetadataSource
 from src.data.sources.tushare_minute_source import TushareMinuteSource
-from src.strategy.aggregators import MinuteAggregatorProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ class CachePipeline:
         3. fetch trade calendar + sync stock_list baseline
         4. download daily OHLCV per trading day (with resume)
         5. backfill daily gaps (compare daily count vs stock_list)
-        6. download 1-min bars per stock and aggregate into snapshots (with resume)
+        6. download raw 1-min bars per stock (with resume)
         7. final verification + missing-minute report
     """
 
@@ -100,14 +101,12 @@ class CachePipeline:
         daily_source: TsanghiDailySource,
         minute_source: TushareMinuteSource,
         metadata_source: TushareMetadataSource,
-        minute_aggregator: MinuteAggregatorProtocol,
         reporter: CacheProgressReporter,
     ) -> None:
         self.storage = storage
         self.daily_source = daily_source
         self.minute_source = minute_source
         self.metadata_source = metadata_source
-        self.minute_aggregator = minute_aggregator
         self.reporter = reporter
 
     # ------------------------------------------------------------------
@@ -630,30 +629,27 @@ class CachePipeline:
             batch_ok = 0
             batch_empty = len(batch.empty)
             for code, raw_bars in batch.ok.items():
-                snaps = self.minute_aggregator.aggregate(raw_bars)
-                if not snaps:
-                    no_data_reasons[code] = f"no_window: {len(raw_bars)}bars"
-                    batch_empty += 1
-                    done += 1
-                    continue
+                # Drop bars that fall on a suspended (stock, date) pair. The
+                # storage layer rejects zero-OHLC bars, so we MUST strip them
+                # before insert — otherwise a single suspended date in the
+                # batch would crash the whole download.
+                kept_bars: list[dict[str, Any]] = []
+                for bar in raw_bars:
+                    trade_time = str(bar.get("trade_time", ""))
+                    if len(trade_time) < 10:
+                        continue
+                    bar_date = _parse_date(trade_time[:10])
+                    if (code, bar_date) in suspended_pairs:
+                        continue
+                    kept_bars.append(bar)
 
-                # Drop suspended dates from the snapshot
-                filtered = {
-                    d: s for d, s in snaps.items() if (code, _parse_date(d)) not in suspended_pairs
-                }
-                if not filtered:
+                if not kept_bars:
                     no_data_reasons[code] = "all_dates_suspended"
                     batch_empty += 1
                     done += 1
                     continue
 
-                for d, snap in filtered.items():
-                    await self.storage.insert_minute_snapshot(
-                        code,
-                        _parse_date(d),
-                        snap if isinstance(snap, MinuteSnapshot) else MinuteSnapshot(*snap),
-                    )
-
+                await self.storage.insert_minute_bars(code, kept_bars)
                 batch_ok += 1
                 done += 1
 

@@ -273,8 +273,6 @@ class CacheProgressReporter:
         return {
             "api_empty": "API返回空数据",
             "api_error": "API报错",
-            "no_0931_0940": "有数据但无09:31~09:40",
-            "no_window": "聚合后无窗口数据",
             "all_dates_suspended": "全部日期均为停牌",
             "unknown_exchange": "无法识别交易所",
             "cancelled": "用户取消",

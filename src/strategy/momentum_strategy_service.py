@@ -41,11 +41,17 @@ async def build_snapshots_from_storage(storage: Any, date_str: str) -> dict[str,
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
 
+    Reads RAW 1-min bars from storage and aggregates them at query time via
+    the strategy-layer ``EarlyWindowAggregator``. The data layer never knows
+    which window we use.
+
     Raises:
         MinuteDataMissingError: if minute data coverage < 50% of daily candidates.
     """
+    from src.strategy.aggregators import EarlyWindowAggregator
     from src.strategy.models import PriceSnapshot
 
+    trade_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     all_daily = await storage.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
 
@@ -53,46 +59,53 @@ async def build_snapshots_from_storage(storage: Any, date_str: str) -> dict[str,
         logger.warning(f"build_snapshots_from_storage: no data for date_str='{date_str}'")
         return snapshots
 
-    daily_candidates = 0
-    minute_hits = 0
-
+    # Step 1: filter to candidates (gap > -0.5%) using daily data only
+    candidates: dict[str, tuple[float, float]] = {}
     for code, day in all_daily.items():
         if day.is_suspended:
             continue
-
         open_price = day.open
         prev_close = day.preClose
         if prev_close <= 0 or open_price <= 0:
             continue
-
-        open_gain = (open_price - prev_close) / prev_close * 100
-        if open_gain < -0.5:
+        if (open_price - prev_close) / prev_close * 100 < -0.5:
             continue
+        candidates[code] = (open_price, prev_close)
 
-        daily_candidates += 1
+    daily_candidates = len(candidates)
+    if daily_candidates == 0:
+        return snapshots
 
-        snapshot = await storage.get_minute_snapshot(code, date_str)
-        if snapshot is None:
+    # Step 2: batch-fetch raw bars for ALL candidates in ONE query, then
+    # aggregate in-memory. This replaces N per-stock round-trips.
+    bars_by_code = await storage.get_minute_bars_for_codes_on_day(
+        list(candidates.keys()), trade_date
+    )
+    aggregator = EarlyWindowAggregator()
+    minute_hits = 0
+
+    for code, (open_price, prev_close) in candidates.items():
+        raw_bars = bars_by_code.get(code, [])
+        if not raw_bars:
             continue
-
+        snaps_by_day = aggregator.aggregate(raw_bars)
+        snap = snaps_by_day.get(date_str)
+        if snap is None or snap.close <= 0:
+            continue
         minute_hits += 1
-
-        if snapshot.close <= 0:
-            continue
-
         snapshots[code] = PriceSnapshot(
             stock_code=code,
             stock_name="",
             open_price=open_price,
             prev_close=prev_close,
-            latest_price=snapshot.close,
-            early_volume=snapshot.cum_volume,
-            high_price=snapshot.max_high,
-            low_price=snapshot.min_low,
+            latest_price=snap.close,
+            early_volume=snap.cum_volume,
+            high_price=snap.max_high,
+            low_price=snap.min_low,
         )
 
     # Trading safety: halt if minute data is severely insufficient
-    if daily_candidates > 0 and minute_hits < daily_candidates * 0.5:
+    if minute_hits < daily_candidates * 0.5:
         coverage_pct = round(minute_hits / daily_candidates * 100, 1)
         raise MinuteDataMissingError(
             f"{date_str} 分钟数据严重不足: 仅 {minute_hits}/{daily_candidates} "
@@ -109,18 +122,46 @@ async def _build_live_snapshots(
     storage: Any,
     trade_calendar: list[date] | None = None,
 ) -> dict[str, Any]:
-    """Build PriceSnapshot dict from live Tushare quotes + prev_close.
+    """Build PriceSnapshot dict from live Tushare bars + prev_close.
+
+    Pulls raw 1-min bars from rt_min_daily and aggregates the 09:31~09:40
+    window in the strategy layer via ``EarlyWindowAggregator`` (same code
+    path as the backtest pipeline).
 
     Two prev_close strategies:
     - With trade_calendar: exact previous trading day → GreptimeDB → tsanghi fallback
     - Without trade_calendar: look back 1-7 days in GreptimeDB storage
     """
+    from src.strategy.aggregators import EarlyWindowAggregator
     from src.strategy.models import PriceSnapshot
 
-    quotes = await realtime_client.batch_get_early_quotes(universe)
-    logger.info(f"Momentum live scan: got {len(quotes)} early quotes")
+    bars_by_code = await realtime_client.batch_get_minute_bars(universe)
+    logger.info(f"Momentum live scan: got bars for {len(bars_by_code)} stocks")
 
-    if not quotes:
+    if not bars_by_code:
+        return {}
+
+    # Aggregate the 09:31~09:40 window (strategy layer owns the window).
+    aggregator = EarlyWindowAggregator()
+    early: dict[str, tuple[float, Any]] = {}  # code -> (day_open, Snapshot)
+    for code, bars in bars_by_code.items():
+        if not bars:
+            continue
+        try:
+            day_open = float(bars[0].get("open") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if day_open <= 0:
+            continue
+        snaps_by_day = aggregator.aggregate(bars)
+        if not snaps_by_day:
+            continue
+        snap = next(iter(snaps_by_day.values()))
+        if snap.close <= 0:
+            continue
+        early[code] = (day_open, snap)
+
+    if not early:
         return {}
 
     # --- Resolve prev_close ---
@@ -143,7 +184,7 @@ async def _build_live_snapshots(
                     prev_closes[code] = close_val
 
         # Source 2: tsanghi API fallback (if storage coverage < 80%)
-        if len(prev_closes) < len(quotes) * 0.8:
+        if len(prev_closes) < len(early) * 0.8:
             from src.data.clients.tsanghi_client import TsanghiClient
 
             ts_client = TsanghiClient()
@@ -188,21 +229,19 @@ async def _build_live_snapshots(
 
     # --- Build PriceSnapshots ---
     price_snapshots: dict[str, PriceSnapshot] = {}
-    for code, quote in quotes.items():
-        if not quote.is_trading:
-            continue
+    for code, (day_open, snap) in early.items():
         prev_close = prev_closes.get(code, 0.0)
         if prev_close <= 0:
             continue
         price_snapshots[code] = PriceSnapshot(
             stock_code=code,
             stock_name="",
-            open_price=quote.open_price,
+            open_price=day_open,
             prev_close=prev_close,
-            latest_price=quote.early_close,
-            early_volume=quote.early_volume,
-            high_price=quote.early_high,
-            low_price=quote.early_low,
+            latest_price=snap.close,
+            early_volume=snap.cum_volume,
+            high_price=snap.max_high,
+            low_price=snap.min_low,
         )
 
     return price_snapshots
