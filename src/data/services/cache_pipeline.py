@@ -628,7 +628,9 @@ class CachePipeline:
             first_code = codes_to_download[done] if done < total else codes_to_download[-1]
             logger.info(
                 "[minute-diag] API batch %d/%d (%s), writing DB",
-                done, total, first_code,
+                done,
+                total,
+                first_code,
             )
             if codes_to_download:
                 await self.reporter.progress(Phase.MINUTE_ACTIVE, done, total, first_code)
