@@ -742,9 +742,7 @@ class CachePipeline:
             codes_list = sorted(missing_codes)
             filled = 0
 
-            async for batch in self.minute_source.fetch_batches(
-                codes_list, gap_date, gap_date
-            ):
+            async for batch in self.minute_source.fetch_batches(codes_list, gap_date, gap_date):
                 self._raise_if_cancelled(cancel_event, "Minute backfill cancelled by user")
 
                 for code in batch.unknown_exchange:
