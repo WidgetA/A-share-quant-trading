@@ -565,8 +565,9 @@ def create_momentum_router() -> APIRouter:
                 return f"同步股票列表: {current}/{total} 天"
             elif phase == "daily_backfill":
                 if detail:
-                    return f"日线补全 {current}/{total}: {detail}"
-                return f"日线补全: {current}/{total} 天"
+                    label = "日线检查" if " +0只" in detail else "日线补全"
+                    return f"{label} {current}/{total}: {detail}"
+                return f"日线检查: {current}/{total} 天"
             elif phase == "minute_active":
                 return f"正在请求: {detail} 起 ({current}/{total} 已完成)"
             elif phase == "minute":

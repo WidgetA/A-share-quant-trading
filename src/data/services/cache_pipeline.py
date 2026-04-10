@@ -625,8 +625,9 @@ class CachePipeline:
         ):
             self._raise_if_cancelled(cancel_event, "Minute download cancelled by user")
 
+            first_code = codes_to_download[done] if done < total else codes_to_download[-1]
+            logger.info("[minute-diag] API returned batch %d/%d (%s), writing DB", done, total, first_code)
             if codes_to_download:
-                first_code = codes_to_download[done] if done < total else codes_to_download[-1]
                 await self.reporter.progress(Phase.MINUTE_ACTIVE, done, total, first_code)
 
             for code in batch.unknown_exchange:
@@ -681,6 +682,7 @@ class CachePipeline:
                 parts.append(f"写入{batch_ok}只")
             if batch_empty:
                 parts.append(f"无数据{batch_empty}只")
+            logger.info("[minute-diag] DB writes done batch %d/%d, requesting next", done, total)
             await self.reporter.progress(
                 Phase.MINUTE, done, total, ", ".join(parts) if parts else ""
             )
