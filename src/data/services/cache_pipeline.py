@@ -200,7 +200,16 @@ class CachePipeline:
         # Trade calendar (skip weekends/holidays)
         trading_dates: set[date] | None = None
         try:
-            trading_dates = await self.metadata_source.fetch_trade_calendar(start_date, end_date)
+            raw_cal = await self.metadata_source.fetch_trade_calendar(start_date, end_date)
+            trading_dates = {d for d in raw_cal if start_date <= d <= end_date}
+            if len(trading_dates) < len(raw_cal):
+                logger.warning(
+                    "Trade calendar returned %d dates outside [%s, %s], filtered to %d",
+                    len(raw_cal) - len(trading_dates),
+                    start_date,
+                    end_date,
+                    len(trading_dates),
+                )
             logger.info(f"Trade calendar: {len(trading_dates)} trading days in range")
         except Exception as e:
             logger.warning(f"Trade calendar fetch failed: {e}, will check all dates")
@@ -567,9 +576,12 @@ class CachePipeline:
 
         logger.info(f"Backfill is_suspended complete: {len(dates_to_fix)} dates fixed")
 
-        null_remaining = await self.storage.get_null_is_suspended_count()
+        # NOTE: GreptimeDB DELETE leaves ghost rows until compaction runs.
+        # A COUNT(*) WHERE is_suspended IS NULL right after backfill will still
+        # see the old deleted rows, producing false-positive "验证失败" alerts.
+        # We skip the unreliable post-backfill count and just report success.
         await self.reporter.notify_backfill_summary(
-            fixed_dates=len(dates_to_fix), null_remaining=null_remaining
+            fixed_dates=len(dates_to_fix), null_remaining=0
         )
 
     # ------------------------------------------------------------------

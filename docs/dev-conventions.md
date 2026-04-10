@@ -308,14 +308,22 @@ Database client does no in-memory caching. One row written = one row dropped fro
 
 ### Cache pipeline phase order
 
-`CachePipeline.download_prices()` runs the following phases in order. Resume / audit semantics are documented per-phase:
+`CachePipeline.download_prices()` runs the following phases in order:
 
-| Phase | Resume granularity | Audit / backfill |
-|-------|--------------------|------------------|
-| `daily` | by **day** — `get_existing_daily_dates()` skips any date that has at least one row in `backtest_daily` | `_backfill_daily_gaps()` compares per-day COUNT(stock_list) vs COUNT(backtest_daily) and refetches the diff codes |
-| `minute` | by **stock** — `get_existing_minute_codes(start, end)` skips any code that has *any* bar in the range | `_backfill_minute_gaps()` runs `audit_minute_gaps_in_range()`: per day, diffs the active daily code set against the distinct minute code set, then refetches each missing `(day, code)` pair via single-day `stk_mins` requests |
+| # | Phase | What it does |
+|---|-------|-------------|
+| 1 | `compact` | `storage.compact_tables()` — GreptimeDB housekeeping |
+| 2 | `backfill` | One-time fixup: DELETE + re-INSERT rows where `is_suspended IS NULL` (uses Tushare `suspend_d`). Skipped when no NULL rows remain |
+| 3 | `stock_list` | Fetch trade calendar (with defensive range filter), then sync `bak_basic` stock list for each trading day not yet cached |
+| 4 | `daily` | Download daily OHLCV per trading day. Resume by **day** — `get_existing_daily_dates()` skips dates already present |
+| 5 | `daily_backfill` | Audit: compare per-day COUNT(stock_list) vs COUNT(backtest_daily), refetch the diff codes |
+| 6 | `minute` | Download raw 1-min bars per stock. Resume by **stock** — `get_existing_minute_codes(start, end)` skips any code with *any* bar in range |
+| 7 | `minute_backfill` | Audit: `audit_minute_gaps_in_range()` diffs active daily codes vs distinct minute codes per day, refetches missing `(day, code)` pairs via single-day `stk_mins` |
+| 8 | `download` | Final verification + missing-minute Feishu report |
 
 The two-phase minute design exists because Tushare's `stk_mins` is a per-stock API: the natural unit of one call is "one stock × range", so the main download uses per-stock resume for throughput. The per-day audit phase then catches any holes the coarse resume cannot detect — e.g. a stock that has bars on most days but is missing one transient-failure day.
+
+**Pre-download integrity check** (`check_data_integrity`) runs before the pipeline starts. `null_is_suspended` is classified as **warning** (not error) because Phase 2 auto-repairs it. Only truly unfixable issues (negative prices, NULL OHLC, etc.) are `error`-level and halt the download.
 
 ## Environment Management (uv)
 
