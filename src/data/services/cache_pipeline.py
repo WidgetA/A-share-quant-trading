@@ -626,7 +626,10 @@ class CachePipeline:
             self._raise_if_cancelled(cancel_event, "Minute download cancelled by user")
 
             first_code = codes_to_download[done] if done < total else codes_to_download[-1]
-            logger.info("[minute-diag] API returned batch %d/%d (%s), writing DB", done, total, first_code)
+            logger.info(
+                "[minute-diag] API batch %d/%d (%s), writing DB",
+                done, total, first_code,
+            )
             if codes_to_download:
                 await self.reporter.progress(Phase.MINUTE_ACTIVE, done, total, first_code)
 
