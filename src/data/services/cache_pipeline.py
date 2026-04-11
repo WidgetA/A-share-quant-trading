@@ -246,8 +246,7 @@ class CachePipeline:
             await self._download_one_daily_date(day, prev_close_map, i + 1, total)
 
         logger.info(
-            f"tsanghi daily download: {total} new trading days "
-            f"in [{start_date} ~ {end_date}]"
+            f"tsanghi daily download: {total} new trading days in [{start_date} ~ {end_date}]"
         )
 
         # Audit & backfill: compare stock_list vs daily count, fill the gaps
