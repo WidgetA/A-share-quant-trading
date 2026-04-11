@@ -423,28 +423,9 @@ class CachePipeline:
     # ------------------------------------------------------------------
 
     async def _backfill_daily_gaps(self, cancel_event: CancelChecker) -> int:
-        all_gaps = await self.storage.audit_daily_gaps()
-        if not all_gaps:
-            return 0
-
-        # Skip dates where the gap is tiny (< 1%) — those missing stocks
-        # are almost certainly absent from tsanghi and will never be filled,
-        # so retrying just wastes API calls.
-        gaps = [(d, exp, act) for d, exp, act in all_gaps if exp == 0 or (exp - act) / exp >= 0.01]
+        gaps = await self.storage.audit_daily_gaps()
         if not gaps:
-            skipped = len(all_gaps)
-            logger.info(
-                "backfill_daily_gaps: %d dates have tiny gaps (<1%%), skipping all",
-                skipped,
-            )
             return 0
-
-        if len(gaps) < len(all_gaps):
-            logger.info(
-                "backfill_daily_gaps: %d dates have significant gaps, %d skipped (<1%%)",
-                len(gaps),
-                len(all_gaps) - len(gaps),
-            )
 
         logger.info("backfill_daily_gaps: %d dates to backfill", len(gaps))
         backfilled = 0
@@ -465,7 +446,8 @@ class CachePipeline:
                 logger.warning("backfill: suspend_d failed for %s: %s, skipping date", date_str, e)
                 continue
 
-            records, _ = await self.daily_source.fetch_day(gap_date)
+            records, failed_exchanges = await self.daily_source.fetch_day(gap_date)
+            api_count = len(records)
             new_count = 0
 
             for raw in records:
@@ -487,7 +469,15 @@ class CachePipeline:
                     prev_close_map[ticker] = rec["close"]
                 new_count += 1
 
+            backfilled += 1
+
             if new_count:
+                await self.reporter.progress(
+                    Phase.DAILY_BACKFILL,
+                    i + 1,
+                    len(gaps),
+                    f"{date_str} +{new_count}只 ({actual}→{actual + new_count}/{expected})",
+                )
                 logger.info(
                     "backfill: %s added %d stocks (was %d, expected %d)",
                     date_str,
@@ -495,14 +485,39 @@ class CachePipeline:
                     actual,
                     expected,
                 )
-
-            backfilled += 1
-            await self.reporter.progress(
-                Phase.DAILY_BACKFILL,
-                i + 1,
-                len(gaps),
-                f"{date_str} +{new_count}只 ({actual}→{actual + new_count}/{expected})",
-            )
+            else:
+                missing_n = expected - actual
+                api_codes = {r["ticker"] for r in records}
+                all_known = existing_codes | api_codes
+                # We can't easily query stock_list codes here, but we can
+                # log which codes the API returned that DB didn't have
+                # (should be 0 since new_count==0) and what DB+API covers.
+                fail_part = ""
+                if failed_exchanges:
+                    fail_part = f", API失败: {'; '.join(failed_exchanges)}"
+                msg = (
+                    f"{date_str} +0 — API返回{api_count}只, "
+                    f"DB已有{actual}只, 期望{expected}只, "
+                    f"缺{missing_n}只(API也没有){fail_part}"
+                )
+                remaining = len(gaps) - i - 1
+                await self.reporter.progress(
+                    Phase.DAILY_BACKFILL,
+                    len(gaps),
+                    len(gaps),
+                    f"{msg}, 停止补全(剩余 {remaining} 天同理)",
+                )
+                logger.info("backfill: %s", msg)
+                logger.info(
+                    "backfill: DB覆盖 %d 只, API覆盖 %d 只, 并集 %d 只, "
+                    "stock_list期望 %d 只 — 差值 %d 只在两个数据源都不存在",
+                    len(existing_codes),
+                    api_count,
+                    len(all_known),
+                    expected,
+                    expected - len(all_known),
+                )
+                break
 
         logger.info("backfill_daily_gaps: done, %d dates backfilled", backfilled)
         return backfilled

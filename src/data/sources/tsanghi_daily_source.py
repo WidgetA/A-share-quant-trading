@@ -74,8 +74,9 @@ class TsanghiDailySource:
             ``None`` when tsanghi returns the row but with empty prices —
             callers decide how to handle this.
 
-            ``failed_exchanges`` lists exchange codes whose API call failed
-            (so the caller can decide whether the date is partial).
+            ``failed_exchanges`` lists exchange codes whose API call failed,
+            each entry formatted as ``"EXCHANGE: error detail"`` so callers
+            can surface the original error reason.
         """
         date_str = trade_date.strftime("%Y-%m-%d")
         records: list[dict[str, Any]] = []
@@ -85,7 +86,7 @@ class TsanghiDailySource:
             try:
                 rows = await self._client.daily_latest(exchange, date_str)
             except RuntimeError as e:
-                failed.append(exchange)
+                failed.append(f"{exchange}: {e}")
                 logger.warning("tsanghi daily_latest(%s, %s) FAILED: %s", exchange, date_str, e)
                 continue
 
