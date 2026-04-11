@@ -597,7 +597,6 @@ def create_momentum_router() -> APIRouter:
 
     async def _run_download(active_dl, storage, pipeline, start_date, end_date) -> None:
         """Main download coroutine. Updates active_dl.state on exit."""
-        import time as _time
 
         def on_progress(phase: str, current: int, total: int, detail: str = "") -> None:
             if phase == "status":
