@@ -398,7 +398,8 @@ function startCacheDownloadFromUI() {
                         fill.style.width = pct + '%';
                         progText.textContent = `${pct}% — ${d.message}`;
                         // Log on phase change, every 10%, or every backfill update
-                        if (d.phase !== lastLoggedPhase || pct >= lastLoggedPct + 10 || d.phase === 'backfill') {
+                        const isBackfill = d.phase && d.phase.includes('backfill');
+                        if (d.phase !== lastLoggedPhase || pct >= lastLoggedPct + 10 || isBackfill) {
                             dlLog(d.message);
                             lastLoggedPhase = d.phase;
                             lastLoggedPct = pct;

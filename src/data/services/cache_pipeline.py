@@ -827,11 +827,19 @@ class CachePipeline:
                     await self.storage.insert_minute_bars(code, kept_bars)
                     filled += 1
 
+                # Report per-batch so watchdog sees activity within a day
+                await self.reporter.progress(
+                    Phase.MINUTE_BACKFILL,
+                    i + 1,
+                    total_days,
+                    f"{date_str} 补 {filled}/{len(missing_codes)} 只",
+                )
+
             await self.reporter.progress(
                 Phase.MINUTE_BACKFILL,
                 i + 1,
                 total_days,
-                f"{date_str} 补 {filled}/{len(missing_codes)} 只",
+                f"{date_str} 补 {filled}/{len(missing_codes)} 只 ✓",
             )
             logger.info(
                 "minute backfill %s: filled %d/%d codes",
