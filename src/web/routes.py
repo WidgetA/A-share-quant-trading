@@ -14,8 +14,12 @@
 # POST /api/momentum/backtest          - Run single-day momentum scan (JSON)
 # POST /api/momentum/combined-analysis - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status    - Get intraday monitor status (JSON)
-# POST /api/momentum/tsanghi-prepare   - Pre-download tsanghi cache (SSE)
-# GET  /api/momentum/tsanghi-cache-status - Cache status (JSON)
+# POST /api/momentum/tsanghi-prepare      - Start background download task (JSON)
+# GET  /api/momentum/tsanghi-stream       - SSE stream for task progress (reconnectable)
+# GET  /api/momentum/tsanghi-task-status  - Current task state (JSON)
+# POST /api/momentum/tsanghi-cancel       - Cancel running task (JSON)
+# POST /api/momentum/tsanghi-clear        - Clear FAILED state (JSON)
+# GET  /api/momentum/tsanghi-cache-status - Cache data coverage status (SSE)
 
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from src.common.pending_store import PendingConfirmationStore
+from src.data.services.download_task import DownloadState
 
 logger = logging.getLogger(__name__)
 
@@ -491,11 +496,253 @@ def create_momentum_router() -> APIRouter:
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
+    # ── Download task helpers ────────────────────────────────────────────────
+
+    def _fmt_progress(phase: str, current: int, total: int, detail: str = "") -> str:
+        if phase == "integrity_check":
+            if detail:
+                return f"完整性检查: {detail}"
+            return f"数据完整性检查中... ({current}/{total})"
+        elif phase == "init":
+            return "正在初始化..."
+        elif phase == "daily_resume":
+            if current > 0:
+                return f"日线已缓存 {current} 天，检查剩余..."
+            return "检查日线缓存..."
+        elif phase == "daily":
+            if detail:
+                return f"日线 {current}/{total}: {detail}"
+            return f"下载日线数据: {current}/{total} 天"
+        elif phase == "minute_resume":
+            if detail:
+                return detail
+            remaining = total - current
+            if remaining == 0:
+                return f"分钟线粗检: {current} 只已有数据，逐日细检中..."
+            if current > 0:
+                return f"分钟线粗检: {current}/{total} 只已有数据，需全量下载 {remaining} 只"
+            return f"分钟线需下载 {total} 只"
+        elif phase == "backfill":
+            if detail:
+                return f"回填 {current}/{total}: {detail}"
+            return f"回填停牌标记: {current}/{total} 天"
+        elif phase == "stock_list":
+            if detail:
+                return f"同步股票列表 {current}/{total}: {detail}"
+            return f"同步股票列表: {current}/{total} 天"
+        elif phase == "daily_backfill":
+            if detail:
+                label = "日线检查" if " +0只" in detail else "日线补全"
+                return f"{label} {current}/{total}: {detail}"
+            return f"日线检查: {current}/{total} 天"
+        elif phase == "minute_active":
+            return f"正在请求: {detail} 起 ({current}/{total} 已完成)"
+        elif phase == "minute":
+            if detail:
+                return f"分钟线 {current}/{total}: {detail}"
+            return f"分钟线 {current}/{total}"
+        elif phase == "minute_backfill":
+            if detail:
+                return f"分钟线补全 {current}/{total}: {detail}"
+            return f"分钟线补全: {current}/{total} 天"
+        elif phase == "download":
+            return f"下载完成: 共 {total} 只股票"
+        elif phase == "post_integrity":
+            if current == 0:
+                return "下载后完整性检查通过"
+            return f"下载后完整性检查: {current} 个警告"
+        return f"{phase}: {current}/{total}"
+
+    def _phase_to_overall(phase: str, current: int, total: int) -> float:
+        if phase == "integrity_check":
+            return 0.01 + 0.04 * (current / total) if total > 0 else 0.01
+        elif phase == "init":
+            return 0.05
+        elif phase in ("daily_resume", "backfill"):
+            return 0.1 + 0.02 * (current / total) if total > 0 else 0.1
+        elif phase == "stock_list":
+            return 0.12 + 0.02 * (current / total) if total > 0 else 0.12
+        elif phase == "daily_backfill":
+            return 0.14 + 0.02 * (current / total) if total > 0 else 0.14
+        elif phase == "daily":
+            return 0.16 + 0.04 * (current / total) if total > 0 else 0.16
+        elif phase in ("minute_resume", "minute_active", "minute"):
+            return 0.2 + 0.7 * (current / total) if total > 0 else 0.2
+        elif phase == "minute_backfill":
+            return 0.9 + 0.05 * (current / total) if total > 0 else 0.9
+        return 1.0
+
+    async def _run_watchdog(active_dl, download_task: asyncio.Task) -> None:
+        """Cancel the download task if no progress for 10 minutes."""
+        NO_PROGRESS_TIMEOUT_SEC = 600
+        import time as _time
+        while not download_task.done():
+            await asyncio.sleep(30)
+            if download_task.done():
+                break
+            silent = _time.monotonic() - active_dl.last_event_at[0]
+            if silent >= NO_PROGRESS_TIMEOUT_SEC:
+                logger.error(
+                    "Download watchdog: no progress for %.0fs, force-cancelling", silent
+                )
+                active_dl.cancel_event.set()
+                download_task.cancel()
+                active_dl.broadcast(
+                    {
+                        "type": "error",
+                        "message": f"下载卡死: {silent:.0f}s 无进度，已强制终止",
+                    }
+                )
+                break
+
+    async def _run_download(active_dl, storage, pipeline, start_date, end_date) -> None:
+        """Main download coroutine. Updates active_dl.state on exit."""
+        import time as _time
+
+        def on_progress(phase: str, current: int, total: int, detail: str = "") -> None:
+            if phase == "status":
+                active_dl.broadcast({"type": "status", "message": detail})
+                return
+            if phase == "post_integrity":
+                warnings = [w for w in detail.split("\n") if w] if detail else []
+                active_dl.broadcast(
+                    {
+                        "type": "integrity_report",
+                        "issues": [
+                            {"level": "warning", "message": w, "count": 0, "samples": []}
+                            for w in warnings
+                        ],
+                        "message": (
+                            f"下载后完整性检查: {len(warnings)} 个警告"
+                            if warnings
+                            else "下载后完整性检查通过"
+                        ),
+                    }
+                )
+                return
+            overall = _phase_to_overall(phase, current, total)
+            active_dl.broadcast(
+                {
+                    "type": "progress",
+                    "progress": overall,
+                    "message": _fmt_progress(phase, current, total, detail),
+                    "phase": phase,
+                }
+            )
+
+        try:
+            # Pre-download integrity check
+            on_progress("integrity_check", 0, 1, "开始检查...")
+            issues = await storage.check_data_integrity()
+            on_progress("integrity_check", 1, 1, "检查完成")
+            if issues:
+                error_count = sum(1 for i in issues if i["level"] == "error")
+                warn_count = sum(1 for i in issues if i["level"] == "warning")
+                parts = []
+                if error_count:
+                    parts.append(f"{error_count} 个错误")
+                if warn_count:
+                    parts.append(f"{warn_count} 个警告")
+                active_dl.broadcast(
+                    {
+                        "type": "integrity_report",
+                        "issues": [
+                            {
+                                "level": i["level"],
+                                "message": i["message"],
+                                "count": i["count"],
+                            }
+                            for i in issues
+                        ],
+                        "message": f"完整性检查: {', '.join(parts)}",
+                    }
+                )
+                if error_count:
+                    error_msgs = [i["message"] for i in issues if i["level"] == "error"]
+                    err_text = (
+                        "数据完整性检查失败，已停止下载。请人工处理后重试:\n\n"
+                        + "\n\n".join(error_msgs)
+                    )
+                    active_dl.error_msg = err_text
+                    active_dl.state = DownloadState.FAILED
+                    active_dl.broadcast({"type": "error", "message": err_text})
+                    return
+            else:
+                active_dl.broadcast(
+                    {
+                        "type": "integrity_report",
+                        "issues": [],
+                        "message": "数据完整性检查通过",
+                    }
+                )
+
+            counts = await pipeline.download_prices(
+                start_date,
+                end_date,
+                progress_cb=on_progress,
+                cancel_event=active_dl.cancel_event,
+            )
+            # Success: broadcast complete event then clear active task
+            active_dl.broadcast(
+                {
+                    "type": "complete",
+                    "daily_count": counts.get("daily_count", 0),
+                    "minute_count": counts.get("minute_count", 0),
+                    "verified": counts.get("verified", False),
+                    "verify_msg": counts.get("verify_msg", ""),
+                    "cached": False,
+                }
+            )
+            try:
+                await pipeline.reporter.notify_download_lifecycle(
+                    "completed",
+                    f"日期: {active_dl.start_date} ~ {active_dl.end_date}",
+                    f"日线: {counts.get('daily_count', 0)} 只 | "
+                    f"分钟线: {counts.get('minute_count', 0)} 只",
+                )
+            except Exception:
+                logger.warning("Failed to send completion notice", exc_info=True)
+
+        except asyncio.CancelledError:
+            active_dl.cancel_event.set()
+            active_dl.broadcast({"type": "cancelled", "message": "下载已取消"})
+            try:
+                await pipeline.reporter.notify_download_lifecycle(
+                    "cancelled",
+                    f"日期: {active_dl.start_date} ~ {active_dl.end_date}",
+                )
+            except Exception:
+                logger.warning("Failed to send cancel notice", exc_info=True)
+            raise
+
+        except Exception as e:
+            err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            logger.error("Cache download failed: %s", err_msg, exc_info=True)
+            active_dl.error_msg = err_msg[:300]
+            active_dl.state = DownloadState.FAILED
+            active_dl.broadcast({"type": "error", "message": err_msg[:300]})
+            try:
+                await pipeline.reporter.notify_download_lifecycle(
+                    "error",
+                    f"日期: {active_dl.start_date} ~ {active_dl.end_date}",
+                    err_msg,
+                )
+            except Exception:
+                logger.warning("Failed to send error notice", exc_info=True)
+
+    # ── Routes ───────────────────────────────────────────────────────────────
+
     @router.post("/api/momentum/tsanghi-prepare")
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
-        """Pre-download backtest data as SSE stream (incremental)."""
-        # Check tokens — most common misconfiguration on new servers
+        """Start a background download task (or report cached/already-running).
+
+        Returns JSON immediately; progress is observed via GET tsanghi-stream.
+        """
+        import threading
+        import time
+
         from src.common.config import get_tsanghi_token_source
+        from src.data.services.download_task import ActiveDownload
 
         if get_tsanghi_token_source() == "not_configured":
             raise HTTPException(
@@ -514,403 +761,184 @@ def create_momentum_router() -> APIRouter:
         if storage is None or pipeline is None:
             raise HTTPException(status_code=503, detail="GreptimeDB 缓存未连接")
 
-        # Check if already covered (boundaries + minute gaps)
+        # Already running? Return current task info instead of starting a new one.
+        existing = getattr(request.app.state, "active_download", None)
+        if existing is not None and existing.state == DownloadState.RUNNING:
+            return {
+                "state": "running",
+                "start_date": existing.start_date,
+                "end_date": existing.end_date,
+                "message": "下载任务已在运行中",
+            }
+
+        # Already cached (and not force-refresh)?
         if not body.force:
             gaps = await storage.missing_ranges(start_date, end_date)
             if not gaps:
                 d_count = await storage.get_daily_stock_count()
                 m_count = await storage.get_minute_stock_count()
+                return {
+                    "state": "cached",
+                    "daily_count": d_count,
+                    "minute_count": m_count,
+                }
 
-                async def cached_stream():
-                    msg = {
-                        "type": "complete",
-                        "daily_count": d_count,
-                        "minute_count": m_count,
-                        "cached": True,
-                    }
-                    yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+        # Build the ActiveDownload object (no asyncio_task yet — set below).
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
 
-                return StreamingResponse(cached_stream(), media_type="text/event-stream")
+        last_event_at = [time.monotonic()]
+        cancel_event = threading.Event()
+        active_dl = ActiveDownload(
+            state=DownloadState.RUNNING,
+            asyncio_task=None,      # filled in below
+            watchdog_task=None,     # filled in below
+            cancel_event=cancel_event,
+            log_buffer=__import__("collections").deque(maxlen=300),
+            last_event_at=last_event_at,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            started_at=_dt.now(_ZI("Asia/Shanghai")),
+        )
 
-        # Download missing data (real-time progress via asyncio.Queue)
-        def _fmt_progress(phase: str, current: int, total: int, detail: str = "") -> str:
-            if phase == "integrity_check":
-                if detail:
-                    return f"完整性检查: {detail}"
-                return f"数据完整性检查中... ({current}/{total})"
-            elif phase == "init":
-                return "正在初始化..."
-            elif phase == "daily_resume":
-                if current > 0:
-                    return f"日线已缓存 {current} 天，检查剩余..."
-                return "检查日线缓存..."
-            elif phase == "daily":
-                if detail:
-                    return f"日线 {current}/{total}: {detail}"
-                return f"下载日线数据: {current}/{total} 天"
-            elif phase == "minute_resume":
-                if detail:
-                    return detail
-                remaining = total - current
-                if remaining == 0:
-                    return f"分钟线粗检: {current} 只已有数据，逐日细检中..."
-                if current > 0:
-                    return f"分钟线粗检: {current}/{total} 只已有数据，需全量下载 {remaining} 只"
-                return f"分钟线需下载 {total} 只"
-            elif phase == "backfill":
-                if detail:
-                    return f"回填 {current}/{total}: {detail}"
-                return f"回填停牌标记: {current}/{total} 天"
-            elif phase == "stock_list":
-                if detail:
-                    return f"同步股票列表 {current}/{total}: {detail}"
-                return f"同步股票列表: {current}/{total} 天"
-            elif phase == "daily_backfill":
-                if detail:
-                    label = "日线检查" if " +0只" in detail else "日线补全"
-                    return f"{label} {current}/{total}: {detail}"
-                return f"日线检查: {current}/{total} 天"
-            elif phase == "minute_active":
-                return f"正在请求: {detail} 起 ({current}/{total} 已完成)"
-            elif phase == "minute":
-                if detail:
-                    return f"分钟线 {current}/{total}: {detail}"
-                return f"分钟线 {current}/{total}"
-            elif phase == "minute_backfill":
-                if detail:
-                    return f"分钟线补全 {current}/{total}: {detail}"
-                return f"分钟线补全: {current}/{total} 天"
-            elif phase == "download":
-                return f"下载完成: 共 {total} 只股票"
-            elif phase == "post_integrity":
-                if current == 0:
-                    return "下载后完整性检查通过"
-                return f"下载后完整性检查: {current} 个警告"
-            return f"{phase}: {current}/{total}"
+        # Notify start (best effort)
+        try:
+            await pipeline.reporter.notify_download_lifecycle(
+                "started", f"日期: {body.start_date} ~ {body.end_date}"
+            )
+        except Exception:
+            logger.warning("Failed to send start notice", exc_info=True)
 
-        async def download_stream():
-            import threading
-            import time
+        # Create the download and watchdog tasks — strong refs stored on active_dl.
+        dl_task = asyncio.create_task(
+            _run_download(active_dl, storage, pipeline, start_date, end_date)
+        )
+        active_dl.asyncio_task = dl_task
 
-            # Watchdog: force-cancel the download if there's no progress for this many
-            # seconds. asyncpg's C extension can hang on socket recv during a flush
-            # storm and ignore CancelledError, so we surface the silence to the user.
-            NO_PROGRESS_TIMEOUT_SEC = 600  # 10 minutes
+        wdog_task = asyncio.create_task(_run_watchdog(active_dl, dl_task))
+        active_dl.watchdog_task = wdog_task
 
-            queue: asyncio.Queue[dict | None] = asyncio.Queue()
-            cancel_event = threading.Event()
-            last_event_at = [time.monotonic()]  # mutable holder for the watchdog
-
-            # Cancel any existing download task
-            prev_task = getattr(request.app.state, "cache_download_task", None)
-            if prev_task and not prev_task.done():
-                prev_task.cancel()
-                try:
-                    await prev_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            def on_progress(phase: str, current: int, total: int, detail: str = ""):
-                last_event_at[0] = time.monotonic()
-                if phase == "status":
-                    queue.put_nowait({"type": "status", "message": detail})
-                    return
-                if phase == "integrity_check":
-                    overall = 0.01 + 0.04 * (current / total) if total > 0 else 0.01
-                elif phase == "init":
-                    overall = 0.05
-                elif phase == "daily_resume":
-                    overall = 0.1
-                elif phase == "backfill":
-                    overall = 0.1 + 0.02 * (current / total) if total > 0 else 0.1
-                elif phase == "stock_list":
-                    overall = 0.12 + 0.02 * (current / total) if total > 0 else 0.12
-                elif phase == "daily_backfill":
-                    overall = 0.14 + 0.02 * (current / total) if total > 0 else 0.14
-                elif phase == "daily":
-                    overall = 0.16 + 0.04 * (current / total) if total > 0 else 0.16
-                elif phase == "minute_resume":
-                    overall = 0.2
-                elif phase == "minute_active":
-                    overall = 0.2 + 0.7 * (current / total) if total > 0 else 0.2
-                elif phase == "minute":
-                    overall = 0.2 + 0.7 * (current / total) if total > 0 else 0.2
-                elif phase == "minute_backfill":
-                    overall = 0.9 + 0.05 * (current / total) if total > 0 else 0.9
-                elif phase == "post_integrity":
-                    # Push a post-download integrity report so the frontend shows it
-                    warnings = [w for w in detail.split("\n") if w] if detail else []
-                    if warnings:
-                        queue.put_nowait(
-                            {
-                                "type": "integrity_report",
-                                "issues": [
-                                    {"level": "warning", "message": w, "count": 0, "samples": []}
-                                    for w in warnings
-                                ],
-                                "message": f"下载后完整性检查: {len(warnings)} 个警告",
-                            }
-                        )
-                    else:
-                        queue.put_nowait(
-                            {
-                                "type": "integrity_report",
-                                "issues": [],
-                                "message": "下载后完整性检查通过",
-                            }
-                        )
-                    return  # already pushed to queue, skip normal progress message
-                else:
-                    overall = 1.0
-                queue.put_nowait(
-                    {
-                        "type": "progress",
-                        "progress": overall,
-                        "message": _fmt_progress(phase, current, total, detail),
-                        "phase": phase,
-                    }
-                )
-
-            async def _run_download():
-                try:
-                    # Pre-download integrity check
-                    on_progress("integrity_check", 0, 1, "开始检查...")
-                    issues = await storage.check_data_integrity()
-                    on_progress("integrity_check", 1, 1, "检查完成")
-                    if issues:
-                        error_count = sum(1 for i in issues if i["level"] == "error")
-                        warn_count = sum(1 for i in issues if i["level"] == "warning")
-                        parts = []
-                        if error_count:
-                            parts.append(f"{error_count} 个错误")
-                        if warn_count:
-                            parts.append(f"{warn_count} 个警告")
-                        queue.put_nowait(
-                            {
-                                "type": "integrity_report",
-                                "issues": [
-                                    {
-                                        "level": i["level"],
-                                        "message": i["message"],
-                                        "count": i["count"],
-                                    }
-                                    for i in issues
-                                ],
-                                "message": f"完整性检查: {', '.join(parts)}",
-                            }
-                        )
-                        # Error-level issues: halt download, user must fix manually
-                        if error_count:
-                            error_msgs = [i["message"] for i in issues if i["level"] == "error"]
-                            queue.put_nowait(
-                                {
-                                    "type": "error",
-                                    "message": "数据完整性检查失败，已停止下载。"
-                                    "请人工处理后重试:\n\n" + "\n\n".join(error_msgs),
-                                }
-                            )
-                            return
-                    else:
-                        queue.put_nowait(
-                            {
-                                "type": "integrity_report",
-                                "issues": [],
-                                "message": "数据完整性检查通过",
-                            }
-                        )
-
-                    counts = await pipeline.download_prices(
-                        start_date,
-                        end_date,
-                        progress_cb=on_progress,
-                        cancel_event=cancel_event,
-                    )
-                    queue.put_nowait({"type": "_done", **counts})  # sentinel
-                    try:
-                        await pipeline.reporter.notify_download_lifecycle(
-                            "completed",
-                            f"日期: {body.start_date} ~ {body.end_date}",
-                            f"日线: {counts.get('daily_count', 0)} 只 | "
-                            f"分钟线: {counts.get('minute_count', 0)} 只",
-                        )
-                    except Exception:
-                        logger.warning("Failed to send download completion notice", exc_info=True)
-                except asyncio.CancelledError:
-                    cancel_event.set()
-                    queue.put_nowait({"type": "cancelled", "message": "下载已取消"})
-                    try:
-                        await pipeline.reporter.notify_download_lifecycle(
-                            "cancelled", f"日期: {body.start_date} ~ {body.end_date}"
-                        )
-                    except Exception:
-                        logger.warning("Failed to send cancel notice", exc_info=True)
-                    raise
-                except Exception as e:
-                    err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-                    logger.error(f"Cache download failed: {err_msg}", exc_info=True)
-                    queue.put_nowait({"type": "error", "message": err_msg[:300]})
-                    try:
-                        await pipeline.reporter.notify_download_lifecycle(
-                            "error", f"日期: {body.start_date} ~ {body.end_date}", err_msg
-                        )
-                    except Exception:
-                        logger.warning("Failed to send error notice", exc_info=True)
-
-            # Notify start (best effort, don't block download)
+        # Cleanup when download finishes (success or cancel → clear active_download).
+        def _on_done(task: asyncio.Task) -> None:
+            # FAILED state was already set inside _run_download; leave it so the
+            # user can see the error when they reconnect.
+            if active_dl.state == DownloadState.RUNNING:
+                # Completed successfully or was cancelled → no longer active.
+                request.app.state.active_download = None
+            else:
+                # FAILED: keep active_dl for error display, but drop task refs
+                # so the completed Task objects (and anything they still pin) can
+                # be collected. error_msg is already copied onto active_dl.
+                active_dl.asyncio_task = None
+                active_dl.watchdog_task = None
+            wdog_task.cancel()
+            # After a bulk download Python's glibc malloc holds freed pages in
+            # its internal arena and never returns them to the OS on its own.
+            # gc.collect() frees Python objects; malloc_trim(0) returns empty
+            # pages back to the kernel (Linux/glibc only — silently ignored
+            # elsewhere).
+            import gc as _gc
+            _gc.collect()
             try:
-                await pipeline.reporter.notify_download_lifecycle(
-                    "started", f"日期: {body.start_date} ~ {body.end_date}"
-                )
+                import ctypes as _ct
+                _ct.CDLL("libc.so.6").malloc_trim(0)
+                logger.info("malloc_trim(0): memory pages returned to OS after download")
             except Exception:
-                logger.warning("Failed to send start notice", exc_info=True)
+                pass  # non-Linux or non-glibc environment
 
-            download_task = asyncio.create_task(_run_download())
-            request.app.state.cache_download_task = download_task
-            request.app.state.cache_download_cancel = cancel_event
+        dl_task.add_done_callback(_on_done)
 
-            def _on_task_done(task: asyncio.Task) -> None:
-                """Guarantee a sentinel reaches the SSE loop even if _run_download
-                exits abnormally (e.g. CancelledError swallowed by asyncpg, or any
-                bare exception that escaped the try/except).
-                """
-                try:
-                    exc = task.exception()
-                except (asyncio.CancelledError, asyncio.InvalidStateError):
-                    exc = None
-                if exc is not None:
-                    err_msg = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-                    logger.error("Cache download task died unexpectedly: %s", err_msg, exc_info=exc)
-                    queue.put_nowait(
-                        {
-                            "type": "error",
-                            "message": f"任务异常退出: {err_msg[:280]}",
-                            "_silent_death": True,
-                        }
-                    )
-                else:
-                    # Task ended cleanly. If no _done sentinel was already pushed
-                    # (e.g. cancelled without producing one), the SSE loop will
-                    # detect task.done() in its heartbeat path and surface it.
-                    queue.put_nowait({"type": "_task_finished"})
+        # Store with strong reference so GC cannot collect the tasks.
+        request.app.state.active_download = active_dl
 
-            download_task.add_done_callback(_on_task_done)
+        return {"state": "running", "start_date": body.start_date, "end_date": body.end_date}
 
-            try:
-                yield _sse(
+    @router.get("/api/momentum/tsanghi-stream")
+    async def tsanghi_stream(request: Request):
+        """SSE stream for download task progress.
+
+        Safe to connect, disconnect and reconnect at any time.  On (re)connect
+        the last 300 log messages are replayed so the browser catches up, then
+        live events follow until the task ends or the browser disconnects.
+        """
+        def _sse_local(msg: dict) -> str:
+            return f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+
+        async def stream():
+            active_dl = getattr(request.app.state, "active_download", None)
+            if active_dl is None:
+                yield _sse_local({"type": "state", "state": "not_started"})
+                return
+
+            # Replay buffered history so a reconnecting browser catches up.
+            for msg in list(active_dl.log_buffer):
+                yield _sse_local(msg)
+
+            # Task already finished?
+            if active_dl.asyncio_task is not None and active_dl.asyncio_task.done():
+                yield _sse_local(
                     {
-                        "type": "status",
-                        "message": f"开始下载 {body.start_date} ~ {body.end_date} ...",
+                        "type": "state",
+                        "state": active_dl.state.value,
+                        "error_msg": active_dl.error_msg,
                     }
                 )
+                return
 
+            # Subscribe to live events.
+            q = active_dl.subscribe()
+            try:
                 while True:
                     try:
-                        event = await asyncio.wait_for(queue.get(), timeout=30)
+                        msg = await asyncio.wait_for(q.get(), timeout=30)
                     except asyncio.TimeoutError:
-                        # Heartbeat path: must check for silent task death and watchdog timeout.
-                        silent = time.monotonic() - last_event_at[0]
-                        if download_task.done() and queue.empty():
-                            # Task finished without sending _done — surface as error.
-                            logger.error(
-                                "Cache download task ended without _done sentinel "
-                                "(silent death after %.0fs)",
-                                silent,
-                            )
-                            try:
-                                await pipeline.reporter.notify_download_lifecycle(
-                                    "silent_death",
-                                    f"日期: {body.start_date} ~ {body.end_date}",
-                                    f"任务在无 _done 信号情况下结束 (静默 {silent:.0f}s)",
-                                )
-                            except Exception:
-                                logger.warning("Failed to send silent_death notice", exc_info=True)
-                            msg = f"下载任务异常退出 (静默 {silent:.0f}s)，请查看服务端日志"
-                            yield _sse({"type": "error", "message": msg})
-                            return
-                        if silent >= NO_PROGRESS_TIMEOUT_SEC:
-                            logger.error(
-                                "Cache download watchdog: no progress for %.0fs, force-cancelling",
-                                silent,
-                            )
-                            cancel_event.set()
-                            download_task.cancel()
-                            try:
-                                await pipeline.reporter.notify_download_lifecycle(
-                                    "watchdog_timeout",
-                                    f"日期: {body.start_date} ~ {body.end_date}",
-                                    f"已 {silent:.0f}s 无进度更新，强制终止下载",
-                                )
-                            except Exception:
-                                logger.warning(
-                                    "Failed to send watchdog_timeout notice", exc_info=True
-                                )
-                            yield _sse(
-                                {
-                                    "type": "error",
-                                    "message": f"下载卡死: {silent:.0f}s 无进度，已强制终止",
-                                }
-                            )
-                            return
-                        yield _sse({"type": "heartbeat"})
+                        yield _sse_local({"type": "heartbeat"})
                         continue
-
-                    last_event_at[0] = time.monotonic()
-
-                    if event.get("type") == "_done":
-                        yield _sse(
-                            {
-                                "type": "complete",
-                                "daily_count": event.get("daily_count", 0),
-                                "minute_count": event.get("minute_count", 0),
-                                "verified": event.get("verified", False),
-                                "verify_msg": event.get("verify_msg", ""),
-                                "cached": False,
-                            }
-                        )
+                    yield _sse_local(msg)
+                    if msg.get("type") in ("complete", "error", "cancelled"):
                         break
-                    if event.get("type") == "_task_finished":
-                        # Task ended cleanly via done_callback. If no _done was already
-                        # processed, this is an unexpected exit (cancelled, etc).
-                        if download_task.cancelled():
-                            yield _sse({"type": "cancelled", "message": "下载已取消"})
-                        else:
-                            logger.error("Cache download task ended without _done sentinel")
-                            yield _sse(
-                                {
-                                    "type": "error",
-                                    "message": "下载任务异常结束，请查看服务端日志",
-                                }
-                            )
-                        return
-                    if event.get("type") in ("error", "cancelled"):
-                        yield _sse(event)
-                        return
-
-                    yield _sse(event)
-            except Exception as e:
-                logger.error(f"Cache download error: {e}", exc_info=True)
-                yield _sse({"type": "error", "message": str(e)[:200]})
             finally:
-                request.app.state.cache_download_task = None
-                request.app.state.cache_download_cancel = None
+                active_dl.unsubscribe(q)
 
         return StreamingResponse(
-            download_stream(),
+            stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @router.get("/api/momentum/tsanghi-task-status")
+    async def tsanghi_task_status(request: Request):
+        """Return current download task state as JSON (for page-load restore)."""
+        active_dl = getattr(request.app.state, "active_download", None)
+        if active_dl is None:
+            return {"state": "not_started"}
+        return {
+            "state": active_dl.state.value,
+            "start_date": active_dl.start_date,
+            "end_date": active_dl.end_date,
+            "error_msg": active_dl.error_msg,
+            "started_at": active_dl.started_at.isoformat() if active_dl.started_at else None,
+        }
+
     @router.post("/api/momentum/tsanghi-cancel")
     async def tsanghi_cancel(request: Request):
-        """Cancel an in-progress cache download."""
-        task = getattr(request.app.state, "cache_download_task", None)
-        if task and not task.done():
-            cancel_event = getattr(request.app.state, "cache_download_cancel", None)
-            if cancel_event:
-                cancel_event.set()
-            task.cancel()
+        """Cancel the running download task."""
+        active_dl = getattr(request.app.state, "active_download", None)
+        if active_dl is not None and active_dl.state == DownloadState.RUNNING:
+            active_dl.cancel_event.set()
+            if active_dl.asyncio_task is not None:
+                active_dl.asyncio_task.cancel()
             return {"success": True, "message": "取消请求已发送"}
         return {"success": False, "message": "没有正在进行的下载"}
+
+    @router.post("/api/momentum/tsanghi-clear")
+    async def tsanghi_clear(request: Request):
+        """Clear a FAILED task state so a new download can be started."""
+        active_dl = getattr(request.app.state, "active_download", None)
+        if active_dl is not None and active_dl.state == DownloadState.FAILED:
+            request.app.state.active_download = None
+            return {"success": True}
+        return {"success": False, "message": "没有失败的任务可清除"}
 
     # === Single-day momentum scan ===
 
