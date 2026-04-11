@@ -223,7 +223,8 @@ class CachePipeline:
         if trading_dates is not None:
             dates_to_download = sorted(trading_dates - existing_dates)
         else:
-            all_dates = {start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)}
+            n_days = (end_date - start_date).days + 1
+            all_dates = {start_date + timedelta(days=i) for i in range(n_days)}
             dates_to_download = sorted(all_dates - existing_dates)
 
         if not dates_to_download:
