@@ -219,36 +219,33 @@ class CachePipeline:
         if trading_dates:
             await self._sync_stock_list(sorted(trading_dates), cancel_event)
 
-        # prev_close map across days
-        prev_close_map = await self.storage.get_latest_closes()
+        # Compute dates that actually need downloading
+        if trading_dates is not None:
+            dates_to_download = sorted(trading_dates - existing_dates)
+        else:
+            all_dates = {start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)}
+            dates_to_download = sorted(all_dates - existing_dates)
 
-        total_days = (end_date - start_date).days + 1
-        trading_days_found = 0
-        current = start_date
-
-        while current <= end_date:
-            self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
-
-            date_str = current.strftime("%Y-%m-%d")
-
-            # Skip non-trading days
-            if trading_dates is not None and current not in trading_dates:
-                current += timedelta(days=1)
-                continue
-
-            # Skip dates already in cache
-            if current in existing_dates:
-                elapsed = (current - start_date).days + 1
-                await self.reporter.progress(Phase.DAILY, elapsed, total_days, f"{date_str} 已缓存")
-                current += timedelta(days=1)
-                continue
-
-            await self._download_one_daily_date(current, prev_close_map, start_date, total_days)
-            trading_days_found += 1
-            current += timedelta(days=1)
+        if not dates_to_download:
+            logger.info("Daily: all dates already cached, nothing to download")
+            return
 
         logger.info(
-            f"tsanghi daily download: {trading_days_found} new trading days "
+            "Daily: %d dates to download (%s ~ %s)",
+            len(dates_to_download),
+            dates_to_download[0],
+            dates_to_download[-1],
+        )
+
+        prev_close_map = await self.storage.get_latest_closes()
+        total = len(dates_to_download)
+
+        for i, day in enumerate(dates_to_download):
+            self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
+            await self._download_one_daily_date(day, prev_close_map, i + 1, total)
+
+        logger.info(
+            f"tsanghi daily download: {total} new trading days "
             f"in [{start_date} ~ {end_date}]"
         )
 
@@ -259,11 +256,10 @@ class CachePipeline:
         self,
         day: date,
         prev_close_map: dict[str, float],
-        progress_origin: date,
-        total_days: int,
+        current: int,
+        total: int,
     ) -> None:
         date_str = day.strftime("%Y-%m-%d")
-        elapsed = (day - progress_origin).days + 1
 
         # Fetch suspended (fail-fast — wrong suspension data is unacceptable)
         try:
@@ -283,8 +279,8 @@ class CachePipeline:
         if failed_exchanges:
             await self.reporter.progress(
                 Phase.DAILY,
-                elapsed,
-                total_days,
+                current,
+                total,
                 f"{date_str} ⚠ API失败: {','.join(failed_exchanges)}",
             )
             if len(failed_exchanges) == len(self.daily_source.EXCHANGES):
@@ -339,11 +335,11 @@ class CachePipeline:
         if rows_written > 0:
             null_part = f", {len(null_codes)}只数据为空" if null_codes else ""
             status = f"{date_str} ({rows_written}只{null_part}) ✓"
-            await self.reporter.progress(Phase.DAILY, elapsed, total_days, status)
+            await self.reporter.progress(Phase.DAILY, current, total, status)
         else:
             null_part = f", {len(null_codes)}只数据为空" if null_codes else ""
             await self.reporter.progress(
-                Phase.DAILY, elapsed, total_days, f"{date_str} ⚠ API返回0条记录{null_part}"
+                Phase.DAILY, current, total, f"{date_str} ⚠ API返回0条记录{null_part}"
             )
             logger.warning(f"Daily {date_str}: 0 usable records from tsanghi API")
 
