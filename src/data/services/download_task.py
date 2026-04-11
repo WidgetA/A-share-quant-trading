@@ -5,6 +5,7 @@ strong references to both asyncio Tasks so they cannot be garbage-collected.
 The SSE stream is a *subscriber* to the task — disconnecting from the stream
 has no effect on the running download.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,11 +37,11 @@ class ActiveDownload:
     """
 
     state: DownloadState
-    asyncio_task: asyncio.Task          # strong ref — prevents GC
-    watchdog_task: asyncio.Task         # strong ref
+    asyncio_task: asyncio.Task | None  # strong ref — prevents GC; None after FAILED cleanup
+    watchdog_task: asyncio.Task | None  # strong ref; None after FAILED cleanup
     cancel_event: threading.Event
-    log_buffer: deque                   # last LOG_BUFFER_SIZE msgs for reconnect
-    last_event_at: list                 # [float] monotonic ts of last progress event
+    log_buffer: deque  # last LOG_BUFFER_SIZE msgs for reconnect
+    last_event_at: list  # [float] monotonic ts of last progress event
     start_date: str = ""
     end_date: str = ""
     error_msg: str | None = None
