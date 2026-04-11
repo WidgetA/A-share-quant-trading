@@ -162,6 +162,12 @@
         </div>
         <div class="download-log" id="downloadLog"></div>
     </div>
+    <!-- Download task FAILED state -->
+    <div id="downloadErrorPanel" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; background:#fff3f3; border:1px solid #f5c6c6; border-radius:4px; font-size:0.82rem; color:#c62828;">
+        <strong>下载出错：</strong><span id="downloadErrorMsg"></span>
+        <button onclick="clearDownloadError()" style="margin-left:1rem; padding:2px 10px; font-size:0.78rem; color:#c62828; background:none; border:1px solid #c62828; border-radius:4px; cursor:pointer;">清除</button>
+        <button onclick="retryDownload()" style="margin-left:0.4rem; padding:2px 10px; font-size:0.78rem; color:#fff; background:#c62828; border:none; border-radius:4px; cursor:pointer;">重试</button>
+    </div>
 
     <!-- Tabs -->
     <div class="tab-bar">
@@ -317,142 +323,229 @@ function dlLog(msg, cls) {
     log.scrollTop = log.scrollHeight;
 }
 
-let currentDownloadAbortCtrl = null;
+// ── Download task state ──────────────────────────────────────────────────
+// The backend keeps one singleton download task alive independently of this
+// page. We POST to start it, then GET /tsanghi-stream to observe progress.
+// Closing/reopening the tab just re-subscribes; the task keeps running.
 
-function startCacheDownloadFromUI() {
-    const startDate = document.getElementById('cacheStart').value;
-    const endDate = document.getElementById('cacheEnd').value;
-    if (!startDate || !endDate) return;
+let _streamReader = null;   // current SSE reader (so we can close on cancel)
+let _lastLoggedPhase = '';
+let _lastLoggedPct = -10;
+let _lastRetryDates = null; // remembered for retryDownload()
 
+async function restoreDownloadTaskState() {
+    // Called on page load. If a task is running or failed, restore the UI.
+    try {
+        const resp = await fetch('/api/momentum/tsanghi-task-status');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.state === 'running') {
+            _showDownloadPanel(data.start_date, data.end_date);
+            _connectToStream();
+        } else if (data.state === 'failed') {
+            _showErrorPanel(data.error_msg || '未知错误');
+        }
+    } catch(e) { /* best-effort */ }
+}
+
+function _showDownloadPanel(startDate, endDate) {
     const panel = document.getElementById('cacheDownloadPanel');
-    const fill = document.getElementById('cacheProgressFill');
-    const progText = document.getElementById('cacheProgressText');
-    const log = document.getElementById('downloadLog');
-    const btn = document.getElementById('cacheDownloadBtn');
-    const stopBtn = document.getElementById('cacheStopBtn');
-
+    const btn   = document.getElementById('cacheDownloadBtn');
+    const stop  = document.getElementById('cacheStopBtn');
+    document.getElementById('downloadErrorPanel').style.display = 'none';
     panel.classList.add('visible');
-    fill.style.width = '0%';
-    progText.textContent = '';
-    log.innerHTML = '';
     btn.disabled = true;
     btn.textContent = '下载中...';
-    stopBtn.style.display = '';
+    stop.style.display = '';
+    _lastLoggedPhase = '';
+    _lastLoggedPct = -10;
+}
 
-    dlLog(`连接服务器... 请求 ${startDate} ~ ${endDate}`);
+function _showErrorPanel(msg) {
+    document.getElementById('downloadErrorMsg').textContent = msg;
+    document.getElementById('downloadErrorPanel').style.display = '';
+    document.getElementById('cacheDownloadPanel').classList.remove('visible');
+    const btn = document.getElementById('cacheDownloadBtn');
+    btn.disabled = false;
+    btn.textContent = '下载数据';
+    document.getElementById('cacheStopBtn').style.display = 'none';
+}
 
-    currentDownloadAbortCtrl = new AbortController();
-    const body = JSON.stringify({ start_date: startDate, end_date: endDate });
+function _onDownloadFinished() {
+    const btn  = document.getElementById('cacheDownloadBtn');
+    const stop = document.getElementById('cacheStopBtn');
+    btn.disabled = false;
+    btn.textContent = '下载数据';
+    stop.style.display = 'none';
+    _streamReader = null;
+}
 
-    let lastLoggedPhase = '';
-    let lastLoggedPct = -10;
+async function _connectToStream() {
+    const fill     = document.getElementById('cacheProgressFill');
+    const progText = document.getElementById('cacheProgressText');
 
-    fetch('/api/momentum/tsanghi-prepare', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body,
-        signal: currentDownloadAbortCtrl.signal,
-    }).then(async resp => {
-        if (!resp.ok) {
-            const err = await resp.text();
-            dlLog(`服务器返回错误 ${resp.status}: ${err}`, 'log-err');
-            return;
-        }
-        dlLog('已连接，开始接收数据...', 'log-ok');
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+    const resp = await fetch('/api/momentum/tsanghi-stream');
+    if (!resp.ok) { dlLog('无法连接到下载流', 'log-err'); _onDownloadFinished(); return; }
+
+    const reader = resp.body.getReader();
+    _streamReader = reader;
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    try {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop();
             for (const line of lines) {
                 if (!line.startsWith('data: ')) continue;
-                try {
-                    const d = JSON.parse(line.slice(6));
-                    if (d.type === 'heartbeat') continue;
-                    if (d.type === 'integrity_report') {
-                        if (d.issues && d.issues.length > 0) {
-                            dlLog('--- 数据完整性检查 ---', 'log-warn');
-                            for (const issue of d.issues) {
-                                const cls = issue.level === 'error' ? 'log-err' : 'log-warn';
-                                const prefix = issue.level === 'error' ? '[错误]' : '[警告]';
-                                let line = `  ${prefix} ${issue.message}`;
-                                if (issue.samples && issue.samples.length > 0) {
-                                    line += ` (示例: ${issue.samples.join(', ')})`;
-                                }
-                                dlLog(line, cls);
-                            }
-                            dlLog('--- 检查完成，继续下载 ---', 'log-warn');
-                        } else {
-                            dlLog('数据完整性检查通过', 'log-ok');
+                let d;
+                try { d = JSON.parse(line.slice(6)); } catch(e) { continue; }
+
+                if (d.type === 'heartbeat') continue;
+
+                if (d.type === 'state') {
+                    if (d.state === 'not_started') { _onDownloadFinished(); return; }
+                    if (d.state === 'failed') { _showErrorPanel(d.error_msg || '未知错误'); return; }
+                    continue;
+                }
+
+                if (d.type === 'integrity_report') {
+                    if (d.issues && d.issues.length > 0) {
+                        dlLog('--- 数据完整性检查 ---', 'log-warn');
+                        for (const issue of d.issues) {
+                            const cls = issue.level === 'error' ? 'log-err' : 'log-warn';
+                            const prefix = issue.level === 'error' ? '[错误]' : '[警告]';
+                            let txt = `  ${prefix} ${issue.message}`;
+                            if (issue.samples && issue.samples.length > 0)
+                                txt += ` (示例: ${issue.samples.join(', ')})`;
+                            dlLog(txt, cls);
                         }
+                        dlLog('--- 检查完成，继续下载 ---', 'log-warn');
+                    } else {
+                        dlLog('数据完整性检查通过', 'log-ok');
                     }
-                    if (d.type === 'status') {
+                }
+                if (d.type === 'status') dlLog(d.message);
+                if (d.type === 'progress') {
+                    const pct = Math.round(d.progress * 100);
+                    fill.style.width = pct + '%';
+                    progText.textContent = `${pct}% — ${d.message}`;
+                    const isBackfill = d.phase && d.phase.includes('backfill');
+                    if (d.phase !== _lastLoggedPhase || pct >= _lastLoggedPct + 10 || isBackfill) {
                         dlLog(d.message);
+                        _lastLoggedPhase = d.phase;
+                        _lastLoggedPct = pct;
                     }
-                    if (d.type === 'progress') {
-                        const pct = Math.round(d.progress * 100);
-                        fill.style.width = pct + '%';
-                        progText.textContent = `${pct}% — ${d.message}`;
-                        // Log on phase change, every 10%, or every backfill update
-                        const isBackfill = d.phase && d.phase.includes('backfill');
-                        if (d.phase !== lastLoggedPhase || pct >= lastLoggedPct + 10 || isBackfill) {
-                            dlLog(d.message);
-                            lastLoggedPhase = d.phase;
-                            lastLoggedPct = pct;
-                        }
+                }
+                if (d.type === 'complete') {
+                    fill.style.width = '100%';
+                    progText.textContent = '100%';
+                    if (d.cached) {
+                        dlLog(`完成 (来自缓存) — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
+                    } else if (d.verified) {
+                        dlLog(`完成 (已下载, 已验证) — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
+                    } else {
+                        dlLog(`下载完成但验证未通过 — ${d.verify_msg || '部分股票分钟数据缺失'}`, 'log-warn');
                     }
-                    if (d.type === 'complete') {
-                        fill.style.width = '100%';
-                        progText.textContent = '100%';
-                        if (d.cached) {
-                            dlLog(`完成 (来自缓存) — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
-                        } else if (d.verified) {
-                            dlLog(`完成 (已下载, 已验证) — 日线 ${d.daily_count} 只, 分钟线 ${d.minute_count} 只`, 'log-ok');
-                        } else {
-                            dlLog(`下载完成但验证未通过 — ${d.verify_msg || '部分股票分钟数据缺失'}`, 'log-warn');
-                        }
-                        // Update cache bar directly from complete event data
-                        const dot = document.getElementById('cacheDot');
-                        const text = document.getElementById('cacheText');
-                        dot.className = 'dot ready';
-                        text.textContent = `缓存就绪: 日线 ${d.daily_count}只, 分钟线 ${d.minute_count}只`;
-                        document.getElementById('cacheControls').style.display = '';
-                        document.getElementById('cacheDownloadBtn').textContent = '补充下载';
-                    }
-                    if (d.type === 'cancelled') {
-                        dlLog(d.message, 'log-warn');
-                    }
-                    if (d.type === 'error') {
-                        dlLog('错误: ' + d.message, 'log-err');
-                    }
-                } catch(e) {}
+                    const dot  = document.getElementById('cacheDot');
+                    const text = document.getElementById('cacheText');
+                    dot.className = 'dot ready';
+                    text.textContent = `缓存就绪: 日线 ${d.daily_count}只, 分钟线 ${d.minute_count}只`;
+                    document.getElementById('cacheControls').style.display = '';
+                    document.getElementById('cacheDownloadBtn').textContent = '补充下载';
+                    _onDownloadFinished();
+                    return;
+                }
+                if (d.type === 'cancelled') {
+                    dlLog(d.message || '下载已取消', 'log-warn');
+                    _onDownloadFinished();
+                    return;
+                }
+                if (d.type === 'error') {
+                    dlLog('错误: ' + d.message, 'log-err');
+                    _showErrorPanel(d.message);
+                    return;
+                }
             }
         }
-    }).catch(e => {
-        if (e.name === 'AbortError') {
-            dlLog('下载已取消', 'log-warn');
-        } else {
-            dlLog('连接失败: ' + e.message, 'log-err');
-        }
-    }).finally(() => {
-        btn.disabled = false;
-        btn.textContent = '下载数据';
-        stopBtn.style.display = 'none';
-        currentDownloadAbortCtrl = null;
-    });
+    } catch(e) {
+        if (e.name !== 'AbortError') dlLog('连接中断: ' + e.message, 'log-err');
+    } finally {
+        if (_streamReader === reader) _streamReader = null;
+    }
+}
+
+async function startCacheDownloadFromUI() {
+    const startDate = document.getElementById('cacheStart').value;
+    const endDate   = document.getElementById('cacheEnd').value;
+    if (!startDate || !endDate) return;
+
+    _lastRetryDates = { start_date: startDate, end_date: endDate };
+    document.getElementById('downloadLog').innerHTML = '';
+    document.getElementById('cacheProgressFill').style.width = '0%';
+    document.getElementById('cacheProgressText').textContent = '';
+
+    dlLog(`请求下载 ${startDate} ~ ${endDate}...`);
+
+    let resp;
+    try {
+        resp = await fetch('/api/momentum/tsanghi-prepare', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ start_date: startDate, end_date: endDate }),
+        });
+    } catch(e) {
+        dlLog('请求失败: ' + e.message, 'log-err');
+        return;
+    }
+
+    if (!resp.ok) {
+        const err = await resp.text();
+        dlLog(`服务器错误 ${resp.status}: ${err}`, 'log-err');
+        return;
+    }
+
+    const data = await resp.json();
+
+    if (data.state === 'cached') {
+        document.getElementById('cacheDownloadPanel').classList.add('visible');
+        document.getElementById('cacheProgressFill').style.width = '100%';
+        dlLog(`数据已缓存 — 日线 ${data.daily_count} 只, 分钟线 ${data.minute_count} 只`, 'log-ok');
+        const dot  = document.getElementById('cacheDot');
+        const text = document.getElementById('cacheText');
+        dot.className = 'dot ready';
+        text.textContent = `缓存就绪: 日线 ${data.daily_count}只, 分钟线 ${data.minute_count}只`;
+        document.getElementById('cacheControls').style.display = '';
+        return;
+    }
+
+    if (data.state === 'running') {
+        _showDownloadPanel(data.start_date, data.end_date);
+        if (data.message) dlLog(data.message);   // "已在运行中" hint if applicable
+        _connectToStream();
+    }
 }
 
 async function stopCacheDownload() {
-    if (currentDownloadAbortCtrl) {
-        currentDownloadAbortCtrl.abort();
+    if (_streamReader) { try { _streamReader.cancel(); } catch(e) {} }
+    try { await fetch('/api/momentum/tsanghi-cancel', { method: 'POST' }); } catch(e) {}
+}
+
+async function clearDownloadError() {
+    try { await fetch('/api/momentum/tsanghi-clear', { method: 'POST' }); } catch(e) {}
+    document.getElementById('downloadErrorPanel').style.display = 'none';
+}
+
+async function retryDownload() {
+    await clearDownloadError();
+    if (_lastRetryDates) {
+        document.getElementById('cacheStart').value = _lastRetryDates.start_date;
+        document.getElementById('cacheEnd').value   = _lastRetryDates.end_date;
     }
-    try {
-        await fetch('/api/momentum/tsanghi-cancel', { method: 'POST' });
-    } catch(e) { /* best-effort */ }
+    startCacheDownloadFromUI();
 }
 
 // ========== Single-day scan ==========
@@ -703,7 +796,8 @@ function renderCsvResult(d) {
     const ago = new Date(); ago.setDate(ago.getDate() - 30);
     document.getElementById('rangeStart').value = ago.toISOString().slice(0, 10);
 
-    // Don't auto-check — user clicks "检查状态" button
+    // Restore download task state (if a task was running when page was last closed)
+    restoreDownloadTaskState();
 })();
 </script>
 {% endblock %}
