@@ -576,15 +576,14 @@ def create_momentum_router() -> APIRouter:
         """Cancel the download task if no progress for 10 minutes."""
         NO_PROGRESS_TIMEOUT_SEC = 600
         import time as _time
+
         while not download_task.done():
             await asyncio.sleep(30)
             if download_task.done():
                 break
             silent = _time.monotonic() - active_dl.last_event_at[0]
             if silent >= NO_PROGRESS_TIMEOUT_SEC:
-                logger.error(
-                    "Download watchdog: no progress for %.0fs, force-cancelling", silent
-                )
+                logger.error("Download watchdog: no progress for %.0fs, force-cancelling", silent)
                 active_dl.cancel_event.set()
                 download_task.cancel()
                 active_dl.broadcast(
@@ -790,8 +789,8 @@ def create_momentum_router() -> APIRouter:
         cancel_event = threading.Event()
         active_dl = ActiveDownload(
             state=DownloadState.RUNNING,
-            asyncio_task=None,      # filled in below
-            watchdog_task=None,     # filled in below
+            asyncio_task=None,  # filled in below
+            watchdog_task=None,  # filled in below
             cancel_event=cancel_event,
             log_buffer=__import__("collections").deque(maxlen=300),
             last_event_at=last_event_at,
@@ -837,9 +836,11 @@ def create_momentum_router() -> APIRouter:
             # pages back to the kernel (Linux/glibc only — silently ignored
             # elsewhere).
             import gc as _gc
+
             _gc.collect()
             try:
                 import ctypes as _ct
+
                 _ct.CDLL("libc.so.6").malloc_trim(0)
                 logger.info("malloc_trim(0): memory pages returned to OS after download")
             except Exception:
@@ -860,6 +861,7 @@ def create_momentum_router() -> APIRouter:
         the last 300 log messages are replayed so the browser catches up, then
         live events follow until the task ends or the browser disconnects.
         """
+
         def _sse_local(msg: dict) -> str:
             return f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
 
