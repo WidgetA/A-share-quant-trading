@@ -483,6 +483,11 @@ async function startCacheDownloadFromUI() {
     const endDate   = document.getElementById('cacheEnd').value;
     if (!startDate || !endDate) return;
 
+    // Disable immediately so rapid clicks can't queue multiple requests.
+    const btn = document.getElementById('cacheDownloadBtn');
+    btn.disabled = true;
+    btn.textContent = '请求中...';
+
     _lastRetryDates = { start_date: startDate, end_date: endDate };
     document.getElementById('downloadLog').innerHTML = '';
     document.getElementById('cacheProgressFill').style.width = '0%';
@@ -499,12 +504,16 @@ async function startCacheDownloadFromUI() {
         });
     } catch(e) {
         dlLog('请求失败: ' + e.message, 'log-err');
+        btn.disabled = false;
+        btn.textContent = '下载数据';
         return;
     }
 
     if (!resp.ok) {
         const err = await resp.text();
         dlLog(`服务器错误 ${resp.status}: ${err}`, 'log-err');
+        btn.disabled = false;
+        btn.textContent = '下载数据';
         return;
     }
 
@@ -519,12 +528,13 @@ async function startCacheDownloadFromUI() {
         dot.className = 'dot ready';
         text.textContent = `缓存就绪: 日线 ${data.daily_count}只, 分钟线 ${data.minute_count}只`;
         document.getElementById('cacheControls').style.display = '';
+        btn.disabled = false;
+        btn.textContent = '补充下载';
         return;
     }
 
     if (data.state === 'running') {
         _showDownloadPanel(data.start_date, data.end_date);
-        if (data.message) dlLog(data.message);   // "已在运行中" hint if applicable
         _connectToStream();
     }
 }

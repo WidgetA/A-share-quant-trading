@@ -759,45 +759,53 @@ def create_momentum_router() -> APIRouter:
         if storage is None or pipeline is None:
             raise HTTPException(status_code=503, detail="GreptimeDB 缓存未连接")
 
-        # Already running? Return current task info instead of starting a new one.
-        existing = getattr(request.app.state, "active_download", None)
-        if existing is not None and existing.state == DownloadState.RUNNING:
-            return {
-                "state": "running",
-                "start_date": existing.start_date,
-                "end_date": existing.end_date,
-                "message": "下载任务已在运行中",
-            }
+        # Use a lock so check+start is atomic — prevents two concurrent requests
+        # from both passing the "already running?" check and spawning two tasks.
+        lock: asyncio.Lock = getattr(request.app.state, "download_lock", None) or asyncio.Lock()
+        async with lock:
+            # Already running? Reject — only one download at a time.
+            existing = getattr(request.app.state, "active_download", None)
+            if existing is not None and existing.state == DownloadState.RUNNING:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"下载任务已在运行中 ({existing.start_date} ~ {existing.end_date})",
+                )
 
-        # Already cached (and not force-refresh)?
-        if not body.force:
-            gaps = await storage.missing_ranges(start_date, end_date)
-            if not gaps:
-                d_count = await storage.get_daily_stock_count()
-                m_count = await storage.get_minute_stock_count()
-                return {
-                    "state": "cached",
-                    "daily_count": d_count,
-                    "minute_count": m_count,
-                }
+            # Already cached (and not force-refresh)?
+            if not body.force:
+                gaps = await storage.missing_ranges(start_date, end_date)
+                if not gaps:
+                    d_count = await storage.get_daily_stock_count()
+                    m_count = await storage.get_minute_stock_count()
+                    return {
+                        "state": "cached",
+                        "daily_count": d_count,
+                        "minute_count": m_count,
+                    }
 
-        # Build the ActiveDownload object (no asyncio_task yet — set below).
-        from datetime import datetime as _dt
-        from zoneinfo import ZoneInfo as _ZI
+            # Build the ActiveDownload object (no asyncio_task yet — set below).
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZI
 
-        last_event_at = [time.monotonic()]
-        cancel_event = threading.Event()
-        active_dl = ActiveDownload(
-            state=DownloadState.RUNNING,
-            asyncio_task=None,  # filled in below
-            watchdog_task=None,  # filled in below
-            cancel_event=cancel_event,
-            log_buffer=__import__("collections").deque(maxlen=300),
-            last_event_at=last_event_at,
-            start_date=body.start_date,
-            end_date=body.end_date,
-            started_at=_dt.now(_ZI("Asia/Shanghai")),
-        )
+            last_event_at = [time.monotonic()]
+            cancel_event = threading.Event()
+            active_dl = ActiveDownload(
+                state=DownloadState.RUNNING,
+                asyncio_task=None,  # filled in below
+                watchdog_task=None,  # filled in below
+                cancel_event=cancel_event,
+                log_buffer=__import__("collections").deque(maxlen=300),
+                last_event_at=last_event_at,
+                start_date=body.start_date,
+                end_date=body.end_date,
+                started_at=_dt.now(_ZI("Asia/Shanghai")),
+            )
+
+            # Register immediately (while still holding the lock) so any
+            # concurrent request that acquires the lock next will see it.
+            request.app.state.active_download = active_dl
+
+        # Lock released — do slow work (notify, create tasks) outside the lock.
 
         # Notify start (best effort)
         try:
@@ -847,9 +855,6 @@ def create_momentum_router() -> APIRouter:
                 pass  # non-Linux or non-glibc environment
 
         dl_task.add_done_callback(_on_done)
-
-        # Store with strong reference so GC cannot collect the tasks.
-        request.app.state.active_download = active_dl
 
         return {"state": "running", "start_date": body.start_date, "end_date": body.end_date}
 
@@ -2782,6 +2787,7 @@ def create_model_router() -> APIRouter:
 
                 async def _progress(msg: str):
                     queue.put_nowait({"type": "progress", "message": msg})
+                    await asyncio.sleep(0)  # yield to event loop so SSE flushes each message
 
                 result = await scheduler.run_full_training(progress_cb=_progress)
                 queue.put_nowait({"type": "result", "data": result})
@@ -2849,6 +2855,7 @@ def create_model_router() -> APIRouter:
 
                 async def _progress(msg: str):
                     queue.put_nowait({"type": "progress", "message": msg})
+                    await asyncio.sleep(0)  # yield to event loop so SSE flushes each message
 
                 result = await scheduler.run_finetune(progress_cb=_progress)
                 queue.put_nowait({"type": "result", "data": result})

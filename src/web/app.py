@@ -134,6 +134,7 @@ def create_app(
         logger.info("Web UI started")
         store.start_cleanup_task()
         app.state.active_download = None  # download_task.ActiveDownload | None
+        app.state.download_lock = asyncio.Lock()  # guards check+start as atomic op
 
         # Send Feishu startup notification
         from src.common.feishu_bot import FeishuBot
