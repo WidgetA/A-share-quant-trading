@@ -646,6 +646,9 @@ class CachePipeline:
         if suspended_pairs:
             logger.info(f"Minute: loaded {len(suspended_pairs)} suspended (stock,date) pairs")
 
+        all_daily_dates = await self.storage.get_existing_daily_dates()
+        trading_dates_set = {d for d in all_daily_dates if start_date <= d <= end_date}
+
         no_data_reasons: dict[str, str] = {}
         total = len(codes_to_download)
         done = 0
@@ -681,12 +684,30 @@ class CachePipeline:
                 )
                 continue
 
+            batch_suspended = 0
+            batch_truly_empty = 0
+            truly_empty_codes: list[str] = []
             for code in batch.empty:
-                no_data_reasons[code] = "api_empty"
+                susp_days = sum(1 for d in trading_dates_set if (code, d) in suspended_pairs)
+                if susp_days == len(trading_dates_set):
+                    no_data_reasons[code] = "suspended"
+                    batch_suspended += 1
+                else:
+                    no_data_reasons[code] = "api_empty"
+                    batch_truly_empty += 1
+                    truly_empty_codes.append(code)
                 done += 1
 
+            if truly_empty_codes:
+                logger.warning(
+                    "minute batch: API返回%d条bar, 以下%d只无数据(非停牌): %s",
+                    batch.api_bar_count,
+                    len(truly_empty_codes),
+                    ", ".join(truly_empty_codes[:10]),
+                )
+
             batch_ok = 0
-            batch_empty = len(batch.empty)
+            batch_empty = batch_truly_empty
             for code, raw_bars in batch.ok.items():
                 # Drop bars that fall on a suspended (stock, date) pair. The
                 # storage layer rejects zero-OHLC bars, so we MUST strip them
@@ -715,6 +736,8 @@ class CachePipeline:
             parts = []
             if batch_ok:
                 parts.append(f"写入{batch_ok}只")
+            if batch_suspended:
+                parts.append(f"停牌{batch_suspended}只")
             if batch_empty:
                 parts.append(f"无数据{batch_empty}只")
             logger.info("[minute-diag] DB writes done batch %d/%d, requesting next", done, total)

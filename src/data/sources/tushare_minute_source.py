@@ -38,7 +38,7 @@ class MinuteBatchResult:
         error_codes: list[code] — codes affected by the error
     """
 
-    __slots__ = ("ok", "empty", "unknown_exchange", "error", "error_codes")
+    __slots__ = ("ok", "empty", "unknown_exchange", "error", "error_codes", "api_bar_count")
 
     def __init__(self) -> None:
         self.ok: dict[str, list[dict[str, Any]]] = {}
@@ -46,6 +46,7 @@ class MinuteBatchResult:
         self.unknown_exchange: list[str] = []
         self.error: str | None = None
         self.error_codes: list[str] = []
+        self.api_bar_count: int = 0
 
 
 class TushareMinuteSource:
@@ -142,6 +143,7 @@ class TushareMinuteSource:
                 await asyncio.sleep(self.REQUEST_DELAY)
                 continue
 
+            result.api_bar_count = len(bars)
             grouped: dict[str, list[dict[str, Any]]] = {ts: [] for ts in ts_to_bare}
             for bar in bars:
                 ts = str(bar.get("ts_code", ""))
