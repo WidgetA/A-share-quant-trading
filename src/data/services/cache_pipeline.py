@@ -423,9 +423,28 @@ class CachePipeline:
     # ------------------------------------------------------------------
 
     async def _backfill_daily_gaps(self, cancel_event: CancelChecker) -> int:
-        gaps = await self.storage.audit_daily_gaps()
-        if not gaps:
+        all_gaps = await self.storage.audit_daily_gaps()
+        if not all_gaps:
             return 0
+
+        # Skip dates where the gap is tiny (< 1%) — those missing stocks
+        # are almost certainly absent from tsanghi and will never be filled,
+        # so retrying just wastes API calls.
+        gaps = [(d, exp, act) for d, exp, act in all_gaps if exp == 0 or (exp - act) / exp >= 0.01]
+        if not gaps:
+            skipped = len(all_gaps)
+            logger.info(
+                "backfill_daily_gaps: %d dates have tiny gaps (<1%%), skipping all",
+                skipped,
+            )
+            return 0
+
+        if len(gaps) < len(all_gaps):
+            logger.info(
+                "backfill_daily_gaps: %d dates have significant gaps, %d skipped (<1%%)",
+                len(gaps),
+                len(all_gaps) - len(gaps),
+            )
 
         logger.info("backfill_daily_gaps: %d dates to backfill", len(gaps))
         backfilled = 0
