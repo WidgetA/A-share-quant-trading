@@ -552,8 +552,10 @@ def create_momentum_router() -> APIRouter:
                 if detail:
                     return detail
                 remaining = total - current
+                if remaining == 0:
+                    return f"分钟线粗检: {current} 只已有数据，逐日细检中..."
                 if current > 0:
-                    return f"分钟线已缓存 {current}/{total} 只，需下载 {remaining} 只"
+                    return f"分钟线粗检: {current}/{total} 只已有数据，需全量下载 {remaining} 只"
                 return f"分钟线需下载 {total} 只"
             elif phase == "backfill":
                 if detail:
