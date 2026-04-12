@@ -182,6 +182,32 @@
             </div>
         </div>
 
+        <!-- Data Engine Status -->
+        <div class="status-card" id="dataEngineCard">
+            <div class="status-card-header">
+                <h3>数据引擎</h3>
+                <span class="status-indicator" id="dataEngineIndicator">--</span>
+            </div>
+            <div class="status-card-body">
+                <div class="status-card-row">
+                    <span class="status-card-label">数据范围</span>
+                    <span class="status-card-value" id="dataEngineRange">--</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">日线</span>
+                    <span class="status-card-value" id="dataEngineDaily">--</span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">分钟线</span>
+                    <span class="status-card-value" id="dataEngineMinute">--</span>
+                </div>
+                <div class="status-card-row" id="dataEngineDownloadRow" style="display:none;">
+                    <span class="status-card-label">下载任务</span>
+                    <span class="status-card-value" id="dataEngineDownload" style="color:#f57c00;">--</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Model Management Card -->
         <div class="status-card" id="modelCard">
             <div class="status-card-header">
@@ -786,6 +812,50 @@ function startFinetune() {
     _streamTraining('/api/model/finetune', 'btnFinetune');
 }
 
+async function loadDataEngineStatus() {
+    try {
+        const resp = await fetch('/api/cache/status', {cache: 'no-store'});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const d = await resp.json();
+
+        const ind = document.getElementById('dataEngineIndicator');
+        if (d.cache_ready) {
+            ind.textContent = '已连接';
+            ind.className = 'status-indicator online';
+        } else {
+            ind.textContent = '未连接';
+            ind.className = 'status-indicator offline';
+        }
+
+        const range = (d.start_date && d.end_date)
+            ? d.start_date.slice(2) + ' ~ ' + d.end_date.slice(2)
+            : '--';
+        document.getElementById('dataEngineRange').textContent = range;
+        document.getElementById('dataEngineDaily').textContent =
+            d.daily_stock_count ? d.daily_stock_count + ' 只' : '--';
+        document.getElementById('dataEngineMinute').textContent =
+            d.minute_stock_count ? d.minute_stock_count + ' 只' : '--';
+
+        // Show active download task if any
+        const dlResp = await fetch('/api/momentum/tsanghi-task-status', {cache: 'no-store'});
+        if (dlResp.ok) {
+            const dl = await dlResp.json();
+            const row = document.getElementById('dataEngineDownloadRow');
+            if (dl.state === 'running') {
+                row.style.display = '';
+                document.getElementById('dataEngineDownload').textContent =
+                    '下载中 ' + (dl.start_date || '') + '~' + (dl.end_date || '');
+            } else {
+                row.style.display = 'none';
+            }
+        }
+    } catch(e) {
+        const ind = document.getElementById('dataEngineIndicator');
+        ind.textContent = '异常';
+        ind.className = 'status-indicator offline';
+    }
+}
+
 // --- Init ---
 document.getElementById('tradeDatePicker').addEventListener('change', loadRecommendations);
 loadHoldings();
@@ -793,9 +863,11 @@ loadRecommendations();
 loadIquantStatus();
 loadPendingSignals();
 loadModelStatus();
+loadDataEngineStatus();
 setInterval(loadHoldings, 10000);
 setInterval(loadIquantStatus, 5000);
 setInterval(loadPendingSignals, 5000);
 setInterval(loadModelStatus, 5000);
+setInterval(loadDataEngineStatus, 30000);
 </script>
 {% endblock %}
