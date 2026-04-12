@@ -140,8 +140,7 @@
     <div class="cache-bar" id="cacheBar">
         <div class="cache-status">
             <span class="dot empty" id="cacheDot"></span>
-            <span id="cacheText">点击右侧按钮检查缓存</span>
-            <button class="btn btn-secondary btn-sm" id="cacheCheckBtn" onclick="checkCacheStatus()" style="margin-left:0.5rem;padding:2px 10px;font-size:0.78rem;">检查状态</button>
+            <span id="cacheText">正在检查缓存...</span>
         </div>
         <div class="cache-download-controls" id="cacheControls" style="display:none;">
             <input type="date" id="cacheStart" value="2024-01-01" title="起始日期" />
@@ -254,11 +253,9 @@ async function checkCacheStatus() {
     const text = document.getElementById('cacheText');
     const controls = document.getElementById('cacheControls');
     const dlBtn = document.getElementById('cacheDownloadBtn');
-    const checkBtn = document.getElementById('cacheCheckBtn');
 
     dot.className = 'dot loading';
     text.textContent = '正在连接 GreptimeDB...';
-    checkBtn.disabled = true;
 
     try {
         const resp = await fetch('/api/momentum/tsanghi-cache-status');
@@ -289,7 +286,6 @@ async function checkCacheStatus() {
         dot.className = 'dot empty';
     } finally {
         _cacheStatusRunning = false;
-        checkBtn.disabled = false;
     }
 }
 
@@ -808,6 +804,8 @@ function renderCsvResult(d) {
 
     // Restore download task state (if a task was running when page was last closed)
     restoreDownloadTaskState();
+    // Auto-check cache status on load instead of requiring manual button click
+    checkCacheStatus();
 })();
 </script>
 {% endblock %}
