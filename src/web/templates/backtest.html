@@ -136,13 +136,9 @@
         </select>
     </div>
 
-    <!-- Cache Status Bar -->
+    <!-- Cache Download Controls -->
     <div class="cache-bar" id="cacheBar">
-        <div class="cache-status">
-            <span class="dot empty" id="cacheDot"></span>
-            <span id="cacheText">正在检查缓存...</span>
-        </div>
-        <div class="cache-download-controls" id="cacheControls" style="display:none;">
+        <div class="cache-download-controls" id="cacheControls">
             <input type="date" id="cacheStart" value="2024-01-01" title="起始日期" />
             <span style="color:#888;">~</span>
             <input type="date" id="cacheEnd" title="结束日期" />
@@ -244,73 +240,6 @@ function switchTab(name) {
 }
 
 // ========== Cache status ==========
-let _cacheStatusRunning = false;
-async function checkCacheStatus() {
-    if (_cacheStatusRunning) return;
-    _cacheStatusRunning = true;
-
-    const dot = document.getElementById('cacheDot');
-    const text = document.getElementById('cacheText');
-    const controls = document.getElementById('cacheControls');
-    const dlBtn = document.getElementById('cacheDownloadBtn');
-
-    dot.className = 'dot loading';
-    text.textContent = '正在连接 GreptimeDB...';
-
-    try {
-        const resp = await fetch('/api/momentum/tsanghi-cache-status');
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                try {
-                    const d = JSON.parse(line.slice(6));
-                    if (d.type === 'step') {
-                        text.textContent = d.message;
-                    } else if (d.type === 'result') {
-                        _applyCacheResult(d, dot, text, controls, dlBtn);
-                    }
-                } catch(e) {}
-            }
-        }
-    } catch(e) {
-        text.textContent = '无法连接服务器: ' + e.message;
-        dot.className = 'dot empty';
-    } finally {
-        _cacheStatusRunning = false;
-    }
-}
-
-function _applyCacheResult(d, dot, text, controls, dlBtn) {
-    if (d.status === 'ready') {
-        dot.className = 'dot ready';
-        const parts = [`日线 ${d.daily_stocks}只 ${d.daily_days}天`];
-        parts.push(d.minute_stocks > 0 ? `分钟线 ${d.minute_stocks}只` : '分钟线 无');
-        text.textContent = `缓存就绪: ${parts.join(', ')} (${d.start_date || '?'} ~ ${d.end_date || '?'})`;
-        controls.style.display = '';
-        dlBtn.textContent = '补充下载';
-    } else if (d.status === 'loading') {
-        dot.className = 'dot loading';
-        text.textContent = '缓存加载中...';
-        controls.style.display = 'none';
-    } else if (d.status === 'error') {
-        dot.className = 'dot empty';
-        text.textContent = '查询出错: ' + (d.error || '未知');
-    } else {
-        dot.className = 'dot empty';
-        text.textContent = '缓存未加载';
-        controls.style.display = '';
-        dlBtn.textContent = '下载数据';
-    }
-}
 
 function dlLog(msg, cls) {
     const log = document.getElementById('downloadLog');
@@ -446,11 +375,6 @@ async function _connectToStream() {
                     } else {
                         dlLog(`下载完成但验证未通过 — ${d.verify_msg || '部分股票分钟数据缺失'}`, 'log-warn');
                     }
-                    const dot  = document.getElementById('cacheDot');
-                    const text = document.getElementById('cacheText');
-                    dot.className = 'dot ready';
-                    text.textContent = `缓存就绪: 日线 ${d.daily_count}只, 分钟线 ${d.minute_count}只`;
-                    document.getElementById('cacheControls').style.display = '';
                     document.getElementById('cacheDownloadBtn').textContent = '补充下载';
                     _onDownloadFinished();
                     return;
@@ -519,11 +443,6 @@ async function startCacheDownloadFromUI() {
         document.getElementById('cacheDownloadPanel').classList.add('visible');
         document.getElementById('cacheProgressFill').style.width = '100%';
         dlLog(`数据已缓存 — 日线 ${data.daily_count} 只, 分钟线 ${data.minute_count} 只`, 'log-ok');
-        const dot  = document.getElementById('cacheDot');
-        const text = document.getElementById('cacheText');
-        dot.className = 'dot ready';
-        text.textContent = `缓存就绪: 日线 ${data.daily_count}只, 分钟线 ${data.minute_count}只`;
-        document.getElementById('cacheControls').style.display = '';
         btn.disabled = false;
         btn.textContent = '补充下载';
         return;
@@ -804,8 +723,6 @@ function renderCsvResult(d) {
 
     // Restore download task state (if a task was running when page was last closed)
     restoreDownloadTaskState();
-    // Auto-check cache status on load instead of requiring manual button click
-    checkCacheStatus();
 })();
 </script>
 {% endblock %}
