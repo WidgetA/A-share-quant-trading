@@ -453,11 +453,26 @@ async function startCacheDownloadFromUI() {
 }
 
 async function stopCacheDownload() {
+    const btn  = document.getElementById('cacheDownloadBtn');
+    const stop = document.getElementById('cacheStopBtn');
+    stop.disabled = true;
+    btn.textContent = '取消中...';
+
     try { await fetch('/api/momentum/tsanghi-cancel', { method: 'POST' }); } catch(e) {}
-    // Close the SSE reader after sending cancel — server may not respond on closed stream
-    if (_streamReader) { try { _streamReader.cancel(); } catch(e) {} }
+    if (_streamReader) { try { _streamReader.cancel(); } catch(e) {} _streamReader = null; }
+
+    // Poll until server task actually stops before re-enabling the download button
+    for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+            const r = await fetch('/api/momentum/tsanghi-task-status', {cache: 'no-store'});
+            if (r.ok && (await r.json()).state !== 'running') break;
+        } catch(e) { break; }
+    }
+
     dlLog('下载已取消', 'log-warn');
     _onDownloadFinished();
+    stop.disabled = false;
 }
 
 async function clearDownloadError() {
