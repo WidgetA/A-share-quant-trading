@@ -190,20 +190,20 @@
             </div>
             <div class="status-card-body">
                 <div class="status-card-row">
+                    <span class="status-card-label">同步范围</span>
+                    <span class="status-card-value" id="dataEngineSyncRange">--</span>
+                </div>
+                <div class="status-card-row" id="dataEngineErrorRow" style="display:none;">
+                    <span class="status-card-label">错误</span>
+                    <span class="status-card-value" id="dataEngineErrorMsg" style="color:#d32f2f;font-size:0.78rem;">--</span>
+                </div>
+                <div class="status-card-row">
                     <span class="status-card-label">数据范围</span>
                     <span class="status-card-value" id="dataEngineRange">--</span>
                 </div>
                 <div class="status-card-row">
-                    <span class="status-card-label">日线</span>
-                    <span class="status-card-value" id="dataEngineDaily">--</span>
-                </div>
-                <div class="status-card-row">
-                    <span class="status-card-label">分钟线</span>
-                    <span class="status-card-value" id="dataEngineMinute">--</span>
-                </div>
-                <div class="status-card-row" id="dataEngineDownloadRow" style="display:none;">
-                    <span class="status-card-label">下载任务</span>
-                    <span class="status-card-value" id="dataEngineDownload" style="color:#f57c00;">--</span>
+                    <span class="status-card-label">日线 / 分钟线</span>
+                    <span class="status-card-value" id="dataEngineCounts">--</span>
                 </div>
             </div>
         </div>
@@ -814,40 +814,43 @@ function startFinetune() {
 
 async function loadDataEngineStatus() {
     try {
-        const resp = await fetch('/api/cache/status', {cache: 'no-store'});
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const d = await resp.json();
+        const [dlResp, cacheResp] = await Promise.all([
+            fetch('/api/momentum/tsanghi-task-status', {cache: 'no-store'}),
+            fetch('/api/cache/status', {cache: 'no-store'}),
+        ]);
+        const dl = dlResp.ok ? await dlResp.json() : null;
+        const c  = cacheResp.ok ? await cacheResp.json() : null;
 
-        const ind = document.getElementById('dataEngineIndicator');
-        if (d.cache_ready) {
-            ind.textContent = '已连接';
-            ind.className = 'status-indicator online';
-        } else {
-            ind.textContent = '未连接';
+        const ind       = document.getElementById('dataEngineIndicator');
+        const syncRange = document.getElementById('dataEngineSyncRange');
+        const errorRow  = document.getElementById('dataEngineErrorRow');
+        const errorMsg  = document.getElementById('dataEngineErrorMsg');
+
+        if (dl && dl.state === 'running') {
+            ind.textContent = '正在同步';
+            ind.className = 'status-indicator unstable';
+            syncRange.textContent = (dl.start_date || '') + ' ~ ' + (dl.end_date || '');
+            errorRow.style.display = 'none';
+        } else if (dl && dl.state === 'failed') {
+            ind.textContent = '失败';
             ind.className = 'status-indicator offline';
+            syncRange.textContent = (dl.start_date || '') + ' ~ ' + (dl.end_date || '');
+            errorRow.style.display = '';
+            errorMsg.textContent = dl.error_msg || '未知错误';
+        } else {
+            ind.textContent = '空闲';
+            ind.className = 'status-indicator online';
+            syncRange.textContent = '--';
+            errorRow.style.display = 'none';
         }
 
-        const range = (d.start_date && d.end_date)
-            ? d.start_date.slice(2) + ' ~ ' + d.end_date.slice(2)
-            : '--';
-        document.getElementById('dataEngineRange').textContent = range;
-        document.getElementById('dataEngineDaily').textContent =
-            d.daily_stock_count ? d.daily_stock_count + ' 只' : '--';
-        document.getElementById('dataEngineMinute').textContent =
-            d.minute_stock_count ? d.minute_stock_count + ' 只' : '--';
-
-        // Show active download task if any
-        const dlResp = await fetch('/api/momentum/tsanghi-task-status', {cache: 'no-store'});
-        if (dlResp.ok) {
-            const dl = await dlResp.json();
-            const row = document.getElementById('dataEngineDownloadRow');
-            if (dl.state === 'running') {
-                row.style.display = '';
-                document.getElementById('dataEngineDownload').textContent =
-                    '下载中 ' + (dl.start_date || '') + '~' + (dl.end_date || '');
-            } else {
-                row.style.display = 'none';
-            }
+        // DB coverage info
+        if (c) {
+            const range = (c.start_date && c.end_date)
+                ? c.start_date.slice(2) + ' ~ ' + c.end_date.slice(2) : '--';
+            document.getElementById('dataEngineRange').textContent = range;
+            document.getElementById('dataEngineCounts').textContent =
+                (c.daily_stock_count || '--') + ' / ' + (c.minute_stock_count || '--') + ' 只';
         }
     } catch(e) {
         const ind = document.getElementById('dataEngineIndicator');
