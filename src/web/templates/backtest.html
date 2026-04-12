@@ -453,8 +453,11 @@ async function startCacheDownloadFromUI() {
 }
 
 async function stopCacheDownload() {
-    if (_streamReader) { try { _streamReader.cancel(); } catch(e) {} }
     try { await fetch('/api/momentum/tsanghi-cancel', { method: 'POST' }); } catch(e) {}
+    // Close the SSE reader after sending cancel — server may not respond on closed stream
+    if (_streamReader) { try { _streamReader.cancel(); } catch(e) {} }
+    dlLog('下载已取消', 'log-warn');
+    _onDownloadFinished();
 }
 
 async function clearDownloadError() {
