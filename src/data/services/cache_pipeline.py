@@ -154,7 +154,8 @@ class CachePipeline:
                     before = len(stock_codes)
                     stock_codes = [c for c in stock_codes if c not in blacklist]
                     if before != len(stock_codes):
-                        logger.info("blacklist: excluded %d stocks from minute download", before - len(stock_codes))
+                        skipped = before - len(stock_codes)
+                        logger.info("blacklist: excluded %d stocks", skipped)
                 no_data_reasons: dict[str, str] = {}
                 if stock_codes:
                     no_data_reasons = await self._download_minute(
@@ -918,7 +919,10 @@ class CachePipeline:
         active_codes = await self.storage.get_active_daily_codes(start_date, end_date)
         existing_minute = await self.storage.get_existing_minute_codes(start_date, end_date)
         blacklist = get_stock_blacklist()
-        would_download = [c for c in active_codes if c not in existing_minute and c not in blacklist]
+        would_download = [
+            c for c in active_codes
+            if c not in existing_minute and c not in blacklist
+        ]
 
         self.storage.invalidate_cache_status()
 

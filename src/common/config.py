@@ -41,7 +41,10 @@ def get_stock_blacklist() -> set[str]:
             data = json.loads(_STOCK_BLACKLIST_PATH.read_text(encoding="utf-8"))
             _stock_blacklist = set(data.get("blacklist", {}).keys())
             if _stock_blacklist:
-                logger.info("stock_blacklist: loaded %d codes: %s", len(_stock_blacklist), _stock_blacklist)
+                logger.info(
+                    "stock_blacklist: loaded %d codes: %s",
+                    len(_stock_blacklist), _stock_blacklist,
+                )
         except Exception as e:
             logger.warning("stock_blacklist: failed to load %s: %s", _STOCK_BLACKLIST_PATH, e)
             _stock_blacklist = set()
