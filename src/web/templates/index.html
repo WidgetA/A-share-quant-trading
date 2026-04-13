@@ -201,6 +201,12 @@
                     <span class="status-card-label">错误</span>
                     <span class="status-card-value" id="dataEngineErrorMsg" style="color:#d32f2f;font-size:0.78rem;">--</span>
                 </div>
+                <div class="status-card-row" id="dataEngineClearRow" style="display:none;">
+                    <span class="status-card-label"></span>
+                    <span class="status-card-value">
+                        <button class="btn-sm" onclick="clearDataEngineError()" style="padding:1px 8px;font-size:0.75rem;color:#d32f2f;background:none;border:1px solid #d32f2f;border-radius:3px;cursor:pointer;">清除</button>
+                    </span>
+                </div>
                 <div class="status-card-row" id="dataEngineDetailRow">
                     <span class="status-card-label">数据详情</span>
                     <span class="status-card-value" id="dataEngineDetail">
@@ -831,24 +837,38 @@ async function loadDataEngineStatus() {
         dbVal.textContent = dl.db_connected ? '已连接' : '未连接';
         dbVal.style.color = dl.db_connected ? '#2e7d32' : '#d32f2f';
 
+        const clearRow = document.getElementById('dataEngineClearRow');
+
         if (dl.state === 'running') {
             ind.textContent = '正在同步';
             ind.className = 'status-indicator unstable';
             syncRow.style.display = '';
             syncRange.textContent = (dl.start_date || '') + ' ~ ' + (dl.end_date || '');
             errorRow.style.display = 'none';
+            clearRow.style.display = 'none';
         } else if (dl.state === 'failed') {
-            ind.textContent = '失败';
+            ind.textContent = '下载失败';
             ind.className = 'status-indicator offline';
             syncRow.style.display = '';
             syncRange.textContent = (dl.start_date || '') + ' ~ ' + (dl.end_date || '');
             errorRow.style.display = '';
             errorMsg.textContent = dl.error_msg || '未知错误';
+            clearRow.style.display = '';
+        } else if (dl.scheduler_last_result === 'failed') {
+            // No active download, but cache scheduler last run failed
+            ind.textContent = '补全失败';
+            ind.className = 'status-indicator offline';
+            syncRow.style.display = '';
+            syncRange.textContent = dl.scheduler_last_time || '--';
+            errorRow.style.display = '';
+            errorMsg.textContent = dl.scheduler_last_message || '定时补全失败';
+            clearRow.style.display = 'none';
         } else {
             ind.textContent = '空闲';
             ind.className = 'status-indicator online';
             syncRow.style.display = 'none';
             errorRow.style.display = 'none';
+            clearRow.style.display = 'none';
         }
     } catch(e) {
         document.getElementById('dataEngineIndicator').textContent = '异常';
@@ -870,6 +890,11 @@ async function loadDataEngineDetail() {
     } catch(e) {
         el.textContent = '查询失败';
     }
+}
+
+async function clearDataEngineError() {
+    try { await fetch('/api/momentum/tsanghi-clear', {method: 'POST'}); } catch(e) {}
+    loadDataEngineStatus();
 }
 
 // --- Init ---
