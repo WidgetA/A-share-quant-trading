@@ -920,8 +920,7 @@ class CachePipeline:
         existing_minute = await self.storage.get_existing_minute_codes(start_date, end_date)
         blacklist = get_stock_blacklist()
         would_download = [
-            c for c in active_codes
-            if c not in existing_minute and c not in blacklist
+            c for c in active_codes if c not in existing_minute and c not in blacklist
         ]
 
         self.storage.invalidate_cache_status()

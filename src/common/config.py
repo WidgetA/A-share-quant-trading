@@ -43,7 +43,8 @@ def get_stock_blacklist() -> set[str]:
             if _stock_blacklist:
                 logger.info(
                     "stock_blacklist: loaded %d codes: %s",
-                    len(_stock_blacklist), _stock_blacklist,
+                    len(_stock_blacklist),
+                    _stock_blacklist,
                 )
         except Exception as e:
             logger.warning("stock_blacklist: failed to load %s: %s", _STOCK_BLACKLIST_PATH, e)
