@@ -930,6 +930,7 @@ def create_momentum_router() -> APIRouter:
             "scheduler_last_result": sched.get("last_run_result"),
             "scheduler_last_time": sched.get("last_run_time"),
             "scheduler_last_message": sched.get("last_run_message"),
+            "scheduler_next_time": sched.get("next_run_time"),
         }
 
         active_dl = getattr(request.app.state, "active_download", None)

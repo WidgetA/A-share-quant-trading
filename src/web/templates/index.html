@@ -859,9 +859,11 @@ async function loadDataEngineStatus() {
             ind.textContent = '补全失败';
             ind.className = 'status-indicator offline';
             syncRow.style.display = '';
-            syncRange.textContent = dl.scheduler_last_time || '--';
+            const next = dl.scheduler_next_time || '明天 03:00';
+            syncRange.textContent = '定时任务 · 下次 ' + next;
             errorRow.style.display = '';
-            errorMsg.textContent = dl.scheduler_last_message || '定时补全失败';
+            errorMsg.textContent = (dl.scheduler_last_message || '定时补全失败')
+                + ' (' + (dl.scheduler_last_time || '') + ')';
             clearRow.style.display = 'none';
         } else {
             ind.textContent = '空闲';
