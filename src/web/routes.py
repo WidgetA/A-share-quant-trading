@@ -6413,6 +6413,7 @@ def create_v15_backtest_router() -> APIRouter:
                 high_940=max_high,
                 low_940=min_low,
                 volume_940=cum_vol,
+                volume_937=0.0,
                 avg_daily_volume=avg_daily_volume,
                 trend_5d=trend_5d,
                 trend_10d=trend_10d,

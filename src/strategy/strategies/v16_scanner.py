@@ -67,6 +67,7 @@ class V16StockData:
     high_940: float
     low_940: float
     volume_940: float  # 9:30-9:40 cumulative volume in 股
+    volume_937: float  # call auction + first 7min (≤09:37) in 股
     avg_daily_volume: float  # 37d average daily volume in 股
     trend_5d: float  # 5-day price change ratio (e.g. 0.05 = 5%)
     trend_10d: float  # 10-day price change ratio
@@ -110,6 +111,10 @@ class V16ScanResult:
     stock_best_board: dict[str, str] = field(default_factory=dict)
     # Board avg gain (%) for hot boards
     step2_board_avg_gains: dict[str, float] = field(default_factory=dict)
+    # CCI(14) for recommended stocks: code → CCI value
+    stock_cci: dict[str, float] = field(default_factory=dict)
+    # Early volume (call auction + first 7min) for recommended stocks: code → volume in 股
+    stock_early_vol: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -125,6 +130,21 @@ class _FunnelStock:
 
 # Minimum history rows for LGBRank advanced features
 _MIN_HISTORY_ROWS = 5
+
+
+def _calc_cci(df: pd.DataFrame, period: int = 14) -> float:
+    """Calculate latest CCI (Commodity Channel Index) from OHLCV DataFrame.
+
+    CCI = (TP - SMA(TP, period)) / (0.015 * MeanDeviation(TP, period))
+    where TP = (high + low + close) / 3
+    """
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    tp_tail = tp.iloc[-period:]
+    sma = tp_tail.mean()
+    mean_dev = (tp_tail - sma).abs().mean()
+    if mean_dev == 0:
+        return 0.0
+    return float((tp.iloc[-1] - sma) / (0.015 * mean_dev))
 
 
 class V16Scanner:
@@ -357,6 +377,15 @@ class V16Scanner:
             )
             top5_str = ", ".join(f"{s.code}(LGB={s.score:.4f})" for s in scored[:5])
             logger.info(f"Step 7: Top 5: {top5_str}")
+
+            # Calculate CCI(14) and early volume for recommended stocks
+            for s in result.recommended:
+                sd = stock_data.get(s.code)
+                if sd is not None:
+                    if sd.history_df is not None and len(sd.history_df) >= 14:
+                        result.stock_cci[s.code] = _calc_cci(sd.history_df, period=14)
+                    if sd.volume_937 > 0:
+                        result.stock_early_vol[s.code] = sd.volume_937
         else:
             logger.info("Step 7: No scored candidates")
 

@@ -49,6 +49,7 @@ class TushareQuote:
     early_high: float = 0.0  # max high in 9:30-9:40
     early_low: float = 0.0  # min low in 9:30-9:40
     early_volume: float = 0.0  # cumulative volume 9:30-9:40 in shares (股)
+    volume_937: float = 0.0  # call auction + first 7min (≤09:37) in shares (股)
 
     @property
     def is_trading(self) -> bool:
@@ -283,6 +284,7 @@ class TushareRealtimeClient:
 
         # 9:30-9:40 early snapshot
         early_bars = []
+        bars_937: list[list] = []  # bars ≤09:37 (call auction + first 7min)
         if has_time:
             for r in items:
                 t = str(r[idx["time"]])
@@ -292,6 +294,8 @@ class TushareRealtimeClient:
                 hhmm = t.replace(":", "")[:4]
                 if hhmm <= "0940":
                     early_bars.append(r)
+                if hhmm <= "0937":
+                    bars_937.append(r)
 
         if early_bars:
             e_close = float(early_bars[-1][idx["close"]])
@@ -305,6 +309,13 @@ class TushareRealtimeClient:
             e_low = float(min_low) if min_low else 0.0
             e_vol = float(total_vol)
 
+        if bars_937:
+            vol_937 = float(
+                sum(r[idx["vol"]] for r in bars_937 if r[idx["vol"]] is not None)
+            )
+        else:
+            vol_937 = e_vol
+
         return TushareQuote(
             stock_code=bare_code,
             open_price=float(first_open),
@@ -317,6 +328,7 @@ class TushareRealtimeClient:
             early_high=e_high,
             early_low=e_low,
             early_volume=e_vol,
+            volume_937=vol_937,
         )
 
     # ------------------------------------------------------------------

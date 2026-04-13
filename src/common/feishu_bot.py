@@ -421,12 +421,19 @@ Limit-up (skipped):
             top1 = recommended[0]
             board = scan_result.stock_best_board.get(top1.code, "-")
             bg = board_gains.get(board, 0)
+            cci_map = getattr(scan_result, "stock_cci", {})
+            evol_map = getattr(scan_result, "stock_early_vol", {})
+            top1_cci = cci_map.get(top1.code)
+            top1_evol = evol_map.get(top1.code)
             lines.append("")
             lines.append(f"推荐 Top-1: {top1.code} {top1.name}")
+            cci_str = f" | CCI: {top1_cci:.0f}" if top1_cci is not None else ""
+            evol_str = f" | 7min量: {top1_evol / 10000:.0f}万股" if top1_evol else ""
             lines.append(
                 f"  板块: {board}(均涨{bg:+.2f}%) | "
                 f"LGB: {top1.score:.4f} | "
                 f"买入价: {top1.buy_price:.2f} (9:40)"
+                f"{cci_str}{evol_str}"
             )
 
             lines.append("")
@@ -434,11 +441,16 @@ Limit-up (skipped):
             for s in recommended:
                 board = scan_result.stock_best_board.get(s.code, "-")
                 bg = board_gains.get(board, 0)
+                s_cci = cci_map.get(s.code)
+                s_evol = evol_map.get(s.code)
+                cci_part = f"  CCI={s_cci:.0f}" if s_cci is not None else ""
+                evol_part = f"  7min={s_evol / 10000:.0f}万" if s_evol else ""
                 lines.append(
                     f"{s.rank}. {s.code} {s.name}  "
                     f"LGB={s.score:.4f}  "
                     f"买入:{s.buy_price:.2f}  "
                     f"{board}({bg:+.2f}%)"
+                    f"{cci_part}{evol_part}"
                 )
         else:
             lines.append("")

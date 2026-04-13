@@ -426,6 +426,7 @@ def _build_stock_data(
         high_940=quote.early_high,
         low_940=quote.early_low,
         volume_940=quote.early_volume,
+        volume_937=quote.volume_937,
         avg_daily_volume=avg_daily_volume,
         trend_5d=trend_5d,
         trend_10d=trend_10d,
