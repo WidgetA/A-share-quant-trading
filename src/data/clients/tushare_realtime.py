@@ -310,9 +310,7 @@ class TushareRealtimeClient:
             e_vol = float(total_vol)
 
         if bars_937:
-            vol_937 = float(
-                sum(r[idx["vol"]] for r in bars_937 if r[idx["vol"]] is not None)
-            )
+            vol_937 = float(sum(r[idx["vol"]] for r in bars_937 if r[idx["vol"]] is not None))
         else:
             vol_937 = e_vol
 
