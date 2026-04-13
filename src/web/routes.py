@@ -914,16 +914,23 @@ def create_momentum_router() -> APIRouter:
 
     @router.get("/api/momentum/tsanghi-task-status")
     async def tsanghi_task_status(request: Request):
-        """Return current download task state as JSON (for page-load restore)."""
+        """Return current download task state as JSON (for page-load restore).
+
+        Also includes db_connected (bool) — read from in-memory state, no DB query.
+        """
+        storage = getattr(request.app.state, "storage", None)
+        db_connected = storage is not None and storage.is_ready
+
         active_dl = getattr(request.app.state, "active_download", None)
         if active_dl is None:
-            return {"state": "not_started"}
+            return {"state": "not_started", "db_connected": db_connected}
         return {
             "state": active_dl.state.value,
             "start_date": active_dl.start_date,
             "end_date": active_dl.end_date,
             "error_msg": active_dl.error_msg,
             "started_at": active_dl.started_at.isoformat() if active_dl.started_at else None,
+            "db_connected": db_connected,
         }
 
     @router.post("/api/momentum/tsanghi-cancel")
