@@ -282,7 +282,8 @@ class TushareRealtimeClient:
             logger.warning(f"Failed to aggregate rt_min_daily for {bare_code}: {e}")
             return None
 
-        # 9:30-9:40 early snapshot
+        # 9:30-9:39 early snapshot (use 0939 so data is identical whether
+        # the API is called at 09:39 or any time later in the day)
         early_bars = []
         bars_937: list[list] = []  # bars ≤09:37 (call auction + first 7min)
         if has_time:
@@ -292,7 +293,7 @@ class TushareRealtimeClient:
                 if " " in t:
                     t = t.split(" ")[-1]
                 hhmm = t.replace(":", "")[:4]
-                if hhmm <= "0940":
+                if hhmm <= "0939":
                     early_bars.append(r)
                 if hhmm <= "0937":
                     bars_937.append(r)
