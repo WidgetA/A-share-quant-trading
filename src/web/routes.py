@@ -1503,9 +1503,16 @@ def create_momentum_router() -> APIRouter:
         if not storage:
             raise HTTPException(503, "GreptimeDB 缓存未连接")
 
-        scheduler = CacheScheduler(request.app.state)
-        result = await scheduler.check_and_fill_gaps()
-        return {"success": True, **result}
+        if getattr(request.app.state, "cache_fill_running", False):
+            raise HTTPException(409, "缓存补全正在运行中，请等待完成后再试")
+
+        request.app.state.cache_fill_running = True
+        try:
+            scheduler = CacheScheduler(request.app.state)
+            result = await scheduler.check_and_fill_gaps()
+            return {"success": True, **result}
+        finally:
+            request.app.state.cache_fill_running = False
 
     return router
 

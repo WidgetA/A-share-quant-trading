@@ -125,6 +125,18 @@ class CacheScheduler:
                     await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
                     continue
 
+                # Skip if a manual trigger is already running
+                if getattr(self._app_state, "cache_fill_running", False):
+                    logger.info(
+                        "CacheScheduler: gap-fill already in progress (manual trigger), skipping"
+                    )
+                    self.last_run_time = run_time
+                    self.last_run_result = "skipped"
+                    self.last_run_message = "手动补全正在运行，跳过本次执行"
+                    await _notify_feishu("[缓存补全·定时任务] 手动补全正在运行，跳过本次执行")
+                    continue
+
+                self._app_state.cache_fill_running = True
                 try:
                     result = await self.check_and_fill_gaps()
                     self.last_run_time = run_time
@@ -146,6 +158,8 @@ class CacheScheduler:
                     await _notify_feishu(
                         f"[缓存补全·定时任务] 执行异常\n{e}\n\n下次重试: {next_retry}"
                     )
+                finally:
+                    self._app_state.cache_fill_running = False
 
         except asyncio.CancelledError:
             logger.info("CacheScheduler cancelled")
