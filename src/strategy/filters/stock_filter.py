@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from src.common.config import get_stock_blacklist
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,6 +148,12 @@ class StockFilter:
         Returns:
             True if the stock is allowed, False if filtered out.
         """
+        code = self._normalize_code(stock_code)
+
+        # Global blacklist — insufficient decision data
+        if code in get_stock_blacklist():
+            return False
+
         exchange = self.get_exchange(stock_code)
 
         # Unknown exchanges are not allowed
@@ -193,7 +201,13 @@ class StockFilter:
         allowed = []
         excluded = {}
 
+        blacklist = get_stock_blacklist()
         for code in stock_codes:
+            bare = self._normalize_code(code)
+            if bare in blacklist:
+                excluded[code] = "黑名单股票(决策信息不足)"
+                continue
+
             exchange = self.get_exchange(code)
 
             if exchange == Exchange.UNKNOWN:

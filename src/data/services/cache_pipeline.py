@@ -24,6 +24,7 @@ from collections import Counter
 from datetime import date, timedelta
 from typing import Any
 
+from src.common.config import get_stock_blacklist
 from src.data.clients.greptime_storage import GreptimeBacktestStorage
 from src.data.services.cache_progress_reporter import (
     CacheProgressReporter,
@@ -148,6 +149,12 @@ class CachePipeline:
 
                 # Phase 2: minute (over the full stock universe)
                 stock_codes = await self.storage.get_stock_codes()
+                blacklist = get_stock_blacklist()
+                if blacklist:
+                    before = len(stock_codes)
+                    stock_codes = [c for c in stock_codes if c not in blacklist]
+                    if before != len(stock_codes):
+                        logger.info("blacklist: excluded %d stocks from minute download", before - len(stock_codes))
                 no_data_reasons: dict[str, str] = {}
                 if stock_codes:
                     no_data_reasons = await self._download_minute(
@@ -784,6 +791,7 @@ class CachePipeline:
         """
         gaps = await self.storage.audit_minute_gaps_in_range(start_date, end_date)
         no_data_reasons: dict[str, str] = {}
+        blacklist = get_stock_blacklist()
 
         if not gaps:
             await self.reporter.progress(Phase.MINUTE_BACKFILL, 0, 0, "无缺口")
@@ -809,7 +817,9 @@ class CachePipeline:
             self._raise_if_cancelled(cancel_event, "Minute backfill cancelled by user")
 
             date_str = gap_date.strftime("%Y-%m-%d")
-            codes_list = sorted(missing_codes)
+            codes_list = sorted(c for c in missing_codes if c not in blacklist)
+            if not codes_list:
+                continue
             filled = 0
 
             async for batch in self.minute_source.fetch_batches(codes_list, gap_date, gap_date):
@@ -907,7 +917,8 @@ class CachePipeline:
 
         active_codes = await self.storage.get_active_daily_codes(start_date, end_date)
         existing_minute = await self.storage.get_existing_minute_codes(start_date, end_date)
-        would_download = [c for c in active_codes if c not in existing_minute]
+        blacklist = get_stock_blacklist()
+        would_download = [c for c in active_codes if c not in existing_minute and c not in blacklist]
 
         self.storage.invalidate_cache_status()
 

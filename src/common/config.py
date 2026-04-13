@@ -8,6 +8,7 @@
 # - Type-safe: Provides typed accessors for settings
 # - Secrets separation: Sensitive credentials stored in secrets.yaml
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,35 @@ logger = logging.getLogger(__name__)
 # Project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.yaml"
+_STOCK_BLACKLIST_PATH = PROJECT_ROOT / "data" / "stock_blacklist.json"
+
+# Cached blacklist (loaded once)
+_stock_blacklist: set[str] | None = None
+
+
+def get_stock_blacklist() -> set[str]:
+    """Load the global stock blacklist from data/stock_blacklist.json.
+
+    Stocks in this set are excluded from ALL data pipelines and trading signals.
+    Reason: insufficient decision data (e.g. Tushare has no minute bars).
+    """
+    global _stock_blacklist
+    if _stock_blacklist is not None:
+        return _stock_blacklist
+
+    if _STOCK_BLACKLIST_PATH.exists():
+        try:
+            data = json.loads(_STOCK_BLACKLIST_PATH.read_text(encoding="utf-8"))
+            _stock_blacklist = set(data.get("blacklist", {}).keys())
+            if _stock_blacklist:
+                logger.info("stock_blacklist: loaded %d codes: %s", len(_stock_blacklist), _stock_blacklist)
+        except Exception as e:
+            logger.warning("stock_blacklist: failed to load %s: %s", _STOCK_BLACKLIST_PATH, e)
+            _stock_blacklist = set()
+    else:
+        _stock_blacklist = set()
+
+    return _stock_blacklist
 
 
 class Config:
