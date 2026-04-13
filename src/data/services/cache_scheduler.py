@@ -74,6 +74,14 @@ class CacheScheduler:
     def _get_pipeline(self):
         return getattr(self._app_state, "pipeline", None)
 
+    def _next_run_str(self) -> str:
+        """Compute next 3am Beijing time as a human-readable string."""
+        now = datetime.now(BEIJING_TZ)
+        target = datetime.combine(now.date(), time(SCHEDULE_HOUR, 0), tzinfo=BEIJING_TZ)
+        if now >= target:
+            target += timedelta(days=1)
+        return target.strftime("%m-%d %H:%M")
+
     def get_status(self) -> dict:
         """Return scheduler status for dashboard display."""
         from src.common.config import get_cache_scheduler_enabled
@@ -114,7 +122,7 @@ class CacheScheduler:
                     self.last_run_time = run_time
                     self.last_run_result = "skipped"
                     self.last_run_message = "已关闭，跳过本次执行"
-                    await _notify_feishu("[缓存补全] 调度器已关闭，跳过本次执行")
+                    await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
                     continue
 
                 try:
@@ -134,7 +142,10 @@ class CacheScheduler:
                     self.last_run_time = run_time
                     self.last_run_result = "failed"
                     self.last_run_message = str(e)[:100]
-                    await _notify_feishu(f"[缓存补全] 执行异常\n{e}")
+                    next_retry = self._next_run_str()
+                    await _notify_feishu(
+                        f"[缓存补全·定时任务] 执行异常\n{e}\n\n下次重试: {next_retry}"
+                    )
 
         except asyncio.CancelledError:
             logger.info("CacheScheduler cancelled")
@@ -247,7 +258,7 @@ class CacheScheduler:
                     f"after {DOWNLOAD_TIMEOUT_SECONDS}s"
                 )
                 await _notify_feishu(
-                    f"[缓存补全] 超时 ({idx}/{total_ranges})\n"
+                    f"[缓存补全·定时任务] 超时 ({idx}/{total_ranges})\n"
                     f"{range_start} ~ {range_end} "
                     f"超过{DOWNLOAD_TIMEOUT_SECONDS // 3600}小时未完成，已跳过"
                 )
@@ -257,7 +268,7 @@ class CacheScheduler:
                     exc_info=True,
                 )
                 await _notify_feishu(
-                    f"[缓存补全] 失败 ({idx}/{total_ranges})\n"
+                    f"[缓存补全·定时任务] 失败 ({idx}/{total_ranges})\n"
                     f"{range_start} ~ {range_end}: {str(e)[:100]}"
                 )
 
@@ -281,9 +292,14 @@ class CacheScheduler:
                 fail_parts.append(f"分钟线仍缺失: {len(remaining_minute_gaps)} 段")
             for w in integrity_warnings:
                 fail_parts.append(w)
-            await _notify_feishu("[缓存补全] 部分失败\n" + "\n".join(fail_parts))
+            next_retry = self._next_run_str()
+            await _notify_feishu(
+                "[缓存补全·定时任务] 部分失败\n"
+                + "\n".join(fail_parts)
+                + f"\n\n下次重试: {next_retry}"
+            )
         else:
-            await _notify_feishu(f"[缓存补全] 补全成功\n已补全: {total_downloaded} 段")
+            await _notify_feishu(f"[缓存补全·定时任务] 补全成功\n已补全: {total_downloaded} 段")
 
         total_gaps = len(missing) + len(minute_gaps)
         return {"gaps_found": total_gaps, "dates_downloaded": total_downloaded}
