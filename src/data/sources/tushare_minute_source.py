@@ -58,7 +58,7 @@ class TushareMinuteSource:
                 ... # process batch.ok / batch.empty / batch.error
     """
 
-    BATCH_SIZE = 100
+    BATCH_SIZE = 200
     REQUEST_DELAY = 0.5  # seconds; ≤ 200 req/min
 
     def __init__(
