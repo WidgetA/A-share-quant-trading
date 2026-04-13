@@ -858,17 +858,21 @@ class CachePipeline:
                     f"{date_str} 补 {filled}/{len(missing_codes)} 只",
                 )
 
+            codes_preview = ", ".join(codes_list[:5])
+            if len(codes_list) > 5:
+                codes_preview += f" 等{len(codes_list)}只"
             await self.reporter.progress(
                 Phase.MINUTE_BACKFILL,
                 i + 1,
                 total_days,
-                f"{date_str} 补 {filled}/{len(missing_codes)} 只 ✓",
+                f"{date_str} 补 {filled}/{len(missing_codes)} 只 [{codes_preview}] ✓",
             )
             logger.info(
-                "minute backfill %s: filled %d/%d codes",
+                "minute backfill %s: filled %d/%d codes — %s",
                 date_str,
                 filled,
                 len(missing_codes),
+                codes_preview,
             )
 
         if no_data_reasons:
