@@ -202,18 +202,51 @@ async def run_ml_backtest(
 
     # Step 3: Build candidate set from daily data (gap pre-filter)
     candidates: dict[str, tuple[float, float]] = {}
+    n_suspended = 0
+    n_invalid_price = 0
+    n_gap_filtered = 0
+    gap_samples: list[tuple[str, float, float, float]] = []  # (code, open, preClose, gap%)
     for code, day in all_daily.items():
         if day.is_suspended:
+            n_suspended += 1
             continue
         open_price = day.open
         prev_close = day.preClose
         if prev_close <= 0 or open_price <= 0:
+            n_invalid_price += 1
             continue
-        if (open_price - prev_close) / prev_close * 100 < -0.5:
+        gap_pct = (open_price - prev_close) / prev_close * 100
+        if gap_pct < -0.5:
+            n_gap_filtered += 1
+            if len(gap_samples) < 5:
+                gap_samples.append((code, open_price, prev_close, gap_pct))
             continue
         candidates[code] = (open_price, prev_close)
 
     daily_candidates = len(candidates)
+
+    # Debug: push filter funnel to Feishu for diagnosis
+    if daily_candidates == 0 and len(all_daily) > 0:
+        from src.common.feishu_bot import FeishuBot
+
+        sample_lines = "\n".join(
+            f"  {c}: open={o:.2f} preClose={pc:.2f} gap={g:.2f}%"
+            for c, o, pc, g in gap_samples
+        )
+        debug_msg = (
+            f"[DEBUG] 回测选股漏斗 {date_str}\n"
+            f"日线总数: {len(all_daily)}\n"
+            f"  → 停牌过滤: -{n_suspended}\n"
+            f"  → 无效价格(<=0): -{n_invalid_price}\n"
+            f"  → 跳空低开(< -0.5%): -{n_gap_filtered}\n"
+            f"  → 候选股: {daily_candidates}\n"
+            f"\n被跳空过滤的样本:\n{sample_lines}"
+        )
+        bot = FeishuBot()
+        if bot.is_configured():
+            import asyncio
+
+            asyncio.ensure_future(bot.send_message(debug_msg))
 
     # Step 4: Batch-fetch raw 1-min bars for all candidates and aggregate
     # in-memory via EarlyWindowAggregator (strategy layer owns the window).
