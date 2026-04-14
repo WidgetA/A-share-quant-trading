@@ -643,15 +643,12 @@ class GreptimeBacktestStorage:
         Returns ``{code: [bar_dict, ...]}`` keyed by stock_code, with each bar
         list ordered by ts ascending and shaped like ``get_minute_bars_for_day``.
 
-        Backtest scanners call this once per trade_date instead of doing
-        ``len(codes)`` round-trips through ``get_minute_bars_for_day``.
+        Fetches ALL stocks for the day and filters in Python — avoids huge
+        IN-list SQL that GreptimeDB can't handle with thousands of codes.
         """
         if not codes:
             return {}
-        code_list = sorted(set(codes))
-        # Build IN-list. stock_code values come from upstream APIs (digits only)
-        # so straightforward quoting is safe — no SQL injection vector.
-        in_list = ",".join(f"'{c}'" for c in code_list)
+        wanted = set(codes)
         day_start = date_to_epoch_ms(day)
         day_end = day_start + 86_400_000
         rows = await self.db.fetch(
@@ -659,12 +656,13 @@ class GreptimeBacktestStorage:
             f"close_price, vol, amount "
             f"FROM backtest_minute "
             f"WHERE ts >= {day_start} AND ts < {day_end} "
-            f"AND stock_code IN ({in_list}) "
             f"ORDER BY stock_code, ts"
         )
         out: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
             code = r["stock_code"]
+            if code not in wanted:
+                continue
             bars = out.setdefault(code, [])
             bars.append(
                 {
