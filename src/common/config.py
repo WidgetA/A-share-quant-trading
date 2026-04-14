@@ -8,7 +8,6 @@
 # - Type-safe: Provides typed accessors for settings
 # - Secrets separation: Sensitive credentials stored in secrets.yaml
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -20,49 +19,19 @@ logger = logging.getLogger(__name__)
 # Project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.yaml"
-_STOCK_BLACKLIST_PATH = PROJECT_ROOT / "data" / "stock_blacklist.json"
 
-# Hardcoded blacklist — always applied regardless of file deployment.
+# Global stock blacklist — excluded from ALL data pipelines and trading signals.
 # Tushare stk_mins returns empty for these codes on ALL dates.
-_BUILTIN_BLACKLIST: set[str] = {
-    "302132",  # Tushare无分钟线数据，决策信息不足
-}
+STOCK_BLACKLIST: frozenset[str] = frozenset(
+    {
+        "302132",  # Tushare无分钟线数据，决策信息不足
+    }
+)
 
-# Cached blacklist (loaded once)
-_stock_blacklist: set[str] | None = None
 
-
-def get_stock_blacklist() -> set[str]:
-    """Return the global stock blacklist (builtin + JSON file).
-
-    Stocks in this set are excluded from ALL data pipelines and
-    trading signals. Reason: insufficient decision data.
-    """
-    global _stock_blacklist
-    if _stock_blacklist is not None:
-        return _stock_blacklist
-
-    _stock_blacklist = set(_BUILTIN_BLACKLIST)
-
-    if _STOCK_BLACKLIST_PATH.exists():
-        try:
-            data = json.loads(_STOCK_BLACKLIST_PATH.read_text(encoding="utf-8"))
-            extra = set(data.get("blacklist", {}).keys())
-            _stock_blacklist |= extra
-        except Exception as e:
-            logger.warning(
-                "stock_blacklist: failed to load %s: %s",
-                _STOCK_BLACKLIST_PATH,
-                e,
-            )
-
-    if _stock_blacklist:
-        logger.info(
-            "stock_blacklist: %d codes: %s",
-            len(_stock_blacklist),
-            _stock_blacklist,
-        )
-    return _stock_blacklist
+def get_stock_blacklist() -> frozenset[str]:
+    """Return the global stock blacklist."""
+    return STOCK_BLACKLIST
 
 
 class Config:

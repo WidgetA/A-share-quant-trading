@@ -569,11 +569,14 @@ class GreptimeBacktestStorage:
         return [ts_to_date(r["ts"]) for r in rows]
 
     async def get_stock_codes(self) -> list[str]:
-        """Get all unique stock codes in daily table."""
+        """Get all unique stock codes in daily table (minus blacklist)."""
+        from src.common.config import get_stock_blacklist
+
         rows = await self.db.fetch(
             "SELECT DISTINCT stock_code FROM backtest_daily ORDER BY stock_code"
         )
-        return [r["stock_code"] for r in rows]
+        blacklist = get_stock_blacklist()
+        return [r["stock_code"] for r in rows if r["stock_code"] not in blacklist]
 
     async def get_date_range(self) -> tuple[date | None, date | None]:
         """Get (min_date, max_date) of daily data."""
@@ -783,6 +786,8 @@ class GreptimeBacktestStorage:
 
     async def get_active_daily_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have at least one non-suspended trading day."""
+        from src.common.config import get_stock_blacklist
+
         start_ms = date_to_epoch_ms(start_date)
         end_ms = date_to_epoch_ms(end_date)
         rows = await self.db.fetch(
@@ -790,7 +795,8 @@ class GreptimeBacktestStorage:
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
             f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
         )
-        return {r["stock_code"] for r in rows}
+        blacklist = get_stock_blacklist()
+        return {r["stock_code"] for r in rows if r["stock_code"] not in blacklist}
 
     async def get_latest_closes(self) -> dict[str, float]:
         """Get the latest close price per stock from existing daily data.
@@ -1133,6 +1139,9 @@ class GreptimeBacktestStorage:
 
         # Step 3: only for the failing days, materialize expected & actual code
         # sets and diff to get the exact missing codes.
+        from src.common.config import get_stock_blacklist
+
+        blacklist = get_stock_blacklist()
         gaps: list[tuple[date, set[str]]] = []
         for d in candidate_dates:
             day_start = date_to_epoch_ms(d)
@@ -1151,7 +1160,7 @@ class GreptimeBacktestStorage:
             )
             actual_set = {r["stock_code"] for r in act_rows}
 
-            missing = expected_set - actual_set
+            missing = expected_set - actual_set - blacklist
             if missing:
                 gaps.append((d, missing))
 
