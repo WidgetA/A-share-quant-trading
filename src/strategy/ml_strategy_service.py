@@ -267,13 +267,31 @@ async def run_ml_backtest(
 
     snapshots: dict[str, StockSnapshot] = {}
     minute_hits = 0
+    n_no_bars = 0
+    n_no_snap = 0
+    debug_logged = False
     for code, (open_price, prev_close) in candidates.items():
         raw_bars = bars_by_code.get(code, [])
         if not raw_bars:
+            n_no_bars += 1
             continue
         snaps_by_day = aggregator.aggregate(raw_bars)
         snap = snaps_by_day.get(date_str)
         if snap is None or snap.close <= 0:
+            n_no_snap += 1
+            if not debug_logged:
+                # Log first failure: show trade_time samples and snap keys
+                sample_times = [b.get("trade_time", "?") for b in raw_bars[:3]]
+                logger.info(
+                    "Aggregation miss: code=%s, bars=%d, sample_times=%s, "
+                    "snap_keys=%s, date_str=%s",
+                    code,
+                    len(raw_bars),
+                    sample_times,
+                    list(snaps_by_day.keys()),
+                    date_str,
+                )
+                debug_logged = True
             continue
         minute_hits += 1
 
@@ -287,6 +305,14 @@ async def run_ml_backtest(
             early_volume=snap.cum_volume,
             history=history_bars.get(code, []),
         )
+
+    logger.info(
+        "ML backtest %s aggregation: %d no_bars, %d no_snap, %d minute_hits",
+        date_str,
+        n_no_bars,
+        n_no_snap,
+        minute_hits,
+    )
 
     # Trading safety: halt if minute data is severely insufficient
     if daily_candidates > 0 and minute_hits < daily_candidates * 0.5:
