@@ -2816,7 +2816,10 @@ def create_model_router() -> APIRouter:
                     await asyncio.sleep(0)  # yield to event loop so SSE flushes each message
 
                 result = await scheduler.run_full_training(progress_cb=_progress)
-                queue.put_nowait({"type": "result", "data": result})
+                if result.get("error"):
+                    queue.put_nowait({"type": "error", "message": result["error"]})
+                else:
+                    queue.put_nowait({"type": "result", "data": result})
             except Exception as e:
                 queue.put_nowait({"type": "error", "message": str(e)[:200]})
             finally:
@@ -2884,7 +2887,10 @@ def create_model_router() -> APIRouter:
                     await asyncio.sleep(0)  # yield to event loop so SSE flushes each message
 
                 result = await scheduler.run_finetune(progress_cb=_progress)
-                queue.put_nowait({"type": "result", "data": result})
+                if result.get("error"):
+                    queue.put_nowait({"type": "error", "message": result["error"]})
+                else:
+                    queue.put_nowait({"type": "result", "data": result})
             except Exception as e:
                 queue.put_nowait({"type": "error", "message": str(e)[:200]})
             finally:

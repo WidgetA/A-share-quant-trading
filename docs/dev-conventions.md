@@ -45,73 +45,55 @@ Comment principles:
 
 ## System Architecture
 
-The system is a **strategy platform** with decoupled modules. Message collection is handled by an **external project** that streams data into PostgreSQL.
+FastAPI web application serving dashboard, backtest tools, and iQuant trading API. GreptimeDB stores all backtest cache data.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│           External Message Collector (Separate Project)         │
-│         CLS / East Money / Sina / Akshare → PostgreSQL          │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓ (streaming)
-                    ┌─────────────────────┐
-                    │     PostgreSQL      │
-                    │   (messages table)  │
-                    └─────────────────────┘
-                              ↓ (read-only)
-┌─────────────────────────────────────────────────────────────────┐
-│              A-Share Quant Trading System (This Project)        │
+│              A-Share Quant Trading System                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │   Strategy   │    │   Trading    │    │  Data/Info   │      │
-│  │    Module    │◄──►│    Module    │◄──►│    Module    │      │
+│  │   Strategy   │    │    Web UI    │    │    Data      │      │
+│  │   Services   │◄──►│  (FastAPI)   │◄──►│   Pipeline   │      │
 │  └──────────────┘    └──────────────┘    └──────────────┘      │
 │         │                   │                   │               │
-│         │            ┌──────┴──────┐           │               │
-│         │            │             │           │               │
-│         ▼            ▼             ▼           ▼               │
-│    [Strategies]  [Live Trade] [Paper Trade] [Market Data]      │
-│    - NewsAnalysis                            [MessageReader]    │
-│    - (Future...)                             (from PostgreSQL)  │
+│         ▼                   ▼                   ▼               │
+│  [ML Scanner]        [Dashboard]         [GreptimeDB]          │
+│  [Momentum Scanner]  [Backtest]          [CachePipeline]       │
+│  [SignalStore]        [iQuant API]       [tsanghi/Tushare]     │
+│                       [Model Mgmt]       [Local JSON]          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
-Communication: Message Queue (Redis/ZeroMQ) for real-time decoupling
+iQuant (Windows QMT) ←──poll/ack──→ /api/iquant/* endpoints
+FC Serverless ←──callback──→ /api/model/* endpoints
 ```
 
 ### Module Responsibilities
 
-| Module | Responsibility | Hot-Reload |
-|--------|---------------|------------|
-| **Strategy** | Signal generation, risk rules, position sizing | Yes - strategies can be updated during trading hours |
-| **Trading** | Order execution, position management, P&L tracking | Partial - receives strategy updates in real-time |
-| **Data/Info** | Market data (Tushare/tsanghi), boards/stock names (local JSON), backtest cache (GreptimeDB) | No - runs continuously |
-
-### Decoupling Requirements
-
-- Modules communicate via **message queue** (not direct function calls)
-- Strategy changes must propagate to Trading module **without restart**
-- Each module can be deployed and scaled independently
-- Use configuration-driven design for runtime parameter changes
+| Module | Responsibility |
+|--------|---------------|
+| **Strategy** (`src/strategy/`) | Stateless scanners (ML + momentum), filters, signal store |
+| **Web** (`src/web/`) | FastAPI routes, dashboard, backtest, iQuant communication |
+| **Data** (`src/data/`) | GreptimeDB storage, cache pipeline, data sources |
+| **Common** (`src/common/`) | Config, Feishu notifications, S3 client, scheduler |
 
 ## CI/CD Pipeline
 
 ```yaml
 # .github/workflows/ci.yml structure
 Pipeline:
-  1. Lint & Format Check (ruff, black)
+  1. Lint & Format Check (ruff)
   2. Type Check (mypy)
   3. Unit Tests (pytest)
-  4. Integration Tests (strategy + trading simulation)
-  5. Build Docker Images
-  6. Deploy to Staging (optional)
+  4. Build & Push Docker Image (trading-service)
+  5. Deploy FC Serverless (ml-training)
 ```
 
 CI Requirements:
 - All PRs must pass CI before merge
-- Test coverage threshold: 80%
 - No type errors allowed
-- Code must be formatted with black
+- Code must be formatted with ruff format
 
 ## Project Structure
 
@@ -125,61 +107,69 @@ A-share-quant-trading/
 │   └── datetime-timezone-guide.md  # Date/time & asyncpg TZ handling
 ├── src/
 │   ├── strategy/            # Strategy module
-│   │   ├── models.py        # Shared data models (PriceSnapshot, etc.)
+│   │   ├── models.py        # Shared data models (PriceSnapshot, DailyBar, etc.)
 │   │   ├── base.py          # Base strategy interface
 │   │   ├── signals.py       # Signal types
 │   │   ├── signal_store.py  # In-memory signal queue (push/poll/ack/expire)
-│   │   ├── momentum_strategy_service.py  # Stateless momentum scan (backtest + live)
+│   │   ├── ml_strategy_service.py       # Stateless ML scan (backtest + live)
+│   │   ├── momentum_strategy_service.py # Stateless momentum scan (backtest + live)
 │   │   ├── strategies/
+│   │   │   ├── ml_scanner.py        # ML 8-layer filter + LightGBM LambdaRank
 │   │   │   └── momentum_scanner.py  # Momentum 7-layer funnel + V3 scoring
-│   │   ├── aggregators/     # Business-defined minute aggregation (injected into pipeline)
+│   │   ├── aggregators/
 │   │   │   └── early_window_aggregator.py  # 09:31~09:40 early-window snapshot
-│   │   └── filters/         # Stock/quality filters
+│   │   └── filters/
 │   │       ├── momentum_quality_filter.py  # Volume filter
 │   │       ├── reversal_factor_filter.py   # 冲高回落 filter
 │   │       └── stock_filter.py             # Exchange filter
-│   ├── trading/             # Trading module
-│   │   ├── position_manager.py  # Slot-based position management
-│   │   ├── holding_tracker.py   # Overnight holding tracking
-│   │   └── repository.py       # Trading DB repository
 │   ├── data/                # Data module
-│   │   ├── clients/         # Storage + read-only adapters (no upstream API calls)
-│   │   │   ├── greptime_storage.py            # Pure GreptimeDB storage (CRUD only)
-│   │   │   ├── greptime_historical_adapter.py # Read-only adapter (HistoricalDataProvider Protocol)
+│   │   ├── clients/         # Storage + read-only adapters
+│   │   │   ├── greptime_storage.py            # GreptimeDB storage (asyncpg, CRUD)
+│   │   │   ├── greptime_historical_adapter.py # Read-only adapter (HistoricalDataProvider)
 │   │   │   ├── iquant_historical_adapter.py   # Live historical adapter
 │   │   │   ├── tushare_realtime.py            # Tushare realtime quotes
 │   │   │   └── sina_realtime.py               # Sina realtime (fallback)
-│   │   ├── sources/         # Upstream API wrappers (one source per feed)
+│   │   ├── sources/         # Upstream API wrappers
 │   │   │   ├── tsanghi_daily_source.py        # tsanghi daily_latest
 │   │   │   ├── tushare_minute_source.py       # Tushare stk_mins (1min bars)
 │   │   │   ├── tushare_metadata_source.py     # Tushare bak_basic / suspend_d / trade_cal
-│   │   │   └── local_concept_mapper.py        # Board ↔ stock mapping
+│   │   │   └── local_concept_mapper.py        # Board ↔ stock mapping (local JSON)
 │   │   └── services/        # Orchestration / scheduling
-│   │       ├── cache_pipeline.py            # Storage write orchestration (sources → aggregator → storage)
+│   │       ├── cache_pipeline.py            # Download orchestration (sources → storage)
 │   │       ├── cache_progress_reporter.py   # Phase enum + Feishu notifications
-│   │       ├── cache_scheduler.py           # 3am daily storage gap-fill
-│   │       └── model_training_scheduler.py  # ML model finetune scheduler
+│   │       ├── cache_scheduler.py           # 3am daily gap-fill
+│   │       ├── download_task.py             # Background task state machine
+│   │       └── model_training_scheduler.py  # ML model training scheduler (FC async)
 │   ├── web/                 # Web UI
-│   │   ├── app.py           # FastAPI application
-│   │   ├── routes.py        # Main routes + backtest + settings
-│   │   ├── iquant_routes.py # iQuant communication + monitoring
-│   │   └── templates/       # Jinja2 templates
+│   │   ├── app.py           # FastAPI application factory + startup
+│   │   ├── routes.py        # Dashboard, backtest, settings, model management
+│   │   ├── iquant_routes.py # iQuant communication + monitoring (isolated)
+│   │   ├── templates/       # Jinja2 templates
+│   │   └── static/          # CSS styles
 │   └── common/              # Shared utilities
-│       ├── config.py        # Configuration + credential management
+│       ├── config.py        # Configuration + stock blacklist
 │       ├── feishu_bot.py    # Feishu notifications
+│       ├── s3_client.py     # S3-compatible upload/download
 │       ├── scheduler.py     # Trading session scheduler
 │       └── pending_store.py # Pending confirmation store
+├── serverless/              # FC serverless ML training
+│   ├── app.py               # Flask endpoint (LightGBM train + S3 upload)
+│   ├── Dockerfile           # FC container image
+│   └── requirements.txt     # FC dependencies
 ├── data/                    # Runtime data files
 │   ├── sectors.json         # THS board names
-│   └── board_constituents.json  # Board → stock mapping + stock names
+│   ├── board_constituents.json  # Board → stock mapping + stock names
+│   └── models/              # ML model files (*.lgb)
 ├── config/
-│   └── database-config.yaml # GreptimeDB connection config
+│   ├── database-config.yaml # GreptimeDB connection config
+│   └── secrets.yaml         # API keys (gitignored)
 ├── scripts/
-│   ├── iquant_live.py       # iQuant live trading script
+│   ├── iquant_live.py       # iQuant live trading script (Windows)
+│   ├── iquant_strategy.py   # iQuant strategy class
 │   └── audit_trading_safety.py  # Safety audit
 └── .github/
     └── workflows/
-        └── ci.yml
+        └── ci.yml           # CI + Docker + FC deploy
 ```
 
 ## Development Checklist
@@ -358,26 +348,13 @@ uv run pytest             # Run tests
 | **Live Trading** | Real trading with actual broker connection |
 | **Hot-Reload** | Ability to update code/config without system restart |
 
-## Message Reader Testing
-
-Message collection is in an external project. This project only reads from PostgreSQL.
-
-Required test types per reader component:
-
-| Test Type | Purpose |
-|-----------|---------|
-| **Connection** | Verify PostgreSQL connection works |
-| **Query** | Verify message queries return expected format |
-| **Incremental** | Verify incremental queries work correctly |
-| **Error Handling** | Verify graceful handling of connection errors |
+## Testing
 
 ```bash
-uv run pytest tests/unit/data/readers/ -v              # All reader tests
-uv run pytest tests/unit/data/readers/ -v -m "not live" # Mocked DB (CI)
-uv run pytest tests/unit/data/readers/ -v -m live       # Live tests (needs DATABASE_URL)
+uv run pytest tests/ -v                    # All tests
+uv run pytest tests/unit/ -v               # Unit tests only
 ```
 
 Guidelines:
 - Use `pytest.mark.asyncio` for async tests
-- Use `pytest-mock` to mock database connections
-- Include at least one `@pytest.mark.live` test connecting to real PostgreSQL
+- Use `pytest-mock` to mock external services

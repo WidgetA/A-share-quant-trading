@@ -16,21 +16,14 @@
 
 ## 二、数据源清单
 
-### 2.1 数据库：历史推荐记录
+### 2.1 历史推荐记录
+
+推荐结果通过 on-demand 方式获取（不持久化到数据库）：
 
 | 数据 | 来源 | 访问方式 |
 |------|------|----------|
-| 每日推荐股票记录 | PostgreSQL `trading.momentum_scan_stocks` | CSV 导出接口 / SQL |
-| 字段 | `trade_date, stock_code, stock_name, board_name, open_gain_pct, pe_ttm, board_avg_pe, open_price, prev_close, buy_price, next_day_open, return_pct, growth_rate` | |
-
-```sql
--- 查某天推荐记录
-SELECT * FROM trading.momentum_scan_stocks
-WHERE trade_date = '2026-02-26'
-ORDER BY return_pct;
-```
-
-CSV 导出：`GET /api/momentum/scan-stocks/csv?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+| 单日推荐结果 | ML scan / Momentum scan | `GET /api/trading/recommendations?date=YYYY-MM-DD` |
+| 范围回测 | Momentum range backtest | `POST /api/momentum/combined-analysis` (SSE stream) |
 
 ### 2.2 日志：Pipeline 各步骤输出
 
@@ -94,14 +87,10 @@ snap = await storage.get_minute_snapshot("600519", "2024-06-01")
 
 确认当天推荐了哪只票、买卖价格、收益率。
 
-```sql
-SELECT stock_code, stock_name, board_name,
-       buy_price, next_day_open, return_pct
-FROM trading.momentum_scan_stocks
-WHERE trade_date = '2026-02-26';
+通过 Dashboard 回测页面查看指定日期的推荐结果，或调用 API：
 ```
-
-或用前端 CSV 导出功能。
+GET /api/trading/recommendations?date=2026-02-26
+```
 
 ### Step 2: 查看当天分钟线走势
 
@@ -150,23 +139,14 @@ composite = Z(gain_from_open) + Z(turnover_amp) - cup_days * 0.3 + leader_bonus
    - `turnover_amp < 0.4` → 缩量弱势，过滤
 2. **Step 5.6 冲高回落过滤** — 看日志 `ReversalFilter`
 3. **Step 5.7 板块相关度** — 看缓存 + 日志 `Step 5.7: Filtered`
-4. **Step 6 负面新闻** — 看 `news_check_passed` 和 `news_check_detail`
 
 ### Step 6: 漏斗分析（批量）
 
 对一段日期范围做漏斗分析，看各层过滤的效果：
 
-```bash
-uv run python scripts/analyze_funnel.py -s 2026-02-10 -e 2026-02-28
-```
-
-输出：
-- 每层股票数量、平均收益、胜率、中位数收益
-- "误杀"统计 — 被过滤掉的票里有多少其实是赚钱的
-
-**Web 接口：**
 ```
 POST /api/momentum/combined-analysis
+Body: {"start_date": "2026-02-10", "end_date": "2026-02-28", "initial_capital": 100000}
 返回: 每天的 backtest + funnel 层级数据 (SSE streaming)
 ```
 
@@ -203,8 +183,8 @@ POST /api/momentum/combined-analysis
 ### 模式 E：个股利空
 
 **特征：** 公司有负面新闻（业绩暴雷、诉讼、高管变动等）
-**诊断：** 查 `news_check_detail` 字段
-**根因：** 新闻过滤器未检测到，或新闻在推荐后才发布
+**诊断：** 手动查询该股票近期公告和新闻
+**根因：** 系统不含新闻过滤，负面消息无法自动检测
 
 ---
 
@@ -243,10 +223,10 @@ POST /api/momentum/combined-analysis
 
 | 文件 | 用途 |
 |------|------|
-| `src/strategy/strategies/momentum_sector_scanner.py` | 主扫描器，Step 1-7 全流程 |
+| `src/strategy/strategies/ml_scanner.py` | ML 扫描器，8 层过滤 + LightGBM 评分 |
+| `src/strategy/strategies/momentum_scanner.py` | 动量扫描器，7 层漏斗 + V3 回归评分 |
 | `src/strategy/filters/momentum_quality_filter.py` | Step 5.5 动量质量过滤 |
 | `src/strategy/filters/reversal_factor_filter.py` | Step 5.6 冲高回落过滤 |
-| `src/data/database/momentum_scan_db.py` | 推荐记录数据库读写 |
-| `src/web/routes.py` | Web API 路由（含 loss-analysis） |
-| `scripts/analyze_funnel.py` | 漏斗分析脚本 |
+| `src/strategy/ml_strategy_service.py` | ML 扫描服务（live + backtest） |
+| `src/web/routes.py` | Web API 路由（推荐、回测） |
 | `data/board_constituents.json` | 板块成分股映射 |

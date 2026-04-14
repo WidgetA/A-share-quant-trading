@@ -50,81 +50,47 @@
 
 ## Module: System
 
-### [SYS-001] Main Program Entry
+### [SYS-001] Application Entry Point
 
 **Status**: Completed
 
-**Description**: Central entry point that orchestrates all modules for 24/7 operation.
+**Description**: FastAPI web application as the sole entry point, serving dashboard UI, backtest API, iQuant trading API, and background schedulers.
 
-**Requirements**:
-- Single entry point for entire trading system
-- Coordinate startup/shutdown of all modules
-- Signal handling (SIGINT, SIGTERM) for graceful shutdown
-- Periodic statistics logging
-- Event-driven module coordination
-
-**Technical Design**:
-- `SystemManager` class orchestrates all components
-- `ModuleCoordinator` provides event pub/sub for loose coupling
-- Event types: NEWS_RECEIVED, SIGNAL_GENERATED, SESSION_CHANGED, etc.
-
-**Files**:
-- `scripts/main.py` - Main entry point
-- `src/common/coordinator.py` - Event coordinator
-- `config/main-config.yaml` - System configuration
-
-**Usage**:
+**Entry Point**:
 ```bash
-# Start the system
-uv run python scripts/main.py
-
-# With custom config
-uv run python scripts/main.py --config config/main-config.yaml
+uv run uvicorn src.web.app:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-**Acceptance Criteria**:
-- [x] SystemManager class implemented
-- [x] ModuleCoordinator with event pub/sub
-- [x] Signal handlers for graceful shutdown
-- [x] Statistics logging
-- [x] YAML configuration support
+**Startup Flow** (`src/web/app.py` → `create_app()`):
+1. Configure root logger (idempotent for pytest)
+2. Mount 6 routers (main, momentum, settings, trade-backtest, trading, model)
+3. Initialize GreptimeDB storage + CachePipeline
+4. Start background schedulers: iQuant monitoring, cache scheduler (3am), model training scheduler
+5. Run trading safety audit
+6. Send Feishu startup notification
+
+**Files**:
+- `src/web/app.py` - FastAPI application factory
+- `Dockerfile` - Container build (uvicorn CMD)
 
 ---
 
-### [SYS-002] State Persistence and Recovery
+### [SYS-002] State Management
 
 **Status**: Completed
 
-**Description**: Enable system recovery from crashes by persisting state to PostgreSQL.
+**Description**: Lightweight state management using GreptimeDB, JSON files, and in-memory stores.
 
-**Requirements**:
-- Persist system state (STARTING, RUNNING, STOPPED, etc.)
-- Save module checkpoints periodically
-- Detect crash on startup (last state was RUNNING)
-- Restore from checkpoints after crash
-- Configurable checkpoint age limit
+**State Storage**:
 
-**Technical Design**:
-- `StateManager` class manages PostgreSQL persistence
-- Database: PostgreSQL (same instance as trading, `trading` schema)
-- Tables:
-  - `trading.system_state` - Overall system state
-  - `trading.module_checkpoints` - Per-module recovery data
-- Connection pooling via asyncpg
-- Checkpoint interval: configurable (default 60s)
-- Recovery: load checkpoints, resume modules, clear old checkpoints
-
-**Files**:
-- `src/common/state_manager.py` - State persistence manager
-- `config/database-config.yaml` - Database configuration
-
-**Acceptance Criteria**:
-- [x] SystemState enum (STARTING, RUNNING, STOPPED, etc.)
-- [x] Checkpoint save/load operations
-- [x] Crash detection on startup
-- [x] Recovery flow implemented
-- [x] Configurable checkpoint age limit
-- [x] PostgreSQL with asyncpg connection pool
+| State | Storage | File/Table |
+|-------|---------|------------|
+| Backtest cache (daily/minute OHLCV) | GreptimeDB | `backtest_daily`, `backtest_minute`, `stock_list` |
+| iQuant holdings | JSON file | `data/v15_holdings.json` |
+| Trading signals | In-memory | `SignalStore` (no persistence — signals expire) |
+| Configuration | Environment vars + YAML | `config/secrets.yaml`, `config/database-config.yaml` |
+| ML models | Local files + S3 | `data/models/*.lgb` |
+| Cache scheduler state | Disk file | `data/cache_scheduler_enabled.txt`, `data/last_finetune_date.txt` |
 
 ---
 
@@ -250,10 +216,10 @@ if bot.is_configured():
 ```
 
 **Integration Points**:
-- `scripts/main.py` - Startup/shutdown notifications
-- `src/common/state_manager.py` - State persistence errors
-- `src/trading/repository.py` - Database connection errors
-- `src/strategy/engine.py` - Strategy execution errors
+- `src/web/app.py` - Startup/shutdown notifications
+- `src/web/iquant_routes.py` - iQuant signal/heartbeat alerts
+- `src/data/services/cache_pipeline.py` - Download progress/failure alerts
+- `src/data/services/model_training_scheduler.py` - Training success/failure alerts
 
 **Acceptance Criteria**:
 - [x] FeishuBot class with async HTTP support
@@ -272,18 +238,7 @@ if bot.is_configured():
 
 **Description**: Web-based user interaction for trading confirmations, replacing command-line stdin input to support containerized deployment.
 
-**Requirements**:
-- Web UI for premarket signal selection and morning sell confirmation
-- Feishu notifications with Web links for intraday signals
-- Timeout handling with configurable default behaviors
-- Support both CLI mode (local development) and Web mode (container)
-
-**Technical Design**:
-- `WebUserInteraction` class extends `UserInteraction` for Web-based input
-- `PendingConfirmationStore` manages pending confirmation requests
-- FastAPI + Jinja2 for Web UI and API
-- Strategy engine creates confirmation → waits for user response via Web
-- Feishu notifications include clickable confirmation links
+**Description**: FastAPI web application serving dashboard UI, backtest tools, iQuant trading API, and background schedulers. All user interaction via browser; Feishu for push notifications.
 
 **Architecture**:
 ```
@@ -291,231 +246,133 @@ if bot.is_configured():
 │                   Trading System (Container)                 │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │   FastAPI    │◄──►│  Pending     │◄──►│  Strategy    │  │
-│  │   :8000      │    │  Store       │    │  Engine      │  │
+│  │   FastAPI    │◄──►│  Pending     │◄──►│  ML/Momentum │  │
+│  │   :8000      │    │  Store       │    │  Services    │  │
 │  └──────────────┘    └──────────────┘    └──────────────┘  │
 │         │                   │                    │          │
 │         ▼                   ▼                    ▼          │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │  HTML Pages  │    │  Feishu Bot  │    │  Web User    │  │
-│  │              │    │  (通知+链接) │    │  Interaction │  │
+│  │  HTML Pages  │    │  Feishu Bot  │    │  SignalStore  │  │
+│  │  (Jinja2)    │    │  (通知+链接) │    │  (push/poll) │  │
 │  └──────────────┘    └──────────────┘    └──────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Interaction Points**:
-| Interaction | Time | Notification | Confirmation |
-|-------------|------|--------------|--------------|
-| Premarket signal selection | 08:30 | - | Web UI |
-| Morning sell confirmation | 09:00 | - | Web UI |
-| Intraday buy confirmation | Trading hours | Feishu | Web UI |
-| Limit-up stock selection | Trading hours | Feishu | Web UI |
+**Pages**:
 
-**API Endpoints**:
+| Page | URL | Content |
+|------|-----|---------|
+| Dashboard | `/` | iQuant connection status, broker positions/cash, data engine status, model management, recommendations |
+| Backtest | `/backtest` | Single-day scan, range backtest (SSE), CSV analysis |
+| Settings | `/settings` | tsanghi token, cache scheduler toggle, FC URL, S3 config |
+| Database | `/database` | Embedded GreptimeDB dashboard |
+
+**Key API Endpoints**:
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `GET /` | GET | Main dashboard (iQuant connection status, positions, pending confirmations) |
-| `GET /backtest` | GET | Backtest page (single-day scan, range backtest, CSV analysis) |
-| `GET /confirm/{id}` | GET | Confirmation page |
-| `GET /api/pending` | GET | List pending confirmations |
-| `GET /api/pending/{id}` | GET | Get confirmation details |
-| `POST /api/pending/{id}/submit` | POST | Submit user decision |
-| `GET /api/status` | GET | Health check |
-| `GET /api/iquant/status` | GET | iQuant connection status (no auth) |
-| `GET /api/momentum/tsanghi-cache-status` | GET | Tsanghi cache status (polling) |
-| `POST /api/momentum/tsanghi-prepare` | POST | Download tsanghi data (SSE stream) |
-| `POST /api/momentum/backtest` | POST | Single-day momentum scan |
-| `POST /api/momentum/combined-analysis` | POST | Range backtest (SSE stream) |
+| `/api/status` | GET | Health check |
+| `/api/iquant/status` | GET | iQuant connection status |
+| `/api/trading/recommendations` | GET | On-demand ML scan results (top-10) |
+| `/api/momentum/tsanghi-prepare` | POST | Download cache data (SSE stream) |
+| `/api/momentum/backtest` | POST | Single-day momentum scan |
+| `/api/momentum/combined-analysis` | POST | Range backtest (SSE stream) |
+| `/api/model/full-train` | POST | Trigger full ML training (SSE stream) |
+| `/api/model/finetune` | POST | Trigger ML fine-tuning (SSE stream) |
+| `/api/iquant/pending-signals` | GET | iQuant polls for signals |
+| `/api/iquant/ack-signal` | POST | iQuant acknowledges signal execution |
+| `/api/iquant/heartbeat` | POST | iQuant heartbeat + positions/cash sync |
 
 **Configuration** (Environment Variables):
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WEB_ENABLED` | `true` | Enable/disable Web UI |
-| `WEB_HOST` | `0.0.0.0` | Bind host |
-| `WEB_PORT` | `8000` | Bind port |
-| `WEB_BASE_URL` | auto | Base URL for notification links |
-| `INTERACTION_MODE` | `web` | `web` or `cli` |
-| `GREPTIME_HOST` | `localhost` | GreptimeDB host for backtest cache |
-
-**Timeout Defaults** (unchanged from CLI):
-| Type | Timeout | Default Action |
-|------|---------|----------------|
-| premarket | 5 min | Skip all signals |
-| intraday | 1 min | Don't buy |
-| morning | 5 min | Sell all holdings |
-| limit_up | 1 min | Skip sector |
+| `WEB_BASE_URL` | auto | Base URL for Feishu notification links |
+| `GREPTIME_HOST` | `localhost` | GreptimeDB host |
+| `FEISHU_BOT_URL` | (leapcell) | Feishu bot relay URL |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID` | - | Feishu credentials |
+| `FC_URL` | - | Alibaba Cloud FC training endpoint |
 
 **Files**:
+- `src/web/app.py` - FastAPI application factory + startup lifecycle
+- `src/web/routes.py` - Dashboard, backtest, settings, model management routes
+- `src/web/iquant_routes.py` - iQuant communication + monitoring (isolated, own DB pool)
 - `src/common/pending_store.py` - Pending confirmation store
-- `src/common/user_interaction.py` - Extended with `WebUserInteraction`
-- `src/web/__init__.py` - Web module
-- `src/web/app.py` - FastAPI application
-- `src/web/routes.py` - API routes
 - `src/web/templates/` - Jinja2 HTML templates
 - `src/web/static/` - CSS styles
 
-**Usage**:
-```python
-# Web mode (container deployment)
-from src.common.user_interaction import WebUserInteraction, WebInteractionConfig
-from src.common.pending_store import get_pending_store
-
-config = WebInteractionConfig(web_base_url="http://your-server:8000")
-ui = WebUserInteraction(config, get_pending_store(), feishu_bot)
-
-# Same interface as UserInteraction
-selected = await ui.premarket_review(signals)
-confirmed = await ui.intraday_confirm(signal)
-```
-
 **Docker Deployment**:
 ```yaml
-# docker-compose.prod.yml
 services:
   trading-service:
     ports:
-      - "8000:8000"  # Web UI port
+      - "8000:8000"
     environment:
-      - WEB_ENABLED=true
       - WEB_BASE_URL=http://your-server:8000
-      - INTERACTION_MODE=web
-      - GREPTIME_HOST=greptimedb  # GreptimeDB host for backtest cache
+      - GREPTIME_HOST=greptimedb
 ```
 
-**Acceptance Criteria**:
-- [x] PendingConfirmationStore for confirmation state management
-- [x] FastAPI Web application with API endpoints
-- [x] HTML templates for confirmation pages
-- [x] WebUserInteraction class extending UserInteraction
-- [x] Feishu notifications with Web confirmation links
-- [x] Docker configuration with port exposure
-- [x] Environment variable configuration
-- [x] Timeout handling with default behaviors
+**Checklist**:
+- [x] FastAPI Web application with 6 routers
+- [x] Dashboard: iQuant status, broker positions, data engine card, model management
+- [x] Backtest page: single-day scan, range backtest, CSV analysis
+- [x] Settings page: tsanghi token, cache scheduler, FC URL, S3 config
+- [x] Database page: embedded GreptimeDB dashboard
+- [x] On-demand recommendations (ML scan, no DB persistence)
+- [x] SSE streaming for downloads, training, backtests
+- [x] Feishu notifications with clickable links
+- [x] Docker deployment with environment variable config
 
 ---
 
 ## Module: Strategy
 
-### [STR-001] Base Strategy Interface
+### [STR-001] Strategy Architecture
 
 **Status**: Completed
 
-**Description**: Define the base interface that all trading strategies must implement.
+**Description**: Stateless strategy services with dependency injection. Scanners produce scored stock lists; strategy services handle data preparation and scanner invocation.
 
-**Requirements**:
-- Strategies must implement `generate_signals(context) -> AsyncIterator[TradingSignal]`
-- Strategies must be loadable at runtime without system restart
-- Support strategy parameter configuration via YAML
-- Lifecycle hooks: on_load(), on_unload(), on_reload()
+**Architecture**:
+```
+iquant_routes.py / routes.py
+        │
+        ▼
+ml_strategy_service.py / momentum_strategy_service.py   (data prep + invocation)
+        │
+        ▼
+ml_scanner.py / momentum_scanner.py                      (filter pipeline + scoring)
+        │
+        ▼
+SignalStore                                               (push signal → iQuant polls)
+```
 
-**Technical Design**:
-- `BaseStrategy` abstract class defines the interface
-- `TradingSignal` dataclass with: signal_type, stock_code, quantity, price, confidence, reason
-- `SignalType` enum: BUY, SELL, HOLD
-- `StrategyContext` provides market data, messages, positions to strategies
-  - Messages are provided by platform-layer `MessageReader` (reads from PostgreSQL)
-  - Strategies should NOT directly access database; use `context.get_messages_since()` instead
+**Key Components**:
+
+| Component | File | Role |
+|-----------|------|------|
+| `MLScanner` | `src/strategy/strategies/ml_scanner.py` | 8-layer filter + LightGBM scoring |
+| `MomentumScanner` | `src/strategy/strategies/momentum_scanner.py` | 7-layer funnel + V3 regression scoring |
+| `MLStrategyService` | `src/strategy/ml_strategy_service.py` | Stateless: `run_ml_live()` / `run_ml_backtest()` |
+| `MomentumStrategyService` | `src/strategy/momentum_strategy_service.py` | Stateless: `run_momentum_live()` / `run_momentum_backtest()` |
+| `SignalStore` | `src/strategy/signal_store.py` | In-memory signal queue (push/poll/ack/expire lifecycle) |
+| `EarlyWindowAggregator` | `src/strategy/aggregators/early_window_aggregator.py` | Aggregates raw 1-min bars → 09:31~09:40 snapshot |
+
+**Shared Data Models** (`src/strategy/models.py`):
+- `PriceSnapshot` - 9:40 snapshot (close, volume, high, low)
+- `DailyBar` - Daily OHLCV NamedTuple
+- `HistoricalDataProvider` - Protocol for historical data access
 
 **Files**:
-- `src/strategy/__init__.py` - Module exports
 - `src/strategy/base.py` - BaseStrategy abstract class
 - `src/strategy/signals.py` - TradingSignal and SignalType
-- `src/strategy/strategies/example_strategy.py` - Example implementation
-
-**Usage**:
-```python
-from src.strategy.base import BaseStrategy, StrategyContext
-from src.strategy.signals import TradingSignal, SignalType
-
-class MyStrategy(BaseStrategy):
-    @property
-    def strategy_name(self) -> str:
-        return "my_strategy"
-
-    async def generate_signals(
-        self, context: StrategyContext
-    ) -> AsyncIterator[TradingSignal]:
-        if some_condition:
-            yield TradingSignal(
-                signal_type=SignalType.BUY,
-                stock_code="000001.SZ",
-                quantity=100,
-                strategy_name=self.strategy_name,
-            )
-```
-
-**Acceptance Criteria**:
-- [x] BaseStrategy abstract class defined
-- [x] TradingSignal dataclass with metadata
-- [x] SignalType enum (BUY/SELL/HOLD)
-- [x] StrategyContext for market data/news
-- [x] Lifecycle hooks (on_load, on_unload, on_reload)
-- [x] Example strategy implementation
-
----
-
-### [STR-002] Strategy Hot-Reload
-
-**Status**: Completed
-
-**Description**: Enable updating strategies during market hours without stopping the trading system.
-
-**Requirements**:
-- File watcher detects strategy file changes
-- New strategy takes effect on next signal generation cycle
-- Rollback mechanism if new strategy fails validation
-- Strategy validation before activation
-
-**Technical Design**:
-- `StrategyEngine` manages strategy lifecycle
-- File watcher checks strategy files every 5 seconds
-- Hot-reload flow:
-  1. Detect file change via hash comparison
-  2. Load new strategy class
-  3. Validate new strategy
-  4. Call on_unload() on old strategy
-  5. Swap strategy instance
-  6. Call on_load() and on_reload() on new strategy
-  7. On failure, keep old strategy
-
-**Files**:
-- `src/strategy/engine.py` - StrategyEngine with hot-reload
-- `src/strategy/strategies/` - Strategy files directory
-
-**Usage**:
-```python
-from src.strategy.engine import StrategyEngine
-
-engine = StrategyEngine(
-    strategy_dir=Path("src/strategy/strategies"),
-    hot_reload=True
-)
-await engine.start()
-
-# Strategies are loaded automatically from directory
-# Modify a .py file -> engine detects and reloads
-
-async for signal in engine.generate_all_signals(context):
-    # Process signals
-    pass
-
-await engine.stop()
-```
-
-**Acceptance Criteria**:
-- [x] StrategyEngine class implemented
-- [x] Strategy file change detection
-- [x] Graceful strategy swap without interruption
-- [x] Strategy validation before activation
-- [x] Rollback on reload failure
+- `src/strategy/filters/` - Stock/quality/reversal filters
 
 ---
 
 ### [STR-003] News Analysis Strategy
 
-**Status**: Removed
-
-**Removal Note**: Removed in refactor/cleanup-v15-only. News-driven strategy was superseded by V15 momentum strategy (STR-005). All related files deleted: `news_analysis_strategy.py`, `news_analyzer.py`, `negative_news_checker.py`, `tavily_client.py`.
+**Status**: Removed (superseded by STR-005/006)
 
 ---
 
@@ -778,347 +635,105 @@ await engine.stop()
 
 ## Module: Trading
 
-### [TRD-000] Trading Data Persistence
+Trading is handled entirely through the iQuant interface (STR-005). There is no standalone trading module — the `src/web/iquant_routes.py` manages signal pushing, position tracking, and order acknowledgment. Holdings are persisted to `data/v15_holdings.json`.
+
+---
+
+## Module: Data
+
+### [DAT-001] Market Data Sources
 
 **Status**: Completed
 
-**Description**: PostgreSQL-based persistence for all trading data including positions, orders, and transactions. Uses separate schema for isolation from messages.
+**Description**: Market data access through multiple sources, unified behind adapters.
 
-**Requirements**:
-- Store position slots and their state
-- Track stock holdings within slots (supports sector buying)
-- Record orders and their lifecycle
-- Record transactions (fills)
-- Track overnight holdings for morning review
-- Schema isolation from message data
+**Data Sources**:
 
-**Technical Design**:
-- Database: PostgreSQL (same instance as messages, separate schema)
-- Schema: `trading` (isolated from `public` schema)
-- Tables:
-  - `position_slots` - Slot state (id, type, state, entry_time, reason, sector)
-  - `stock_holdings` - Holdings per slot (stock_code, quantity, price)
-  - `orders` - Order records (id, type, stock, qty, price, status)
-  - `transactions` - Fill records (order_id, price, qty, amount, commission)
-  - `overnight_holdings` - Overnight tracking for morning review
+| Purpose | Source | Adapter / File |
+|---------|--------|----------------|
+| Backtest daily OHLCV | tsanghi 沧海数据 | `GreptimeHistoricalAdapter` via `CachePipeline` |
+| Backtest minute bars | Tushare Pro `stk_mins` 1min | `GreptimeBacktestStorage` via `CachePipeline` |
+| Live realtime quotes | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
+| Live historical | GreptimeDB cache | `IQuantHistoricalAdapter` |
+| Stock metadata | Tushare Pro `bak_basic` / `suspend_d` / `trade_cal` | `TushareMetadataSource` |
+| Board/concept mapping | Local JSON files | `LocalConceptMapper` |
+| Stock names | Local JSON files | `LocalConceptMapper.get_stock_name()` |
 
 **Files**:
-- `src/trading/repository.py` - TradingRepository class
-- `src/trading/position_manager.py` - Updated with DB support
-- `src/trading/holding_tracker.py` - Updated with DB support
-- `config/database-config.yaml` - Database configuration
-
-**Usage**:
-```python
-from src.trading import (
-    TradingRepository,
-    create_position_manager_with_db,
-    create_trading_repository_from_config,
-)
-
-# Create repository and connect
-repo = create_trading_repository_from_config()
-await repo.connect()
-
-# Create position manager with DB persistence
-manager = await create_position_manager_with_db(config, repo)
-
-# All operations auto-persist to PostgreSQL
-slot = manager.get_available_slot("premarket")
-manager.allocate_slot(slot, "000001", 15.50, "利好消息")
-await manager.save_slot_to_db(slot.slot_id)
-```
-
-**Configuration** (`config/database-config.yaml`):
-```yaml
-database:
-  trading:
-    host: "${DB_HOST:localhost}"
-    port: ${DB_PORT:5432}
-    database: "${DB_NAME:messages}"
-    user: "${DB_USER:reader}"
-    password: "${DB_PASSWORD}"
-    schema: "trading"
-    auto_create_schema: true
-```
-
-**Acceptance Criteria**:
-- [x] TradingRepository class with asyncpg
-- [x] Schema and table auto-creation
-- [x] Position slot CRUD operations
-- [x] Stock holdings persistence
-- [x] Order management methods
-- [x] Transaction recording
-- [x] Overnight holdings tracking
-- [x] PositionManager DB integration
-- [x] HoldingTracker DB integration
+- `src/data/clients/greptime_storage.py` - GreptimeDB storage (asyncpg, CRUD)
+- `src/data/clients/greptime_historical_adapter.py` - Read-only adapter (HistoricalDataProvider Protocol)
+- `src/data/clients/iquant_historical_adapter.py` - Live historical adapter
+- `src/data/clients/tushare_realtime.py` - Tushare realtime quotes
+- `src/data/clients/sina_realtime.py` - Sina realtime (fallback)
+- `src/data/sources/tsanghi_daily_source.py` - tsanghi daily OHLCV
+- `src/data/sources/tushare_minute_source.py` - Tushare 1-min bars
+- `src/data/sources/tushare_metadata_source.py` - Stock metadata (trade_cal, suspend, stock_basic)
+- `src/data/sources/local_concept_mapper.py` - Board ↔ stock mapping (local JSON)
 
 ---
 
-### [TRD-001] Order Executor
+### [DAT-002] Cache Pipeline (GreptimeDB)
 
-**Status**: Planned
+**Status**: Completed
 
-**Description**: Core component that receives signals and executes orders.
+**Description**: Automated data download and caching pipeline. Downloads daily OHLCV from tsanghi and minute bars from Tushare Pro into GreptimeDB for backtesting and ML training.
 
-**Requirements**:
-- Receive signals from strategy module via message queue
-- Support order types: MARKET, LIMIT
-- Track order status: PENDING → SUBMITTED → FILLED/CANCELLED
-- Position management and P&L calculation
+**GreptimeDB Tables**:
 
-**Acceptance Criteria**:
-- [ ] Order executor class implemented
-- [ ] Message queue integration
-- [ ] Order state machine implemented
+| Table | Content | Key |
+|-------|---------|-----|
+| `backtest_daily` | Daily OHLCV + is_suspended | `(ts, stock_code)` |
+| `backtest_minute` | 9:40 snapshot (close_940, cum_volume, max_high, min_low) | `(ts, stock_code)` |
+| `stock_list` | Per-day stock metadata (name, exchange, is_suspended) | `(ts, stock_code)` |
 
----
+**Pipeline Phases** (`CachePipeline.download_prices()`):
 
-### [TRD-002] Paper Trading
+| # | Phase | What it does |
+|---|-------|-------------|
+| 1 | `compact` | GreptimeDB housekeeping |
+| 2 | `backfill` | Fix NULL `is_suspended` rows (one-time) |
+| 3 | `stock_list` | Sync stock metadata per trading day |
+| 4 | `daily` | Download daily OHLCV (resume by day) |
+| 5 | `daily_backfill` | Audit + refetch missing stocks per day |
+| 6 | `minute` | Download 1-min bars per stock (resume by stock) |
+| 7 | `minute_backfill` | Audit + refetch missing (day, code) pairs |
+| 8 | `download` | Final verification + Feishu report |
 
-**Status**: Planned
-
-**Description**: Simulated trading environment for strategy testing.
-
-**Requirements**:
-- Simulate order fills with realistic slippage model
-- Track virtual positions and P&L
-- Use real market data for simulation
-- Export trading records for analysis
-
-**Technical Design**:
-- Database: PostgreSQL (trading schema, reuse TRD-000 infrastructure)
-- Additional tables if needed:
-  - `paper_account` - Virtual cash balance, total value
-
-**Acceptance Criteria**:
-- [ ] Paper trading executor implemented
-- [ ] Slippage model configurable
-- [ ] Trade log export functionality
-
----
-
-### [TRD-003] Live Trading
-
-**Status**: Planned
-
-**Description**: Real trading with broker API integration.
-
-**Requirements**:
-- Broker API adapter (support multiple brokers)
-- Risk checks before order submission
-- Order confirmation and error handling
-- Real-time position sync with broker
-
-**Acceptance Criteria**:
-- [ ] At least one broker adapter implemented
-- [ ] Pre-trade risk checks
-- [ ] Order lifecycle management
-
----
-
-## Module: Data/Info
-
-### [DAT-001] Real-time Market Data
-
-**Status**: Planned
-
-**Description**: Provide real-time stock quotes and market data.
-
-**Requirements**:
-- Subscribe to real-time quotes for watchlist stocks
-- Data format: OHLCV + bid/ask
-- Publish data to message queue for other modules
-- Support A-share trading hours (9:30-11:30, 13:00-15:00)
-
-**Acceptance Criteria**:
-- [ ] Real-time data source adapter
-- [ ] Data normalization to standard format
-- [ ] Message queue publishing
-
----
-
-### [DAT-002] Historical Data
-
-**Status**: Planned
-
-**Description**: Historical OHLCV data for backtesting and analysis.
-
-**Requirements**:
-- Daily and minute-level historical data
-- Data storage in TimescaleDB
-- API for querying historical data
-- Data update scheduler
-
-**Acceptance Criteria**:
-- [ ] Historical data fetcher implemented
-- [ ] Database schema designed
-- [ ] Query API available
-
----
-
-### [DAT-003] Message Reader (Platform Layer)
-
-**Status**: Planned
-
-**Description**: Platform-level component that reads messages from external PostgreSQL database. Message collection is handled by a separate project that streams data into PostgreSQL.
-
-**Architecture**:
-```
-┌─────────────────────────────────────────────────────────────┐
-│              External Message Collector Project             │
-│  (CLS, East Money, Sina, Akshare → PostgreSQL streaming)   │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-                    PostgreSQL (messages table)
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│                 This Project (Strategy Platform)            │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              MessageReader (Platform Layer)          │   │
-│  │    - Connects to PostgreSQL                         │   │
-│  │    - Polls for new messages                         │   │
-│  │    - Provides unified query interface               │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                              ↓                              │
-│                    StrategyContext.messages                 │
-│                              ↓                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  Strategy A  │  │  Strategy B  │  │  Strategy C  │      │
-│  │ (NewsAnalysis)│  │   (Future)   │  │   (Future)   │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Requirements**:
-- Connect to external PostgreSQL database (read-only)
-- Polling-based message retrieval with incremental queries
-- Provide unified interface for all strategies via StrategyContext
-- Support time-range queries (e.g., messages since last close)
-- Support source-type filtering (announcement, news, social)
-- Connection pooling for efficiency
-
-**Technical Design**:
-- Library: `asyncpg` for async PostgreSQL access
-- Query Strategy: Polling with `fetch_time > last_check_time`
-- PostgreSQL Table Schema (read from external DB):
-  - `id` (TEXT PRIMARY KEY)
-  - `source_type` (TEXT) - announcement/news/social
-  - `source_name` (TEXT) - cls/eastmoney/sina/akshare
-  - `title` (TEXT)
-  - `content` (TEXT)
-  - `url` (TEXT)
-  - `stock_codes` (TEXT) - JSON array
-  - `publish_time` (TIMESTAMP)
-  - `fetch_time` (TIMESTAMP)
-  - `raw_data` (JSONB)
-- Indexes (managed by external project): source_type, publish_time, fetch_time
+**Scheduling**: 3am daily auto-fill via `CacheScheduler` (toggle on/off in Settings page).
 
 **Files**:
-- `src/data/models/message.py` - Message data model (unchanged)
-- `src/data/readers/message_reader.py` - PostgreSQL message reader
-- `src/data/readers/__init__.py` - Reader exports
-- `config/database-config.yaml` - PostgreSQL connection config
+- `src/data/services/cache_pipeline.py` - Download orchestration
+- `src/data/services/cache_scheduler.py` - 3am auto gap-fill
+- `src/data/services/cache_progress_reporter.py` - Phase tracking + Feishu notifications
+- `src/data/services/download_task.py` - Background task state machine
+- `src/data/clients/greptime_storage.py` - GreptimeDB storage (asyncpg pool)
 
-**Usage**:
-```python
-# Platform layer initializes MessageReader
-from src.data.readers import MessageReader
-
-reader = MessageReader(config)
-await reader.connect()
-
-# Strategies access messages via StrategyContext
-class MyStrategy(BaseStrategy):
-    async def generate_signals(self, context: StrategyContext):
-        # Get messages since last market close
-        messages = await context.get_messages_since(last_close_time)
-
-        # Get messages by source type
-        news = await context.get_messages(source_type="news", limit=100)
-
-        # Process messages...
-```
-
-**Configuration** (`config/database-config.yaml`):
-```yaml
-database:
-  messages:
-    host: "localhost"
-    port: 5432
-    database: "messages"
-    user: "reader"
-    password: "${MESSAGES_DB_PASSWORD}"  # From environment
-    pool_size: 5
-    read_only: true
-```
-
-**Acceptance Criteria**:
-- [ ] MessageReader class with async PostgreSQL connection
-- [ ] Connection pooling configured
-- [ ] Incremental query support (by fetch_time)
-- [ ] Source type filtering
-- [ ] StrategyContext integration
-- [ ] Configuration via YAML
-- [ ] Unit tests with mocked database
+**Checklist**:
+- [x] GreptimeDB storage with asyncpg (3 mandatory overrides — see dev-conventions.md)
+- [x] Cache pipeline with 8 phases
+- [x] Cache scheduler (3am daily, configurable toggle)
+- [x] Download resume by day (daily) and by stock (minute)
+- [x] Per-day minute audit + backfill
+- [x] Integrity validation on write
+- [x] Feishu notifications for all scenarios
+- [x] Dashboard data engine status card
+- [x] Manual download with SSE progress + stop button
 
 ---
 
-### [DAT-004] Real Data Sources
+### [DAT-003] Stock Blacklist
 
-**Status**: Removed (Migrated to External Project)
+**Status**: Completed
 
-**Description**: ~~Production-ready data sources for fetching real financial news and announcements.~~
+**Description**: Global stock blacklist. Blacklisted stocks are skipped in data download, scanning, and trading.
 
-**Migration Note**:
-Message collection has been moved to a separate project. This project now only reads messages from PostgreSQL. The external project handles:
-- Akshare announcements
-- CLS (财联社) telegraph
-- East Money (东方财富) news
-- Sina Finance (新浪财经) news
-- Deduplication and streaming to PostgreSQL
-
-**Removed Files**:
-- `src/data/sources/akshare_announcement.py`
-- `src/data/sources/cls_news.py`
-- `src/data/sources/eastmoney_news.py`
-- `src/data/sources/sina_news.py`
-- `src/data/sources/base.py`
-- `src/data/sources/registry.py`
-- `src/data/services/message_service.py`
-- `src/data/database/message_db.py`
-- `config/message-config.yaml`
-- Related tests in `tests/unit/data/sources/`
+**Implementation**: Hardcoded `STOCK_BLACKLIST` frozenset in `src/common/config.py`. Applied at download, scan, and signal generation layers.
 
 ---
-
-### [DAT-005] Limit-Up Stocks Data Collection
-
-**Status**: Removed
-
-**Removal Note**: Removed in refactor/cleanup-v15-only. iFinD-dependent limit-up data collection was not needed for V15 strategy. All related files deleted: `limit_up.py`, `limit_up_db.py`, `ifind_limit_up.py`, `fetch_limit_up.py`.
 
 ---
 
 ## Infrastructure
-
-### [INF-001] Message Queue Setup
-
-**Status**: Planned
-
-**Description**: Inter-module communication via message queue.
-
-**Requirements**:
-- Redis Pub/Sub or ZeroMQ for low-latency messaging
-- Message format: JSON with schema validation
-- Topics: `signals`, `orders`, `market_data`, `system_events`
-
-**Acceptance Criteria**:
-- [ ] Message queue infrastructure configured
-- [ ] Publisher/subscriber abstractions implemented
-- [ ] Message schema defined
-
----
 
 ### [INF-002] CI Pipeline
 
@@ -1126,80 +741,19 @@ Message collection has been moved to a separate project. This project now only r
 
 **Description**: Continuous integration pipeline for code quality.
 
-**Requirements**:
-- Lint check (ruff)
-- Format check (ruff format)
-- Type check (mypy)
-- Unit tests (pytest)
-
 **Technical Design**:
 - GitHub Actions workflow on push/PR to main branch
 - Uses `uv` for fast dependency installation
-- Three parallel jobs: lint, typecheck, test
+- Parallel jobs: lint (ruff), format (ruff format), typecheck (mypy), test (pytest)
+- Auto-deploys trading-service Docker image and FC serverless function
 
 **Files**:
 - `.github/workflows/ci.yml` - GitHub Actions workflow
-
-**Acceptance Criteria**:
-- [x] GitHub Actions workflow configured
-- [x] Lint and format checks (ruff)
-- [x] Type check (mypy)
-- [x] Unit tests (pytest)
-
----
-
-### [INF-003] Configuration Management
-
-**Status**: Planned
-
-**Description**: Centralized configuration with hot-reload support.
-
-**Requirements**:
-- YAML-based configuration files
-- Environment-specific configs (dev, staging, prod)
-- Runtime config reload without restart
-- Secret management (API keys, credentials)
-
-**Acceptance Criteria**:
-- [ ] Config loader implemented
-- [ ] Config hot-reload mechanism
-- [ ] Secrets handled securely
-
----
-
-### [INF-004] THS SDK Installation
-
-**Status**: Removed
-
-**Removal Note**: Removed in refactor/cleanup-v15-only. iFinD SDK is no longer used.
-
----
-
-## Module: Simulation
-
-### [SIM-001] Historical Simulation Trading
-
-**Status**: Removed
-
-**Removal Note**: Removed in refactor/cleanup-v15-only. Simulation module was iFinD-dependent and superseded by the unified backtest page. All files in `src/simulation/` deleted.
-
----
-
-### [OA-001] Order Assistant (Real-time News Dashboard)
-
-**Status**: Removed
-
-**Removal Note**: Removed in refactor/cleanup-v15-only. Order assistant depended on news analysis (STR-003) which was removed. Template and routes deleted.
 
 ---
 
 ## Backlog
 
-Features under consideration (not yet planned):
-
-- [x] Web dashboard for monitoring → See SYS-005
-- [ ] Telegram/WeChat notifications
-- [x] Backtesting framework → See SIM-001 (Historical Simulation)
-- [x] Order assistant → See OA-001
 - [ ] Multi-account support
 - [ ] Performance analytics
+- [ ] Unit test coverage improvement
