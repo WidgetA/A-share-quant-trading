@@ -448,7 +448,7 @@ SignalStore                                               (push signal → iQuan
 - [x] Cache scheduler toggle on Settings page (enable/disable, persisted to disk)
 - [x] Cache download resume: skip already-downloaded daily dates and minute stocks on retry
 - [x] Cache scheduler detects minute data gaps (not just daily gaps)
-- [x] Per-day minute audit + backfill: after the coarse per-stock minute download, the pipeline diffs `backtest_daily` (active stocks) against `backtest_minute` (distinct stocks) day-by-day and refetches the exact `(day, code)` holes via single-day `stk_mins` calls — fixes the long-standing case where a stock has bars on most days but is missing one or two due to a transient API failure
+- [x] Per-day minute audit + backfill: after the coarse per-stock minute download, the pipeline audits each stock's bar count per day against the expected 241 bars (9:30-15:00, verified via Tushare API). Stocks with zero bars (missing) or fewer than 241 bars (incomplete, e.g. only afternoon session) are refetched via single-day `stk_mins` calls
 - [x] Cache scheduler Feishu notifications (all scenarios: start / progress / success / failure / timeout / exception / no_gaps / disabled)
 - [x] Data integrity validation: stock count, per-day consistency, minute coverage
 - [x] Data integrity validation on write (GreptimeDB)
