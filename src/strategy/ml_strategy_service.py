@@ -230,8 +230,7 @@ async def run_ml_backtest(
         from src.common.feishu_bot import FeishuBot
 
         sample_lines = "\n".join(
-            f"  {c}: open={o:.2f} preClose={pc:.2f} gap={g:.2f}%"
-            for c, o, pc, g in gap_samples
+            f"  {c}: open={o:.2f} preClose={pc:.2f} gap={g:.2f}%" for c, o, pc, g in gap_samples
         )
         debug_msg = (
             f"[DEBUG] 回测选股漏斗 {date_str}\n"
