@@ -200,64 +200,59 @@ async def run_ml_backtest(
             for d, o, h, lo, c, v in bars
         ]
 
+    # Step 2.5: Get previous trading day's closes from DB as preClose source.
+    # The DB pre_close column can be 0 if the pipeline lacked prior data at
+    # download time, so we derive it directly from the previous day's close.
+    from src.data.clients.tushare_realtime import get_tushare_trade_calendar
+
+    cal_start = (trade_date - timedelta(days=14)).strftime("%Y-%m-%d")
+    cal_end = (trade_date - timedelta(days=1)).strftime("%Y-%m-%d")
+    cal = await get_tushare_trade_calendar(cal_start, cal_end)
+    prev_td = cal[-1] if cal else None  # last trading day before trade_date
+
+    prev_close_map: dict[str, float] = {}
+    if prev_td:
+        prev_daily = await storage.get_all_codes_with_daily(prev_td)
+        for code, bar in prev_daily.items():
+            if bar.close > 0:
+                prev_close_map[code] = bar.close
+
     # Step 3: Build candidate set from daily data (gap pre-filter)
     candidates: dict[str, tuple[float, float]] = {}
     n_suspended = 0
-    n_open_zero = 0
-    n_preclose_zero = 0
+    n_no_prev_close = 0
     n_gap_filtered = 0
-    gap_samples: list[tuple[str, float, float, float]] = []  # (code, open, preClose, gap%)
-    invalid_samples: list[tuple[str, float, float]] = []  # (code, open, preClose)
     for code, day in all_daily.items():
         if day.is_suspended:
             n_suspended += 1
             continue
         open_price = day.open
-        prev_close = day.preClose
         if open_price <= 0:
-            n_open_zero += 1
-            if len(invalid_samples) < 3:
-                invalid_samples.append((code, open_price, prev_close))
             continue
+        prev_close = prev_close_map.get(code, 0.0)
         if prev_close <= 0:
-            n_preclose_zero += 1
-            if len(invalid_samples) < 3:
-                invalid_samples.append((code, open_price, prev_close))
+            n_no_prev_close += 1
             continue
         gap_pct = (open_price - prev_close) / prev_close * 100
         if gap_pct < -0.5:
             n_gap_filtered += 1
-            if len(gap_samples) < 5:
-                gap_samples.append((code, open_price, prev_close, gap_pct))
             continue
         candidates[code] = (open_price, prev_close)
 
     daily_candidates = len(candidates)
 
-    # Debug: push filter funnel to Feishu for diagnosis
-    if daily_candidates == 0 and len(all_daily) > 0:
-        from src.common.feishu_bot import FeishuBot
-
-        sample_lines = "\n".join(
-            f"  {c}: open={o:.2f} preClose={pc:.2f} gap={g:.2f}%" for c, o, pc, g in gap_samples
-        )
-        invalid_lines = "\n".join(f"  {c}: open={o} preClose={pc}" for c, o, pc in invalid_samples)
-        debug_msg = (
-            f"[DEBUG] 回测选股漏斗 {date_str}\n"
-            f"日线总数: {len(all_daily)}\n"
-            f"  → 停牌: -{n_suspended}\n"
-            f"  → open<=0: -{n_open_zero}\n"
-            f"  → preClose<=0: -{n_preclose_zero}\n"
-            f"  → 跳空低开(< -0.5%): -{n_gap_filtered}\n"
-            f"  → 候选股: {daily_candidates}\n"
-            f"\n无效价格样本:\n{invalid_lines}"
-            f"\n跳空过滤样本:\n{sample_lines}"
-        )
-        bot = FeishuBot()
-        if bot.is_configured():
-            import asyncio
-
-            asyncio.ensure_future(bot.send_message(debug_msg))
+    logger.info(
+        "ML backtest %s: prev_td=%s, prev_close_map=%d, "
+        "%d daily → -%d suspended -%d no_prev -%d gap → %d candidates",
+        date_str,
+        prev_td,
+        len(prev_close_map),
+        len(all_daily),
+        n_suspended,
+        n_no_prev_close,
+        n_gap_filtered,
+        daily_candidates,
+    )
 
     # Step 4: Batch-fetch raw 1-min bars for all candidates and aggregate
     # in-memory via EarlyWindowAggregator (strategy layer owns the window).
