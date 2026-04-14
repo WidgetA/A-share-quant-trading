@@ -658,6 +658,17 @@ class GreptimeBacktestStorage:
             f"WHERE ts >= {day_start} AND ts < {day_end} "
             f"ORDER BY stock_code, ts"
         )
+        distinct_codes = {r["stock_code"] for r in rows} if rows else set()
+        logger.info(
+            "get_minute_bars_for_codes_on_day: day=%s, "
+            "day_start=%d, day_end=%d, rows=%d, distinct_codes=%d, wanted=%d",
+            day,
+            day_start,
+            day_end,
+            len(rows),
+            len(distinct_codes),
+            len(wanted),
+        )
         out: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
             code = r["stock_code"]
@@ -675,6 +686,7 @@ class GreptimeBacktestStorage:
                     "amount": float(r["amount"]) if r["amount"] is not None else 0.0,
                 }
             )
+        logger.info("get_minute_bars_for_codes_on_day: matched %d stocks", len(out))
         return out
 
     # ==================== Range / Gap Detection ====================
