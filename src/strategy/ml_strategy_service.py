@@ -203,17 +203,26 @@ async def run_ml_backtest(
     # Step 3: Build candidate set from daily data (gap pre-filter)
     candidates: dict[str, tuple[float, float]] = {}
     n_suspended = 0
-    n_invalid_price = 0
+    n_open_zero = 0
+    n_preclose_zero = 0
     n_gap_filtered = 0
     gap_samples: list[tuple[str, float, float, float]] = []  # (code, open, preClose, gap%)
+    invalid_samples: list[tuple[str, float, float]] = []  # (code, open, preClose)
     for code, day in all_daily.items():
         if day.is_suspended:
             n_suspended += 1
             continue
         open_price = day.open
         prev_close = day.preClose
-        if prev_close <= 0 or open_price <= 0:
-            n_invalid_price += 1
+        if open_price <= 0:
+            n_open_zero += 1
+            if len(invalid_samples) < 3:
+                invalid_samples.append((code, open_price, prev_close))
+            continue
+        if prev_close <= 0:
+            n_preclose_zero += 1
+            if len(invalid_samples) < 3:
+                invalid_samples.append((code, open_price, prev_close))
             continue
         gap_pct = (open_price - prev_close) / prev_close * 100
         if gap_pct < -0.5:
@@ -232,14 +241,17 @@ async def run_ml_backtest(
         sample_lines = "\n".join(
             f"  {c}: open={o:.2f} preClose={pc:.2f} gap={g:.2f}%" for c, o, pc, g in gap_samples
         )
+        invalid_lines = "\n".join(f"  {c}: open={o} preClose={pc}" for c, o, pc in invalid_samples)
         debug_msg = (
             f"[DEBUG] 回测选股漏斗 {date_str}\n"
             f"日线总数: {len(all_daily)}\n"
-            f"  → 停牌过滤: -{n_suspended}\n"
-            f"  → 无效价格(<=0): -{n_invalid_price}\n"
+            f"  → 停牌: -{n_suspended}\n"
+            f"  → open<=0: -{n_open_zero}\n"
+            f"  → preClose<=0: -{n_preclose_zero}\n"
             f"  → 跳空低开(< -0.5%): -{n_gap_filtered}\n"
             f"  → 候选股: {daily_candidates}\n"
-            f"\n被跳空过滤的样本:\n{sample_lines}"
+            f"\n无效价格样本:\n{invalid_lines}"
+            f"\n跳空过滤样本:\n{sample_lines}"
         )
         bot = FeishuBot()
         if bot.is_configured():
