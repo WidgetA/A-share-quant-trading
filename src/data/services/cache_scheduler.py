@@ -125,15 +125,16 @@ class CacheScheduler:
                     await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
                     continue
 
-                # Skip if a manual trigger is already running
-                if getattr(self._app_state, "cache_fill_running", False):
-                    logger.info(
-                        "CacheScheduler: gap-fill already in progress (manual trigger), skipping"
-                    )
+                # Skip if any download is already running
+                active = getattr(self._app_state, "active_download", None)
+                if getattr(self._app_state, "cache_fill_running", False) or (
+                    active is not None and active.state.value == "running"
+                ):
+                    logger.info("CacheScheduler: download already in progress, skipping")
                     self.last_run_time = run_time
                     self.last_run_result = "skipped"
-                    self.last_run_message = "手动补全正在运行，跳过本次执行"
-                    await _notify_feishu("[缓存补全·定时任务] 手动补全正在运行，跳过本次执行")
+                    self.last_run_message = "下载正在运行，跳过本次执行"
+                    await _notify_feishu("[缓存补全·定时任务] 下载正在运行，跳过本次执行")
                     continue
 
                 self._app_state.cache_fill_running = True
