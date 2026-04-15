@@ -183,7 +183,8 @@ class CachePipeline:
             # Fallback: generate all dates in range (excluding weekends)
             n_days = (end_date - start_date).days + 1
             trading_dates = sorted(
-                start_date + timedelta(days=i) for i in range(n_days)
+                start_date + timedelta(days=i)
+                for i in range(n_days)
                 if (start_date + timedelta(days=i)).weekday() < 5
             )
 
@@ -203,11 +204,11 @@ class CachePipeline:
 
         logger.info(
             "Daily: %d dates need downloading (%s ~ %s)",
-            len(gaps), gaps[0][0], gaps[-1][0],
+            len(gaps),
+            gaps[0][0],
+            gaps[-1][0],
         )
-        await self.reporter.progress(
-            Phase.DAILY_CHECK, 1, 1, f"{len(gaps)} 天需下载"
-        )
+        await self.reporter.progress(Phase.DAILY_CHECK, 1, 1, f"{len(gaps)} 天需下载")
 
         prev_close_map = await self.storage.get_latest_closes()
 
@@ -216,14 +217,15 @@ class CachePipeline:
 
             if actual == 0:
                 # Full download — no existing codes to skip
-                await self._download_one_daily_date(
-                    gap_date, prev_close_map, i + 1, len(gaps)
-                )
+                await self._download_one_daily_date(gap_date, prev_close_map, i + 1, len(gaps))
             else:
                 # Partial — skip codes already in DB
                 existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
                 await self._download_one_daily_date(
-                    gap_date, prev_close_map, i + 1, len(gaps),
+                    gap_date,
+                    prev_close_map,
+                    i + 1,
+                    len(gaps),
                     skip_codes=existing_codes,
                 )
 
@@ -526,7 +528,8 @@ class CachePipeline:
         total_missing = sum(len(codes) for _, codes in gaps)
         logger.info(
             "Minute audit: %d days with gaps, %d (day,code) entries",
-            total_gap_days, total_missing,
+            total_gap_days,
+            total_missing,
         )
 
         # Find stocks that are completely missing (appear in every gap day)
@@ -538,8 +541,7 @@ class CachePipeline:
 
         # Stocks missing in ALL gap days → full-range download
         completely_missing = sorted(
-            code for code, count in code_gap_count.items()
-            if count == total_gap_days
+            code for code, count in code_gap_count.items() if count == total_gap_days
         )
 
         # Load suspended pairs for filtering
@@ -552,8 +554,11 @@ class CachePipeline:
                 len(completely_missing),
             )
             step_a_reasons = await self._minute_download_full_range(
-                completely_missing, start_date, end_date,
-                suspended_pairs, cancel_event,
+                completely_missing,
+                start_date,
+                end_date,
+                suspended_pairs,
+                cancel_event,
             )
             no_data_reasons.update(step_a_reasons)
 
@@ -565,10 +570,13 @@ class CachePipeline:
             total_remaining = sum(len(codes) for _, codes in gaps)
             logger.info(
                 "Minute step B: %d days still have gaps, %d (day,code) entries",
-                len(gaps), total_remaining,
+                len(gaps),
+                total_remaining,
             )
             step_b_reasons = await self._minute_backfill_per_day(
-                gaps, suspended_pairs, cancel_event,
+                gaps,
+                suspended_pairs,
+                cancel_event,
             )
             no_data_reasons.update(step_b_reasons)
         else:
@@ -609,7 +617,9 @@ class CachePipeline:
                     no_data_reasons[code] = f"api_error: {batch.error}"
                     done += 1
                 await self.reporter.progress(
-                    Phase.MINUTE, done, total,
+                    Phase.MINUTE,
+                    done,
+                    total,
                     f"API错误{len(batch.error_codes)}只: {batch.error}",
                 )
                 continue
@@ -631,7 +641,8 @@ class CachePipeline:
             if truly_empty_codes:
                 logger.warning(
                     "minute batch: API返回%d条bar, 以下%d只无数据(非停牌): %s",
-                    batch.api_bar_count, len(truly_empty_codes),
+                    batch.api_bar_count,
+                    len(truly_empty_codes),
                     ", ".join(truly_empty_codes[:10]),
                 )
 
@@ -693,7 +704,9 @@ class CachePipeline:
         total_missing = sum(len(codes) for _, codes in gaps)
 
         await self.reporter.progress(
-            Phase.MINUTE_BACKFILL, 0, total_days,
+            Phase.MINUTE_BACKFILL,
+            0,
+            total_days,
             f"待补 {total_days} 天 {total_missing} 只",
         )
 
@@ -715,7 +728,9 @@ class CachePipeline:
                         no_data_reasons[code] = f"api_error: {batch.error}"
                     logger.warning(
                         "minute backfill %s: API error on %d codes: %s",
-                        date_str, len(batch.error_codes), batch.error,
+                        date_str,
+                        len(batch.error_codes),
+                        batch.error,
                     )
                     continue
 
@@ -742,20 +757,25 @@ class CachePipeline:
 
                 # Report per-batch so watchdog sees activity within a day
                 await self.reporter.progress(
-                    Phase.MINUTE_BACKFILL, i + 1, total_days,
+                    Phase.MINUTE_BACKFILL,
+                    i + 1,
+                    total_days,
                     f"{date_str} 补 {filled}/{len(missing_codes)} 只",
                 )
 
             logger.info(
                 "minute backfill %s: filled %d/%d codes",
-                date_str, filled, len(missing_codes),
+                date_str,
+                filled,
+                len(missing_codes),
             )
 
         if no_data_reasons:
             counter = Counter(r.split(":")[0] for r in no_data_reasons.values())
             logger.info(
                 "minute backfill: %d codes still missing — %s",
-                len(no_data_reasons), dict(counter),
+                len(no_data_reasons),
+                dict(counter),
             )
         logger.info("minute backfill done: %d days processed", total_days)
         return no_data_reasons
