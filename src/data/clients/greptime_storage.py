@@ -1136,9 +1136,7 @@ class GreptimeBacktestStorage:
             f"WHERE ts >= {start_ms} AND ts < {end_boundary} "
             f"GROUP BY day_ts ORDER BY day_ts"
         )
-        actual_bars = {
-            ts_to_date(r["day_ts"]): int(r["cnt"]) for r in minute_count_rows
-        }
+        actual_bars = {ts_to_date(r["day_ts"]): int(r["cnt"]) for r in minute_count_rows}
 
         # Phase 1, Step 3: screen for gap days
         gap_days: list[date] = []
@@ -1198,9 +1196,7 @@ class GreptimeBacktestStorage:
                     incomplete.add(code)
 
             if incomplete:
-                n_missing = sum(
-                    1 for c in incomplete if actual_bar_counts.get(c, 0) == 0
-                )
+                n_missing = sum(1 for c in incomplete if actual_bar_counts.get(c, 0) == 0)
                 n_partial = len(incomplete) - n_missing
                 logger.info(
                     "audit %s: expected %d stocks × %d bars, "
