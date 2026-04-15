@@ -193,7 +193,7 @@ Before starting any development task:
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
 | Backtest Cache | GreptimeDB (asyncpg pgwire port 4003) | Time-series optimized, OSS object storage, no in-memory caching |
 | Config Format | YAML | Human-readable, supports hot-reload |
-| Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d + `stk_mins` 1min for backtest minute), tsanghi (backtest daily, **max concurrency=2**) | A-share real-time and historical data |
+| Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d + `stk_mins` 1min for backtest minute), tsanghi (backtest daily, **max concurrency=2**) | A-share real-time and historical data. **`stk_mins` server-side limit: 8000 rows/call** — batch size must stay ≤ 30 codes (30 × 241 bars = 7230) |
 | GreptimeDB Client | asyncpg | Async PostgreSQL wire protocol access |
 
 ## GreptimeDB Rules (CRITICAL)

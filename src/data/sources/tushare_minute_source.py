@@ -3,7 +3,8 @@
 # TushareRealtimeClient lifecycle and enforces the rate limit (200 req/min).
 #
 # Concerns owned here:
-#   - 20 codes per request batching (reduces 3000+ calls to ~160)
+#   - 30 codes per request batching (Tushare stk_mins caps at 8000 rows/call;
+#     30 codes × 241 bars = 7230, safely under the limit)
 #   - Rate limiting (sleep 0.5s between requests)
 #   - Symbol normalization (bare code → ts_code)
 #   - Returning raw bar dicts grouped by stock
@@ -58,7 +59,9 @@ class TushareMinuteSource:
                 ... # process batch.ok / batch.empty / batch.error
     """
 
-    BATCH_SIZE = 200
+    # Tushare stk_mins server-side limit: 8000 rows per request.
+    # 30 codes × 241 bars/day = 7230 rows — fits in one call.
+    BATCH_SIZE = 30
     REQUEST_DELAY = 0.5  # seconds; ≤ 200 req/min
 
     def __init__(
