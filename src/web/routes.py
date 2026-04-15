@@ -526,7 +526,7 @@ def create_momentum_router() -> APIRouter:
                 return f"分钟线补全 {current}/{total}: {detail}"
             return f"分钟线补全: {current}/{total} 天"
         elif phase == "download":
-            return f"下载完成: 共 {total} 只股票"
+            return f"下载完成: {detail}" if detail else "下载完成"
         elif phase == "post_integrity":
             if current == 0:
                 return "下载后完整性检查通过"
