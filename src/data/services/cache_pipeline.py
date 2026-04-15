@@ -202,42 +202,142 @@ class CachePipeline:
             await self.reporter.progress(Phase.DAILY_CHECK, 1, 1, "日线数据完整，无需下载")
             return
 
-        # Log detailed gap summary
-        full_dates = sum(1 for _, _, act in gaps if act == 0)
-        partial_dates = len(gaps) - full_dates
-        if partial_dates:
-            sample = [(d, exp, act) for d, exp, act in gaps if act > 0][:5]
+        # Split: full gaps (actual=0, need API) vs partial gaps (handle locally)
+        full_gaps = [(d, exp, act) for d, exp, act in gaps if act == 0]
+        partial_gaps = [(d, exp, act) for d, exp, act in gaps if act > 0]
+
+        # Log audit summary to frontend
+        if partial_gaps:
+            sample = partial_gaps[:5]
             sample_str = ", ".join(f"{d}(差{exp - act}只)" for d, exp, act in sample)
+            extra = f" ...等{len(partial_gaps)}天" if len(partial_gaps) > 5 else ""
             logger.info(
-                "Daily audit: %d 天需下载 (全量%d天, 部分%d天). 部分示例: %s",
-                len(gaps),
-                full_dates,
-                partial_dates,
+                "Daily audit: 全量%d天, 部分缺口%d天. 示例: %s%s",
+                len(full_gaps),
+                len(partial_gaps),
                 sample_str,
+                extra,
             )
         else:
-            logger.info("Daily audit: %d 天需全量下载", len(gaps))
+            logger.info("Daily audit: %d 天需全量下载", len(full_gaps))
 
         await self.reporter.progress(
             Phase.DAILY_CHECK,
             1,
             1,
-            f"{len(gaps)} 天需下载 (全量{full_dates}, 部分{partial_dates})",
+            f"全量下载{len(full_gaps)}天, 部分缺口{len(partial_gaps)}天(本地补)",
         )
 
         prev_close_map = await self.storage.get_latest_closes()
 
-        # Concurrent prefetch + sequential process to keep API pipeline busy.
-        # tsanghi httpx pool (max_connections=2) handles throttling internally.
+        # --- Phase A: fill partial gaps locally (no tsanghi API) ---
+        if partial_gaps:
+            await self._fill_partial_gaps(partial_gaps, prev_close_map, cancel_event)
+
+        # --- Phase B: full-download dates via concurrent prefetch ---
+        if full_gaps:
+            await self._download_full_gap_dates(full_gaps, prev_close_map, cancel_event)
+
+        logger.info(
+            "Daily unified: %d full + %d partial gap dates processed",
+            len(full_gaps),
+            len(partial_gaps),
+        )
+
+    async def _fill_partial_gaps(
+        self,
+        partial_gaps: list[tuple[date, int, int]],
+        prev_close_map: dict[str, float],
+        cancel_event: CancelChecker,
+    ) -> None:
+        """Fill partial gaps locally: query missing codes, fill suspended with prev_close.
+
+        No tsanghi API calls — only Tushare suspend_d + DB queries.
+        """
+        total = len(partial_gaps)
+        filled_total = 0
+        unfillable_total = 0
+
+        for i, (gap_date, expected, actual) in enumerate(partial_gaps):
+            self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
+            date_str = gap_date.strftime("%Y-%m-%d")
+
+            # Compute missing codes
+            expected_codes = await self.storage.get_stock_list_codes_for_date(gap_date)
+            existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
+            missing_codes = expected_codes - existing_codes
+
+            if not missing_codes:
+                await self.reporter.progress(Phase.DAILY, i + 1, total, f"{date_str} 缺口已消失 ✓")
+                continue
+
+            # Fetch suspended list (Tushare, fast)
+            try:
+                suspended_codes = await self.metadata_source.fetch_suspended(gap_date)
+            except Exception as e:
+                logger.critical(
+                    f"FATAL: Tushare suspend_d API failed for {date_str}: {e}. "
+                    f"Aborting daily download to prevent wrong suspension data.",
+                    exc_info=True,
+                )
+                await self.reporter.notify_suspend_d_failure(date_str, e)
+                raise
+
+            filled = 0
+            unfillable: list[str] = []
+            for code in missing_codes:
+                pre_close = prev_close_map.get(code, 0.0)
+                if code in suspended_codes and pre_close > 0:
+                    await self.storage.insert_daily_record(
+                        code, gap_date, _suspended_record(pre_close)
+                    )
+                    filled += 1
+                else:
+                    unfillable.append(code)
+
+            filled_total += filled
+            unfillable_total += len(unfillable)
+
+            parts = [f"缺{len(missing_codes)}只"]
+            if filled:
+                parts.append(f"补停牌{filled}只")
+            if unfillable:
+                parts.append(f"无法补{len(unfillable)}只")
+                logger.info(
+                    "partial %s: %d missing, %d filled (suspended), %d unfillable: %s",
+                    date_str,
+                    len(missing_codes),
+                    filled,
+                    len(unfillable),
+                    ", ".join(unfillable[:10]),
+                )
+
+            await self.reporter.progress(
+                Phase.DAILY, i + 1, total, f"{date_str} ({', '.join(parts)}) ✓"
+            )
+
+        logger.info(
+            "Partial gaps: %d dates, filled %d suspended, %d unfillable",
+            total,
+            filled_total,
+            unfillable_total,
+        )
+
+    async def _download_full_gap_dates(
+        self,
+        full_gaps: list[tuple[date, int, int]],
+        prev_close_map: dict[str, float],
+        cancel_event: CancelChecker,
+    ) -> None:
+        """Download dates with no existing data via concurrent prefetch."""
         _PREFETCH = 4
         sem = asyncio.Semaphore(_PREFETCH)
 
         async def _prefetch(
-            gap_date: date, actual: int
-        ) -> tuple[date, set, list[dict], list[str], set[str] | None]:
+            gap_date: date,
+        ) -> tuple[date, set, list[dict], list[str]]:
             async with sem:
                 self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
-                # Fetch suspended (Tushare) + daily (tsanghi) in parallel
                 susp_task = asyncio.create_task(self.metadata_source.fetch_suspended(gap_date))
                 daily_task = asyncio.create_task(self.daily_source.fetch_day(gap_date))
                 try:
@@ -253,27 +353,23 @@ class CachePipeline:
                     await self.reporter.notify_suspend_d_failure(date_str, e)
                     raise
                 records, failed_exchanges = await daily_task
-                skip_codes = None
-                if actual > 0:
-                    skip_codes = await self.storage.get_codes_for_daily_date(gap_date)
-                return gap_date, suspended_codes, records, failed_exchanges, skip_codes
+                return gap_date, suspended_codes, records, failed_exchanges
 
-        # Launch all prefetch tasks (semaphore limits concurrency)
-        tasks = [asyncio.create_task(_prefetch(d, act)) for d, _exp, act in gaps]
+        tasks = [asyncio.create_task(_prefetch(d)) for d, _exp, _act in full_gaps]
 
         try:
             for i, task in enumerate(tasks):
                 self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
-                gap_date, suspended_codes, records, failed_exchanges, skip_codes = await task
+                gap_date, suspended_codes, records, failed_exchanges = await task
                 await self._process_daily_date(
                     gap_date,
                     suspended_codes,
                     records,
                     failed_exchanges,
-                    skip_codes,
+                    None,
                     prev_close_map,
                     i + 1,
-                    len(gaps),
+                    len(full_gaps),
                 )
         except BaseException:
             for t in tasks:
@@ -281,8 +377,6 @@ class CachePipeline:
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
-
-        logger.info("Daily unified: %d gap dates processed", len(gaps))
 
     async def _process_daily_date(
         self,

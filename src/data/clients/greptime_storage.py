@@ -833,6 +833,12 @@ class GreptimeBacktestStorage:
         rows = await self.db.fetch(f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}")
         return {r["stock_code"] for r in rows}
 
+    async def get_stock_list_codes_for_date(self, day: date) -> set[str]:
+        """Return all stock codes in stock_list for a given date."""
+        ts_ms = date_to_epoch_ms(day)
+        rows = await self.db.fetch(f"SELECT stock_code FROM stock_list WHERE ts = {ts_ms}")
+        return {r["stock_code"] for r in rows}
+
     async def get_suspended_pairs(self, start_date: date, end_date: date) -> set[tuple[str, date]]:
         """Return (stock_code, date) pairs marked is_suspended=true in range."""
         start_ms = date_to_epoch_ms(start_date)
