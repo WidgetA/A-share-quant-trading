@@ -1098,26 +1098,18 @@ class GreptimeBacktestStorage:
             logger.info("audit_minute_gaps: all %d dates complete", len(expected))
         return gaps
 
-    async def audit_minute_gaps_in_range(
-        self, start_date: date, end_date: date
-    ) -> list[tuple[date, set[str]]]:
-        """Per-day audit returning stocks that are missing or have incomplete bars.
+    async def audit_minute_gap_days(self, start_date: date, end_date: date) -> list[date]:
+        """Cheap day-level screen: total minute bars vs expected per day.
 
-        Two-phase approach for efficiency:
-        Phase 1 (cheap): total bar count per day vs expected — screens for gap days.
-        Phase 2 (expensive, gap days only): per-stock GROUP BY to find missing codes.
+        expected = (non-suspended stocks with vol>0) × 241
+        actual   = COUNT(*) from backtest_minute grouped by day
 
-        Returns: ``[(day, codes_to_redownload), ...]`` sorted by day.
-        Empty list if all days are complete.
+        Returns sorted list of dates where actual < expected.
         """
         start_ms = date_to_epoch_ms(start_date)
         end_ms = date_to_epoch_ms(end_date)
 
-        from src.common.config import get_stock_blacklist
-
-        blacklist = get_stock_blacklist()
-
-        # Phase 1, Step 1: expected stock count per day from daily table
+        # Query 1: expected stock count per day from daily table
         daily_count_rows = await self.db.fetch(
             f"SELECT ts, COUNT(*) as cnt FROM backtest_daily "
             f"WHERE ts >= {start_ms} AND ts <= {end_ms} "
@@ -1128,7 +1120,7 @@ class GreptimeBacktestStorage:
             return []
         expected_cnt = {ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_count_rows}
 
-        # Phase 1, Step 2: actual total bar count per day (single query)
+        # Query 2: actual total bar count per day from minute table
         end_boundary = end_ms + 86_400_000
         minute_count_rows = await self.db.fetch(
             f"SELECT date_trunc('day', ts) as day_ts, COUNT(*) as cnt "
@@ -1138,98 +1130,70 @@ class GreptimeBacktestStorage:
         )
         actual_bars = {ts_to_date(r["day_ts"]): int(r["cnt"]) for r in minute_count_rows}
 
-        # Phase 1, Step 3: screen for gap days
+        # Compare
         gap_days: list[date] = []
         for d, exp in expected_cnt.items():
-            expected_bars = exp * _EXPECTED_BARS_PER_DAY
-            actual = actual_bars.get(d, 0)
-            if actual < expected_bars:
+            if actual_bars.get(d, 0) < exp * _EXPECTED_BARS_PER_DAY:
                 gap_days.append(d)
+        gap_days.sort()
 
-        if not gap_days:
+        if gap_days:
             logger.info(
-                "audit_minute_gaps_in_range: %s~%s, %d days, all complete",
-                start_date,
-                end_date,
-                len(expected_cnt),
-            )
-            return []
-
-        logger.info(
-            "audit_minute_gaps_in_range: %s~%s, %d/%d days may have gaps, "
-            "running per-stock detail check",
-            start_date,
-            end_date,
-            len(gap_days),
-            len(expected_cnt),
-        )
-
-        # Phase 2: per-stock detail for gap days only
-        gaps: list[tuple[date, set[str]]] = []
-
-        for d in sorted(gap_days):
-            day_start = date_to_epoch_ms(d)
-            day_end = day_start + 86_400_000
-
-            bar_count_rows = await self.db.fetch(
-                f"SELECT stock_code, COUNT(*) as cnt FROM backtest_minute "
-                f"WHERE ts >= {day_start} AND ts < {day_end} "
-                f"GROUP BY stock_code"
-            )
-            actual_bar_counts: dict[str, int] = {
-                r["stock_code"]: int(r["cnt"]) for r in bar_count_rows
-            }
-
-            exp_rows = await self.db.fetch(
-                f"SELECT stock_code FROM backtest_daily "
-                f"WHERE ts = {day_start} "
-                f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
-            )
-            expected_set = {r["stock_code"] for r in exp_rows}
-
-            incomplete: set[str] = set()
-            for code in expected_set:
-                if code in blacklist:
-                    continue
-                bars = actual_bar_counts.get(code, 0)
-                if bars < _EXPECTED_BARS_PER_DAY:
-                    incomplete.add(code)
-
-            if incomplete:
-                n_missing = sum(1 for c in incomplete if actual_bar_counts.get(c, 0) == 0)
-                n_partial = len(incomplete) - n_missing
-                logger.info(
-                    "audit %s: expected %d stocks × %d bars, "
-                    "incomplete=%d (missing=%d, partial=%d)",
-                    d,
-                    expected_cnt[d],
-                    _EXPECTED_BARS_PER_DAY,
-                    len(incomplete),
-                    n_missing,
-                    n_partial,
-                )
-                gaps.append((d, incomplete))
-
-        if gaps:
-            total = sum(len(m) for _, m in gaps)
-            logger.info(
-                "audit_minute_gaps_in_range: %s~%s, %d/%d days have gaps, "
-                "%d (day,code) entries to redownload",
-                start_date,
-                end_date,
-                len(gaps),
-                len(expected_cnt),
-                total,
-            )
-        else:
-            logger.info(
-                "audit_minute_gaps_in_range: %s~%s, screening found %d "
-                "potential gap days but per-stock check shows all complete",
+                "audit_minute_gap_days: %s~%s, %d/%d days have gaps",
                 start_date,
                 end_date,
                 len(gap_days),
+                len(expected_cnt),
             )
-        return gaps
+        else:
+            logger.info(
+                "audit_minute_gap_days: %s~%s, %d days all complete",
+                start_date,
+                end_date,
+                len(expected_cnt),
+            )
+        return gap_days
+
+    async def find_missing_minute_stocks(self, d: date) -> set[str]:
+        """For a single gap day, find stocks with missing or incomplete bars."""
+        from src.common.config import get_stock_blacklist
+
+        blacklist = get_stock_blacklist()
+        day_start = date_to_epoch_ms(d)
+        day_end = day_start + 86_400_000
+
+        bar_count_rows = await self.db.fetch(
+            f"SELECT stock_code, COUNT(*) as cnt FROM backtest_minute "
+            f"WHERE ts >= {day_start} AND ts < {day_end} "
+            f"GROUP BY stock_code"
+        )
+        actual = {r["stock_code"]: int(r["cnt"]) for r in bar_count_rows}
+
+        exp_rows = await self.db.fetch(
+            f"SELECT stock_code FROM backtest_daily "
+            f"WHERE ts = {day_start} "
+            f"AND (is_suspended = false OR is_suspended IS NULL) AND vol > 0"
+        )
+        expected_set = {r["stock_code"] for r in exp_rows}
+
+        incomplete: set[str] = set()
+        for code in expected_set:
+            if code in blacklist:
+                continue
+            if actual.get(code, 0) < _EXPECTED_BARS_PER_DAY:
+                incomplete.add(code)
+
+        if incomplete:
+            n_missing = sum(1 for c in incomplete if actual.get(c, 0) == 0)
+            logger.info(
+                "minute gap %s: %d incomplete (%d missing, %d partial) / %d expected",
+                d,
+                len(incomplete),
+                n_missing,
+                len(incomplete) - n_missing,
+                len(expected_set),
+            )
+        return incomplete
 
     async def validate_integrity(self) -> list[str]:
         """Run high-level integrity checks. Returns list of warning messages."""

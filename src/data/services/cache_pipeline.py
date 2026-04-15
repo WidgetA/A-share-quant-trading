@@ -640,53 +640,62 @@ class CachePipeline:
         end_date: date,
         cancel_event: CancelChecker,
     ) -> dict[str, str]:
-        """Unified minute download: audit gaps → full-range for missing stocks → per-day backfill.
+        """Minute download: cheap day-level audit → per-day backfill.
 
-        Step A: audit_minute_gaps_in_range → collect completely missing stocks
-                (code appears in ALL gap days → never had any minute data)
-                → download full range in batch (efficient: 1 API call per 200 stocks)
-        Step B: re-audit → per-day surgical backfill for remaining gaps
-                (stocks with partial data — some days present, some missing)
+        1. audit_minute_gap_days  — 2 queries, returns gap dates
+        2. For each gap day, find_missing_minute_stocks → download missing
         """
         no_data_reasons: dict[str, str] = {}
 
-        # Step A: initial audit to find all gaps
+        # Step 1: cheap day-level audit (2 queries)
         await self.reporter.status("检查分钟线缺口...")
-        gaps = await self.storage.audit_minute_gaps_in_range(start_date, end_date)
+        gap_days = await self.storage.audit_minute_gap_days(start_date, end_date)
 
-        if not gaps:
+        if not gap_days:
             logger.info("Minute: all data complete, nothing to download")
             await self.reporter.progress(Phase.MINUTE, 0, 0, "分钟线数据完整")
             return no_data_reasons
 
-        total_gap_days = len(gaps)
+        logger.info("Minute audit: %d days with gaps", len(gap_days))
+
+        # Step 2: per gap day, find missing stocks then download
+        suspended_pairs = await self.storage.get_suspended_pairs(start_date, end_date)
+
+        gaps: list[tuple[date, set[str]]] = []
+        for d in gap_days:
+            missing = await self.storage.find_missing_minute_stocks(d)
+            if missing:
+                gaps.append((d, missing))
+
+        if not gaps:
+            logger.info("Minute: day-level screen found gaps but all stocks complete")
+            await self.reporter.progress(Phase.MINUTE, 0, 0, "分钟线数据完整")
+            return no_data_reasons
+
         total_missing = sum(len(codes) for _, codes in gaps)
         logger.info(
-            "Minute audit: %d days with gaps, %d (day,code) entries",
-            total_gap_days,
+            "Minute: %d days, %d (day,code) entries to download",
+            len(gaps),
             total_missing,
         )
 
-        # Find stocks that are completely missing (appear in every gap day)
-        # These benefit from full-range download instead of per-day
+        # Step 3: download — split into full-range batch vs per-day backfill
+        # Stocks missing in ALL gap days → full-range download (more efficient)
+        total_gap_days = len(gaps)
         code_gap_count: Counter[str] = Counter()
         for _, codes in gaps:
             for code in codes:
                 code_gap_count[code] += 1
 
-        # Stocks missing in ALL gap days → full-range download
         completely_missing = sorted(
             code for code, count in code_gap_count.items() if count == total_gap_days
         )
 
-        # Load suspended pairs for filtering
-        suspended_pairs = await self.storage.get_suspended_pairs(start_date, end_date)
-
-        # Step A: full-range download for completely missing stocks
         if completely_missing:
             logger.info(
-                "Minute step A: %d stocks completely missing, full-range download",
+                "Minute: %d stocks missing all %d days, full-range download",
                 len(completely_missing),
+                total_gap_days,
             )
             step_a_reasons = await self._minute_download_full_range(
                 completely_missing,
@@ -697,25 +706,25 @@ class CachePipeline:
             )
             no_data_reasons.update(step_a_reasons)
 
-        # Step B: re-audit and per-day backfill for remaining gaps
-        await self.reporter.status("重新检查分钟线缺口...")
-        gaps = await self.storage.audit_minute_gaps_in_range(start_date, end_date)
+        # Remaining per-day gaps
+        cm_set = set(completely_missing)
+        remaining_gaps = [(d, codes - cm_set) for d, codes in gaps]
+        remaining_gaps = [(d, codes) for d, codes in remaining_gaps if codes]
 
-        if gaps:
-            total_remaining = sum(len(codes) for _, codes in gaps)
+        if remaining_gaps:
+            total_remaining = sum(len(codes) for _, codes in remaining_gaps)
             logger.info(
-                "Minute step B: %d days still have gaps, %d (day,code) entries",
-                len(gaps),
+                "Minute: %d days, %d (day,code) entries for per-day backfill",
+                len(remaining_gaps),
                 total_remaining,
             )
             step_b_reasons = await self._minute_backfill_per_day(
-                gaps,
+                remaining_gaps,
                 suspended_pairs,
                 cancel_event,
             )
             no_data_reasons.update(step_b_reasons)
-        else:
-            logger.info("Minute: all gaps filled after step A")
+        elif not completely_missing:
             await self.reporter.progress(Phase.MINUTE_BACKFILL, 0, 0, "无缺口")
 
         return no_data_reasons
