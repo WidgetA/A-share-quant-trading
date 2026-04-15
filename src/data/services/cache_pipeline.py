@@ -232,18 +232,14 @@ class CachePipeline:
         _PREFETCH = 4
         sem = asyncio.Semaphore(_PREFETCH)
 
-        async def _prefetch(gap_date: date, actual: int) -> tuple[
-            date, set, list[dict], list[str], set[str] | None
-        ]:
+        async def _prefetch(
+            gap_date: date, actual: int
+        ) -> tuple[date, set, list[dict], list[str], set[str] | None]:
             async with sem:
                 self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
                 # Fetch suspended (Tushare) + daily (tsanghi) in parallel
-                susp_task = asyncio.create_task(
-                    self.metadata_source.fetch_suspended(gap_date)
-                )
-                daily_task = asyncio.create_task(
-                    self.daily_source.fetch_day(gap_date)
-                )
+                susp_task = asyncio.create_task(self.metadata_source.fetch_suspended(gap_date))
+                daily_task = asyncio.create_task(self.daily_source.fetch_day(gap_date))
                 try:
                     suspended_codes = await susp_task
                 except Exception as e:
@@ -263,17 +259,12 @@ class CachePipeline:
                 return gap_date, suspended_codes, records, failed_exchanges, skip_codes
 
         # Launch all prefetch tasks (semaphore limits concurrency)
-        tasks = [
-            asyncio.create_task(_prefetch(d, act))
-            for d, _exp, act in gaps
-        ]
+        tasks = [asyncio.create_task(_prefetch(d, act)) for d, _exp, act in gaps]
 
         try:
             for i, task in enumerate(tasks):
                 self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
-                gap_date, suspended_codes, records, failed_exchanges, skip_codes = (
-                    await task
-                )
+                gap_date, suspended_codes, records, failed_exchanges, skip_codes = await task
                 await self._process_daily_date(
                     gap_date,
                     suspended_codes,

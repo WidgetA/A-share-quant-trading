@@ -96,9 +96,7 @@ class TsanghiDailySource:
                 return [], f"{exchange}: {e}"
             return rows or [], None
 
-        results = await asyncio.gather(
-            *[_fetch_exchange(ex) for ex in self.EXCHANGES]
-        )
+        results = await asyncio.gather(*[_fetch_exchange(ex) for ex in self.EXCHANGES])
 
         records: list[dict[str, Any]] = []
         failed: list[str] = []
