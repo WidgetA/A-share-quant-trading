@@ -1166,8 +1166,13 @@ class GreptimeBacktestStorage:
             )
         return gap_days
 
-    async def find_missing_minute_stocks(self, d: date) -> set[str]:
-        """For a single gap day, find stocks with missing or incomplete bars."""
+    async def find_missing_minute_stocks(self, d: date) -> tuple[set[str], int]:
+        """For a single gap day, find stocks with missing or incomplete bars.
+
+        Returns:
+            (incomplete_codes, expected_count) where expected_count is the
+            total number of active (non-suspended, vol>0) stocks for that day.
+        """
         from src.common.config import get_stock_blacklist
 
         blacklist = get_stock_blacklist()
@@ -1205,7 +1210,7 @@ class GreptimeBacktestStorage:
                 len(incomplete) - n_missing,
                 len(expected_set),
             )
-        return incomplete
+        return incomplete, len(expected_set)
 
     async def validate_integrity(self) -> list[str]:
         """Run high-level integrity checks. Returns list of warning messages."""

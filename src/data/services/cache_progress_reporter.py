@@ -266,6 +266,45 @@ class CacheProgressReporter:
         logger.info("Missing minute report:\n%s", message)
         await self._send_feishu(message)
 
+    async def notify_minor_gap_failures(
+        self,
+        per_day_failures: dict[date, tuple[list[tuple[str, str]], int]],
+    ) -> None:
+        """Send per-day Feishu report for minor gap download failures.
+
+        Args:
+            per_day_failures: {date: ([(code, reason), ...], expected_count)}
+        """
+        lines: list[str] = ["分钟线缺口下载失败明细", ""]
+
+        for d in sorted(per_day_failures.keys()):
+            failures, _expected = per_day_failures[d]
+            for code, reason in failures:
+                label = self._reason_label(reason.split(":")[0])
+                # e.g. "2024-09-27 000111 API返回空数据"
+                detail = reason.split(":", 1)[1].strip() if ":" in reason else ""
+                entry = f"{d} {code} {label}"
+                if detail:
+                    entry += f": {detail}"
+                lines.append(entry)
+
+        # Feishu has message size limits — split into chunks if needed
+        message = "\n".join(lines)
+        if len(message) <= 4000:
+            logger.info("Minor gap failures report:\n%s", message)
+            await self._send_feishu(message)
+        else:
+            # Split into multiple messages
+            chunk_lines: list[str] = [lines[0], lines[1]]  # header
+            for line in lines[2:]:
+                if len("\n".join(chunk_lines + [line])) > 3800:
+                    await self._send_feishu("\n".join(chunk_lines))
+                    chunk_lines = [lines[0] + "(续)", ""]
+                chunk_lines.append(line)
+            if len(chunk_lines) > 2:
+                await self._send_feishu("\n".join(chunk_lines))
+            logger.info("Minor gap failures report: %d entries, sent in chunks", len(lines) - 2)
+
     @staticmethod
     def _reason_label(reason: str) -> str:
         return {
@@ -274,6 +313,8 @@ class CacheProgressReporter:
             "all_dates_suspended": "全部日期均为停牌",
             "unknown_exchange": "无法识别交易所",
             "cancelled": "用户取消",
+            "partial_bars": "下载成功但bar数不足241",
+            "suspended": "全日期停牌",
         }.get(reason, reason)
 
 

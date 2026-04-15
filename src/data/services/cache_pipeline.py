@@ -631,8 +631,11 @@ class CachePipeline:
         await self.reporter.notify_backfill_summary(fixed_dates=len(dates_to_fix), null_remaining=0)
 
     # ------------------------------------------------------------------
-    # Phase 2: minute (unified — audit + full-range + per-day backfill)
+    # Phase 2: minute (unified — audit + classify + retry/report)
     # ------------------------------------------------------------------
+
+    _MINOR_GAP_THRESHOLD = 0.10  # <10% missing → minor gap (targeted + report)
+    _MAX_MAJOR_RETRIES = 3  # max retry rounds for major gaps (>=10%)
 
     async def _download_minute_unified(
         self,
@@ -640,10 +643,12 @@ class CachePipeline:
         end_date: date,
         cancel_event: CancelChecker,
     ) -> dict[str, str]:
-        """Minute download: cheap day-level audit → per-day backfill.
+        """Minute download with percentage-based gap classification.
 
-        1. audit_minute_gap_days  — 2 queries, returns gap dates
-        2. For each gap day, find_missing_minute_stocks → download missing
+        1. audit_minute_gap_days → gap dates
+        2. For each gap day: find missing stocks + compute missing %
+        3. Major gaps (>=10%): retry loop with full-range + per-day download
+        4. Minor gaps (<10%): one-shot download + detailed Feishu failure report
         """
         no_data_reasons: dict[str, str] = {}
 
@@ -657,33 +662,107 @@ class CachePipeline:
             return no_data_reasons
 
         logger.info("Minute audit: %d days with gaps", len(gap_days))
-
-        # Step 2: per gap day, find missing stocks then download
         suspended_pairs = await self.storage.get_suspended_pairs(start_date, end_date)
 
-        gaps: list[tuple[date, set[str]]] = []
-        for d in gap_days:
-            missing = await self.storage.find_missing_minute_stocks(d)
-            if missing:
-                gaps.append((d, missing))
+        # Step 2: classify each gap day by missing percentage
+        # (date, missing_codes, expected_count)
+        major_gaps: list[tuple[date, set[str], int]] = []
+        minor_gaps: list[tuple[date, set[str], int]] = []
 
-        if not gaps:
+        for d in gap_days:
+            missing, expected = await self.storage.find_missing_minute_stocks(d)
+            if not missing:
+                continue
+            pct = len(missing) / expected if expected > 0 else 1.0
+            if pct >= self._MINOR_GAP_THRESHOLD:
+                major_gaps.append((d, missing, expected))
+            else:
+                minor_gaps.append((d, missing, expected))
+
+        if not major_gaps and not minor_gaps:
             logger.info("Minute: day-level screen found gaps but all stocks complete")
             await self.reporter.progress(Phase.MINUTE, 0, 0, "分钟线数据完整")
             return no_data_reasons
 
-        total_missing = sum(len(codes) for _, codes in gaps)
         logger.info(
-            "Minute: %d days, %d (day,code) entries to download",
-            len(gaps),
-            total_missing,
+            "Minute gaps classified: %d major (>=10%%), %d minor (<10%%)",
+            len(major_gaps),
+            len(minor_gaps),
         )
 
-        # Step 3: download — split into full-range batch vs per-day backfill
-        # Stocks missing in ALL gap days → full-range download (more efficient)
-        total_gap_days = len(gaps)
+        # Step 3: major gaps — retry loop
+        for attempt in range(self._MAX_MAJOR_RETRIES):
+            if not major_gaps:
+                break
+            self._raise_if_cancelled(cancel_event, "Minute download cancelled")
+
+            logger.info(
+                "Major gap round %d/%d: %d days",
+                attempt + 1,
+                self._MAX_MAJOR_RETRIES,
+                len(major_gaps),
+            )
+            await self.reporter.status(
+                f"分钟线重大缺口 第{attempt + 1}/{self._MAX_MAJOR_RETRIES}轮, {len(major_gaps)}天"
+            )
+
+            if attempt == 0:
+                # First round: full-range for stocks missing in ALL major days
+                reasons = await self._major_gap_first_round(
+                    major_gaps, start_date, end_date, suspended_pairs, cancel_event
+                )
+            else:
+                # Subsequent rounds: per-day only
+                dl_gaps = [(d, codes) for d, codes, _ in major_gaps]
+                reasons = await self._minute_backfill_per_day(
+                    dl_gaps, suspended_pairs, cancel_event
+                )
+            no_data_reasons.update(reasons)
+
+            # Re-check & reclassify each major gap day
+            new_major: list[tuple[date, set[str], int]] = []
+            for d, old_missing, expected in major_gaps:
+                new_missing, expected = await self.storage.find_missing_minute_stocks(d)
+                if not new_missing:
+                    continue
+                new_pct = len(new_missing) / expected if expected > 0 else 1.0
+                old_pct = len(old_missing) / expected if expected > 0 else 1.0
+                if new_pct < self._MINOR_GAP_THRESHOLD:
+                    minor_gaps.append((d, new_missing, expected))
+                elif new_pct < old_pct:
+                    new_major.append((d, new_missing, expected))  # improved, retry
+                else:
+                    minor_gaps.append((d, new_missing, expected))  # no progress
+            major_gaps = new_major
+
+        # Remaining major after max retries → demote to minor
+        minor_gaps.extend(major_gaps)
+
+        # Step 4: minor gaps — one-shot download + Feishu report
+        if minor_gaps:
+            per_day_failures = await self._download_minor_gaps(
+                minor_gaps, suspended_pairs, cancel_event, no_data_reasons
+            )
+            if per_day_failures:
+                await self.reporter.notify_minor_gap_failures(per_day_failures)
+
+        return no_data_reasons
+
+    async def _major_gap_first_round(
+        self,
+        major_gaps: list[tuple[date, set[str], int]],
+        start_date: date,
+        end_date: date,
+        suspended_pairs: set[tuple[str, date]],
+        cancel_event: CancelChecker,
+    ) -> dict[str, str]:
+        """First round for major gaps: full-range for stocks missing everywhere,
+        per-day backfill for the rest."""
+        no_data_reasons: dict[str, str] = {}
+
+        total_gap_days = len(major_gaps)
         code_gap_count: Counter[str] = Counter()
-        for _, codes in gaps:
+        for _, codes, _ in major_gaps:
             for code in codes:
                 code_gap_count[code] += 1
 
@@ -693,7 +772,7 @@ class CachePipeline:
 
         if completely_missing:
             logger.info(
-                "Minute: %d stocks missing all %d days, full-range download",
+                "Major round 1: %d stocks missing all %d days, full-range download",
                 len(completely_missing),
                 total_gap_days,
             )
@@ -708,26 +787,77 @@ class CachePipeline:
 
         # Remaining per-day gaps
         cm_set = set(completely_missing)
-        remaining_gaps = [(d, codes - cm_set) for d, codes in gaps]
+        remaining_gaps = [(d, codes - cm_set) for d, codes, _ in major_gaps]
         remaining_gaps = [(d, codes) for d, codes in remaining_gaps if codes]
 
         if remaining_gaps:
             total_remaining = sum(len(codes) for _, codes in remaining_gaps)
             logger.info(
-                "Minute: %d days, %d (day,code) entries for per-day backfill",
+                "Major round 1: %d days, %d (day,code) entries for per-day backfill",
                 len(remaining_gaps),
                 total_remaining,
             )
             step_b_reasons = await self._minute_backfill_per_day(
-                remaining_gaps,
-                suspended_pairs,
-                cancel_event,
+                remaining_gaps, suspended_pairs, cancel_event
             )
             no_data_reasons.update(step_b_reasons)
         elif not completely_missing:
             await self.reporter.progress(Phase.MINUTE_BACKFILL, 0, 0, "无缺口")
 
         return no_data_reasons
+
+    async def _download_minor_gaps(
+        self,
+        minor_gaps: list[tuple[date, set[str], int]],
+        suspended_pairs: set[tuple[str, date]],
+        cancel_event: CancelChecker,
+        no_data_reasons: dict[str, str],
+    ) -> dict[date, tuple[list[tuple[str, str]], int]]:
+        """One-shot per-day download for minor gaps, collect per-day failure details.
+
+        Returns:
+            {date: ([(code, reason), ...], expected_count)} for days with failures.
+        """
+        per_day_failures: dict[date, tuple[list[tuple[str, str]], int]] = {}
+        total_days = len(minor_gaps)
+        total_missing = sum(len(codes) for _, codes, _ in minor_gaps)
+
+        logger.info(
+            "Minor gaps: %d days, %d stocks to download",
+            total_days,
+            total_missing,
+        )
+        await self.reporter.status(f"分钟线尾部缺口: {total_days}天, {total_missing}只")
+
+        for i, (d, missing_codes, expected) in enumerate(minor_gaps):
+            self._raise_if_cancelled(cancel_event, "Minor gap download cancelled")
+
+            day_reasons = await self._minute_backfill_per_day(
+                [(d, missing_codes)], suspended_pairs, cancel_event
+            )
+            no_data_reasons.update(day_reasons)
+
+            # Re-check DB to catch ALL failure types (including partial downloads)
+            still_missing, _ = await self.storage.find_missing_minute_stocks(d)
+            if not still_missing:
+                continue
+
+            failures: list[tuple[str, str]] = []
+            for code in sorted(still_missing):
+                reason = day_reasons.get(code) or no_data_reasons.get(code) or "partial_bars"
+                failures.append((code, reason))
+
+            if failures:
+                per_day_failures[d] = (failures, expected)
+
+            await self.reporter.progress(
+                Phase.MINUTE_BACKFILL,
+                i + 1,
+                total_days,
+                f"尾部缺口 {i + 1}/{total_days}天",
+            )
+
+        return per_day_failures
 
     async def _minute_download_full_range(
         self,
