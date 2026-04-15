@@ -202,60 +202,110 @@ class CachePipeline:
             await self.reporter.progress(Phase.DAILY_CHECK, 1, 1, "日线数据完整，无需下载")
             return
 
-        logger.info(
-            "Daily: %d dates need downloading (%s ~ %s)",
-            len(gaps),
-            gaps[0][0],
-            gaps[-1][0],
+        # Log detailed gap summary
+        full_dates = sum(1 for _, _, act in gaps if act == 0)
+        partial_dates = len(gaps) - full_dates
+        if partial_dates:
+            sample = [(d, exp, act) for d, exp, act in gaps if act > 0][:5]
+            sample_str = ", ".join(f"{d}(差{exp - act}只)" for d, exp, act in sample)
+            logger.info(
+                "Daily audit: %d 天需下载 (全量%d天, 部分%d天). 部分示例: %s",
+                len(gaps),
+                full_dates,
+                partial_dates,
+                sample_str,
+            )
+        else:
+            logger.info("Daily audit: %d 天需全量下载", len(gaps))
+
+        await self.reporter.progress(
+            Phase.DAILY_CHECK,
+            1,
+            1,
+            f"{len(gaps)} 天需下载 (全量{full_dates}, 部分{partial_dates})",
         )
-        await self.reporter.progress(Phase.DAILY_CHECK, 1, 1, f"{len(gaps)} 天需下载")
 
         prev_close_map = await self.storage.get_latest_closes()
 
-        for i, (gap_date, expected, actual) in enumerate(gaps):
-            self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
+        # Concurrent prefetch + sequential process to keep API pipeline busy.
+        # tsanghi httpx pool (max_connections=2) handles throttling internally.
+        _PREFETCH = 4
+        sem = asyncio.Semaphore(_PREFETCH)
 
-            if actual == 0:
-                # Full download — no existing codes to skip
-                await self._download_one_daily_date(gap_date, prev_close_map, i + 1, len(gaps))
-            else:
-                # Partial — skip codes already in DB
-                existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
-                await self._download_one_daily_date(
+        async def _prefetch(gap_date: date, actual: int) -> tuple[
+            date, set, list[dict], list[str], set[str] | None
+        ]:
+            async with sem:
+                self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
+                # Fetch suspended (Tushare) + daily (tsanghi) in parallel
+                susp_task = asyncio.create_task(
+                    self.metadata_source.fetch_suspended(gap_date)
+                )
+                daily_task = asyncio.create_task(
+                    self.daily_source.fetch_day(gap_date)
+                )
+                try:
+                    suspended_codes = await susp_task
+                except Exception as e:
+                    daily_task.cancel()
+                    date_str = gap_date.strftime("%Y-%m-%d")
+                    logger.critical(
+                        f"FATAL: Tushare suspend_d API failed for {date_str}: {e}. "
+                        f"Aborting daily download to prevent wrong suspension data.",
+                        exc_info=True,
+                    )
+                    await self.reporter.notify_suspend_d_failure(date_str, e)
+                    raise
+                records, failed_exchanges = await daily_task
+                skip_codes = None
+                if actual > 0:
+                    skip_codes = await self.storage.get_codes_for_daily_date(gap_date)
+                return gap_date, suspended_codes, records, failed_exchanges, skip_codes
+
+        # Launch all prefetch tasks (semaphore limits concurrency)
+        tasks = [
+            asyncio.create_task(_prefetch(d, act))
+            for d, _exp, act in gaps
+        ]
+
+        try:
+            for i, task in enumerate(tasks):
+                self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
+                gap_date, suspended_codes, records, failed_exchanges, skip_codes = (
+                    await task
+                )
+                await self._process_daily_date(
                     gap_date,
+                    suspended_codes,
+                    records,
+                    failed_exchanges,
+                    skip_codes,
                     prev_close_map,
                     i + 1,
                     len(gaps),
-                    skip_codes=existing_codes,
                 )
+        except BaseException:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         logger.info("Daily unified: %d gap dates processed", len(gaps))
 
-    async def _download_one_daily_date(
+    async def _process_daily_date(
         self,
         day: date,
+        suspended_codes: set,
+        records: list[dict[str, Any]],
+        failed_exchanges: list[str],
+        skip_codes: set[str] | None,
         prev_close_map: dict[str, float],
         current: int,
         total: int,
-        *,
-        skip_codes: set[str] | None = None,
     ) -> None:
+        """Insert pre-fetched daily data into storage. Updates prev_close_map in-place."""
         date_str = day.strftime("%Y-%m-%d")
-
-        # Fetch suspended (fail-fast — wrong suspension data is unacceptable)
-        try:
-            suspended_codes = await self.metadata_source.fetch_suspended(day)
-        except Exception as e:
-            logger.critical(
-                f"FATAL: Tushare suspend_d API failed for {date_str}: {e}. "
-                f"Aborting daily download to prevent wrong suspension data.",
-                exc_info=True,
-            )
-            await self.reporter.notify_suspend_d_failure(date_str, e)
-            raise
-
-        # Fetch tsanghi
-        records, failed_exchanges = await self.daily_source.fetch_day(day)
 
         if failed_exchanges:
             await self.reporter.progress(

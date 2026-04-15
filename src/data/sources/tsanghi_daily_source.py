@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date
 from typing import Any
@@ -79,20 +80,32 @@ class TsanghiDailySource:
             can surface the original error reason.
         """
         date_str = trade_date.strftime("%Y-%m-%d")
-        records: list[dict[str, Any]] = []
-        failed: list[str] = []
 
-        for exchange in self.EXCHANGES:
+        async def _fetch_exchange(
+            exchange: str,
+        ) -> tuple[list[dict], str | None]:
             try:
                 rows = await self._client.daily_latest(exchange, date_str)
             except RuntimeError as e:
-                failed.append(f"{exchange}: {e}")
-                logger.warning("tsanghi daily_latest(%s, %s) FAILED: %s", exchange, date_str, e)
-                continue
+                logger.warning(
+                    "tsanghi daily_latest(%s, %s) FAILED: %s",
+                    exchange,
+                    date_str,
+                    e,
+                )
+                return [], f"{exchange}: {e}"
+            return rows or [], None
 
-            if not rows:
-                continue
+        results = await asyncio.gather(
+            *[_fetch_exchange(ex) for ex in self.EXCHANGES]
+        )
 
+        records: list[dict[str, Any]] = []
+        failed: list[str] = []
+        for rows, error in results:
+            if error:
+                failed.append(error)
+                continue
             for raw in rows:
                 ticker = str(raw.get("ticker", ""))
                 if not ticker or len(ticker) != 6:
