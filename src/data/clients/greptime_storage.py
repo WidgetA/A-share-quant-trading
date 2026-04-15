@@ -1121,14 +1121,26 @@ class GreptimeBacktestStorage:
         expected_cnt = {ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_count_rows}
 
         # Query 2: actual total bar count per day from minute table
-        end_boundary = end_ms + 86_400_000
-        minute_count_rows = await self.db.fetch(
-            f"SELECT date_trunc('day', ts) as day_ts, COUNT(*) as cnt "
-            f"FROM backtest_minute "
-            f"WHERE ts >= {start_ms} AND ts < {end_boundary} "
-            f"GROUP BY day_ts ORDER BY day_ts"
-        )
-        actual_bars = {ts_to_date(r["day_ts"]): int(r["cnt"]) for r in minute_count_rows}
+        # Chunked by month to avoid full-table scan on low-memory machines
+        actual_bars: dict[date, int] = {}
+        chunk_start = start_date.replace(day=1)
+        while chunk_start <= end_date:
+            # chunk = one calendar month
+            if chunk_start.month == 12:
+                chunk_end = chunk_start.replace(year=chunk_start.year + 1, month=1)
+            else:
+                chunk_end = chunk_start.replace(month=chunk_start.month + 1)
+            cs_ms = date_to_epoch_ms(chunk_start)
+            ce_ms = date_to_epoch_ms(chunk_end)
+            rows = await self.db.fetch(
+                f"SELECT date_trunc('day', ts) as day_ts, COUNT(*) as cnt "
+                f"FROM backtest_minute "
+                f"WHERE ts >= {cs_ms} AND ts < {ce_ms} "
+                f"GROUP BY day_ts ORDER BY day_ts"
+            )
+            for r in rows:
+                actual_bars[ts_to_date(r["day_ts"])] = int(r["cnt"])
+            chunk_start = chunk_end
 
         # Compare
         gap_days: list[date] = []
