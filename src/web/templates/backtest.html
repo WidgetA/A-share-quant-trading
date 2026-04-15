@@ -401,10 +401,14 @@ async function startCacheDownloadFromUI() {
     const endDate   = document.getElementById('cacheEnd').value;
     if (!startDate || !endDate) return;
 
+    // Save dates to localStorage so they persist across page reloads
+    localStorage.setItem('cacheDownloadStart', startDate);
+    localStorage.setItem('cacheDownloadEnd', endDate);
+
     // Disable immediately so rapid clicks can't queue multiple requests.
     const btn = document.getElementById('cacheDownloadBtn');
     btn.disabled = true;
-    btn.textContent = '请求中...';
+    btn.textContent = '启动中...';
 
     _lastRetryDates = { start_date: startDate, end_date: endDate };
     document.getElementById('downloadLog').innerHTML = '';
@@ -436,15 +440,6 @@ async function startCacheDownloadFromUI() {
     }
 
     const data = await resp.json();
-
-    if (data.state === 'cached') {
-        document.getElementById('cacheDownloadPanel').classList.add('visible');
-        document.getElementById('cacheProgressFill').style.width = '100%';
-        dlLog(`数据已缓存 — 日线 ${data.daily_count} 只, 分钟线 ${data.minute_count} 只`, 'log-ok');
-        btn.disabled = false;
-        btn.textContent = '补充下载';
-        return;
-    }
 
     if (data.state === 'running') {
         _showDownloadPanel(data.start_date, data.end_date);
@@ -732,10 +727,15 @@ function renderCsvResult(d) {
     const today = new Date().toISOString().slice(0, 10);
     document.getElementById('singleDate').value = today;
     document.getElementById('rangeEnd').value = today;
-    document.getElementById('cacheEnd').value = today;
     // Start date: 30 days ago
     const ago = new Date(); ago.setDate(ago.getDate() - 30);
     document.getElementById('rangeStart').value = ago.toISOString().slice(0, 10);
+
+    // Restore download date range from localStorage (or use defaults)
+    const savedStart = localStorage.getItem('cacheDownloadStart');
+    const savedEnd = localStorage.getItem('cacheDownloadEnd');
+    document.getElementById('cacheStart').value = savedStart || '2024-01-01';
+    document.getElementById('cacheEnd').value = savedEnd || today;
 
     // Restore download task state (if a task was running when page was last closed)
     restoreDownloadTaskState();

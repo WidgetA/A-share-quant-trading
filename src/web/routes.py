@@ -499,29 +499,8 @@ def create_momentum_router() -> APIRouter:
     # ── Download task helpers ────────────────────────────────────────────────
 
     def _fmt_progress(phase: str, current: int, total: int, detail: str = "") -> str:
-        if phase == "integrity_check":
-            if detail:
-                return f"完整性检查: {detail}"
-            return f"数据完整性检查中... ({current}/{total})"
-        elif phase == "init":
+        if phase == "init":
             return "正在初始化..."
-        elif phase == "daily_resume":
-            if current > 0:
-                return f"日线已缓存 {current} 天，检查剩余..."
-            return "检查日线缓存..."
-        elif phase == "daily":
-            if detail:
-                return f"日线 {current}/{total}: {detail}"
-            return f"下载日线数据: {current}/{total} 天"
-        elif phase == "minute_resume":
-            if detail:
-                return detail
-            remaining = total - current
-            if remaining == 0:
-                return f"分钟线粗检: {current} 只已有数据，逐日细检中..."
-            if current > 0:
-                return f"分钟线粗检: {current}/{total} 只已有数据，需全量下载 {remaining} 只"
-            return f"分钟线需下载 {total} 只"
         elif phase == "backfill":
             if detail:
                 return f"回填 {current}/{total}: {detail}"
@@ -530,13 +509,14 @@ def create_momentum_router() -> APIRouter:
             if detail:
                 return f"同步股票列表 {current}/{total}: {detail}"
             return f"同步股票列表: {current}/{total} 天"
-        elif phase == "daily_backfill":
+        elif phase == "daily_check":
             if detail:
-                label = "日线检查" if " +0只" in detail else "日线补全"
-                return f"{label} {current}/{total}: {detail}"
-            return f"日线检查: {current}/{total} 天"
-        elif phase == "minute_active":
-            return f"正在请求: {detail} 起 ({current}/{total} 已完成)"
+                return f"检查日线缺口: {detail}"
+            return "检查日线缺口..."
+        elif phase == "daily":
+            if detail:
+                return f"日线 {current}/{total}: {detail}"
+            return f"下载日线数据: {current}/{total} 天"
         elif phase == "minute":
             if detail:
                 return f"分钟线 {current}/{total}: {detail}"
@@ -554,22 +534,20 @@ def create_momentum_router() -> APIRouter:
         return f"{phase}: {current}/{total}"
 
     def _phase_to_overall(phase: str, current: int, total: int) -> float:
-        if phase == "integrity_check":
-            return 0.01 + 0.04 * (current / total) if total > 0 else 0.01
-        elif phase == "init":
-            return 0.05
-        elif phase in ("daily_resume", "backfill"):
-            return 0.1 + 0.02 * (current / total) if total > 0 else 0.1
+        if phase == "init":
+            return 0.02
+        elif phase == "backfill":
+            return 0.02 + 0.02 * (current / total) if total > 0 else 0.02
         elif phase == "stock_list":
-            return 0.12 + 0.02 * (current / total) if total > 0 else 0.12
-        elif phase == "daily_backfill":
-            return 0.14 + 0.02 * (current / total) if total > 0 else 0.14
+            return 0.04 + 0.06 * (current / total) if total > 0 else 0.04
+        elif phase == "daily_check":
+            return 0.10 + 0.01 * (current / total) if total > 0 else 0.10
         elif phase == "daily":
-            return 0.16 + 0.04 * (current / total) if total > 0 else 0.16
-        elif phase in ("minute_resume", "minute_active", "minute"):
-            return 0.2 + 0.7 * (current / total) if total > 0 else 0.2
+            return 0.11 + 0.09 * (current / total) if total > 0 else 0.11
+        elif phase == "minute":
+            return 0.20 + 0.65 * (current / total) if total > 0 else 0.20
         elif phase == "minute_backfill":
-            return 0.9 + 0.05 * (current / total) if total > 0 else 0.9
+            return 0.85 + 0.10 * (current / total) if total > 0 else 0.85
         return 1.0
 
     async def _run_watchdog(active_dl, download_task: asyncio.Task) -> None:
@@ -629,50 +607,13 @@ def create_momentum_router() -> APIRouter:
             )
 
         try:
-            # Pre-download integrity check
-            on_progress("integrity_check", 0, 1, "开始检查...")
-            issues = await storage.check_data_integrity()
-            on_progress("integrity_check", 1, 1, "检查完成")
-            if issues:
-                error_count = sum(1 for i in issues if i["level"] == "error")
-                warn_count = sum(1 for i in issues if i["level"] == "warning")
-                parts = []
-                if error_count:
-                    parts.append(f"{error_count} 个错误")
-                if warn_count:
-                    parts.append(f"{warn_count} 个警告")
-                active_dl.broadcast(
-                    {
-                        "type": "integrity_report",
-                        "issues": [
-                            {
-                                "level": i["level"],
-                                "message": i["message"],
-                                "count": i["count"],
-                            }
-                            for i in issues
-                        ],
-                        "message": f"完整性检查: {', '.join(parts)}",
-                    }
+            # Notify start (best effort)
+            try:
+                await pipeline.reporter.notify_download_lifecycle(
+                    "started", f"日期: {active_dl.start_date} ~ {active_dl.end_date}"
                 )
-                if error_count:
-                    error_msgs = [i["message"] for i in issues if i["level"] == "error"]
-                    err_text = (
-                        "数据完整性检查失败，已停止下载。请人工处理后重试:\n\n"
-                        + "\n\n".join(error_msgs)
-                    )
-                    active_dl.error_msg = err_text
-                    active_dl.state = DownloadState.FAILED
-                    active_dl.broadcast({"type": "error", "message": err_text})
-                    return
-            else:
-                active_dl.broadcast(
-                    {
-                        "type": "integrity_report",
-                        "issues": [],
-                        "message": "数据完整性检查通过",
-                    }
-                )
+            except Exception:
+                logger.warning("Failed to send start notice", exc_info=True)
 
             counts = await pipeline.download_prices(
                 start_date,
@@ -771,18 +712,6 @@ def create_momentum_router() -> APIRouter:
                     detail=f"下载任务已在运行中 ({existing.start_date} ~ {existing.end_date})",
                 )
 
-            # Already cached (and not force-refresh)?
-            if not body.force:
-                gaps = await storage.missing_ranges(start_date, end_date)
-                if not gaps:
-                    d_count = await storage.get_daily_stock_count()
-                    m_count = await storage.get_minute_stock_count()
-                    return {
-                        "state": "cached",
-                        "daily_count": d_count,
-                        "minute_count": m_count,
-                    }
-
             # Build the ActiveDownload object (no asyncio_task yet — set below).
             from datetime import datetime as _dt
             from zoneinfo import ZoneInfo as _ZI
@@ -805,15 +734,8 @@ def create_momentum_router() -> APIRouter:
             # concurrent request that acquires the lock next will see it.
             request.app.state.active_download = active_dl
 
-        # Lock released — do slow work (notify, create tasks) outside the lock.
-
-        # Notify start (best effort)
-        try:
-            await pipeline.reporter.notify_download_lifecycle(
-                "started", f"日期: {body.start_date} ~ {body.end_date}"
-            )
-        except Exception:
-            logger.warning("Failed to send start notice", exc_info=True)
+        # Lock released — create tasks outside the lock.
+        # Feishu start notification is now inside _run_download (non-blocking).
 
         # Create the download and watchdog tasks — strong refs stored on active_dl.
         dl_task = asyncio.create_task(
@@ -2828,6 +2750,7 @@ def create_model_router() -> APIRouter:
         async def event_stream():
             task = asyncio.create_task(_run())
             request.app.state.model_train_task = task
+            had_error = False
             try:
                 yield _sse({"type": "status", "message": "全量训练开始..."})
                 while True:
@@ -2840,11 +2763,11 @@ def create_model_router() -> APIRouter:
                     if event is None:
                         break
                     if event.get("type") == "error":
-                        yield _sse(event)
-                        return
+                        had_error = True
                     yield _sse(event)
 
-                yield _sse({"type": "complete", "message": "全量训练完成"})
+                if not had_error:
+                    yield _sse({"type": "complete", "message": "全量训练完成"})
             except Exception as e:
                 logger.error(f"Full train SSE error: {e}", exc_info=True)
                 yield _sse({"type": "error", "message": str(e)[:200]})
@@ -2899,6 +2822,7 @@ def create_model_router() -> APIRouter:
         async def event_stream():
             task = asyncio.create_task(_run())
             request.app.state.model_finetune_task = task
+            had_error = False
             try:
                 yield _sse({"type": "status", "message": "微调开始..."})
                 while True:
@@ -2911,11 +2835,11 @@ def create_model_router() -> APIRouter:
                     if event is None:
                         break
                     if event.get("type") == "error":
-                        yield _sse(event)
-                        return
+                        had_error = True
                     yield _sse(event)
 
-                yield _sse({"type": "complete", "message": "微调完成"})
+                if not had_error:
+                    yield _sse({"type": "complete", "message": "微调完成"})
             except Exception as e:
                 logger.error(f"Finetune SSE error: {e}", exc_info=True)
                 yield _sse({"type": "error", "message": str(e)[:200]})

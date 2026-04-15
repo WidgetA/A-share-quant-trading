@@ -89,12 +89,12 @@ class CachePipeline:
         1. compact existing tables
         2. backfill historical ``is_suspended IS NULL`` rows (one-time fixup)
         3. fetch trade calendar + sync stock_list baseline
-        4. download daily OHLCV per trading day (with resume)
-        5. backfill daily gaps (compare daily count vs stock_list)
-        6. download raw 1-min bars per stock (coarse per-stock resume)
-        7. backfill minute gaps (per-day audit: refetch the exact (day, code)
-           pairs that are present in active daily but missing from minute)
-        8. final verification + missing-minute report
+        4. audit daily gaps (stock_list count vs backtest_daily count per day)
+           → download only gap days
+        5. audit minute gaps (per-day 241-bar check)
+           → full-range download for completely missing stocks
+           → per-day download for partially missing stocks
+        6. final verification + missing-minute report
     """
 
     def __init__(
@@ -143,29 +143,13 @@ class CachePipeline:
                 self.minute_source,
                 self.metadata_source,
             ):
-                # Phase 1: daily
-                await self._download_daily(start_date, end_date, cancel_event)
+                # Phase 1: calendar + stock_list + daily (unified)
+                await self._download_daily_unified(start_date, end_date, cancel_event)
 
-                # Phase 2: minute (over the full stock universe)
-                stock_codes = await self.storage.get_stock_codes()
-                no_data_reasons: dict[str, str] = {}
-                if stock_codes:
-                    no_data_reasons = await self._download_minute(
-                        stock_codes, start_date, end_date, cancel_event
-                    )
-                    # Phase 2b: per-day audit + per-stock backfill. The main
-                    # download skips any code that already has *any* bar in
-                    # the range; this fills the surgical (day, code) holes
-                    # that the coarse resume cannot detect.
-                    backfill_reasons = await self._backfill_minute_gaps(
-                        start_date, end_date, cancel_event
-                    )
-                    # New failures override stale main-download reasons. Codes
-                    # that backfill rescued will simply be excluded from
-                    # ``would_download`` in verify (since they now have bars).
-                    no_data_reasons.update(backfill_reasons)
-                else:
-                    logger.warning("No stock codes in DB, skipping minute download")
+                # Phase 2: minute (unified)
+                no_data_reasons = await self._download_minute_unified(
+                    start_date, end_date, cancel_event
+                )
 
             # Phase 3: verification + report
             return await self._verify_and_report(start_date, end_date, no_data_reasons)
@@ -173,84 +157,77 @@ class CachePipeline:
             self.reporter = saved_reporter
 
     # ------------------------------------------------------------------
-    # Phase 1: daily download
+    # Phase 1: daily (unified — calendar + stock_list + audit + download)
     # ------------------------------------------------------------------
 
-    async def _download_daily(
+    async def _download_daily_unified(
         self,
         start_date: date,
         end_date: date,
         cancel_event: CancelChecker,
     ) -> None:
-        existing_dates = await self.storage.get_existing_daily_dates()
-        if existing_dates:
-            logger.info(
-                "Daily resume: %d dates cached (%s ~ %s), will skip them individually",
-                len(existing_dates),
-                min(existing_dates),
-                max(existing_dates),
-            )
-        await self.reporter.progress(
-            Phase.DAILY_RESUME, len(existing_dates), len(existing_dates), ""
-        )
-
         # One-time historical fixup: rows with is_suspended IS NULL
         await self._backfill_is_suspended(cancel_event)
 
         # Trade calendar (skip weekends/holidays)
-        trading_dates: set[date] | None = None
+        trading_dates: list[date] = []
         try:
             raw_cal = await self.metadata_source.fetch_trade_calendar(start_date, end_date)
-            trading_dates = {d for d in raw_cal if start_date <= d <= end_date}
-            if len(trading_dates) < len(raw_cal):
-                logger.warning(
-                    "Trade calendar returned %d dates outside [%s, %s], filtered to %d",
-                    len(raw_cal) - len(trading_dates),
-                    start_date,
-                    end_date,
-                    len(trading_dates),
-                )
+            trading_dates = sorted(d for d in raw_cal if start_date <= d <= end_date)
             logger.info(f"Trade calendar: {len(trading_dates)} trading days in range")
         except Exception as e:
             logger.warning(f"Trade calendar fetch failed: {e}, will check all dates")
             await self.reporter.progress(Phase.DAILY, 0, 0, f"⚠ 交易日历获取失败: {e}")
 
-        # Sync stock_list baseline BEFORE daily download (audit needs it)
-        if trading_dates:
-            await self._sync_stock_list(sorted(trading_dates), cancel_event)
-
-        # Compute dates that actually need downloading
-        if trading_dates is not None:
-            dates_to_download = sorted(trading_dates - existing_dates)
-        else:
+        if not trading_dates:
+            # Fallback: generate all dates in range (excluding weekends)
             n_days = (end_date - start_date).days + 1
-            all_dates = {start_date + timedelta(days=i) for i in range(n_days)}
-            dates_to_download = sorted(all_dates - existing_dates)
+            trading_dates = sorted(
+                start_date + timedelta(days=i) for i in range(n_days)
+                if (start_date + timedelta(days=i)).weekday() < 5
+            )
 
-        if not dates_to_download:
-            logger.info("Daily: all dates already cached, nothing to download")
+        # Sync stock_list baseline BEFORE gap audit (audit needs it)
+        await self._sync_stock_list(trading_dates, cancel_event)
+
+        # Audit: compare stock_list vs backtest_daily per date
+        await self.reporter.progress(Phase.DAILY_CHECK, 0, 1, "检查日线缺口...")
+        gaps = await self.storage.audit_daily_gaps()
+        # Filter to only dates in our target range
+        gaps = [(d, exp, act) for d, exp, act in gaps if start_date <= d <= end_date]
+
+        if not gaps:
+            logger.info("Daily: all dates complete, nothing to download")
+            await self.reporter.progress(Phase.DAILY_CHECK, 1, 1, "日线数据完整，无需下载")
             return
 
         logger.info(
-            "Daily: %d dates to download (%s ~ %s)",
-            len(dates_to_download),
-            dates_to_download[0],
-            dates_to_download[-1],
+            "Daily: %d dates need downloading (%s ~ %s)",
+            len(gaps), gaps[0][0], gaps[-1][0],
+        )
+        await self.reporter.progress(
+            Phase.DAILY_CHECK, 1, 1, f"{len(gaps)} 天需下载"
         )
 
         prev_close_map = await self.storage.get_latest_closes()
-        total = len(dates_to_download)
 
-        for i, day in enumerate(dates_to_download):
+        for i, (gap_date, expected, actual) in enumerate(gaps):
             self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
-            await self._download_one_daily_date(day, prev_close_map, i + 1, total)
 
-        logger.info(
-            f"tsanghi daily download: {total} new trading days in [{start_date} ~ {end_date}]"
-        )
+            if actual == 0:
+                # Full download — no existing codes to skip
+                await self._download_one_daily_date(
+                    gap_date, prev_close_map, i + 1, len(gaps)
+                )
+            else:
+                # Partial — skip codes already in DB
+                existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
+                await self._download_one_daily_date(
+                    gap_date, prev_close_map, i + 1, len(gaps),
+                    skip_codes=existing_codes,
+                )
 
-        # Audit & backfill: compare stock_list vs daily count, fill the gaps
-        await self._backfill_daily_gaps(cancel_event)
+        logger.info("Daily unified: %d gap dates processed", len(gaps))
 
     async def _download_one_daily_date(
         self,
@@ -258,6 +235,8 @@ class CachePipeline:
         prev_close_map: dict[str, float],
         current: int,
         total: int,
+        *,
+        skip_codes: set[str] | None = None,
     ) -> None:
         date_str = day.strftime("%Y-%m-%d")
 
@@ -295,6 +274,11 @@ class CachePipeline:
         for raw in records:
             ticker = raw["ticker"]
             seen_codes.add(ticker)
+
+            # Skip codes already in DB (partial backfill mode)
+            if skip_codes and ticker in skip_codes:
+                continue
+
             pre_close = prev_close_map.get(ticker, 0.0)
 
             rec: dict[str, Any] | None
@@ -314,6 +298,8 @@ class CachePipeline:
         for susp_code in suspended_codes:
             if susp_code in seen_codes:
                 continue
+            if skip_codes and susp_code in skip_codes:
+                continue
             pre_close = prev_close_map.get(susp_code, 0.0)
             if pre_close <= 0:
                 continue  # nothing to fill from
@@ -332,14 +318,15 @@ class CachePipeline:
             await self.reporter.notify_null_data(date_str, null_codes)
 
         # Progress
+        skip_part = f", 跳过{len(skip_codes)}只已有" if skip_codes else ""
         if rows_written > 0:
             null_part = f", {len(null_codes)}只数据为空" if null_codes else ""
-            status = f"{date_str} ({rows_written}只{null_part}) ✓"
+            status = f"{date_str} ({rows_written}只{null_part}{skip_part}) ✓"
             await self.reporter.progress(Phase.DAILY, current, total, status)
         else:
             null_part = f", {len(null_codes)}只数据为空" if null_codes else ""
             await self.reporter.progress(
-                Phase.DAILY, current, total, f"{date_str} ⚠ API返回0条记录{null_part}"
+                Phase.DAILY, current, total, f"{date_str} ⚠ API返回0条记录{null_part}{skip_part}"
             )
             logger.warning(f"Daily {date_str}: 0 usable records from tsanghi API")
 
@@ -365,8 +352,6 @@ class CachePipeline:
         for i, td in enumerate(to_sync):
             self._raise_if_cancelled(cancel_event, "stock_list sync cancelled")
 
-            # Pre-step status: if a hang happens, the LAST status line on the
-            # frontend tells you exactly which side stalled (API vs DB).
             await self.reporter.status(f"stock_list {td}: → 调用 bak_basic API ...")
             t_fetch = time.monotonic()
             codes = await self.metadata_source.fetch_listed_stocks(td)
@@ -417,110 +402,6 @@ class CachePipeline:
             )
 
         logger.info("stock_list: sync complete, %d dates added", len(to_sync))
-
-    # ------------------------------------------------------------------
-    # Daily gap backfill
-    # ------------------------------------------------------------------
-
-    async def _backfill_daily_gaps(self, cancel_event: CancelChecker) -> int:
-        gaps = await self.storage.audit_daily_gaps()
-        if not gaps:
-            return 0
-
-        logger.info("backfill_daily_gaps: %d dates to backfill", len(gaps))
-        backfilled = 0
-        prev_close_map = await self.storage.get_latest_closes()
-
-        for i, (gap_date, expected, actual) in enumerate(gaps):
-            if cancel_event and cancel_event.is_set():
-                logger.info("daily backfill cancelled")
-                break
-
-            date_str = gap_date.strftime("%Y-%m-%d")
-            existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
-
-            # Fetch suspended for this date
-            try:
-                suspended_codes = await self.metadata_source.fetch_suspended(gap_date)
-            except Exception as e:
-                logger.warning("backfill: suspend_d failed for %s: %s, skipping date", date_str, e)
-                continue
-
-            records, failed_exchanges = await self.daily_source.fetch_day(gap_date)
-            api_count = len(records)
-            new_count = 0
-
-            for raw in records:
-                ticker = raw["ticker"]
-                if ticker in existing_codes:
-                    continue
-
-                pre_close = prev_close_map.get(ticker, 0.0)
-                rec: dict[str, Any] | None
-                if ticker in suspended_codes:
-                    rec = _suspended_record(pre_close)
-                else:
-                    rec = _normal_record(raw, pre_close)
-                    if rec is None:
-                        continue
-
-                await self.storage.insert_daily_record(ticker, gap_date, rec)
-                if rec["close"] > 0:
-                    prev_close_map[ticker] = rec["close"]
-                new_count += 1
-
-            backfilled += 1
-
-            if new_count:
-                await self.reporter.progress(
-                    Phase.DAILY_BACKFILL,
-                    i + 1,
-                    len(gaps),
-                    f"{date_str} +{new_count}只 ({actual}→{actual + new_count}/{expected})",
-                )
-                logger.info(
-                    "backfill: %s added %d stocks (was %d, expected %d)",
-                    date_str,
-                    new_count,
-                    actual,
-                    expected,
-                )
-            else:
-                missing_n = expected - actual
-                api_codes = {r["ticker"] for r in records}
-                all_known = existing_codes | api_codes
-                # We can't easily query stock_list codes here, but we can
-                # log which codes the API returned that DB didn't have
-                # (should be 0 since new_count==0) and what DB+API covers.
-                fail_part = ""
-                if failed_exchanges:
-                    fail_part = f", API失败: {'; '.join(failed_exchanges)}"
-                msg = (
-                    f"{date_str} +0 — API返回{api_count}只, "
-                    f"DB已有{actual}只, 期望{expected}只, "
-                    f"缺{missing_n}只(API也没有){fail_part}"
-                )
-                remaining = len(gaps) - i - 1
-                await self.reporter.progress(
-                    Phase.DAILY_BACKFILL,
-                    len(gaps),
-                    len(gaps),
-                    f"{msg}, 停止补全(剩余 {remaining} 天同理)",
-                )
-                logger.info("backfill: %s", msg)
-                logger.info(
-                    "backfill: DB覆盖 %d 只, API覆盖 %d 只, 并集 %d 只, "
-                    "stock_list期望 %d 只 — 差值 %d 只在两个数据源都不存在",
-                    len(existing_codes),
-                    api_count,
-                    len(all_known),
-                    expected,
-                    expected - len(all_known),
-                )
-                break
-
-        logger.info("backfill_daily_gaps: done, %d dates backfilled", backfilled)
-        return backfilled
 
     # ------------------------------------------------------------------
     # is_suspended NULL backfill (one-time historical fixup)
@@ -613,60 +494,111 @@ class CachePipeline:
         await self.reporter.notify_backfill_summary(fixed_dates=len(dates_to_fix), null_remaining=0)
 
     # ------------------------------------------------------------------
-    # Phase 2: minute download
+    # Phase 2: minute (unified — audit + full-range + per-day backfill)
     # ------------------------------------------------------------------
 
-    async def _download_minute(
+    async def _download_minute_unified(
         self,
-        codes: list[str],
         start_date: date,
         end_date: date,
         cancel_event: CancelChecker,
     ) -> dict[str, str]:
-        existing_codes = await self.storage.get_existing_minute_codes(start_date, end_date)
-        active_codes = await self.storage.get_active_daily_codes(start_date, end_date)
+        """Unified minute download: audit gaps → full-range for missing stocks → per-day backfill.
 
-        total_before = len(codes)
-        eligible = [c for c in codes if c in active_codes]
-        suspended_count = total_before - len(eligible)
-        codes_to_download = [c for c in eligible if c not in existing_codes]
+        Step A: audit_minute_gaps_in_range → collect completely missing stocks
+                (code appears in ALL gap days → never had any minute data)
+                → download full range in batch (efficient: 1 API call per 200 stocks)
+        Step B: re-audit → per-day surgical backfill for remaining gaps
+                (stocks with partial data — some days present, some missing)
+        """
+        no_data_reasons: dict[str, str] = {}
 
-        if suspended_count > 0:
-            logger.info(f"Minute: skipped {suspended_count} fully-suspended stocks")
+        # Step A: initial audit to find all gaps
+        await self.reporter.status("检查分钟线缺口...")
+        gaps = await self.storage.audit_minute_gaps_in_range(start_date, end_date)
+
+        if not gaps:
+            logger.info("Minute: all data complete, nothing to download")
+            await self.reporter.progress(Phase.MINUTE, 0, 0, "分钟线数据完整")
+            return no_data_reasons
+
+        total_gap_days = len(gaps)
+        total_missing = sum(len(codes) for _, codes in gaps)
         logger.info(
-            f"Minute resume: {len(existing_codes)} cached / {len(eligible)} active, "
-            f"downloading {len(codes_to_download)}"
+            "Minute audit: %d days with gaps, %d (day,code) entries",
+            total_gap_days, total_missing,
         )
-        await self.reporter.progress(Phase.MINUTE_RESUME, len(existing_codes), len(eligible), "")
 
-        if not codes_to_download:
-            return {}
+        # Find stocks that are completely missing (appear in every gap day)
+        # These benefit from full-range download instead of per-day
+        code_gap_count: Counter[str] = Counter()
+        for _, codes in gaps:
+            for code in codes:
+                code_gap_count[code] += 1
 
+        # Stocks missing in ALL gap days → full-range download
+        completely_missing = sorted(
+            code for code, count in code_gap_count.items()
+            if count == total_gap_days
+        )
+
+        # Load suspended pairs for filtering
         suspended_pairs = await self.storage.get_suspended_pairs(start_date, end_date)
-        if suspended_pairs:
-            logger.info(f"Minute: loaded {len(suspended_pairs)} suspended (stock,date) pairs")
+
+        # Step A: full-range download for completely missing stocks
+        if completely_missing:
+            logger.info(
+                "Minute step A: %d stocks completely missing, full-range download",
+                len(completely_missing),
+            )
+            step_a_reasons = await self._minute_download_full_range(
+                completely_missing, start_date, end_date,
+                suspended_pairs, cancel_event,
+            )
+            no_data_reasons.update(step_a_reasons)
+
+        # Step B: re-audit and per-day backfill for remaining gaps
+        await self.reporter.status("重新检查分钟线缺口...")
+        gaps = await self.storage.audit_minute_gaps_in_range(start_date, end_date)
+
+        if gaps:
+            total_remaining = sum(len(codes) for _, codes in gaps)
+            logger.info(
+                "Minute step B: %d days still have gaps, %d (day,code) entries",
+                len(gaps), total_remaining,
+            )
+            step_b_reasons = await self._minute_backfill_per_day(
+                gaps, suspended_pairs, cancel_event,
+            )
+            no_data_reasons.update(step_b_reasons)
+        else:
+            logger.info("Minute: all gaps filled after step A")
+            await self.reporter.progress(Phase.MINUTE_BACKFILL, 0, 0, "无缺口")
+
+        return no_data_reasons
+
+    async def _minute_download_full_range(
+        self,
+        codes: list[str],
+        start_date: date,
+        end_date: date,
+        suspended_pairs: set[tuple[str, date]],
+        cancel_event: CancelChecker,
+    ) -> dict[str, str]:
+        """Download minute bars for a list of stocks over the full date range."""
+        no_data_reasons: dict[str, str] = {}
+        total = len(codes)
+        done = 0
 
         all_daily_dates = await self.storage.get_existing_daily_dates()
         trading_dates_set = {d for d in all_daily_dates if start_date <= d <= end_date}
 
-        no_data_reasons: dict[str, str] = {}
-        total = len(codes_to_download)
-        done = 0
-
-        async for batch in self.minute_source.fetch_batches(
-            codes_to_download, start_date, end_date
-        ):
+        async for batch in self.minute_source.fetch_batches(codes, start_date, end_date):
             self._raise_if_cancelled(cancel_event, "Minute download cancelled by user")
 
-            first_code = codes_to_download[done] if done < total else codes_to_download[-1]
-            logger.info(
-                "[minute-diag] API batch %d/%d (%s), writing DB",
-                done,
-                total,
-                first_code,
-            )
-            if codes_to_download:
-                await self.reporter.progress(Phase.MINUTE_ACTIVE, done, total, first_code)
+            first_code = codes[done] if done < total else codes[-1]
+            logger.info("[minute-diag] API batch %d/%d (%s), writing DB", done, total, first_code)
+            await self.reporter.progress(Phase.MINUTE, done, total, first_code)
 
             for code in batch.unknown_exchange:
                 no_data_reasons[code] = "unknown_exchange"
@@ -677,9 +609,7 @@ class CachePipeline:
                     no_data_reasons[code] = f"api_error: {batch.error}"
                     done += 1
                 await self.reporter.progress(
-                    Phase.MINUTE,
-                    done,
-                    total,
+                    Phase.MINUTE, done, total,
                     f"API错误{len(batch.error_codes)}只: {batch.error}",
                 )
                 continue
@@ -701,18 +631,13 @@ class CachePipeline:
             if truly_empty_codes:
                 logger.warning(
                     "minute batch: API返回%d条bar, 以下%d只无数据(非停牌): %s",
-                    batch.api_bar_count,
-                    len(truly_empty_codes),
+                    batch.api_bar_count, len(truly_empty_codes),
                     ", ".join(truly_empty_codes[:10]),
                 )
 
             batch_ok = 0
             batch_empty = batch_truly_empty
             for code, raw_bars in batch.ok.items():
-                # Drop bars that fall on a suspended (stock, date) pair. The
-                # storage layer rejects zero-OHLC bars, so we MUST strip them
-                # before insert — otherwise a single suspended date in the
-                # batch would crash the whole download.
                 kept_bars: list[dict[str, Any]] = []
                 for bar in raw_bars:
                     trade_time = str(bar.get("trade_time", ""))
@@ -751,59 +676,26 @@ class CachePipeline:
         if no_data_reasons:
             counter = Counter(r.split(":")[0] for r in no_data_reasons.values())
             logger.info(
-                f"minute download: {len(no_data_reasons)} stocks have no data — {dict(counter)}"
+                f"minute full-range: {len(no_data_reasons)} stocks have no data — {dict(counter)}"
             )
-        logger.info(f"minute download done: {done}/{total} stocks")
+        logger.info(f"minute full-range done: {done}/{total} stocks")
         return no_data_reasons
 
-    # ------------------------------------------------------------------
-    # Phase 2b: minute gap backfill (per-day audit)
-    # ------------------------------------------------------------------
-
-    async def _backfill_minute_gaps(
+    async def _minute_backfill_per_day(
         self,
-        start_date: date,
-        end_date: date,
+        gaps: list[tuple[date, set[str]]],
+        suspended_pairs: set[tuple[str, date]],
         cancel_event: CancelChecker,
     ) -> dict[str, str]:
-        """Audit minute coverage day-by-day and refetch the missing (day, code) pairs.
-
-        The main minute download skips a stock if it has *any* bar in the
-        range. This phase catches the holes the coarse resume cannot detect:
-        a stock that has bars on day1~day9 but is missing day5 (e.g. a single
-        API failure during the original run that wasn't retried).
-
-        For each day with a gap, we issue ``stk_mins`` requests scoped to that
-        single day for only the missing codes — no full-range refetch, no
-        wasted bandwidth on already-cached days.
-
-        Returns a ``no_data_reasons`` dict keyed by stock_code listing codes
-        whose backfill attempt also failed (api_error / api_empty / etc.).
-        Successful fills are reflected by the absence of the code in the
-        return value (and by ``backtest_minute`` now containing the bars).
-        """
-        gaps = await self.storage.audit_minute_gaps_in_range(start_date, end_date)
+        """Per-day surgical backfill for minute gaps."""
         no_data_reasons: dict[str, str] = {}
-
-        if not gaps:
-            await self.reporter.progress(Phase.MINUTE_BACKFILL, 0, 0, "无缺口")
-            return no_data_reasons
-
         total_days = len(gaps)
         total_missing = sum(len(codes) for _, codes in gaps)
-        logger.info(
-            "_backfill_minute_gaps: %d days with gaps, %d (day,code) entries to fill",
-            total_days,
-            total_missing,
-        )
+
         await self.reporter.progress(
-            Phase.MINUTE_BACKFILL,
-            0,
-            total_days,
+            Phase.MINUTE_BACKFILL, 0, total_days,
             f"待补 {total_days} 天 {total_missing} 只",
         )
-
-        suspended_pairs = await self.storage.get_suspended_pairs(start_date, end_date)
 
         for i, (gap_date, missing_codes) in enumerate(gaps):
             self._raise_if_cancelled(cancel_event, "Minute backfill cancelled by user")
@@ -823,9 +715,7 @@ class CachePipeline:
                         no_data_reasons[code] = f"api_error: {batch.error}"
                     logger.warning(
                         "minute backfill %s: API error on %d codes: %s",
-                        date_str,
-                        len(batch.error_codes),
-                        batch.error,
+                        date_str, len(batch.error_codes), batch.error,
                     )
                     continue
 
@@ -852,39 +742,20 @@ class CachePipeline:
 
                 # Report per-batch so watchdog sees activity within a day
                 await self.reporter.progress(
-                    Phase.MINUTE_BACKFILL,
-                    i + 1,
-                    total_days,
+                    Phase.MINUTE_BACKFILL, i + 1, total_days,
                     f"{date_str} 补 {filled}/{len(missing_codes)} 只",
                 )
 
-            codes_detail: list[str] = []
-            for code in codes_list[:5]:
-                reason = no_data_reasons.get(code, "filled" if filled else "?")
-                codes_detail.append(f"{code}({reason})")
-            detail_str = ", ".join(codes_detail)
-            if len(codes_list) > 5:
-                detail_str += f" 等{len(codes_list)}只"
-            await self.reporter.progress(
-                Phase.MINUTE_BACKFILL,
-                i + 1,
-                total_days,
-                f"{date_str} 补 {filled}/{len(missing_codes)} 只 [{detail_str}] ✓",
-            )
             logger.info(
-                "minute backfill %s: filled %d/%d codes — %s",
-                date_str,
-                filled,
-                len(missing_codes),
-                detail_str,
+                "minute backfill %s: filled %d/%d codes",
+                date_str, filled, len(missing_codes),
             )
 
         if no_data_reasons:
             counter = Counter(r.split(":")[0] for r in no_data_reasons.values())
             logger.info(
-                "minute backfill: %d codes still missing after backfill — %s",
-                len(no_data_reasons),
-                dict(counter),
+                "minute backfill: %d codes still missing — %s",
+                len(no_data_reasons), dict(counter),
             )
         logger.info("minute backfill done: %d days processed", total_days)
         return no_data_reasons
