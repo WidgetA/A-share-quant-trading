@@ -793,14 +793,6 @@ class GreptimeBacktestStorage:
         )
         return {r["stock_code"] for r in rows}
 
-    async def get_codes_for_daily_date(self, day: date) -> set[str]:
-        """Return stock codes that have a row in backtest_daily for the given date."""
-        ms = date_to_epoch_ms(day)
-        rows = await self.db.fetch(
-            f"SELECT stock_code FROM backtest_daily WHERE ts = {ms}"
-        )
-        return {r["stock_code"] for r in rows}
-
     async def get_active_daily_codes(self, start_date: date, end_date: date) -> set[str]:
         """Get stock codes that have at least one non-suspended trading day."""
         from src.common.config import get_stock_blacklist
