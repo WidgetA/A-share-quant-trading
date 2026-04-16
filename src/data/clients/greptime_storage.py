@@ -594,11 +594,41 @@ class GreptimeBacktestStorage:
         return int(row["cnt"]) if row else 0
 
     async def get_minute_stock_count(self) -> int:
-        """Count distinct stock codes in minute table."""
+        """Count distinct stock codes with minute data on the most recent day.
+
+        NOT a historical all-time distinct count. A naive
+        ``SELECT COUNT(DISTINCT stock_code) FROM backtest_minute`` is a full
+        table scan of ~1.8B rows (~2+ minutes on a loaded GreptimeDB),
+        which blows the 120s query timeout and serves no real purpose:
+
+        - UI just wants a "how many stocks are in the minute cache" number
+          for display -- recent-day count is more informative (delisted
+          stocks don't matter)
+        - Coverage-ratio warnings (< total_stocks * 0.5) are inherently a
+          snapshot check, not historical
+        - Non-empty gating uses ``has_minute_data()`` instead
+
+        Real gap detection does NOT rely on this -- see ``audit_minute_gaps``
+        and ``audit_minute_gap_days`` which scan per-day with precise
+        expected-vs-actual comparison.
+        """
+        row = await self.db.fetchrow("SELECT MAX(ts) as max_ts FROM backtest_minute")
+        if not row or row["max_ts"] is None:
+            return 0
+        max_ts = int(row["max_ts"])
+        # Align to UTC day boundary (ts convention: epoch ms, naive UTC)
+        day_start = (max_ts // 86_400_000) * 86_400_000
+        day_end = day_start + 86_400_000
         row = await self.db.fetchrow(
-            "SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute"
+            f"SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_minute "
+            f"WHERE ts >= {day_start} AND ts < {day_end}"
         )
         return int(row["cnt"]) if row else 0
+
+    async def has_minute_data(self) -> bool:
+        """Cheap non-empty check for backtest_minute (avoids full distinct scan)."""
+        row = await self.db.fetchrow("SELECT 1 as x FROM backtest_minute LIMIT 1")
+        return row is not None
 
     async def get_daily_date_count(self) -> int:
         """Count distinct trading dates in daily table."""
@@ -1379,8 +1409,7 @@ class GreptimeBacktestStorage:
                 }
             )
 
-        minute_count = await self.get_minute_stock_count()
-        if minute_count > 0:
+        if await self.has_minute_data():
             await _count_and_sample(
                 "backtest_minute",
                 "close_price <= 0 OR open_price <= 0 OR high_price <= 0 OR low_price <= 0",
