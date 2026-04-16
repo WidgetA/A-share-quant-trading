@@ -615,7 +615,7 @@ class GreptimeBacktestStorage:
         row = await self.db.fetchrow("SELECT MAX(ts) as max_ts FROM backtest_minute")
         if not row or row["max_ts"] is None:
             return 0
-        max_ts = int(row["max_ts"])
+        max_ts = ts_to_epoch_ms(row["max_ts"])
         # Align to UTC day boundary (ts convention: epoch ms, naive UTC)
         day_start = (max_ts // 86_400_000) * 86_400_000
         day_end = day_start + 86_400_000
