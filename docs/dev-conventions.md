@@ -304,12 +304,18 @@ Database client does no in-memory caching. One row written = one row dropped fro
 |---|-------|-------------|
 | 1 | `compact` | `storage.compact_tables()` — GreptimeDB housekeeping |
 | 2 | `backfill` | One-time fixup: DELETE + re-INSERT rows where `is_suspended IS NULL` (uses Tushare `suspend_d`). Skipped when no NULL rows remain |
-| 3 | `stock_list` | Fetch trade calendar (with defensive range filter), then sync `bak_basic` stock list for each trading day not yet cached |
-| 4 | `daily` | Download daily OHLCV per trading day. Resume by **day** — `get_existing_daily_dates()` skips dates already present |
-| 5 | `daily_backfill` | Audit: compare per-day COUNT(stock_list) vs COUNT(backtest_daily), refetch the diff codes |
+| 3 | `stock_list` | Fetch trade calendar (with defensive range filter), then sync `bak_basic` stock list for each trading day not yet cached. **This is the foundation** — all gap detection depends on stock_list being accurate |
+| 4 | `daily_check` | Audit: `audit_daily_gaps()` compares per-day COUNT(stock_list) vs COUNT(backtest_daily). Splits results into **full gaps** (actual=0) and **partial gaps** (actual>0) |
+| 5a | `daily` (partial) | **Local fill, no tsanghi API**: compute `stock_list - backtest_daily` → exact missing codes. Query Tushare `suspend_d` → fill suspended stocks with prev_close. Non-suspended unfillable stocks logged |
+| 5b | `daily` (full) | **Concurrent prefetch**: `Semaphore(4)` launches prefetch tasks that fetch Tushare suspend_d + tsanghi daily in parallel. DB inserts happen sequentially to maintain `prev_close_map` order. tsanghi `fetch_day` fetches XSHG+XSHE concurrently via `asyncio.gather` |
 | 6 | `minute` | Download raw 1-min bars per stock. Resume by **stock** — `get_existing_minute_codes(start, end)` skips any code with *any* bar in range |
 | 7 | `minute_backfill` | Audit: `audit_minute_gaps_in_range()` diffs active daily codes vs distinct minute codes per day, refetches missing `(day, code)` pairs via single-day `stk_mins` |
 | 8 | `download` | Final verification + missing-minute Feishu report |
+
+**Key design decisions:**
+- **stock_list is the source of truth**: gap detection = `COUNT(stock_list) vs COUNT(backtest_daily)`. Precise missing codes = `stock_list codes - backtest_daily codes`. No need to pull full-market API data to find what's missing.
+- **Partial gaps never call tsanghi**: most "gaps" are just a few suspended stocks per day. Filling them with Tushare suspend_d + prev_close is ~200ms/day vs ~2s/day for a full-market API call. Over 700+ partial days this saves ~25min.
+- **Full gaps use concurrent prefetch**: `Semaphore(4)` keeps the tsanghi connection pool (max_connections=2) busy. Fetch and DB-insert are pipelined — while one date writes to DB, the next date's API calls are already in flight.
 
 The two-phase minute design exists because Tushare's `stk_mins` is a per-stock API: the natural unit of one call is "one stock × range", so the main download uses per-stock resume for throughput. The per-day audit phase then catches any holes the coarse resume cannot detect — e.g. a stock that has bars on most days but is missing one transient-failure day.
 
