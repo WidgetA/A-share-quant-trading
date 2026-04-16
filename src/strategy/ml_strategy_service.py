@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -254,27 +255,29 @@ async def run_ml_backtest(
         daily_candidates,
     )
 
-    # Step 4: Batch-fetch raw 1-min bars for all candidates and aggregate
-    # in-memory via EarlyWindowAggregator (strategy layer owns the window).
+    # Step 4: Per-code streaming fetch + aggregate.
+    # Previously pulled ALL stocks' minute bars for the day in a single query
+    # (~1.2M rows → ~600 MB peak in the Python process). Now we fetch one
+    # candidate at a time with bounded concurrency, build the snapshot
+    # immediately, and let the raw bars go out of scope for GC.
     from src.strategy.strategies.ml_scanner import StockSnapshot
 
-    bars_by_code: dict[str, list[dict]] = {}
-    if candidates:
-        bars_by_code = await storage.get_minute_bars_for_codes_on_day(
-            list(candidates.keys()), trade_date
-        )
     aggregator = EarlyWindowAggregator()
-
     snapshots: dict[str, StockSnapshot] = {}
     minute_hits = 0
     n_no_bars = 0
     n_no_snap = 0
     debug_logged = False
-    for code, (open_price, prev_close) in candidates.items():
-        raw_bars = bars_by_code.get(code, [])
+
+    sem = asyncio.Semaphore(8)
+
+    async def _process_candidate(code: str, open_price: float, prev_close: float) -> None:
+        nonlocal minute_hits, n_no_bars, n_no_snap, debug_logged
+        async with sem:
+            raw_bars = await storage.get_minute_bars_for_day(code, trade_date)
         if not raw_bars:
             n_no_bars += 1
-            continue
+            return
         snaps_by_day = aggregator.aggregate(raw_bars)
         snap = snaps_by_day.get(date_str)
         if snap is None or snap.close <= 0:
@@ -292,9 +295,8 @@ async def run_ml_backtest(
                     date_str,
                 )
                 debug_logged = True
-            continue
+            return
         minute_hits += 1
-
         snapshots[code] = StockSnapshot(
             stock_code=code,
             prev_close=prev_close,
@@ -304,6 +306,14 @@ async def run_ml_backtest(
             low_940=snap.min_low,
             early_volume=snap.cum_volume,
             history=history_bars.get(code, []),
+        )
+
+    if candidates:
+        await asyncio.gather(
+            *[
+                _process_candidate(code, open_price, prev_close)
+                for code, (open_price, prev_close) in candidates.items()
+            ]
         )
 
     logger.info(
