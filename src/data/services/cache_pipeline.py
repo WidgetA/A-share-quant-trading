@@ -687,10 +687,19 @@ class CachePipeline:
 
         # Step 2: classify each gap day by missing percentage
         # (date, missing_codes, expected_count)
+        # NOTE: each iteration issues a SQL against backtest_minute (~0.5-1s),
+        # so ~700 days easily takes 5-10 minutes. Emit progress every N days
+        # so the watchdog stays happy and the UI keeps moving.
         major_gaps: list[tuple[date, set[str], int]] = []
         minor_gaps: list[tuple[date, set[str], int]] = []
 
-        for d in gap_days:
+        total_gap_days = len(gap_days)
+        heartbeat_every = max(1, total_gap_days // 50)  # ~50 status lines max
+        for i, d in enumerate(gap_days):
+            if i == 0 or (i + 1) % heartbeat_every == 0 or (i + 1) == total_gap_days:
+                await self.reporter.status(
+                    f"按日核查缺口 {i + 1}/{total_gap_days} ({d}) ..."
+                )
             missing, expected = await self.storage.find_missing_minute_stocks(d)
             if not missing:
                 continue
