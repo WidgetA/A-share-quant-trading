@@ -516,18 +516,12 @@ function renderSingleResult(d) {
         return;
     }
 
+    // Funnel: labels owned by backend (MLScanner.FunnelStage). Render as-is.
     let html = '<div class="result-card"><h4>漏斗统计</h4><div class="funnel-row">';
-    const funnel = [
-        ['L1 高开股', d.initial_gainers],
-        ['L2-3 热门板块', d.hot_boards],
-        ['L4 板块扩展', d.l4_count],
-        ['L5 量价', d.l5_count],
-        ['L6 过滤', d.l6_count],
-        ['最终候选', d.final_candidates],
-    ];
-    funnel.forEach(([label, val]) => {
-        html += `<span class="funnel-item"><span class="label">${label}: </span><span class="value">${val}</span></span>`;
+    (d.funnel || []).forEach(s => {
+        html += `<span class="funnel-item"><span class="label">${s.label}: </span><span class="value">${s.count}</span></span>`;
     });
+    html += `<span class="funnel-item"><span class="label">热门板块数: </span><span class="value">${d.hot_boards}</span></span>`;
     html += '</div></div>';
 
     if (d.scored_stocks && d.scored_stocks.length > 0) {

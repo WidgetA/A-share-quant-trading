@@ -946,7 +946,9 @@ def create_momentum_router() -> APIRouter:
                 "trade_date": body.trade_date,
                 "hot_boards": result.hot_board_count,
                 "final_candidates": result.final_candidates,
-                "layer_counts": result.layer_counts,
+                "funnel": [
+                    {"key": s.key, "label": s.label, "count": s.count} for s in result.funnel
+                ],
                 "scored_stocks": [
                     {
                         "stock_code": s.stock_code,
@@ -1145,11 +1147,10 @@ def create_momentum_router() -> APIRouter:
                             "trade_date": str(trade_date),
                             "has_trade": False,
                             "capital": round(capital, 2),
-                            "funnel": {
-                                "hot_boards": scan_result.hot_board_count,
-                                "final": scan_result.final_candidates,
-                                **scan_result.layer_counts,
-                            },
+                            "funnel": [
+                                {"key": s.key, "label": s.label, "count": s.count}
+                                for s in scan_result.funnel
+                            ],
                         }
 
                         if rec:
@@ -1217,11 +1218,10 @@ def create_momentum_router() -> APIRouter:
                                         "capital_before": round(capital_before, 2),
                                         "capital": round(capital, 2),
                                         "ml_score": round(rec.ml_score, 4),
-                                        "funnel": {
-                                            "hot_boards": scan_result.hot_board_count,
-                                            "final": scan_result.final_candidates,
-                                            **scan_result.layer_counts,
-                                        },
+                                        "funnel": [
+                                            {"key": s.key, "label": s.label, "count": s.count}
+                                            for s in scan_result.funnel
+                                        ],
                                     }
                                 else:
                                     day_backtest["skip_reason"] = (
@@ -1647,7 +1647,7 @@ async def _execute_monitor_scan(state: dict, storage: Any = None) -> dict | None
         "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
         "hot_boards": scan_result.hot_board_count,
         "final_candidates": scan_result.final_candidates,
-        "layer_counts": scan_result.layer_counts,
+        "funnel": [{"key": s.key, "label": s.label, "count": s.count} for s in scan_result.funnel],
         "elapsed_seconds": round(elapsed, 1),
         "scored_top5": [
             {

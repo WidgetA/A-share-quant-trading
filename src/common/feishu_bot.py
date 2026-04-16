@@ -273,15 +273,14 @@ Limit-up (skipped):
         now = scan_time or datetime.now(BEIJING_TZ)
         time_str = now.strftime("%Y-%m-%d %H:%M")
 
-        layer_counts = scan_result.layer_counts
         lines = [
             f"ML选股报告 ({time_str})",
             (f"热门板块: {scan_result.hot_board_count}个 | 最终: {scan_result.final_candidates}只"),
         ]
 
         # Layer funnel if available
-        if layer_counts:
-            funnel_parts = [f"{k}:{v}" for k, v in layer_counts.items()]
+        if scan_result.funnel:
+            funnel_parts = [f"{s.key}:{s.count}" for s in scan_result.funnel]
             lines.append(f"漏斗: {' → '.join(funnel_parts)}")
 
         rec = scan_result.recommended

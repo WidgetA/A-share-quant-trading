@@ -216,6 +216,15 @@ class MLScoredStock:
 
 
 @dataclass
+class FunnelStage:
+    """One stage of the scan funnel. Scanner owns key + display label."""
+
+    key: str  # stable machine id, e.g. "L2_hot_boards"
+    label: str  # Chinese display label shown in UI / Feishu
+    count: int
+
+
+@dataclass
 class MLScanResult:
     """Complete output of ML scan pipeline."""
 
@@ -223,7 +232,7 @@ class MLScanResult:
     all_scored: list[MLScoredStock] = field(default_factory=list)  # top-10
     feature_importance: dict[str, float] = field(default_factory=dict)
     model_name: str = ""
-    layer_counts: dict[str, int] = field(default_factory=dict)
+    funnel: list[FunnelStage] = field(default_factory=list)
     hot_board_count: int = 0
     final_candidates: int = 0
     skip_reason: str = ""  # why empty: "no_daily_data" | "no_snapshots" | ""
@@ -1317,11 +1326,11 @@ class MLScanner:
             FileNotFoundError: If model file doesn't exist.
             ImportError: If lightgbm is not installed.
         """
-        layer_counts: dict[str, int] = {"L0_snapshots": len(snapshots)}
+        funnel: list[FunnelStage] = []
 
         # Step 0: Build universe (for board mapping)
         universe = await self.build_universe()
-        layer_counts["L0_universe"] = len(universe.codes)
+        funnel.append(FunnelStage("L0_universe", "L0 股票池", len(universe.codes)))
 
         # Build code → name lookup from universe board_stocks
         code_name: dict[str, str] = {}
@@ -1332,7 +1341,7 @@ class MLScanner:
 
         # Preprocess: compute indicators + IPO filter
         prep = MLScanner.preprocess(snapshots, today)
-        layer_counts["L1_after_preprocess"] = len(prep.indicators)
+        funnel.append(FunnelStage("L1_preprocess", "L1 预处理", len(prep.indicators)))
 
         # Step 2: Hot board filter
         hot = MLScanner.filter_hot_boards(
@@ -1341,34 +1350,34 @@ class MLScanner:
             set(prep.indicators.keys()),
             suspended or set(),
         )
-        layer_counts["L2_hot_boards"] = len(hot.qualified_codes)
+        funnel.append(FunnelStage("L2_hot_boards", "L2 热门板块", len(hot.qualified_codes)))
 
         # Step 3: Early gain filter
         gain_codes = MLScanner.filter_by_early_gain(hot.qualified_codes, snapshots)
-        layer_counts["L3_early_gain"] = len(gain_codes)
+        funnel.append(FunnelStage("L3_early_gain", "L3 早盘涨幅", len(gain_codes)))
 
         # Step 4: Price filter
         price_codes = MLScanner.filter_by_price(gain_codes, snapshots)
-        layer_counts["L4_price"] = len(price_codes)
+        funnel.append(FunnelStage("L4_price", "L4 价格", len(price_codes)))
 
         # Step 5: Volume amplification filter
         vol_result = MLScanner.filter_by_volume(price_codes, snapshots, prep.indicators)
-        layer_counts["L5_volume"] = len(vol_result.passed_codes)
+        funnel.append(FunnelStage("L5_volume", "L5 量能", len(vol_result.passed_codes)))
 
         # Step 6: Surge ratio filter
         surge_codes = MLScanner.filter_by_surge_ratio(
             vol_result.passed_codes, snapshots, prep.indicators
         )
-        layer_counts["L6_surge"] = len(surge_codes)
+        funnel.append(FunnelStage("L6_surge", "L6 脉冲", len(surge_codes)))
 
         # Step 7: Upper shadow filter
         final_codes = MLScanner.filter_by_upper_shadow(surge_codes, snapshots)
-        layer_counts["L7_final"] = len(final_codes)
+        funnel.append(FunnelStage("L7_final", "L7 上影线", len(final_codes)))
 
         if not final_codes:
             logger.info("scan: no candidates after filtering, returning empty result")
             return MLScanResult(
-                layer_counts=layer_counts,
+                funnel=funnel,
                 hot_board_count=len(hot.hot_boards),
                 final_candidates=0,
                 model_name=model_name,
@@ -1417,7 +1426,7 @@ class MLScanner:
             all_scored=all_scored[:10],
             feature_importance=scoring.feature_importance,
             model_name=model_name,
-            layer_counts=layer_counts,
+            funnel=funnel,
             hot_board_count=len(hot.hot_boards),
             final_candidates=len(final_codes),
         )
