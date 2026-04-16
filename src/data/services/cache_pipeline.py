@@ -196,7 +196,9 @@ class CachePipeline:
         await self._sync_stock_list(trading_dates, cancel_event)
 
         # Audit: compare stock_list vs backtest_daily per date
-        await self.reporter.progress(Phase.DAILY_CHECK, 0, 1, "检查日线缺口 (扫 stock_list + backtest_daily) ...")
+        await self.reporter.progress(
+            Phase.DAILY_CHECK, 0, 1, "检查日线缺口 (扫 stock_list + backtest_daily) ..."
+        )
         gaps = await self.storage.audit_daily_gaps()
         await self.reporter.status(f"日线缺口扫描完成，{len(gaps)} 天存在缺口")
         # Filter to only dates in our target range
