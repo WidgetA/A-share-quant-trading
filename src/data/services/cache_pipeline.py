@@ -135,8 +135,9 @@ class CachePipeline:
         if progress_cb is not None:
             self.reporter = saved_reporter.with_progress_cb(progress_cb)
         try:
+            await self.reporter.progress(Phase.INIT, 0, 0, "压缩表文件 (COMPACT) ...")
             await self.storage.compact_tables()
-            await self.reporter.progress(Phase.INIT, 0, 0, "")
+            await self.reporter.progress(Phase.INIT, 0, 0, "压缩完成，进入下载流程")
 
             async with (
                 self.daily_source,
@@ -167,14 +168,17 @@ class CachePipeline:
         cancel_event: CancelChecker,
     ) -> None:
         # One-time historical fixup: rows with is_suspended IS NULL
+        await self.reporter.status("检查 is_suspended NULL 行 (历史回填) ...")
         await self._backfill_is_suspended(cancel_event)
 
         # Trade calendar (skip weekends/holidays)
+        await self.reporter.status("获取交易日历 (Tushare) ...")
         trading_dates: list[date] = []
         try:
             raw_cal = await self.metadata_source.fetch_trade_calendar(start_date, end_date)
             trading_dates = sorted(d for d in raw_cal if start_date <= d <= end_date)
             logger.info(f"Trade calendar: {len(trading_dates)} trading days in range")
+            await self.reporter.status(f"交易日历: {len(trading_dates)} 个交易日")
         except Exception as e:
             logger.warning(f"Trade calendar fetch failed: {e}, will check all dates")
             await self.reporter.progress(Phase.DAILY, 0, 0, f"⚠ 交易日历获取失败: {e}")
@@ -192,8 +196,9 @@ class CachePipeline:
         await self._sync_stock_list(trading_dates, cancel_event)
 
         # Audit: compare stock_list vs backtest_daily per date
-        await self.reporter.progress(Phase.DAILY_CHECK, 0, 1, "检查日线缺口...")
+        await self.reporter.progress(Phase.DAILY_CHECK, 0, 1, "检查日线缺口 (扫 stock_list + backtest_daily) ...")
         gaps = await self.storage.audit_daily_gaps()
+        await self.reporter.status(f"日线缺口扫描完成，{len(gaps)} 天存在缺口")
         # Filter to only dates in our target range
         gaps = [(d, exp, act) for d, exp, act in gaps if start_date <= d <= end_date]
 
@@ -228,7 +233,9 @@ class CachePipeline:
             f"全量下载{len(full_gaps)}天, 部分缺口{len(partial_gaps)}天(本地补)",
         )
 
+        await self.reporter.status("加载 prev_close 映射 (get_latest_closes) ...")
         prev_close_map = await self.storage.get_latest_closes()
+        await self.reporter.status(f"prev_close 映射: {len(prev_close_map)} 只股票")
 
         # --- Phase A: fill partial gaps locally (no tsanghi API) ---
         if partial_gaps:
@@ -652,9 +659,20 @@ class CachePipeline:
         """
         no_data_reasons: dict[str, str] = {}
 
-        # Step 1: cheap day-level audit (2 queries)
+        # Step 1: day-level audit — chunked by month (~15-30s per chunk on a
+        # ~1.8B-row backtest_minute). Emit a status per chunk so the front end
+        # keeps showing progress and the watchdog's 600s silent-timeout doesn't
+        # fire on a multi-year range.
         await self.reporter.status("检查分钟线缺口...")
-        gap_days = await self.storage.audit_minute_gap_days(start_date, end_date)
+
+        async def _on_audit_chunk(done: int, total: int, chunk_start: date) -> None:
+            await self.reporter.status(
+                f"检查分钟线缺口 {done}/{total} 月 ({chunk_start:%Y-%m}) ..."
+            )
+
+        gap_days = await self.storage.audit_minute_gap_days(
+            start_date, end_date, on_chunk=_on_audit_chunk
+        )
 
         if not gap_days:
             logger.info("Minute: all data complete, nothing to download")
@@ -662,6 +680,7 @@ class CachePipeline:
             return no_data_reasons
 
         logger.info("Minute audit: %d days with gaps", len(gap_days))
+        await self.reporter.status(f"发现 {len(gap_days)} 天有缺口，查询停牌记录 ...")
         suspended_pairs = await self.storage.get_suspended_pairs(start_date, end_date)
 
         # Step 2: classify each gap day by missing percentage

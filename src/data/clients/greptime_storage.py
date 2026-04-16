@@ -1128,11 +1128,21 @@ class GreptimeBacktestStorage:
             logger.info("audit_minute_gaps: all %d dates complete", len(expected))
         return gaps
 
-    async def audit_minute_gap_days(self, start_date: date, end_date: date) -> list[date]:
+    async def audit_minute_gap_days(
+        self,
+        start_date: date,
+        end_date: date,
+        on_chunk: Callable[[int, int, date], Awaitable[None]] | None = None,
+    ) -> list[date]:
         """Cheap day-level screen: total minute bars vs expected per day.
 
         expected = (non-suspended stocks with vol>0) × 241
         actual   = COUNT(*) from backtest_minute grouped by day
+
+        ``on_chunk(done, total, chunk_start)`` fires after each monthly chunk so
+        the caller can emit keepalive progress — on a ~1.8B-row backtest_minute
+        each chunk query takes 15-30s, and a 40-month range easily exceeds the
+        download watchdog's 600s silent-timeout without heartbeats.
 
         Returns sorted list of dates where actual < expected.
         """
@@ -1153,15 +1163,20 @@ class GreptimeBacktestStorage:
         # Query 2: actual total bar count per day from minute table
         # Chunked by month to avoid full-table scan on low-memory machines
         actual_bars: dict[date, int] = {}
+        # Enumerate all monthly chunks up front so we know the total for progress
+        chunks: list[tuple[date, date]] = []
         chunk_start = start_date.replace(day=1)
         while chunk_start <= end_date:
-            # chunk = one calendar month
             if chunk_start.month == 12:
                 chunk_end = chunk_start.replace(year=chunk_start.year + 1, month=1)
             else:
                 chunk_end = chunk_start.replace(month=chunk_start.month + 1)
-            cs_ms = date_to_epoch_ms(chunk_start)
-            ce_ms = date_to_epoch_ms(chunk_end)
+            chunks.append((chunk_start, chunk_end))
+            chunk_start = chunk_end
+
+        for idx, (cs, ce) in enumerate(chunks):
+            cs_ms = date_to_epoch_ms(cs)
+            ce_ms = date_to_epoch_ms(ce)
             rows = await self.db.fetch(
                 f"SELECT date_trunc('day', ts) as day_ts, COUNT(*) as cnt "
                 f"FROM backtest_minute "
@@ -1170,7 +1185,8 @@ class GreptimeBacktestStorage:
             )
             for r in rows:
                 actual_bars[ts_to_date(r["day_ts"])] = int(r["cnt"])
-            chunk_start = chunk_end
+            if on_chunk is not None:
+                await on_chunk(idx + 1, len(chunks), cs)
 
         # Compare
         gap_days: list[date] = []
