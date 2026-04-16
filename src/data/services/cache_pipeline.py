@@ -697,9 +697,7 @@ class CachePipeline:
         heartbeat_every = max(1, total_gap_days // 50)  # ~50 status lines max
         for i, d in enumerate(gap_days):
             if i == 0 or (i + 1) % heartbeat_every == 0 or (i + 1) == total_gap_days:
-                await self.reporter.status(
-                    f"按日核查缺口 {i + 1}/{total_gap_days} ({d}) ..."
-                )
+                await self.reporter.status(f"按日核查缺口 {i + 1}/{total_gap_days} ({d}) ...")
             missing, expected = await self.storage.find_missing_minute_stocks(d)
             if not missing:
                 continue
