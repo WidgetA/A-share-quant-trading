@@ -257,10 +257,10 @@ class GreptimeClient:
     - statement_cache_size=0 (GreptimeDB does not support DEALLOCATE/PREPARE)
     - Connection pool for safe concurrent access (download + status polling)
     - Custom connection class with no-op reset
-    - All queries have a 120s timeout to prevent indefinite hangs
+    - All queries have a 180s timeout to prevent indefinite hangs
     """
 
-    _QUERY_TIMEOUT: float = 120.0
+    _QUERY_TIMEOUT: float = 180.0
     _ACQUIRE_TIMEOUT: float = 30.0
     # Slow query watchdog: any SQL still running after this many seconds
     # gets a logger.warning printed (and again every interval). Used to
@@ -599,7 +599,7 @@ class GreptimeBacktestStorage:
         NOT a historical all-time distinct count. A naive
         ``SELECT COUNT(DISTINCT stock_code) FROM backtest_minute`` is a full
         table scan of ~1.8B rows (~2+ minutes on a loaded GreptimeDB),
-        which blows the 120s query timeout and serves no real purpose:
+        which blows the 180s query timeout and serves no real purpose:
 
         - UI just wants a "how many stocks are in the minute cache" number
           for display -- recent-day count is more informative (delisted
