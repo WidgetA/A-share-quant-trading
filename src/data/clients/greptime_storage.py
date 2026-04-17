@@ -948,10 +948,13 @@ class GreptimeBacktestStorage:
 
         ``record`` keys: open, high, low, close, pre_close, volume, amount,
         turnover_ratio (may be None), is_suspended.
+        Price fields may be None for suspended stocks with no prev_close.
         """
         ts_ms = date_to_epoch_ms(day)
-        tr = record["turnover_ratio"]
-        tr_str = str(tr) if tr is not None else "NULL"
+
+        def _v(x: object) -> str:
+            return "NULL" if x is None else str(x)
+
         suspended = "true" if record.get("is_suspended") else "false"
         cols = (
             "(stock_code,ts,open_price,high_price,low_price,close_price,"
@@ -959,8 +962,11 @@ class GreptimeBacktestStorage:
         )
         val = (
             f"('{code}',{ts_ms},"
-            f"{record['open']},{record['high']},{record['low']},{record['close']},"
-            f"{record['pre_close']},{record['volume']},{record['amount']},{tr_str},{suspended})"
+            f"{_v(record['open'])},{_v(record['high'])},"
+            f"{_v(record['low'])},{_v(record['close'])},"
+            f"{_v(record['pre_close'])},{_v(record['volume'])},"
+            f"{_v(record['amount'])},{_v(record['turnover_ratio'])},"
+            f"{suspended})"
         )
         await self.db.execute(f"INSERT INTO backtest_daily{cols} VALUES {val}")
 

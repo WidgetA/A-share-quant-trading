@@ -44,14 +44,18 @@ def _suspended_record(pre_close: float) -> dict[str, Any]:
 
     Single source of truth for what a suspended row looks like — used by both
     the live download and the backfill / repair paths so the two cannot drift.
+
+    When pre_close is unavailable (<=0), price fields are left None so no fake
+    data is written.  The is_suspended flag is always True — the row MUST exist
+    so the backtest engine knows the stock is not tradable on this day.
     """
-    fill = pre_close if pre_close > 0 else 0.0
+    fill = pre_close if pre_close > 0 else None
     return {
         "open": fill,
         "high": fill,
         "low": fill,
         "close": fill,
-        "pre_close": pre_close,
+        "pre_close": pre_close if pre_close > 0 else None,
         "volume": 0.0,
         "amount": 0.0,
         "turnover_ratio": None,
@@ -296,7 +300,7 @@ class CachePipeline:
             unfillable: list[str] = []
             for code in missing_codes:
                 pre_close = prev_close_map.get(code, 0.0)
-                if code in suspended_codes and pre_close > 0:
+                if code in suspended_codes:
                     await self.storage.insert_daily_record(
                         code, gap_date, _suspended_record(pre_close)
                     )
@@ -440,15 +444,14 @@ class CachePipeline:
             prev_close_map[ticker] = rec["close"]
             rows_written += 1
 
-        # Stocks in suspend_d but not returned by tsanghi: insert with prev_close fill
+        # Stocks in suspend_d but not returned by tsanghi: always insert suspended row.
+        # Never skip — the row must exist so backtest knows this stock is not tradable.
         for susp_code in suspended_codes:
             if susp_code in seen_codes:
                 continue
             if skip_codes and susp_code in skip_codes:
                 continue
             pre_close = prev_close_map.get(susp_code, 0.0)
-            if pre_close <= 0:
-                continue  # nothing to fill from
             await self.storage.insert_daily_record(susp_code, day, _suspended_record(pre_close))
             rows_written += 1
 
@@ -612,14 +615,12 @@ class CachePipeline:
                 await self.storage.insert_daily_record(code, day, rec)
                 upserted += 1
 
-            # Suspended stocks not in DB at all → insert from prev_close
+            # Suspended stocks not in DB at all → always insert suspended row
             existing_codes = {r["stock_code"] for r in db_rows}
             for susp_code in suspended_codes:
                 if susp_code in existing_codes:
                     continue
                 pre_close = prev_close_map.get(susp_code, 0.0)
-                if pre_close <= 0:
-                    continue
                 await self.storage.insert_daily_record(susp_code, day, _suspended_record(pre_close))
                 upserted += 1
 
