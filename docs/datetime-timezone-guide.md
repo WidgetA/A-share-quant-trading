@@ -65,59 +65,90 @@ When user mentions any date/time reference:
 
 ---
 
-## asyncpg Timezone Handling (Critical)
+## asyncpg + GreptimeDB Timezone Handling (Critical)
 
-**Core Principle: ALWAYS use timezone-aware datetimes when passing parameters to asyncpg queries.**
+**Core Principle: All GreptimeDB queries use epoch milliseconds, never datetime objects — this sidesteps asyncpg's timezone pitfalls entirely.**
 
-### Root Cause
+### Why Epoch Ms (Background)
 
-asyncpg has **asymmetric timezone behavior** that causes silent data corruption:
+asyncpg has **asymmetric timezone behavior** when using datetime objects:
+- **Sending** (query parameters): Naive datetimes interpreted using **system timezone** (`TZ` env var)
+- **Receiving** (query results): Returns **UTC-aware** datetimes for `timestamptz` columns
 
-| Direction | Behavior |
-|-----------|----------|
-| **Sending** (query parameters) | Naive datetimes are interpreted using the **system timezone** (`TZ` env var) |
-| **Receiving** (query results) | Always returns **UTC-aware** datetimes (`tzinfo=UTC`) for `timestamptz` columns |
+This can silently shift timestamps by hours. Our codebase avoids this by **never passing datetime objects as query parameters** — all timestamps are converted to epoch ms integers first.
 
-When the Docker container has `TZ=Asia/Shanghai`, this asymmetry causes a **16-hour offset** for naive datetimes:
+### ts Column Convention
 
+All tables (`backtest_daily`, `backtest_minute`, `stock_list`) store timestamps as epoch ms with the string interpreted as naive UTC:
+
+```python
+import calendar
+from datetime import date, datetime
+
+# date → epoch ms (midnight UTC)
+def date_to_epoch_ms(d: date) -> int:
+    return calendar.timegm(d.timetuple()) * 1000
+
+# "2026-04-09 09:31:00" → epoch ms (treated as naive UTC)
+def minute_str_to_epoch_ms(s: str) -> int:
+    dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    return calendar.timegm(dt.timetuple()) * 1000
 ```
-Naive 01:30 → asyncpg treats as 01:30 CST → converts to 17:30 UTC (previous day!)
-Expected: 01:30 UTC
-Actual:   17:30 UTC (WRONG by 16 hours)
+
+Day boundary math is trivial: `day_end_ms = day_start_ms + 86_400_000`.
+
+### Actual Query Patterns (from greptime_storage.py)
+
+```python
+# CORRECT: All queries use epoch ms integers, no datetime objects
+start_ms = date_to_epoch_ms(parse_date_str(start_date))
+end_ms = date_to_epoch_ms(parse_date_str(end_date))
+rows = await db.fetch(
+    f"SELECT ts, ... FROM backtest_daily "
+    f"WHERE stock_code = '{code}' AND ts >= {start_ms} AND ts <= {end_ms}"
+)
+
+# CORRECT: Minute bar day range
+day_start = date_to_epoch_ms(day)
+day_end = day_start + 86_400_000
+rows = await db.fetch(
+    f"SELECT ts, ... FROM backtest_minute "
+    f"WHERE stock_code = '{code}' AND ts >= {day_start} AND ts < {day_end}"
+)
+```
+
+### Result Conversion Patterns
+
+```python
+from datetime import datetime, timezone
+
+# epoch ms → date
+def epoch_ms_to_date(ms: int | float) -> date:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date()
+
+# epoch ms → minute string
+def epoch_ms_to_minute_str(ms: int | float) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+# asyncpg datetime result → epoch ms (when asyncpg returns datetime objects)
+def ts_to_epoch_ms(val: Any) -> int:
+    if isinstance(val, datetime):
+        return int(val.replace(tzinfo=timezone.utc).timestamp() * 1000)
 ```
 
 ### Prohibited Patterns
 
 ```python
-# FORBIDDEN: Subtracting hours from naive datetime for "manual UTC conversion"
-start_bj = datetime(2026, 2, 8, 9, 30)  # 9:30 Beijing
-start_utc = start_bj - timedelta(hours=8)  # 01:30 naive — WRONG!
-# asyncpg will interpret 01:30 as 01:30 CST → 17:30 UTC
-
-# FORBIDDEN: Any naive datetime as asyncpg query parameter
+# FORBIDDEN: Passing datetime objects as asyncpg query parameters
 await conn.fetch("SELECT * FROM t WHERE ts >= $1", naive_datetime)
-```
 
-### Correct Patterns
+# FORBIDDEN: Manual UTC offset arithmetic for query params
+start_utc = start_bj - timedelta(hours=8)  # Don't do this
 
-```python
-from zoneinfo import ZoneInfo
-
-beijing_tz = ZoneInfo("Asia/Shanghai")
-
-# CORRECT: Use timezone-aware datetime for query parameters
-start_bj = datetime(2026, 2, 8, 9, 30)
-start_aware = start_bj.replace(tzinfo=beijing_tz)  # 09:30+08:00
-# asyncpg correctly converts to 01:30 UTC
-
-await conn.fetch("SELECT * FROM t WHERE ts >= $1", start_aware)
-
-# CORRECT: Display conversion (UTC result → Beijing time for display)
-utc_time = row["publish_time"]  # e.g., 2026-02-07 22:58:00+00:00
-beijing_display = (utc_time + timedelta(hours=8)).replace(tzinfo=None)
-# Result: 2026-02-08 06:58:00 (clean Beijing time string)
+# FORBIDDEN: + timedelta(hours=8) for display conversion
+# (not needed — our epoch ms convention already treats strings as naive UTC)
 ```
 
 ### Past Incident
 
-In Feb 2026, incorrectly changed UTC→Beijing conversion multiple times. Root cause took many iterations: the QUERY was wrong (searching yesterday's data), not the display. The display (+8h) was correct all along. Always run diagnostic SQL inside the container to check actual DB values before assuming.
+In Feb 2026, incorrectly changed UTC→Beijing conversion multiple times. Root cause took many iterations: the QUERY was wrong (searching yesterday's data), not the display. Always run diagnostic SQL inside the container to check actual DB values before assuming.

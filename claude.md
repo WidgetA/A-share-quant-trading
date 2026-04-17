@@ -61,13 +61,13 @@ Rules:
 
 > Full examples and calculation patterns: [docs/datetime-timezone-guide.md](docs/datetime-timezone-guide.md)
 
-## 7. asyncpg Timezone Handling (CRITICAL)
+## 7. asyncpg + GreptimeDB Timezone Handling (CRITICAL)
 
-**Core Rules (asyncpg has asymmetric TZ behavior that causes silent data corruption):**
-1. **Query parameters**: Always use `datetime.replace(tzinfo=beijing_tz)` — NEVER subtract 8h from naive datetimes
-2. **Display results**: Always use `+ timedelta(hours=8)` then `.replace(tzinfo=None)` for clean Beijing time
-3. **Never assume system TZ**: Code must work correctly regardless of `TZ` environment variable
-4. **FORBIDDEN**: Any naive datetime as asyncpg query parameter
+**Core Rules (all GreptimeDB queries use epoch ms integers to avoid asyncpg's TZ pitfalls):**
+1. **Query parameters**: Convert dates/times to epoch ms via `calendar.timegm()` — NEVER pass datetime objects
+2. **Result conversion**: Use `datetime.fromtimestamp(ms/1000, tz=timezone.utc)` — no manual `+8h` arithmetic
+3. **ts column convention**: Timestamp strings treated as naive UTC → `calendar.timegm()` → epoch ms
+4. **FORBIDDEN**: Any datetime object as asyncpg query parameter; any `- timedelta(hours=8)` offset hack
 
 > Detailed root cause, prohibited/correct patterns: [docs/datetime-timezone-guide.md](docs/datetime-timezone-guide.md)
 
