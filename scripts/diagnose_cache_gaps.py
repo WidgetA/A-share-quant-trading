@@ -97,7 +97,9 @@ async def _run_fill(
         pipeline.metadata_source,
     ):
         await pipeline._download_daily_unified(start_date, end_date, None)
-        no_data_reasons = await pipeline._download_minute_unified(start_date, end_date, None)
+        no_data_reasons = await pipeline._download_minute_unified(
+            start_date, end_date, None
+        )
 
     return no_data_reasons
 
@@ -117,7 +119,9 @@ async def _audit_and_export(
     rows = await storage.db.fetch("SELECT DISTINCT ts FROM stock_list ORDER BY ts")
     from src.data.clients.greptime_storage import ts_to_date
 
-    all_dates = sorted(d for r in rows if start_date <= (d := ts_to_date(r["ts"])) <= end_date)
+    all_dates = sorted(
+        d for r in rows if start_date <= (d := ts_to_date(r["ts"])) <= end_date
+    )
     if not all_dates:
         print("stock_list 中无数据，无法审计")
         return 0
@@ -139,15 +143,13 @@ async def _audit_and_export(
         missing_daily = expected_codes - existing_daily
 
         for code in sorted(missing_daily):
-            gap_rows.append(
-                {
-                    "date": day_str,
-                    "stock_code": code,
-                    "gap_type": "daily",
-                    "reason": "not_in_daily",
-                    "detail": "在stock_list但不在backtest_daily",
-                }
-            )
+            gap_rows.append({
+                "date": day_str,
+                "stock_code": code,
+                "gap_type": "daily",
+                "reason": "not_in_daily",
+                "detail": "在stock_list但不在backtest_daily",
+            })
 
         # --- Minute gaps ---
         # Get daily detail for this date (is_suspended, vol)
@@ -174,29 +176,25 @@ async def _audit_and_export(
             # Suspended → expected no minute data
             if is_suspended is True:
                 if bar_count < EXPECTED_BARS:
-                    gap_rows.append(
-                        {
-                            "date": day_str,
-                            "stock_code": code,
-                            "gap_type": "minute",
-                            "reason": "suspended",
-                            "detail": f"停牌(is_suspended=true), bars={bar_count}",
-                        }
-                    )
+                    gap_rows.append({
+                        "date": day_str,
+                        "stock_code": code,
+                        "gap_type": "minute",
+                        "reason": "suspended",
+                        "detail": f"停牌(is_suspended=true), bars={bar_count}",
+                    })
                 continue
 
             # Zero volume → probably no minute data
             if vol == 0:
                 if bar_count < EXPECTED_BARS:
-                    gap_rows.append(
-                        {
-                            "date": day_str,
-                            "stock_code": code,
-                            "gap_type": "minute",
-                            "reason": "zero_volume",
-                            "detail": f"成交量为0(vol=0), bars={bar_count}",
-                        }
-                    )
+                    gap_rows.append({
+                        "date": day_str,
+                        "stock_code": code,
+                        "gap_type": "minute",
+                        "reason": "zero_volume",
+                        "detail": f"成交量为0(vol=0), bars={bar_count}",
+                    })
                 continue
 
             # Active stock: should have 241 bars
@@ -208,26 +206,22 @@ async def _audit_and_export(
             if bar_count == 0:
                 reason_key = pipeline_reason.split(":")[0] if pipeline_reason else "no_bars"
                 detail_str = pipeline_reason if pipeline_reason else "非停牌有成交但无分钟数据"
-                gap_rows.append(
-                    {
-                        "date": day_str,
-                        "stock_code": code,
-                        "gap_type": "minute",
-                        "reason": reason_key,
-                        "detail": detail_str,
-                    }
-                )
+                gap_rows.append({
+                    "date": day_str,
+                    "stock_code": code,
+                    "gap_type": "minute",
+                    "reason": reason_key,
+                    "detail": detail_str,
+                })
             else:
-                gap_rows.append(
-                    {
-                        "date": day_str,
-                        "stock_code": code,
-                        "gap_type": "minute",
-                        "reason": "partial_bars",
-                        "detail": f"分钟线不完整(actual={bar_count}/expected={EXPECTED_BARS})"
-                        + (f", pipeline={pipeline_reason}" if pipeline_reason else ""),
-                    }
-                )
+                gap_rows.append({
+                    "date": day_str,
+                    "stock_code": code,
+                    "gap_type": "minute",
+                    "reason": "partial_bars",
+                    "detail": f"分钟线不完整(actual={bar_count}/expected={EXPECTED_BARS})"
+                    + (f", pipeline={pipeline_reason}" if pipeline_reason else ""),
+                })
 
     # Write CSV
     if not gap_rows:
@@ -236,9 +230,7 @@ async def _audit_and_export(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["date", "stock_code", "gap_type", "reason", "detail"]
-        )
+        writer = csv.DictWriter(f, fieldnames=["date", "stock_code", "gap_type", "reason", "detail"])
         writer.writeheader()
         writer.writerows(gap_rows)
 
@@ -264,14 +256,8 @@ async def main() -> None:
 
     now = datetime.now(BEIJING_TZ)
     start_date = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else DEFAULT_START
-    end_date = (
-        datetime.strptime(args.end, "%Y-%m-%d").date()
-        if args.end
-        else (now.date() - timedelta(days=1))
-    )
-    output_path = (
-        Path(args.output) if args.output else (_project_root / "data" / "cache_gap_diagnosis.csv")
-    )
+    end_date = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else (now.date() - timedelta(days=1))
+    output_path = Path(args.output) if args.output else (_project_root / "data" / "cache_gap_diagnosis.csv")
 
     print(f"日期范围: {start_date} ~ {end_date}")
     print(f"输出路径: {output_path}")
