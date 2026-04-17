@@ -123,8 +123,25 @@ if success:
     _sync_state_now()         # push to server immediately
 ```
 
+## Silent Skip — Data Pipeline
+
+Never silently skip writing a record because supplementary data is missing. The record itself (even with NULL fields) carries semantic meaning.
+
+```python
+# FORBIDDEN: skip suspended stock because prev_close unavailable
+pre_close = prev_close_map.get(susp_code, 0.0)
+if pre_close <= 0:
+    continue  # backtest engine now has NO IDEA this stock is suspended
+
+# CORRECT: always write the row — price fields can be NULL
+pre_close = prev_close_map.get(susp_code, 0.0)
+await storage.insert_daily_record(code, day, _suspended_record(pre_close))
+# _suspended_record uses None for prices when pre_close <= 0
+```
+
 ## Past Incidents
 
 - **momentum_quality_filter.py**: Used fail-open pattern — API failure → no filtering → bad trades went through undetected. L2/L3 filters showed +0.00% because they silently did nothing.
 - **app.py startup ordering** (2026-03-18): `run_audit()` was unprotected before `_start_monitoring()` — audit crash silently skipped monitoring startup, no heartbeat alerts sent all day.
 - **iQuant heartbeat thread** (2026-04-02): Moved `get_trade_detail_data` to background thread → silently returned empty → dashboard showed 0 positions after deploy. Fix: QMT API calls stay on main thread, background thread only does HTTP.
+- **cache_pipeline suspended skip** (2026-04-17): `if pre_close <= 0: continue` silently skipped ~17 delisted/long-suspended stocks. Tushare `suspend_d` correctly reported them, but no row was written → backtest engine couldn't distinguish "not tradable" from "doesn't exist". Fix: always write `is_suspended=true` row, price fields NULL when prev_close unavailable.
