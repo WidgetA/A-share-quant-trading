@@ -482,12 +482,12 @@ class GreptimeBacktestStorage:
         )
 
     async def get_all_codes_with_daily(self, date_str: str) -> dict[str, DailyBar]:
-        """Get daily data for ALL stocks on a specific date."""
+        """Get daily data for all non-suspended stocks on a specific date."""
         ms = date_to_epoch_ms(parse_date_str(date_str))
         rows = await self.db.fetch(
             f"SELECT stock_code, open_price, high_price, low_price, close_price, "
-            f"pre_close, vol, amount, turnover_ratio, is_suspended "
-            f"FROM backtest_daily WHERE ts = {ms}"
+            f"pre_close, vol, amount, turnover_ratio "
+            f"FROM backtest_daily WHERE ts = {ms} AND is_suspended = false"
         )
         result: dict[str, DailyBar] = {}
         for r in rows:
@@ -500,7 +500,7 @@ class GreptimeBacktestStorage:
                 volume=float(r["vol"]),
                 amount=float(r["amount"]),
                 turnoverRatio=r["turnover_ratio"],
-                is_suspended=bool(r["is_suspended"]) if r["is_suspended"] is not None else False,
+                is_suspended=False,
             )
         return result
 
