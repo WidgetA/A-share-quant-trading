@@ -551,6 +551,15 @@ class TushareRealtimeClient:
                 code = data.get("code")
                 if code != 0:
                     msg = data.get("msg", "unknown error")
+                    # Retry on rate limit (40203) with longer backoff
+                    if code == 40203 and attempt < self.MAX_RETRIES:
+                        wait = 15.0 * attempt  # 15s, 30s
+                        logger.warning(
+                            f"Tushare rate limit hit (attempt {attempt}), "
+                            f"waiting {wait:.0f}s before retry"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
                     raise TushareRealtimeError(f"Tushare API error: code={code}, msg={msg}")
                 return data
 
