@@ -522,6 +522,7 @@ function renderSingleResult(d) {
         html += `<span class="funnel-item"><span class="label">${s.label}: </span><span class="value">${s.count}</span></span>`;
     });
     html += `<span class="funnel-item"><span class="label">热门板块数: </span><span class="value">${d.hot_boards}</span></span>`;
+    html += `<button onclick="exportFunnel('${d.trade_date}')" style="margin-left:12px;font-size:0.8rem;padding:2px 10px;cursor:pointer;">导出CSV</button>`;
     html += '</div></div>';
 
     if (d.scored_stocks && d.scored_stocks.length > 0) {
@@ -551,6 +552,23 @@ function renderSingleResult(d) {
     }
 
     el.innerHTML = html;
+}
+
+async function exportFunnel(tradeDate) {
+    try {
+        const r = await fetch('/api/momentum/backtest-export', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ trade_date: tradeDate })
+        });
+        if (!r.ok) { const d = await r.json(); alert(d.detail || '导出失败'); return; }
+        const blob = await r.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `funnel_${tradeDate}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    } catch(e) { alert('导出失败: ' + e.message); }
 }
 
 // ========== Range backtest ==========

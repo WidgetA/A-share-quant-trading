@@ -12,6 +12,7 @@
 #
 # === MOMENTUM BACKTEST ENDPOINTS ===
 # POST /api/momentum/backtest          - Run single-day momentum scan (JSON)
+# POST /api/momentum/backtest-export   - Export single-day funnel as CSV download
 # POST /api/momentum/combined-analysis - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status    - Get intraday monitor status (JSON)
 # POST /api/momentum/tsanghi-prepare      - Start background download task (JSON)
@@ -990,6 +991,77 @@ def create_momentum_router() -> APIRouter:
         except Exception as e:
             logger.error(f"ML backtest error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
+
+    # === Funnel export (CSV) ===
+
+    @router.post("/api/momentum/backtest-export")
+    async def export_backtest_funnel(request: Request, body: BacktestScanRequest):
+        """Run single-day ML scan and return per-layer funnel as CSV download."""
+        import csv
+        import io
+        from datetime import datetime
+
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.strategy.ml_strategy_service import run_ml_backtest
+
+        try:
+            trade_date = datetime.strptime(body.trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误")
+
+        storage = getattr(request.app.state, "storage", None)
+        if not storage or not storage.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载回测数据")
+
+        result = await run_ml_backtest(
+            storage=storage,
+            concept_mapper=LocalConceptMapper(),
+            trade_date=trade_date,
+        )
+
+        # Build code → name/board lookup from scored stocks
+        code_name: dict[str, str] = {}
+        code_board: dict[str, str] = {}
+        for s in result.all_scored:
+            code_name[s.stock_code] = s.stock_name
+            code_board[s.stock_code] = s.board_name
+
+        # Collect all codes and per-layer membership
+        layer_keys = [s.key for s in result.funnel]
+        layer_codes = {s.key: set(s.codes) for s in result.funnel}
+
+        # ML scores for final candidates
+        ml_scores: dict[str, float] = {s.stock_code: s.ml_score for s in result.all_scored}
+
+        # Union of all codes across all layers
+        all_codes: set[str] = set()
+        for codes in layer_codes.values():
+            all_codes.update(codes)
+
+        # Build CSV
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        header = ["stock_code", "stock_name", "board"] + layer_keys + ["ml_score"]
+        writer.writerow(header)
+
+        for code in sorted(all_codes):
+            row = [
+                code,
+                code_name.get(code, ""),
+                code_board.get(code, ""),
+            ]
+            for key in layer_keys:
+                row.append("1" if code in layer_codes[key] else "")
+            row.append(f"{ml_scores[code]:.4f}" if code in ml_scores else "")
+            writer.writerow(row)
+
+        csv_bytes = buf.getvalue().encode("utf-8-sig")  # BOM for Excel
+        filename = f"funnel_{body.trade_date}.csv"
+        return StreamingResponse(
+            iter([csv_bytes]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     # === Range backtest with capital simulation ===
 

@@ -222,6 +222,7 @@ class FunnelStage:
     key: str  # stable machine id, e.g. "L2_hot_boards"
     label: str  # Chinese display label shown in UI / Feishu
     count: int
+    codes: list[str] = field(default_factory=list)  # sorted stock codes at this layer
 
 
 @dataclass
@@ -1330,7 +1331,14 @@ class MLScanner:
 
         # Step 0: Build universe (for board mapping)
         universe = await self.build_universe()
-        funnel.append(FunnelStage("L0_universe", "L0 股票池", len(universe.codes)))
+        funnel.append(
+            FunnelStage(
+                "L0_universe",
+                "L0 股票池",
+                len(universe.codes),
+                sorted(universe.codes),
+            )
+        )
 
         # Build code → name lookup from universe board_stocks
         code_name: dict[str, str] = {}
@@ -1341,7 +1349,14 @@ class MLScanner:
 
         # Preprocess: compute indicators + IPO filter
         prep = MLScanner.preprocess(snapshots, today)
-        funnel.append(FunnelStage("L1_preprocess", "L1 预处理", len(prep.indicators)))
+        funnel.append(
+            FunnelStage(
+                "L1_preprocess",
+                "L1 预处理",
+                len(prep.indicators),
+                sorted(prep.indicators.keys()),
+            )
+        )
 
         # Step 2: Hot board filter
         hot = MLScanner.filter_hot_boards(
@@ -1350,29 +1365,71 @@ class MLScanner:
             set(prep.indicators.keys()),
             suspended or set(),
         )
-        funnel.append(FunnelStage("L2_hot_boards", "L2 热门板块", len(hot.qualified_codes)))
+        funnel.append(
+            FunnelStage(
+                "L2_hot_boards",
+                "L2 热门板块",
+                len(hot.qualified_codes),
+                sorted(hot.qualified_codes),
+            )
+        )
 
         # Step 3: Early gain filter
         gain_codes = MLScanner.filter_by_early_gain(hot.qualified_codes, snapshots)
-        funnel.append(FunnelStage("L3_early_gain", "L3 早盘涨幅", len(gain_codes)))
+        funnel.append(
+            FunnelStage(
+                "L3_early_gain",
+                "L3 早盘涨幅",
+                len(gain_codes),
+                sorted(gain_codes),
+            )
+        )
 
         # Step 4: Price filter
         price_codes = MLScanner.filter_by_price(gain_codes, snapshots)
-        funnel.append(FunnelStage("L4_price", "L4 价格", len(price_codes)))
+        funnel.append(
+            FunnelStage(
+                "L4_price",
+                "L4 价格",
+                len(price_codes),
+                sorted(price_codes),
+            )
+        )
 
         # Step 5: Volume amplification filter
         vol_result = MLScanner.filter_by_volume(price_codes, snapshots, prep.indicators)
-        funnel.append(FunnelStage("L5_volume", "L5 量能", len(vol_result.passed_codes)))
+        funnel.append(
+            FunnelStage(
+                "L5_volume",
+                "L5 量能",
+                len(vol_result.passed_codes),
+                sorted(vol_result.passed_codes),
+            )
+        )
 
         # Step 6: Surge ratio filter
         surge_codes = MLScanner.filter_by_surge_ratio(
             vol_result.passed_codes, snapshots, prep.indicators
         )
-        funnel.append(FunnelStage("L6_surge", "L6 脉冲", len(surge_codes)))
+        funnel.append(
+            FunnelStage(
+                "L6_surge",
+                "L6 脉冲",
+                len(surge_codes),
+                sorted(surge_codes),
+            )
+        )
 
         # Step 7: Upper shadow filter
         final_codes = MLScanner.filter_by_upper_shadow(surge_codes, snapshots)
-        funnel.append(FunnelStage("L7_final", "L7 上影线", len(final_codes)))
+        funnel.append(
+            FunnelStage(
+                "L7_final",
+                "L7 上影线",
+                len(final_codes),
+                sorted(final_codes),
+            )
+        )
 
         if not final_codes:
             logger.info("scan: no candidates after filtering, returning empty result")
