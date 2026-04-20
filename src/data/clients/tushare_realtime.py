@@ -404,6 +404,121 @@ class TushareRealtimeClient:
         )
         return result
 
+    # ------------------------------------------------------------------
+    # stk_mins: historical minute bars (for backtest 9:40 snapshot)
+    # ------------------------------------------------------------------
+
+    async def batch_get_historical_940(
+        self, stock_codes: list[str], trade_date: str
+    ) -> dict[str, tuple[float, float, float, float]]:
+        """
+        Fetch historical 9:40 snapshot for multiple stocks via stk_mins.
+
+        Uses Tushare stk_mins API (historical 1-min bars) to reproduce the same
+        9:30-9:39 aggregation used by the live scan (rt_min_daily).
+
+        Args:
+            stock_codes: List of bare 6-digit codes
+            trade_date: Date in YYYY-MM-DD format (e.g., "2026-04-03")
+
+        Returns:
+            Dict: stock_code -> (price_940, cum_volume, max_high, min_low)
+            Volume is in 股 (shares), consistent with Tushare convention.
+        """
+        if not self._client:
+            raise TushareRealtimeError("Client not started — call start() first")
+
+        if not stock_codes:
+            return {}
+
+        # stk_mins uses YYYYMMDD format for start/end date
+        date_compact = trade_date.replace("-", "")
+        results: dict[str, tuple[float, float, float, float]] = {}
+        sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
+
+        async def _fetch_one(
+            bare_code: str,
+        ) -> tuple[str, tuple[float, float, float, float] | None]:
+            ts_code = self._to_ts_code(bare_code)
+            async with sem:
+                data = await self._api_call(
+                    "stk_mins",
+                    {
+                        "ts_code": ts_code,
+                        "freq": "1min",
+                        "start_date": f"{date_compact} 09:30:00",
+                        "end_date": f"{date_compact} 09:40:00",
+                    },
+                    fields="trade_time,open,close,high,low,vol",
+                )
+
+            fields = data.get("data", {}).get("fields", [])
+            items = data.get("data", {}).get("items", [])
+            if not fields or not items:
+                return bare_code, None
+
+            idx = {f: i for i, f in enumerate(fields)}
+            required = {"open", "close", "high", "low", "vol"}
+            if not required.issubset(idx.keys()):
+                return bare_code, None
+
+            has_time = "trade_time" in idx
+
+            # Filter bars to <= 09:39 (same cutoff as live scan)
+            early_bars = []
+            for r in items:
+                if has_time:
+                    t = str(r[idx["trade_time"]])
+                    # Format: "2026-04-03 09:31:00"
+                    if " " in t:
+                        t = t.split(" ")[-1]
+                    hhmm = t.replace(":", "")[:4]
+                    if hhmm <= "0939":
+                        early_bars.append(r)
+                else:
+                    early_bars.append(r)
+
+            if not early_bars:
+                return bare_code, None
+
+            try:
+                price_940 = float(early_bars[-1][idx["close"]])
+                max_high = float(
+                    max(r[idx["high"]] for r in early_bars if r[idx["high"]] is not None)
+                )
+                min_low = float(min(r[idx["low"]] for r in early_bars if r[idx["low"]] is not None))
+                cum_vol = float(sum(r[idx["vol"]] for r in early_bars if r[idx["vol"]] is not None))
+            except (ValueError, TypeError):
+                return bare_code, None
+
+            if price_940 <= 0:
+                return bare_code, None
+
+            return bare_code, (price_940, cum_vol, max_high, min_low)
+
+        all_results = await asyncio.gather(
+            *[_fetch_one(c) for c in stock_codes], return_exceptions=True
+        )
+
+        failed = 0
+        for res in all_results:
+            if isinstance(res, TushareRealtimeError):
+                raise res
+            if isinstance(res, BaseException):
+                failed += 1
+                continue
+            bare_code, snapshot = res
+            if snapshot is not None:
+                results[bare_code] = snapshot
+            else:
+                failed += 1
+
+        logger.info(
+            f"stk_mins historical 940: {len(results)}/{len(stock_codes)} "
+            f"(date={trade_date}, failed={failed})"
+        )
+        return results
+
     async def get_exchange_time(self) -> tuple[str, str] | None:
         """Not available from Tushare. Returns None."""
         return None

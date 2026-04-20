@@ -6308,6 +6308,28 @@ def create_v15_backtest_router() -> APIRouter:
                 "message": f"{body.trade_date} 无可用日线数据（非交易日或数据未下载）",
             }
 
+        # Fetch 9:40 snapshot via Tushare stk_mins (historical 1-min bars)
+        # This matches the live scan which uses Tushare rt_min_daily 1-min bars.
+        from src.common.config import get_tushare_token
+        from src.data.clients.tushare_realtime import TushareRealtimeClient
+
+        tushare_token = get_tushare_token()
+        tushare_client = TushareRealtimeClient(token=tushare_token)
+        await tushare_client.start()
+        try:
+            # Only fetch for codes that have daily data (avoid wasting API calls)
+            codes_with_daily = [c for c in universe_codes if c in all_daily]
+            tushare_940 = await tushare_client.batch_get_historical_940(
+                codes_with_daily, body.trade_date
+            )
+        finally:
+            await tushare_client.stop()
+
+        logger.info(
+            f"V16 backtest: Tushare stk_mins 940 coverage: "
+            f"{len(tushare_940)}/{len(codes_with_daily)} stocks"
+        )
+
         # Build stock data with 37d history
         stock_data: dict[str, V16StockData] = {}
         lookback_days = 37
@@ -6330,13 +6352,13 @@ def create_v15_backtest_router() -> APIRouter:
                 skipped_reasons["no_daily"] += 1
                 continue
 
-            # Get 9:40 data
-            data_940 = tsanghi_cache.get_940_price(code, body.trade_date)
-            if not data_940:
+            # Get 9:40 data from Tushare stk_mins (consistent with live scan)
+            snapshot_940 = tushare_940.get(code)
+            if not snapshot_940:
                 skipped_reasons["no_940"] += 1
                 continue
 
-            price_940, cum_vol, max_high, min_low = data_940
+            price_940, cum_vol, max_high, min_low = snapshot_940
             if price_940 <= 0:
                 skipped_reasons["no_940"] += 1
                 continue
