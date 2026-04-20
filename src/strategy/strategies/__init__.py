@@ -1,3 +1,3 @@
 # === MODULE PURPOSE ===
 # Strategy implementations directory.
-# Currently contains MomentumScanner (7-layer momentum funnel).
+# Currently contains MLScanner (board-first funnel + LGBRank scoring).

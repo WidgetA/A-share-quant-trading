@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Filtering utilities for strategy module.
-# Filters stocks by exchange, boards by relevance, and momentum quality.
+# Filters stocks by exchange and boards by relevance.
 
 from src.strategy.filters.board_filter import (
     BROAD_CONCEPT_BOARDS,

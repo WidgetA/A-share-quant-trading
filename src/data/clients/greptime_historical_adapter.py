@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Adapter that exposes ``GreptimeBacktestStorage`` through the
-# ``HistoricalDataProvider`` Protocol used by MomentumScanner / ML scanner.
+# ``HistoricalDataProvider`` Protocol used by ML scanner.
 #
 # This file is a thin read-only translator:
 #   - It does NOT call upstream APIs

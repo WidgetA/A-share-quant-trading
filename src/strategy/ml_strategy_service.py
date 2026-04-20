@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # ML strategy service: data preparation + MLScanner invocation.
-# Parallel to momentum_strategy_service.py but uses ML scanner pipeline.
+# Prepares data and invokes MLScanner for live and backtest pipelines.
 #
 # === DESIGN PRINCIPLES ===
 # - Stateless: all dependencies passed as arguments
@@ -363,7 +363,7 @@ async def _resolve_prev_close(
 ) -> dict[str, float]:
     """Resolve prev_close from GreptimeDB (+ tsanghi fallback).
 
-    Replicates the logic from momentum_strategy_service._build_live_snapshots.
+    Build live PriceSnapshot dict from realtime quotes.
     """
     prev_closes: dict[str, float] = {}
 

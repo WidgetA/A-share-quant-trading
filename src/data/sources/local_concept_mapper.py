@@ -15,7 +15,7 @@
 # === KEY CONCEPTS ===
 # - Forward index: board_name → [(stock_code, stock_name), ...]
 # - Reverse index: stock_code → [board_name, ...] (built at load time)
-# - Same interface used by MomentumScanner for board ↔ stock mapping
+# - Same interface used by ML scanner for board ↔ stock mapping
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class LocalConceptMapper:
     Maps stocks to/from concept boards via local JSON files.
 
     Maps stocks to/from concept boards using local JSON data.
-    Used by MomentumScanner for board lookups.
+    Used by ML scanner for board lookups.
 
     Data files:
         data/sectors.json            — THS concept board names (repo)

@@ -1,5 +1,5 @@
 # === MODULE PURPOSE ===
-# Strategy module: momentum scanner and shared models.
+# Strategy module: ML scanner and shared models.
 
 from src.strategy.models import (
     HistoricalDataProvider,
