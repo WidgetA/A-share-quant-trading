@@ -6299,7 +6299,7 @@ def create_v15_backtest_router() -> APIRouter:
             return {
                 "success": True,
                 "trade_date": body.trade_date,
-                "step0_universe": len(universe_codes),
+                "step0_universe": 0,
                 "hot_board_count": 0,
                 "final_candidates": 0,
                 "funnel": [],
@@ -6429,13 +6429,13 @@ def create_v15_backtest_router() -> APIRouter:
             return {
                 "success": True,
                 "trade_date": body.trade_date,
-                "step0_universe": len(universe_codes),
+                "step0_universe": 0,
                 "hot_board_count": 0,
                 "final_candidates": 0,
                 "funnel": [],
                 "recommended": [],
                 "all_scored": [],
-                "message": f"{body.trade_date} 无法构建股票数据",
+                "message": (f"{body.trade_date} 无法构建股票数据 (skipped: {skipped_reasons})"),
             }
 
         # Run V16 scan
