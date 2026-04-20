@@ -6308,7 +6308,7 @@ def create_v15_backtest_router() -> APIRouter:
                 "message": f"{body.trade_date} 无可用日线数据（非交易日或数据未下载）",
             }
 
-        # --- Phase 1: Build stock_data with tsanghi 940 prices (fast, local) ---
+        # Build stock data with 37d history
         stock_data: dict[str, V16StockData] = {}
         lookback_days = 37
         skipped_reasons: dict[str, int] = {
@@ -6330,7 +6330,7 @@ def create_v15_backtest_router() -> APIRouter:
                 skipped_reasons["no_daily"] += 1
                 continue
 
-            # Get 9:40 data from tsanghi cache (initial estimate)
+            # Get 9:40 data
             data_940 = tsanghi_cache.get_940_price(code, body.trade_date)
             if not data_940:
                 skipped_reasons["no_940"] += 1
@@ -6342,6 +6342,7 @@ def create_v15_backtest_router() -> APIRouter:
                 continue
 
             # Build 37d history DataFrame
+            # Get trading dates before td
             all_dates_for_code = sorted(tsanghi_cache._daily.get(code, {}).keys())
             hist_dates = [d for d in all_dates_for_code if d < body.trade_date]
             hist_dates = hist_dates[-lookback_days:]  # last 37
@@ -6362,6 +6363,7 @@ def create_v15_backtest_router() -> APIRouter:
                         rows.append({"open": o, "high": h, "low": lo, "close": c, "volume": v})
 
             if len(rows) < 5:
+                # Check if new listing
                 if hist_dates and len(hist_dates) < lookback_days:
                     skipped_reasons["new_listing"] += 1
                 else:
@@ -6372,16 +6374,19 @@ def create_v15_backtest_router() -> APIRouter:
             closes = np.array([r["close"] for r in rows])
             volumes = np.array([r["volume"] for r in rows])
 
+            # Derived metrics
             recent_vol = volumes[-lookback_days:]
             avg_daily_volume = float(recent_vol.mean()) if len(recent_vol) > 0 else 0.0
 
             trend_5d = 0.0
-            if len(closes) >= 6 and closes[-6] > 0:
-                trend_5d = (closes[-1] - closes[-6]) / closes[-6]
+            if len(closes) >= 6:
+                if closes[-6] > 0:
+                    trend_5d = (closes[-1] - closes[-6]) / closes[-6]
 
             trend_10d = 0.0
-            if len(closes) >= 11 and closes[-11] > 0:
-                trend_10d = (closes[-1] - closes[-11]) / closes[-11]
+            if len(closes) >= 11:
+                if closes[-11] > 0:
+                    trend_10d = (closes[-1] - closes[-11]) / closes[-11]
 
             avg_daily_return_20d = 0.0
             volatility_20d = 0.0
@@ -6419,72 +6424,6 @@ def create_v15_backtest_router() -> APIRouter:
             )
 
         logger.info(f"V16 backtest: built {len(stock_data)} stocks, skipped: {skipped_reasons}")
-
-        # --- Phase 2: Identify borderline boards and refine 940 via Tushare ---
-        # The tsanghi 5-min bars can differ from Tushare 1-min bars by ~0.1%.
-        # To match the live scan, we fetch precise 1-min 940 data from Tushare
-        # but ONLY for stocks in boards near the hot-board threshold (≥0.60%).
-        # This keeps API calls under Tushare's 500/min rate limit.
-        if stock_data:
-            BOARD_MARGIN = 0.20  # % below threshold to include
-            borderline_threshold = scanner.MIN_BOARD_AVG_GAIN - BOARD_MARGIN  # 0.60%
-
-            # Pre-compute board avg gains with tsanghi data
-            pre_board_gains: dict[str, float] = {}
-            for board_name, members in clean_boards.items():
-                gains = []
-                for code, _name in members:
-                    sd = stock_data.get(code)
-                    if sd and sd.open_price > 0:
-                        g = (sd.price_940 - sd.open_price) / sd.open_price * 100
-                        gains.append(g)
-                if len(gains) >= scanner.MIN_STOCKS_PER_BOARD:
-                    pre_board_gains[board_name] = sum(gains) / len(gains)
-
-            # Collect codes in borderline+ boards
-            borderline_codes: set[str] = set()
-            borderline_boards = []
-            for board_name, avg_gain in pre_board_gains.items():
-                if avg_gain >= borderline_threshold:
-                    borderline_boards.append(board_name)
-                    for code, _name in clean_boards[board_name]:
-                        if code in stock_data:
-                            borderline_codes.add(code)
-
-            logger.info(
-                f"V16 backtest: {len(borderline_boards)} borderline boards "
-                f"(>={borderline_threshold}%), {len(borderline_codes)} stocks to refine"
-            )
-
-            # Fetch precise 940 data from Tushare stk_mins for borderline stocks
-            if borderline_codes:
-                from src.common.config import get_tushare_token
-                from src.data.clients.tushare_realtime import TushareRealtimeClient
-
-                tushare_token = get_tushare_token()
-                tushare_client = TushareRealtimeClient(token=tushare_token)
-                await tushare_client.start()
-                try:
-                    tushare_940 = await tushare_client.batch_get_historical_940(
-                        sorted(borderline_codes), body.trade_date
-                    )
-                finally:
-                    await tushare_client.stop()
-
-                # Update stock_data with precise Tushare values
-                updated = 0
-                for code, (price, vol, high, low) in tushare_940.items():
-                    if code in stock_data:
-                        stock_data[code].price_940 = price
-                        stock_data[code].high_940 = high
-                        stock_data[code].low_940 = low
-                        stock_data[code].volume_940 = vol
-                        updated += 1
-
-                logger.info(
-                    f"V16 backtest: Tushare stk_mins refined {updated}/"
-                    f"{len(borderline_codes)} stocks' 940 data"
-                )
 
         if not stock_data:
             return {
