@@ -400,7 +400,13 @@ class V16Scanner:
         self,
         clean_boards: dict[str, list[tuple[str, str]]],
         stock_data: dict[str, V16StockData],
-    ) -> tuple[dict[str, list[str]], dict[str, list[str]], int, dict[str, float]]:
+    ) -> tuple[
+        dict[str, list[str]],
+        dict[str, list[str]],
+        int,
+        dict[str, float],
+        dict[str, float],
+    ]:
         """Find boards with avg gain ≥ threshold using ALL traded constituents.
 
         Key difference from V15: avg gain uses ALL constituents that have trading
@@ -459,7 +465,7 @@ class V16Scanner:
                 f"Step 2: 0 hot boards! threshold={self.MIN_BOARD_AVG_GAIN}%, "
                 f"boards_checked={len(all_board_avg_gains)}, "
                 f"max_avg_gain={sorted_gains[0]:+.4f}%, "
-                f"median={sorted_gains[len(sorted_gains)//2]:+.4f}%, "
+                f"median={sorted_gains[len(sorted_gains) // 2]:+.4f}%, "
                 f"top5: [{top5_str}]"
             )
             # Sample a few stocks to check data sanity
@@ -468,13 +474,15 @@ class V16Scanner:
                 sd = stock_data[sc]
                 g = (sd.price_940 - sd.open_price) / sd.open_price * 100
                 logger.warning(
-                    f"  sample {sc}: open={sd.open_price}, "
-                    f"price_940={sd.price_940}, gain={g:+.4f}%"
+                    f"  sample {sc}: open={sd.open_price}, price_940={sd.price_940}, gain={g:+.4f}%"
                 )
 
         return (
-            hot_boards, dict(stock_all_boards), filtered_by_avg,
-            board_avg_gains, all_board_avg_gains,
+            hot_boards,
+            dict(stock_all_boards),
+            filtered_by_avg,
+            board_avg_gains,
+            all_board_avg_gains,
         )
 
     # ── Step 3: Gain Filter ──

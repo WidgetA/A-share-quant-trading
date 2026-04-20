@@ -6492,12 +6492,8 @@ def create_v15_backtest_router() -> APIRouter:
             "boards_checked": len(all_gains),
             "threshold": 0.80,
             "max_avg_gain": round(gain_values[0], 4) if gain_values else 0,
-            "median_avg_gain": round(
-                gain_values[len(gain_values) // 2], 4
-            ) if gain_values else 0,
-            "top5": [
-                {"board": b, "avg_gain": round(g, 4)} for b, g in top5_boards
-            ],
+            "median_avg_gain": round(gain_values[len(gain_values) // 2], 4) if gain_values else 0,
+            "top5": [{"board": b, "avg_gain": round(g, 4)} for b, g in top5_boards],
         }
 
         return {
