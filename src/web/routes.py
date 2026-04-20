@@ -6505,7 +6505,7 @@ def create_v15_backtest_router() -> APIRouter:
             open_gap = (
                 (sd.open_price - sd.prev_close) / sd.prev_close * 100 if sd.prev_close > 0 else 0
             )
-            expected_vol = sd.avg_daily_volume * 10 / 240  # ~10min fraction
+            expected_vol = sd.avg_daily_volume * 0.125  # same as V16Scanner.TURNOVER_FRACTION
             turnover_amp = sd.volume_940 / expected_vol if expected_vol > 0 else 0
             stock_data_dump.append(
                 {
