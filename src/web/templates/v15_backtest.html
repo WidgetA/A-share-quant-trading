@@ -39,7 +39,8 @@
                     <span class="result-badge">股票池: <strong id="v16-universe">0</strong> 只</span>
                     <span class="result-badge">热门板块: <strong id="v16-boards">0</strong> 个</span>
                     <span class="result-badge highlight">最终候选: <strong id="v16-final">0</strong> 只</span>
-                    <button id="v16-export-btn" class="btn btn-secondary" style="margin-left:auto;font-size:0.85rem;padding:4px 12px">导出</button>
+                    <button id="v16-export-btn" class="btn btn-secondary" style="margin-left:auto;font-size:0.85rem;padding:4px 12px">导出JSON</button>
+                    <button id="v16-export-csv-btn" class="btn btn-secondary" style="margin-left:4px;font-size:0.85rem;padding:4px 12px">导出CSV</button>
                 </div>
             </div>
 
@@ -99,6 +100,48 @@ document.getElementById('v16-export-btn').addEventListener('click', () => {
     const a = document.createElement('a');
     a.href = url;
     a.download = `v16_backtest_${_v16LastData.trade_date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+});
+
+document.getElementById('v16-export-csv-btn').addEventListener('click', () => {
+    if (!_v16LastData) return;
+    const d = _v16LastData;
+    let csv = '\uFEFF';  // UTF-8 BOM for Excel
+
+    // Sheet 1: stock data
+    const sdCols = ['code','name','open','prev_close','price_940','high_940','low_940',
+        'volume_940','avg_daily_volume','gain_from_open','open_gap','turnover_amp',
+        'trend_5d','trend_10d','volatility_20d','consecutive_up_days'];
+    const sdHeaders = ['代码','名称','开盘价','前收盘','9:40价','9:40最高','9:40最低',
+        '9:40量(股)','日均量(股)','开盘涨幅%','跳空%','量能倍数',
+        '5日趋势','10日趋势','20日波动率','连涨天数'];
+    csv += sdHeaders.join(',') + '\n';
+    const stocks = (d.stock_data_dump || []).slice().sort((a,b) => b.gain_from_open - a.gain_from_open);
+    for (const s of stocks) {
+        csv += sdCols.map(c => s[c] ?? '').join(',') + '\n';
+    }
+
+    // Sheet 2: board avg gains
+    csv += '\n\n板块均涨幅\n';
+    csv += '板块名,均涨幅%\n';
+    const boards = d.board_avg_gains || {};
+    for (const [name, gain] of Object.entries(boards)) {
+        csv += `${name},${gain}\n`;
+    }
+
+    // Sheet 3: funnel
+    csv += '\n\n漏斗\n';
+    csv += '层级,数量\n';
+    for (const f of (d.funnel || [])) {
+        csv += `${f.label},${f.count}\n`;
+    }
+
+    const blob = new Blob([csv], {type: 'text/csv;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `v16_data_${d.trade_date}.csv`;
     a.click();
     URL.revokeObjectURL(url);
 });

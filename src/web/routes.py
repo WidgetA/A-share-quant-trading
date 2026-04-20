@@ -6496,6 +6496,43 @@ def create_v15_backtest_router() -> APIRouter:
             "top5": [{"board": b, "avg_gain": round(g, 4)} for b, g in top5_boards],
         }
 
+        # Raw stock data dump for debugging/export
+        stock_data_dump = []
+        for sd in stock_data.values():
+            gain_from_open = (
+                (sd.price_940 - sd.open_price) / sd.open_price * 100 if sd.open_price > 0 else 0
+            )
+            open_gap = (
+                (sd.open_price - sd.prev_close) / sd.prev_close * 100 if sd.prev_close > 0 else 0
+            )
+            expected_vol = sd.avg_daily_volume * 10 / 240  # ~10min fraction
+            turnover_amp = sd.volume_940 / expected_vol if expected_vol > 0 else 0
+            stock_data_dump.append(
+                {
+                    "code": sd.code,
+                    "name": sd.name,
+                    "open": round(sd.open_price, 2),
+                    "prev_close": round(sd.prev_close, 2),
+                    "price_940": round(sd.price_940, 2),
+                    "high_940": round(sd.high_940, 2),
+                    "low_940": round(sd.low_940, 2),
+                    "volume_940": round(sd.volume_940, 0),
+                    "avg_daily_volume": round(sd.avg_daily_volume, 0),
+                    "gain_from_open": round(gain_from_open, 4),
+                    "open_gap": round(open_gap, 4),
+                    "turnover_amp": round(turnover_amp, 4),
+                    "trend_5d": round(sd.trend_5d, 6),
+                    "trend_10d": round(sd.trend_10d, 6),
+                    "volatility_20d": round(sd.volatility_20d, 6),
+                    "consecutive_up_days": sd.consecutive_up_days,
+                }
+            )
+
+        # All board avg gains (not just hot ones)
+        board_avg_gains = {
+            b: round(g, 4) for b, g in sorted(all_gains.items(), key=lambda x: -x[1])
+        }
+
         return {
             "success": True,
             "trade_date": body.trade_date,
@@ -6514,6 +6551,8 @@ def create_v15_backtest_router() -> APIRouter:
             "recommended": rec_list,
             "all_scored": all_scored_list,
             "hot_boards": result.step2_boards_detail,
+            "board_avg_gains": board_avg_gains,
+            "stock_data_dump": stock_data_dump,
             "layers": {
                 "step0_codes": result.step0_codes,
                 "step2_boards": result.step2_boards_detail,
