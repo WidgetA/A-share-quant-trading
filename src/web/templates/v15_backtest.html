@@ -164,9 +164,23 @@ function renderV16Results(data) {
     // Funnel table
     const funnelBody = document.getElementById('v16-funnel-body');
     const funnel = data.funnel || [];
-    funnelBody.innerHTML = funnel.map(f =>
+    let funnelHtml = funnel.map(f =>
         `<tr><td>${f.label}</td><td>${f.count}</td></tr>`
     ).join('');
+
+    // Step 2 diagnostic: show top boards when 0 hot boards found
+    const diag = data.step2_diag;
+    if (diag && data.hot_board_count === 0 && diag.boards_checked > 0) {
+        const top5Rows = (diag.top5 || []).map(t =>
+            `<tr style="color:#92400e;font-size:0.85rem"><td style="padding-left:2em">${t.board}</td><td>${t.avg_gain >= 0 ? '+' : ''}${t.avg_gain.toFixed(4)}%</td></tr>`
+        ).join('');
+        funnelHtml += `<tr style="background:#fffbeb"><td colspan="2" style="color:#92400e;font-weight:600;font-size:0.85rem">` +
+            `Step 2 诊断: ${diag.boards_checked} 板块已检查, 阈值 ${diag.threshold}%, ` +
+            `最大板块均涨 ${diag.max_avg_gain >= 0 ? '+' : ''}${diag.max_avg_gain.toFixed(4)}%, ` +
+            `中位数 ${diag.median_avg_gain >= 0 ? '+' : ''}${diag.median_avg_gain.toFixed(4)}%</td></tr>` +
+            top5Rows;
+    }
+    funnelBody.innerHTML = funnelHtml;
 
     // Top-10 Recommendation
     const recCard = document.getElementById('v16-rec-card');

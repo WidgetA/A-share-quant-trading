@@ -115,6 +115,8 @@ class V16ScanResult:
     stock_cci: dict[str, float] = field(default_factory=dict)
     # Early volume (call auction + first 7min) for recommended stocks: code → volume in 股
     stock_early_vol: dict[str, float] = field(default_factory=dict)
+    # Diagnostic: ALL board avg gains (including non-hot), for debugging Step 2 = 0
+    step2_all_board_avg_gains: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -269,13 +271,14 @@ class V16Scanner:
         result.step0_codes = sorted(stock_data.keys())
 
         # ── Step 2: Hot boards ──
-        hot_boards, stock_all_boards, avg_gain_filtered, board_avg_gains = self._step2_hot_boards(
-            clean_boards, stock_data
+        hot_boards, stock_all_boards, avg_gain_filtered, board_avg_gains, all_board_avg_gains = (
+            self._step2_hot_boards(clean_boards, stock_data)
         )
         result.step2_hot_board_count = len(hot_boards)
         result.step2_filtered_by_avg_gain = avg_gain_filtered
         result.step2_boards_detail = {b: sorted(codes) for b, codes in hot_boards.items()}
         result.step2_board_avg_gains = board_avg_gains
+        result.step2_all_board_avg_gains = all_board_avg_gains
 
         # Collect unique codes from hot boards
         hot_board_codes: set[str] = set()
@@ -407,12 +410,14 @@ class V16Scanner:
             (hot_boards, stock_all_boards, filtered_by_avg_gain_count, board_avg_gains)
             hot_boards: board_name → [code, ...]
             stock_all_boards: code → [board_name, ...]
-            board_avg_gains: board_name → avg gain %
+            board_avg_gains: board_name → avg gain % (includes ALL boards, not just hot)
         """
         hot_boards: dict[str, list[str]] = {}
         stock_all_boards: dict[str, list[str]] = defaultdict(list)
         board_avg_gains: dict[str, float] = {}
         filtered_by_avg = 0
+        # Collect ALL board avg gains for diagnostics (not just hot boards)
+        all_board_avg_gains: dict[str, float] = {}
 
         for board_name, members in clean_boards.items():
             # Collect gain_from_open for ALL constituents with data
@@ -434,6 +439,8 @@ class V16Scanner:
                 continue
 
             avg_gain = sum(board_gains) / len(board_gains)
+            all_board_avg_gains[board_name] = avg_gain
+
             if avg_gain < self.MIN_BOARD_AVG_GAIN:
                 filtered_by_avg += 1
                 continue
@@ -443,7 +450,32 @@ class V16Scanner:
             for code in board_codes:
                 stock_all_boards[code].append(board_name)
 
-        return hot_boards, dict(stock_all_boards), filtered_by_avg, board_avg_gains
+        # Diagnostic: log gain distribution when no hot boards found
+        if not hot_boards and all_board_avg_gains:
+            sorted_gains = sorted(all_board_avg_gains.values(), reverse=True)
+            top5 = sorted(all_board_avg_gains.items(), key=lambda x: -x[1])[:5]
+            top5_str = ", ".join(f"{b}={g:+.4f}%" for b, g in top5)
+            logger.warning(
+                f"Step 2: 0 hot boards! threshold={self.MIN_BOARD_AVG_GAIN}%, "
+                f"boards_checked={len(all_board_avg_gains)}, "
+                f"max_avg_gain={sorted_gains[0]:+.4f}%, "
+                f"median={sorted_gains[len(sorted_gains)//2]:+.4f}%, "
+                f"top5: [{top5_str}]"
+            )
+            # Sample a few stocks to check data sanity
+            sample_codes = list(stock_data.keys())[:3]
+            for sc in sample_codes:
+                sd = stock_data[sc]
+                g = (sd.price_940 - sd.open_price) / sd.open_price * 100
+                logger.warning(
+                    f"  sample {sc}: open={sd.open_price}, "
+                    f"price_940={sd.price_940}, gain={g:+.4f}%"
+                )
+
+        return (
+            hot_boards, dict(stock_all_boards), filtered_by_avg,
+            board_avg_gains, all_board_avg_gains,
+        )
 
     # ── Step 3: Gain Filter ──
 

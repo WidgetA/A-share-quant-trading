@@ -6484,12 +6484,29 @@ def create_v15_backtest_router() -> APIRouter:
             for s in result.all_scored
         ]
 
+        # Diagnostic: top 5 boards by avg gain (even if below threshold)
+        all_gains = result.step2_all_board_avg_gains
+        top5_boards = sorted(all_gains.items(), key=lambda x: -x[1])[:5]
+        gain_values = sorted(all_gains.values(), reverse=True) if all_gains else []
+        step2_diag = {
+            "boards_checked": len(all_gains),
+            "threshold": 0.80,
+            "max_avg_gain": round(gain_values[0], 4) if gain_values else 0,
+            "median_avg_gain": round(
+                gain_values[len(gain_values) // 2], 4
+            ) if gain_values else 0,
+            "top5": [
+                {"board": b, "avg_gain": round(g, 4)} for b, g in top5_boards
+            ],
+        }
+
         return {
             "success": True,
             "trade_date": body.trade_date,
             "step0_universe": result.step0_universe_count,
             "hot_board_count": result.step2_hot_board_count,
             "step2_filtered_by_avg_gain": result.step2_filtered_by_avg_gain,
+            "step2_diag": step2_diag,
             "step3_count": result.step3_count,
             "step4_count": result.step4_count,
             "step5_count": result.step5_count,
