@@ -251,8 +251,9 @@
                 <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
                     <button class="btn-sm btn-buy" id="btnFullTrain" onclick="startFullTrain()">全量训练</button>
                     <button class="btn-sm btn-sell" id="btnFinetune" onclick="startFinetune()"
-                        {% if not model_scheduler.has_full_model %}disabled title="请先全量训练"{% endif %}>手动微调</button>
-                    <button class="btn-sm btn-sell" id="btnDownloadS3" onclick="downloadModelFromS3()" style="background:#1565c0;">下载模型</button>
+                        {% if not model_scheduler.s3_has_full_model %}disabled title="S3 无全量模型"{% endif %}>手动微调</button>
+                    <button class="btn-sm btn-sell" id="btnDownloadS3" onclick="downloadModelFromS3()" style="background:#1565c0;"
+                        {% if not model_scheduler.s3_has_full_model %}disabled title="S3 无可用模型"{% endif %}>下载模型</button>
                 </div>
                 <div id="trainLogArea" style="display:none;margin-top:0.5rem;max-height:200px;overflow-y:auto;
                     background:#f5f5f5;padding:0.5rem;border-radius:4px;font-size:0.75rem;font-family:monospace;
@@ -750,13 +751,16 @@ async function loadModelStatus() {
         document.getElementById('nextFinetune').textContent = d.next_run_time || '--';
         const btn = document.getElementById('btnFinetune');
         if (btn) {
-            btn.disabled = !d.has_full_model || d.training_in_progress;
-            if (!d.has_full_model) btn.title = '请先全量训练';
+            btn.disabled = !d.s3_has_full_model || d.training_in_progress;
+            btn.title = !d.s3_has_full_model ? 'S3 无全量模型' : '';
         }
         const btnFull = document.getElementById('btnFullTrain');
         if (btnFull) btnFull.disabled = d.training_in_progress;
         const btnDl = document.getElementById('btnDownloadS3');
-        if (btnDl) btnDl.disabled = d.training_in_progress;
+        if (btnDl) {
+            btnDl.disabled = !d.s3_has_full_model || d.training_in_progress;
+            btnDl.title = !d.s3_has_full_model ? 'S3 无可用模型' : '';
+        }
         if (d.training_in_progress) {
             document.getElementById('trainLogArea').style.display = 'block';
         }

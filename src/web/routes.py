@@ -2933,12 +2933,9 @@ def create_model_router() -> APIRouter:
                 media_type="text/event-stream",
             )
 
-        from src.data.services.model_training_scheduler import FULL_MODEL_NAME, MODEL_DIR
-
-        full_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
-        if not full_path.exists():
+        if not scheduler.s3_has_full_model:
             return StreamingResponse(
-                iter([_sse({"type": "error", "message": "无全量训练模型，请先执行全量训练"})]),
+                iter([_sse({"type": "error", "message": "S3 无全量模型，请先执行全量训练"})]),
                 media_type="text/event-stream",
             )
 
@@ -3147,6 +3144,10 @@ def create_model_router() -> APIRouter:
         if filename.startswith("full_") and filename != f"{FULL_MODEL_NAME}.lgb":
             latest_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
             copyfile(local_path, latest_path)
+
+        # Update scheduler's S3 model availability flag
+        scheduler = _get_scheduler(request)
+        scheduler.s3_has_full_model = True
 
         size_kb = round(local_path.stat().st_size / 1024, 1)
         return {"status": "ok", "model_name": local_path.stem, "size_kb": size_kb}
