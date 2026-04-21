@@ -63,6 +63,9 @@ docker-compose*.yml
 !docker-compose.example.yml
 config/greptimedb.toml
 
+# === Dev Tools (local scripts, model files, caches for offline analysis) ===
+dev-tools/
+
 # === OS ===
 .DS_Store
 Thumbs.db

@@ -326,7 +326,7 @@ class MLScanner:
     _MIN_PRICE = 12.0  # stock price ≥ 12 yuan
     _TURNOVER_AMP_MIN = 0.498  # volume amplification lower bound
     _TURNOVER_AMP_MAX = 6.0  # volume amplification upper bound
-    _EARLY_SESSION_RATIO = 0.125  # 10min / 80min continuous auction
+    _EARLY_SESSION_RATIO = 0.125  # empirical: first 10min ≈ 12.5% of daily volume
     _SURGE_RATIO_PERCENTILE = 0.95  # dynamic cutoff at 95th percentile
     _SURGE_RATIO_FLOOR = 0.15  # cutoff never below this
     _UPPER_SHADOW_MAX = 3.0  # upper shadow > 3% → remove
