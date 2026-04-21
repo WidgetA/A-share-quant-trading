@@ -94,7 +94,11 @@ class ModelTrainingScheduler:
         self._ensure_local_model_from_s3()
 
     def _ensure_local_model_from_s3(self) -> None:
-        """On startup, download model from S3 if local model is missing."""
+        """On startup, download model from S3 if local is missing.
+
+        S3 is the single source of truth. Local is just a cache.
+        Only FC writes to S3 (after training). This method only reads.
+        """
         full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
         if full_model_path.exists():
             return
@@ -112,13 +116,13 @@ class ModelTrainingScheduler:
                 models = await s3.list_models(prefix="models/")
                 full_models = [m for m in models if "full_" in m["key"]]
                 if not full_models:
+                    logger.info("No model in S3 yet, skipping download")
                     return
                 latest = sorted(full_models, key=lambda m: m["last_modified"])[-1]
                 MODEL_DIR.mkdir(parents=True, exist_ok=True)
                 await s3.download_file(latest["key"], full_model_path)
                 logger.info("Downloaded model from S3: %s", latest["key"])
 
-            # Run sync in __init__ — event loop may not exist yet
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(_download())
@@ -455,20 +459,7 @@ class ModelTrainingScheduler:
             latest_path.write_bytes(model_bytes)
             await _log(f"基准模型已保存: {latest_path.name}")
 
-        # Upload to S3 as safety net (in case FC's upload failed)
         s3_uri = result.get("s3_uri")
-        if not s3_uri:
-            try:
-                from src.common.s3_client import create_s3_client_from_config
-
-                s3 = create_s3_client_from_config()
-                if s3:
-                    s3_uri = await s3.upload_file(model_path, f"models/{model_name}.lgb")
-                    if mode == "full":
-                        await s3.upload_file(model_path, f"models/{FULL_MODEL_NAME}.lgb")
-                    await _log(f"模型已上传 S3: {s3_uri}")
-            except Exception as e:
-                await _log(f"S3 上传失败（非致命）: {e}")
         elapsed = result.get("elapsed_seconds", 0)
         n_samples = result.get("n_samples", 0)
         n_days = result.get("n_days", 0)
