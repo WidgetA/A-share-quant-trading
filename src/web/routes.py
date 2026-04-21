@@ -3039,4 +3039,46 @@ def create_model_router() -> APIRouter:
             ),
         }
 
+    @router.get("/api/model/s3-models")
+    async def list_s3_models():
+        """List available model files on S3."""
+        from src.common.s3_client import create_s3_client_from_config
+
+        s3 = create_s3_client_from_config()
+        if s3 is None:
+            raise HTTPException(status_code=503, detail="S3 未配置")
+        models = await s3.list_models(prefix="models/")
+        return {"models": models}
+
+    @router.post("/api/model/download-s3")
+    async def download_s3_model(request: Request):
+        """Download a model file from S3 to local data/models/."""
+        from shutil import copyfile
+
+        from src.common.s3_client import create_s3_client_from_config
+        from src.data.services.model_training_scheduler import FULL_MODEL_NAME, MODEL_DIR
+
+        s3 = create_s3_client_from_config()
+        if s3 is None:
+            raise HTTPException(status_code=503, detail="S3 未配置")
+
+        body = await request.json()
+        s3_key = body.get("s3_key", "")
+        if not s3_key or not s3_key.endswith(".lgb"):
+            raise HTTPException(status_code=400, detail="无效的 S3 key")
+
+        filename = s3_key.rsplit("/", 1)[-1]
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        local_path = MODEL_DIR / filename
+
+        await s3.download_file(s3_key, local_path)
+
+        # If this is a full model, also set it as the active model
+        if filename.startswith("full_") and filename != f"{FULL_MODEL_NAME}.lgb":
+            latest_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
+            copyfile(local_path, latest_path)
+
+        size_kb = round(local_path.stat().st_size / 1024, 1)
+        return {"status": "ok", "model_name": local_path.stem, "size_kb": size_kb}
+
     return router

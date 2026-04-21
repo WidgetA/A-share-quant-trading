@@ -252,6 +252,7 @@
                     <button class="btn-sm btn-buy" id="btnFullTrain" onclick="startFullTrain()">全量训练</button>
                     <button class="btn-sm btn-sell" id="btnFinetune" onclick="startFinetune()"
                         {% if not model_scheduler.has_full_model %}disabled title="请先全量训练"{% endif %}>手动微调</button>
+                    <button class="btn-sm btn-sell" id="btnDownloadS3" onclick="downloadModelFromS3()" style="background:#1565c0;">下载模型</button>
                 </div>
                 <div id="trainLogArea" style="display:none;margin-top:0.5rem;max-height:200px;overflow-y:auto;
                     background:#f5f5f5;padding:0.5rem;border-radius:4px;font-size:0.75rem;font-family:monospace;
@@ -754,6 +755,8 @@ async function loadModelStatus() {
         }
         const btnFull = document.getElementById('btnFullTrain');
         if (btnFull) btnFull.disabled = d.training_in_progress;
+        const btnDl = document.getElementById('btnDownloadS3');
+        if (btnDl) btnDl.disabled = d.training_in_progress;
         if (d.training_in_progress) {
             document.getElementById('trainLogArea').style.display = 'block';
         }
@@ -818,6 +821,57 @@ function startFullTrain() {
 function startFinetune() {
     if (!confirm('确认开始手动微调？')) return;
     _streamTraining('/api/model/finetune', 'btnFinetune');
+}
+
+async function downloadModelFromS3() {
+    const btn = document.getElementById('btnDownloadS3');
+    const logArea = document.getElementById('trainLogArea');
+    btn.disabled = true;
+    btn.textContent = '查询中...';
+    logArea.style.display = 'block';
+    logArea.textContent = '正在查询 S3 可用模型...\n';
+    try {
+        const listResp = await fetch('/api/model/s3-models', {cache: 'no-store'});
+        if (listResp.status === 503) {
+            logArea.textContent += 'S3 未配置，请先配置 S3 存储\n';
+            showToast('S3 未配置', 'error');
+            return;
+        }
+        if (!listResp.ok) throw new Error('HTTP ' + listResp.status);
+        const {models} = await listResp.json();
+        if (!models || models.length === 0) {
+            logArea.textContent += 'S3 上无可用模型\n';
+            showToast('S3 无可用模型', 'error');
+            return;
+        }
+        // Pick latest full_*.lgb by last_modified
+        const fullModels = models.filter(m => m.key.includes('full_'));
+        const target = fullModels.length > 0
+            ? fullModels.sort((a, b) => b.last_modified.localeCompare(a.last_modified))[0]
+            : models.sort((a, b) => b.last_modified.localeCompare(a.last_modified))[0];
+        const sizeKb = (target.size / 1024).toFixed(1);
+        logArea.textContent += `找到模型: ${target.key} (${sizeKb} KB)\n下载中...\n`;
+        btn.textContent = '下载中...';
+        const dlResp = await fetch('/api/model/download-s3', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({s3_key: target.key})
+        });
+        if (!dlResp.ok) {
+            const err = await dlResp.json().catch(() => ({}));
+            throw new Error(err.detail || 'HTTP ' + dlResp.status);
+        }
+        const result = await dlResp.json();
+        logArea.textContent += `下载完成: ${result.model_name} (${result.size_kb} KB)\n`;
+        showToast(`模型已下载: ${result.model_name}`, 'success');
+        loadModelStatus();
+    } catch (e) {
+        logArea.textContent += '[错误] ' + e.message + '\n';
+        showToast('下载失败: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '下载模型';
+    }
 }
 
 async function loadDataEngineStatus() {
