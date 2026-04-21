@@ -30,12 +30,15 @@ class S3Client:
     def _get_client(self):
         """Create a boto3 S3 client (not thread-safe, create per-call)."""
         import boto3
+        from botocore.config import Config
 
+        # OSS requires virtual hosted style (bucket.endpoint, not endpoint/bucket)
         return boto3.client(
             "s3",
             endpoint_url=self._endpoint_url,
             aws_access_key_id=self._access_key,
             aws_secret_access_key=self._secret_key,
+            config=Config(s3={"addressing_style": "virtual"}),
         )
 
     async def upload_file(self, local_path: Path, s3_key: str) -> str:
