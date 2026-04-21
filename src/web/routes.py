@@ -2233,6 +2233,76 @@ def create_settings_router() -> APIRouter:
         except Exception as e:
             return {"success": False, "message": f"连接失败: {e}"}
 
+    # === S3 OBJECT STORAGE CONFIG ===
+
+    @router.get("/api/settings/s3-config")
+    async def get_s3_config_status():
+        from src.common.config import get_s3_config
+
+        config = get_s3_config()
+        if config and config.get("endpoint_url") and config.get("bucket"):
+            ep = config["endpoint_url"]
+            masked_ep = ep[:20] + "..." + ep[-10:] if len(ep) > 35 else ep
+            ak = config.get("access_key", "")
+            masked_ak = ak[:4] + "***" + ak[-4:] if len(ak) > 8 else "***"
+            return {
+                "configured": True,
+                "masked_token": f"{masked_ep} | {masked_ak}",
+                "token_length": len(ep),
+                "source_label": "文件配置",
+                "bucket": config.get("bucket", ""),
+            }
+        return {"configured": False}
+
+    @router.post("/api/settings/s3-config")
+    async def update_s3_config(request: Request):
+        from src.common.config import set_s3_config
+
+        body = await request.json()
+        config = {
+            "endpoint_url": (body.get("endpoint_url") or "").strip(),
+            "access_key": (body.get("access_key") or "").strip(),
+            "secret_key": (body.get("secret_key") or "").strip(),
+            "bucket": (body.get("bucket") or "").strip(),
+        }
+        if not config["endpoint_url"] or not config["bucket"]:
+            raise HTTPException(status_code=400, detail="Endpoint URL 和 Bucket 不能为空")
+        if not config["access_key"] or not config["secret_key"]:
+            raise HTTPException(status_code=400, detail="Access Key 和 Secret Key 不能为空")
+
+        set_s3_config(config)
+        return {"success": True, "message": "S3 配置已保存"}
+
+    @router.post("/api/settings/s3-config/test")
+    async def test_s3_config(request: Request):
+        body = await request.json()
+        endpoint_url = (body.get("endpoint_url") or "").strip()
+        access_key = (body.get("access_key") or "").strip()
+        secret_key = (body.get("secret_key") or "").strip()
+        bucket = (body.get("bucket") or "").strip()
+
+        if not all([endpoint_url, access_key, secret_key, bucket]):
+            return {"success": False, "message": "请填写全部 4 个字段"}
+
+        try:
+            from src.common.s3_client import S3Client
+
+            s3 = S3Client(endpoint_url, access_key, secret_key, bucket)
+            models = await s3.list_models(prefix="models/")
+            return {
+                "success": True,
+                "message": f"连接成功，Bucket 中有 {len(models)} 个模型文件",
+            }
+        except Exception as e:
+            msg = str(e)
+            if "NoSuchBucket" in msg:
+                return {"success": False, "message": f"Bucket '{bucket}' 不存在"}
+            if "AccessDenied" in msg or "InvalidAccessKeyId" in msg:
+                return {"success": False, "message": "Access Key 无效或无权限"}
+            if "SignatureDoesNotMatch" in msg:
+                return {"success": False, "message": "Secret Key 不匹配"}
+            return {"success": False, "message": f"连接失败: {msg}"}
+
     # === ALL KEYS STATUS ===
 
     @router.get("/api/settings/keys-status")

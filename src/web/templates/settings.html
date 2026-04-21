@@ -138,6 +138,47 @@
             <div class="token-message hidden" id="iquantMessage"></div>
         </div>
     </section>
+
+    <!-- S3 Object Storage Section -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>S3 对象存储</h3>
+            <p class="settings-desc">用于存储和下载 ML 模型文件。支持阿里云 OSS（S3 兼容模式）、AWS S3 等。</p>
+
+            <div class="token-status" id="s3Status">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="s3StatusValue">加载中...</span>
+            </div>
+
+            <div class="form-group">
+                <label for="s3Endpoint">Endpoint URL</label>
+                <input type="text" id="s3Endpoint" class="token-input"
+                    placeholder="https://oss-cn-shanghai.aliyuncs.com" style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="s3AccessKey">Access Key</label>
+                <input type="text" id="s3AccessKey" class="token-input"
+                    placeholder="LTAI5t..." style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="s3SecretKey">Secret Key</label>
+                <input type="password" id="s3SecretKey" class="token-input"
+                    placeholder="Secret Key..." style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="s3Bucket">Bucket</label>
+                <input type="text" id="s3Bucket" class="token-input"
+                    placeholder="my-trading-models" style="font-family: monospace;">
+            </div>
+
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testS3Config()" id="s3TestBtn">测试连接</button>
+                <button class="btn btn-primary" onclick="saveS3Config()" id="s3SaveBtn">保存</button>
+            </div>
+
+            <div class="token-message hidden" id="s3Message"></div>
+        </div>
+    </section>
 </div>
 {% endblock %}
 
@@ -260,11 +301,70 @@ async function toggleCacheScheduler(el) {
     }
 }
 
+// S3 Object Storage
+function loadS3Status() { loadKeyStatus('/api/settings/s3-config', 's3StatusValue'); }
+
+function _getS3Fields() {
+    return {
+        endpoint_url: document.getElementById('s3Endpoint').value.trim(),
+        access_key: document.getElementById('s3AccessKey').value.trim(),
+        secret_key: document.getElementById('s3SecretKey').value.trim(),
+        bucket: document.getElementById('s3Bucket').value.trim(),
+    };
+}
+
+async function testS3Config() {
+    const fields = _getS3Fields();
+    if (!fields.endpoint_url || !fields.bucket) { showMessage('s3Message', '请填写 Endpoint URL 和 Bucket', false); return; }
+    const btn = document.getElementById('s3TestBtn');
+    btn.disabled = true; btn.textContent = '测试中...';
+    showMessage('s3Message', '', true);
+    try {
+        const resp = await fetch('/api/settings/s3-config/test', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(fields)
+        });
+        const data = await resp.json();
+        showMessage('s3Message', data.message, data.success);
+    } catch (e) {
+        showMessage('s3Message', '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '测试连接'; }
+}
+
+async function saveS3Config() {
+    const fields = _getS3Fields();
+    if (!fields.endpoint_url || !fields.bucket || !fields.access_key || !fields.secret_key) {
+        showMessage('s3Message', '请填写全部 4 个字段', false); return;
+    }
+    const btn = document.getElementById('s3SaveBtn');
+    btn.disabled = true; btn.textContent = '保存中...';
+    try {
+        const resp = await fetch('/api/settings/s3-config', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(fields)
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage('s3Message', data.message, true);
+            document.getElementById('s3Endpoint').value = '';
+            document.getElementById('s3AccessKey').value = '';
+            document.getElementById('s3SecretKey').value = '';
+            document.getElementById('s3Bucket').value = '';
+            loadS3Status();
+        } else {
+            showMessage('s3Message', data.detail || data.message || '保存失败', false);
+        }
+    } catch (e) {
+        showMessage('s3Message', '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '保存'; }
+}
+
 // Load all on page load
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
 loadIquantStatus();
 loadFcStatus();
+loadS3Status();
 </script>
 {% endblock %}

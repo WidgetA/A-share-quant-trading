@@ -537,8 +537,54 @@ def set_recommendations_enabled(enabled: bool) -> None:
 S3_CONFIG_FILE = PROJECT_ROOT / "data" / "s3_config.json"
 
 
+GREPTIMEDB_TOML = PROJECT_ROOT / "config" / "greptimedb.toml"
+
+
+def _read_s3_from_greptimedb_toml() -> dict[str, str]:
+    """Read OSS credentials from config/greptimedb.toml [storage] section.
+
+    The endpoint may use internal VPC address (oss-cn-xxx-internal.aliyuncs.com).
+    For boto3 S3-compatible access, strip '-internal' and ensure https://.
+    """
+    if not GREPTIMEDB_TOML.exists():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    try:
+        with open(GREPTIMEDB_TOML, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return {}
+
+    storage = data.get("storage", {})
+    if storage.get("type", "").lower() != "oss":
+        return {}
+
+    endpoint = storage.get("endpoint", "")
+    endpoint = endpoint.replace("-internal.", ".")
+    if endpoint and not endpoint.startswith("https://"):
+        endpoint = f"https://{endpoint}"
+
+    bucket = storage.get("bucket", "")
+    access_key = storage.get("access_key_id", "")
+    secret_key = storage.get("access_key_secret", "")
+    if endpoint and bucket:
+        return {
+            "endpoint_url": endpoint,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "bucket": bucket,
+        }
+    return {}
+
+
 def get_s3_config() -> dict[str, str]:
-    """Get S3 configuration. Priority: persisted file > env vars > secrets.yaml.
+    """Get S3 configuration.
+
+    Priority: persisted file > greptimedb.toml > env vars > secrets.yaml.
 
     Returns:
         Dict with keys: endpoint_url, access_key, secret_key, bucket.
@@ -547,7 +593,7 @@ def get_s3_config() -> dict[str, str]:
     import json
     import os
 
-    # 1. Persisted file
+    # 1. Persisted file (web UI override)
     if S3_CONFIG_FILE.exists():
         try:
             config = json.loads(S3_CONFIG_FILE.read_text(encoding="utf-8"))
@@ -556,7 +602,12 @@ def get_s3_config() -> dict[str, str]:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # 2. Environment variables
+    # 2. GreptimeDB TOML — same OSS bucket, already has credentials
+    config = _read_s3_from_greptimedb_toml()
+    if config:
+        return config
+
+    # 3. Environment variables
     endpoint = os.environ.get("S3_ENDPOINT_URL", "")
     access_key = os.environ.get("S3_ACCESS_KEY", "")
     secret_key = os.environ.get("S3_SECRET_KEY", "")
@@ -569,7 +620,7 @@ def get_s3_config() -> dict[str, str]:
             "bucket": bucket,
         }
 
-    # 3. secrets.yaml
+    # 4. secrets.yaml
     try:
         secrets = load_secrets()
         endpoint = secrets.get_str("s3.endpoint_url") or ""
