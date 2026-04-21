@@ -3155,7 +3155,7 @@ def create_model_router() -> APIRouter:
     async def upload_model_to_s3():
         """Upload local model files to S3."""
         from src.common.s3_client import create_s3_client_from_config
-        from src.data.services.model_training_scheduler import FULL_MODEL_NAME, MODEL_DIR
+        from src.data.services.model_training_scheduler import MODEL_DIR
 
         s3 = create_s3_client_from_config()
         if s3 is None:
