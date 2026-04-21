@@ -564,7 +564,7 @@ def _read_s3_from_greptimedb_toml() -> dict[str, str]:
         return {}
 
     endpoint = storage.get("endpoint", "")
-    endpoint = endpoint.replace("-internal.", ".")
+    # Keep endpoint as-is (internal for VPC, public for external)
     if endpoint and not endpoint.startswith("https://"):
         endpoint = f"https://{endpoint}"
 
