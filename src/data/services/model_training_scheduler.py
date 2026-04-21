@@ -342,7 +342,12 @@ class ModelTrainingScheduler:
 
         s3_config = get_s3_config()
         if s3_config:
-            payload["s3_config"] = s3_config
+            # FC runs on public internet, convert internal VPC endpoint to public
+            fc_s3 = dict(s3_config)
+            ep = fc_s3.get("endpoint_url", "")
+            if "-internal." in ep:
+                fc_s3["endpoint_url"] = ep.replace("-internal.", ".")
+            payload["s3_config"] = fc_s3
 
         # Step 4: POST async trigger to FC
         fc_url = get_fc_url()
