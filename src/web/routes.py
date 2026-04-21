@@ -3151,26 +3151,4 @@ def create_model_router() -> APIRouter:
         size_kb = round(local_path.stat().st_size / 1024, 1)
         return {"status": "ok", "model_name": local_path.stem, "size_kb": size_kb}
 
-    @router.post("/api/model/upload-s3")
-    async def upload_model_to_s3():
-        """Upload local model files to S3."""
-        from src.common.s3_client import create_s3_client_from_config
-        from src.data.services.model_training_scheduler import MODEL_DIR
-
-        s3 = create_s3_client_from_config()
-        if s3 is None:
-            raise HTTPException(status_code=503, detail="S3 未配置")
-
-        uploaded = []
-        for lgb_file in sorted(MODEL_DIR.glob("*.lgb")):
-            s3_key = f"models/{lgb_file.name}"
-            await s3.upload_file(lgb_file, s3_key)
-            size_kb = round(lgb_file.stat().st_size / 1024, 1)
-            uploaded.append({"name": lgb_file.name, "size_kb": size_kb})
-
-        if not uploaded:
-            raise HTTPException(status_code=404, detail="本地无模型文件")
-
-        return {"status": "ok", "uploaded": uploaded, "count": len(uploaded)}
-
     return router

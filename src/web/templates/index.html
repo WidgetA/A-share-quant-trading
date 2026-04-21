@@ -253,7 +253,6 @@
                     <button class="btn-sm btn-sell" id="btnFinetune" onclick="startFinetune()"
                         {% if not model_scheduler.has_full_model %}disabled title="请先全量训练"{% endif %}>手动微调</button>
                     <button class="btn-sm btn-sell" id="btnDownloadS3" onclick="downloadModelFromS3()" style="background:#1565c0;">下载模型</button>
-                    <button class="btn-sm btn-sell" id="btnUploadS3" onclick="uploadModelToS3()" style="background:#2e7d32;">上传模型</button>
                 </div>
                 <div id="trainLogArea" style="display:none;margin-top:0.5rem;max-height:200px;overflow-y:auto;
                     background:#f5f5f5;padding:0.5rem;border-radius:4px;font-size:0.75rem;font-family:monospace;
@@ -872,32 +871,6 @@ async function downloadModelFromS3() {
     } finally {
         btn.disabled = false;
         btn.textContent = '下载模型';
-    }
-}
-
-async function uploadModelToS3() {
-    const btn = document.getElementById('btnUploadS3');
-    const logArea = document.getElementById('trainLogArea');
-    btn.disabled = true;
-    btn.textContent = '上传中...';
-    logArea.style.display = 'block';
-    logArea.textContent += '正在上传本地模型到 S3...\n';
-    try {
-        const resp = await fetch('/api/model/upload-s3', {method: 'POST'});
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            throw new Error(err.detail || 'HTTP ' + resp.status);
-        }
-        const result = await resp.json();
-        const names = result.uploaded.map(m => m.name + ' (' + m.size_kb + ' KB)').join(', ');
-        logArea.textContent += '上传完成: ' + names + '\n';
-        showToast('已上传 ' + result.count + ' 个模型到 S3', 'success');
-    } catch (e) {
-        logArea.textContent += '[错误] ' + e.message + '\n';
-        showToast('上传失败: ' + e.message, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '上传模型';
     }
 }
 
