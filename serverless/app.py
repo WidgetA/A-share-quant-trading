@@ -391,7 +391,7 @@ def _get_s3_client(s3_config: dict):
         endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
-        config=Config(s3={"addressing_style": "virtual"}),
+        config=Config(s3={"addressing_style": "virtual", "payload_signing_enabled": False}),
     )
     return client, bucket
 
