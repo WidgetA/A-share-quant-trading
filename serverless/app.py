@@ -550,7 +550,20 @@ def _run_training_inner(data: dict, mode: str, lgb, t0: float) -> dict:
     )
     logger.info("Step 2/4 done (%.1fs)", time.time() - t_step)
 
-    callbacks = [lgb.log_evaluation(period=50)]
+    def _log_eval(period=50):
+        """LightGBM callback that logs via logger instead of stdout."""
+
+        def _callback(env):
+            if env.iteration % period == 0 or env.iteration == env.end_iteration - 1:
+                metrics = []
+                for data_name, eval_name, result, _ in env.evaluation_result_list:
+                    metrics.append(f"{data_name} {eval_name}={result:.4f}")
+                logger.info("  [%d/%d] %s", env.iteration, env.end_iteration, " | ".join(metrics))
+
+        _callback.order = 10
+        return _callback
+
+    callbacks = [_log_eval(period=25)]
     valid_sets = [train_data]
     valid_names = ["train"]
 
