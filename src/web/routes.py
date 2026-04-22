@@ -3121,6 +3121,7 @@ def create_model_router() -> APIRouter:
     async def download_s3_model(request: Request):
         """Download a model file from S3 and serve it to the browser."""
         import tempfile
+        from pathlib import Path
 
         from starlette.responses import FileResponse
 
