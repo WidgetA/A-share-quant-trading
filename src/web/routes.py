@@ -3119,11 +3119,12 @@ def create_model_router() -> APIRouter:
 
     @router.post("/api/model/download-s3")
     async def download_s3_model(request: Request):
-        """Download a model file from S3 to local data/models/."""
-        from shutil import copyfile
+        """Download a model file from S3 and serve it to the browser."""
+        import tempfile
+
+        from starlette.responses import FileResponse
 
         from src.common.s3_client import create_s3_client_from_config
-        from src.data.services.model_training_scheduler import FULL_MODEL_NAME, MODEL_DIR
 
         s3 = create_s3_client_from_config()
         if s3 is None:
@@ -3135,21 +3136,17 @@ def create_model_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="无效的 S3 key")
 
         filename = s3_key.rsplit("/", 1)[-1]
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        local_path = MODEL_DIR / filename
 
-        await s3.download_file(s3_key, local_path)
+        # Download to temp file and serve to browser
+        tmp = tempfile.NamedTemporaryFile(suffix=".lgb", delete=False)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+        await s3.download_file(s3_key, tmp_path)
 
-        # If this is a full model, also set it as the active model
-        if filename.startswith("full_") and filename != f"{FULL_MODEL_NAME}.lgb":
-            latest_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
-            copyfile(local_path, latest_path)
-
-        # Update scheduler's S3 model availability flag
-        scheduler = _get_scheduler(request)
-        scheduler.s3_has_full_model = True
-
-        size_kb = round(local_path.stat().st_size / 1024, 1)
-        return {"status": "ok", "model_name": local_path.stem, "size_kb": size_kb}
+        return FileResponse(
+            tmp_path,
+            filename=filename,
+            media_type="application/octet-stream",
+        )
 
     return router

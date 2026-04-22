@@ -865,10 +865,17 @@ async function downloadModelFromS3() {
             const err = await dlResp.json().catch(() => ({}));
             throw new Error(err.detail || 'HTTP ' + dlResp.status);
         }
-        const result = await dlResp.json();
-        logArea.textContent += `下载完成: ${result.model_name} (${result.size_kb} KB)\n`;
-        showToast(`模型已下载: ${result.model_name}`, 'success');
-        loadModelStatus();
+        const blob = await dlResp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = target.key.split('/').pop();
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        logArea.textContent += `下载完成: ${target.key.split('/').pop()} (${sizeKb} KB)\n`;
+        showToast('模型已下载到本地', 'success');
     } catch (e) {
         logArea.textContent += '[错误] ' + e.message + '\n';
         showToast('下载失败: ' + e.message, 'error');
