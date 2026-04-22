@@ -9,7 +9,7 @@ resources:
       region: cn-shanghai
       functionName: ashare_mltrain
       runtime: custom-container
-      timeout: 600
+      timeout: 1500
       memorySize: 16384
       cpu: 4
       diskSize: 10240
