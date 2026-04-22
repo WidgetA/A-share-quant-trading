@@ -375,6 +375,7 @@ def _fetch_training_data(callback_url: str) -> dict[str, dict[str, dict]]:
 def _get_s3_client(s3_config: dict):
     """Create boto3 S3 client from config. Returns (client, bucket) or (None, None)."""
     import boto3
+    from botocore.config import Config
 
     endpoint_url = s3_config.get("endpoint_url", "")
     access_key = s3_config.get("access_key", "")
@@ -384,11 +385,13 @@ def _get_s3_client(s3_config: dict):
     if not all([endpoint_url, access_key, secret_key, bucket]):
         return None, None
 
+    # OSS requires virtual hosted style (bucket.endpoint, not endpoint/bucket)
     client = boto3.client(
         "s3",
         endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
+        config=Config(s3={"addressing_style": "virtual"}),
     )
     return client, bucket
 
