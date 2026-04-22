@@ -418,7 +418,7 @@ def upload_to_s3(local_path: Path, s3_key: str, s3_config: dict) -> str | None:
         logger.warning("S3 config incomplete, skipping upload")
         return None
 
-    client.upload_file(str(local_path), bucket, s3_key)
+    client.put_object(Bucket=bucket, Key=s3_key, Body=local_path.read_bytes())
     uri = f"s3://{bucket}/{s3_key}"
     logger.info("Uploaded %s -> %s", local_path.name, uri)
     return uri
