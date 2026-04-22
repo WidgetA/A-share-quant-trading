@@ -359,7 +359,8 @@ class ModelTrainingScheduler:
         async def _log(msg: str):
             self._append_log(msg)
             if progress_cb:
-                await progress_cb(msg)
+                ts = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
+                await progress_cb(f"[{ts}] {msg}")
 
         await _log(f"{label}开始 (远程FC)")
         await _notify_feishu(f"[模型训练] {label}开始 (远程FC)")
