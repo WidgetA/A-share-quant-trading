@@ -1374,7 +1374,8 @@ class GreptimeBacktestStorage:
         await _count_and_sample(
             "backtest_daily",
             "(is_suspended = false OR is_suspended IS NULL) AND "
-            "(open_price IS NULL OR high_price IS NULL OR low_price IS NULL OR close_price IS NULL)",
+            "(open_price IS NULL OR high_price IS NULL"
+            " OR low_price IS NULL OR close_price IS NULL)",
             "error",
             "null_prices",
             "日线: {cnt} 条非停牌记录价格字段为 NULL",
