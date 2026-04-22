@@ -133,6 +133,19 @@ class ModelTrainingScheduler:
         except Exception as e:
             logger.warning("S3 model check on startup failed (non-fatal): %s", e)
 
+    async def _refresh_s3_flag(self) -> None:
+        """Query S3 to update s3_has_full_model. S3 is single source of truth."""
+        try:
+            from src.common.s3_client import create_s3_client_from_config
+
+            s3 = create_s3_client_from_config()
+            if not s3:
+                return
+            models = await s3.list_models(prefix="models/")
+            self.s3_has_full_model = any("full_" in m["key"] for m in models)
+        except Exception as e:
+            logger.warning("S3 flag refresh failed: %s", e)
+
     def _generate_training_token(self, mode: str) -> str:
         """Generate a one-time token for FC callback authentication."""
         token = secrets.token_urlsafe(32)
@@ -463,7 +476,6 @@ class ModelTrainingScheduler:
                         if mode == "full":
                             await s3.download_file(s3_key, full_model_path)
                         downloaded_from_s3 = True
-                        self.s3_has_full_model = True
                         await _log(f"模型已从 S3 下载: {model_path.name}")
                 except Exception as e:
                     await _log(f"S3 下载失败，尝试 base64 fallback: {e}")
@@ -483,6 +495,9 @@ class ModelTrainingScheduler:
             await _log(f"模型已保存 (base64 fallback): {model_path.name} ({size}B)")
             if mode == "full":
                 full_model_path.write_bytes(model_bytes)
+
+        # Refresh s3_has_full_model from S3 (S3 is single source of truth)
+        await self._refresh_s3_flag()
 
         elapsed = result.get("elapsed_seconds", 0)
         n_samples = result.get("n_samples", 0)
