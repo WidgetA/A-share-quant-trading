@@ -624,8 +624,11 @@ def _run_training_inner(data: dict, mode: str, lgb, t0: float) -> dict:
         s3_uri = None
         s3_config = data.get("s3_config")
         if s3_config:
-            logger.info("Step 6: Uploading to S3 (endpoint=%s, bucket=%s)",
-                        s3_config.get("endpoint_url", "?"), s3_config.get("bucket", "?"))
+            logger.info(
+                "Step 6: Uploading to S3 (endpoint=%s, bucket=%s)",
+                s3_config.get("endpoint_url", "?"),
+                s3_config.get("bucket", "?"),
+            )
             try:
                 s3_uri = upload_to_s3(tmp_out_path, f"models/{model_name}.lgb", s3_config)
                 if mode == "full":
