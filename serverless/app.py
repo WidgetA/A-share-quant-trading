@@ -624,12 +624,17 @@ def _run_training_inner(data: dict, mode: str, lgb, t0: float) -> dict:
         s3_uri = None
         s3_config = data.get("s3_config")
         if s3_config:
+            logger.info("Step 6: Uploading to S3 (endpoint=%s, bucket=%s)",
+                        s3_config.get("endpoint_url", "?"), s3_config.get("bucket", "?"))
             try:
                 s3_uri = upload_to_s3(tmp_out_path, f"models/{model_name}.lgb", s3_config)
                 if mode == "full":
                     upload_to_s3(tmp_out_path, "models/full_latest.lgb", s3_config)
+                logger.info("Step 6 done: s3_uri=%s", s3_uri)
             except Exception as e:
-                logger.error("S3 upload failed: %s", e)
+                logger.error("S3 upload failed: %s", e, exc_info=True)
+        else:
+            logger.warning("Step 6: SKIPPED — no s3_config in payload")
     finally:
         tmp_out_path.unlink(missing_ok=True)
 
