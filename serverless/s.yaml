@@ -10,8 +10,8 @@ resources:
       functionName: ashare_mltrain
       runtime: custom-container
       timeout: 600
-      memorySize: 4096
-      cpu: 1
+      memorySize: 16384
+      cpu: 4
       diskSize: 10240
       customContainerConfig:
         image: ${env.ACR_IMAGE}
