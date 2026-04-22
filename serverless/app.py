@@ -18,7 +18,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import sys
 import tempfile
 import time
 from datetime import datetime
@@ -30,7 +29,7 @@ import requests as http_requests
 from flask import Flask, request
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
