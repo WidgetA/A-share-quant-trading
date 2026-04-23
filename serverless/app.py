@@ -278,14 +278,10 @@ def extract_features(
     # amplitude_decay: avg amplitude 5d / avg amplitude 20d
     if len(history) >= 20:
         amp_5 = [
-            (b["high"] - b["low"]) / b["open"] * 100
-            for b in history[-5:]
-            if b.get("open", 0) > 0
+            (b["high"] - b["low"]) / b["open"] * 100 for b in history[-5:] if b.get("open", 0) > 0
         ]
         amp_20 = [
-            (b["high"] - b["low"]) / b["open"] * 100
-            for b in history[-20:]
-            if b.get("open", 0) > 0
+            (b["high"] - b["low"]) / b["open"] * 100 for b in history[-20:] if b.get("open", 0) > 0
         ]
         mean_5 = statistics.mean(amp_5) if amp_5 else 0.0
         mean_20 = statistics.mean(amp_20) if amp_20 else 0.0
@@ -339,9 +335,7 @@ def extract_features(
 
     # up_day_ratio_20d
     if len(closes) >= 21:
-        up_days = sum(
-            1 for i in range(len(closes) - 20, len(closes)) if closes[i] > closes[i - 1]
-        )
+        up_days = sum(1 for i in range(len(closes) - 20, len(closes)) if closes[i] > closes[i - 1])
         raw["up_day_ratio_20d"] = up_days / 20.0
     else:
         raw["up_day_ratio_20d"] = 0.5
@@ -349,9 +343,7 @@ def extract_features(
     # amplitude_20d: avg daily amplitude over 20d (%)
     if len(history) >= 20:
         amps = [
-            (b["high"] - b["low"]) / b["open"] * 100
-            for b in history[-20:]
-            if b.get("open", 0) > 0
+            (b["high"] - b["low"]) / b["open"] * 100 for b in history[-20:] if b.get("open", 0) > 0
         ]
         raw["amplitude_20d"] = statistics.mean(amps) if amps else 0.0
     else:
@@ -525,10 +517,7 @@ def build_day_data(
     valid_labels: list[int] = []
     for code in codes_list:
         raw_vec = raw_features_per_code[code]
-        z_vec = [
-            (raw_vec[j] - means[j]) / stds[j] if stds[j] > 0 else 0.0
-            for j in range(n_raw)
-        ]
+        z_vec = [(raw_vec[j] - means[j]) / stds[j] if stds[j] > 0 else 0.0 for j in range(n_raw)]
         features.append(raw_vec + z_vec)
         valid_labels.append(labels[code_to_idx[code]])
 
