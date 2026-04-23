@@ -3012,7 +3012,8 @@ def create_model_router() -> APIRouter:
         async def generate_ndjson():
             existing_dates = sorted(await storage.get_existing_daily_dates())
             if mode == "finetune":
-                existing_dates = existing_dates[-120:]
+                # 120 training days + 37 lookback buffer for history-based features
+                existing_dates = existing_dates[-157:]
 
             yield (
                 json.dumps(

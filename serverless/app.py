@@ -113,11 +113,29 @@ EARLY_STOPPING = 50
 # ── Feature Extraction ─────────────────────────────────────
 
 
-def extract_features(bar: dict) -> list[float] | None:
-    """Extract 76 features from a daily OHLCV bar dict.
+def extract_features(
+    bar: dict,
+    history: list[dict],
+    prev_bar: dict | None,
+    market_open_gain: float,
+) -> list[float] | None:
+    """Extract 38 raw features from a daily OHLCV bar + history.
 
-    Returns 38 raw features + 38 Z-scored (zeros during training).
+    Matches ml_scanner.py compute_raw_features() as closely as possible,
+    using daily OHLCV as proxy for intraday 9:40 snapshot features.
+
+    Args:
+        bar: Today's {open, high, low, close, volume} bar.
+        history: Past ~37 bars (oldest first), each {open, high, low, close, volume}.
+        prev_bar: Yesterday's bar (for gap, open_position). None if no previous day.
+        market_open_gain: Average open_gain across all stocks on this day.
+
+    Returns:
+        38 raw feature values in FEATURE_NAMES_RAW order, or None if bar invalid.
     """
+    import math
+    import statistics
+
     o = bar["open"]
     h = bar["high"]
     lo = bar["low"]
@@ -127,93 +145,317 @@ def extract_features(bar: dict) -> list[float] | None:
     if not all([o > 0, h > 0, lo > 0, c > 0]):
         return None
 
-    raw = {}
-    # Basic features
-    raw["open_gain"] = (o / c - 1) * 100
-    raw["volume_amp"] = vol / 1e6 if vol else 0
-    raw["consecutive_up_days"] = 0
-    raw["trend_5d"] = 0
-    raw["trend_10d"] = 0
-    raw["avg_return_20d"] = 0
-    raw["volatility_20d"] = 0
+    raw: dict[str, float] = {}
+    closes = [b["close"] for b in history if b.get("close", 0) > 0]
+
+    # ── 13 Basic Features ──
+
+    # open_gain: daily proxy for intraday (latest_940 - open) / open × 100
+    raw["open_gain"] = (c - o) / o * 100
+
+    # volume_amp: volume / avg_volume (normalized to ~1 for typical day)
+    hist_vols = [b.get("volume", 0) for b in history if b.get("volume", 0) > 0]
+    avg_vol = statistics.mean(hist_vols) if hist_vols else 0.0
+    raw["volume_amp"] = vol / avg_vol if avg_vol > 0 else 0.0
+
+    # consecutive_up_days: count from history
+    cup = 0
+    if len(closes) >= 2:
+        for i in range(len(closes) - 1, 0, -1):
+            if closes[i] > closes[i - 1]:
+                cup += 1
+            else:
+                break
+    raw["consecutive_up_days"] = float(cup)
+
+    # trend_5d: (last close - close 5 days ago) / close 5 days ago × 100
+    if len(closes) >= 6:
+        raw["trend_5d"] = (closes[-1] - closes[-6]) / closes[-6] * 100
+    else:
+        raw["trend_5d"] = 0.0
+
+    # trend_10d
+    if len(closes) >= 11:
+        raw["trend_10d"] = (closes[-1] - closes[-11]) / closes[-11] * 100
+    else:
+        raw["trend_10d"] = 0.0
+
+    # avg_return_20d: mean daily return over last 20 days (%)
+    if len(closes) >= 21:
+        rets_20 = [
+            (closes[i] - closes[i - 1]) / closes[i - 1] * 100
+            for i in range(len(closes) - 20, len(closes))
+            if closes[i - 1] > 0
+        ]
+        raw["avg_return_20d"] = statistics.mean(rets_20) if rets_20 else 0.0
+    else:
+        raw["avg_return_20d"] = 0.0
+
+    # volatility_20d: stdev of daily returns over last 20 days (%)
+    if len(closes) >= 21:
+        rets_20 = [
+            (closes[i] - closes[i - 1]) / closes[i - 1] * 100
+            for i in range(len(closes) - 20, len(closes))
+            if closes[i - 1] > 0
+        ]
+        raw["volatility_20d"] = statistics.stdev(rets_20) if len(rets_20) >= 2 else 0.0
+    else:
+        raw["volatility_20d"] = 0.0
+
+    # early_price_range: daily proxy = (high - low) / open × 100
     raw["early_price_range"] = (h - lo) / o * 100
-    raw["market_open_gain"] = 0
-    raw["trend_consistency"] = 0
-    raw["gap"] = 0
-    raw["upper_shadow_ratio"] = (h - max(o, c)) / (h - lo) if h > lo else 0
-    raw["volume_ratio"] = 1.0
 
-    # Advanced features
-    raw["open_position_consistency"] = 0
-    raw["volume_price_divergence"] = 0
-    raw["intraday_momentum_cont"] = (c - o) / (h - lo) if h > lo else 0
-    raw["volume_concentration"] = 0
-    raw["relative_strength"] = 0
-    raw["return_consistency"] = 0
-    raw["amplitude_decay"] = 0
-    raw["volume_stability"] = 0
-    raw["close_vs_vwap"] = 0
-    raw["volume_weighted_return"] = 0
-    raw["price_channel_position"] = 0
-    raw["up_day_ratio_20d"] = 0
-    raw["amplitude_20d"] = (h - lo) / o * 100
-    raw["volume_ratio_5d_20d"] = 1.0
+    # market_open_gain: passed in (avg across all stocks today)
+    raw["market_open_gain"] = market_open_gain
 
-    # Cross features
-    raw["momentum_x_mean_reversion"] = raw["open_gain"] * raw["avg_return_20d"]
+    # trend_consistency: fraction of last 5 days with positive returns
+    if len(closes) >= 6:
+        recent_5 = closes[-6:]
+        pos_days = sum(1 for i in range(1, len(recent_5)) if recent_5[i] > recent_5[i - 1])
+        raw["trend_consistency"] = pos_days / 5.0
+    else:
+        raw["trend_consistency"] = 0.0
+
+    # gap: (open - prev_close) / prev_close × 100
+    if prev_bar and prev_bar.get("close", 0) > 0:
+        raw["gap"] = (o - prev_bar["close"]) / prev_bar["close"] * 100
+    else:
+        raw["gap"] = 0.0
+
+    # upper_shadow_ratio: (high - max(open, close)) / open × 100
+    body_top = max(o, c)
+    raw["upper_shadow_ratio"] = (h - body_top) / o * 100 if o > 0 else 0.0
+
+    # volume_ratio: volume / avg_volume (raw, not normalized by session ratio)
+    raw["volume_ratio"] = vol / avg_vol if avg_vol > 0 else 0.0
+
+    # ── 14 Advanced Features ──
+
+    # open_position_consistency: where today's open sits in yesterday's range
+    if prev_bar and prev_bar.get("high", 0) > 0:
+        day_range = prev_bar["high"] - prev_bar["low"]
+        raw["open_position_consistency"] = (
+            (o - prev_bar["low"]) / day_range if day_range > 0 else 0.5
+        )
+    else:
+        raw["open_position_consistency"] = 0.5
+
+    # volume_price_divergence: return × volume change (last day)
+    if len(history) >= 2:
+        prev_c = history[-2].get("close", 0)
+        last_ret = (history[-1]["close"] - prev_c) / prev_c if prev_c > 0 else 0.0
+        prev_v = history[-2].get("volume", 0)
+        last_vol_chg = (history[-1]["volume"] - prev_v) / prev_v if prev_v > 0 else 0.0
+        raw["volume_price_divergence"] = last_ret * last_vol_chg
+    else:
+        raw["volume_price_divergence"] = 0.0
+
+    # intraday_momentum_cont: open_gain × gap (continuation signal)
+    raw["intraday_momentum_cont"] = raw["open_gain"] * raw["gap"]
+
+    # volume_concentration: volume_amp × early_session_ratio
+    raw["volume_concentration"] = raw["volume_amp"] * 0.125
+
+    # relative_strength: stock gain vs market gain
+    raw["relative_strength"] = raw["open_gain"] - market_open_gain
+
+    # return_consistency: |mean(ret)| / std(ret) over 20d
+    if len(closes) >= 21:
+        rets = [
+            (closes[i + 1] - closes[i]) / closes[i] * 100
+            for i in range(len(closes) - 21, len(closes) - 1)
+            if closes[i] > 0
+        ]
+        if len(rets) >= 2:
+            mean_r = statistics.mean(rets)
+            std_r = statistics.stdev(rets)
+            raw["return_consistency"] = abs(mean_r) / std_r if std_r > 0 else 0.0
+        else:
+            raw["return_consistency"] = 0.0
+    else:
+        raw["return_consistency"] = 0.0
+
+    # amplitude_decay: avg amplitude 5d / avg amplitude 20d
+    if len(history) >= 20:
+        amp_5 = [
+            (b["high"] - b["low"]) / b["open"] * 100
+            for b in history[-5:]
+            if b.get("open", 0) > 0
+        ]
+        amp_20 = [
+            (b["high"] - b["low"]) / b["open"] * 100
+            for b in history[-20:]
+            if b.get("open", 0) > 0
+        ]
+        mean_5 = statistics.mean(amp_5) if amp_5 else 0.0
+        mean_20 = statistics.mean(amp_20) if amp_20 else 0.0
+        raw["amplitude_decay"] = mean_5 / mean_20 if mean_20 > 0 else 1.0
+    else:
+        raw["amplitude_decay"] = 1.0
+
+    # volume_stability: CV of volumes over 20d
+    if len(history) >= 20:
+        vols_20 = [b.get("volume", 0) for b in history[-20:]]
+        mean_v = statistics.mean(vols_20)
+        std_v = statistics.stdev(vols_20) if len(vols_20) >= 2 else 0.0
+        raw["volume_stability"] = std_v / mean_v if mean_v > 0 else 0.0
+    else:
+        raw["volume_stability"] = 0.0
+
+    # close_vs_vwap: close vs typical price proxy of last historical bar
+    if len(history) >= 1:
+        last = history[-1]
+        typical = (last["high"] + last["low"] + last["close"]) / 3
+        raw["close_vs_vwap"] = (c - typical) / typical * 100 if typical > 0 else 0.0
+    else:
+        raw["close_vs_vwap"] = 0.0
+
+    # volume_weighted_return over 20d
+    if len(history) >= 21:
+        total_vw = 0.0
+        total_vol = 0.0
+        for i in range(len(history) - 20, len(history)):
+            if i > 0 and history[i - 1].get("close", 0) > 0:
+                ret = (history[i]["close"] - history[i - 1]["close"]) / history[i - 1]["close"] * 100
+                total_vw += ret * history[i].get("volume", 0)
+                total_vol += history[i].get("volume", 0)
+        raw["volume_weighted_return"] = total_vw / total_vol if total_vol > 0 else 0.0
+    else:
+        raw["volume_weighted_return"] = 0.0
+
+    # price_channel_position: (close - 20d_low) / (20d_high - 20d_low)
+    if len(history) >= 20:
+        highs_20 = [b["high"] for b in history[-20:] if b.get("high", 0) > 0]
+        lows_20 = [b["low"] for b in history[-20:] if b.get("low", 0) > 0]
+        if highs_20 and lows_20:
+            h20, l20 = max(highs_20), min(lows_20)
+            channel = h20 - l20
+            raw["price_channel_position"] = (c - l20) / channel if channel > 0 else 0.5
+        else:
+            raw["price_channel_position"] = 0.5
+    else:
+        raw["price_channel_position"] = 0.5
+
+    # up_day_ratio_20d
+    if len(closes) >= 21:
+        up_days = sum(
+            1 for i in range(len(closes) - 20, len(closes)) if closes[i] > closes[i - 1]
+        )
+        raw["up_day_ratio_20d"] = up_days / 20.0
+    else:
+        raw["up_day_ratio_20d"] = 0.5
+
+    # amplitude_20d: avg daily amplitude over 20d (%)
+    if len(history) >= 20:
+        amps = [
+            (b["high"] - b["low"]) / b["open"] * 100
+            for b in history[-20:]
+            if b.get("open", 0) > 0
+        ]
+        raw["amplitude_20d"] = statistics.mean(amps) if amps else 0.0
+    else:
+        raw["amplitude_20d"] = 0.0
+
+    # volume_ratio_5d_20d: avg vol 5d / avg vol 20d
+    if len(history) >= 20:
+        vol_5d = statistics.mean([b.get("volume", 0) for b in history[-5:]])
+        vol_20d = statistics.mean([b.get("volume", 0) for b in history[-20:]])
+        raw["volume_ratio_5d_20d"] = vol_5d / vol_20d if vol_20d > 0 else 1.0
+    else:
+        raw["volume_ratio_5d_20d"] = 1.0
+
+    # ── 11 Cross Features ──
+    vol_20 = raw["volatility_20d"]
+    raw["momentum_x_mean_reversion"] = (
+        raw["trend_5d"] * (1.0 - raw["avg_return_20d"] / vol_20) if vol_20 > 0 else 0.0
+    )
     raw["trend_acceleration"] = raw["trend_5d"] - raw["trend_10d"]
-    raw["momentum_quality"] = raw["open_gain"] * raw["volume_amp"]
-    raw["volume_trend_interaction"] = raw["volume_ratio"] * raw["trend_5d"]
+    raw["momentum_quality"] = raw["trend_5d"] * raw["volume_amp"]
+    raw["volume_trend_interaction"] = raw["volume_ratio_5d_20d"] * raw["trend_5d"]
     raw["gap_volume_interaction"] = raw["gap"] * raw["volume_amp"]
     raw["strength_persistence"] = raw["relative_strength"] * raw["consecutive_up_days"]
-    raw["volatility_adj_return"] = (
-        raw["open_gain"] / raw["volatility_20d"] if raw["volatility_20d"] > 0 else 0
-    )
-    raw["volume_price_momentum"] = raw["volume_amp"] * raw["intraday_momentum_cont"]
-    raw["gap_reversion"] = raw["gap"] * raw["open_gain"]
-    raw["trend_volume_divergence"] = raw["trend_5d"] * (1 - raw["volume_ratio"])
+    raw["volatility_adj_return"] = raw["avg_return_20d"] / vol_20 if vol_20 > 0 else 0.0
+    raw["volume_price_momentum"] = raw["volume_amp"] * raw["open_gain"]
+    raw["gap_reversion"] = raw["gap"] * (raw["open_gain"] - raw["gap"])
+    vr_5_20 = raw["volume_ratio_5d_20d"]
+    raw["trend_volume_divergence"] = raw["trend_5d"] / vr_5_20 if vr_5_20 > 0 else 0.0
     raw["momentum_stability"] = raw["return_consistency"] * raw["trend_5d"]
 
-    feature_vec = [raw.get(name, 0.0) for name in FEATURE_NAMES_RAW]
-    z_scored = [0.0] * len(FEATURE_NAMES_RAW)
-    return feature_vec + z_scored
+    # Sanitize: replace NaN/Inf with 0
+    for k, v in raw.items():
+        if math.isnan(v) or math.isinf(v):
+            raw[k] = 0.0
+
+    return [raw.get(name, 0.0) for name in FEATURE_NAMES_RAW]
 
 
 # ── Dataset Building ───────────────────────────────────────
 
 
+def _build_stock_history(
+    code: str,
+    daily_data: dict[str, dict[str, dict]],
+    all_dates: list[str],
+    day_idx: int,
+    lookback: int = 37,
+) -> list[dict]:
+    """Build history list for one stock up to (not including) day_idx.
+
+    Returns list of bar dicts (oldest first), up to `lookback` bars.
+    """
+    history: list[dict] = []
+    start = max(0, day_idx - lookback)
+    for i in range(start, day_idx):
+        bar = daily_data.get(all_dates[i], {}).get(code)
+        if bar and bar.get("close", 0) > 0 and not bar.get("is_suspended"):
+            history.append(bar)
+    return history
+
+
 def build_day_data(
-    daily_map: dict[str, dict],
+    daily_data: dict[str, dict[str, dict]],
+    all_dates: list[str],
+    day_idx: int,
     future_map: dict[str, dict],
 ) -> dict | None:
-    """Build features + labels for one trading day.
+    """Build features + labels for one trading day, using full history context.
 
     Args:
-        daily_map: {stock_code: {open, high, low, close, ...}} for day T.
+        daily_data: Full {date_str: {stock_code: bar}} dataset.
+        all_dates: Sorted list of all date strings.
+        day_idx: Index of current day in all_dates.
         future_map: {stock_code: {close, ...}} for day T+FORWARD_DAYS.
 
     Returns:
         {"features": [...], "labels": [...], "group_size": int} or None.
     """
+    import statistics
+
+    current_date = all_dates[day_idx]
+    daily_map = daily_data.get(current_date, {})
+
     if not daily_map or not future_map or len(daily_map) < 50:
         return None
 
-    # Collect close prices
-    today_close = {}
+    # Previous day for gap/open_position features
+    prev_date_map = daily_data.get(all_dates[day_idx - 1], {}) if day_idx > 0 else {}
+
+    # Collect close prices (skip suspended)
+    today_close: dict[str, float] = {}
     for code, bar in daily_map.items():
         if bar.get("is_suspended"):
             continue
         if bar.get("close", 0) > 0:
             today_close[code] = bar["close"]
 
-    future_close = {}
+    future_close: dict[str, float] = {}
     for code, bar in future_map.items():
         if bar.get("close", 0) > 0:
             future_close[code] = bar["close"]
 
     # Forward returns
-    codes_with_return = []
-    returns = []
+    codes_with_return: list[str] = []
+    returns: list[float] = []
     for code in today_close:
         if code in future_close:
             ret = (future_close[code] / today_close[code] - 1) * 100 - TOTAL_FEE_PCT
@@ -226,7 +468,7 @@ def build_day_data(
     # Quintile labels
     sorted_rets = sorted(returns)
     bin_size = len(sorted_rets) / LABEL_BINS
-    labels = []
+    labels: list[int] = []
     for ret in returns:
         for b in range(LABEL_BINS):
             threshold_idx = min(int((b + 1) * bin_size), len(sorted_rets) - 1)
@@ -236,20 +478,58 @@ def build_day_data(
         else:
             labels.append(LABEL_BINS - 1)
 
-    # Extract features
-    features = []
-    valid_labels = []
+    # Compute market_open_gain (average open_gain across all non-suspended stocks)
+    open_gains: list[float] = []
+    for code, bar in daily_map.items():
+        if bar.get("is_suspended"):
+            continue
+        o = bar.get("open", 0)
+        c = bar.get("close", 0)
+        if o > 0 and c > 0:
+            open_gains.append((c - o) / o * 100)
+    market_open_gain = statistics.mean(open_gains) if open_gains else 0.0
+
+    # Extract raw features per stock
+    raw_features_per_code: dict[str, list[float]] = {}
+    code_to_idx: dict[str, int] = {}
     for i, code in enumerate(codes_with_return):
         bar = daily_map.get(code)
         if not bar:
             continue
-        fv = extract_features(bar)
+        history = _build_stock_history(code, daily_data, all_dates, day_idx)
+        prev_bar = prev_date_map.get(code)
+        fv = extract_features(bar, history, prev_bar, market_open_gain)
         if fv is not None:
-            features.append(fv)
-            valid_labels.append(labels[i])
+            raw_features_per_code[code] = fv
+            code_to_idx[code] = i
 
-    if not features:
+    if not raw_features_per_code:
         return None
+
+    # Z-score normalize across this day's candidates (matching ml_scanner)
+    n_raw = len(FEATURE_NAMES_RAW)
+    codes_list = list(raw_features_per_code.keys())
+    raw_matrix = [raw_features_per_code[c] for c in codes_list]
+
+    means = []
+    stds = []
+    for j in range(n_raw):
+        vals = [row[j] for row in raw_matrix]
+        m = statistics.mean(vals)
+        s = statistics.stdev(vals) if len(vals) >= 2 else 1.0
+        means.append(m)
+        stds.append(s)
+
+    features: list[list[float]] = []
+    valid_labels: list[int] = []
+    for code in codes_list:
+        raw_vec = raw_features_per_code[code]
+        z_vec = [
+            (raw_vec[j] - means[j]) / stds[j] if stds[j] > 0 else 0.0
+            for j in range(n_raw)
+        ]
+        features.append(raw_vec + z_vec)
+        valid_labels.append(labels[code_to_idx[code]])
 
     return {
         "features": features,
@@ -276,18 +556,22 @@ def build_training_data(
     if len(all_dates) < MIN_TRAIN_DAYS:
         raise ValueError(f"Not enough data: {len(all_dates)} < {MIN_TRAIN_DAYS} days")
 
+    # For finetune: only train/val on last 120 days, but keep full date list
+    # so _build_stock_history can look back 37 days for feature computation.
     if mode == "finetune":
-        all_dates = all_dates[-120:]
+        train_val_dates = all_dates[-120:]
+    else:
+        train_val_dates = list(all_dates)
 
-    split_idx = int(len(all_dates) * TRAIN_VAL_SPLIT)
-    train_dates = all_dates[:split_idx]
-    val_dates = all_dates[split_idx:]
+    split_idx = int(len(train_val_dates) * TRAIN_VAL_SPLIT)
+    train_dates = train_val_dates[:split_idx]
+    val_dates = train_val_dates[split_idx:]
 
     def _process_dates(dates):
         features, labels, groups = [], [], []
         skipped = 0
-        for i, d in enumerate(dates):
-            # Find future date
+        for d in dates:
+            # Use full all_dates for index (so history lookback works)
             d_idx = all_dates.index(d)
             if d_idx + FORWARD_DAYS >= len(all_dates):
                 skipped += 1
@@ -295,7 +579,9 @@ def build_training_data(
             future_d = all_dates[d_idx + FORWARD_DAYS]
 
             day_data = build_day_data(
-                daily_data.get(d, {}),
+                daily_data,
+                all_dates,
+                d_idx,
                 daily_data.get(future_d, {}),
             )
             if day_data is None:
