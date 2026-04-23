@@ -316,7 +316,8 @@ def extract_features(
         total_vol = 0.0
         for i in range(len(history) - 20, len(history)):
             if i > 0 and history[i - 1].get("close", 0) > 0:
-                ret = (history[i]["close"] - history[i - 1]["close"]) / history[i - 1]["close"] * 100
+                prev_cl = history[i - 1]["close"]
+                ret = (history[i]["close"] - prev_cl) / prev_cl * 100
                 total_vw += ret * history[i].get("volume", 0)
                 total_vol += history[i].get("volume", 0)
         raw["volume_weighted_return"] = total_vw / total_vol if total_vol > 0 else 0.0
