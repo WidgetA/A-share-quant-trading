@@ -588,6 +588,17 @@ SignalStore                                               (push signal → iQuan
 - **Training**: ~1 year data, ~200 candidates/day, ~57k training records
 - **Hyperparams**: 15 leaves, lr 0.05, 80% feature/sample fraction, L1=0.1, L2=1.0, max 500 rounds, early stop 50
 
+**Feature Alignment (CRITICAL)**:
+FC training (`serverless/app.py`) MUST replicate `lgbrank_scorer.py`'s feature computation exactly:
+- **Units**: All ratios (0.01 = 1%), NOT percentages. `open_gain = (close-open)/open`, not `×100`
+- **volume_amp**: Uses `×0.125` early session ratio: `vol / (avg_vol × 0.125)`
+- **market_open_gain**: Average **gap** ratio `(open-prev_close)/prev_close`, NOT intraday gain
+- **trend_consistency**: Sharpe-like `avg_return/(volatility+0.001)`, NOT fraction of positive days
+- **Advanced features**: Numpy arrays over full history, matching `_compute_advanced_features` exactly
+- **Cross features**: Match `_compute_engineered_features` exactly (e.g. `trend_acceleration = trend_10d - trend_5d`)
+- **Z-score**: numpy std (ddof=0), matching `_add_zscore`
+- **Reference**: `lgbrank_scorer.py` in main worktree is the source of truth for all feature formulas
+
 **Model Management**:
 - Training runs on Alibaba Cloud FC serverless (async invocation, `X-Fc-Invocation-Type: Async`)
 - Flow: trading-service triggers FC → FC fetches data via callback → trains → POSTs result back
