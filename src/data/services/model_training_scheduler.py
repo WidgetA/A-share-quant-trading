@@ -431,9 +431,9 @@ class ModelTrainingScheduler:
 
         # Wait for FC to call back with result
         try:
-            await asyncio.wait_for(event.wait(), timeout=1800)
+            await asyncio.wait_for(event.wait(), timeout=3600)
         except asyncio.TimeoutError:
-            error = "FC 训练超时 (>1800s 未收到回调)"
+            error = "FC 训练超时 (>3600s 未收到回调)"
             await _log(error)
             await _notify_feishu(f"[模型{label}] {error}")
             return {"error": error}
