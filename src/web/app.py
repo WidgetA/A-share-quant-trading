@@ -57,6 +57,61 @@ TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
 
 
+async def _try_connect_greptime(app: FastAPI) -> bool:
+    """Try to connect GreptimeDB and wire up storage + pipeline.
+
+    On success: sets app.state.storage, app.state.pipeline, injects into
+    iQuant router, and returns True.
+    On failure: leaves app.state.storage/pipeline as None and returns False.
+    """
+    from src.data.clients.greptime_storage import create_storage_from_config
+    from src.data.services.cache_pipeline import CachePipeline
+    from src.data.services.cache_progress_reporter import CacheProgressReporter
+    from src.data.sources.tsanghi_daily_source import TsanghiDailySource
+    from src.data.sources.tushare_metadata_source import TushareMetadataSource
+    from src.data.sources.tushare_minute_source import TushareMinuteSource
+
+    storage = create_storage_from_config()
+    try:
+        await storage.start()
+    except Exception as e:
+        logger.warning(f"GreptimeDB not available: {e}")
+        return False
+
+    app.state.storage = storage
+    app.state.pipeline = CachePipeline(
+        storage=storage,
+        daily_source=TsanghiDailySource(),
+        minute_source=TushareMinuteSource(),
+        metadata_source=TushareMetadataSource(),
+        reporter=CacheProgressReporter(),
+    )
+    logger.info("GreptimeDB storage + cache pipeline ready")
+
+    # Inject shared storage into iQuant router
+    iquant_rtr = getattr(app.state, "iquant_router", None)
+    if iquant_rtr and hasattr(iquant_rtr, "_inject_storage"):
+        iquant_rtr._inject_storage(storage)
+    return True
+
+
+async def _greptime_reconnect_loop(app: FastAPI) -> None:
+    """Background task: retry connecting GreptimeDB with exponential backoff.
+
+    Runs until connection succeeds or the task is cancelled (shutdown).
+    """
+    import asyncio
+
+    delay = 5
+    while True:
+        await asyncio.sleep(delay)
+        if await _try_connect_greptime(app):
+            logger.info("GreptimeDB connected via background retry")
+            return
+        delay = min(delay * 2, 60)
+        logger.warning(f"GreptimeDB still unavailable, next retry in {delay}s")
+
+
 def create_app(
     store: PendingConfirmationStore | None = None,
     web_base_url: str | None = None,
@@ -152,34 +207,17 @@ def create_app(
         # GreptimeDB storage + cache pipeline — wired here so the dependency
         # graph (storage → sources → aggregator → reporter → pipeline) lives
         # in one place. Routes / schedulers consume them via app.state.
-        from src.data.clients.greptime_storage import create_storage_from_config
-        from src.data.services.cache_pipeline import CachePipeline
-        from src.data.services.cache_progress_reporter import CacheProgressReporter
-        from src.data.sources.tsanghi_daily_source import TsanghiDailySource
-        from src.data.sources.tushare_metadata_source import TushareMetadataSource
-        from src.data.sources.tushare_minute_source import TushareMinuteSource
+        #
+        # Uses a background retry loop: if GreptimeDB is unavailable at startup,
+        # a background task keeps retrying with exponential backoff. Once connected
+        # it sets app.state.storage / pipeline so all consumers pick it up.
+        app.state.storage = None
+        app.state.pipeline = None
 
-        storage = create_storage_from_config()
-        try:
-            await storage.start()
-            app.state.storage = storage
-            app.state.pipeline = CachePipeline(
-                storage=storage,
-                daily_source=TsanghiDailySource(),
-                minute_source=TushareMinuteSource(),
-                metadata_source=TushareMetadataSource(),
-                reporter=CacheProgressReporter(),
+        if not await _try_connect_greptime(app):
+            app.state._greptime_reconnect_task = asyncio.create_task(
+                _greptime_reconnect_loop(app)
             )
-            logger.info("GreptimeDB storage + cache pipeline ready")
-
-            # Inject shared storage into iQuant router
-            iquant_rtr = getattr(app.state, "iquant_router", None)
-            if iquant_rtr and hasattr(iquant_rtr, "_inject_storage"):
-                iquant_rtr._inject_storage(storage)
-        except Exception as e:
-            logger.error(f"Failed to connect GreptimeDB storage: {e}")
-            app.state.storage = None
-            app.state.pipeline = None
 
         # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
         # CRITICAL: must start before anything else — safety monitoring cannot be skipped
@@ -280,6 +318,12 @@ def create_app(
                 task.cancel()
             monitor_state["running"] = False
             logger.info("Intraday momentum monitor stopped")
+
+        # Cancel GreptimeDB reconnect task if still running
+        reconnect_task = getattr(app.state, "_greptime_reconnect_task", None)
+        if reconnect_task and not reconnect_task.done():
+            reconnect_task.cancel()
+            logger.info("GreptimeDB reconnect task cancelled")
 
         # Close GreptimeDB storage pool
         storage = getattr(app.state, "storage", None)
