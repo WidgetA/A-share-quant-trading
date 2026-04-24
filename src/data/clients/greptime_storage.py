@@ -856,12 +856,12 @@ class GreptimeBacktestStorage:
         across incremental download runs.
         """
         rows = await self.db.fetch(
-            "SELECT stock_code, close_price FROM backtest_daily "
-            "WHERE (stock_code, ts) IN ("
-            "  SELECT stock_code, MAX(ts) FROM backtest_daily "
+            "SELECT b.stock_code, b.close_price FROM backtest_daily b "
+            "INNER JOIN ("
+            "  SELECT stock_code, MAX(ts) as max_ts FROM backtest_daily "
             "  WHERE close_price IS NOT NULL "
             "  GROUP BY stock_code"
-            ")"
+            ") m ON b.stock_code = m.stock_code AND b.ts = m.max_ts"
         )
         return {r["stock_code"]: float(r["close_price"]) for r in rows}
 
