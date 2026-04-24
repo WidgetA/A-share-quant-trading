@@ -196,6 +196,17 @@ Before starting any development task:
 | Market Data | Tushare Pro (realtime + trade_cal + stock_basic + suspend_d + `stk_mins` 1min for backtest minute), tsanghi (backtest daily, **max concurrency=2**) | A-share real-time and historical data. **`stk_mins` server-side limit: 8000 rows/call** — batch size must stay ≤ 30 codes (30 × 241 bars = 7230) |
 | GreptimeDB Client | asyncpg | Async PostgreSQL wire protocol access |
 
+## ML Model Management
+
+**S3 is the single source of truth.** Local `data/models/full_latest.lgb` is only a disk cache required by LightGBM (which only loads from file paths).
+
+| Rule | Detail |
+|------|--------|
+| **Startup sync** | `_ensure_local_model_from_s3` always downloads the latest model from S3, overwriting local cache. No "skip if exists" — stale models are worse than a 1-second download |
+| **Model metadata** | Every S3 download writes `data/models/.model_meta.json` with `s3_key`, `training_date`, `downloaded_at`. Dashboard reads this to show which model version is active |
+| **Training callback** | After FC training completes, Step 5 downloads from S3 and writes the same `.model_meta.json` |
+| **Fallback** | If S3 is unreachable on startup, the existing local model is used (last downloaded copy). The service still starts |
+
 ## GreptimeDB Rules (CRITICAL)
 
 GreptimeDB exposes a PostgreSQL wire protocol on port 4003, but its compatibility is incomplete in places asyncpg's pool exercises every few thousand queries. The result is **silent hangs** that take hours to diagnose. The rules below encode hard-won lessons — do NOT skip any of them.

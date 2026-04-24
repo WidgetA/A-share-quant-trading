@@ -20,6 +20,8 @@ MAX_DATA_FIX_ATTEMPTS = 3
 FULL_MODEL_NAME = "full_latest"
 MODEL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "models"
 LAST_TRAIN_FILE = MODEL_DIR / ".last_finetune_date"
+LAST_SUCCESS_FILE = MODEL_DIR / ".last_success_time"
+MODEL_META_FILE = MODEL_DIR / ".model_meta.json"
 
 
 async def _notify_feishu(message: str) -> None:
@@ -71,6 +73,57 @@ def _set_last_finetune_date(d: date) -> None:
     LAST_TRAIN_FILE.write_text(d.strftime("%Y-%m-%d"), encoding="utf-8")
 
 
+def _get_last_success_time() -> str | None:
+    """Read the last successful training time from marker file."""
+    if LAST_SUCCESS_FILE.exists():
+        try:
+            return LAST_SUCCESS_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return None
+
+
+def _set_last_success_time(mode: str, model_name: str) -> None:
+    """Write the last successful training time to marker file."""
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(BEIJING_TZ)
+    label = "全量" if mode == "full" else "微调"
+    text = f"{now.strftime('%Y-%m-%d %H:%M')}|{label}|{model_name}"
+    LAST_SUCCESS_FILE.write_text(text, encoding="utf-8")
+
+
+def _write_model_meta(s3_key: str, s3_last_modified: str) -> None:
+    """Write model metadata after downloading from S3."""
+    import json
+    import re
+
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    # Extract training date from S3 key, e.g. "models/full_20260406.lgb" → "2026-04-06"
+    training_date: str | None = None
+    m = re.search(r"(\d{4})(\d{2})(\d{2})\.lgb$", s3_key)
+    if m:
+        training_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    meta = {
+        "s3_key": s3_key,
+        "s3_last_modified": s3_last_modified,
+        "training_date": training_date,
+        "downloaded_at": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    MODEL_META_FILE.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def get_model_meta() -> dict | None:
+    """Read model metadata. Returns None if not available."""
+    import json
+
+    if not MODEL_META_FILE.exists():
+        return None
+    try:
+        return json.loads(MODEL_META_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 class ModelTrainingScheduler:
     """Background scheduler for auto fine-tuning every 20 trading days at 3am.
 
@@ -95,11 +148,11 @@ class ModelTrainingScheduler:
         self._ensure_local_model_from_s3()
 
     def _ensure_local_model_from_s3(self) -> None:
-        """On startup, check S3 for models and download if local is missing.
+        """On startup, always sync latest model from S3.
 
-        S3 is the single source of truth. Local is just a cache.
-        Only FC writes to S3 (after training). This method only reads.
-        Sets self.s3_has_full_model based on S3 query result.
+        S3 is the single source of truth. Local is just a disk cache
+        required by LightGBM (which only loads from file paths).
+        Always downloads the latest model to ensure freshness.
         """
         try:
             from src.common.s3_client import create_s3_client_from_config
@@ -117,13 +170,12 @@ class ModelTrainingScheduler:
                     logger.info("No model in S3 yet")
                     return
                 self.s3_has_full_model = True
-                full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
-                if full_model_path.exists():
-                    return  # local cache already present
                 latest = sorted(full_models, key=lambda m: m["last_modified"])[-1]
+                full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
                 MODEL_DIR.mkdir(parents=True, exist_ok=True)
                 await s3.download_file(latest["key"], full_model_path)
-                logger.info("Downloaded model from S3: %s", latest["key"])
+                _write_model_meta(latest["key"], latest["last_modified"])
+                logger.info("Synced model from S3: %s", latest["key"])
 
             try:
                 loop = asyncio.get_running_loop()
@@ -188,6 +240,15 @@ class ModelTrainingScheduler:
     def get_status(self) -> dict:
         """Return scheduler status for dashboard display."""
         full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
+        # Parse last success info from file: "2026-04-24 03:15|微调|finetune_20260424"
+        last_success = _get_last_success_time()
+        last_success_time = None
+        last_success_label = None
+        if last_success:
+            parts = last_success.split("|", 2)
+            last_success_time = parts[0]
+            last_success_label = parts[1] if len(parts) > 1 else None
+        meta = get_model_meta()
         return {
             "next_run_time": self.next_run_time,
             "last_run_time": self.last_run_time,
@@ -197,7 +258,11 @@ class ModelTrainingScheduler:
             "has_full_model": full_model_path.exists(),
             "s3_has_full_model": self.s3_has_full_model,
             "current_model": self._get_current_model_name(),
+            "model_training_date": meta.get("training_date") if meta else None,
+            "model_s3_key": meta.get("s3_key") if meta else None,
             "log_lines": self.training_log[-50:],
+            "last_success_time": last_success_time,
+            "last_success_label": last_success_label,
         }
 
     def _get_current_model_name(self) -> str | None:
@@ -464,6 +529,7 @@ class ModelTrainingScheduler:
         full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
 
         downloaded_from_s3 = False
+        s3_key = None
         if s3_uri:
             # Parse s3_key from s3_uri (format: s3://bucket/key)
             s3_key = "/".join(s3_uri.split("/")[3:]) if s3_uri.startswith("s3://") else None
@@ -497,6 +563,13 @@ class ModelTrainingScheduler:
             if mode == "full":
                 full_model_path.write_bytes(model_bytes)
 
+        # Write model metadata so dashboard shows training date
+        now_str = datetime.now(BEIJING_TZ).isoformat()
+        _write_model_meta(
+            s3_key=s3_key or f"models/{model_name}.lgb",
+            s3_last_modified=now_str,
+        )
+
         # Refresh s3_has_full_model from S3 (S3 is single source of truth)
         await self._refresh_s3_flag()
 
@@ -511,8 +584,9 @@ class ModelTrainingScheduler:
             f"耗时: {elapsed}s"
         )
 
-        # Step 6: Update last finetune date
+        # Step 6: Update last finetune date and last success time
         _set_last_finetune_date(datetime.now(BEIJING_TZ).date())
+        _set_last_success_time(mode, model_name)
 
         await _log(f"{label}全部完成 ({rounds}轮, {elapsed}s)")
         return {

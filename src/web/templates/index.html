@@ -224,24 +224,42 @@
             <div class="status-card-body">
                 <div class="status-card-row">
                     <span class="status-card-label">当前模型</span>
-                    <span class="status-card-value" id="modelName">{{ model_scheduler.current_model or '--' }}</span>
+                    <span class="status-card-value" id="modelName">
+                        {% if model_scheduler.model_training_date %}
+                        {{ model_scheduler.model_training_date }} 训练
+                        {% elif model_scheduler.current_model %}
+                        {{ model_scheduler.current_model }}
+                        {% else %}
+                        --
+                        {% endif %}
+                    </span>
                 </div>
                 <div class="status-card-row">
                     <span class="status-card-label">下次微调</span>
                     <span class="status-card-value" id="nextFinetune">{{ model_scheduler.next_run_time or '--' }}</span>
                 </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">上次成功</span>
+                    <span class="status-card-value" id="lastSuccessTime">
+                        {% if model_scheduler.last_success_time %}
+                        <span style="color:#2e7d32;">{{ model_scheduler.last_success_time }} ({{ model_scheduler.last_success_label or '' }})</span>
+                        {% else %}
+                        <span style="color:#999;">--</span>
+                        {% endif %}
+                    </span>
+                </div>
                 {% if model_scheduler.last_run_time %}
                 <div class="status-card-row">
-                    <span class="status-card-label">上次 {{ model_scheduler.last_run_time[5:] }}</span>
+                    <span class="status-card-label">上次运行</span>
                     <span class="status-card-value" id="lastTrainResult">
                         {% if model_scheduler.last_run_result == 'success' %}
-                        <span style="color:#2e7d32;">成功</span>
+                        <span style="color:#2e7d32;">{{ model_scheduler.last_run_time[5:] }} 成功</span>
                         {% elif model_scheduler.last_run_result == 'skipped' %}
-                        <span style="color:#999;">跳过</span>
+                        <span style="color:#999;">{{ model_scheduler.last_run_time[5:] }} 跳过</span>
                         {% elif model_scheduler.last_run_result == 'no_model' %}
-                        <span style="color:#f57c00;">无模型</span>
+                        <span style="color:#f57c00;">{{ model_scheduler.last_run_time[5:] }} 无模型</span>
                         {% elif model_scheduler.last_run_result == 'failed' %}
-                        <span style="color:#d32f2f;">失败</span>
+                        <span style="color:#d32f2f;">{{ model_scheduler.last_run_time[5:] }} 失败</span>
                         {% else %}
                         --
                         {% endif %}
@@ -747,8 +765,16 @@ async function loadModelStatus() {
         const resp = await fetch('/api/model/status', {cache: 'no-store'});
         if (!resp.ok) return;
         const d = await resp.json();
-        document.getElementById('modelName').textContent = d.current_model || '--';
+        document.getElementById('modelName').textContent = d.model_training_date ? d.model_training_date + ' 训练' : (d.current_model || '--');
         document.getElementById('nextFinetune').textContent = d.next_run_time || '--';
+        const successEl = document.getElementById('lastSuccessTime');
+        if (successEl) {
+            if (d.last_success_time) {
+                successEl.innerHTML = '<span style="color:#2e7d32;">' + d.last_success_time + ' (' + (d.last_success_label || '') + ')</span>';
+            } else {
+                successEl.innerHTML = '<span style="color:#999;">--</span>';
+            }
+        }
         const btn = document.getElementById('btnFinetune');
         if (btn) {
             btn.disabled = !d.s3_has_full_model || d.training_in_progress;

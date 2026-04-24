@@ -115,6 +115,9 @@ def create_router() -> APIRouter:
                 "last_run_message": None,
                 "has_full_model": False,
                 "current_model": None,
+                "model_training_date": None,
+                "last_success_time": None,
+                "last_success_label": None,
             }
         )
 
