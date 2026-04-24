@@ -138,8 +138,27 @@
                 </div>
                 <div class="status-card-row">
                     <span class="status-card-label">上次扫描</span>
-                    <span class="status-card-value" id="lastScanTime">{{ daily_scan.last_scan_time or '--' }}</span>
+                    <span class="status-card-value" id="lastScanTime">
+                        {% if daily_scan.last_scan_time %}
+                            {{ daily_scan.last_scan_time[5:] }}
+                            {% if daily_scan.last_scan_result == 'success' %}
+                            <span style="color:#2e7d32;" title="{{ daily_scan.last_scan_message or '' }}">成功</span>
+                            {% elif daily_scan.last_scan_result == 'failed' %}
+                            <span style="color:#d32f2f;" title="{{ daily_scan.last_scan_message or '' }}">失败</span>
+                            {% elif daily_scan.last_scan_result == 'no_result' %}
+                            <span style="color:#f57c00;" title="{{ daily_scan.last_scan_message or '' }}">无结果</span>
+                            {% endif %}
+                        {% else %}
+                            --
+                        {% endif %}
+                    </span>
                 </div>
+                {% if daily_scan.last_scan_result == 'failed' and daily_scan.last_scan_message %}
+                <div class="status-card-row">
+                    <span class="status-card-label">失败原因</span>
+                    <span class="status-card-value" style="color:#d32f2f; font-size:12px;">{{ daily_scan.last_scan_message }}</span>
+                </div>
+                {% endif %}
             </div>
         </div>
 

@@ -236,6 +236,8 @@ def create_app(
         app.state.momentum_monitor_state = {
             "running": False,
             "last_scan_time": None,
+            "last_scan_result": None,  # "success" | "failed" | "no_result"
+            "last_scan_message": None,
             "last_result": None,
             "today_results": [],
             "task": None,

@@ -131,6 +131,8 @@ def create_router() -> APIRouter:
             "enabled": get_daily_scan_enabled(),
             "running": monitor_state.get("running", False),
             "last_scan_time": monitor_state.get("last_scan_time"),
+            "last_scan_result": monitor_state.get("last_scan_result"),
+            "last_scan_message": monitor_state.get("last_scan_message"),
         }
 
         resp = templates.TemplateResponse(
@@ -1402,6 +1404,8 @@ def create_momentum_router() -> APIRouter:
         return {
             "running": monitor_state["running"],
             "last_scan_time": monitor_state["last_scan_time"],
+            "last_scan_result": monitor_state.get("last_scan_result"),
+            "last_scan_message": monitor_state.get("last_scan_message"),
             "today_results": monitor_state["today_results"],
         }
 
@@ -1431,14 +1435,27 @@ def create_momentum_router() -> APIRouter:
     @router.post("/api/momentum/monitor/trigger")
     async def trigger_monitor_scan(request: Request) -> dict:
         """Manually trigger a momentum scan right now (any time of day)."""
+        from zoneinfo import ZoneInfo
+
         monitor_state = _get_monitor_state(request)
         storage = getattr(request.app.state, "storage", None)
+        scan_time_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+        monitor_state["last_scan_time"] = scan_time_str
         try:
             result = await _execute_monitor_scan(monitor_state, storage=storage)
             if result is None:
+                monitor_state["last_scan_result"] = "no_result"
+                monitor_state["last_scan_message"] = "无合格股票"
                 return {"success": False, "message": "扫描未产生结果"}
+            monitor_state["last_scan_result"] = "success"
+            candidates = result.get("final_candidates", 0)
+            rec = result.get("recommended_stock")
+            rec_name = rec["stock_name"] if rec else "无"
+            monitor_state["last_scan_message"] = f"{candidates}只候选, 推荐: {rec_name}"
             return {"success": True, "result": result}
         except Exception as e:
+            monitor_state["last_scan_result"] = "failed"
+            monitor_state["last_scan_message"] = str(e)[:100]
             logger.error(f"Manual scan trigger error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"扫描失败: {str(e)}")
 
@@ -1748,7 +1765,11 @@ async def _execute_monitor_scan(state: dict, storage: Any = None) -> dict | None
     }
 
     state["last_result"] = result_entry
-    state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
+    # last_scan_time is set by the caller (_run_intraday_monitor / trigger endpoint)
+    # to ensure it's always set even on failure.
+    # Manual trigger also sets it here as fallback:
+    if not state.get("last_scan_time"):
+        state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
     state["today_results"].append(result_entry)
 
     # Send Feishu notification
@@ -1829,13 +1850,17 @@ async def _run_intraday_monitor(state: dict) -> None:
                 await asyncio.sleep(min(wait_secs, 3600))
                 continue
 
-            # 9:40-9:50 window — run scan once
+            # 9:39-9:50 window — run scan once
             logger.info("Monitor: entering scan window")
+            scan_time_str = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M")
+            state["last_scan_time"] = scan_time_str  # Always set when we attempt
             try:
                 app_state = state.get("_app_state")
                 storage = getattr(app_state, "storage", None) if app_state else None
                 result = await _execute_monitor_scan(state, storage=storage)
                 if result is None:
+                    state["last_scan_result"] = "no_result"
+                    state["last_scan_message"] = "无合格股票"
                     logger.warning("Monitor scan returned None (no result)")
                     try:
                         from src.common.feishu_bot import FeishuBot
@@ -1848,7 +1873,15 @@ async def _run_intraday_monitor(state: dict) -> None:
                             )
                     except Exception:
                         pass
+                else:
+                    state["last_scan_result"] = "success"
+                    candidates = result.get("final_candidates", 0)
+                    rec = result.get("recommended_stock")
+                    rec_name = rec["stock_name"] if rec else "无"
+                    state["last_scan_message"] = f"{candidates}只候选, 推荐: {rec_name}"
             except Exception as e:
+                state["last_scan_result"] = "failed"
+                state["last_scan_message"] = str(e)[:100]
                 logger.error(f"Monitor scan error: {e}", exc_info=True)
                 try:
                     from src.common.feishu_bot import FeishuBot

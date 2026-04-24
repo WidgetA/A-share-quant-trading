@@ -130,6 +130,19 @@ async def run_ml_live(
         len(history_bars),
     )
 
+    # ── SAFETY: refuse to recommend if history data is severely incomplete ──
+    # If <20% of stocks with early data have history, GreptimeDB cache is
+    # likely missing recent dates. Better to fail loudly than recommend based
+    # on garbage data.
+    _MIN_HISTORY_COVERAGE = 0.20
+    if early_data and len(history_bars) < len(early_data) * _MIN_HISTORY_COVERAGE:
+        raise RuntimeError(
+            f"GreptimeDB 历史数据严重不足: "
+            f"仅 {len(history_bars)}/{len(early_data)} 只股票有37天历史 "
+            f"(覆盖率 {len(history_bars)/len(early_data)*100:.0f}% < 20%)。"
+            f"请检查缓存补全是否正常运行。"
+        )
+
     # Step 5: Build snapshots
     snapshot_result = MLScanner.build_snapshots(
         universe.codes, prev_closes, early_data, history_bars
