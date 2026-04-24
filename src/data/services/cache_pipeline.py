@@ -452,7 +452,10 @@ class CachePipeline:
             if skip_codes and susp_code in skip_codes:
                 continue
             pre_close = prev_close_map.get(susp_code, 0.0)
-            await self.storage.insert_daily_record(susp_code, day, _suspended_record(pre_close))
+            rec = _suspended_record(pre_close)
+            await self.storage.insert_daily_record(susp_code, day, rec)
+            if rec["close"] is not None:
+                prev_close_map[susp_code] = rec["close"]
             rows_written += 1
 
         # Notifications

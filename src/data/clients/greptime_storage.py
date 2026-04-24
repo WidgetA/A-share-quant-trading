@@ -851,15 +851,17 @@ class GreptimeBacktestStorage:
     async def get_latest_closes(self) -> dict[str, float]:
         """Get the latest close price per stock from existing daily data.
 
-        Used by the pipeline to seed pre_close computation during incremental
-        downloads.
+        Queries each stock's own most recent non-NULL close so that
+        suspended/delisted stocks carry forward their last known price
+        across incremental download runs.
         """
-        row = await self.db.fetchrow("SELECT MAX(ts) as max_ts FROM backtest_daily")
-        if not row or row["max_ts"] is None:
-            return {}
-        max_ts = ts_to_epoch_ms(row["max_ts"])
         rows = await self.db.fetch(
-            f"SELECT stock_code, close_price FROM backtest_daily WHERE ts = {max_ts}"
+            "SELECT stock_code, close_price FROM backtest_daily "
+            "WHERE (stock_code, ts) IN ("
+            "  SELECT stock_code, MAX(ts) FROM backtest_daily "
+            "  WHERE close_price IS NOT NULL "
+            "  GROUP BY stock_code"
+            ")"
         )
         return {r["stock_code"]: float(r["close_price"]) for r in rows}
 
