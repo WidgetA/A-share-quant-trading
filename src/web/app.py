@@ -215,9 +215,7 @@ def create_app(
         app.state.pipeline = None
 
         if not await _try_connect_greptime(app):
-            app.state._greptime_reconnect_task = asyncio.create_task(
-                _greptime_reconnect_loop(app)
-            )
+            app.state._greptime_reconnect_task = asyncio.create_task(_greptime_reconnect_loop(app))
 
         # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
         # CRITICAL: must start before anything else — safety monitoring cannot be skipped
