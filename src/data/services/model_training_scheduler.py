@@ -144,15 +144,15 @@ class ModelTrainingScheduler:
         self.training_log: list[str] = []
         self._training_tokens: dict[str, dict] = {}
         self._pending_results: dict[str, dict] = {}  # token -> {"event", "result"}
-        self.s3_has_full_model: bool = False  # updated by _ensure_local_model_from_s3
-        self._ensure_local_model_from_s3()
+        self.s3_has_full_model: bool = False
 
-    def _ensure_local_model_from_s3(self) -> None:
-        """On startup, always sync latest model from S3.
+    async def sync_model_from_s3(self) -> None:
+        """Sync latest model from S3. Must be awaited during app startup.
 
         S3 is the single source of truth. Local is just a disk cache
         required by LightGBM (which only loads from file paths).
-        Always downloads the latest model to ensure freshness.
+        Always downloads the latest model to ensure it's fresh before
+        the app starts serving requests.
         """
         try:
             from src.common.s3_client import create_s3_client_from_config
@@ -161,35 +161,25 @@ class ModelTrainingScheduler:
             if not s3:
                 return
 
-            import asyncio
+            models = await s3.list_models(prefix="models/")
+            full_models = [m for m in models if "full_" in m["key"]]
+            if not full_models:
+                logger.info("No model in S3 yet")
+                return
+            self.s3_has_full_model = True
+            # Prefer dated models (full_20260406.lgb) over full_latest.lgb
+            # so we can extract the training date from the filename.
+            import re
 
-            async def _check_and_download():
-                models = await s3.list_models(prefix="models/")
-                full_models = [m for m in models if "full_" in m["key"]]
-                if not full_models:
-                    logger.info("No model in S3 yet")
-                    return
-                self.s3_has_full_model = True
-                # Prefer dated models (full_20260406.lgb) over full_latest.lgb
-                # so we can extract the training date from the filename.
-                # full_latest.lgb is just a copy with no date info.
-                import re
-
-                dated = [m for m in full_models if re.search(r"\d{8}\.lgb$", m["key"])]
-                latest = sorted(dated or full_models, key=lambda m: m["last_modified"])[-1]
-                full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
-                MODEL_DIR.mkdir(parents=True, exist_ok=True)
-                await s3.download_file(latest["key"], full_model_path)
-                _write_model_meta(latest["key"], latest["last_modified"])
-                logger.info("Synced model from S3: %s", latest["key"])
-
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_check_and_download())
-            except RuntimeError:
-                asyncio.run(_check_and_download())
+            dated = [m for m in full_models if re.search(r"\d{8}\.lgb$", m["key"])]
+            latest = sorted(dated or full_models, key=lambda m: m["last_modified"])[-1]
+            full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            await s3.download_file(latest["key"], full_model_path)
+            _write_model_meta(latest["key"], latest["last_modified"])
+            logger.info("Synced model from S3: %s", latest["key"])
         except Exception as e:
-            logger.warning("S3 model check on startup failed (non-fatal): %s", e)
+            logger.warning("S3 model sync failed (non-fatal): %s", e)
 
     async def _refresh_s3_flag(self) -> None:
         """Query S3 to update s3_has_full_model. S3 is single source of truth."""

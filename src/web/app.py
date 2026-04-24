@@ -227,6 +227,7 @@ def create_app(
         from src.data.services.model_training_scheduler import ModelTrainingScheduler
 
         model_scheduler = ModelTrainingScheduler(app.state)
+        await model_scheduler.sync_model_from_s3()
         app.state.model_scheduler = model_scheduler
         app.state.model_scheduler_task = asyncio.create_task(model_scheduler.run())
         logger.info("Model training scheduler started")
