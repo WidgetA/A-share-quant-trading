@@ -219,9 +219,9 @@ _CREATE_SCHEDULER_LOG_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_log (
     "name" STRING PRIMARY KEY,
     ts TIMESTAMP TIME INDEX,
-    trigger_type STRING,
-    result STRING,
-    message STRING
+    "trigger_type" STRING,
+    "result" STRING,
+    "message" STRING
 )
 """
 
@@ -1558,7 +1558,7 @@ class GreptimeBacktestStorage:
         # Escape single quotes in message
         safe_msg = (message or "")[:200].replace("'", "''")
         sql = (
-            f'INSERT INTO scheduler_log ("name", ts, trigger_type, result, message) '
+            f'INSERT INTO scheduler_log ("name", ts, "trigger_type", "result", "message") '
             f"VALUES ('{name}', {now_ms}, '{trigger_type}', '{result}', '{safe_msg}')"
         )
         try:
@@ -1574,7 +1574,7 @@ class GreptimeBacktestStorage:
         """
         try:
             row = await self.db.fetchrow(
-                f"SELECT ts, trigger_type, result, message FROM scheduler_log "
+                f'SELECT ts, "trigger_type", "result", "message" FROM scheduler_log '
                 f"WHERE \"name\" = '{name}' ORDER BY ts DESC LIMIT 1"
             )
             if not row:
