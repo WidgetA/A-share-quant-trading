@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import tempfile
 import time
 from datetime import datetime
@@ -110,16 +111,104 @@ MAX_BOOST_ROUNDS = 500
 EARLY_STOPPING = 50
 
 
+# ── Stock-Major Columnar Index ─────────────────────────────
+# Pre-build {code: {dates, opens, highs, lows, closes, volumes}} from
+# date-major daily_data. This eliminates per-stock-per-day dict lookups
+# in _build_stock_history (from ~1 billion dict lookups to array slicing).
+
+
+def build_stock_index(
+    daily_data: dict[str, dict[str, dict]],
+    all_dates: list[str],
+) -> dict[str, dict]:
+    """Build stock-major columnar index for fast history lookup.
+
+    Args:
+        daily_data: {date_str: {code: {open, high, low, close, volume, ...}}}
+        all_dates: Sorted date strings.
+
+    Returns:
+        {code: {"date_indices": np.array, "opens": np.array, "highs": np.array,
+                "lows": np.array, "closes": np.array, "volumes": np.array}}
+    """
+    # Collect per-stock bars with their date indices
+    stock_bars: dict[str, list[tuple[int, dict]]] = {}
+    for d_idx, date_str in enumerate(all_dates):
+        day_map = daily_data.get(date_str, {})
+        for code, bar in day_map.items():
+            if bar.get("close", 0) > 0 and not bar.get("is_suspended"):
+                if code not in stock_bars:
+                    stock_bars[code] = []
+                stock_bars[code].append((d_idx, bar))
+
+    # Convert to columnar numpy arrays
+    result: dict[str, dict] = {}
+    for code, bars in stock_bars.items():
+        # bars is already sorted by d_idx since we iterated all_dates in order
+        n = len(bars)
+        date_indices = np.empty(n, dtype=np.int32)
+        opens = np.empty(n, dtype=np.float64)
+        highs = np.empty(n, dtype=np.float64)
+        lows = np.empty(n, dtype=np.float64)
+        closes = np.empty(n, dtype=np.float64)
+        volumes = np.empty(n, dtype=np.float64)
+        for i, (di, bar) in enumerate(bars):
+            date_indices[i] = di
+            opens[i] = bar.get("open", 0.0)
+            highs[i] = bar.get("high", 0.0)
+            lows[i] = bar.get("low", 0.0)
+            closes[i] = bar["close"]
+            volumes[i] = bar.get("volume", 0.0)
+        result[code] = {
+            "date_indices": date_indices,
+            "opens": opens,
+            "highs": highs,
+            "lows": lows,
+            "closes": closes,
+            "volumes": volumes,
+        }
+    return result
+
+
+def get_stock_history_arrays(
+    stock_idx: dict,
+    code: str,
+    day_idx: int,
+    lookback: int = 37,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Get history arrays for a stock up to (not including) day_idx.
+
+    Returns (opens, highs, lows, closes, volumes) numpy arrays, or None.
+    """
+    entry = stock_idx.get(code)
+    if entry is None:
+        return None
+    di = entry["date_indices"]
+    # Find the position just before day_idx using searchsorted
+    end = np.searchsorted(di, day_idx, side="left")
+    start = max(0, end - lookback)
+    if start >= end:
+        return None
+    sl = slice(start, end)
+    return (
+        entry["opens"][sl],
+        entry["highs"][sl],
+        entry["lows"][sl],
+        entry["closes"][sl],
+        entry["volumes"][sl],
+    )
+
+
 # ── Feature Extraction ─────────────────────────────────────
 
 
 def extract_features(
     bar: dict,
-    history: list[dict],
+    hist_arrays: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
     prev_bar: dict | None,
     market_open_gain: float,
 ) -> list[float] | None:
-    """Extract 38 raw features from a daily OHLCV bar + history.
+    """Extract 38 raw features from a daily OHLCV bar + history arrays.
 
     IMPORTANT: This replicates lgbrank_scorer.py's _compute_base_features +
     _compute_advanced_features + _compute_engineered_features EXACTLY.
@@ -135,16 +224,14 @@ def extract_features(
 
     Args:
         bar: Today's {open, high, low, close, volume} bar.
-        history: Past ~37 bars (oldest first), each {open, high, low, close, volume}.
+        hist_arrays: (opens, highs, lows, closes, volumes) numpy arrays from
+            get_stock_history_arrays(), or None if no history.
         prev_bar: Yesterday's bar (for gap, open_position). None if no previous day.
         market_open_gain: Average gap ratio across all stocks: mean((open-pc)/pc).
 
     Returns:
         38 raw feature values in FEATURE_NAMES_RAW order, or None if bar invalid.
     """
-    import math
-    import statistics
-
     o = bar["open"]
     h = bar["high"]
     lo = bar["low"]
@@ -156,8 +243,14 @@ def extract_features(
 
     prev_close = prev_bar["close"] if prev_bar and prev_bar.get("close", 0) > 0 else 0.0
 
+    # Unpack history arrays (already filtered to valid bars by stock index)
+    if hist_arrays is not None:
+        opens_arr, highs_arr, lows_arr, closes_arr, volumes_arr = hist_arrays
+        n_hist = len(closes_arr)
+    else:
+        n_hist = 0
+
     raw: dict[str, float] = {}
-    closes = [b["close"] for b in history if b.get("close", 0) > 0]
 
     # ── 13 Basic Features (lgbrank_scorer._compute_base_features) ──
 
@@ -165,52 +258,49 @@ def extract_features(
     raw["open_gain"] = (c - o) / o
 
     # volume_amp = volume / (avg_volume × 0.125)  [with early session ratio]
-    hist_vols = [b.get("volume", 0) for b in history if b.get("volume", 0) > 0]
-    avg_vol = statistics.mean(hist_vols) if hist_vols else 0.0
+    if n_hist > 0:
+        pos_vols = volumes_arr[volumes_arr > 0]
+        avg_vol = float(pos_vols.mean()) if len(pos_vols) > 0 else 0.0
+    else:
+        avg_vol = 0.0
     expected_vol = avg_vol * 0.125
     raw["volume_amp"] = vol / expected_vol if expected_vol > 0 else 0.0
 
     # consecutive_up_days
     cup = 0
-    if len(closes) >= 2:
-        for i in range(len(closes) - 1, 0, -1):
-            if closes[i] > closes[i - 1]:
+    if n_hist >= 2:
+        for i in range(n_hist - 1, 0, -1):
+            if closes_arr[i] > closes_arr[i - 1]:
                 cup += 1
             else:
                 break
     raw["consecutive_up_days"] = float(cup)
 
     # trend_5d  [RATIO, not %]
-    if len(closes) >= 6:
-        raw["trend_5d"] = (closes[-1] - closes[-6]) / closes[-6]
+    if n_hist >= 6:
+        raw["trend_5d"] = float((closes_arr[-1] - closes_arr[-6]) / closes_arr[-6])
     else:
         raw["trend_5d"] = 0.0
 
     # trend_10d  [RATIO, not %]
-    if len(closes) >= 11:
-        raw["trend_10d"] = (closes[-1] - closes[-11]) / closes[-11]
+    if n_hist >= 11:
+        raw["trend_10d"] = float((closes_arr[-1] - closes_arr[-11]) / closes_arr[-11])
     else:
         raw["trend_10d"] = 0.0
 
     # avg_return_20d  [RATIO, not %]
-    if len(closes) >= 21:
-        rets_20 = [
-            (closes[i] - closes[i - 1]) / closes[i - 1]
-            for i in range(len(closes) - 20, len(closes))
-            if closes[i - 1] > 0
-        ]
-        raw["avg_return_20d"] = statistics.mean(rets_20) if rets_20 else 0.0
+    if n_hist >= 21:
+        c20 = closes_arr[-21:]
+        rets_20 = np.diff(c20) / c20[:-1]
+        raw["avg_return_20d"] = float(rets_20.mean())
     else:
         raw["avg_return_20d"] = 0.0
 
     # volatility_20d  [RATIO, not %]
-    if len(closes) >= 21:
-        rets_20 = [
-            (closes[i] - closes[i - 1]) / closes[i - 1]
-            for i in range(len(closes) - 20, len(closes))
-            if closes[i - 1] > 0
-        ]
-        raw["volatility_20d"] = statistics.stdev(rets_20) if len(rets_20) >= 2 else 0.0
+    if n_hist >= 21:
+        c20 = closes_arr[-21:]
+        rets_20 = np.diff(c20) / c20[:-1]
+        raw["volatility_20d"] = float(rets_20.std(ddof=1)) if len(rets_20) >= 2 else 0.0
     else:
         raw["volatility_20d"] = 0.0
 
@@ -236,28 +326,8 @@ def extract_features(
     # ── 14 Advanced Features (lgbrank_scorer._compute_advanced_features) ──
     # Uses numpy arrays over full history, matching lgbrank_scorer exactly.
 
-    # Build history OHLCV arrays
-    hist_opens: list[float] = []
-    hist_highs: list[float] = []
-    hist_lows: list[float] = []
-    hist_closes: list[float] = []
-    hist_volumes: list[float] = []
-    for b in history:
-        if b.get("close", 0) > 0:
-            hist_opens.append(float(b.get("open", 0)))
-            hist_highs.append(float(b.get("high", 0)))
-            hist_lows.append(float(b.get("low", 0)))
-            hist_closes.append(float(b["close"]))
-            hist_volumes.append(float(b.get("volume", 0)))
-
-    n_hist = len(hist_closes)
-
     if n_hist >= 5:
-        opens_arr = np.array(hist_opens)
-        highs_arr = np.array(hist_highs)
-        lows_arr = np.array(hist_lows)
-        closes_arr = np.array(hist_closes)
-        volumes_arr = np.array(hist_volumes)
+        n = n_hist
         n = n_hist
 
         # 1. open_position_consistency: 1 - std(open_positions[-20:])
@@ -416,24 +486,36 @@ def extract_features(
 # ── Dataset Building ───────────────────────────────────────
 
 
-def _build_stock_history(
+def _build_stock_history_legacy(
     code: str,
     daily_data: dict[str, dict[str, dict]],
     all_dates: list[str],
     day_idx: int,
     lookback: int = 37,
-) -> list[dict]:
-    """Build history list for one stock up to (not including) day_idx.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Legacy fallback: build history arrays from date-major data.
 
-    Returns list of bar dicts (oldest first), up to `lookback` bars.
+    Returns (opens, highs, lows, closes, volumes) numpy arrays, or None.
     """
-    history: list[dict] = []
+    opens, highs, lows, closes, volumes = [], [], [], [], []
     start = max(0, day_idx - lookback)
     for i in range(start, day_idx):
         bar = daily_data.get(all_dates[i], {}).get(code)
         if bar and bar.get("close", 0) > 0 and not bar.get("is_suspended"):
-            history.append(bar)
-    return history
+            opens.append(bar.get("open", 0.0))
+            highs.append(bar.get("high", 0.0))
+            lows.append(bar.get("low", 0.0))
+            closes.append(bar["close"])
+            volumes.append(bar.get("volume", 0.0))
+    if not closes:
+        return None
+    return (
+        np.array(opens),
+        np.array(highs),
+        np.array(lows),
+        np.array(closes),
+        np.array(volumes),
+    )
 
 
 def build_day_data(
@@ -441,6 +523,7 @@ def build_day_data(
     all_dates: list[str],
     day_idx: int,
     future_map: dict[str, dict],
+    stock_idx: dict | None = None,
 ) -> dict | None:
     """Build features + labels for one trading day, using full history context.
 
@@ -449,12 +532,11 @@ def build_day_data(
         all_dates: Sorted list of all date strings.
         day_idx: Index of current day in all_dates.
         future_map: {stock_code: {close, ...}} for day T+FORWARD_DAYS.
+        stock_idx: Pre-built stock-major columnar index for fast history lookup.
 
     Returns:
         {"features": [...], "labels": [...], "group_size": int} or None.
     """
-    import statistics
-
     current_date = all_dates[day_idx]
     daily_map = daily_data.get(current_date, {})
 
@@ -515,7 +597,7 @@ def build_day_data(
         prev = prev_date_map.get(code)
         if prev and prev.get("close", 0) > 0:
             gap_ratios.append((o - prev["close"]) / prev["close"])
-    market_open_gain = statistics.mean(gap_ratios) if gap_ratios else 0.0
+    market_open_gain = sum(gap_ratios) / len(gap_ratios) if gap_ratios else 0.0
 
     # Extract raw features per stock
     raw_features_per_code: dict[str, list[float]] = {}
@@ -524,9 +606,12 @@ def build_day_data(
         bar = daily_map.get(code)
         if not bar:
             continue
-        history = _build_stock_history(code, daily_data, all_dates, day_idx)
+        if stock_idx is not None:
+            hist_arrays = get_stock_history_arrays(stock_idx, code, day_idx)
+        else:
+            hist_arrays = _build_stock_history_legacy(code, daily_data, all_dates, day_idx)
         prev_bar = prev_date_map.get(code)
-        fv = extract_features(bar, history, prev_bar, market_open_gain)
+        fv = extract_features(bar, hist_arrays, prev_bar, market_open_gain)
         if fv is not None:
             raw_features_per_code[code] = fv
             code_to_idx[code] = i
@@ -536,23 +621,18 @@ def build_day_data(
 
     # Z-score normalize across this day's candidates
     # Uses numpy std (ddof=0), matching lgbrank_scorer._add_zscore
-    n_raw = len(FEATURE_NAMES_RAW)
     codes_list = list(raw_features_per_code.keys())
     raw_matrix = np.array([raw_features_per_code[c] for c in codes_list])
 
     means = raw_matrix.mean(axis=0)
     stds = raw_matrix.std(axis=0)  # ddof=0, matching lgbrank_scorer
 
-    features: list[list[float]] = []
-    valid_labels: list[int] = []
-    for i, code in enumerate(codes_list):
-        raw_vec = list(raw_matrix[i])
-        z_vec = [
-            float((raw_matrix[i, j] - means[j]) / stds[j]) if stds[j] > 1e-10 else 0.0
-            for j in range(n_raw)
-        ]
-        features.append(raw_vec + z_vec)
-        valid_labels.append(labels[code_to_idx[code]])
+    # Vectorized Z-score: replaces per-element Python loop
+    z_matrix = np.where(stds > 1e-10, (raw_matrix - means) / stds, 0.0)
+    full_matrix = np.hstack([raw_matrix, z_matrix])
+    features = full_matrix.tolist()
+
+    valid_labels = [labels[code_to_idx[code]] for code in codes_list]
 
     return {
         "features": features,
@@ -579,8 +659,17 @@ def build_training_data(
     if len(all_dates) < MIN_TRAIN_DAYS:
         raise ValueError(f"Not enough data: {len(all_dates)} < {MIN_TRAIN_DAYS} days")
 
+    # Pre-build stock-major columnar index for fast history lookup.
+    # This replaces ~1 billion dict lookups with numpy array slicing.
+    t_idx = time.time()
+    stock_idx = build_stock_index(daily_data, all_dates)
+    logger.info("Built stock index: %d stocks (%.1fs)", len(stock_idx), time.time() - t_idx)
+
+    # Pre-build date→index map (replaces O(n) list.index with O(1) dict lookup)
+    date_to_idx = {d: i for i, d in enumerate(all_dates)}
+
     # For finetune: only train/val on last 120 days, but keep full date list
-    # so _build_stock_history can look back 37 days for feature computation.
+    # so history lookback works via stock_idx.
     if mode == "finetune":
         train_val_dates = all_dates[-120:]
     else:
@@ -594,8 +683,7 @@ def build_training_data(
         features, labels, groups = [], [], []
         skipped = 0
         for d in dates:
-            # Use full all_dates for index (so history lookback works)
-            d_idx = all_dates.index(d)
+            d_idx = date_to_idx[d]
             if d_idx + FORWARD_DAYS >= len(all_dates):
                 skipped += 1
                 continue
@@ -606,6 +694,7 @@ def build_training_data(
                 all_dates,
                 d_idx,
                 daily_data.get(future_d, {}),
+                stock_idx=stock_idx,
             )
             if day_data is None:
                 skipped += 1
