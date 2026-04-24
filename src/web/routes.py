@@ -1452,10 +1452,12 @@ def create_momentum_router() -> APIRouter:
             rec = result.get("recommended_stock")
             rec_name = rec["stock_name"] if rec else "无"
             monitor_state["last_scan_message"] = f"{candidates}只候选, 推荐: {rec_name}"
+            await _persist_scan_status(monitor_state, "manual")
             return {"success": True, "result": result}
         except Exception as e:
             monitor_state["last_scan_result"] = "failed"
             monitor_state["last_scan_message"] = str(e)[:100]
+            await _persist_scan_status(monitor_state, "manual")
             logger.error(f"Manual scan trigger error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"扫描失败: {str(e)}")
 
@@ -1789,6 +1791,42 @@ async def _execute_monitor_scan(state: dict, storage: Any = None) -> dict | None
     return result_entry
 
 
+async def _persist_scan_status(state: dict, trigger: str) -> None:
+    """Write daily scan status to GreptimeDB scheduler_log."""
+    try:
+        app_state = state.get("_app_state")
+        storage = getattr(app_state, "storage", None) if app_state else None
+        if storage and getattr(storage, "is_ready", False):
+            await storage.log_scheduler_run(
+                "daily_scan",
+                trigger,
+                state.get("last_scan_result") or "unknown",
+                state.get("last_scan_message") or "",
+            )
+    except Exception:
+        logger.warning("Failed to persist scan status to DB", exc_info=True)
+
+
+async def _restore_scan_status(state: dict) -> None:
+    """Restore daily scan status from GreptimeDB on startup."""
+    try:
+        app_state = state.get("_app_state")
+        storage = getattr(app_state, "storage", None) if app_state else None
+        if storage and getattr(storage, "is_ready", False):
+            last = await storage.get_last_scheduler_run("daily_scan")
+            if last:
+                state["last_scan_time"] = last["time"]
+                state["last_scan_result"] = last["result"]
+                state["last_scan_message"] = last["message"]
+                logger.info(
+                    "Monitor: restored last scan from DB: %s %s",
+                    last["time"],
+                    last["result"],
+                )
+    except Exception:
+        logger.warning("Failed to restore scan status from DB", exc_info=True)
+
+
 async def _run_intraday_monitor(state: dict) -> None:
     """Background task: intraday momentum monitor.
 
@@ -1802,6 +1840,10 @@ async def _run_intraday_monitor(state: dict) -> None:
     SCAN_TIME = time(9, 39)
 
     state["running"] = True
+
+    # Restore last scan status from DB so dashboard shows history after restart
+    await asyncio.sleep(30)  # wait for storage to be ready
+    await _restore_scan_status(state)
     logger.info("Intraday momentum monitor started")
 
     try:
@@ -1894,6 +1936,9 @@ async def _run_intraday_monitor(state: dict) -> None:
                         )
                 except Exception:
                     pass
+
+            # Persist scan status to GreptimeDB
+            await _persist_scan_status(state, "scheduled")
 
             # After scan, wait until next day (keep today_results for status endpoint)
             tomorrow = now + timedelta(days=1)

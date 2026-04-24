@@ -1,7 +1,8 @@
 # === MODULE PURPOSE ===
 # Background scheduler that auto-fills missing dates in GreptimeDB storage.
-# Runs daily at 3am Beijing time: checks for gaps from 2024-01-01 to yesterday,
-# downloads missing dates into GreptimeDB.
+# Checks gaps on startup (so restarts don't lose a day), then daily at 3am.
+# All run status is persisted to GreptimeDB scheduler_log table so it
+# survives container restarts.
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 CACHE_START_DATE = date(2024, 1, 1)
 SCHEDULE_HOUR = 3  # 3am Beijing time
 DOWNLOAD_TIMEOUT_SECONDS = 4 * 3600  # 4 hours max per range
+_STARTUP_DELAY_SECONDS = 60  # wait for storage/pipeline to initialize
 
 
 async def _notify_feishu(message: str) -> None:
@@ -51,7 +53,11 @@ async def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
 
 
 class CacheScheduler:
-    """Background task that auto-fills GreptimeDB backtest cache gaps at 3am daily.
+    """Background task that auto-fills GreptimeDB backtest cache gaps.
+
+    - On startup: check gaps after a short delay, fill immediately.
+    - Then: sleep until 3am daily, check gaps, fill.
+    - All run results are persisted to GreptimeDB ``scheduler_log`` table.
 
     Usage:
         scheduler = CacheScheduler(app.state)
@@ -60,9 +66,11 @@ class CacheScheduler:
         task.cancel()
     """
 
+    _LOG_NAME = "cache_scheduler"
+
     def __init__(self, app_state) -> None:
         self._app_state = app_state
-        # Status tracking for dashboard display
+        # Status tracking for dashboard display (restored from DB on startup)
         self.next_run_time: str | None = None
         self.last_run_time: str | None = None
         self.last_run_result: str | None = None  # "success" | "failed" | "skipped" | "no_gaps"
@@ -94,10 +102,60 @@ class CacheScheduler:
             "last_run_message": self.last_run_message,
         }
 
+    # ------------------------------------------------------------------
+    # Persistent status (GreptimeDB scheduler_log)
+    # ------------------------------------------------------------------
+
+    async def _restore_status_from_db(self) -> None:
+        """Load last run status from GreptimeDB so dashboard shows history
+        even after container restart."""
+        storage = self._get_storage()
+        if not storage or not storage.is_ready:
+            return
+        last = await storage.get_last_scheduler_run(self._LOG_NAME)
+        if last:
+            self.last_run_time = last["time"]
+            self.last_run_result = last["result"]
+            self.last_run_message = last["message"]
+            logger.info(
+                "CacheScheduler: restored last run from DB: %s %s",
+                self.last_run_time,
+                self.last_run_result,
+            )
+
+    async def _persist_status(self, trigger: str) -> None:
+        """Write current run status to GreptimeDB."""
+        storage = self._get_storage()
+        if not storage or not storage.is_ready:
+            return
+        await storage.log_scheduler_run(
+            self._LOG_NAME,
+            trigger,
+            self.last_run_result or "unknown",
+            self.last_run_message or "",
+        )
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
     async def run(self) -> None:
-        """Main loop: sleep until 3am, check gaps, download."""
+        """Main loop: check gaps on startup, then daily at 3am.
+
+        The startup check ensures that if the container restarts after 3am
+        (OOM, watchtower, crash), gaps are still filled that day instead of
+        waiting until the next 3am — which may also be missed.
+        """
         logger.info("CacheScheduler started, will run daily at 3am Beijing time")
         try:
+            # Wait for storage to be ready, then restore last status from DB
+            await asyncio.sleep(_STARTUP_DELAY_SECONDS)
+            await self._restore_status_from_db()
+
+            # ── Startup check: fill gaps immediately ──
+            await self._run_once("startup")
+
+            # ── Daily 3am loop ──
             while True:
                 now = datetime.now(BEIJING_TZ)
                 target = datetime.combine(now.date(), time(SCHEDULE_HOUR, 0), tzinfo=BEIJING_TZ)
@@ -111,59 +169,72 @@ class CacheScheduler:
                     f"({wait_secs / 3600:.1f}h from now)"
                 )
                 await asyncio.sleep(wait_secs)
-
-                run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
-
-                # Check if scheduler is enabled
-                from src.common.config import get_cache_scheduler_enabled
-
-                if not get_cache_scheduler_enabled():
-                    logger.info("CacheScheduler: disabled via settings, skipping this run")
-                    self.last_run_time = run_time
-                    self.last_run_result = "skipped"
-                    self.last_run_message = "已关闭，跳过本次执行"
-                    await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
-                    continue
-
-                # Skip if any download is already running
-                active = getattr(self._app_state, "active_download", None)
-                if getattr(self._app_state, "cache_fill_running", False) or (
-                    active is not None and active.state.value == "running"
-                ):
-                    logger.info("CacheScheduler: download already in progress, skipping")
-                    self.last_run_time = run_time
-                    self.last_run_result = "skipped"
-                    self.last_run_message = "下载正在运行，跳过本次执行"
-                    await _notify_feishu("[缓存补全·定时任务] 下载正在运行，跳过本次执行")
-                    continue
-
-                self._app_state.cache_fill_running = True
-                try:
-                    result = await self.check_and_fill_gaps()
-                    self.last_run_time = run_time
-                    if result.get("error"):
-                        self.last_run_result = "failed"
-                        self.last_run_message = result["error"]
-                    elif result["gaps_found"] == 0:
-                        self.last_run_result = "no_gaps"
-                        self.last_run_message = "无缺失数据"
-                    else:
-                        self.last_run_result = "success"
-                        self.last_run_message = f"已补全 {result['dates_downloaded']} 段"
-                except Exception as e:
-                    logger.error(f"CacheScheduler gap-fill failed: {e}", exc_info=True)
-                    self.last_run_time = run_time
-                    self.last_run_result = "failed"
-                    self.last_run_message = str(e)[:100]
-                    next_retry = self._next_run_str()
-                    await _notify_feishu(
-                        f"[缓存补全·定时任务] 执行异常\n{e}\n\n下次重试: {next_retry}"
-                    )
-                finally:
-                    self._app_state.cache_fill_running = False
+                await self._run_once("scheduled")
 
         except asyncio.CancelledError:
             logger.info("CacheScheduler cancelled")
+
+    async def _run_once(self, trigger: str) -> None:
+        """Execute one gap-check-and-fill cycle.
+
+        Args:
+            trigger: 'startup' | 'scheduled' | 'manual'
+        """
+        run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+
+        from src.common.config import get_cache_scheduler_enabled
+
+        if not get_cache_scheduler_enabled():
+            logger.info("CacheScheduler: disabled via settings, skipping (%s)", trigger)
+            self.last_run_time = run_time
+            self.last_run_result = "skipped"
+            self.last_run_message = "已关闭，跳过本次执行"
+            await self._persist_status(trigger)
+            await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
+            return
+
+        # Skip if any download is already running
+        active = getattr(self._app_state, "active_download", None)
+        if getattr(self._app_state, "cache_fill_running", False) or (
+            active is not None and active.state.value == "running"
+        ):
+            logger.info("CacheScheduler: download already in progress, skipping (%s)", trigger)
+            self.last_run_time = run_time
+            self.last_run_result = "skipped"
+            self.last_run_message = "下载正在运行，跳过本次执行"
+            await self._persist_status(trigger)
+            await _notify_feishu("[缓存补全·定时任务] 下载正在运行，跳过本次执行")
+            return
+
+        self._app_state.cache_fill_running = True
+        try:
+            result = await self.check_and_fill_gaps()
+            self.last_run_time = run_time
+            if result.get("error"):
+                self.last_run_result = "failed"
+                self.last_run_message = result["error"]
+            elif result["gaps_found"] == 0:
+                self.last_run_result = "no_gaps"
+                self.last_run_message = "无缺失数据"
+            else:
+                self.last_run_result = "success"
+                self.last_run_message = f"已补全 {result['dates_downloaded']} 段"
+        except Exception as e:
+            logger.error(f"CacheScheduler gap-fill failed: {e}", exc_info=True)
+            self.last_run_time = run_time
+            self.last_run_result = "failed"
+            self.last_run_message = str(e)[:100]
+            next_retry = self._next_run_str()
+            await _notify_feishu(
+                f"[缓存补全·定时任务] 执行异常 ({trigger})\n{e}\n\n下次重试: {next_retry}"
+            )
+        finally:
+            self._app_state.cache_fill_running = False
+            await self._persist_status(trigger)
+
+    # ------------------------------------------------------------------
+    # Gap detection + download
+    # ------------------------------------------------------------------
 
     async def check_and_fill_gaps(
         self,

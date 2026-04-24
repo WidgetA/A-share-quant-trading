@@ -215,6 +215,16 @@ CREATE TABLE IF NOT EXISTS stock_list (
 )
 """
 
+_CREATE_SCHEDULER_LOG_SQL = """
+CREATE TABLE IF NOT EXISTS scheduler_log (
+    name STRING PRIMARY KEY,
+    ts TIMESTAMP TIME INDEX,
+    trigger_type STRING,
+    result STRING,
+    message STRING
+)
+"""
+
 
 # ---------------------------------------------------------------------------
 # Low-level GreptimeDB connection pool
@@ -434,6 +444,7 @@ class GreptimeBacktestStorage:
         await self.db.execute(_CREATE_DAILY_SQL)
         await self.db.execute(_CREATE_MINUTE_SQL)
         await self.db.execute(_CREATE_STOCK_LIST_SQL)
+        await self.db.execute(_CREATE_SCHEDULER_LOG_SQL)
         # Add is_suspended column if missing (CREATE IF NOT EXISTS won't alter)
         try:
             await self.db.execute("ALTER TABLE backtest_daily ADD COLUMN is_suspended BOOLEAN")
@@ -1525,6 +1536,66 @@ class GreptimeBacktestStorage:
     def invalidate_cache_status(self) -> None:
         """Force next get_cache_status() to re-query. Call after downloads."""
         self._cache_status_result = None
+
+    # ==================== Scheduler Log (persistent across restarts) ====================
+
+    async def log_scheduler_run(
+        self,
+        name: str,
+        trigger_type: str,
+        result: str,
+        message: str,
+    ) -> None:
+        """Write a scheduler run record to GreptimeDB.
+
+        Args:
+            name: Scheduler name, e.g. 'cache_scheduler' or 'daily_scan'.
+            trigger_type: 'startup' | 'scheduled' | 'manual'.
+            result: 'success' | 'failed' | 'skipped' | 'no_gaps' | 'no_result'.
+            message: Human-readable detail.
+        """
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        # Escape single quotes in message
+        safe_msg = (message or "")[:200].replace("'", "''")
+        sql = (
+            f"INSERT INTO scheduler_log (name, ts, trigger_type, result, message) "
+            f"VALUES ('{name}', {now_ms}, '{trigger_type}', '{result}', '{safe_msg}')"
+        )
+        try:
+            await self.db.execute(sql)
+        except Exception:
+            logger.warning("Failed to write scheduler_log", exc_info=True)
+
+    async def get_last_scheduler_run(self, name: str) -> dict | None:
+        """Read the most recent scheduler run for the given name.
+
+        Returns dict with keys: time, trigger_type, result, message.
+        Returns None if no records exist.
+        """
+        try:
+            row = await self.db.fetchrow(
+                f"SELECT ts, trigger_type, result, message FROM scheduler_log "
+                f"WHERE name = '{name}' ORDER BY ts DESC LIMIT 1"
+            )
+            if not row:
+                return None
+            ts = row["ts"]
+            if isinstance(ts, (int, float)):
+                dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            else:
+                dt = ts
+            from zoneinfo import ZoneInfo
+
+            bj = dt.astimezone(ZoneInfo("Asia/Shanghai"))
+            return {
+                "time": bj.strftime("%Y-%m-%d %H:%M"),
+                "trigger_type": row["trigger_type"],
+                "result": row["result"],
+                "message": row["message"],
+            }
+        except Exception:
+            logger.warning("Failed to read scheduler_log", exc_info=True)
+            return None
 
 
 def create_storage_from_config() -> GreptimeBacktestStorage:
