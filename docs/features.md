@@ -730,6 +730,7 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 - [x] Feishu notifications for all scenarios
 - [x] Dashboard data engine status card
 - [x] Manual download with SSE progress + stop button
+- [x] Suspended stock prev_close chaining (per-stock latest close, not global MAX date)
 
 ---
 
