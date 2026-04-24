@@ -170,7 +170,13 @@ class ModelTrainingScheduler:
                     logger.info("No model in S3 yet")
                     return
                 self.s3_has_full_model = True
-                latest = sorted(full_models, key=lambda m: m["last_modified"])[-1]
+                # Prefer dated models (full_20260406.lgb) over full_latest.lgb
+                # so we can extract the training date from the filename.
+                # full_latest.lgb is just a copy with no date info.
+                import re
+
+                dated = [m for m in full_models if re.search(r"\d{8}\.lgb$", m["key"])]
+                latest = sorted(dated or full_models, key=lambda m: m["last_modified"])[-1]
                 full_model_path = MODEL_DIR / f"{FULL_MODEL_NAME}.lgb"
                 MODEL_DIR.mkdir(parents=True, exist_ok=True)
                 await s3.download_file(latest["key"], full_model_path)
