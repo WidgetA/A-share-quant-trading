@@ -139,7 +139,7 @@ async def run_ml_live(
         raise RuntimeError(
             f"GreptimeDB 历史数据严重不足: "
             f"仅 {len(history_bars)}/{len(early_data)} 只股票有37天历史 "
-            f"(覆盖率 {len(history_bars)/len(early_data)*100:.0f}% < 20%)。"
+            f"(覆盖率 {len(history_bars) / len(early_data) * 100:.0f}% < 20%)。"
             f"请检查缓存补全是否正常运行。"
         )
 
