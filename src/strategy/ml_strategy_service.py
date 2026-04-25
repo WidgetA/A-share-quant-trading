@@ -231,11 +231,10 @@ async def run_ml_backtest(
             if bar.close > 0:
                 prev_close_map[code] = bar.close
 
-    # Step 3: Build candidate set from daily data (gap pre-filter)
+    # Step 3: Build candidate set from daily data
     candidates: dict[str, tuple[float, float]] = {}
     n_suspended = 0
     n_no_prev_close = 0
-    n_gap_filtered = 0
     for code, day in all_daily.items():
         if day.is_suspended:
             n_suspended += 1
@@ -247,24 +246,19 @@ async def run_ml_backtest(
         if prev_close <= 0:
             n_no_prev_close += 1
             continue
-        gap_pct = (open_price - prev_close) / prev_close * 100
-        if gap_pct < -0.5:
-            n_gap_filtered += 1
-            continue
         candidates[code] = (open_price, prev_close)
 
     daily_candidates = len(candidates)
 
     logger.info(
         "ML backtest %s: prev_td=%s, prev_close_map=%d, "
-        "%d daily → -%d suspended -%d no_prev -%d gap → %d candidates",
+        "%d daily → -%d suspended -%d no_prev → %d candidates",
         date_str,
         prev_td,
         len(prev_close_map),
         len(all_daily),
         n_suspended,
         n_no_prev_close,
-        n_gap_filtered,
         daily_candidates,
     )
 

@@ -330,7 +330,7 @@ class MLScanner:
     _SURGE_RATIO_PERCENTILE = 0.95  # dynamic cutoff at 95th percentile
     _SURGE_RATIO_FLOOR = 0.15  # cutoff never below this
     _UPPER_SHADOW_MAX = 3.0  # upper shadow > 3% → remove
-    _UPPER_SHADOW_EXEMPT = 7.0  # but exempt if gain_pct >= 7%
+    _UPPER_SHADOW_EXEMPT = 9.5  # but exempt if early_gain_pct >= 9.5% (intraday)
 
     def __init__(
         self,
@@ -891,8 +891,8 @@ class MLScanner:
         """Step 7: Remove stocks with heavy upper shadow (selling pressure).
 
         upper_shadow = (high_940 - max(open, latest)) / open
-        Remove if upper_shadow > 3% AND gain_pct < 7%.
-        Stocks near limit-up (≥7%) are exempt — strong buyer dominance.
+        Remove if upper_shadow > 3% AND early_gain_pct < 9.5%.
+        Stocks with strong intraday gain (≥9.5%) are exempt — buyer dominance.
 
         Args:
             codes: Codes from filter_by_surge_ratio().
@@ -916,7 +916,7 @@ class MLScanner:
 
             if (
                 shadow > MLScanner._UPPER_SHADOW_MAX
-                and snap.gain_pct < MLScanner._UPPER_SHADOW_EXEMPT
+                and snap.early_gain_pct < MLScanner._UPPER_SHADOW_EXEMPT
             ):
                 removed += 1
             else:
