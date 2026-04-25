@@ -1191,11 +1191,12 @@ class MLScanner:
         Returns:
             Dict of code → FeatureVector.
         """
-        # Compute market-wide open gain (average across all candidates)
+        # Compute market-wide open gain (average across ALL snapshots, not just
+        # filtered candidates — this represents the true market-level signal)
         gains = [
-            snapshots[c].early_gain_pct
-            for c in codes
-            if c in snapshots and snapshots[c].open_price > 0
+            s.early_gain_pct
+            for s in snapshots.values()
+            if s.open_price > 0
         ]
         market_open_gain = statistics.mean(gains) if gains else 0.0
 
