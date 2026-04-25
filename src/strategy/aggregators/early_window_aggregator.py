@@ -22,15 +22,18 @@ class Snapshot(NamedTuple):
 
 
 class EarlyWindowAggregator:
-    """Aggregate the 09:31~09:40 window into one snapshot per day.
+    """Aggregate the 09:31~09:38 window into one snapshot per day.
 
-    Used by current momentum / ML strategies as the early-day signal source.
+    Uses bars 09:31-09:38 (8 bars). The live scan triggers at 09:39 but
+    the 09:39 bar is still forming, so the latest complete bar is 09:38.
+    Backtest must match live: use the same 8-bar window.
+
     Consumes raw 1-min bar dicts in Tushare ``stk_mins`` format
     (``trade_time``, ``open``, ``high``, ``low``, ``close``, ``vol``).
     """
 
     WINDOW_START = "09:31"
-    WINDOW_END = "09:40"
+    WINDOW_END = "09:38"
 
     def aggregate(self, bars: list[dict[str, Any]]) -> dict[str, Snapshot]:
         """Return ``{YYYY-MM-DD: Snapshot}`` for each day present in ``bars``."""
