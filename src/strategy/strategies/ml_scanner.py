@@ -1193,11 +1193,7 @@ class MLScanner:
         """
         # Compute market-wide open gain (average across ALL snapshots, not just
         # filtered candidates — this represents the true market-level signal)
-        gains = [
-            s.early_gain_pct
-            for s in snapshots.values()
-            if s.open_price > 0
-        ]
+        gains = [s.early_gain_pct for s in snapshots.values() if s.open_price > 0]
         market_open_gain = statistics.mean(gains) if gains else 0.0
 
         # Compute raw features for each stock
