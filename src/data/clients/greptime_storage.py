@@ -1565,7 +1565,7 @@ class GreptimeBacktestStorage:
         )
         try:
             await self.db.execute(sql)
-        except Exception:
+        except Exception:  # safety: ignore — non-trading metadata, ok to swallow
             logger.warning("Failed to write scheduler_log", exc_info=True)
 
     async def get_last_scheduler_run(self, name: str) -> dict | None:
@@ -1595,7 +1595,7 @@ class GreptimeBacktestStorage:
                 "result": row["result"],
                 "message": row["message"],
             }
-        except Exception:
+        except Exception:  # safety: ignore — non-trading metadata, ok to swallow
             logger.warning("Failed to read scheduler_log", exc_info=True)
             return None
 
