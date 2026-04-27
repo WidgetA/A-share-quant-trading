@@ -139,6 +139,37 @@
         </div>
     </section>
 
+    <!-- xtquant Broker Section -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>Broker 服务器 (xtquant-trade-server)</h3>
+            <p class="settings-desc">Windows 服务器上运行的 xtquant-trade-server，负责实际下单。填写内网 IP 和端口（如 <code>http://192.168.1.10:8001</code>）。</p>
+
+            <div class="token-status" id="xtquantStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="xtquantStatusValue">加载中...</span>
+            </div>
+
+            <div class="form-group">
+                <label for="xtquantUrl">Server URL</label>
+                <input type="text" id="xtquantUrl" class="token-input"
+                    placeholder="http://192.168.1.10:8001" style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="xtquantKey">API Key</label>
+                <input type="text" id="xtquantKey" class="token-input"
+                    placeholder="xtquant-trade-server 的 X-API-Key..." style="font-family: monospace;">
+            </div>
+
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testXtquant()" id="xtquantTestBtn">测试连接</button>
+                <button class="btn btn-primary" onclick="saveXtquant()" id="xtquantSaveBtn">保存</button>
+            </div>
+
+            <div class="token-message hidden" id="xtquantMessage"></div>
+        </div>
+    </section>
+
     <!-- S3 Object Storage Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -359,12 +390,78 @@ async function saveS3Config() {
     } finally { btn.disabled = false; btn.textContent = '保存'; }
 }
 
+// xtquant Broker
+async function loadXtquantStatus() {
+    try {
+        const resp = await fetch('/api/settings/xtquant');
+        const data = await resp.json();
+        const el = document.getElementById('xtquantStatusValue');
+        if (data.configured) {
+            el.textContent = `已配置 | ${data.server_url} | Key: ${data.masked_key}`;
+            el.className = 'token-status-value configured';
+        } else if (data.server_url) {
+            el.textContent = `URL 已配置 (${data.server_url})，Key 未配置`;
+            el.className = 'token-status-value not-configured';
+        } else {
+            el.textContent = '未配置';
+            el.className = 'token-status-value not-configured';
+        }
+    } catch (e) {
+        document.getElementById('xtquantStatusValue').textContent = '加载失败';
+    }
+}
+
+async function testXtquant() {
+    const url = document.getElementById('xtquantUrl').value.trim();
+    const key = document.getElementById('xtquantKey').value.trim();
+    if (!url || !key) { showMessage('xtquantMessage', '请填写 URL 和 API Key', false); return; }
+    const btn = document.getElementById('xtquantTestBtn');
+    btn.disabled = true; btn.textContent = '连接中...';
+    showMessage('xtquantMessage', '', true);
+    try {
+        const resp = await fetch('/api/settings/xtquant/test', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({server_url: url, api_key: key})
+        });
+        const data = await resp.json();
+        showMessage('xtquantMessage', data.message || data.detail, data.success);
+    } catch (e) {
+        showMessage('xtquantMessage', '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '测试连接'; }
+}
+
+async function saveXtquant() {
+    const url = document.getElementById('xtquantUrl').value.trim();
+    const key = document.getElementById('xtquantKey').value.trim();
+    if (!url || !key) { showMessage('xtquantMessage', '请填写 URL 和 API Key', false); return; }
+    const btn = document.getElementById('xtquantSaveBtn');
+    btn.disabled = true; btn.textContent = '保存中...';
+    try {
+        const resp = await fetch('/api/settings/xtquant', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({server_url: url, api_key: key})
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage('xtquantMessage', data.message, true);
+            document.getElementById('xtquantUrl').value = '';
+            document.getElementById('xtquantKey').value = '';
+            loadXtquantStatus();
+        } else {
+            showMessage('xtquantMessage', data.detail || data.message || '保存失败', false);
+        }
+    } catch (e) {
+        showMessage('xtquantMessage', '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '保存'; }
+}
+
 // Load all on page load
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
 loadIquantStatus();
 loadFcStatus();
+loadXtquantStatus();
 loadS3Status();
 </script>
 {% endblock %}

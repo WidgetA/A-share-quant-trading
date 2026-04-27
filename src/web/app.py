@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
-from src.web.iquant_routes import create_iquant_router
+from src.trading.broker_client import BrokerClient
+from src.web.ml_routes import create_ml_router
 from src.web.routes import (
     create_model_router,
     create_momentum_router,
@@ -88,11 +89,39 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     )
     logger.info("GreptimeDB storage + cache pipeline ready")
 
-    # Inject shared storage into iQuant router
-    iquant_rtr = getattr(app.state, "iquant_router", None)
-    if iquant_rtr and hasattr(iquant_rtr, "_inject_storage"):
-        iquant_rtr._inject_storage(storage)
+    # Inject shared storage into ML router
+    ml_rtr = getattr(app.state, "ml_router", None)
+    if ml_rtr and hasattr(ml_rtr, "_inject_storage"):
+        ml_rtr._inject_storage(storage)
     return True
+
+
+async def _broker_position_poll_loop(app: FastAPI) -> None:
+    """Poll xtquant-trade-server for positions/cash every 30s and cache in app.state."""
+    import asyncio
+
+    while True:
+        await asyncio.sleep(30)
+        broker: BrokerClient | None = getattr(app.state, "broker", None)
+        if broker is None:
+            continue
+        try:
+            positions = await broker.get_positions()
+            account = await broker.get_account()
+            app.state.broker_positions = [
+                {
+                    "code": p.code,
+                    "volume": p.volume,
+                    "can_use_volume": p.can_use_volume,
+                    "avg_price": p.avg_price,
+                    "market_value": p.market_value,
+                }
+                for p in positions
+                if p.volume > 0
+            ]
+            app.state.available_cash = account.cash
+        except Exception as e:
+            logger.warning(f"Broker position poll failed: {e}")
 
 
 async def _greptime_reconnect_loop(app: FastAPI) -> None:
@@ -171,10 +200,10 @@ def create_app(
     model_router = create_model_router()
     app.include_router(model_router)
 
-    # Add iQuant API router (isolated from main system, lazily initialized)
-    iquant_router = create_iquant_router()
-    app.include_router(iquant_router)
-    app.state.iquant_router = iquant_router  # for shutdown cleanup
+    # Add ML strategy router (scan, backtest, quote, universe)
+    ml_router = create_ml_router()
+    app.include_router(ml_router)
+    app.state.ml_router = ml_router  # for shutdown cleanup
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():
@@ -188,6 +217,23 @@ def create_app(
 
         logger.info("Web UI started")
         store.start_cleanup_task()
+
+        # Initialize xtquant-trade-server broker client
+        app.state.broker = None
+        app.state.broker_positions = []
+        app.state.available_cash = 0.0
+        app.state._broker_poll_task = None
+        try:
+            from src.common.config import get_xtquant_api_key, get_xtquant_server_url
+
+            broker = BrokerClient(get_xtquant_server_url(), get_xtquant_api_key())
+            await broker.start()
+            app.state.broker = broker
+            app.state._broker_poll_task = asyncio.create_task(_broker_position_poll_loop(app))
+            logger.info(f"BrokerClient initialized: {get_xtquant_server_url()}")
+        except ValueError as e:
+            logger.warning(f"Broker not configured, trading disabled: {e}")
+
         app.state.active_download = None  # download_task.ActiveDownload | None
         app.state.download_lock = asyncio.Lock()  # guards check+start as atomic op
         app.state.cache_fill_running = False  # True while check_and_fill_gaps is active
@@ -219,10 +265,10 @@ def create_app(
 
         # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
         # CRITICAL: must start before anything else — safety monitoring cannot be skipped
-        iquant_rtr = getattr(app.state, "iquant_router", None)
-        if iquant_rtr and hasattr(iquant_rtr, "_start_monitoring"):
-            iquant_rtr._start_monitoring()
-            logger.info("iQuant monitoring scheduler started")
+        ml_rtr = getattr(app.state, "ml_router", None)
+        if ml_rtr and hasattr(ml_rtr, "_start_monitoring"):
+            ml_rtr._start_monitoring(app.state)
+            logger.info("ML monitoring scheduler started")
 
         # Run trading safety audit at startup → notify Feishu if CRITICAL
         try:
@@ -329,10 +375,21 @@ def create_app(
             await storage.stop()
             logger.info("GreptimeDB storage closed")
 
-        # Cleanup iQuant isolated resources
-        iquant_rtr = getattr(app.state, "iquant_router", None)
-        if iquant_rtr and hasattr(iquant_rtr, "_iquant_cleanup"):
-            await iquant_rtr._iquant_cleanup()
+        # Stop broker position poll
+        broker_poll = getattr(app.state, "_broker_poll_task", None)
+        if broker_poll and not broker_poll.done():
+            broker_poll.cancel()
+
+        # Stop broker client
+        broker = getattr(app.state, "broker", None)
+        if broker:
+            await broker.stop()
+            logger.info("BrokerClient stopped")
+
+        # Cleanup ML router resources
+        ml_rtr = getattr(app.state, "ml_router", None)
+        if ml_rtr and hasattr(ml_rtr, "_ml_cleanup"):
+            await ml_rtr._ml_cleanup()
 
     return app
 

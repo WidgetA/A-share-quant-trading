@@ -448,6 +448,76 @@ def get_tsanghi_token_source() -> str:
     return "not_configured"
 
 
+# === xtquant-trade-server ===
+
+XTQUANT_KEY_FILE = PROJECT_ROOT / "data" / "xtquant_api_key.txt"
+XTQUANT_URL_FILE = PROJECT_ROOT / "data" / "xtquant_server_url.txt"
+
+
+def get_xtquant_server_url() -> str:
+    """Get xtquant-trade-server base URL (e.g. http://192.168.1.10:8001).
+
+    Priority: persisted file > XTQUANT_SERVER_URL env var.
+
+    Raises:
+        ValueError: If not configured.
+    """
+    import os
+
+    if XTQUANT_URL_FILE.exists():
+        url = XTQUANT_URL_FILE.read_text(encoding="utf-8").strip()
+        if url:
+            return url
+
+    url = os.environ.get("XTQUANT_SERVER_URL", "").strip()
+    if url:
+        return url
+
+    raise ValueError(
+        "xtquant-trade-server URL not configured. "
+        "Set via Settings page or XTQUANT_SERVER_URL environment variable."
+    )
+
+
+def set_xtquant_server_url(url: str) -> None:
+    """Persist xtquant-trade-server URL to disk."""
+    XTQUANT_URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    XTQUANT_URL_FILE.write_text(url, encoding="utf-8")
+    logger.info("xtquant server URL updated and persisted to disk")
+
+
+def get_xtquant_api_key() -> str:
+    """Get API key for xtquant-trade-server.
+
+    Priority: persisted file > XTQUANT_API_KEY env var.
+
+    Raises:
+        ValueError: If not configured.
+    """
+    import os
+
+    if XTQUANT_KEY_FILE.exists():
+        key = XTQUANT_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+
+    key = os.environ.get("XTQUANT_API_KEY", "").strip()
+    if key:
+        return key
+
+    raise ValueError(
+        "xtquant-trade-server API key not configured. "
+        "Set via Settings page or XTQUANT_API_KEY environment variable."
+    )
+
+
+def set_xtquant_api_key(key: str) -> None:
+    """Persist xtquant-trade-server API key to disk."""
+    XTQUANT_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    XTQUANT_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("xtquant API key updated and persisted to disk")
+
+
 # --- Cache Scheduler Toggle ---
 
 _cache_scheduler_enabled_override: bool | None = None

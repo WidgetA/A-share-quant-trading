@@ -76,17 +76,15 @@ def create_router() -> APIRouter:
 
         templates = request.app.state.templates
 
-        # Get iQuant connection status
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if iquant_rtr and hasattr(iquant_rtr, "_get_status"):
-            iquant_status = iquant_rtr._get_status()
+        # Get broker connection status
+        ml_rtr = getattr(request.app.state, "ml_router", None)
+        if ml_rtr and hasattr(ml_rtr, "_get_status"):
+            iquant_status = ml_rtr._get_status(request.app.state)
         else:
             iquant_status = {
-                "connected": False,
-                "last_poll_time": None,
-                "gap_seconds": None,
+                "broker_configured": False,
                 "holdings_count": 0,
-                "pending_count": 0,
+                "available_cash": 0,
             }
 
         # Get cache scheduler status
@@ -2402,6 +2400,81 @@ def create_settings_router() -> APIRouter:
             "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
         }
 
+    # === XTQUANT BROKER SETTINGS ===
+
+    class XtquantConfigRequest(BaseModel):
+        server_url: str
+        api_key: str
+
+    @router.get("/api/settings/xtquant")
+    async def get_xtquant_status():
+        """Get current xtquant-trade-server config status."""
+        from src.common.config import get_xtquant_api_key, get_xtquant_server_url
+
+        url_configured = False
+        current_url = ""
+        try:
+            current_url = get_xtquant_server_url()
+            url_configured = True
+        except ValueError:
+            pass
+
+        key_configured = False
+        masked_key = ""
+        try:
+            key = get_xtquant_api_key()
+            masked_key = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
+            key_configured = True
+        except ValueError:
+            pass
+
+        return {
+            "configured": url_configured and key_configured,
+            "server_url": current_url,
+            "key_configured": key_configured,
+            "masked_key": masked_key,
+        }
+
+    @router.post("/api/settings/xtquant")
+    async def update_xtquant_config(body: XtquantConfigRequest):
+        """Save xtquant-trade-server URL and API key."""
+        from src.common.config import set_xtquant_api_key, set_xtquant_server_url
+
+        url = body.server_url.strip().rstrip("/")
+        key = body.api_key.strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="Server URL 不能为空")
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        set_xtquant_server_url(url)
+        set_xtquant_api_key(key)
+        return {"success": True, "message": "Broker 配置已保存，重启服务后生效"}
+
+    @router.post("/api/settings/xtquant/test")
+    async def test_xtquant_connection(request: Request, body: XtquantConfigRequest):
+        """Test xtquant-trade-server connection via /readyz."""
+        import httpx
+
+        url = body.server_url.strip().rstrip("/")
+        key = body.api_key.strip()
+        if not url or not key:
+            raise HTTPException(status_code=400, detail="URL 和 Key 不能为空")
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{url}/readyz")
+                if resp.status_code == 200:
+                    return {"success": True, "message": "连接成功，Broker 已就绪"}
+                elif resp.status_code == 503:
+                    return {"success": False, "message": "服务器在线但 Broker 未就绪（QMT 可能未登录）"}
+                else:
+                    return {"success": False, "message": f"服务器返回 {resp.status_code}"}
+        except httpx.ConnectError:
+            return {"success": False, "message": f"无法连接到 {url}，请检查 IP 和端口"}
+        except httpx.TimeoutException:
+            return {"success": False, "message": "连接超时，请检查内网是否可达"}
+
     return router
 
 
@@ -2765,16 +2838,9 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/holdings")
     async def get_holdings(request: Request) -> dict:
-        """Get current broker positions (synced from iQuant)."""
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr or not hasattr(iquant_rtr, "_get_broker_positions"):
-            return {"holdings": []}
+        """Get current broker positions (cached from xtquant-trade-server poll)."""
+        broker_pos = getattr(request.app.state, "broker_positions", [])
 
-        broker_pos = iquant_rtr._get_broker_positions()
-        # Filter out sold positions (volume=0)
-        active = [p for p in broker_pos if p.get("volume", 0) > 0]
-
-        # Look up company names from local board_constituents.json
         from src.data.sources.local_concept_mapper import LocalConceptMapper
 
         mapper = LocalConceptMapper()
@@ -2784,7 +2850,8 @@ def create_trading_router() -> APIRouter:
                 "name": mapper.get_stock_name(pos["code"]),
                 "quantity": pos.get("volume", 0),
             }
-            for pos in active
+            for pos in broker_pos
+            if pos.get("volume", 0) > 0
         ]
         return {"holdings": holdings}
 
@@ -2825,7 +2892,9 @@ def create_trading_router() -> APIRouter:
 
     @router.post("/api/trading/buy")
     async def submit_buy(request: Request) -> dict:
-        """Push a BUY signal into iQuant pending queue."""
+        """Place a BUY order via xtquant-trade-server."""
+        from src.trading.broker_client import BrokerClient, BrokerError
+
         body = await request.json()
         stock_code = body.get("stock_code", "")
         stock_name = body.get("stock_name", "")
@@ -2835,28 +2904,30 @@ def create_trading_router() -> APIRouter:
         if not stock_code or quantity <= 0 or quantity % 100 != 0:
             raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
 
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr or not hasattr(iquant_rtr, "_push_order"):
-            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
+        if broker is None:
+            raise HTTPException(status_code=503, detail="Broker 未配置，请设置 XTQUANT_SERVER_URL")
 
-        signal = {
-            "type": "buy",
-            "stock_code": stock_code,
-            "stock_name": stock_name,
-            "quantity": quantity,
-            "price": float(price) if price else None,
-            "price_type": "limit" if price else "market",
-            "latest_price": float(price) if price else 0.0,
-            "reason": "Dashboard手动买入",
-            "manual": True,
-        }
+        try:
+            result = await broker.place_order(
+                code=stock_code,
+                side="BUY",
+                qty=quantity,
+                price_type="LIMIT" if price else "MARKET",
+                price=float(price) if price else None,
+                remark=f"Dashboard买入 {stock_name}".strip(),
+            )
+        except BrokerError as e:
+            raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
-        pushed = iquant_rtr._push_order(signal)
-        return {"success": True, "signal_id": pushed.get("id"), "quantity": quantity}
+        logger.info(f"BUY order placed: {stock_code} qty={quantity} order_id={result.order_id}")
+        return {"success": True, "order_id": result.order_id, "status": result.status, "quantity": quantity}
 
     @router.post("/api/trading/sell")
     async def submit_sell(request: Request) -> dict:
-        """Push a SELL signal into iQuant pending queue."""
+        """Place a SELL order via xtquant-trade-server."""
+        from src.trading.broker_client import BrokerClient, BrokerError
+
         body = await request.json()
         stock_code = body.get("stock_code", "")
         stock_name = body.get("stock_name", "")
@@ -2865,49 +2936,53 @@ def create_trading_router() -> APIRouter:
         if not stock_code or quantity <= 0 or quantity % 100 != 0:
             raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
 
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr or not hasattr(iquant_rtr, "_push_order"):
-            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
+        if broker is None:
+            raise HTTPException(status_code=503, detail="Broker 未配置，请设置 XTQUANT_SERVER_URL")
 
-        signal = {
-            "type": "sell",
-            "stock_code": stock_code,
-            "stock_name": stock_name,
-            "quantity": quantity,
-            "price": None,
-            "price_type": "market",
-            "latest_price": 0.0,
-            "reason": "Dashboard手动卖出",
-            "manual": True,
-        }
+        try:
+            result = await broker.place_order(
+                code=stock_code,
+                side="SELL",
+                qty=quantity,
+                price_type="MARKET",
+                remark=f"Dashboard卖出 {stock_name}".strip(),
+            )
+        except BrokerError as e:
+            raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
-        pushed = iquant_rtr._push_order(signal)
-        return {"success": True, "signal_id": pushed.get("id"), "quantity": quantity}
+        logger.info(f"SELL order placed: {stock_code} qty={quantity} order_id={result.order_id}")
+        return {"success": True, "order_id": result.order_id, "status": result.status, "quantity": quantity}
 
-    @router.get("/api/trading/pending-signals")
-    async def dashboard_pending_signals(request: Request) -> dict:
-        """Return pending signals for dashboard display (no auth)."""
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr or not hasattr(iquant_rtr, "_get_pending_signals"):
-            return {"signals": []}
-        return {"signals": iquant_rtr._get_pending_signals()}
+    @router.get("/api/trading/orders")
+    async def get_orders(request: Request) -> dict:
+        """Return today's open orders from broker."""
+        from src.trading.broker_client import BrokerClient
 
-    @router.post("/api/trading/cancel-signal")
-    async def cancel_signal(request: Request) -> dict:
-        """Cancel a pending signal by ID (dashboard, no auth)."""
-        body = await request.json()
-        signal_id = body.get("signal_id", "")
-        if not signal_id:
-            raise HTTPException(status_code=400, detail="signal_id required")
+        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
+        if broker is None:
+            return {"orders": []}
+        try:
+            orders = await broker.get_orders()
+            return {"orders": orders}
+        except Exception as e:
+            logger.warning(f"get_orders failed: {e}")
+            return {"orders": []}
 
-        iquant_rtr = getattr(request.app.state, "iquant_router", None)
-        if not iquant_rtr or not hasattr(iquant_rtr, "_cancel_signal"):
-            raise HTTPException(status_code=503, detail="iQuant 路由未就绪")
+    @router.delete("/api/trading/orders/{order_id}")
+    async def cancel_order(request: Request, order_id: int) -> dict:
+        """Cancel an open order by broker order_id."""
+        from src.trading.broker_client import BrokerClient, BrokerError
 
-        removed = iquant_rtr._cancel_signal(signal_id)
-        if not removed:
-            raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
-        return {"success": True, "signal_id": signal_id}
+        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
+        if broker is None:
+            raise HTTPException(status_code=503, detail="Broker 未配置")
+
+        try:
+            result = await broker.cancel_order(order_id)
+            return {"success": True, "result": result}
+        except BrokerError as e:
+            raise HTTPException(status_code=400, detail=e.message)
 
     return router
 
