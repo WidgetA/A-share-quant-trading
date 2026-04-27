@@ -2467,7 +2467,10 @@ def create_settings_router() -> APIRouter:
                 if resp.status_code == 200:
                     return {"success": True, "message": "连接成功，Broker 已就绪"}
                 elif resp.status_code == 503:
-                    return {"success": False, "message": "服务器在线但 Broker 未就绪（QMT 可能未登录）"}
+                    return {
+                        "success": False,
+                        "message": "服务器在线但 Broker 未就绪（QMT 可能未登录）",
+                    }
                 else:
                     return {"success": False, "message": f"服务器返回 {resp.status_code}"}
         except httpx.ConnectError:
@@ -2921,7 +2924,12 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
         logger.info(f"BUY order placed: {stock_code} qty={quantity} order_id={result.order_id}")
-        return {"success": True, "order_id": result.order_id, "status": result.status, "quantity": quantity}
+        return {
+            "success": True,
+            "order_id": result.order_id,
+            "status": result.status,
+            "quantity": quantity,
+        }
 
     @router.post("/api/trading/sell")
     async def submit_sell(request: Request) -> dict:
@@ -2952,7 +2960,12 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
         logger.info(f"SELL order placed: {stock_code} qty={quantity} order_id={result.order_id}")
-        return {"success": True, "order_id": result.order_id, "status": result.status, "quantity": quantity}
+        return {
+            "success": True,
+            "order_id": result.order_id,
+            "status": result.status,
+            "quantity": quantity,
+        }
 
     @router.get("/api/trading/orders")
     async def get_orders(request: Request) -> dict:
