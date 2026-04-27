@@ -2452,7 +2452,7 @@ def create_settings_router() -> APIRouter:
         return {"success": True, "message": "Broker 配置已保存，重启服务后生效"}
 
     @router.post("/api/settings/xtquant/test")
-    async def test_xtquant_connection(request: Request, body: XtquantConfigRequest):
+    async def test_xtquant_connection(body: XtquantConfigRequest):
         """Test xtquant-trade-server connection via /readyz."""
         import httpx
 
