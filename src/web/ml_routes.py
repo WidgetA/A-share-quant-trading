@@ -135,7 +135,7 @@ def create_ml_router() -> APIRouter:
     # --- Resource management ---
 
     async def _ensure_resources() -> dict[str, Any]:
-        """Lazily initialize iQuant-specific resources and start scheduler."""
+        """Lazily initialize ML strategy resources and start scheduler."""
         if _state["initialized"]:
             return _state
 
@@ -184,7 +184,7 @@ def create_ml_router() -> APIRouter:
         _state["scheduler_task"] = asyncio.create_task(_signal_scheduler())
 
         _state["initialized"] = True
-        logger.info("iQuant resources initialized + scheduler started")
+        logger.info("ML strategy resources initialized + scheduler started")
         return _state
 
     async def _cleanup_resources() -> None:
@@ -197,7 +197,7 @@ def create_ml_router() -> APIRouter:
         if rt_client:
             await rt_client.stop()
         _state["initialized"] = False
-        logger.info("iQuant resources cleaned up")
+        logger.info("ML strategy resources cleaned up")
 
     router._ml_cleanup = _cleanup_resources  # type: ignore[attr-defined]
     router._ml_init = _ensure_resources  # type: ignore[attr-defined]
@@ -207,7 +207,7 @@ def create_ml_router() -> APIRouter:
     def _inject_storage(storage: Any) -> None:
         """Inject GreptimeDB storage for preClose / minute lookups."""
         _state["storage"] = storage
-        logger.info("iQuant: GreptimeDB storage injected")
+        logger.info("ML strategy: GreptimeDB storage injected")
 
     router._inject_storage = _inject_storage  # type: ignore[attr-defined]
 
@@ -223,7 +223,7 @@ def create_ml_router() -> APIRouter:
         stock_filter = _state["stock_filter"]
         codes = [c for c in all_codes if stock_filter.is_allowed(c)]
         _state["universe_cache"] = codes
-        logger.info(f"iQuant universe cached: {len(codes)} codes")
+        logger.info(f"ML strategy universe cached: {len(codes)} codes")
         return codes
 
     # --- ML scan (delegates to strategy service) ---
@@ -401,7 +401,7 @@ def create_ml_router() -> APIRouter:
                     cal = await _get_trade_calendar()
                     if now_bj.date() not in cal:
                         if scan_done_date != ex_date:
-                            logger.info(f"iQuant: {ex_date} is not a trading day")
+                            logger.info(f"ML strategy: {ex_date} is not a trading day")
                             scan_done_date = ex_date
                         await asyncio.sleep(3600)
                         continue
@@ -413,7 +413,7 @@ def create_ml_router() -> APIRouter:
                     from src.common.config import get_daily_scan_enabled
 
                     if not get_daily_scan_enabled():
-                        logger.info("iQuant: daily scan disabled, skipping")
+                        logger.info("ML strategy: daily scan disabled, skipping")
                         scan_done_date = ex_date
                         await asyncio.sleep(120)
                         continue
@@ -471,7 +471,7 @@ def create_ml_router() -> APIRouter:
         broker_positions = getattr(request.app.state, "broker_positions", [])
         return {
             "status": "ok",
-            "service": "iquant-ml",
+            "service": "ml-strategy",
             "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "broker_positions": len(broker_positions),
         }
@@ -595,7 +595,7 @@ def create_ml_router() -> APIRouter:
         }
 
     @router.get("/status")
-    async def iquant_status(request: Request) -> JSONResponse:
+    async def ml_status(request: Request) -> JSONResponse:
         """Public broker connection status (no auth required)."""
         return JSONResponse(
             content=_get_status(request.app.state),

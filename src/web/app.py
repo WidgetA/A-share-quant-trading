@@ -62,7 +62,7 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     """Try to connect GreptimeDB and wire up storage + pipeline.
 
     On success: sets app.state.storage, app.state.pipeline, injects into
-    iQuant router, and returns True.
+    ML router, and returns True.
     On failure: leaves app.state.storage/pipeline as None and returns False.
     """
     from src.data.clients.greptime_storage import create_storage_from_config
@@ -263,7 +263,7 @@ def create_app(
         if not await _try_connect_greptime(app):
             app.state._greptime_reconnect_task = asyncio.create_task(_greptime_reconnect_loop(app))
 
-        # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
+        # Auto-start ML monitoring scheduler (readiness, broker alerts)
         # CRITICAL: must start before anything else — safety monitoring cannot be skipped
         ml_rtr = getattr(app.state, "ml_router", None)
         if ml_rtr and hasattr(ml_rtr, "_start_monitoring"):

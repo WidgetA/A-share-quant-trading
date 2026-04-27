@@ -109,33 +109,33 @@
         </div>
     </section>
 
-    <!-- iQuant API Key Section -->
+    <!-- ML Strategy API Key Section -->
     <section class="settings-section">
         <div class="settings-card">
-            <h3>iQuant API Key</h3>
-            <p class="settings-desc">用于 iQuant 脚本连接策略服务器的认证密钥。iQuant 脚本中的 API_KEY 需与此处一致。</p>
+            <h3>ML 策略 API Key</h3>
+            <p class="settings-desc">用于回测脚本连接策略服务器的认证密钥。</p>
 
             <!-- Current Status -->
-            <div class="token-status" id="iquantStatus">
+            <div class="token-status" id="mlKeyStatus">
                 <span class="token-status-label">当前状态：</span>
-                <span class="token-status-value" id="iquantStatusValue">加载中...</span>
+                <span class="token-status-value" id="mlKeyStatusValue">加载中...</span>
             </div>
 
             <!-- Key Input -->
             <div class="form-group">
-                <label for="iquantInput">API Key</label>
-                <input type="text" id="iquantInput" class="token-input"
+                <label for="mlKeyInput">API Key</label>
+                <input type="text" id="mlKeyInput" class="token-input"
                     placeholder="输入任意字符串作为密钥..." style="font-family: monospace;">
             </div>
 
             <!-- Actions -->
             <div class="token-actions">
-                <button class="btn btn-secondary" onclick="generateIquantKey()" id="iquantGenBtn">随机生成</button>
-                <button class="btn btn-primary" onclick="saveIquantKey()" id="iquantSaveBtn">保存</button>
+                <button class="btn btn-secondary" onclick="generateMlKey()" id="mlKeyGenBtn">随机生成</button>
+                <button class="btn btn-primary" onclick="saveMlKey()" id="mlKeySaveBtn">保存</button>
             </div>
 
             <!-- Result Message -->
-            <div class="token-message hidden" id="iquantMessage"></div>
+            <div class="token-message hidden" id="mlKeyMessage"></div>
         </div>
     </section>
 
@@ -293,15 +293,15 @@ function loadTsanghiStatus() { loadKeyStatus('/api/settings/tsanghi-token', 'tsa
 function testTsanghiToken() { testKey('/api/settings/tsanghi-token/test', 'tsanghiInput', 'tsanghiMessage', 'tsanghiTestBtn', '验证 Token'); }
 function saveTsanghiToken() { saveKey('/api/settings/tsanghi-token', 'tsanghiInput', 'tsanghiMessage', 'tsanghiSaveBtn', loadTsanghiStatus); }
 
-// iQuant
-function loadIquantStatus() { loadKeyStatus('/api/settings/iquant-key', 'iquantStatusValue'); }
-function generateIquantKey() {
+// ML Strategy API Key
+function loadMlKeyStatus() { loadKeyStatus('/api/settings/ml-key', 'mlKeyStatusValue'); }
+function generateMlKey() {
     const arr = new Uint8Array(16);
     crypto.getRandomValues(arr);
-    document.getElementById('iquantInput').value = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
-    showMessage('iquantMessage', '已生成随机密钥，请保存后复制到 iQuant 脚本的 API_KEY 中', true);
+    document.getElementById('mlKeyInput').value = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+    showMessage('mlKeyMessage', '已生成随机密钥，请保存后复制到回测脚本的 API_KEY 中', true);
 }
-function saveIquantKey() { saveKey('/api/settings/iquant-key', 'iquantInput', 'iquantMessage', 'iquantSaveBtn', loadIquantStatus, '，请将此 Key 填入 iQuant 脚本的 API_KEY 变量'); }
+function saveMlKey() { saveKey('/api/settings/ml-key', 'mlKeyInput', 'mlKeyMessage', 'mlKeySaveBtn', loadMlKeyStatus); }
 
 // FC Training Endpoint
 function loadFcStatus() { loadKeyStatus('/api/settings/fc-url', 'fcStatusValue'); }
@@ -459,7 +459,7 @@ async function saveXtquant() {
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
-loadIquantStatus();
+loadMlKeyStatus();
 loadFcStatus();
 loadXtquantStatus();
 loadS3Status();

@@ -79,9 +79,9 @@ def create_router() -> APIRouter:
         # Get broker connection status
         ml_rtr = getattr(request.app.state, "ml_router", None)
         if ml_rtr and hasattr(ml_rtr, "_get_status"):
-            iquant_status = ml_rtr._get_status(request.app.state)
+            broker_status = ml_rtr._get_status(request.app.state)
         else:
-            iquant_status = {
+            broker_status = {
                 "broker_configured": False,
                 "holdings_count": 0,
                 "available_cash": 0,
@@ -137,7 +137,7 @@ def create_router() -> APIRouter:
             "index.html",
             {
                 "request": request,
-                "iquant_status": iquant_status,
+                "broker_status": broker_status,
                 "scheduler": scheduler_status,
                 "model_scheduler": model_scheduler_status,
                 "daily_scan": daily_scan_status,
@@ -2062,11 +2062,11 @@ def create_settings_router() -> APIRouter:
         except httpx.HTTPError as e:
             return {"success": False, "message": f"HTTP 请求失败: {e}"}
 
-    # === IQUANT API KEY SETTINGS ===
+    # === ML STRATEGY API KEY SETTINGS ===
 
-    @router.get("/api/settings/iquant-key")
-    async def get_iquant_key_status():
-        """Get current iQuant API key status (masked)."""
+    @router.get("/api/settings/ml-key")
+    async def get_ml_key_status():
+        """Get current ML strategy API key status (masked)."""
         from src.common.config import get_iquant_api_key, get_iquant_key_source
 
         source = get_iquant_key_source()
@@ -2099,9 +2099,9 @@ def create_settings_router() -> APIRouter:
                 "key_length": 0,
             }
 
-    @router.post("/api/settings/iquant-key")
-    async def update_iquant_key(body: TokenUpdateRequest):
-        """Save a new iQuant API key."""
+    @router.post("/api/settings/ml-key")
+    async def update_ml_key(body: TokenUpdateRequest):
+        """Save a new ML strategy API key."""
         from src.common.config import set_iquant_api_key
 
         key = body.token.strip()
@@ -2109,7 +2109,7 @@ def create_settings_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="API Key 不能为空")
 
         set_iquant_api_key(key)
-        return {"success": True, "message": "iQuant API Key 已保存"}
+        return {"success": True, "message": "ML 策略 API Key 已保存"}
 
     # === TSANGHI TOKEN SETTINGS ===
 
@@ -2392,11 +2392,11 @@ def create_settings_router() -> APIRouter:
             get_tsanghi_token_source,
         )
 
-        iquant_ok = get_iquant_key_source() != "not_configured"
+        ml_key_ok = get_iquant_key_source() != "not_configured"
         tsanghi_ok = get_tsanghi_token_source() != "not_configured"
 
         return {
-            "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
+            "ml_key": {"configured": ml_key_ok, "source": get_iquant_key_source()},
             "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
         }
 

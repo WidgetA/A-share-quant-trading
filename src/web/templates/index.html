@@ -90,28 +90,20 @@
 <div class="dashboard">
     <!-- Status Cards Grid -->
     <div class="status-grid">
-        <!-- iQuant Connection Status -->
-        <div class="status-card" id="iquantCard">
+        <!-- Broker Connection Status -->
+        <div class="status-card" id="brokerCard">
             <div class="status-card-header">
-                <h3>iQuant 连接</h3>
-                <span class="status-indicator" id="iquantIndicator">--</span>
+                <h3>Broker 连接</h3>
+                <span class="status-indicator" id="brokerIndicator">--</span>
             </div>
             <div class="status-card-body">
                 <div class="status-card-row">
-                    <span class="status-card-label">心跳</span>
-                    <span class="status-card-value" id="iquantHeartbeat">--</span>
-                </div>
-                <div class="status-card-row">
                     <span class="status-card-label">余额</span>
-                    <span class="status-card-value" id="iquantCash">--</span>
+                    <span class="status-card-value" id="brokerCash">--</span>
                 </div>
                 <div class="status-card-row">
                     <span class="status-card-label">持仓</span>
-                    <span class="status-card-value" id="iquantHoldings">--</span>
-                </div>
-                <div class="status-card-row">
-                    <span class="status-card-label">待执行</span>
-                    <span class="status-card-value" id="iquantPending">--</span>
+                    <span class="status-card-value" id="brokerHoldings">--</span>
                 </div>
             </div>
         </div>
@@ -340,15 +332,15 @@
             </div>
         </div>
     </div>
-    <!-- Right column: pending signals queue -->
+    <!-- Right column: today's orders -->
     <div class="status-card">
         <div class="panel" id="pendingSignalsPanel">
             <div class="panel-header">
-                <h3>待执行订单队列</h3>
+                <h3>今日订单</h3>
                 <span class="badge" id="pendingSignalCount">0</span>
             </div>
             <div id="pendingSignalsContainer">
-                <div class="empty-state">暂无待执行信号</div>
+                <div class="empty-state">暂无今日订单</div>
             </div>
         </div>
     </div>
@@ -417,12 +409,10 @@ async function loadHoldings() {
 function renderHoldings(holdings) {
     const el = document.getElementById('holdingsContainer');
     document.getElementById('holdingsCount').textContent =
-        holdings.length ? holdings.length : (_iquantOnline ? '0' : '--');
+        holdings.length ? holdings.length : '0';
 
     if (!holdings.length) {
-        el.innerHTML = _iquantOnline
-            ? '<div class="empty-state">无持仓</div>'
-            : '<div class="empty-state">iQuant 离线，无法获取持仓</div>';
+        el.innerHTML = '<div class="empty-state">无持仓</div>';
         return;
     }
 
@@ -664,116 +654,91 @@ function esc(s) {
     return d.innerHTML;
 }
 
-// --- iQuant Status Polling ---
-let _iquantOnline = false;
+// --- Broker Status Polling ---
 let _statusFetchErrors = 0;
-async function loadIquantStatus() {
+async function loadBrokerStatus() {
     try {
         const resp = await fetch('/api/iquant/status', {cache: 'no-store'});
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const d = await resp.json();
         _statusFetchErrors = 0;
-        const ind = document.getElementById('iquantIndicator');
-        const gap = d.gap_seconds;
-        let label, cls;
-        if (gap === null || gap === undefined) {
-            label = '离线'; cls = 'offline';
-        } else if (gap < 35) {
-            label = '在线'; cls = 'online';
-        } else if (gap < 60) {
-            label = '不稳定'; cls = 'unstable';
-        } else {
-            label = '离线'; cls = 'offline';
-        }
-        _iquantOnline = cls === 'online' || cls === 'unstable';
-        ind.textContent = label;
-        ind.className = 'status-indicator ' + cls;
-        // Show relative time for heartbeat
-        let hbText = '从未连接';
-        if (d.last_poll_time && gap !== null && gap !== undefined) {
-            if (gap < 60) hbText = Math.round(gap) + '秒前';
-            else if (gap < 3600) hbText = Math.round(gap / 60) + '分钟前';
-            else hbText = d.last_poll_time.substring(11);
-        }
-        document.getElementById('iquantHeartbeat').textContent = hbText;
-        document.getElementById('iquantCash').textContent =
-            d.available_cash > 0 ? d.available_cash.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
-        document.getElementById('iquantHoldings').textContent = d.holdings_count || '--';
-        document.getElementById('iquantPending').textContent = d.pending_count;
+        const ind = document.getElementById('brokerIndicator');
+        const configured = d.broker_configured;
+        ind.textContent = configured ? '在线' : '未配置';
+        ind.className = 'status-indicator ' + (configured ? 'online' : 'offline');
+        document.getElementById('brokerCash').textContent =
+            d.available_cash > 0
+                ? d.available_cash.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+                : '--';
+        document.getElementById('brokerHoldings').textContent = d.holdings_count || '--';
     } catch (e) {
         _statusFetchErrors++;
         if (_statusFetchErrors >= 2) {
-            _iquantOnline = false;
-            const ind = document.getElementById('iquantIndicator');
+            const ind = document.getElementById('brokerIndicator');
             ind.textContent = '连接异常';
             ind.className = 'status-indicator offline';
-            document.getElementById('iquantHeartbeat').textContent = '请求失败';
         }
     }
 }
 
-// --- Pending Signals Queue ---
-async function loadPendingSignals() {
+// --- Today's Orders ---
+async function loadTodayOrders() {
     try {
-        const resp = await fetch('/api/trading/pending-signals');
+        const resp = await fetch('/api/trading/orders');
         const data = await resp.json();
-        renderPendingSignals(data.signals || []);
+        renderTodayOrders(data.orders || []);
     } catch (e) { /* ignore */ }
 }
 
-function renderPendingSignals(signals) {
-    const panel = document.getElementById('pendingSignalsPanel');
+const _CANCELLABLE = new Set(['NEW', 'PENDING_NEW', 'ACCEPTED', 'PARTIALLY_FILLED']);
+
+function renderTodayOrders(orders) {
     const el = document.getElementById('pendingSignalsContainer');
     const badge = document.getElementById('pendingSignalCount');
-    badge.textContent = signals.length;
+    badge.textContent = orders.length;
 
-    if (!signals.length) {
-        el.innerHTML = '<div class="empty-state">暂无待执行信号</div>';
+    if (!orders.length) {
+        el.innerHTML = '<div class="empty-state">暂无今日订单</div>';
         return;
     }
 
     let html = '<table class="trading-table"><thead><tr>' +
-        '<th>方向</th><th>代码</th><th>名称</th><th>数量</th><th>价格</th><th>来源</th><th>时间</th><th>操作</th>' +
+        '<th>方向</th><th>代码</th><th>数量</th><th>价格</th><th>状态</th><th>操作</th>' +
         '</tr></thead><tbody>';
 
-    for (const s of signals) {
-        const dir = s.type === 'buy' ? '买入' : '卖出';
-        const dirClass = s.type === 'buy' ? 'gain-pos' : 'gain-neg';
-        const priceStr = s.price_type === 'market' ? '市价' : (s.price ? s.price.toFixed(2) : '--');
-        const source = s.manual ? '手动' : '策略';
+    for (const o of orders) {
+        const dir = o.side === 'BUY' ? '买入' : '卖出';
+        const dirClass = o.side === 'BUY' ? 'gain-pos' : 'gain-neg';
+        const priceStr = o.price > 0 ? o.price.toFixed(2) : '市价';
+        const canCancel = _CANCELLABLE.has(o.status);
         html += '<tr>' +
             '<td class="' + dirClass + '">' + dir + '</td>' +
-            '<td class="code">' + esc(s.stock_code) + '</td>' +
-            '<td>' + esc(s.stock_name || '') + '</td>' +
-            '<td>' + s.quantity + '</td>' +
+            '<td class="code">' + esc(o.code) + '</td>' +
+            '<td>' + o.qty + '</td>' +
             '<td class="price">' + priceStr + '</td>' +
-            '<td>' + source + '</td>' +
-            '<td>' + esc(s.created_at || '') + '</td>' +
-            '<td><button class="btn-sm btn-sell" onclick="cancelSignal(\'' + esc(s.id) + '\')">撤销</button></td>' +
+            '<td>' + esc(o.status) + '</td>' +
+            '<td>' + (canCancel
+                ? '<button class="btn-sm btn-sell" onclick="cancelOrder(' + o.order_id + ')">撤单</button>'
+                : '--') + '</td>' +
             '</tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
 }
 
-async function cancelSignal(signalId) {
-    if (!confirm('确认撤销该信号？')) return;
+async function cancelOrder(orderId) {
+    if (!confirm('确认撤单？')) return;
     try {
-        const resp = await fetch('/api/trading/cancel-signal', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({signal_id: signalId})
-        });
+        const resp = await fetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
         const data = await resp.json();
         if (data.success) {
-            showToast('信号已撤销', 'success');
-            loadPendingSignals();
-            loadIquantStatus();
+            showToast('撤单已提交', 'success');
+            loadTodayOrders();
         } else {
-            showToast('撤销失败: ' + (data.detail || '未知'), 'error');
+            showToast('撤单失败: ' + (data.detail || '未知'), 'error');
         }
     } catch (e) {
-        showToast('撤销失败: ' + e.message, 'error');
+        showToast('撤单失败: ' + e.message, 'error');
     }
 }
 
@@ -1013,13 +978,13 @@ async function clearDataEngineError() {
 document.getElementById('tradeDatePicker').addEventListener('change', loadRecommendations);
 loadHoldings();
 loadRecommendations();
-loadIquantStatus();
-loadPendingSignals();
+loadBrokerStatus();
+loadTodayOrders();
 loadModelStatus();
 loadDataEngineStatus();
 setInterval(loadHoldings, 10000);
-setInterval(loadIquantStatus, 5000);
-setInterval(loadPendingSignals, 5000);
+setInterval(loadBrokerStatus, 5000);
+setInterval(loadTodayOrders, 5000);
 setInterval(loadModelStatus, 5000);
 setInterval(loadDataEngineStatus, 30000);
 </script>
