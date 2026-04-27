@@ -312,6 +312,7 @@ async def run_ml_backtest(
             high_940=snap.max_high,
             low_940=snap.min_low,
             early_volume=snap.cum_volume,
+            early_amount=snap.cum_amount,
             history=history_bars.get(code, []),
         )
 

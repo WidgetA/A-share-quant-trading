@@ -93,6 +93,7 @@ class StockSnapshot:
     high_940: float  # 9:30-9:40 high
     low_940: float  # 9:30-9:40 low
     early_volume: float  # 9:30-9:40 cumulative volume (股)
+    early_amount: float  # 9:30-9:40 cumulative turnover (元)
     history: list[DailyBar]  # 37 trading days, oldest first
 
     @property
@@ -206,6 +207,7 @@ class MLScoredStock:
     stock_code: str
     stock_name: str  # from board_constituents.json
     board_name: str  # best hot board
+    board_avg_gain_pct: float  # best board's average early gain (%)
     ml_score: float  # LightGBM LambdaRank prediction
     open_price: float
     prev_close: float
@@ -213,6 +215,8 @@ class MLScoredStock:
     gain_pct: float  # (latest - prev_close) / prev_close × 100
     early_gain_pct: float  # (latest - open) / open × 100
     turnover_amp: float
+    early_amount: float  # 9:30-9:40 cumulative turnover (元)
+    cci14: float  # 14-period CCI on closed daily bars (last 14 in history)
 
 
 @dataclass
@@ -484,6 +488,7 @@ class MLScanner:
                 high_940=snap.max_high,
                 low_940=snap.min_low,
                 early_volume=snap.cum_volume,
+                early_amount=snap.cum_amount,
                 history=hist,
             )
 
@@ -1173,6 +1178,25 @@ class MLScanner:
         return f
 
     @staticmethod
+    def compute_cci14(history: list[DailyBar]) -> float:
+        """Compute 14-period CCI on the last 14 closed daily bars.
+
+        Standard formula: CCI = (TP - SMA(TP, 14)) / (0.015 × MAD), where
+        TP = (high + low + close) / 3 and MAD is the mean absolute deviation
+        of TP from its SMA over the same 14 bars. Returns 0.0 when fewer
+        than 14 bars are available or the deviation is degenerate.
+        """
+        if len(history) < 14:
+            return 0.0
+        last14 = history[-14:]
+        tps = [(b.high + b.low + b.close) / 3.0 for b in last14]
+        sma = sum(tps) / 14
+        mad = sum(abs(tp - sma) for tp in tps) / 14
+        if mad <= 0:
+            return 0.0
+        return (tps[-1] - sma) / (0.015 * mad)
+
+    @staticmethod
     def compute_all_features(
         codes: set[str],
         snapshots: dict[str, StockSnapshot],
@@ -1452,11 +1476,15 @@ class MLScanner:
                 expected = ind.avg_volume_37d * MLScanner._EARLY_SESSION_RATIO
                 amp = snap.early_volume / expected if expected > 0 else 0.0
 
+            best = hot.best_board.get(code, "")
+            board_avg_gain = hot.hot_boards.get(best, 0.0) if best else 0.0
+
             all_scored.append(
                 MLScoredStock(
                     stock_code=code,
                     stock_name=code_name.get(code, ""),
-                    board_name=hot.best_board.get(code, ""),
+                    board_name=best,
+                    board_avg_gain_pct=board_avg_gain,
                     ml_score=score,
                     open_price=snap.open_price,
                     prev_close=snap.prev_close,
@@ -1464,6 +1492,8 @@ class MLScanner:
                     gain_pct=snap.gain_pct,
                     early_gain_pct=snap.early_gain_pct,
                     turnover_amp=round(amp, 4),
+                    early_amount=snap.early_amount,
+                    cci14=MLScanner.compute_cci14(snap.history),
                 )
             )
 

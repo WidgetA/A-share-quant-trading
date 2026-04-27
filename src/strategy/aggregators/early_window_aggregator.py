@@ -17,6 +17,7 @@ class Snapshot(NamedTuple):
 
     close: float
     cum_volume: float
+    cum_amount: float  # cumulative turnover in 元 (yuan)
     max_high: float
     min_low: float
 
@@ -29,7 +30,7 @@ class EarlyWindowAggregator:
     Backtest must match live: use the same 8-bar window.
 
     Consumes raw 1-min bar dicts in Tushare ``stk_mins`` format
-    (``trade_time``, ``open``, ``high``, ``low``, ``close``, ``vol``).
+    (``trade_time``, ``open``, ``high``, ``low``, ``close``, ``vol``, ``amount``).
     """
 
     WINDOW_START = "09:31"
@@ -51,16 +52,20 @@ class EarlyWindowAggregator:
                 lo = float(bar["low"])
                 c = float(bar["close"])
                 v = float(bar.get("vol", 0))
+                a = float(bar.get("amount", 0))
             except (ValueError, TypeError, KeyError):
                 continue
 
             existing = out.get(bar_date)
             if existing is None:
-                out[bar_date] = Snapshot(close=c, cum_volume=v, max_high=h, min_low=lo)
+                out[bar_date] = Snapshot(
+                    close=c, cum_volume=v, cum_amount=a, max_high=h, min_low=lo
+                )
             else:
                 out[bar_date] = Snapshot(
                     close=c,
                     cum_volume=existing.cum_volume + v,
+                    cum_amount=existing.cum_amount + a,
                     max_high=max(existing.max_high, h),
                     min_low=min(existing.min_low, lo),
                 )

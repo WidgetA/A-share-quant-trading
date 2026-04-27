@@ -299,13 +299,15 @@ Limit-up (skipped):
         scored = scan_result.all_scored
         if scored:
             lines.append("")
-            lines.append("评分前5:")
-            for i, s in enumerate(scored[:5]):
+            lines.append("评分前10:")
+            for i, s in enumerate(scored[:10]):
                 lines.append(
                     f"{i + 1}. {s.stock_code} {s.stock_name}  "
-                    f"ML={s.ml_score:.4f}  {s.board_name}  "
-                    f"涨{s.early_gain_pct:+.2f}%  "
-                    f"换手{s.turnover_amp:.2f}x"
+                    f"LGB={s.ml_score:.4f}  "
+                    f"买入:{s.latest_price:.2f}  "
+                    f"{s.board_name}({s.board_avg_gain_pct:+.2f}%)  "
+                    f"CCI14={s.cci14:.0f}  "
+                    f"7min成交={s.early_amount / 10000:.0f}万元"
                 )
 
         return await self.send_message("\n".join(lines))
