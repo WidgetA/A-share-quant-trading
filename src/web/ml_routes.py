@@ -314,10 +314,7 @@ def create_ml_router() -> APIRouter:
                     ex_time = now_bj.time().replace(second=0, microsecond=0)
 
                     # --- READINESS REPORT: 09:30 ---
-                    if (
-                        readiness_done_date != ex_date
-                        and time(9, 30) <= ex_time <= time(9, 35)
-                    ):
+                    if readiness_done_date != ex_date and time(9, 30) <= ex_time <= time(9, 35):
                         readiness_done_date = ex_date
                         await _send_readiness_report(now_bj, app_state)
 
