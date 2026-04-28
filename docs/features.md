@@ -46,6 +46,7 @@
 | 0.13.1 | 2026-04-07 | - | STR-006: FC serverless async training (X-Fc-Invocation-Type: Async), remove local training code |
 | 0.13.2 | 2026-04-08 | - | STR-006: Wire up ML inference — replace V15 momentum scan with LightGBM scoring (live + backtest) |
 | 0.13.3 | 2026-04-17 | - | DAT-001: Fix silent skip of suspended stocks without prev_close in daily cache — always write is_suspended=true row |
+| 0.13.4 | 2026-04-28 | - | STR-006: Stock-level blacklist — hardcoded codes removed at top of funnel (live scan + replicate_v16) and stripped from training data stream |
 
 ---
 
@@ -609,8 +610,17 @@ FC training (`serverless/app.py`) MUST replicate `lgbrank_scorer.py`'s feature c
 - Fine-tune: FC downloads init model from S3, no local training code
 - Feishu alerts for: training success/failure, S3 upload, data issues, scheduler status
 
+**Stock Blacklist** (added 2026-04-28):
+- Individual codes that violate strategy assumptions (low-volatility heavyweights, repeat false-positive names) are hardcoded in `src/strategy/filters/stock_blacklist.py` as `BLACKLISTED_STOCKS: dict[str, str]` (code → reason).
+- Applied at the top of the funnel in three places:
+  - `MLScanner.build_universe` Step 0 — alongside the ST filter, before any other gate runs
+  - `replicate_v16.py` Step 0 — keeps offline replication consistent with prod
+  - `/api/model/training-data` NDJSON stream — strips blacklisted codes from every day's bars so the LambdaRank model never sees their data
+- To add a code: edit the dict, fill in the reason, commit, push. Watchtower picks up the new image on prod within ~60s of CI passing.
+
 **Key Files**:
 - `src/strategy/strategies/ml_scanner.py` — 8-layer filter pipeline + feature engineering + model inference
+- `src/strategy/filters/stock_blacklist.py` — Hardcoded individual-stock blacklist (code → reason)
 - `src/data/services/model_training_scheduler.py` — Scheduler + FC async orchestration (trigger/callback/save)
 - `serverless/app.py` — FC serverless training endpoint (LightGBM train, S3 upload, result callback)
 - `src/strategy/ml_strategy_service.py` — Stateless runners: `run_ml_live()` + `run_ml_backtest()`

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from src.data.sources.local_concept_mapper import LocalConceptMapper
+from src.strategy.filters.stock_blacklist import BLACKLISTED_STOCKS
 from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
 if TYPE_CHECKING:
@@ -385,8 +386,11 @@ class MLScanner:
 
         # ST filter: check stock name from board_constituents.json
         st_codes = {code for code in exchange_filtered if _is_st(code_name[code])}
-        valid_codes = exchange_filtered - st_codes
+        # Stock-level blacklist: hardcoded codes that violate strategy assumptions
+        blacklisted = exchange_filtered & BLACKLISTED_STOCKS.keys()
+        valid_codes = exchange_filtered - st_codes - blacklisted
         excluded_st = len(st_codes)
+        excluded_blacklist = len(blacklisted)
 
         # Rebuild board_stocks and stock_boards with only valid codes
         filtered_board_stocks: dict[str, list[tuple[str, str]]] = {}
@@ -408,17 +412,19 @@ class MLScanner:
             "total_raw_stocks": total_raw,
             "excluded_exchange": excluded_exchange,
             "excluded_st": excluded_st,
+            "excluded_blacklist": excluded_blacklist,
             "final_boards": len(filtered_board_stocks),
             "final_stocks": len(valid_codes),
         }
 
         logger.info(
             "Step 0 universe: %d boards, %d raw stocks → "
-            "-%d exchange -%d ST → %d final stocks in %d boards",
+            "-%d exchange -%d ST -%d blacklist → %d final stocks in %d boards",
             total_boards,
             total_raw,
             excluded_exchange,
             excluded_st,
+            excluded_blacklist,
             len(valid_codes),
             len(filtered_board_stocks),
         )

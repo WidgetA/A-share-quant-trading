@@ -8,6 +8,11 @@ from src.strategy.filters.board_filter import (
     filter_boards,
     is_junk_board,
 )
+from src.strategy.filters.stock_blacklist import (
+    BLACKLISTED_STOCKS,
+    filter_blacklisted,
+    is_blacklisted,
+)
 from src.strategy.filters.stock_filter import StockFilter, create_main_board_only_filter
 
 __all__ = [
@@ -17,4 +22,7 @@ __all__ = [
     "JUNK_BOARDS",
     "is_junk_board",
     "filter_boards",
+    "BLACKLISTED_STOCKS",
+    "is_blacklisted",
+    "filter_blacklisted",
 ]

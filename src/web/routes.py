@@ -35,6 +35,7 @@ from starlette.responses import StreamingResponse
 
 from src.common.pending_store import PendingConfirmationStore
 from src.data.services.download_task import DownloadState
+from src.strategy.filters.stock_blacklist import BLACKLISTED_STOCKS
 
 logger = logging.getLogger(__name__)
 
@@ -3275,6 +3276,8 @@ def create_model_router() -> APIRouter:
 
                 day_dict: dict[str, dict] = {}
                 for code, bar in bar_map.items():
+                    if code in BLACKLISTED_STOCKS:
+                        continue
                     day_dict[code] = {
                         "open": bar.open,
                         "high": bar.high,
