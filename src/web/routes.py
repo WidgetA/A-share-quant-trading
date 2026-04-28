@@ -2439,8 +2439,8 @@ def create_settings_router() -> APIRouter:
         }
 
     @router.post("/api/settings/xtquant")
-    async def update_xtquant_config(body: XtquantConfigRequest):
-        """Save xtquant-trade-server URL and API key."""
+    async def update_xtquant_config(request: Request, body: XtquantConfigRequest):
+        """Save xtquant-trade-server URL and API key, then hot-reload broker."""
         from src.common.config import set_xtquant_api_key, set_xtquant_server_url
 
         url = body.server_url.strip().rstrip("/")
@@ -2454,7 +2454,14 @@ def create_settings_router() -> APIRouter:
 
         set_xtquant_server_url(url)
         set_xtquant_api_key(key)
-        return {"success": True, "message": "Broker 配置已保存，重启服务后生效"}
+
+        init_broker = getattr(request.app.state, "init_broker", None)
+        if init_broker is None:
+            return {"success": True, "message": "配置已保存（重启服务后生效）"}
+        ok, msg = await init_broker(request.app)
+        if ok:
+            return {"success": True, "message": f"Broker 配置已保存并连接: {msg}"}
+        return {"success": True, "message": f"配置已保存，但启动 Broker 失败: {msg}"}
 
     @router.post("/api/settings/xtquant/test")
     async def test_xtquant_connection(body: XtquantConfigRequest):

@@ -96,6 +96,44 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     return True
 
 
+async def _init_broker(app: FastAPI) -> tuple[bool, str]:
+    """(Re)initialize BrokerClient from persisted config.
+
+    Stops any existing broker, loads config, creates+starts a new client,
+    and ensures the position poll loop is running. Returns (ok, message).
+    """
+    import asyncio
+
+    from src.common.config import get_xtquant_api_key, get_xtquant_server_url
+
+    old: BrokerClient | None = getattr(app.state, "broker", None)
+    if old is not None:
+        app.state.broker = None
+        try:
+            await old.stop()
+        except Exception as e:
+            logger.warning(f"Failed to stop old BrokerClient: {e}")
+
+    try:
+        url = get_xtquant_server_url()
+        key = get_xtquant_api_key()
+    except ValueError as e:
+        return False, f"配置缺失: {e}"
+
+    broker = BrokerClient(url, key)
+    try:
+        await broker.start()
+    except Exception as e:
+        return False, f"启动 BrokerClient 失败: {e}"
+    app.state.broker = broker
+
+    poll_task = getattr(app.state, "_broker_poll_task", None)
+    if poll_task is None or poll_task.done():
+        app.state._broker_poll_task = asyncio.create_task(_broker_position_poll_loop(app))
+    logger.info(f"BrokerClient (re)initialized: {url}")
+    return True, url
+
+
 async def _broker_position_poll_loop(app: FastAPI) -> None:
     """Poll xtquant-trade-server for positions/cash every 30s and cache in app.state."""
     import asyncio
@@ -223,16 +261,10 @@ def create_app(
         app.state.broker_positions = []
         app.state.available_cash = 0.0
         app.state._broker_poll_task = None
-        try:
-            from src.common.config import get_xtquant_api_key, get_xtquant_server_url
-
-            broker = BrokerClient(get_xtquant_server_url(), get_xtquant_api_key())
-            await broker.start()
-            app.state.broker = broker
-            app.state._broker_poll_task = asyncio.create_task(_broker_position_poll_loop(app))
-            logger.info(f"BrokerClient initialized: {get_xtquant_server_url()}")
-        except ValueError as e:
-            logger.warning(f"Broker not configured, trading disabled: {e}")
+        app.state.init_broker = _init_broker  # exposed for runtime reload via Settings UI
+        ok, msg = await _init_broker(app)
+        if not ok:
+            logger.warning(f"Broker not initialized, trading disabled: {msg}")
 
         app.state.active_download = None  # download_task.ActiveDownload | None
         app.state.download_lock = asyncio.Lock()  # guards check+start as atomic op
