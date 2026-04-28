@@ -413,6 +413,13 @@ class TsanghiPrepareRequest(BaseModel):
     force: bool = False  # Force full re-download (clears existing cache)
 
 
+class XtquantConfigRequest(BaseModel):
+    """Request body for xtquant-trade-server config save/test."""
+
+    server_url: str
+    api_key: str
+
+
 # ==================== Momentum Backtest Router ====================
 
 
@@ -2401,10 +2408,6 @@ def create_settings_router() -> APIRouter:
         }
 
     # === XTQUANT BROKER SETTINGS ===
-
-    class XtquantConfigRequest(BaseModel):
-        server_url: str
-        api_key: str
 
     @router.get("/api/settings/xtquant")
     async def get_xtquant_status():
