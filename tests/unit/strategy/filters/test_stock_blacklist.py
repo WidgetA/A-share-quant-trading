@@ -28,8 +28,8 @@ class TestFilterBlacklisted:
             {"600000": "x", "000002": "y"},
             clear=True,
         ):
-            result = list(stock_blacklist.filter_blacklisted(["600000", "000001", "000002", "600519"]))
-            assert result == ["000001", "600519"]
+            codes = ["600000", "000001", "000002", "600519"]
+            assert list(stock_blacklist.filter_blacklisted(codes)) == ["000001", "600519"]
 
     def test_passthrough_when_blacklist_empty(self):
         with patch.dict(stock_blacklist.BLACKLISTED_STOCKS, {}, clear=True):
