@@ -96,11 +96,39 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     return True
 
 
+async def _broker_fetch_once(app: FastAPI) -> str | None:
+    """Fetch positions + account once and update app.state. Returns error string or None."""
+    broker: BrokerClient | None = getattr(app.state, "broker", None)
+    if broker is None:
+        return "broker not initialized"
+    try:
+        positions = await broker.get_positions()
+        account = await broker.get_account()
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    app.state.broker_positions = [
+        {
+            "code": p.code,
+            "volume": p.volume,
+            "can_use_volume": p.can_use_volume,
+            "avg_price": p.avg_price,
+            "market_value": p.market_value,
+        }
+        for p in positions
+        if p.volume > 0
+    ]
+    app.state.available_cash = account.cash
+    app.state.broker_total_asset = account.total_asset
+    app.state.broker_account_id = account.account_id
+    return None
+
+
 async def _init_broker(app: FastAPI) -> tuple[bool, str]:
     """(Re)initialize BrokerClient from persisted config.
 
     Stops any existing broker, loads config, creates+starts a new client,
-    and ensures the position poll loop is running. Returns (ok, message).
+    runs a synchronous warmup fetch, and ensures the poll loop is running.
+    Returns (ok, message). `ok` reflects connection (not just construction).
     """
     import asyncio
 
@@ -118,19 +146,32 @@ async def _init_broker(app: FastAPI) -> tuple[bool, str]:
         url = get_xtquant_server_url()
         key = get_xtquant_api_key()
     except ValueError as e:
+        app.state.broker_last_error = f"配置缺失: {e}"
         return False, f"配置缺失: {e}"
 
     broker = BrokerClient(url, key)
     try:
         await broker.start()
     except Exception as e:
+        app.state.broker_last_error = f"启动 BrokerClient 失败: {e}"
         return False, f"启动 BrokerClient 失败: {e}"
     app.state.broker = broker
+
+    # Synchronous warmup — verifies the URL is actually reachable and returns
+    # data so the user sees an immediate result instead of waiting 30s.
+    err = await _broker_fetch_once(app)
+    if err:
+        app.state.broker_last_error = err
+        logger.warning(f"BrokerClient warmup fetch failed: {err}")
+    else:
+        app.state.broker_last_error = None
 
     poll_task = getattr(app.state, "_broker_poll_task", None)
     if poll_task is None or poll_task.done():
         app.state._broker_poll_task = asyncio.create_task(_broker_position_poll_loop(app))
-    logger.info(f"BrokerClient (re)initialized: {url}")
+    logger.info(f"BrokerClient (re)initialized: {url} (warmup_err={err})")
+    if err:
+        return False, f"已配置但无法获取数据: {err}"
     return True, url
 
 
@@ -139,27 +180,17 @@ async def _broker_position_poll_loop(app: FastAPI) -> None:
     import asyncio
 
     while True:
-        await asyncio.sleep(30)
         broker: BrokerClient | None = getattr(app.state, "broker", None)
         if broker is None:
+            await asyncio.sleep(30)
             continue
-        try:
-            positions = await broker.get_positions()
-            account = await broker.get_account()
-            app.state.broker_positions = [
-                {
-                    "code": p.code,
-                    "volume": p.volume,
-                    "can_use_volume": p.can_use_volume,
-                    "avg_price": p.avg_price,
-                    "market_value": p.market_value,
-                }
-                for p in positions
-                if p.volume > 0
-            ]
-            app.state.available_cash = account.cash
-        except Exception as e:
-            logger.warning(f"Broker position poll failed: {e}")
+        err = await _broker_fetch_once(app)
+        if err:
+            app.state.broker_last_error = err
+            logger.warning(f"Broker position poll failed: {err}")
+        else:
+            app.state.broker_last_error = None
+        await asyncio.sleep(30)
 
 
 async def _greptime_reconnect_loop(app: FastAPI) -> None:

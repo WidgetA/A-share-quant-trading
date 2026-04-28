@@ -365,10 +365,13 @@ def create_ml_router() -> APIRouter:
         broker = getattr(app_state, "broker", None)
         broker_positions = getattr(app_state, "broker_positions", [])
         available_cash = getattr(app_state, "available_cash", 0)
+        last_error = getattr(app_state, "broker_last_error", None)
         return {
             "broker_configured": broker is not None,
+            "broker_healthy": broker is not None and not last_error,
             "holdings_count": len(broker_positions),
             "available_cash": available_cash,
+            "last_error": last_error,
         }
 
     router._get_status = _get_status  # type: ignore[attr-defined]

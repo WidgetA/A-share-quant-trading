@@ -2461,7 +2461,7 @@ def create_settings_router() -> APIRouter:
         ok, msg = await init_broker(request.app)
         if ok:
             return {"success": True, "message": f"Broker 配置已保存并连接: {msg}"}
-        return {"success": True, "message": f"配置已保存，但启动 Broker 失败: {msg}"}
+        return {"success": False, "message": f"配置已保存，但 Broker 连接失败: {msg}"}
 
     @router.post("/api/settings/xtquant/test")
     async def test_xtquant_connection(body: XtquantConfigRequest):

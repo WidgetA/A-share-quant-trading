@@ -663,9 +663,19 @@ async function loadBrokerStatus() {
         const d = await resp.json();
         _statusFetchErrors = 0;
         const ind = document.getElementById('brokerIndicator');
-        const configured = d.broker_configured;
-        ind.textContent = configured ? '在线' : '未配置';
-        ind.className = 'status-indicator ' + (configured ? 'online' : 'offline');
+        if (!d.broker_configured) {
+            ind.textContent = '未配置';
+            ind.className = 'status-indicator offline';
+            ind.title = '';
+        } else if (d.broker_healthy) {
+            ind.textContent = '在线';
+            ind.className = 'status-indicator online';
+            ind.title = '';
+        } else {
+            ind.textContent = '无法连接';
+            ind.className = 'status-indicator offline';
+            ind.title = d.last_error || '';
+        }
         document.getElementById('brokerCash').textContent =
             d.available_cash > 0
                 ? d.available_cash.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2})
