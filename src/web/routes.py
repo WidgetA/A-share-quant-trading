@@ -2947,6 +2947,50 @@ def create_trading_router() -> APIRouter:
             "quantity": quantity,
         }
 
+    @router.post("/api/trading/buy-batch-by-amount")
+    async def submit_buy_batch_by_amount(request: Request) -> dict:
+        """Batch BUY via xtquant-trade-server's /v1/orders/batch-by-amount.
+
+        Body: {"amount": <per-leg CNY>, "orders": [{"code": "601398", "ref_price": 5.20}, ...]}
+        Server computes lots = floor(amount/ref_price/100); uses MARKET_CONVERT_5_CANCEL
+        with retry, residuals fall back to a passive limit at ref_price.
+        """
+        from src.trading.broker_client import BrokerClient, BrokerError
+
+        body = await request.json()
+        amount = float(body.get("amount", 0))
+        rows = body.get("orders", [])
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="amount 必须 > 0")
+        if not rows or not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail="orders 不能为空")
+        if len(rows) > 50:
+            raise HTTPException(status_code=400, detail="orders 最多 50 条")
+
+        legs: list[dict] = []
+        for r in rows:
+            code = (r.get("code") or "").strip()
+            ref_price = float(r.get("ref_price") or 0)
+            if not code or ref_price <= 0:
+                continue
+            legs.append({"code": code, "amount": amount, "ref_price": ref_price})
+        if not legs:
+            raise HTTPException(status_code=400, detail="没有有效行（code+ref_price 都需填写）")
+
+        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
+        if broker is None:
+            raise HTTPException(status_code=503, detail="Broker 未配置，请设置 XTQUANT_SERVER_URL")
+
+        try:
+            data = await broker.place_batch_by_amount(orders=legs, side="BUY")
+        except BrokerError as e:
+            raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
+
+        logger.info(
+            f"Batch BUY submitted: legs={len(legs)} amount={amount} summary={data.get('summary')}"
+        )
+        return data
+
     @router.post("/api/trading/sell")
     async def submit_sell(request: Request) -> dict:
         """Place a SELL order via xtquant-trade-server."""

@@ -170,6 +170,39 @@ class BrokerClient:
             status=d.get("status", ""),
         )
 
+    async def place_batch_by_amount(
+        self,
+        orders: list[dict],
+        side: str = "BUY",
+        max_retries: int = 3,
+        fallback: str = "limit_at_ref",
+    ) -> dict:
+        """Amount-driven batch market order via /v1/orders/batch-by-amount.
+
+        Each entry in `orders` must have keys `code`, `amount`, `ref_price`.
+        Server computes lots = floor(amount / ref_price / 100) per leg and
+        submits MARKET_CONVERT_5_CANCEL with retry; residuals fall back to
+        passive limits at `ref_price` (or are skipped if `fallback="skip"`).
+        Returns the raw envelope `data` field (results[] + summary).
+        """
+        normalized = [
+            {
+                "code": _normalize_code(o["code"]),
+                "amount": float(o["amount"]),
+                "ref_price": float(o["ref_price"]),
+            }
+            for o in orders
+        ]
+        payload = {
+            "side": side,
+            "max_retries": max_retries,
+            "fallback": fallback,
+            "orders": normalized,
+        }
+        resp = await self._c().post("/v1/orders/batch-by-amount", json=payload)
+        resp.raise_for_status()
+        return self._unwrap(resp.json()) or {}
+
     async def cancel_order(self, order_id: int) -> dict:
         resp = await self._c().delete(f"/v1/orders/{order_id}")
         resp.raise_for_status()
