@@ -63,6 +63,10 @@
 .btn-sell { background: #1976d2; color: white; }
 .btn-sell:hover { background: #1565c0; }
 .btn-sell:disabled { background: #ccc; cursor: not-allowed; }
+.btn-cancel { background: #ed6c02; color: white; }
+.btn-cancel:hover { background: #c95e00; }
+.btn-cancel:disabled { background: #ccc; cursor: not-allowed; }
+.order-status { font-size: 0.75rem; color: #666; margin-left: 6px; }
 
 /* Error hint */
 .error-hint { color: #d32f2f; font-size: 0.75rem; display: none; margin-top: 2px; }
@@ -395,18 +399,33 @@ async function toggleScheduler(el) {
 
 // --- Holdings ---
 
+const _PENDING_STATUSES = new Set(['NEW', 'PENDING_NEW', 'ACCEPTED', 'PARTIALLY_FILLED']);
+
 async function loadHoldings() {
     try {
-        const resp = await fetch('/api/trading/holdings');
-        const data = await resp.json();
-        renderHoldings(data.holdings || []);
+        const [hResp, oResp] = await Promise.all([
+            fetch('/api/trading/holdings'),
+            fetch('/api/trading/orders'),
+        ]);
+        const hData = await hResp.json();
+        const oData = oResp.ok ? await oResp.json() : {orders: []};
+        // Build map: stock_code → pending SELL order (most recent wins)
+        const pendingSells = {};
+        for (const o of (oData.orders || [])) {
+            if (o.side !== 'SELL') continue;
+            if (!_PENDING_STATUSES.has(o.status)) continue;
+            const bareCode = String(o.code).split('.')[0];
+            pendingSells[bareCode] = o;
+        }
+        renderHoldings(hData.holdings || [], pendingSells);
     } catch (e) {
         document.getElementById('holdingsContainer').innerHTML =
             '<div class="empty-state">加载持仓失败</div>';
     }
 }
 
-function renderHoldings(holdings) {
+function renderHoldings(holdings, pendingSells) {
+    pendingSells = pendingSells || {};
     const el = document.getElementById('holdingsContainer');
     document.getElementById('holdingsCount').textContent =
         holdings.length ? holdings.length : '0';
@@ -422,21 +441,36 @@ function renderHoldings(holdings) {
 
     for (const h of holdings) {
         const qty = h.quantity || 0;
+        const bareCode = String(h.code).split('.')[0];
+        const pending = pendingSells[bareCode];
+        let actionCell;
+        if (pending) {
+            const statusLabel = pending.status === 'PARTIALLY_FILLED' ? '部成' : '挂单中';
+            actionCell = '<button class="btn-sm btn-cancel" data-order-id="' + pending.order_id +
+                '">撤单</button>' +
+                '<span class="order-status">' + statusLabel + ' ' + pending.qty + '股</span>';
+        } else {
+            actionCell = '<button class="btn-sm btn-sell" data-code="' + esc(h.code) +
+                '" data-name="' + esc(h.name || '') + '" data-qty="' + qty + '">卖出</button>';
+        }
         html += '<tr>' +
             '<td class="code">' + esc(h.code) + '</td>' +
             '<td>' + esc(h.name || '') + '</td>' +
             '<td>' + qty + '</td>' +
-            '<td><button class="btn-sm btn-sell" data-code="' + esc(h.code) +
-            '" data-name="' + esc(h.name || '') + '" data-qty="' + qty + '">卖出</button></td>' +
+            '<td>' + actionCell + '</td>' +
             '</tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
 
-    // Bind sell buttons via event delegation (avoids inline onclick issues)
     el.querySelectorAll('.btn-sell').forEach(function(btn) {
         btn.addEventListener('click', function() {
             doSell(btn.dataset.code, btn.dataset.name, parseInt(btn.dataset.qty) || 0, btn);
+        });
+    });
+    el.querySelectorAll('.btn-cancel').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            doCancelHoldingOrder(parseInt(btn.dataset.orderId), btn);
         });
     });
 }
@@ -463,9 +497,10 @@ async function doSell(code, name, quantity, btn) {
         }
         const data = await resp.json();
         if (data.success) {
-            showToast(code + ' 卖出 ' + (quantity / 100) + '手 信号已推送', 'success');
-            btn.textContent = '已推送';
-            setTimeout(loadHoldings, 2000);
+            showToast(code + ' 卖出单已下达 (status=' + (data.status || '?') + ')', 'success');
+            // Immediately repaint — pending order will surface a 撤单 button.
+            loadHoldings();
+            loadTodayOrders();
         } else {
             console.error('[doSell] not success:', data);
             showToast('卖出失败: ' + (data.detail || '未知错误'), 'error');
@@ -475,6 +510,27 @@ async function doSell(code, name, quantity, btn) {
         console.error('[doSell] fetch error:', e);
         showToast('请求失败: ' + e.message, 'error');
         btn.disabled = false; btn.textContent = '卖出';
+    }
+}
+
+async function doCancelHoldingOrder(orderId, btn) {
+    if (!confirm('确认撤单 (order_id=' + orderId + ')?')) return;
+    btn.disabled = true;
+    btn.textContent = '撤单中...';
+    try {
+        const resp = await fetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showToast('撤单已提交', 'success');
+            loadHoldings();
+            loadTodayOrders();
+        } else {
+            showToast('撤单失败: ' + (data.detail || '未知'), 'error');
+            btn.disabled = false; btn.textContent = '撤单';
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+        btn.disabled = false; btn.textContent = '撤单';
     }
 }
 
