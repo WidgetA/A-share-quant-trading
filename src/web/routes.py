@@ -2449,6 +2449,8 @@ def create_settings_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="Server URL 不能为空")
         if not key:
             raise HTTPException(status_code=400, detail="API Key 不能为空")
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
 
         set_xtquant_server_url(url)
         set_xtquant_api_key(key)
@@ -2463,6 +2465,8 @@ def create_settings_router() -> APIRouter:
         key = body.api_key.strip()
         if not url or not key:
             raise HTTPException(status_code=400, detail="URL 和 Key 不能为空")
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -2480,6 +2484,8 @@ def create_settings_router() -> APIRouter:
             return {"success": False, "message": f"无法连接到 {url}，请检查 IP 和端口"}
         except httpx.TimeoutException:
             return {"success": False, "message": "连接超时，请检查内网是否可达"}
+        except httpx.HTTPError as e:
+            return {"success": False, "message": f"请求失败: {type(e).__name__}: {e}"}
 
     return router
 
