@@ -24,7 +24,10 @@
 
 # code → reason. Reason MUST be filled in (see module doc).
 BLACKLISTED_STOCKS: dict[str, str] = {
-    # Add entries as: "600000": "reason why this code is excluded (added YYYY-MM-DD)",
+    "601869": (
+        "长飞光纤：量价/换手/价格变化与同类股完全不一致，"
+        "大单轨迹、反应速度、动能消化都不对——疑似单价与热度错配 (added 2026-04-28)"
+    ),
 }
 
 
