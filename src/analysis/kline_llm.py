@@ -108,15 +108,20 @@ async def _render_via_lambda(
     url = get_lambda_kline_url()
     token = get_lambda_kline_token()
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            url,
-            headers={
-                "x-upload-token": token,
-                "content-type": "application/json",
-            },
-            json={"code": code, "days": days, "ohlcv": ohlcv},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                url,
+                headers={
+                    "x-upload-token": token,
+                    "content-type": "application/json",
+                },
+                json={"code": code, "days": days, "ohlcv": ohlcv},
+            )
+    except httpx.TimeoutException as e:
+        raise RuntimeError(f"lambda-kline timeout after {timeout}s: {e}") from e
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"lambda-kline transport error: {type(e).__name__}: {e}") from e
 
     if resp.status_code >= 400:
         raise RuntimeError(f"lambda-kline {resp.status_code}: {resp.text[:500]}")
@@ -157,12 +162,17 @@ async def _ask_vision_llm(
         ],
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+            )
+    except httpx.TimeoutException as e:
+        raise RuntimeError(f"bltcy timeout after {timeout}s: {e}") from e
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"bltcy transport error: {type(e).__name__}: {e}") from e
 
     if resp.status_code >= 400:
         raise RuntimeError(f"bltcy {resp.status_code}: {resp.text[:500]}")
@@ -184,7 +194,7 @@ async def analyze_kline(
     days: int = 30,
     prompt: str | None = None,
     timeout_render: float = 60.0,
-    timeout_llm: float = 120.0,
+    timeout_llm: float = 240.0,
 ) -> dict[str, Any]:
     """Full pipeline: fetch OHLCV → render via Lambda → ask vision LLM.
 
