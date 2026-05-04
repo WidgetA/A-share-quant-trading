@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.trading.broker_client import BrokerClient
+from src.web.analysis_routes import create_analysis_router
 from src.web.ml_routes import create_ml_router
 from src.web.routes import (
     create_model_router,
@@ -273,6 +274,10 @@ def create_app(
     ml_router = create_ml_router()
     app.include_router(ml_router)
     app.state.ml_router = ml_router  # for shutdown cleanup
+
+    # Add analysis router (vision LLM K-line analysis via overseas Lambda)
+    analysis_router = create_analysis_router()
+    app.include_router(analysis_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():

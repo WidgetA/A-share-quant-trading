@@ -47,6 +47,7 @@
 | 0.13.2 | 2026-04-08 | - | STR-006: Wire up ML inference — replace V15 momentum scan with LightGBM scoring (live + backtest) |
 | 0.13.3 | 2026-04-17 | - | DAT-001: Fix silent skip of suspended stocks without prev_close in daily cache — always write is_suspended=true row |
 | 0.13.4 | 2026-04-28 | - | STR-006: Stock-level blacklist — hardcoded codes removed at top of funnel (live scan + replicate_v16) and stripped from training data stream |
+| 0.14.0 | 2026-05-04 | - | ANA-001: K-line technical analysis via overseas Lambda renderer + 柏拉图AI vision LLM (POST /api/analyze-kline) |
 
 ---
 
@@ -772,6 +773,83 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 
 **Files**:
 - `.github/workflows/ci.yml` - GitHub Actions workflow
+
+---
+
+## Module: Analysis
+
+### [ANA-001] K-line Technical Analysis (Vision LLM)
+
+**Status**: Completed (infrastructure); UI/trigger TBD
+
+**Description**: 端到端 K 线技术面分析。主程序从 GreptimeDB 取最近 N 个交易日的日 K，
+POST 给海外 AWS Lambda；Lambda 用 matplotlib 画图，存到公开读 S3，返回 URL；
+主程序拿 URL 调柏拉图AI vision LLM（OpenAI 兼容，gpt-5.5-pro），返回中文技术面分析。
+
+**Architecture & Why**:
+
+```
+trading-service (cn-shanghai VPC)        Lambda (us-east-1)
+─────────────────────────────────        ─────────────────────────
+1. trigger (HTTP POST)
+2. GreptimeDB → OHLCV[N days]
+3. POST {code, days, ohlcv[]} ─────────► 4. matplotlib 渲染 PNG
+                                          5. S3 put_object (ACL=public-read)
+   ◄────── { url, key } ─────────────── 6. 返回公开 URL
+7. POST chat/completions (柏拉图AI)
+   { image_url: { url } }
+   ◄──── { analysis text }              [bltcy → GPT-5.5-pro]
+```
+
+**为什么数据国内查、画图存海外**：阿里云 OSS 大陆 region bucket 的默认域名从
+2025-03-20 起对新用户禁止做数据 API 操作，必须绑定备案过的自定义域名才能给
+公网（包括 LLM provider）拉图。把渲染 + 存储放到 AWS us-east-1 直接绕开 ICP
+备案、`Content-Disposition: attachment` 强制下载、跨网延迟等一连串问题，
+trading-service 只发 JSON over HTTPS。
+
+**Components**:
+
+| 部分 | 路径 | 说明 |
+|------|------|------|
+| Lambda 渲染服务 | `lambda-kline/` | Container Lambda，POST OHLCV → PNG → 公开 S3 URL |
+| Orchestrator | `src/analysis/kline_llm.py` | 取数据 → 调 Lambda → 调柏拉图，对外是 `analyze_kline()` |
+| HTTP 入口 | `src/web/analysis_routes.py` | `POST /api/analyze-kline` (body: code, days, prompt?) |
+| 配置 helpers | `src/common/config.py` | `get_lambda_kline_url/token`, `get_bltcy_api_key/base_url/model` |
+| CI/CD | `.github/workflows/ci.yml::deploy-lambda-kline` | push 到 main / refactor 分支自动构建并更新 Lambda 镜像 |
+| AWS bootstrap 文档 | `lambda-kline/README.md` | S3/ECR/IAM/Lambda 一次性建资源 + 鉴权说明 |
+
+**Required env on trading-service** (production .env):
+- `LAMBDA_KLINE_URL` — Lambda Function URL
+- `LAMBDA_KLINE_TOKEN` — 与 Lambda 端 `UPLOAD_TOKEN` 相同的 secret，作为 `x-upload-token` header
+- `BLTCY_API_KEY` — 柏拉图AI API key（可选 `BLTCY_BASE_URL` / `BLTCY_MODEL` 覆盖默认值）
+
+**Required GitHub Secrets** (for CI auto-deploy):
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`
+- `AWS_LAMBDA_KLINE_ECR` (ECR repo name) / `AWS_LAMBDA_KLINE_FUNCTION` (Lambda 函数名)
+- Repo Variable `LAMBDA_KLINE_ENABLED=true` 才开启 deploy 这个 job
+
+**接口**:
+
+```
+POST /api/analyze-kline
+{ "code": "000001.SZ", "days": 30, "prompt": null }
+↓
+{
+  "code": "000001.SZ",
+  "days": 30,
+  "bars": 30,
+  "image_url": "https://<bucket>.s3.us-east-1.amazonaws.com/kline/...png",
+  "model": "gpt-5.5-pro",
+  "analysis": "...中文分析文本..."
+}
+```
+
+**Trigger 方式**：当前只暴露 HTTP endpoint，UI 按钮 / 飞书命令 / 定时任务后续接入。
+
+**Backlog**:
+- 渲染加分钟级、加 RSI/MACD 等指标
+- 历史分析归档（落 GreptimeDB），支持 web UI 回看
+- prompt 工程：把基本面/资金流/板块温度等结构化信号一起喂进去，不只看图
 
 ---
 

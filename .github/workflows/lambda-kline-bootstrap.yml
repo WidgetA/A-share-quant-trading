@@ -29,6 +29,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push Lambda image
+        id: build
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.AWS_LAMBDA_KLINE_ECR }}
@@ -38,4 +39,21 @@ jobs:
           docker build --platform linux/amd64 -t "${IMAGE_URI}" -t "${IMAGE_LATEST}" lambda-kline
           docker push "${IMAGE_URI}"
           docker push "${IMAGE_LATEST}"
-          echo "IMAGE_URI=${IMAGE_URI}"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+      # Pushing to ECR doesn't update the running Lambda — we have to point the
+      # function at the new image explicitly. `wait function-updated` lets
+      # subsequent invokes hit the new code.
+      - name: Update Lambda function code
+        env:
+          FUNCTION_NAME: ${{ secrets.AWS_LAMBDA_KLINE_FUNCTION }}
+          IMAGE_URI: ${{ steps.build.outputs.image_uri }}
+        run: |
+          aws lambda update-function-code \
+            --function-name "${FUNCTION_NAME}" \
+            --image-uri "${IMAGE_URI}" \
+            --publish \
+            > /dev/null
+          aws lambda wait function-updated \
+            --function-name "${FUNCTION_NAME}"
+          echo "Lambda ${FUNCTION_NAME} now serving ${IMAGE_URI}"

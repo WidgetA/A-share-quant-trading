@@ -716,6 +716,78 @@ def set_s3_config(config: dict[str, str]) -> None:
     logger.info("S3 config updated via web UI")
 
 
+# --- 柏拉图AI (bltcy) — OpenAI-compatible vision LLM proxy ---
+
+BLTCY_KEY_FILE = PROJECT_ROOT / "data" / "bltcy_api_key.txt"
+BLTCY_BASE_URL_DEFAULT = "https://api.bltcy.ai/v1"
+BLTCY_MODEL_DEFAULT = "gpt-5.5-pro"
+
+
+def get_bltcy_api_key() -> str:
+    """Get bltcy API key. Priority: persisted file > BLTCY_API_KEY env > secrets.yaml."""
+    import os
+
+    if BLTCY_KEY_FILE.exists():
+        key = BLTCY_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+
+    env_key = os.environ.get("BLTCY_API_KEY", "")
+    if env_key:
+        return env_key
+
+    try:
+        secrets = load_secrets()
+        key = secrets.get_str("bltcy.api_key")
+        if key:
+            return key
+    except FileNotFoundError:
+        pass
+
+    raise ValueError(
+        "bltcy API key not configured. "
+        "Save to data/bltcy_api_key.txt, set BLTCY_API_KEY env var, "
+        "or configure bltcy.api_key in config/secrets.yaml."
+    )
+
+
+def get_bltcy_base_url() -> str:
+    """Get bltcy base URL (default https://api.bltcy.ai/v1)."""
+    import os
+
+    return os.environ.get("BLTCY_BASE_URL") or BLTCY_BASE_URL_DEFAULT
+
+
+def get_bltcy_model() -> str:
+    """Get bltcy model name (default gpt-5.5-pro)."""
+    import os
+
+    return os.environ.get("BLTCY_MODEL") or BLTCY_MODEL_DEFAULT
+
+
+# --- lambda-kline (overseas K-line render service) ---
+
+
+def get_lambda_kline_url() -> str:
+    """Get lambda-kline Function URL (e.g. https://xxx.lambda-url.us-east-1.on.aws/)."""
+    import os
+
+    url = os.environ.get("LAMBDA_KLINE_URL", "").strip()
+    if not url:
+        raise ValueError("lambda-kline URL not configured — set LAMBDA_KLINE_URL env var.")
+    return url
+
+
+def get_lambda_kline_token() -> str:
+    """Get lambda-kline upload token (matches Lambda env var UPLOAD_TOKEN)."""
+    import os
+
+    token = os.environ.get("LAMBDA_KLINE_TOKEN", "").strip()
+    if not token:
+        raise ValueError("lambda-kline token not configured — set LAMBDA_KLINE_TOKEN env var.")
+    return token
+
+
 # --- FC (Serverless Training) URL ---
 
 FC_URL_FILE = PROJECT_ROOT / "data" / "fc_url.txt"

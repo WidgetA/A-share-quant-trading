@@ -60,6 +60,18 @@ All config is in `docker-compose.yml`. Key variables:
 | `FEISHU_APP_ID/SECRET/CHAT_ID` | Alert notifications |
 | `GREPTIME_HOST/PORT` | GreptimeDB backtest cache (default: greptimedb:4003) |
 | `WEB_BASE_URL` | Public URL for the web UI |
+| `LAMBDA_KLINE_URL` | Overseas K-line render Lambda Function URL (see [lambda-kline/README.md](lambda-kline/README.md)) |
+| `LAMBDA_KLINE_TOKEN` | Shared secret for the Lambda renderer (matches Lambda env `UPLOAD_TOKEN`) |
+| `BLTCY_API_KEY` | 柏拉图AI key for vision-LLM K-line analysis |
+
+## K-line Technical Analysis
+
+`POST /api/analyze-kline {"code":"000001.SZ","days":30}` — pulls OHLCV from
+GreptimeDB, renders the chart in an overseas AWS Lambda (sidesteps mainland
+ICP filing rules for public image URLs), then asks 柏拉图AI's vision model for
+a Chinese technical analysis. See [docs/features.md ANA-001](docs/features.md)
+for the full architecture and [lambda-kline/README.md](lambda-kline/README.md)
+for one-time AWS bootstrap.
 
 ## Development
 
