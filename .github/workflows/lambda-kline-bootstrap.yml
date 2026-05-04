@@ -42,18 +42,24 @@ jobs:
           echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
 
       # Pushing to ECR doesn't update the running Lambda — we have to point the
-      # function at the new image explicitly. `wait function-updated` lets
-      # subsequent invokes hit the new code.
+      # function at the new image explicitly. On first-time setup the function
+      # may not exist yet; in that case skip with a warning and let the user
+      # run lambda-kline/README.md step 4 once. Subsequent pushes auto-update.
       - name: Update Lambda function code
         env:
           FUNCTION_NAME: ${{ secrets.AWS_LAMBDA_KLINE_FUNCTION }}
           IMAGE_URI: ${{ steps.build.outputs.image_uri }}
         run: |
-          aws lambda update-function-code \
-            --function-name "${FUNCTION_NAME}" \
-            --image-uri "${IMAGE_URI}" \
-            --publish \
-            > /dev/null
-          aws lambda wait function-updated \
-            --function-name "${FUNCTION_NAME}"
-          echo "Lambda ${FUNCTION_NAME} now serving ${IMAGE_URI}"
+          if aws lambda get-function --function-name "${FUNCTION_NAME}" >/dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name "${FUNCTION_NAME}" \
+              --image-uri "${IMAGE_URI}" \
+              --publish > /dev/null
+            aws lambda wait function-updated --function-name "${FUNCTION_NAME}"
+            echo "Lambda ${FUNCTION_NAME} now serving ${IMAGE_URI}"
+          else
+            echo "::warning::Lambda function ${FUNCTION_NAME} not found — image pushed to ECR but not deployed."
+            echo "Run lambda-kline/README.md step 4 (aws lambda create-function) once with this image:"
+            echo "  ${IMAGE_URI}"
+            echo "Subsequent pushes will auto-update."
+          fi
