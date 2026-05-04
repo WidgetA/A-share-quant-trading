@@ -57,6 +57,10 @@ async def _fetch_ohlcv(code: str, days: int) -> list[dict[str, Any]]:
         ts_to_date,
     )
 
+    # GreptimeDB stores 6-digit codes without exchange suffix. Accept either
+    # form from the caller and normalize.
+    code_norm = code.split(".")[0].strip()
+
     today = date.today()
     # Pull a wider window then tail(days) to handle weekends/holidays/suspensions.
     start = today - timedelta(days=int(days * 2.2) + 60)
@@ -64,7 +68,7 @@ async def _fetch_ohlcv(code: str, days: int) -> list[dict[str, Any]]:
     storage = create_storage_from_config()
     await storage.start()
     try:
-        rows = await storage.get_daily_for_code(code, str(start), str(today))
+        rows = await storage.get_daily_for_code(code_norm, str(start), str(today))
     finally:
         await storage.stop()
 
