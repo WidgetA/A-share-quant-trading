@@ -1,3 +1,7 @@
 matplotlib==3.9.2
 pandas==2.2.3
 numpy==2.1.3
+# Pin transitive deps that lack cp311 manylinux_2_17 wheels in their latest
+# release (Lambda base image has no C/C++ toolchain → source builds fail).
+# Last verified: 2026-05-04, contourpy 1.3.3 ships no cp311 wheel.
+contourpy<1.3.3
