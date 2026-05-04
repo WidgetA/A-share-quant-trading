@@ -2495,6 +2495,186 @@ def create_settings_router() -> APIRouter:
         except httpx.HTTPError as e:
             return {"success": False, "message": f"请求失败: {type(e).__name__}: {e}"}
 
+    # === LAMBDA-KLINE URL (overseas K-line render Function URL) ===
+
+    @router.get("/api/settings/lambda-kline-url")
+    async def get_lambda_kline_url_status():
+        from src.common.config import LAMBDA_KLINE_URL_FILE
+
+        if LAMBDA_KLINE_URL_FILE.exists():
+            url = LAMBDA_KLINE_URL_FILE.read_text(encoding="utf-8").strip()
+            if url:
+                masked = url[:24] + "..." + url[-12:] if len(url) > 40 else url
+                return {
+                    "configured": True,
+                    "masked_token": masked,
+                    "token_length": len(url),
+                    "source_label": "文件配置",
+                }
+        return {"configured": False}
+
+    @router.post("/api/settings/lambda-kline-url")
+    async def update_lambda_kline_url(request: Request):
+        from src.common.config import set_lambda_kline_url
+
+        body = await request.json()
+        url = (body.get("token") or "").strip()
+        if not url or not url.startswith("http"):
+            raise HTTPException(status_code=400, detail="URL 格式不正确（需 http(s)://...)")
+
+        set_lambda_kline_url(url)
+        return {"success": True, "message": "lambda-kline URL 已保存"}
+
+    @router.post("/api/settings/lambda-kline-url/test")
+    async def test_lambda_kline_url(request: Request):
+        import httpx
+
+        body = await request.json()
+        url = (body.get("token") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="URL 不能为空")
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok") and data.get("service") == "kline-render":
+                        return {"success": True, "message": "Lambda 端点连接成功"}
+                    return {"success": False, "message": f"意外响应: {data}"}
+                return {"success": False, "message": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+        except httpx.TimeoutException:
+            return {"success": False, "message": "连接超时"}
+        except Exception as e:
+            return {"success": False, "message": f"连接失败: {e}"}
+
+    # === LAMBDA-KLINE TOKEN (x-upload-token shared with Lambda) ===
+
+    @router.get("/api/settings/lambda-kline-token")
+    async def get_lambda_kline_token_status():
+        from src.common.config import LAMBDA_KLINE_TOKEN_FILE
+
+        if LAMBDA_KLINE_TOKEN_FILE.exists():
+            token = LAMBDA_KLINE_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if token:
+                masked = token[:4] + "***" + token[-4:] if len(token) > 8 else "***"
+                return {
+                    "configured": True,
+                    "masked_token": masked,
+                    "token_length": len(token),
+                    "source_label": "文件配置",
+                }
+        return {"configured": False}
+
+    @router.post("/api/settings/lambda-kline-token")
+    async def update_lambda_kline_token(request: Request):
+        from src.common.config import set_lambda_kline_token
+
+        body = await request.json()
+        token = (body.get("token") or "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        set_lambda_kline_token(token)
+        return {"success": True, "message": "lambda-kline Token 已保存"}
+
+    @router.post("/api/settings/lambda-kline-token/test")
+    async def test_lambda_kline_token(request: Request):
+        """Send a tiny synthetic POST to verify token matches the Lambda."""
+        import httpx
+
+        from src.common.config import LAMBDA_KLINE_URL_FILE
+
+        body = await request.json()
+        token = (body.get("token") or "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token 不能为空")
+
+        if not LAMBDA_KLINE_URL_FILE.exists():
+            return {"success": False, "message": "请先配置 lambda-kline URL"}
+        url = LAMBDA_KLINE_URL_FILE.read_text(encoding="utf-8").strip()
+        if not url:
+            return {"success": False, "message": "请先配置 lambda-kline URL"}
+
+        # Wrong-token request returns 401, missing-body request returns 400.
+        # Either is fine — both prove the Lambda is alive AND the token is the
+        # one it expects (vs returning 401 if it isn't).
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    url,
+                    headers={"x-upload-token": token, "content-type": "application/json"},
+                    json={},  # empty body → 400 if token OK, 401 if not
+                )
+                if resp.status_code == 401:
+                    return {"success": False, "message": "Token 错误（Lambda 返回 401）"}
+                if resp.status_code in (200, 400):
+                    return {"success": True, "message": f"Token 通过（HTTP {resp.status_code}）"}
+                return {"success": False, "message": f"意外响应 HTTP {resp.status_code}"}
+        except httpx.TimeoutException:
+            return {"success": False, "message": "连接超时"}
+        except Exception as e:
+            return {"success": False, "message": f"连接失败: {e}"}
+
+    # === BLTCY API KEY (柏拉图AI vision LLM) ===
+
+    @router.get("/api/settings/bltcy-key")
+    async def get_bltcy_key_status():
+        from src.common.config import BLTCY_KEY_FILE
+
+        if BLTCY_KEY_FILE.exists():
+            key = BLTCY_KEY_FILE.read_text(encoding="utf-8").strip()
+            if key:
+                masked = key[:6] + "***" + key[-4:] if len(key) > 10 else "***"
+                return {
+                    "configured": True,
+                    "masked_token": masked,
+                    "token_length": len(key),
+                    "source_label": "文件配置",
+                }
+        return {"configured": False}
+
+    @router.post("/api/settings/bltcy-key")
+    async def update_bltcy_key(request: Request):
+        from src.common.config import set_bltcy_api_key
+
+        body = await request.json()
+        key = (body.get("token") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        set_bltcy_api_key(key)
+        return {"success": True, "message": "柏拉图AI API Key 已保存"}
+
+    @router.post("/api/settings/bltcy-key/test")
+    async def test_bltcy_key(request: Request):
+        """Light-touch probe: list /models with the key. 200 = key works."""
+        import httpx
+
+        from src.common.config import get_bltcy_base_url
+
+        body = await request.json()
+        key = (body.get("token") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        base_url = get_bltcy_base_url().rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{base_url}/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+                if resp.status_code == 200:
+                    return {"success": True, "message": "柏拉图AI Key 验证通过"}
+                if resp.status_code in (401, 403):
+                    return {"success": False, "message": f"Key 无效（HTTP {resp.status_code}）"}
+                return {"success": False, "message": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+        except httpx.TimeoutException:
+            return {"success": False, "message": "连接超时"}
+        except Exception as e:
+            return {"success": False, "message": f"连接失败: {e}"}
+
     return router
 
 

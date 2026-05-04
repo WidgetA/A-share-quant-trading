@@ -724,7 +724,7 @@ BLTCY_MODEL_DEFAULT = "gpt-5.5-pro"
 
 
 def get_bltcy_api_key() -> str:
-    """Get bltcy API key. Priority: persisted file > BLTCY_API_KEY env > secrets.yaml."""
+    """Get bltcy API key. Priority: persisted file (web UI) > env > secrets.yaml."""
     import os
 
     if BLTCY_KEY_FILE.exists():
@@ -746,9 +746,16 @@ def get_bltcy_api_key() -> str:
 
     raise ValueError(
         "bltcy API key not configured. "
-        "Save to data/bltcy_api_key.txt, set BLTCY_API_KEY env var, "
+        "Set via web UI Settings page, BLTCY_API_KEY env var, "
         "or configure bltcy.api_key in config/secrets.yaml."
     )
+
+
+def set_bltcy_api_key(key: str) -> None:
+    """Persist bltcy API key to disk (used by web UI Settings page)."""
+    BLTCY_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BLTCY_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("bltcy API key updated via web UI and persisted to disk")
 
 
 def get_bltcy_base_url() -> str:
@@ -767,25 +774,58 @@ def get_bltcy_model() -> str:
 
 # --- lambda-kline (overseas K-line render service) ---
 
+LAMBDA_KLINE_URL_FILE = PROJECT_ROOT / "data" / "lambda_kline_url.txt"
+LAMBDA_KLINE_TOKEN_FILE = PROJECT_ROOT / "data" / "lambda_kline_token.txt"
+
 
 def get_lambda_kline_url() -> str:
-    """Get lambda-kline Function URL (e.g. https://xxx.lambda-url.us-east-1.on.aws/)."""
+    """Get lambda-kline Function URL. Priority: persisted file > env var."""
     import os
+
+    if LAMBDA_KLINE_URL_FILE.exists():
+        url = LAMBDA_KLINE_URL_FILE.read_text(encoding="utf-8").strip()
+        if url:
+            return url
 
     url = os.environ.get("LAMBDA_KLINE_URL", "").strip()
     if not url:
-        raise ValueError("lambda-kline URL not configured — set LAMBDA_KLINE_URL env var.")
+        raise ValueError(
+            "lambda-kline URL not configured. "
+            "Set via web UI Settings page or LAMBDA_KLINE_URL env var."
+        )
     return url
 
 
+def set_lambda_kline_url(url: str) -> None:
+    """Persist lambda-kline URL to disk."""
+    LAMBDA_KLINE_URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAMBDA_KLINE_URL_FILE.write_text(url, encoding="utf-8")
+    logger.info("lambda-kline URL updated via web UI and persisted to disk")
+
+
 def get_lambda_kline_token() -> str:
-    """Get lambda-kline upload token (matches Lambda env var UPLOAD_TOKEN)."""
+    """Get lambda-kline upload token. Priority: persisted file > env var."""
     import os
+
+    if LAMBDA_KLINE_TOKEN_FILE.exists():
+        token = LAMBDA_KLINE_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            return token
 
     token = os.environ.get("LAMBDA_KLINE_TOKEN", "").strip()
     if not token:
-        raise ValueError("lambda-kline token not configured — set LAMBDA_KLINE_TOKEN env var.")
+        raise ValueError(
+            "lambda-kline token not configured. "
+            "Set via web UI Settings page or LAMBDA_KLINE_TOKEN env var."
+        )
     return token
+
+
+def set_lambda_kline_token(token: str) -> None:
+    """Persist lambda-kline upload token to disk."""
+    LAMBDA_KLINE_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAMBDA_KLINE_TOKEN_FILE.write_text(token, encoding="utf-8")
+    logger.info("lambda-kline token updated via web UI and persisted to disk")
 
 
 # --- FC (Serverless Training) URL ---

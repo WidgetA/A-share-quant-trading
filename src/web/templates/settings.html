@@ -210,6 +210,66 @@
             <div class="token-message hidden" id="s3Message"></div>
         </div>
     </section>
+
+    <!-- K-line LLM Analysis: lambda-kline + bltcy -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>K 线技术面分析（Lambda + 柏拉图AI）</h3>
+            <p class="settings-desc">
+                <code>POST /api/analyze-kline</code> 调用链所需配置。Lambda 负责画图，柏拉图 vision 模型读图给出技术面分析。
+                详见 <a href="/static/lambda-kline-arch.png" target="_blank" style="text-decoration:none;">ANA-001</a>。
+            </p>
+
+            <div class="token-status" id="lambdaKlineUrlStatus">
+                <span class="token-status-label">Lambda URL 状态：</span>
+                <span class="token-status-value" id="lambdaKlineUrlStatusValue">加载中...</span>
+            </div>
+            <div class="form-group">
+                <label for="lambdaKlineUrlInput">Lambda Function URL</label>
+                <input type="text" id="lambdaKlineUrlInput" class="token-input"
+                    placeholder="https://xxx.lambda-url.us-east-1.on.aws/" style="font-family: monospace;">
+            </div>
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testLambdaKlineUrl()" id="lambdaKlineUrlTestBtn">测试连接</button>
+                <button class="btn btn-primary" onclick="saveLambdaKlineUrl()" id="lambdaKlineUrlSaveBtn">保存</button>
+            </div>
+            <div class="token-message hidden" id="lambdaKlineUrlMessage"></div>
+
+            <hr style="margin: 18px 0; border: 0; border-top: 1px solid #2a2a2a;">
+
+            <div class="token-status" id="lambdaKlineTokenStatus">
+                <span class="token-status-label">Lambda Token 状态：</span>
+                <span class="token-status-value" id="lambdaKlineTokenStatusValue">加载中...</span>
+            </div>
+            <div class="form-group">
+                <label for="lambdaKlineTokenInput">Upload Token（与 Lambda 端 <code>UPLOAD_TOKEN</code> 一致）</label>
+                <input type="password" id="lambdaKlineTokenInput" class="token-input"
+                    placeholder="openssl rand -hex 32 生成的 64 位十六进制字符串..." style="font-family: monospace;">
+            </div>
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testLambdaKlineToken()" id="lambdaKlineTokenTestBtn">测试 Token</button>
+                <button class="btn btn-primary" onclick="saveLambdaKlineToken()" id="lambdaKlineTokenSaveBtn">保存</button>
+            </div>
+            <div class="token-message hidden" id="lambdaKlineTokenMessage"></div>
+
+            <hr style="margin: 18px 0; border: 0; border-top: 1px solid #2a2a2a;">
+
+            <div class="token-status" id="bltcyKeyStatus">
+                <span class="token-status-label">柏拉图AI Key 状态：</span>
+                <span class="token-status-value" id="bltcyKeyStatusValue">加载中...</span>
+            </div>
+            <div class="form-group">
+                <label for="bltcyKeyInput">柏拉图AI API Key</label>
+                <input type="password" id="bltcyKeyInput" class="token-input"
+                    placeholder="sk-xxxxxxx..." style="font-family: monospace;">
+            </div>
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="testBltcyKey()" id="bltcyKeyTestBtn">验证 Key</button>
+                <button class="btn btn-primary" onclick="saveBltcyKey()" id="bltcyKeySaveBtn">保存</button>
+            </div>
+            <div class="token-message hidden" id="bltcyKeyMessage"></div>
+        </div>
+    </section>
 </div>
 {% endblock %}
 
@@ -307,6 +367,20 @@ function saveMlKey() { saveKey('/api/settings/ml-key', 'mlKeyInput', 'mlKeyMessa
 function loadFcStatus() { loadKeyStatus('/api/settings/fc-url', 'fcStatusValue'); }
 function testFcUrl() { testKey('/api/settings/fc-url/test', 'fcInput', 'fcMessage', 'fcTestBtn', '测试连接'); }
 function saveFcUrl() { saveKey('/api/settings/fc-url', 'fcInput', 'fcMessage', 'fcSaveBtn', loadFcStatus); }
+
+// Lambda-kline (overseas K-line render)
+function loadLambdaKlineUrlStatus() { loadKeyStatus('/api/settings/lambda-kline-url', 'lambdaKlineUrlStatusValue'); }
+function testLambdaKlineUrl() { testKey('/api/settings/lambda-kline-url/test', 'lambdaKlineUrlInput', 'lambdaKlineUrlMessage', 'lambdaKlineUrlTestBtn', '测试连接'); }
+function saveLambdaKlineUrl() { saveKey('/api/settings/lambda-kline-url', 'lambdaKlineUrlInput', 'lambdaKlineUrlMessage', 'lambdaKlineUrlSaveBtn', loadLambdaKlineUrlStatus); }
+
+function loadLambdaKlineTokenStatus() { loadKeyStatus('/api/settings/lambda-kline-token', 'lambdaKlineTokenStatusValue'); }
+function testLambdaKlineToken() { testKey('/api/settings/lambda-kline-token/test', 'lambdaKlineTokenInput', 'lambdaKlineTokenMessage', 'lambdaKlineTokenTestBtn', '测试 Token'); }
+function saveLambdaKlineToken() { saveKey('/api/settings/lambda-kline-token', 'lambdaKlineTokenInput', 'lambdaKlineTokenMessage', 'lambdaKlineTokenSaveBtn', loadLambdaKlineTokenStatus); }
+
+// 柏拉图AI vision LLM
+function loadBltcyKeyStatus() { loadKeyStatus('/api/settings/bltcy-key', 'bltcyKeyStatusValue'); }
+function testBltcyKey() { testKey('/api/settings/bltcy-key/test', 'bltcyKeyInput', 'bltcyKeyMessage', 'bltcyKeyTestBtn', '验证 Key'); }
+function saveBltcyKey() { saveKey('/api/settings/bltcy-key', 'bltcyKeyInput', 'bltcyKeyMessage', 'bltcyKeySaveBtn', loadBltcyKeyStatus); }
 
 // Cache Scheduler toggle
 async function loadCacheSchedulerStatus() {
@@ -463,5 +537,8 @@ loadMlKeyStatus();
 loadFcStatus();
 loadXtquantStatus();
 loadS3Status();
+loadLambdaKlineUrlStatus();
+loadLambdaKlineTokenStatus();
+loadBltcyKeyStatus();
 </script>
 {% endblock %}
