@@ -341,12 +341,15 @@ async def test_concurrent_run_returns_skipped():
     # Hold the lock manually
     await sched._lock.acquire()
     try:
-        with patch(
-            "src.common.config.get_pre_market_report_enabled",
-            return_value=True,
-        ), patch(
-            "src.data.services.pre_market_report_scheduler._is_trading_day",
-            AsyncMock(return_value=True),
+        with (
+            patch(
+                "src.common.config.get_pre_market_report_enabled",
+                return_value=True,
+            ),
+            patch(
+                "src.data.services.pre_market_report_scheduler._is_trading_day",
+                AsyncMock(return_value=True),
+            ),
         ):
             await sched._run_once("manual")
     finally:

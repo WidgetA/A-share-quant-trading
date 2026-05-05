@@ -387,9 +387,7 @@ def create_app(
 
         pre_market_scheduler = PreMarketReportScheduler(app.state)
         app.state.pre_market_report_scheduler = pre_market_scheduler
-        app.state.pre_market_report_scheduler_task = asyncio.create_task(
-            pre_market_scheduler.run()
-        )
+        app.state.pre_market_report_scheduler_task = asyncio.create_task(pre_market_scheduler.run())
         logger.info("Pre-market report scheduler started (8am daily)")
 
         # Auto-start intraday momentum monitor as background task

@@ -276,9 +276,7 @@ class PreMarketReportScheduler:
             self.last_run_time = run_time
             self.last_run_result = "failed"
             self.last_run_message = "Broker 未初始化"
-            await _notify_feishu(
-                f"[盘前持仓日报] 失败 ({trigger})\nBroker 未初始化，无法获取持仓"
-            )
+            await _notify_feishu(f"[盘前持仓日报] 失败 ({trigger})\nBroker 未初始化，无法获取持仓")
             return
 
         # Genuine "no positions" vs broker error: positions list is updated only
@@ -289,9 +287,7 @@ class PreMarketReportScheduler:
             self.last_run_time = run_time
             self.last_run_result = "failed"
             self.last_run_message = f"Broker 错误: {broker_err}"
-            await _notify_feishu(
-                f"[盘前持仓日报] 失败 ({trigger})\nBroker 错误: {broker_err}"
-            )
+            await _notify_feishu(f"[盘前持仓日报] 失败 ({trigger})\nBroker 错误: {broker_err}")
             return
 
         if not positions:
