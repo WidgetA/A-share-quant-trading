@@ -859,8 +859,9 @@ POST /api/analyze-kline
 
 错误码：400 = 输入或配置缺失；502 = Lambda 或 bltcy 上游错误；503 = `app.state.storage` 未初始化（GreptimeDB 没连上）。
 
-**默认超时**：Lambda render 60s，bltcy LLM 360s（gpt-5.5-pro reasoning + vision；
-2026-05-05 加了卖出/持有/增持三档信号 prompt 后输出变长，240s 不够，提到 360s）。
+**默认超时**：Lambda render 60s，bltcy LLM 600s。新 prompt 下 LLM 端到端波动很
+大：240s → 360s 都踩到过 timeout，600s 给足 buffer，不影响调用方（ANA-002 串行
+调用，每只就算跑满 10 分钟也只有几个持仓，8am 开市前肯定跑完）。
 
 **Backlog**:
 - UI trigger（dashboard 按钮 / 飞书命令）—— ✅ 定时任务已由 ANA-002 兜住
