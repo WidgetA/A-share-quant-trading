@@ -174,6 +174,174 @@ class FeishuBot:
         message = f"🚨 {title}\n\n{content}"
         return await self.send_message(message)
 
+    async def send_markdown(
+        self, markdown: str, title: str | None = None, max_retries: int = 5
+    ) -> bool:
+        """Send a Markdown message via the relay's `/api/send_markdown` endpoint.
+
+        Renders as Feishu rich-text card (lark md subset: headings, bold, lists,
+        tables, code, links, dividers). Use this instead of `send_message` when
+        the body has structure worth rendering — e.g. LLM analysis output.
+
+        Args:
+            markdown: Body in Markdown.
+            title: Optional card title. If None, the relay extracts from the
+                first heading in the markdown.
+            max_retries: Retry attempts on transient failures (lower than text
+                send because the body is large; we don't want to spam on a
+                misformatted request).
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        if not self.is_configured():
+            logger.warning("Feishu bot not configured, skipping markdown")
+            return False
+
+        payload: dict[str, str] = {
+            "app_id": self.app_id,
+            "app_secret": self.app_secret,
+            "chat_id": self.chat_id,
+            "markdown": markdown,
+        }
+        if title:
+            payload["title"] = title
+
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        f"{self.bot_url}/api/send_markdown",
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    if data.get("code") == 0:
+                        if attempt > 0:
+                            logger.info("Markdown sent after %d retries (title=%r)", attempt, title)
+                        return True
+                    last_error = Exception(f"Feishu API error: {data}")
+                    logger.warning(
+                        "Feishu markdown error (attempt %d/%d): %s",
+                        attempt + 1,
+                        max_retries + 1,
+                        data,
+                    )
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logger.warning(
+                    "Feishu markdown HTTP error (attempt %d/%d): %s - %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    e.response.status_code,
+                    e.response.text[:200],
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Feishu markdown exception (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    e,
+                )
+            if attempt < max_retries:
+                await asyncio.sleep(min(2**attempt, 60))
+
+        logger.error(
+            "Failed to send Feishu markdown after %d attempts: %s", max_retries + 1, last_error
+        )
+        return False
+
+    async def send_image(
+        self,
+        image: bytes | str,
+        filename: str = "image.png",
+        max_retries: int = 5,
+    ) -> bool:
+        """Send a native Feishu image message via `/api/send_image` (multipart).
+
+        Args:
+            image: Either raw image bytes OR an http(s):// URL. URLs are
+                fetched first and uploaded as multipart — the relay's
+                send_image endpoint requires a `file` part, not a URL.
+            filename: Multipart filename (also determines content-type
+                guess on the relay side; default PNG is fine for our charts).
+            max_retries: Retry attempts on transient failures.
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        if not self.is_configured():
+            logger.warning("Feishu bot not configured, skipping image")
+            return False
+
+        # Resolve to bytes once — don't refetch on every retry.
+        if isinstance(image, str):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.get(image)
+                    resp.raise_for_status()
+                    image_bytes = resp.content
+            except Exception as e:
+                logger.error("Failed to fetch image for Feishu upload from %s: %s", image, e)
+                return False
+        else:
+            image_bytes = image
+
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        f"{self.bot_url}/api/send_image",
+                        data={
+                            "app_id": self.app_id,
+                            "app_secret": self.app_secret,
+                            "chat_id": self.chat_id,
+                        },
+                        files={"file": (filename, image_bytes, "image/png")},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    if data.get("code") == 0:
+                        if attempt > 0:
+                            logger.info(
+                                "Image sent after %d retries (filename=%s)", attempt, filename
+                            )
+                        return True
+                    last_error = Exception(f"Feishu API error: {data}")
+                    logger.warning(
+                        "Feishu image error (attempt %d/%d): %s",
+                        attempt + 1,
+                        max_retries + 1,
+                        data,
+                    )
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logger.warning(
+                    "Feishu image HTTP error (attempt %d/%d): %s - %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    e.response.status_code,
+                    e.response.text[:200],
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Feishu image exception (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    e,
+                )
+            if attempt < max_retries:
+                await asyncio.sleep(min(2**attempt, 60))
+
+        logger.error(
+            "Failed to send Feishu image after %d attempts: %s", max_retries + 1, last_error
+        )
+        return False
+
     async def send_startup_notification(
         self,
         git_commit: str | None = None,

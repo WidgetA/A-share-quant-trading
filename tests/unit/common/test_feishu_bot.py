@@ -263,6 +263,94 @@ class TestFeishuBot:
             assert "A股交易系统已停止" in message
             assert "停止时间" in message
 
+    @pytest.mark.asyncio
+    async def test_send_markdown_success(self):
+        """send_markdown posts to /api/send_markdown with title + body."""
+        bot = FeishuBot(
+            bot_url="http://test.local",
+            app_id="aid",
+            app_secret="sec",
+            chat_id="cid",
+        )
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"code": 0}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            post = AsyncMock(return_value=mock_response)
+            mock_client.return_value.__aenter__.return_value.post = post
+            result = await bot.send_markdown("# Hello\n\n**body**", title="t")
+
+        assert result is True
+        # Verify posted to the markdown endpoint with right payload
+        call = post.call_args
+        assert call.args[0].endswith("/api/send_markdown")
+        body = call.kwargs["json"]
+        assert body["chat_id"] == "cid"
+        assert body["markdown"].startswith("# Hello")
+        assert body["title"] == "t"
+
+    @pytest.mark.asyncio
+    async def test_send_markdown_not_configured(self):
+        bot = FeishuBot(app_id="", app_secret="", chat_id="")
+        result = await bot.send_markdown("body")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_image_with_bytes(self):
+        """send_image with raw bytes uploads multipart to /api/send_image."""
+        bot = FeishuBot(
+            bot_url="http://test.local",
+            app_id="aid",
+            app_secret="sec",
+            chat_id="cid",
+        )
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"code": 0}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            post = AsyncMock(return_value=mock_response)
+            mock_client.return_value.__aenter__.return_value.post = post
+            result = await bot.send_image(b"\x89PNG fake bytes", filename="x.png")
+
+        assert result is True
+        call = post.call_args
+        assert call.args[0].endswith("/api/send_image")
+        # multipart fields
+        assert call.kwargs["data"]["chat_id"] == "cid"
+        assert call.kwargs["files"]["file"][0] == "x.png"
+
+    @pytest.mark.asyncio
+    async def test_send_image_fetches_url_then_uploads(self):
+        """send_image with URL fetches bytes once, then uploads multipart."""
+        bot = FeishuBot(
+            bot_url="http://test.local",
+            app_id="aid",
+            app_secret="sec",
+            chat_id="cid",
+        )
+
+        # First call (GET image), second call (POST upload) — both go through
+        # the same AsyncClient mock; differentiate by method.
+        get_response = MagicMock()
+        get_response.content = b"\x89PNG fake bytes"
+        get_response.raise_for_status = MagicMock()
+
+        upload_response = MagicMock()
+        upload_response.json.return_value = {"code": 0}
+        upload_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            ctx = mock_client.return_value.__aenter__.return_value
+            ctx.get = AsyncMock(return_value=get_response)
+            ctx.post = AsyncMock(return_value=upload_response)
+            result = await bot.send_image("https://example.com/k.png")
+
+        assert result is True
+        ctx.get.assert_awaited_once_with("https://example.com/k.png")
+        ctx.post.assert_awaited()
+
 
 class TestGetFeishuConfig:
     """Tests for get_feishu_config function."""

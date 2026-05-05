@@ -265,7 +265,9 @@ async def test_run_once_success_per_stock_serial():
             "analysis": "测试分析文本",
         }
     )
-    feishu_mock = AsyncMock()
+    text_mock = AsyncMock()
+    image_mock = AsyncMock()
+    md_mock = AsyncMock()
 
     with (
         patch(
@@ -278,7 +280,15 @@ async def test_run_once_success_per_stock_serial():
         ),
         patch(
             "src.data.services.pre_market_report_scheduler._notify_feishu",
-            feishu_mock,
+            text_mock,
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_image",
+            image_mock,
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_markdown",
+            md_mock,
         ),
         patch("src.analysis.kline_llm.analyze_kline", analyze_mock),
     ):
@@ -286,8 +296,10 @@ async def test_run_once_success_per_stock_serial():
 
     assert sched.last_run_result == "success"
     assert "成功 2/2" in sched.last_run_message
-    # 1 header + 2 per-stock messages
-    assert feishu_mock.await_count == 3
+    # 1 text header + 2 image + 2 markdown per stock
+    assert text_mock.await_count == 1
+    assert image_mock.await_count == 2
+    assert md_mock.await_count == 2
     assert analyze_mock.await_count == 2
 
 
@@ -308,7 +320,9 @@ async def test_run_once_partial_failure_one_stock_errors():
             raise RuntimeError("no daily data")
         return {"image_url": "https://example.com/k.png", "analysis": "ok"}
 
-    feishu_mock = AsyncMock()
+    text_mock = AsyncMock()
+    image_mock = AsyncMock()
+    md_mock = AsyncMock()
 
     with (
         patch(
@@ -321,7 +335,15 @@ async def test_run_once_partial_failure_one_stock_errors():
         ),
         patch(
             "src.data.services.pre_market_report_scheduler._notify_feishu",
-            feishu_mock,
+            text_mock,
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_image",
+            image_mock,
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_markdown",
+            md_mock,
         ),
         patch("src.analysis.kline_llm.analyze_kline", AsyncMock(side_effect=_analyze)),
     ):
@@ -330,6 +352,11 @@ async def test_run_once_partial_failure_one_stock_errors():
     assert sched.last_run_result == "success"
     assert "成功 1/2" in sched.last_run_message
     assert "失败 1" in sched.last_run_message
+    # 1 header + 1 error text for failed stock
+    assert text_mock.await_count == 2
+    # Successful stock got both image + markdown; failed stock got neither
+    assert image_mock.await_count == 1
+    assert md_mock.await_count == 1
 
 
 @pytest.mark.asyncio

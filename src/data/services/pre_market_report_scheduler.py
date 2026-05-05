@@ -29,7 +29,7 @@ _AS_OF_LOOKBACK_DAYS = 14  # how far back to search for the latest cached tradin
 
 
 async def _notify_feishu(message: str) -> None:
-    """Best-effort Feishu notification, never raises."""
+    """Best-effort Feishu text notification (status / errors). Never raises."""
     try:
         from src.common.feishu_bot import FeishuBot
 
@@ -38,6 +38,34 @@ async def _notify_feishu(message: str) -> None:
             await bot.send_message(message)
     except Exception:
         logger.warning("Failed to send Feishu pre-market notification", exc_info=True)
+
+
+async def _notify_feishu_image(image_url: str, filename: str = "kline.png") -> bool:
+    """Send a native Feishu image message. Returns True on success."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if not bot.is_configured():
+            return False
+        return await bot.send_image(image_url, filename=filename)
+    except Exception:
+        logger.warning("Failed to send Feishu pre-market image", exc_info=True)
+        return False
+
+
+async def _notify_feishu_markdown(markdown: str, title: str | None = None) -> bool:
+    """Send a Feishu markdown rich-text message. Returns True on success."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if not bot.is_configured():
+            return False
+        return await bot.send_markdown(markdown, title=title)
+    except Exception:
+        logger.warning("Failed to send Feishu pre-market markdown", exc_info=True)
+        return False
 
 
 async def _is_trading_day(d: date) -> bool:
@@ -297,7 +325,7 @@ class PreMarketReportScheduler:
             logger.info("PreMarketReportScheduler: no positions, silent skip")
             return
 
-        # Header
+        # Header (plain text — short, no need for markdown)
         await _notify_feishu(
             f"📊 盘前持仓日报 ({as_of}) · 触发: {trigger}\n"
             f"持仓数: {len(positions)} 只，开始逐只生成技术分析..."
@@ -333,13 +361,23 @@ class PreMarketReportScheduler:
                 await _notify_feishu(f"⚠️ {code} {name} 分析失败\n{err_msg}")
                 continue
 
-            msg = (
-                f"📊 盘前持仓日报 · {code} {name} ({as_of})\n\n"
-                f"持仓: {volume} 股  成本: ¥{avg_price:.2f}  市值: ¥{market_value:.2f}\n\n"
-                f"K 线图: {result['image_url']}\n\n"
-                f"【技术分析】\n{result['analysis']}"
+            # Send K-line as a native Feishu image (not a URL link), then send
+            # the analysis as a Markdown rich-text card so headings / bullets
+            # / bold render properly in the chat. Two messages per stock.
+            title = f"📊 {code} {name} ({as_of})"
+            await _notify_feishu_image(result["image_url"], filename=f"{bare}_{as_of}.png")
+
+            md = (
+                f"## {title}\n\n"
+                f"| | |\n"
+                f"|---|---|\n"
+                f"| 持仓 | **{volume}** 股 |\n"
+                f"| 成本 | ¥{avg_price:.2f} |\n"
+                f"| 市值 | ¥{market_value:,.2f} |\n\n"
+                f"---\n\n"
+                f"{result['analysis']}"
             )
-            await _notify_feishu(msg)
+            await _notify_feishu_markdown(md, title=title)
             ok += 1
 
         self.last_run_time = run_time

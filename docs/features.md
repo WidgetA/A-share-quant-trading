@@ -891,18 +891,29 @@ POST /api/analyze-kline
 **交易日判定**: 复用 `cache_scheduler._get_trading_calendar()`（Tushare `trade_cal` →
 weekday fallback），周末/节假日不跑。
 
-**消息格式**（每只持仓一条飞书消息，串行发送）:
+**消息格式**（每只持仓发 2 条飞书消息：原生图片 + Markdown 富文本卡片，串行发送）:
 
-```
-📊 盘前持仓日报 · {code} {name} ({YYYY-MM-DD})
+1. **图片消息** —— K 线 PNG 通过 `FeishuBot.send_image()` 上传到飞书
+   `/api/send_image`，原生 image type，群里直接展示图片，不是 URL 链接。
+2. **Markdown 卡片** —— 通过 `FeishuBot.send_markdown()` 走 `/api/send_markdown`，
+   飞书富文本卡片渲染。结构：
 
-持仓: {volume} 股  成本: ¥{avg_price}  市值: ¥{market_value}
+```markdown
+## 📊 {code} {name} ({YYYY-MM-DD})
 
-K 线图: {image_url}
+| | |
+|---|---|
+| 持仓 | **{volume}** 股 |
+| 成本 | ¥{avg_price} |
+| 市值 | ¥{market_value} |
 
-【技术分析】
+---
+
 {LLM analysis with 卖出 / 持有 / 增持 三档信号}
 ```
+
+> 早期版本曾用 text 消息 + URL 拼接，渲染丑且图片不展开，2026-05-05 改为
+> 原生 image + markdown 双消息（FeishuBot 加 `send_image` / `send_markdown`）。
 
 **边界处理**:
 
