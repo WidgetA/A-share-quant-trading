@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -25,6 +25,9 @@ from src.common.config import (
     get_lambda_kline_token,
     get_lambda_kline_url,
 )
+
+if TYPE_CHECKING:
+    from src.data.clients.greptime_storage import GreptimeBacktestStorage
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +49,22 @@ DEFAULT_PROMPT = (
 # ── Data fetch ──────────────────────────────────────────────
 
 
-async def _fetch_ohlcv(code: str, days: int) -> list[dict[str, Any]]:
+async def _fetch_ohlcv(
+    storage: GreptimeBacktestStorage,
+    code: str,
+    days: int,
+) -> list[dict[str, Any]]:
     """Pull last `days` trading days of OHLCV for one code from GreptimeDB.
+
+    `storage` must be an already-started `GreptimeBacktestStorage` (typically
+    `request.app.state.storage`). This function does not start/stop it — that
+    lifecycle belongs to the FastAPI app so the asyncpg pool is reused across
+    requests.
 
     Returns a list of dicts with keys: date (YYYY-MM-DD), open, high, low, close,
     volume — already converted to 股 (shares). Sorted ascending by date.
     """
-    from src.data.clients.greptime_storage import (
-        create_storage_from_config,
-        ts_to_date,
-    )
+    from src.data.clients.greptime_storage import ts_to_date
 
     # GreptimeDB stores 6-digit codes without exchange suffix. Accept either
     # form from the caller and normalize.
@@ -65,12 +74,7 @@ async def _fetch_ohlcv(code: str, days: int) -> list[dict[str, Any]]:
     # Pull a wider window then tail(days) to handle weekends/holidays/suspensions.
     start = today - timedelta(days=int(days * 2.2) + 60)
 
-    storage = create_storage_from_config()
-    await storage.start()
-    try:
-        rows = await storage.get_daily_for_code(code_norm, str(start), str(today))
-    finally:
-        await storage.stop()
+    rows = await storage.get_daily_for_code(code_norm, str(start), str(today))
 
     if not rows:
         raise ValueError(f"No daily data found for {code!r} in GreptimeDB")
@@ -190,6 +194,7 @@ async def _ask_vision_llm(
 
 
 async def analyze_kline(
+    storage: GreptimeBacktestStorage,
     code: str,
     days: int = 30,
     prompt: str | None = None,
@@ -197,6 +202,9 @@ async def analyze_kline(
     timeout_llm: float = 240.0,
 ) -> dict[str, Any]:
     """Full pipeline: fetch OHLCV → render via Lambda → ask vision LLM.
+
+    `storage` is the long-lived `GreptimeBacktestStorage` from
+    `app.state.storage`. The caller owns its start/stop lifecycle.
 
     Returns:
         {
@@ -212,7 +220,7 @@ async def analyze_kline(
     if days < 5:
         raise ValueError("days must be >= 5")
 
-    ohlcv = await _fetch_ohlcv(code, days)
+    ohlcv = await _fetch_ohlcv(storage, code, days)
     image_url = await _render_via_lambda(code, days, ohlcv, timeout_render)
     user_prompt = prompt or DEFAULT_PROMPT
     analysis, raw = await _ask_vision_llm(code, image_url, user_prompt, timeout_llm)

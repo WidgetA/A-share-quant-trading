@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,21 @@ def create_analysis_router() -> APIRouter:
     router = APIRouter(tags=["analysis"])
 
     @router.post("/api/analyze-kline")
-    async def analyze_kline_endpoint(req: AnalyzeKlineRequest) -> dict:
+    async def analyze_kline_endpoint(req: AnalyzeKlineRequest, request: Request) -> dict:
         from src.analysis.kline_llm import analyze_kline
+
+        # Reuse the long-lived asyncpg pool from app.state instead of building
+        # one per request. If GreptimeDB never connected at startup, fail fast.
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            raise HTTPException(
+                status_code=503,
+                detail="GreptimeDB unavailable (app.state.storage not initialized)",
+            )
 
         try:
             result = await analyze_kline(
+                storage=storage,
                 code=req.code,
                 days=req.days,
                 prompt=req.prompt,
