@@ -382,6 +382,16 @@ def create_app(
         app.state.model_scheduler_task = asyncio.create_task(model_scheduler.run())
         logger.info("Model training scheduler started")
 
+        # Auto-start pre-market holdings report scheduler (8am daily, ANA-002)
+        from src.data.services.pre_market_report_scheduler import PreMarketReportScheduler
+
+        pre_market_scheduler = PreMarketReportScheduler(app.state)
+        app.state.pre_market_report_scheduler = pre_market_scheduler
+        app.state.pre_market_report_scheduler_task = asyncio.create_task(
+            pre_market_scheduler.run()
+        )
+        logger.info("Pre-market report scheduler started (8am daily)")
+
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
             "running": False,
@@ -421,6 +431,12 @@ def create_app(
         if model_task and not model_task.done():
             model_task.cancel()
             logger.info("Model training scheduler stopped")
+
+        # Stop pre-market report scheduler
+        pre_market_task = getattr(app.state, "pre_market_report_scheduler_task", None)
+        if pre_market_task and not pre_market_task.done():
+            pre_market_task.cancel()
+            logger.info("Pre-market report scheduler stopped")
 
         # Stop momentum monitor
         monitor_state = getattr(app.state, "momentum_monitor_state", None)

@@ -49,6 +49,7 @@
 | 0.13.4 | 2026-04-28 | - | STR-006: Stock-level blacklist — hardcoded codes removed at top of funnel (live scan + replicate_v16) and stripped from training data stream |
 | 0.14.0 | 2026-05-04 | - | ANA-001: K-line technical analysis via overseas Lambda renderer + 柏拉图AI vision LLM (POST /api/analyze-kline) |
 | 0.14.1 | 2026-05-05 | - | ANA-001: web UI Settings for lambda-kline URL/token + bltcy key (zero-restart config); orchestrator reuses `app.state.storage`; gpt-5.5-pro locked; production-verified end-to-end |
+| 0.15.0 | 2026-05-05 | - | ANA-002: 盘前持仓日报——交易日 8am 自动扫描 broker 持仓→对每只调 ANA-001→飞书逐条推送 K 线 + 技术面分析；附 `POST /api/pre-market-report/run` 手动触发 |
 
 ---
 
@@ -861,10 +862,84 @@ POST /api/analyze-kline
 **默认超时**：Lambda render 60s，bltcy LLM 240s（gpt-5.5-pro reasoning + vision 实测端到端 ~190s，留 buffer）。
 
 **Backlog**:
-- UI trigger（dashboard 按钮 / 飞书命令 / 定时任务）
+- UI trigger（dashboard 按钮 / 飞书命令）—— ✅ 定时任务已由 ANA-002 兜住
 - 渲染加分钟级、加 RSI / MACD 等指标
 - 历史分析归档（落 GreptimeDB），支持 web UI 回看
 - prompt 工程：把基本面 / 资金流 / 板块温度等结构化信号一起喂进去，不只看图
+
+---
+
+### [ANA-002] 盘前持仓日报 (Pre-Market Holdings Report)
+
+**Status**: Completed (2026-05-05)
+
+**Description**: 交易日早 8 点自动扫描当前 broker 持仓，对每只持仓股调用 ANA-001
+生成 K 线图 + 技术面分析，并按【卖出 / 持有 / 增持】信号给出当日操作建议，逐只推送到
+飞书群。**为什么放 8am 不放 15:00**：tsanghi/Tushare 日线接口 T-1 出数据，
+`CacheScheduler` 3am 才把昨日数据补全；8am 跑可以直接用昨日收盘的完整 K 线，避免在
+15:00 触发还要额外补一次今日数据。
+
+**触发机制**:
+
+| 入口 | 触发方式 | 备注 |
+|------|---------|------|
+| 自动调度 | 工作日 8:00 Beijing | `PreMarketReportScheduler.run()`，`asyncio` 后台任务 |
+| 手动触发 | `POST /api/pre-market-report/run` | 立即执行一次（异步，立即返回 `{"started": true}`），用于测试和补发 |
+| 总开关 | Settings → `pre_market_report_enabled`（默认 on） | off 时 scheduler 跳过本次执行，写一行 `skipped` 日志 |
+
+**交易日判定**: 复用 `cache_scheduler._get_trading_calendar()`（Tushare `trade_cal` →
+weekday fallback），周末/节假日不跑。
+
+**消息格式**（每只持仓一条飞书消息，串行发送）:
+
+```
+📊 盘前持仓日报 · {code} {name} ({YYYY-MM-DD})
+
+持仓: {volume} 股  成本: ¥{avg_price}  市值: ¥{market_value}
+
+K 线图: {image_url}
+
+【技术分析】
+{LLM analysis with 卖出 / 持有 / 增持 三档信号}
+```
+
+**边界处理**:
+
+| 场景 | 行为 |
+|------|------|
+| 无持仓 | 静默跳过（不发飞书），`scheduler_log` 记 `no_positions` |
+| Broker 未连接 | 发飞书失败告警 + `scheduler_log` 记 `failed` |
+| 单只股票分析失败 | 跳过该股，发飞书错误消息，继续下一只（不让一只挂掉整个日报） |
+| ANA-001 配置缺失（lambda/bltcy） | 发飞书告警 + `scheduler_log` 记 `failed` |
+| 节假日 | 不触发 |
+
+**速率**: 持仓串行处理（避免 tsanghi 2 并发限制 + LLM 同时跑撞超时），单只
+~30s（图渲染 < 10s + LLM ~20s），10 只持仓约 5 分钟内全部发完。
+
+**Files**:
+- `src/data/services/pre_market_report_scheduler.py` — 主逻辑（参考 `cache_scheduler.py` 模式）
+- `src/web/analysis_routes.py` — 新增 `POST /api/pre-market-report/run`
+- `src/common/config.py` — `get_/set_pre_market_report_enabled()`
+- `src/web/app.py` — startup 启动 task、shutdown cancel
+
+**配置**:
+
+| 配置项 | 持久化文件 | env var fallback | 默认 |
+|--------|----------|------------------|------|
+| 启用开关 | `data/pre_market_report_enabled.txt` | `PRE_MARKET_REPORT_ENABLED` | `true` |
+
+**HTTP 接口**:
+
+```
+POST /api/pre-market-report/run
+↓ 200
+{ "started": true, "trigger": "manual" }
+```
+
+错误码：503 = `app.state.storage` 未就绪；409 = 上一次执行还没结束。
+
+**调度日志**: 与 cache/model 调度器共用 `scheduler_log` 表，name=`pre_market_report`，
+result ∈ `{success, no_positions, failed, skipped}`。
 
 ---
 

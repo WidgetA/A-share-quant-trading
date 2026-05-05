@@ -574,6 +574,39 @@ def set_daily_scan_enabled(enabled: bool) -> None:
     logger.info(f"Daily scan {'enabled' if enabled else 'disabled'} via web UI")
 
 
+# --- Pre-Market Holdings Report Toggle (ANA-002) ---
+
+_pre_market_report_enabled_override: bool | None = None
+PRE_MARKET_REPORT_FILE = PROJECT_ROOT / "data" / "pre_market_report_enabled.txt"
+
+
+def get_pre_market_report_enabled() -> bool:
+    """Return whether the 8am pre-market holdings report is enabled. Default: True."""
+    import os
+
+    global _pre_market_report_enabled_override
+    if _pre_market_report_enabled_override is not None:
+        return _pre_market_report_enabled_override
+    if PRE_MARKET_REPORT_FILE.exists():
+        val = PRE_MARKET_REPORT_FILE.read_text(encoding="utf-8").strip().lower()
+        if val in ("false", "0", "off", "no"):
+            return False
+        return True
+    env = os.getenv("PRE_MARKET_REPORT_ENABLED")
+    if env is not None and env.strip().lower() in ("false", "0", "off", "no"):
+        return False
+    return True
+
+
+def set_pre_market_report_enabled(enabled: bool) -> None:
+    """Set pre-market report enabled state and persist to disk."""
+    global _pre_market_report_enabled_override
+    _pre_market_report_enabled_override = enabled
+    PRE_MARKET_REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PRE_MARKET_REPORT_FILE.write_text(str(enabled).lower(), encoding="utf-8")
+    logger.info(f"Pre-market report {'enabled' if enabled else 'disabled'} via web UI")
+
+
 # --- Recommendations Toggle ---
 
 _recommendations_enabled_override: bool | None = None

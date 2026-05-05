@@ -3,10 +3,13 @@
 # (overseas Lambda renderer + 柏拉图AI vision LLM).
 #
 # Currently exposes:
-#   POST /api/analyze-kline   {code, days?, prompt?} → analysis text + image_url
+#   POST /api/analyze-kline           {code, days?, prompt?} → analysis text + image_url
+#   POST /api/pre-market-report/run   → kick off ANA-002 holdings report (manual)
+#   GET  /api/pre-market-report/status → ANA-002 status (last run, enabled, etc.)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -64,5 +67,39 @@ def create_analysis_router() -> APIRouter:
             "model": result["model"],
             "analysis": result["analysis"],
         }
+
+    @router.post("/api/pre-market-report/run")
+    async def run_pre_market_report(request: Request) -> dict:
+        """Manually fire one ANA-002 pre-market holdings report.
+
+        Returns immediately; the actual report runs in the background and
+        pushes results to Feishu. Use `/api/pre-market-report/status` to
+        check progress.
+        """
+        scheduler = getattr(request.app.state, "pre_market_report_scheduler", None)
+        if scheduler is None:
+            raise HTTPException(
+                status_code=503,
+                detail="PreMarketReportScheduler not initialized",
+            )
+        if scheduler.is_running():
+            raise HTTPException(status_code=409, detail="上一次执行还没结束")
+        # Fire-and-forget: HTTP returns immediately, scheduler does the work.
+        asyncio.create_task(scheduler.trigger_manual())
+        return {"started": True, "trigger": "manual"}
+
+    @router.get("/api/pre-market-report/status")
+    async def get_pre_market_report_status(request: Request) -> dict:
+        scheduler = getattr(request.app.state, "pre_market_report_scheduler", None)
+        if scheduler is None:
+            return {
+                "enabled": False,
+                "running": False,
+                "next_run_time": None,
+                "last_run_time": None,
+                "last_run_result": None,
+                "last_run_message": "scheduler not initialized",
+            }
+        return scheduler.get_status()
 
     return router
