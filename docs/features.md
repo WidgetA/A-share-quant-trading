@@ -859,7 +859,8 @@ POST /api/analyze-kline
 
 错误码：400 = 输入或配置缺失；502 = Lambda 或 bltcy 上游错误；503 = `app.state.storage` 未初始化（GreptimeDB 没连上）。
 
-**默认超时**：Lambda render 60s，bltcy LLM 240s（gpt-5.5-pro reasoning + vision 实测端到端 ~190s，留 buffer）。
+**默认超时**：Lambda render 60s，bltcy LLM 360s（gpt-5.5-pro reasoning + vision；
+2026-05-05 加了卖出/持有/增持三档信号 prompt 后输出变长，240s 不够，提到 360s）。
 
 **Backlog**:
 - UI trigger（dashboard 按钮 / 飞书命令）—— ✅ 定时任务已由 ANA-002 兜住

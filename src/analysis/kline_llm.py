@@ -211,7 +211,7 @@ async def analyze_kline(
     days: int = 30,
     prompt: str | None = None,
     timeout_render: float = 60.0,
-    timeout_llm: float = 240.0,
+    timeout_llm: float = 360.0,
 ) -> dict[str, Any]:
     """Full pipeline: fetch OHLCV → render via Lambda → ask vision LLM.
 
