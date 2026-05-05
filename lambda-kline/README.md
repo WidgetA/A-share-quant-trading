@@ -150,18 +150,36 @@ Minimum IAM policy for the CI user:
 ]}
 ```
 
-### 6. Trading-service env
+### 6. Trading-service configuration (Settings page, no restart needed)
 
-Add to the production `.env` (or whatever env mechanism docker-compose uses):
+The trading-service reads three values to talk to this stack. **Use the
+Settings page** — it persists each value under `data/` and the orchestrator
+re-reads on every request, so changes take effect immediately:
+
+1. Open `http(s)://<trading-service>/settings` → scroll to
+   **「K 线技术面分析（Lambda + 柏拉图AI）」**
+2. Paste **Lambda Function URL** → 测试连接（应返回 `{"ok":true,"service":"kline-render"}`） → 保存
+3. Paste **Upload Token** (same string as the Lambda's `UPLOAD_TOKEN`
+   env var) → 测试 Token（应 200 / 400 = 通过；401 = token 不匹配）→ 保存
+4. Paste **柏拉图AI API Key** → 验证 Key（hits `/v1/models` with the key）→ 保存
+
+Persisted at `data/lambda_kline_url.txt`, `data/lambda_kline_token.txt`,
+`data/bltcy_api_key.txt`.
+
+**Env-var fallback** (only used when the persisted file is empty / missing —
+useful for fresh container bootstrap before anyone touches the Settings page):
 
 ```
 LAMBDA_KLINE_URL=https://xxx.lambda-url.us-east-1.on.aws/
 LAMBDA_KLINE_TOKEN=<same UPLOAD_TOKEN as Lambda env var>
 BLTCY_API_KEY=sk-xxxxxxx
-# optional overrides:
-# BLTCY_BASE_URL=https://api.bltcy.ai/v1
-# BLTCY_MODEL=gpt-5.5-pro
+# Optional:
+# BLTCY_BASE_URL=https://api.bltcy.ai/v1   # only env, no UI override
+# BLTCY_MODEL=gpt-5.5-pro                  # locked; emergency escape only
 ```
+
+> Model is locked to `gpt-5.5-pro` —— other vision models tested were too
+> shallow for technical analysis. Don't add a model selector to the UI.
 
 ## Local smoke test
 

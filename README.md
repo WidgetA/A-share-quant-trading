@@ -60,18 +60,23 @@ All config is in `docker-compose.yml`. Key variables:
 | `FEISHU_APP_ID/SECRET/CHAT_ID` | Alert notifications |
 | `GREPTIME_HOST/PORT` | GreptimeDB backtest cache (default: greptimedb:4003) |
 | `WEB_BASE_URL` | Public URL for the web UI |
-| `LAMBDA_KLINE_URL` | Overseas K-line render Lambda Function URL (see [lambda-kline/README.md](lambda-kline/README.md)) |
-| `LAMBDA_KLINE_TOKEN` | Shared secret for the Lambda renderer (matches Lambda env `UPLOAD_TOKEN`) |
-| `BLTCY_API_KEY` | 柏拉图AI key for vision-LLM K-line analysis |
+
+API keys / endpoints (Tushare, Tsanghi, xtquant broker, AWS Lambda render
+service, 柏拉图AI etc.) are configured **via the Settings page** at runtime
+and persisted under `data/`. Env vars (`LAMBDA_KLINE_URL`, `LAMBDA_KLINE_TOKEN`,
+`BLTCY_API_KEY`, …) remain a fallback for fresh container bootstrap before
+the web UI is reachable.
 
 ## K-line Technical Analysis
 
-`POST /api/analyze-kline {"code":"000001.SZ","days":30}` — pulls OHLCV from
+`POST /api/analyze-kline {"code":"000001","days":30}` — pulls OHLCV from
 GreptimeDB, renders the chart in an overseas AWS Lambda (sidesteps mainland
-ICP filing rules for public image URLs), then asks 柏拉图AI's vision model for
-a Chinese technical analysis. See [docs/features.md ANA-001](docs/features.md)
-for the full architecture and [lambda-kline/README.md](lambda-kline/README.md)
-for one-time AWS bootstrap.
+OSS ICP-filing rules for public image URLs), then asks 柏拉图AI's vision model
+(`gpt-5.5-pro`, locked) for a Chinese technical analysis. Configure the three
+endpoints/keys on the Settings page → "K 线技术面分析（Lambda + 柏拉图AI）"
+card. Full architecture: [docs/features.md ANA-001](docs/features.md). Initial
+AWS resource bootstrap (S3 / ECR / IAM / Lambda function):
+[lambda-kline/README.md](lambda-kline/README.md).
 
 ## Development
 
