@@ -33,6 +33,10 @@ class PreMarketReportToggleRequest(BaseModel):
     enabled: bool = Field(..., description="True to enable the 8am scheduled run, False to disable")
 
 
+class PreMarketReportRunOneRequest(BaseModel):
+    code: str = Field(..., description="Stock code, e.g. 605299.SH or 605299")
+
+
 def create_analysis_router() -> APIRouter:
     router = APIRouter(tags=["analysis"])
 
@@ -106,6 +110,26 @@ def create_analysis_router() -> APIRouter:
                 "last_run_message": "scheduler not initialized",
             }
         return scheduler.get_status()
+
+    @router.post("/api/pre-market-report/run-one")
+    async def run_pre_market_report_one(
+        req: PreMarketReportRunOneRequest, request: Request
+    ) -> dict:
+        """Manually fire ANA-002 for ONE stock and push the result to Feishu.
+
+        Same image + markdown card as the batch report, just for a single code.
+        Returns immediately; the analysis runs in the background.
+        """
+        scheduler = getattr(request.app.state, "pre_market_report_scheduler", None)
+        if scheduler is None:
+            raise HTTPException(503, "PreMarketReportScheduler not initialized")
+        if scheduler.is_running():
+            raise HTTPException(409, "上一次执行还没结束")
+        code = req.code.strip()
+        if not code:
+            raise HTTPException(400, "code is required")
+        asyncio.create_task(scheduler.trigger_one_stock(code))
+        return {"started": True, "code": code, "trigger": "manual_one"}
 
     @router.post("/api/pre-market-report/toggle")
     async def toggle_pre_market_report(req: PreMarketReportToggleRequest) -> dict:

@@ -206,14 +206,12 @@
                     <span id="preMarketReportRunMsg" style="font-size:12px; color:#666;"></span>
                 </div>
                 <div class="status-card-row" style="display:block;">
-                    <div style="font-size:12px; color:#666; margin-bottom:4px;">单票 AI 评价（仅本页显示，不发飞书）</div>
+                    <div style="font-size:12px; color:#666; margin-bottom:4px;">单票 AI 评价（点击 → 推送到飞书）</div>
                     <div id="preMarketReportHoldingsBtns" style="display:flex; flex-wrap:wrap; gap:4px;">
                         <span style="color:#999; font-size:12px;">加载中...</span>
                     </div>
-                </div>
-                <div id="preMarketReportSingleResult"
-                    style="display:none; margin-top:10px; padding:10px;
-                           background:#f9f9f9; border:1px solid #e0e0e0; border-radius:4px;">
+                    <div id="preMarketReportSingleMsg"
+                        style="margin-top:6px; font-size:12px; color:#666;"></div>
                 </div>
             </div>
         </div>
@@ -546,39 +544,29 @@ function _pmrEscape(s) {
 async function analyzeOneStock(btn) {
     const code = btn.dataset.code;
     const name = btn.dataset.name;
-    const result = document.getElementById('preMarketReportSingleResult');
-    // Disable all stock buttons during the call (LLM is serial-bound on bltcy quota)
-    document.querySelectorAll('.pmr-stock-btn').forEach(b => b.disabled = true);
-    const orig = btn.textContent.trim();
-    btn.textContent = '分析中...';
-    result.style.display = 'block';
-    result.innerHTML = `<div style="color:#666; font-size:13px;">⏳ ${_pmrEscape(code)} ${_pmrEscape(name)} 分析中（约 3-5 分钟，请勿关闭页面）...</div>`;
+    const msg = document.getElementById('preMarketReportSingleMsg');
+    msg.textContent = `⏳ ${code} ${name} 已触发，飞书将在 3-5 分钟后推送`;
+    msg.style.color = '#666';
     try {
-        const resp = await fetch('/api/analyze-kline', {
+        const resp = await fetch('/api/pre-market-report/run-one', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({code: code, days: 30})
+            body: JSON.stringify({code: code})
         });
         const data = await resp.json();
-        if (resp.ok) {
-            result.innerHTML = `
-                <div style="font-weight:600; margin-bottom:8px; font-size:14px;">
-                    📊 ${_pmrEscape(code)} ${_pmrEscape(name)}
-                </div>
-                <img src="${_pmrEscape(data.image_url)}"
-                    style="max-width:100%; border:1px solid #ddd; border-radius:3px; margin-bottom:10px;"
-                    alt="K 线图">
-                <div style="white-space:pre-wrap; font-size:13px; line-height:1.6; font-family:inherit;">${_pmrEscape(data.analysis)}</div>
-            `;
+        if (resp.ok && data.started) {
+            msg.textContent = `✅ ${code} ${name} 已推送任务，飞书将在 3-5 分钟后收到图片 + 分析卡片`;
+            msg.style.color = '#2e7d32';
+        } else if (resp.status === 409) {
+            msg.textContent = `⚠️ 上一次还没结束（点 "状态" 看进度），稍后再点`;
+            msg.style.color = '#f57c00';
         } else {
-            const detail = data.detail || resp.statusText;
-            result.innerHTML = `<div style="color:#d32f2f; font-size:13px;">分析失败：${_pmrEscape(detail)}</div>`;
+            msg.textContent = `❌ 触发失败：${data.detail || resp.statusText}`;
+            msg.style.color = '#d32f2f';
         }
     } catch(e) {
-        result.innerHTML = `<div style="color:#d32f2f; font-size:13px;">请求异常：${_pmrEscape(e.message)}</div>`;
-    } finally {
-        document.querySelectorAll('.pmr-stock-btn').forEach(b => b.disabled = false);
-        btn.textContent = orig;
+        msg.textContent = `❌ 请求异常：${e.message}`;
+        msg.style.color = '#d32f2f';
     }
 }
 

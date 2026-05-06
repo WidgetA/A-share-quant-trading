@@ -945,12 +945,21 @@ weekday fallback），周末/节假日不跑。
 **HTTP 接口**:
 
 ```
-POST /api/pre-market-report/run
+POST /api/pre-market-report/run                            # 全部持仓批量
+POST /api/pre-market-report/run-one  {code}                # 单只持仓
+POST /api/pre-market-report/toggle   {enabled: bool}       # 仅控 8am 自动
+GET  /api/pre-market-report/status                         # 查状态
 ↓ 200
-{ "started": true, "trigger": "manual" }
+{ "started": true, "trigger": "manual" }                   # /run, /run-one
+{ "enabled": true }                                        # /toggle
 ```
 
-错误码：503 = `app.state.storage` 未就绪；409 = 上一次执行还没结束。
+错误码：503 = `app.state.storage` 未就绪；409 = 上一次执行还没结束；
+400 = `/run-one` 参数缺失。
+
+**Dashboard UI**:「盘前持仓日报」卡片（在 index.html 主页），含开关、下次执行时间、
+上次结果显示、「触发全部持仓 → 飞书」按钮、「单票 AI 评价」每只持仓一个按钮（点击
+→ 推送该股票分析到飞书，30s 自动刷新持仓列表）。
 
 **调度日志**: 与 cache/model 调度器共用 `scheduler_log` 表，name=`pre_market_report`，
 result ∈ `{success, no_positions, failed, skipped}`。

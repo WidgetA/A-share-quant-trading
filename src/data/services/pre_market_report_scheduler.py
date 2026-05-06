@@ -332,7 +332,6 @@ class PreMarketReportScheduler:
             f"持仓数: {len(positions)} 只，开始逐只生成技术分析..."
         )
 
-        from src.analysis.kline_llm import analyze_kline
         from src.data.sources.local_concept_mapper import LocalConceptMapper
 
         mapper = LocalConceptMapper()
@@ -343,43 +342,20 @@ class PreMarketReportScheduler:
             code = str(pos.get("code", "")).strip()
             if not code:
                 continue
-            bare = code.split(".")[0]
-            name = mapper.get_stock_name(bare) or "?"
-            volume = pos.get("volume", 0) or 0
-            avg_price = float(pos.get("avg_price", 0.0) or 0.0)
-            market_value = float(pos.get("market_value", 0.0) or 0.0)
-
-            try:
-                result = await analyze_kline(
-                    storage=storage,
-                    code=code,
-                    days=_ANALYZE_DAYS,
-                )
-            except Exception as e:
-                err_msg = f"{type(e).__name__}: {str(e)[:200]}"
-                logger.warning("analyze_kline failed for %s: %s", code, err_msg)
-                failed.append((code, err_msg))
-                await _notify_feishu(f"⚠️ {code} {name} 分析失败\n{err_msg}")
-                continue
-
-            # Send K-line as a native Feishu image (not a URL link), then send
-            # the analysis as a Markdown rich-text card so headings / bullets
-            # / bold render properly in the chat. Two messages per stock.
-            title = f"📊 {code} {name} ({as_of})"
-            await _notify_feishu_image(result["image_url"], filename=f"{bare}_{as_of}.png")
-
-            md = (
-                f"## {title}\n\n"
-                f"| | |\n"
-                f"|---|---|\n"
-                f"| 持仓 | **{volume}** 股 |\n"
-                f"| 成本 | ¥{avg_price:.2f} |\n"
-                f"| 市值 | ¥{market_value:,.2f} |\n\n"
-                f"---\n\n"
-                f"{result['analysis']}"
+            name = mapper.get_stock_name(code.split(".")[0]) or "?"
+            success, err = await self._analyze_and_push_one(
+                storage,
+                code=code,
+                name=name,
+                as_of=as_of,
+                volume=int(pos.get("volume", 0) or 0),
+                avg_price=float(pos.get("avg_price", 0.0) or 0.0),
+                market_value=float(pos.get("market_value", 0.0) or 0.0),
             )
-            await _notify_feishu_markdown(md, title=title)
-            ok += 1
+            if success:
+                ok += 1
+            else:
+                failed.append((code, err or "unknown"))
 
         self.last_run_time = run_time
         if failed and ok == 0:
@@ -391,3 +367,106 @@ class PreMarketReportScheduler:
         else:
             self.last_run_result = "success"
             self.last_run_message = f"成功 {ok}/{len(positions)}"
+
+    async def _analyze_and_push_one(
+        self,
+        storage: GreptimeBacktestStorage,
+        code: str,
+        name: str,
+        as_of: date,
+        volume: int = 0,
+        avg_price: float = 0.0,
+        market_value: float = 0.0,
+    ) -> tuple[bool, str | None]:
+        """Run analyze_kline + push native image + markdown card to Feishu for ONE stock.
+
+        Used by both the batch loop and the single-stock manual trigger. Returns
+        ``(ok, error_msg)``. On error, also pushes a Feishu warning text.
+        """
+        from src.analysis.kline_llm import analyze_kline
+
+        bare = code.split(".")[0]
+        try:
+            result = await analyze_kline(storage=storage, code=code, days=_ANALYZE_DAYS)
+        except Exception as e:
+            err_msg = f"{type(e).__name__}: {str(e)[:200]}"
+            logger.warning("analyze_kline failed for %s: %s", code, err_msg)
+            await _notify_feishu(f"⚠️ {code} {name} 分析失败\n{err_msg}")
+            return False, err_msg
+
+        # Native image (NOT a URL link) + Markdown rich-text card so headings /
+        # bullets / tables render in the chat instead of appearing as raw text.
+        title = f"📊 {code} {name} ({as_of})"
+        await _notify_feishu_image(result["image_url"], filename=f"{bare}_{as_of}.png")
+
+        md_lines = [f"## {title}", ""]
+        # Position table only when we actually have position info — avoids a
+        # zero-everything table for ad-hoc single-stock queries against a code
+        # the user no longer holds.
+        if volume > 0 or avg_price > 0 or market_value > 0:
+            md_lines += [
+                "| | |",
+                "|---|---|",
+                f"| 持仓 | **{volume}** 股 |",
+                f"| 成本 | ¥{avg_price:.2f} |",
+                f"| 市值 | ¥{market_value:,.2f} |",
+                "",
+                "---",
+                "",
+            ]
+        md_lines.append(result["analysis"])
+        await _notify_feishu_markdown("\n".join(md_lines), title=title)
+        return True, None
+
+    async def trigger_one_stock(self, code: str) -> None:
+        """Manual single-stock trigger: analyze + push image+markdown to Feishu.
+
+        Looks up position info from `app.state.broker_positions` (volume / cost
+        / market_value) so the Feishu card shows the same header as the batch
+        report. If the user no longer holds the code, falls back to zeros and
+        omits the position table.
+
+        Acquires the same lock as the batch run so single-stock and batch
+        don't burn LLM quota in parallel on the same data.
+        """
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+
+        if self._lock.locked():
+            await _notify_feishu(f"⚠️ {code} 单票推送跳过\n上一次执行尚未结束")
+            return
+
+        async with self._lock:
+            storage = self._get_storage()
+            if storage is None or not storage.is_ready:
+                await _notify_feishu(f"⚠️ {code} 单票推送失败\nGreptimeDB 未就绪")
+                return
+
+            today = datetime.now(BEIJING_TZ).date()
+            as_of = await _latest_trading_day_with_data(storage, today)
+            if as_of is None:
+                await _notify_feishu(f"⚠️ {code} 单票推送失败\n未找到已缓存的日线交易日")
+                return
+
+            mapper = LocalConceptMapper()
+            name = mapper.get_stock_name(code.split(".")[0]) or "?"
+
+            # Look up position info (may be None / zero if not currently held)
+            volume = 0
+            avg_price = 0.0
+            market_value = 0.0
+            for p in getattr(self._app_state, "broker_positions", []) or []:
+                if str(p.get("code", "")).strip() == code:
+                    volume = int(p.get("volume", 0) or 0)
+                    avg_price = float(p.get("avg_price", 0.0) or 0.0)
+                    market_value = float(p.get("market_value", 0.0) or 0.0)
+                    break
+
+            await self._analyze_and_push_one(
+                storage,
+                code=code,
+                name=name,
+                as_of=as_of,
+                volume=volume,
+                avg_price=avg_price,
+                market_value=market_value,
+            )

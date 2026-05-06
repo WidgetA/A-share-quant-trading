@@ -421,6 +421,107 @@ def test_is_running_reflects_lock():
 
 
 @pytest.mark.asyncio
+async def test_trigger_one_stock_pushes_image_and_markdown():
+    """Single-stock manual trigger pushes image + markdown to Feishu, just like
+    the batch loop does for one position."""
+    state = _make_app_state(
+        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        broker=MagicMock(),
+        broker_positions=[
+            {"code": "605299.SH", "volume": 4600, "avg_price": 25.0, "market_value": 119600.0},
+        ],
+    )
+    sched = PreMarketReportScheduler(state)
+
+    analyze_mock = AsyncMock(
+        return_value={"image_url": "https://example.com/k.png", "analysis": "ok"}
+    )
+    image_mock = AsyncMock()
+    md_mock = AsyncMock()
+
+    with (
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_image",
+            image_mock,
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_markdown",
+            md_mock,
+        ),
+        patch("src.analysis.kline_llm.analyze_kline", analyze_mock),
+    ):
+        await sched.trigger_one_stock("605299.SH")
+
+    analyze_mock.assert_awaited_once()
+    image_mock.assert_awaited_once()
+    md_mock.assert_awaited_once()
+    # Markdown should include the position table for a held stock
+    md_arg = md_mock.await_args.args[0]
+    assert "持仓" in md_arg and "4600" in md_arg
+
+
+@pytest.mark.asyncio
+async def test_trigger_one_stock_omits_position_table_for_unheld():
+    """When the requested code isn't currently held, the markdown card should
+    skip the position table (no zero-everything header)."""
+    state = _make_app_state(
+        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        broker=MagicMock(),
+        broker_positions=[],  # no positions
+    )
+    sched = PreMarketReportScheduler(state)
+
+    analyze_mock = AsyncMock(
+        return_value={"image_url": "https://example.com/k.png", "analysis": "ok"}
+    )
+    md_mock = AsyncMock()
+
+    with (
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_image",
+            AsyncMock(),
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu_markdown",
+            md_mock,
+        ),
+        patch("src.analysis.kline_llm.analyze_kline", analyze_mock),
+    ):
+        await sched.trigger_one_stock("999999.SH")
+
+    md_arg = md_mock.await_args.args[0]
+    assert "持仓" not in md_arg  # no position table
+
+
+@pytest.mark.asyncio
+async def test_trigger_one_stock_skips_when_locked():
+    """If a batch run is in progress, single-stock trigger should NOT queue —
+    it sends a Feishu warning and returns without burning quota."""
+    state = _make_app_state(storage=_make_storage())
+    sched = PreMarketReportScheduler(state)
+    await sched._lock.acquire()
+
+    text_mock = AsyncMock()
+    analyze_mock = AsyncMock()
+
+    try:
+        with (
+            patch(
+                "src.data.services.pre_market_report_scheduler._notify_feishu",
+                text_mock,
+            ),
+            patch("src.analysis.kline_llm.analyze_kline", analyze_mock),
+        ):
+            await sched.trigger_one_stock("605299.SH")
+    finally:
+        sched._lock.release()
+
+    analyze_mock.assert_not_awaited()
+    text_mock.assert_awaited_once()
+    assert "尚未结束" in text_mock.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_get_status_shape():
     sched = PreMarketReportScheduler(_make_app_state())
     with patch(
