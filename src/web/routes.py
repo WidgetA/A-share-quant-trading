@@ -120,6 +120,21 @@ def create_router() -> APIRouter:
             }
         )
 
+        # Get pre-market report scheduler status (ANA-002)
+        pmr_sched = getattr(request.app.state, "pre_market_report_scheduler", None)
+        pre_market_report_status = (
+            pmr_sched.get_status()
+            if pmr_sched
+            else {
+                "enabled": False,
+                "running": False,
+                "next_run_time": None,
+                "last_run_time": None,
+                "last_run_result": None,
+                "last_run_message": None,
+            }
+        )
+
         today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
         # Get daily scan status
@@ -142,6 +157,7 @@ def create_router() -> APIRouter:
                 "scheduler": scheduler_status,
                 "model_scheduler": model_scheduler_status,
                 "daily_scan": daily_scan_status,
+                "pre_market_report": pre_market_report_status,
                 "recommendations_enabled": get_recommendations_enabled(),
                 "today": today,
             },

@@ -158,6 +158,56 @@
             </div>
         </div>
 
+        <!-- Pre-Market Holdings Report (ANA-002) -->
+        <div class="status-card">
+            <div class="status-card-header">
+                <h3>盘前持仓日报</h3>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="preMarketReportToggle"
+                        {% if pre_market_report.enabled %}checked{% endif %}
+                        onchange="togglePreMarketReport(this)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="status-card-body">
+                <div class="status-card-row">
+                    <span class="status-card-label">定时</span>
+                    <span class="status-card-value" id="preMarketReportEnabled">
+                        {{ '已开启 · 每日 8:00' if pre_market_report.enabled else '已关闭' }}
+                    </span>
+                </div>
+                <div class="status-card-row">
+                    <span class="status-card-label">下次执行</span>
+                    <span class="status-card-value">
+                        {% if pre_market_report.enabled %}{{ pre_market_report.next_run_time or '计算中...' }}{% else %}--{% endif %}
+                    </span>
+                </div>
+                {% if pre_market_report.last_run_time %}
+                <div class="status-card-row">
+                    <span class="status-card-label">上次 {{ pre_market_report.last_run_time[5:] }}</span>
+                    <span class="status-card-value" title="{{ pre_market_report.last_run_message or '' }}">
+                        {% if pre_market_report.last_run_result == 'success' %}
+                        <span style="color:#2e7d32;">{{ pre_market_report.last_run_message or '成功' }}</span>
+                        {% elif pre_market_report.last_run_result == 'no_positions' %}
+                        <span style="color:#999;">无持仓</span>
+                        {% elif pre_market_report.last_run_result == 'skipped' %}
+                        <span style="color:#999;">{{ pre_market_report.last_run_message or '跳过' }}</span>
+                        {% elif pre_market_report.last_run_result == 'failed' %}
+                        <span style="color:#d32f2f;">失败</span>
+                        {% endif %}
+                    </span>
+                </div>
+                {% endif %}
+                <div class="status-card-row">
+                    <button id="preMarketReportRunBtn" onclick="runPreMarketReport()"
+                        style="padding:4px 10px; font-size:12px; cursor:pointer;">
+                        立即触发一次
+                    </button>
+                    <span id="preMarketReportRunMsg" style="font-size:12px; color:#666;"></span>
+                </div>
+            </div>
+        </div>
+
         <!-- Cache Scheduler Status -->
         <div class="status-card">
             <div class="status-card-header">
@@ -429,6 +479,54 @@ async function toggleScheduler(el) {
         const data = await resp.json();
         if (!data.success) el.checked = !el.checked;
     } catch(e) { el.checked = !el.checked; }
+}
+
+// --- Toggle 8am pre-market holdings report (ANA-002) ---
+async function togglePreMarketReport(el) {
+    try {
+        const resp = await fetch('/api/pre-market-report/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: el.checked})
+        });
+        const data = await resp.json();
+        if (typeof data.enabled === 'boolean') {
+            el.checked = data.enabled;
+            const lbl = document.getElementById('preMarketReportEnabled');
+            if (lbl) lbl.textContent = data.enabled ? '已开启 · 每日 8:00' : '已关闭';
+        } else {
+            el.checked = !el.checked;
+        }
+    } catch(e) { el.checked = !el.checked; }
+}
+
+// --- Manually fire pre-market holdings report ---
+async function runPreMarketReport() {
+    const btn = document.getElementById('preMarketReportRunBtn');
+    const msg = document.getElementById('preMarketReportRunMsg');
+    btn.disabled = true;
+    msg.textContent = '触发中...';
+    msg.style.color = '#666';
+    try {
+        const resp = await fetch('/api/pre-market-report/run', {method: 'POST'});
+        const data = await resp.json();
+        if (resp.ok && data.started) {
+            msg.textContent = '已触发，飞书将逐只推送（每只约 3-5 分钟）';
+            msg.style.color = '#2e7d32';
+        } else if (resp.status === 409) {
+            msg.textContent = '上一次还没结束，稍后再试';
+            msg.style.color = '#f57c00';
+        } else {
+            msg.textContent = '触发失败：' + (data.detail || resp.statusText);
+            msg.style.color = '#d32f2f';
+        }
+    } catch(e) {
+        msg.textContent = '请求异常：' + e.message;
+        msg.style.color = '#d32f2f';
+    } finally {
+        // Re-enable after 5s so users can fire again if needed
+        setTimeout(() => { btn.disabled = false; }, 5000);
+    }
 }
 
 // --- Holdings ---
