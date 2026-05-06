@@ -226,17 +226,18 @@ class PreMarketReportScheduler:
 
         run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
 
-        if not get_pre_market_report_enabled():
-            logger.info("PreMarketReportScheduler: disabled, skipping (%s)", trigger)
-            self.last_run_time = run_time
-            self.last_run_result = "skipped"
-            self.last_run_message = "已关闭，跳过本次执行"
-            await self._persist_status(trigger)
-            return
-
-        # Trading-day filter — auto-trigger only. Manual trigger always runs so
-        # the user can 补发 a missed day or test on a Sunday.
+        # Toggle and trading-day filter ONLY apply to the scheduled 8am
+        # trigger — manual triggers always run so the user can 补发 a missed
+        # day, test on a Sunday, or fire one-off even with daily auto disabled.
         if trigger == "scheduled":
+            if not get_pre_market_report_enabled():
+                logger.info("PreMarketReportScheduler: disabled, skipping scheduled run")
+                self.last_run_time = run_time
+                self.last_run_result = "skipped"
+                self.last_run_message = "定时任务已关闭"
+                await self._persist_status(trigger)
+                return
+
             today = datetime.now(BEIJING_TZ).date()
             if not await _is_trading_day(today):
                 logger.info("PreMarketReportScheduler: %s is non-trading day, skipping", today)

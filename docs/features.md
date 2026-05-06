@@ -886,8 +886,9 @@ POST /api/analyze-kline
 | 入口 | 触发方式 | 备注 |
 |------|---------|------|
 | 自动调度 | 工作日 8:00 Beijing | `PreMarketReportScheduler.run()`，`asyncio` 后台任务 |
-| 手动触发 | `POST /api/pre-market-report/run` | 立即执行一次（异步，立即返回 `{"started": true}`），用于测试和补发 |
-| 总开关 | Settings → `pre_market_report_enabled`（默认 on） | off 时 scheduler 跳过本次执行，写一行 `skipped` 日志 |
+| 手动触发 | `POST /api/pre-market-report/run` | 立即执行一次（异步，立即返回 `{"started": true}`），**永远可用**——不受定时开关或交易日过滤影响，用于补发或调试 |
+| 定时开关 | `POST /api/pre-market-report/toggle {enabled: bool}` | **仅控制 8am 自动**——关闭后 scheduler 写一行 `skipped` 日志，手动触发不受影响 |
+| 持久化 | `data/pre_market_report_enabled.txt`（默认 true） | env fallback `PRE_MARKET_REPORT_ENABLED` |
 
 **交易日判定**: 复用 `cache_scheduler._get_trading_calendar()`（Tushare `trade_cal` →
 weekday fallback），周末/节假日不跑。

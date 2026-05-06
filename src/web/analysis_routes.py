@@ -3,9 +3,10 @@
 # (overseas Lambda renderer + 柏拉图AI vision LLM).
 #
 # Currently exposes:
-#   POST /api/analyze-kline           {code, days?, prompt?} → analysis text + image_url
-#   POST /api/pre-market-report/run   → kick off ANA-002 holdings report (manual)
-#   GET  /api/pre-market-report/status → ANA-002 status (last run, enabled, etc.)
+#   POST /api/analyze-kline             {code, days?, prompt?} → analysis text + image_url
+#   POST /api/pre-market-report/run     → kick off ANA-002 holdings report (manual, always runs)
+#   GET  /api/pre-market-report/status  → ANA-002 status (last run, enabled, etc.)
+#   POST /api/pre-market-report/toggle  {enabled: bool} → enable/disable the 8am auto trigger
 
 from __future__ import annotations
 
@@ -26,6 +27,10 @@ class AnalyzeKlineRequest(BaseModel):
     code: str = Field(..., description="Stock code, e.g. 000001.SZ")
     days: int = Field(30, ge=5, le=180, description="Trading days to render")
     prompt: str | None = Field(None, description="Override default Chinese analyst prompt")
+
+
+class PreMarketReportToggleRequest(BaseModel):
+    enabled: bool = Field(..., description="True to enable the 8am scheduled run, False to disable")
 
 
 def create_analysis_router() -> APIRouter:
@@ -101,5 +106,18 @@ def create_analysis_router() -> APIRouter:
                 "last_run_message": "scheduler not initialized",
             }
         return scheduler.get_status()
+
+    @router.post("/api/pre-market-report/toggle")
+    async def toggle_pre_market_report(req: PreMarketReportToggleRequest) -> dict:
+        """Enable/disable the 8am scheduled run.
+
+        Only affects the auto trigger. Manual `POST /api/pre-market-report/run`
+        always works regardless of this toggle — the user explicitly clicking
+        the button signals intent we don't want to second-guess.
+        """
+        from src.common.config import get_pre_market_report_enabled, set_pre_market_report_enabled
+
+        set_pre_market_report_enabled(req.enabled)
+        return {"enabled": get_pre_market_report_enabled()}
 
     return router

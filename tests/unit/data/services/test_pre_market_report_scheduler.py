@@ -69,7 +69,8 @@ async def test_latest_trading_day_with_data_lookback_limit():
 
 
 @pytest.mark.asyncio
-async def test_run_once_skipped_when_disabled():
+async def test_run_once_scheduled_skipped_when_disabled():
+    """When the toggle is off, the 8am scheduled trigger skips."""
     state = _make_app_state(storage=_make_storage())
     sched = PreMarketReportScheduler(state)
 
@@ -81,6 +82,34 @@ async def test_run_once_skipped_when_disabled():
 
     assert sched.last_run_result == "skipped"
     assert "已关闭" in sched.last_run_message
+
+
+@pytest.mark.asyncio
+async def test_run_once_manual_ignores_disabled_toggle():
+    """Manual trigger always runs, even when the scheduled toggle is off —
+    user explicitly clicked the button, signal of intent we don't override."""
+    state = _make_app_state(
+        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        broker=MagicMock(),
+        broker_positions=[],  # no positions → reaches no_positions branch
+    )
+    sched = PreMarketReportScheduler(state)
+
+    with (
+        patch(
+            "src.common.config.get_pre_market_report_enabled",
+            return_value=False,  # toggle OFF
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._is_trading_day",
+            AsyncMock(return_value=False),  # also non-trading day
+        ),
+    ):
+        await sched._run_once("manual")
+
+    # Reached no-positions branch — proves both toggle and trading-day filter
+    # were bypassed for manual trigger.
+    assert sched.last_run_result == "no_positions"
 
 
 @pytest.mark.asyncio
