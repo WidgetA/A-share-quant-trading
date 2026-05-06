@@ -458,6 +458,24 @@ function showToast(msg, type) {
     setTimeout(() => t.classList.remove('show'), 3000);
 }
 
+// --- Trading API key (gates /api/trading/*) ---
+// Reads from localStorage, attaches X-API-Key header, prompts on 401.
+async function tradingFetch(url, options = {}) {
+    const key = (() => { try { return localStorage.getItem('tradingApiKey') || ''; } catch (e) { return ''; } })();
+    const headers = Object.assign({}, options.headers || {});
+    if (key) headers['X-API-Key'] = key;
+    let resp = await fetch(url, Object.assign({}, options, {headers}));
+    if (resp.status === 401) {
+        const newKey = prompt('需要 Trading API Key（Settings → Trading API Key）');
+        if (newKey) {
+            try { localStorage.setItem('tradingApiKey', newKey); } catch (e) {}
+            headers['X-API-Key'] = newKey;
+            resp = await fetch(url, Object.assign({}, options, {headers}));
+        }
+    }
+    return resp;
+}
+
 // --- Toggle daily scan ---
 async function toggleDailyScan(el) {
     try {
@@ -513,7 +531,7 @@ async function loadPreMarketHoldingButtons() {
     const container = document.getElementById('preMarketReportHoldingsBtns');
     if (!container) return;
     try {
-        const resp = await fetch('/api/trading/holdings');
+        const resp = await tradingFetch('/api/trading/holdings');
         const data = await resp.json();
         const holdings = data.holdings || [];
         if (!holdings.length) {
@@ -606,8 +624,8 @@ const _PENDING_STATUSES = new Set(['NEW', 'PENDING_NEW', 'ACCEPTED', 'PARTIALLY_
 async function loadHoldings() {
     try {
         const [hResp, oResp] = await Promise.all([
-            fetch('/api/trading/holdings'),
-            fetch('/api/trading/orders'),
+            tradingFetch('/api/trading/holdings'),
+            tradingFetch('/api/trading/orders'),
         ]);
         const hData = await hResp.json();
         const oData = oResp.ok ? await oResp.json() : {orders: []};
@@ -683,7 +701,7 @@ async function doSell(code, name, quantity, btn) {
     btn.disabled = true;
     btn.textContent = '提交中...';
     try {
-        const resp = await fetch('/api/trading/sell', {
+        const resp = await tradingFetch('/api/trading/sell', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity })
@@ -720,7 +738,7 @@ async function doCancelHoldingOrder(orderId, btn) {
     btn.disabled = true;
     btn.textContent = '撤单中...';
     try {
-        const resp = await fetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
+        const resp = await tradingFetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
         const data = await resp.json();
         if (resp.ok && data.success) {
             showToast('撤单已提交', 'success');
@@ -784,7 +802,7 @@ async function loadRecommendations() {
     document.getElementById('recCount').textContent = '...';
 
     try {
-        const resp = await fetch('/api/trading/recommendations?date=' + selectedDate);
+        const resp = await tradingFetch('/api/trading/recommendations?date=' + selectedDate);
         const data = await resp.json();
         if (data.error) {
             document.getElementById('recContainer').innerHTML =
@@ -886,7 +904,7 @@ async function doBuy(code, name, price, rowId, btn) {
     btn.disabled = true;
     btn.textContent = '提交中...';
     try {
-        const resp = await fetch('/api/trading/buy', {
+        const resp = await tradingFetch('/api/trading/buy', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity, price: price })
@@ -935,7 +953,7 @@ async function submitManualBuyAll() {
     logEl.textContent = '提交批量委托中（最长 30s）...\n';
 
     try {
-        const resp = await fetch('/api/trading/buy-batch-by-amount', {
+        const resp = await tradingFetch('/api/trading/buy-batch-by-amount', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({amount, orders: valid}),
@@ -1013,7 +1031,7 @@ async function loadBrokerStatus() {
 // --- Today's Orders ---
 async function loadTodayOrders() {
     try {
-        const resp = await fetch('/api/trading/orders');
+        const resp = await tradingFetch('/api/trading/orders');
         const data = await resp.json();
         renderTodayOrders(data.orders || []);
     } catch (e) { /* ignore */ }
@@ -1058,7 +1076,7 @@ function renderTodayOrders(orders) {
 async function cancelOrder(orderId) {
     if (!confirm('确认撤单？')) return;
     try {
-        const resp = await fetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
+        const resp = await tradingFetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
         const data = await resp.json();
         if (data.success) {
             showToast('撤单已提交', 'success');

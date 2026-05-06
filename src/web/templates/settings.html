@@ -139,6 +139,37 @@
         </div>
     </section>
 
+    <!-- Trading API Key Section (gates /api/trading/*) -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>Trading API Key（下单接口鉴权）</h3>
+            <p class="settings-desc">
+                保护 <code>/api/trading/*</code>（buy/sell/buy-batch-by-amount/orders 等）。
+                未配置时这些接口对公网开放——配置后请求必须带 <code>X-API-Key</code> 头。
+                Dashboard 自动从浏览器 localStorage 读取并注入；外部服务调用见
+                <a href="/static/" style="text-decoration:none;">features.md</a>。
+            </p>
+
+            <div class="token-status" id="tradingKeyStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="tradingKeyStatusValue">加载中...</span>
+            </div>
+
+            <div class="form-group">
+                <label for="tradingKeyInput">API Key</label>
+                <input type="text" id="tradingKeyInput" class="token-input"
+                    placeholder="32 位十六进制（点击随机生成）..." style="font-family: monospace;">
+            </div>
+
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="generateTradingKey()" id="tradingKeyGenBtn">随机生成</button>
+                <button class="btn btn-primary" onclick="saveTradingKey()" id="tradingKeySaveBtn">保存</button>
+            </div>
+
+            <div class="token-message hidden" id="tradingKeyMessage"></div>
+        </div>
+    </section>
+
     <!-- xtquant Broker Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -363,6 +394,38 @@ function generateMlKey() {
 }
 function saveMlKey() { saveKey('/api/settings/ml-key', 'mlKeyInput', 'mlKeyMessage', 'mlKeySaveBtn', loadMlKeyStatus); }
 
+// Trading API Key (gates /api/trading/*) — also writes localStorage so dashboard reuses it
+function loadTradingKeyStatus() { loadKeyStatus('/api/settings/trading-api-key', 'tradingKeyStatusValue'); }
+function generateTradingKey() {
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    document.getElementById('tradingKeyInput').value = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+    showMessage('tradingKeyMessage', '已生成密钥，保存后将自动写入本浏览器 localStorage 供 Dashboard 使用', true);
+}
+async function saveTradingKey() {
+    const token = document.getElementById('tradingKeyInput').value.trim();
+    if (!token) { showMessage('tradingKeyMessage', '请先输入', false); return; }
+    const btn = document.getElementById('tradingKeySaveBtn');
+    btn.disabled = true; btn.textContent = '保存中...';
+    try {
+        const resp = await fetch('/api/settings/trading-api-key', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: token})
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            try { localStorage.setItem('tradingApiKey', token); } catch (e) {}
+            showMessage('tradingKeyMessage', (data.message || '保存成功') + ' | 已写入 localStorage', true);
+            document.getElementById('tradingKeyInput').value = '';
+            loadTradingKeyStatus();
+        } else {
+            showMessage('tradingKeyMessage', data.detail || data.message || '保存失败', false);
+        }
+    } catch (e) {
+        showMessage('tradingKeyMessage', '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '保存'; }
+}
+
 // FC Training Endpoint
 function loadFcStatus() { loadKeyStatus('/api/settings/fc-url', 'fcStatusValue'); }
 function testFcUrl() { testKey('/api/settings/fc-url/test', 'fcInput', 'fcMessage', 'fcTestBtn', '测试连接'); }
@@ -534,6 +597,7 @@ loadCacheSchedulerStatus();
 loadTushareStatus();
 loadTsanghiStatus();
 loadMlKeyStatus();
+loadTradingKeyStatus();
 loadFcStatus();
 loadXtquantStatus();
 loadS3Status();

@@ -50,6 +50,7 @@
 | 0.14.0 | 2026-05-04 | - | ANA-001: K-line technical analysis via overseas Lambda renderer + 柏拉图AI vision LLM (POST /api/analyze-kline) |
 | 0.14.1 | 2026-05-05 | - | ANA-001: web UI Settings for lambda-kline URL/token + bltcy key (zero-restart config); orchestrator reuses `app.state.storage`; gpt-5.5-pro locked; production-verified end-to-end |
 | 0.15.0 | 2026-05-05 | - | ANA-002: 盘前持仓日报——交易日 8am 自动扫描 broker 持仓→对每只调 ANA-001→飞书逐条推送 K 线 + 技术面分析；附 `POST /api/pre-market-report/run` 手动触发 |
+| 0.17.0 | 2026-05-07 | - | SYS-005: `/api/trading/*` 加 `X-API-Key` 鉴权（`TRADING_API_KEY` 配置可选；未配置时仅在启动日志告警，配置后立即生效）；Settings 页可生成/保存 key；Dashboard JS 自动从 localStorage 注入 |
 
 ---
 
@@ -287,6 +288,26 @@ if bot.is_configured():
 | `/api/iquant/pending-signals` | GET | iQuant polls for signals |
 | `/api/iquant/ack-signal` | POST | iQuant acknowledges signal execution |
 | `/api/iquant/heartbeat` | POST | iQuant heartbeat + positions/cash sync |
+| `/api/trading/buy` / `sell` / `buy-batch-by-amount` | POST | 下单（dashboard + 外部服务）；**需 `X-API-Key`** |
+| `/api/trading/holdings` / `recommendations` / `orders` | GET | 持仓/推荐/委托查询；**需 `X-API-Key`** |
+| `/api/trading/orders/{order_id}` | DELETE | 撤单；**需 `X-API-Key`** |
+| `/api/settings/trading-api-key` | GET / POST | 查/设当前的 trading API key（持久化到 `data/trading_api_key.txt`） |
+
+**Trading API 鉴权（v0.17.0）**:
+
+所有 `/api/trading/*` 路由通过路由级 `Depends(verify_trading_api_key)` 校验请求头 `X-API-Key`。
+
+- **Key 来源优先级**：`data/trading_api_key.txt` (Settings 页保存) > `TRADING_API_KEY` 环境变量
+- **未配置时**：启动日志输出 WARNING，路由放行（保留向后兼容，避免升级即破坏部署）
+- **配置后**：立即强制校验，无 / 错 key → 401
+- **Dashboard JS**：从 `localStorage.tradingApiKey` 读取并注入；首次 401 → `prompt()` 让用户输入并保存
+- **外部服务调用示例**：
+  ```bash
+  curl -X POST http://<host>:8000/api/trading/buy-batch-by-amount \
+    -H 'X-API-Key: <key>' \
+    -H 'Content-Type: application/json' \
+    -d '{"amount":30000,"orders":[{"code":"601398","ref_price":5.20}]}'
+  ```
 
 **Configuration** (Environment Variables):
 
@@ -297,6 +318,7 @@ if bot.is_configured():
 | `FEISHU_BOT_URL` | (leapcell) | Feishu bot relay URL |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID` | - | Feishu credentials |
 | `FC_URL` | - | Alibaba Cloud FC training endpoint |
+| `TRADING_API_KEY` | - | `/api/trading/*` 鉴权 key（亦可经 Settings 持久化到 `data/trading_api_key.txt`） |
 
 **Files**:
 - `src/web/app.py` - FastAPI application factory + startup lifecycle

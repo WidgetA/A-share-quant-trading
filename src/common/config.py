@@ -170,6 +170,10 @@ _iquant_key_override: str | None = None
 # Persistence file for iQuant API key (survives container restarts)
 IQUANT_KEY_FILE = PROJECT_ROOT / "data" / "iquant_api_key.txt"
 
+# Runtime override for Trading API key (gates /api/trading/* routes)
+_trading_api_key_override: str | None = None
+TRADING_API_KEY_FILE = PROJECT_ROOT / "data" / "trading_api_key.txt"
+
 # Runtime override for Tsanghi (沧海数据) token (set via web UI)
 _tsanghi_token_override: str | None = None
 # Persistence file for Tsanghi token (survives container restarts)
@@ -371,6 +375,57 @@ def get_iquant_key_source() -> str:
     if IQUANT_KEY_FILE.exists() and IQUANT_KEY_FILE.read_text(encoding="utf-8").strip():
         return "persisted_file"
     if os.environ.get("IQUANT_API_KEY", ""):
+        return "env_var"
+    return "not_configured"
+
+
+# === Trading API Key (gates /api/trading/* HTTP routes) ===
+
+
+def get_trading_api_key() -> str | None:
+    """Get the trading API key used to gate `/api/trading/*` endpoints.
+
+    Priority: runtime override > persisted file > TRADING_API_KEY env var.
+    Returns None when nothing is configured (caller decides what to do — the
+    FastAPI dependency falls back to allow-all + startup warning so a fresh
+    deploy does not break the dashboard).
+    """
+    import os
+
+    if _trading_api_key_override:
+        return _trading_api_key_override
+
+    if TRADING_API_KEY_FILE.exists():
+        key = TRADING_API_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+
+    env_key = os.environ.get("TRADING_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    return None
+
+
+def set_trading_api_key(key: str) -> None:
+    """Set trading API key at runtime and persist to disk."""
+    global _trading_api_key_override
+    _trading_api_key_override = key
+
+    TRADING_API_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TRADING_API_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("Trading API key updated via web UI and persisted to disk")
+
+
+def get_trading_api_key_source() -> str:
+    """Return which source the current trading API key comes from."""
+    import os
+
+    if _trading_api_key_override:
+        return "web_ui"
+    if TRADING_API_KEY_FILE.exists() and TRADING_API_KEY_FILE.read_text(encoding="utf-8").strip():
+        return "persisted_file"
+    if os.environ.get("TRADING_API_KEY", "").strip():
         return "env_var"
     return "not_configured"
 

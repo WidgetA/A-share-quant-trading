@@ -28,7 +28,7 @@ import logging
 from collections import defaultdict
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
@@ -38,6 +38,38 @@ from src.data.services.download_task import DownloadState
 from src.strategy.filters.stock_blacklist import BLACKLISTED_STOCKS
 
 logger = logging.getLogger(__name__)
+
+
+_trading_api_key_warned = False
+
+
+async def verify_trading_api_key(
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+) -> None:
+    """Gate `/api/trading/*` routes behind a simple shared-secret header.
+
+    Behaviour by config state:
+      - Not configured: log a one-time WARNING and allow the request through.
+        Keeps existing deploys working until the operator sets a key via the
+        Settings page or TRADING_API_KEY env var.
+      - Configured: require `X-API-Key` to match exactly; otherwise 401.
+    """
+    from src.common.config import get_trading_api_key
+
+    configured = get_trading_api_key()
+    if not configured:
+        global _trading_api_key_warned
+        if not _trading_api_key_warned:
+            logger.warning(
+                "TRADING_API_KEY not configured — /api/trading/* endpoints are "
+                "PUBLIC. Set one via Settings page (Trading API Key) or the "
+                "TRADING_API_KEY env var."
+            )
+            _trading_api_key_warned = True
+        return
+
+    if not x_api_key or x_api_key != configured:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
 class SubmitRequest(BaseModel):
@@ -2135,6 +2167,57 @@ def create_settings_router() -> APIRouter:
         set_iquant_api_key(key)
         return {"success": True, "message": "ML 策略 API Key 已保存"}
 
+    # === TRADING API KEY SETTINGS (gates /api/trading/*) ===
+
+    @router.get("/api/settings/trading-api-key")
+    async def get_trading_api_key_status():
+        """Return current trading API key status (masked)."""
+        from src.common.config import (
+            get_trading_api_key,
+            get_trading_api_key_source,
+        )
+
+        source = get_trading_api_key_source()
+        source_labels = {
+            "web_ui": "Web UI (当前会话)",
+            "persisted_file": "Web UI (已持久化)",
+            "env_var": "环境变量",
+            "not_configured": "未配置",
+        }
+
+        key = get_trading_api_key()
+        if not key:
+            return {
+                "configured": False,
+                "source": source,
+                "source_label": source_labels.get(source, source),
+                "masked_key": "",
+                "key_length": 0,
+            }
+        masked = key[:4] + "..." + key[-4:] if len(key) > 16 else "***"
+        return {
+            "configured": True,
+            "source": source,
+            "source_label": source_labels.get(source, source),
+            "masked_key": masked,
+            "key_length": len(key),
+        }
+
+    @router.post("/api/settings/trading-api-key")
+    async def update_trading_api_key(body: TokenUpdateRequest):
+        """Save a new trading API key (gates /api/trading/*)."""
+        from src.common.config import set_trading_api_key
+
+        key = body.token.strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+        set_trading_api_key(key)
+        return {
+            "success": True,
+            "message": "Trading API Key 已保存，下次请求起 /api/trading/* 需要带 X-API-Key",
+        }
+
     # === TSANGHI TOKEN SETTINGS ===
 
     @router.get("/api/settings/tsanghi-token")
@@ -3049,7 +3132,10 @@ def create_trading_router() -> APIRouter:
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    router = APIRouter(tags=["trading"])
+    router = APIRouter(
+        tags=["trading"],
+        dependencies=[Depends(verify_trading_api_key)],
+    )
     BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
     @router.get("/api/trading/holdings")
