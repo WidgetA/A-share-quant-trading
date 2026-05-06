@@ -201,9 +201,19 @@
                 <div class="status-card-row">
                     <button id="preMarketReportRunBtn" onclick="runPreMarketReport()"
                         style="padding:4px 10px; font-size:12px; cursor:pointer;">
-                        立即触发一次
+                        触发全部持仓 → 飞书
                     </button>
                     <span id="preMarketReportRunMsg" style="font-size:12px; color:#666;"></span>
+                </div>
+                <div class="status-card-row" style="display:block;">
+                    <div style="font-size:12px; color:#666; margin-bottom:4px;">单票 AI 评价（仅本页显示，不发飞书）</div>
+                    <div id="preMarketReportHoldingsBtns" style="display:flex; flex-wrap:wrap; gap:4px;">
+                        <span style="color:#999; font-size:12px;">加载中...</span>
+                    </div>
+                </div>
+                <div id="preMarketReportSingleResult"
+                    style="display:none; margin-top:10px; padding:10px;
+                           background:#f9f9f9; border:1px solid #e0e0e0; border-radius:4px;">
                 </div>
             </div>
         </div>
@@ -498,6 +508,78 @@ async function togglePreMarketReport(el) {
             el.checked = !el.checked;
         }
     } catch(e) { el.checked = !el.checked; }
+}
+
+// --- Render per-stock buttons + single-stock AI analysis ---
+async function loadPreMarketHoldingButtons() {
+    const container = document.getElementById('preMarketReportHoldingsBtns');
+    if (!container) return;
+    try {
+        const resp = await fetch('/api/trading/holdings');
+        const data = await resp.json();
+        const holdings = data.holdings || [];
+        if (!holdings.length) {
+            container.innerHTML = '<span style="color:#999; font-size:12px;">无持仓</span>';
+            return;
+        }
+        container.innerHTML = holdings.map(h => {
+            const bare = String(h.code).split('.')[0];
+            const safeName = (h.name || '').replace(/'/g, '\\\'');
+            return `<button class="pmr-stock-btn" data-code="${h.code}" data-name="${safeName}"
+                onclick="analyzeOneStock(this)"
+                style="padding:3px 8px; font-size:12px; cursor:pointer;
+                       border:1px solid #c8c8c8; background:#fff; border-radius:3px;">
+                ${bare} ${h.name || ''}
+            </button>`;
+        }).join('');
+    } catch(e) {
+        container.innerHTML = '<span style="color:#d32f2f; font-size:12px;">加载持仓失败</span>';
+    }
+}
+
+function _pmrEscape(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+    ));
+}
+
+async function analyzeOneStock(btn) {
+    const code = btn.dataset.code;
+    const name = btn.dataset.name;
+    const result = document.getElementById('preMarketReportSingleResult');
+    // Disable all stock buttons during the call (LLM is serial-bound on bltcy quota)
+    document.querySelectorAll('.pmr-stock-btn').forEach(b => b.disabled = true);
+    const orig = btn.textContent.trim();
+    btn.textContent = '分析中...';
+    result.style.display = 'block';
+    result.innerHTML = `<div style="color:#666; font-size:13px;">⏳ ${_pmrEscape(code)} ${_pmrEscape(name)} 分析中（约 3-5 分钟，请勿关闭页面）...</div>`;
+    try {
+        const resp = await fetch('/api/analyze-kline', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code: code, days: 30})
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            result.innerHTML = `
+                <div style="font-weight:600; margin-bottom:8px; font-size:14px;">
+                    📊 ${_pmrEscape(code)} ${_pmrEscape(name)}
+                </div>
+                <img src="${_pmrEscape(data.image_url)}"
+                    style="max-width:100%; border:1px solid #ddd; border-radius:3px; margin-bottom:10px;"
+                    alt="K 线图">
+                <div style="white-space:pre-wrap; font-size:13px; line-height:1.6; font-family:inherit;">${_pmrEscape(data.analysis)}</div>
+            `;
+        } else {
+            const detail = data.detail || resp.statusText;
+            result.innerHTML = `<div style="color:#d32f2f; font-size:13px;">分析失败：${_pmrEscape(detail)}</div>`;
+        }
+    } catch(e) {
+        result.innerHTML = `<div style="color:#d32f2f; font-size:13px;">请求异常：${_pmrEscape(e.message)}</div>`;
+    } finally {
+        document.querySelectorAll('.pmr-stock-btn').forEach(b => b.disabled = false);
+        btn.textContent = orig;
+    }
 }
 
 // --- Manually fire pre-market holdings report ---
@@ -1241,6 +1323,8 @@ loadBrokerStatus();
 loadTodayOrders();
 loadModelStatus();
 loadDataEngineStatus();
+loadPreMarketHoldingButtons();
+setInterval(loadPreMarketHoldingButtons, 30000);
 setInterval(loadHoldings, 10000);
 setInterval(loadBrokerStatus, 5000);
 setInterval(loadTodayOrders, 5000);
