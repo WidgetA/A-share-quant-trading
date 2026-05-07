@@ -3003,6 +3003,34 @@ footer {
     font-size: 0.95rem;
 }
 
+.tn-doc-section-label {
+    margin: 0.35rem 0 0.1rem;
+    color: inherit;
+    opacity: 0.65;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.tn-doc-section-label:first-child {
+    margin-top: 0;
+}
+
+.tn-content-section {
+    margin: 0.8rem 0 0.3rem;
+    color: #444;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid #e6e8eb;
+    padding-bottom: 0.15rem;
+}
+
+.tn-content-section:first-child {
+    margin-top: 0;
+}
+
 .tn-doc-trade-card.sell {
     border-color: #ead7d4;
     background: #fff7f5;

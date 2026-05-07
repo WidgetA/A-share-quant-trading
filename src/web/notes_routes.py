@@ -37,6 +37,7 @@ class CreateEventRequest(BaseModel):
     event_type: str = Field(..., min_length=1, max_length=32)
     title: str = Field("", max_length=200)
     content: str = Field("", max_length=100_000)
+    content_external: str = Field("", max_length=100_000)
     author: str = Field("user", max_length=64)
     source: str = Field("user", pattern=r"^(user|ai)$")
     ts_ms: int | None = Field(None, description="Epoch ms; defaults to now if omitted")
@@ -45,6 +46,7 @@ class CreateEventRequest(BaseModel):
 class UpdateEventRequest(BaseModel):
     title: str | None = Field(None, max_length=200)
     content: str | None = Field(None, max_length=100_000)
+    content_external: str | None = Field(None, max_length=100_000)
     ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
     event_type: str | None = Field(None, min_length=1, max_length=32)
 
@@ -115,8 +117,9 @@ def create_notes_router() -> APIRouter:
                     "qty": e.qty,
                     "side": e.side,
                     "content": e.content,
+                    "content_external": e.content_external,
                     "author": e.author,
-                    "has_content": bool(e.content),
+                    "has_content": bool(e.content or e.content_external),
                 }
                 for e in events
             ],
@@ -139,6 +142,7 @@ def create_notes_router() -> APIRouter:
             "qty": ev.qty,
             "side": ev.side,
             "content": ev.content,
+            "content_external": ev.content_external,
             "author": ev.author,
         }
 
@@ -150,6 +154,7 @@ def create_notes_router() -> APIRouter:
             event_type=body.event_type,
             title=body.title,
             content=body.content,
+            content_external=body.content_external,
             author=body.author,
             source=body.source,
             ts_ms=body.ts_ms,
@@ -167,6 +172,7 @@ def create_notes_router() -> APIRouter:
             event_id=event_id,
             title=body.title,
             content=body.content,
+            content_external=body.content_external,
             ts_ms=body.ts_ms,
             event_type=body.event_type,
         )

@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.9 | 2026-05-07 | - | NOTE-001: 买入/卖出 事件正文拆 对内 / 对外 两栏（schema 加 `content_external` 列，幂等 ALTER 兼容老部署）；新增/编辑表单都给两个 textarea，单事件查看 + 篇 view trade card 都展示双栏（两栏都填时显示「对内/对外」分节标签）。 |
 | 0.16.8 | 2026-05-07 | - | NOTE-001: 手插带时间戳的卡片改为独立持久化（新表 `note_cards`，与 `trade_notes` 解耦）；带 4 个新 endpoint（GET/POST/PATCH/DELETE `/api/notes/{code}/cards`），按自己的 ts 在 篇 view 与 买入/卖出 交错排序。点卡片可直接编辑/删除（modal 重用）。每个 cmt 现在也是独立 segment（之前同一时段多个 cmt 会合并丢数据）。 |
 | 0.16.7 | 2026-05-07 | - | NOTE-001: 篇 view 的 买入/卖出 卡片渲染自身的 `content`（之前只画 label+meta，content 被藏在单事件编辑器里）。卡片改成 column flex：header 行（label+meta）+ 可选 body（markdown 只读）。 |
 | 0.16.6 | 2026-05-07 | - | NOTE-001: 左栏股票头部加 ✎ 按钮——纠正输错的股票代码（`PATCH /api/notes/stocks/{code} {new_code}`）。把当前股票的所有 live 事件迁到新代码，旧代码下软删；新代码若已有事件则按 ts 合并。 |
@@ -1031,7 +1032,8 @@ CREATE TABLE trade_notes (
     price       FLOAT64,                     -- 成交价（broker 事件填，其他 NULL）
     qty         INT64,                       -- 数量
     side        STRING,                      -- 'buy' / 'sell'
-    content     STRING,                      -- 自由文本（markdown）
+    content     STRING,                      -- 对内 markdown（私房话）
+    content_external STRING,                 -- 对外 markdown（分享版本，仅 买入/卖出 用）
     author      STRING,                      -- 创建者标识
     deleted     BOOLEAN,                     -- 软删除（NULL 也视为未删，兼容老 ALTER）
     PRIMARY KEY (code, event_id)

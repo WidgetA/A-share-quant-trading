@@ -91,8 +91,11 @@
             <label>标题（可选）
                 <input id="tnNewTitle" type="text" placeholder="事件简短描述" />
             </label>
-            <label>正文 (markdown)
-                <textarea id="tnNewContent" rows="10" placeholder="思路 / 观察 / 反思…"></textarea>
+            <label>对内 (markdown)
+                <textarea id="tnNewContent" rows="6" placeholder="思路 / 观察 / 反思…"></textarea>
+            </label>
+            <label>对外 (markdown)
+                <textarea id="tnNewContentExternal" rows="6" placeholder="对外说法 / 分享版本…"></textarea>
             </label>
             <div class="tn-modal-actions">
                 <button id="tnNewCancel">取消</button>
@@ -141,6 +144,7 @@
         newTs: document.getElementById('tnNewTs'),
         newTitle: document.getElementById('tnNewTitle'),
         newContent: document.getElementById('tnNewContent'),
+        newContentExternal: document.getElementById('tnNewContentExternal'),
         newCancel: document.getElementById('tnNewCancel'),
         newSave: document.getElementById('tnNewSave'),
         addCardBtn: document.getElementById('tnAddCardBtn'),
@@ -452,12 +456,28 @@
             card.appendChild(header);
 
             // If this trade has its own content (notes typed in the per-event
-            // editor), render it inline so 篇 view doesn't hide it. Read-only —
-            // editing still goes through the per-event editor on click.
-            if (trade.content) {
+            // editor), render both 对内 / 对外 inline so 篇 view doesn't hide
+            // them. Read-only — editing goes through the per-event editor on
+            // click. Section labels only appear when both halves have text;
+            // if only one is filled, render it bare (less noisy).
+            const hasInternal = !!trade.content;
+            const hasExternal = !!trade.content_external;
+            if (hasInternal || hasExternal) {
                 const body = document.createElement('div');
                 body.className = 'tn-doc-trade-card-body';
-                body.innerHTML = renderMarkdown(trade.content);
+                let html = '';
+                if (hasInternal && hasExternal) {
+                    html += '<div class="tn-doc-section-label">对内</div>';
+                    html += renderMarkdown(trade.content);
+                    html += '<div class="tn-doc-section-label">对外</div>';
+                    html += renderMarkdown(trade.content_external);
+                } else if (hasInternal) {
+                    html = renderMarkdown(trade.content);
+                } else {
+                    html += '<div class="tn-doc-section-label">对外</div>';
+                    html += renderMarkdown(trade.content_external);
+                }
+                body.innerHTML = html;
                 card.appendChild(body);
             }
 
@@ -655,8 +675,15 @@
         const sourceLabel = ev.source === 'broker' ? '系统记录' : (ev.source === 'ai' ? 'AI' : '手动');
         const sourceLine = `<div class="tn-content-source">来源: ${escapeHtml(sourceLabel)}${ev.author ? ` · ${escapeHtml(ev.author)}` : ''}</div>`;
         const titleLine = ev.title ? `<div class="tn-content-title-text">${escapeHtml(ev.title)}</div>` : '';
-        const body = ev.content
-            ? `<div class="tn-content-md">${renderMarkdown(ev.content)}</div>`
+        const sections = [];
+        if (ev.content) {
+            sections.push(`<h4 class="tn-content-section">对内</h4><div class="tn-content-md">${renderMarkdown(ev.content)}</div>`);
+        }
+        if (ev.content_external) {
+            sections.push(`<h4 class="tn-content-section">对外</h4><div class="tn-content-md">${renderMarkdown(ev.content_external)}</div>`);
+        }
+        const body = sections.length
+            ? sections.join('')
             : '<div class="tn-empty">（暂无正文，点 ✎ 编辑添加）</div>';
         dom.content.innerHTML = metaLine + titleLine + sourceLine + body;
     }
@@ -702,8 +729,11 @@
                 <label>标题
                     <input type="text" id="tnEditTitle" value="${escapeHtml(ev.title || '')}" />
                 </label>
-                <label>正文 (markdown)
-                    <textarea id="tnEditContent" rows="20">${escapeHtml(ev.content || '')}</textarea>
+                <label>对内 (markdown)
+                    <textarea id="tnEditContent" rows="10">${escapeHtml(ev.content || '')}</textarea>
+                </label>
+                <label>对外 (markdown)
+                    <textarea id="tnEditContentExternal" rows="10">${escapeHtml(ev.content_external || '')}</textarea>
                 </label>
                 <div class="tn-edit-actions">
                     <button id="tnEditCancel">取消</button>
@@ -718,6 +748,7 @@
     async function saveEdit() {
         const title = document.getElementById('tnEditTitle').value;
         const content = document.getElementById('tnEditContent').value;
+        const contentExternal = document.getElementById('tnEditContentExternal').value;
         const eventType = document.getElementById('tnEditType').value;
         const tsRaw = document.getElementById('tnEditTs').value;
         const tsMs = tsRaw ? new Date(tsRaw).getTime() : null;
@@ -726,7 +757,7 @@
         }
         const code = state.currentCode;
         const eventId = state.currentEventId;
-        const body = { title, content, event_type: eventType };
+        const body = { title, content, content_external: contentExternal, event_type: eventType };
         if (tsMs !== null) body.ts_ms = tsMs;
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(eventId)}`, {
@@ -772,6 +803,7 @@
         dom.newTs.value = nowLocalDatetimeValue();
         dom.newTitle.value = '';
         dom.newContent.value = '';
+        dom.newContentExternal.value = '';
         dom.modal.hidden = false;
         dom.newContent.focus();
     }
@@ -824,6 +856,7 @@
         const event_type = dom.newType.value;
         const title = dom.newTitle.value;
         const content = dom.newContent.value;
+        const content_external = dom.newContentExternal.value;
         if (!event_type) { alert('请选择类型'); return; }
         // datetime-local input is in local TZ; new Date(value) parses as
         // local and getTime() returns epoch UTC ms — what the backend wants.
@@ -832,7 +865,7 @@
         if (tsRaw && Number.isNaN(ts_ms)) {
             alert('时间格式错误'); return;
         }
-        const body = { event_type, title, content, author: 'user', source: 'user' };
+        const body = { event_type, title, content, content_external, author: 'user', source: 'user' };
         if (ts_ms !== null) body.ts_ms = ts_ms;
         try {
             const data = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events`, {

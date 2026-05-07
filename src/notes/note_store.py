@@ -32,11 +32,17 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     qty         INT64,
     side        STRING,
     content     STRING,
+    content_external STRING,
     author      STRING,
     deleted     BOOLEAN,
     PRIMARY KEY (code, event_id)
 )
 """
+
+# Existing deploys created the table without `content_external`. Add it
+# idempotently — GreptimeDB returns an error if the column already exists,
+# which we swallow.
+_ALTER_ADD_CONTENT_EXTERNAL_SQL = "ALTER TABLE trade_notes ADD COLUMN content_external STRING"
 
 
 # Manually-inserted cards in 篇 view live in their own table — they aren't
@@ -73,7 +79,8 @@ class NoteEvent:
     price: float | None
     qty: int | None
     side: str | None  # 'buy' | 'sell' | None
-    content: str
+    content: str  # 对内 — private notes
+    content_external: str  # 对外 — for sharing; only used for 买入/卖出
     author: str
     deleted: bool
 
@@ -131,6 +138,7 @@ def _row_to_event(row) -> NoteEvent:
         qty=row["qty"],
         side=row["side"],
         content=row["content"] or "",
+        content_external=row["content_external"] or "",
         author=row["author"] or "",
         deleted=bool(row["deleted"]) if row["deleted"] is not None else False,
     )
@@ -156,6 +164,15 @@ class TradeNoteStore:
     async def ensure_schema(self) -> None:
         await self._db.execute(_CREATE_TRADE_NOTES_SQL)
         await self._db.execute(_CREATE_NOTE_CARDS_SQL)
+        # Idempotent ALTER for deploys created before content_external existed.
+        # GreptimeDB raises if the column is already there — swallow that case
+        # only; surface anything else.
+        try:
+            await self._db.execute(_ALTER_ADD_CONTENT_EXTERNAL_SQL)
+        except Exception as e:
+            msg = str(e).lower()
+            if "exists" not in msg and "duplicate" not in msg:
+                logger.warning(f"trade_notes ALTER content_external: {e}")
 
     # ---------- left pane: list of stocks with any event ----------
 
@@ -206,7 +223,7 @@ class TradeNoteStore:
     async def list_events(self, code: str) -> list[NoteEvent]:
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
-            f"       price, qty, side, content, author, deleted "
+            f"       price, qty, side, content, content_external, author, deleted "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND {_NOT_DELETED} "
             f"ORDER BY ts ASC"
@@ -223,7 +240,7 @@ class TradeNoteStore:
         # ensures we always get the latest LIVE row.
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
-            f"       price, qty, side, content, author, deleted "
+            f"       price, qty, side, content, content_external, author, deleted "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
             f"AND {_NOT_DELETED} "
@@ -278,6 +295,7 @@ class TradeNoteStore:
             qty=qty,
             side=side_lower,
             content="",
+            content_external="",
             author="system",
             deleted=False,
         )
@@ -342,6 +360,7 @@ class TradeNoteStore:
         event_type: str,
         title: str,
         content: str,
+        content_external: str = "",
         author: str = "user",
         source: str = "user",
         ts_ms: int | None = None,
@@ -358,6 +377,7 @@ class TradeNoteStore:
             qty=qty,
             side=side,
             content=content,
+            content_external=content_external,
             author=author,
             ts_ms=ts_ms if ts_ms is not None else _now_ms(),
         )
@@ -368,10 +388,11 @@ class TradeNoteStore:
         event_id: str,
         title: str | None = None,
         content: str | None = None,
+        content_external: str | None = None,
         ts_ms: int | None = None,
         event_type: str | None = None,
     ) -> bool:
-        """Update title, content, ts, and/or event_type. Other fields immutable.
+        """Update title, content (对内/对外), ts, and/or event_type.
 
         Re-INSERT with same (code, event_id, ts) overwrites via mito dedup.
         Changing ts creates a row at the new ts; we soft-delete the row at
@@ -387,6 +408,9 @@ class TradeNoteStore:
             return False
         new_title = title if title is not None else existing.title
         new_content = content if content is not None else existing.content
+        new_content_external = (
+            content_external if content_external is not None else existing.content_external
+        )
         new_event_type = event_type if event_type is not None else existing.event_type
         new_side: str | None
         if event_type is not None and event_type in ("买入", "卖出"):
@@ -408,6 +432,7 @@ class TradeNoteStore:
                 qty=existing.qty,
                 side=existing.side,
                 content=existing.content,
+                content_external=existing.content_external,
                 author=existing.author,
                 deleted=True,
             )
@@ -422,6 +447,7 @@ class TradeNoteStore:
             qty=existing.qty,
             side=new_side,
             content=new_content,
+            content_external=new_content_external,
             author=existing.author,
             deleted=False,
         )
@@ -460,6 +486,7 @@ class TradeNoteStore:
                 qty=ev.qty,
                 side=ev.side,
                 content=ev.content,
+                content_external=ev.content_external,
                 author=ev.author,
                 deleted=False,
             )
@@ -474,6 +501,7 @@ class TradeNoteStore:
                 qty=ev.qty,
                 side=ev.side,
                 content=ev.content,
+                content_external=ev.content_external,
                 author=ev.author,
                 deleted=True,
             )
@@ -497,6 +525,7 @@ class TradeNoteStore:
             qty=existing.qty,
             side=existing.side,
             content=existing.content,
+            content_external=existing.content_external,
             author=existing.author,
             deleted=True,
         )
@@ -610,6 +639,7 @@ class TradeNoteStore:
         qty: int | None,
         side: str | None,
         content: str,
+        content_external: str,
         author: str,
         ts_ms: int,
     ) -> str:
@@ -625,6 +655,7 @@ class TradeNoteStore:
             qty=qty,
             side=side,
             content=content,
+            content_external=content_external,
             author=author,
             deleted=False,
         )
@@ -643,6 +674,7 @@ class TradeNoteStore:
         qty: int | None,
         side: str | None,
         content: str,
+        content_external: str,
         author: str,
         deleted: bool,
     ) -> None:
@@ -652,9 +684,10 @@ class TradeNoteStore:
         sql = (
             "INSERT INTO trade_notes "
             "(ts, code, event_id, event_type, event_source, title, "
-            " price, qty, side, content, author, deleted) "
+            " price, qty, side, content, content_external, author, deleted) "
             f"VALUES ({ts_ms}, {_q(code)}, {_q(event_id)}, {_q(event_type)}, "
             f"{_q(source)}, {_q(title)}, {price_lit}, {qty_lit}, {side_lit}, "
-            f"{_q(content)}, {_q(author)}, {'true' if deleted else 'false'})"
+            f"{_q(content)}, {_q(content_external)}, {_q(author)}, "
+            f"{'true' if deleted else 'false'})"
         )
         await self._db.execute(sql)
