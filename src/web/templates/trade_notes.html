@@ -92,7 +92,6 @@
         currentCode: null,
         currentEventId: null,
         editing: false,
-        docItems: [],  // cached events (incl cmts) for the current 篇
     };
 
     const dom = {
@@ -186,213 +185,44 @@
         }
     }
 
-    function isTradeType(t) { return t === '买入' || t === '卖出'; }
-
     async function selectStock(code) {
         state.currentCode = code;
         state.currentEventId = null;
-        state.docItems = [];
         dom.stocks.querySelectorAll('.tn-stock-row').forEach(el => {
             el.classList.toggle('active', el.dataset.code === code);
         });
         dom.eventsTitle.textContent = `事件 · ${code}`;
-        dom.contentTitle.textContent = `篇 · ${code}`;
         dom.addEventBtn.disabled = false;
-        dom.editBtn.disabled = true;
-        dom.deleteBtn.disabled = true;
         dom.events.innerHTML = '<div class="tn-empty">加载中…</div>';
-        dom.content.innerHTML = '<div class="tn-empty">加载中…</div>';
+        clearContent();
 
         try {
             const data = await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events`);
-            const items = data.events || [];
-            state.docItems = items;
-            const trades = items.filter(ev => isTradeType(ev.event_type));
-            // Middle pane shows only 买入/卖出 (条).
-            if (!trades.length) {
-                dom.events.innerHTML = '<div class="tn-empty">无交易，点 + 新增</div>';
-            } else {
-                dom.events.innerHTML = trades.map(ev => {
-                    const sourceCls = ev.source === 'broker' ? 'broker' : 'user';
-                    const titleText = ev.title || ev.event_type;
-                    const dot = ev.has_content ? '●' : '○';
-                    return `
-                        <div class="tn-event-row" data-id="${escapeHtml(ev.event_id)}">
-                            <div class="tn-event-line1">
-                                <span class="tn-event-type tn-source-${sourceCls}">${escapeHtml(ev.event_type)}</span>
-                                <span class="tn-event-dot">${dot}</span>
-                            </div>
-                            <div class="tn-event-title">${escapeHtml(titleText)}</div>
-                            <div class="tn-event-time">${formatDateTime(ev.ts)}</div>
-                        </div>
-                    `;
-                }).join('');
-                dom.events.querySelectorAll('.tn-event-row').forEach(el => {
-                    el.addEventListener('click', () => selectEvent(el.dataset.id));
-                });
+            if (!data.events.length) {
+                dom.events.innerHTML = '<div class="tn-empty">无事件，点 + 新增</div>';
+                return;
             }
-            // Right pane: render the full 篇 (trades + cmts in chronological order).
-            renderDocument(items);
+            dom.events.innerHTML = data.events.map(ev => {
+                const sourceCls = ev.source === 'broker' ? 'broker' : (ev.source === 'ai' ? 'ai' : 'user');
+                const titleText = ev.title || ev.event_type;
+                const dot = ev.has_content ? '●' : '○';
+                return `
+                    <div class="tn-event-row" data-id="${escapeHtml(ev.event_id)}">
+                        <div class="tn-event-line1">
+                            <span class="tn-event-type tn-source-${sourceCls}">${escapeHtml(ev.event_type)}</span>
+                            <span class="tn-event-dot">${dot}</span>
+                        </div>
+                        <div class="tn-event-title">${escapeHtml(titleText)}</div>
+                        <div class="tn-event-time">${formatDateTime(ev.ts)}</div>
+                    </div>
+                `;
+            }).join('');
+            dom.events.querySelectorAll('.tn-event-row').forEach(el => {
+                el.addEventListener('click', () => selectEvent(el.dataset.id));
+            });
         } catch (e) {
             dom.events.innerHTML = `<div class="tn-empty tn-error">加载失败: ${escapeHtml(e.message)}</div>`;
-            dom.content.innerHTML = `<div class="tn-empty tn-error">加载失败: ${escapeHtml(e.message)}</div>`;
         }
-    }
-
-    function renderDocument(items) {
-        if (!items.length) {
-            dom.content.innerHTML = `
-                <div class="tn-doc">
-                    <div class="tn-empty">空篇 — 加个评论或交易开始</div>
-                    <button class="tn-doc-insert" data-prev-ts="" data-next-ts="">+ 评论</button>
-                </div>`;
-            wireDocInserts();
-            return;
-        }
-        const parts = ['<div class="tn-doc">'];
-        // Insert button before first item
-        parts.push(`<button class="tn-doc-insert" data-prev-ts="" data-next-ts="${items[0].ts}">+</button>`);
-        for (let i = 0; i < items.length; i++) {
-            const ev = items[i];
-            if (isTradeType(ev.event_type)) {
-                parts.push(renderDocTradeCard(ev));
-            } else {
-                parts.push(renderDocCmt(ev));
-            }
-            const next = items[i + 1];
-            parts.push(`<button class="tn-doc-insert" data-prev-ts="${ev.ts}" data-next-ts="${next ? next.ts : ''}">+</button>`);
-        }
-        parts.push('</div>');
-        dom.content.innerHTML = parts.join('');
-        wireDocInserts();
-        wireDocCmts();
-        wireDocTrades();
-    }
-
-    function renderDocTradeCard(ev) {
-        const cls = ev.source === 'broker' ? 'broker' : 'user';
-        const meta = [];
-        if (ev.price !== null && ev.price !== undefined) meta.push(`@${ev.price}`);
-        if (ev.qty !== null && ev.qty !== undefined) meta.push(`x${ev.qty}`);
-        return `
-            <div class="tn-doc-trade tn-doc-trade-${cls}" data-id="${escapeHtml(ev.event_id)}" title="点击编辑该条">
-                <span class="tn-doc-trade-type">${escapeHtml(ev.event_type)}</span>
-                <span class="tn-doc-trade-meta">${escapeHtml(meta.join(' '))}</span>
-                <span class="tn-doc-trade-ts">${formatDateTime(ev.ts)}</span>
-            </div>`;
-    }
-
-    function renderDocCmt(ev) {
-        const text = ev.content || ev.title || '(空)';
-        return `
-            <div class="tn-doc-cmt" data-id="${escapeHtml(ev.event_id)}" data-ts="${ev.ts}">
-                <div class="tn-doc-cmt-text">${renderMarkdown(text)}</div>
-                <div class="tn-doc-cmt-time">${formatDateTime(ev.ts)}</div>
-            </div>`;
-    }
-
-    function wireDocInserts() {
-        dom.content.querySelectorAll('.tn-doc-insert').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const prevTs = btn.dataset.prevTs || null;
-                const nextTs = btn.dataset.nextTs || null;
-                openInsertCmtModal(prevTs, nextTs);
-            });
-        });
-    }
-
-    function wireDocTrades() {
-        dom.content.querySelectorAll('.tn-doc-trade').forEach(el => {
-            el.addEventListener('click', () => selectEvent(el.dataset.id));
-        });
-    }
-
-    function wireDocCmts() {
-        dom.content.querySelectorAll('.tn-doc-cmt').forEach(el => {
-            el.addEventListener('click', () => openCmtInlineEdit(el));
-        });
-    }
-
-    function openCmtInlineEdit(el) {
-        const eventId = el.dataset.id;
-        const item = (state.docItems || []).find(x => x.event_id === eventId);
-        if (!item) return;
-        const initial = item.content || item.title || '';
-        el.innerHTML = `
-            <textarea class="tn-doc-cmt-edit" rows="4">${escapeHtml(initial)}</textarea>
-            <label class="tn-doc-cmt-tslabel">时间
-                <input type="datetime-local" class="tn-doc-cmt-ts" step="60" value="${isoToLocalDatetimeValue(item.ts)}" />
-            </label>
-            <div class="tn-doc-cmt-actions">
-                <button class="tn-doc-cmt-delete">删除</button>
-                <button class="tn-doc-cmt-cancel">取消</button>
-                <button class="tn-doc-cmt-save primary">保存</button>
-            </div>`;
-        el.querySelector('.tn-doc-cmt-cancel').addEventListener('click', e => {
-            e.stopPropagation();
-            selectStock(state.currentCode);
-        });
-        el.querySelector('.tn-doc-cmt-delete').addEventListener('click', async e => {
-            e.stopPropagation();
-            if (!confirm('删除这条评论？')) return;
-            try {
-                await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(eventId)}`, { method: 'DELETE' });
-                selectStock(state.currentCode);
-            } catch (err) {
-                alert('删除失败: ' + err.message);
-            }
-        });
-        el.querySelector('.tn-doc-cmt-save').addEventListener('click', async e => {
-            e.stopPropagation();
-            const newText = el.querySelector('.tn-doc-cmt-edit').value;
-            const tsRaw = el.querySelector('.tn-doc-cmt-ts').value;
-            const tsMs = tsRaw ? new Date(tsRaw).getTime() : null;
-            const body = { content: newText };
-            if (tsMs !== null && !Number.isNaN(tsMs)) body.ts_ms = tsMs;
-            try {
-                await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(eventId)}`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
-                selectStock(state.currentCode);
-            } catch (err) {
-                alert('保存失败: ' + err.message);
-            }
-        });
-        el.querySelector('.tn-doc-cmt-edit').focus();
-    }
-
-    function openInsertCmtModal(prevTsIso, nextTsIso) {
-        const prevMs = prevTsIso ? new Date(prevTsIso).getTime() : null;
-        const nextMs = nextTsIso ? new Date(nextTsIso).getTime() : null;
-        const text = prompt('写一条评论（留时间用前后两条中点；要指定时间用编辑器改）');
-        if (text === null) return;
-        if (!text.trim()) return;
-        let tsMs;
-        if (prevMs !== null && nextMs !== null) tsMs = Math.floor((prevMs + nextMs) / 2);
-        else if (prevMs !== null) tsMs = prevMs + 60_000;
-        else if (nextMs !== null) tsMs = nextMs - 60_000;
-        else tsMs = Date.now();
-        (async () => {
-            try {
-                await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        event_type: '评论',
-                        title: '',
-                        content: text,
-                        author: 'user',
-                        source: 'user',
-                        ts_ms: tsMs,
-                    }),
-                });
-                selectStock(state.currentCode);
-            } catch (err) {
-                alert('插入失败: ' + err.message);
-            }
-        })();
     }
 
     async function selectEvent(eventId) {
