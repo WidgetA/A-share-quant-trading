@@ -196,33 +196,6 @@ class TradeNoteStore:
 
     # ---------- writes ----------
 
-    async def append_broker_event(
-        self,
-        code: str,
-        side: str,  # 'buy' | 'sell'
-        qty: int,
-        price: float | None,
-    ) -> str:
-        """Auto-insert when place_order succeeds. price=None means market order."""
-        side = side.lower()
-        event_type = "买入" if side == "buy" else "卖出"
-        if price is not None:
-            title = f"{event_type} @{price:.2f} x {qty}"
-        else:
-            title = f"{event_type} 市价 x {qty}"
-        return await self._insert(
-            code=code,
-            event_type=event_type,
-            source="broker",
-            title=title,
-            price=price,
-            qty=qty,
-            side=side,
-            content="",
-            author="system",
-            ts_ms=_now_ms(),
-        )
-
     async def upsert_broker_event_by_order_id(
         self,
         *,
@@ -269,6 +242,59 @@ class TradeNoteStore:
             deleted=False,
         )
         return True
+
+    async def import_today_filled_orders(
+        self,
+        broker,
+        code_filter: set[str] | None = None,
+    ) -> tuple[int, int]:
+        """Import today's FILLED orders from broker into trade_notes.
+
+        Reads `broker.get_orders()`, keeps rows with status='FILLED', and
+        upserts one event per order keyed by `broker_<order_id>`. Idempotent:
+        re-running won't duplicate. Used by both /backfill-today and the
+        post-batch-order hook in routes.py.
+
+        `code_filter` (set of bare 6-digit codes): if given, only orders for
+        these codes are imported — useful to scope work after a batch order.
+        Pass None to import all of today's fills.
+
+        Returns (written, skipped).
+        """
+        orders = await broker.get_orders()
+        written = 0
+        skipped = 0
+        for o in orders:
+            if str(o.get("status", "")).upper() != "FILLED":
+                continue
+            order_id = o.get("order_id")
+            code = o.get("code") or ""
+            if not code:
+                continue
+            bare_code = code.split(".")[0]
+            if code_filter is not None and bare_code not in code_filter:
+                continue
+            side_raw = str(o.get("side", "")).lower()
+            qty = int(o.get("qty") or 0)
+            price = o.get("price")
+            try:
+                price_val = float(price) if price not in (None, 0, "0") else None
+            except (TypeError, ValueError):
+                price_val = None
+            if order_id is None or side_raw not in ("buy", "sell") or qty <= 0:
+                continue
+            inserted = await self.upsert_broker_event_by_order_id(
+                order_id=order_id,
+                code=bare_code,
+                side=side_raw,
+                qty=qty,
+                price=price_val,
+            )
+            if inserted:
+                written += 1
+            else:
+                skipped += 1
+        return written, skipped
 
     async def create_event(
         self,

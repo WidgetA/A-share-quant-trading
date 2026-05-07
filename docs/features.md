@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.5 | 2026-05-07 | - | NOTE-001: 批量下单（/api/trading/buy-batch-by-amount）后自动写入 trade_notes（拉 broker.get_orders 的 FILLED 腿，按 broker_<order_id> 幂等）；同时单笔 hook 改用 upsert_broker_event_by_order_id，修掉单笔 hook + ⤓ 回补的重复计数 bug。 |
 | 0.16.4 | 2026-05-07 | - | NOTE-001: 事件 tag 颜色改按 event_type 上色——买入=绿，卖出=黄（之前按 source broker/user/ai 分色，意义不直观）。来源仍可在右栏「来源:」行查到。 |
 | 0.16.3 | 2026-05-07 | - | NOTE-001: 编辑表单加「类型」select——可在 买入/卖出 之间切换 event_type；后端 `update_event` 同步翻转 `side` 保持数据一致（PATCH `/api/notes/{code}/events/{event_id}` 接受 `event_type` 字段）。 |
 | 0.16.2 | 2026-05-07 | - | NOTE-001: 篇 view 加 `+卡片` 按钮——弹窗输入时间+内容，作为 `【YYYY-MM-DD HH:mm】 …` 内联标记插入光标处；存为周边 `评论` 内容的一部分，不新建事件；时间戳标记在渲染时获得视觉样式。 |
@@ -1048,10 +1049,14 @@ DELETE /api/notes/{code}/events/{event_id}    # 软删除
 ```
 
 **自动 hook 位置**:
-- `src/web/routes.py` 的两个 `place_order` 调用点（buy / sell endpoint），下单成功
-  立刻 `note_store.append_broker_event(code, side, price, qty)`。
-- 简化语义：**下单成功即写入**，不等成交回报。少数部分成交/撤单情况会失真，后期
-  加 reconciliation。
+- `src/web/routes.py` 的两个单笔 `place_order` 调用点（buy / sell endpoint），下单成功
+  立刻 `store.upsert_broker_event_by_order_id(order_id=result.order_id, ...)`。
+- `submit_buy_batch_by_amount` 返回后调 `store.import_today_filled_orders(broker, code_filter=…)`
+  把当批 codes 的 FILLED 订单从 broker 拉回 trade_notes。
+- 所有路径都用 `broker_<order_id>` 当 event_id → 单笔 hook、批量 hook、`/backfill-today`
+  三处之间天然幂等，不会重复计数。
+- 简化语义：单笔下单成功即写入（提交价 + 提交数量），不等成交回报；批量下单走
+  broker.get_orders() 拿真实成交腿数据。少数部分成交/撤单情况会失真，后期加 reconciliation。
 
 **为什么不分两张表（`trade_fills` vs `trade_notes`）**: 中栏需要把自动事件和手动事件
 混排按时间倒序，单表 + `source` 列查询最简单；结构化字段（price/qty/side）对 manual

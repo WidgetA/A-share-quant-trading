@@ -43,17 +43,26 @@ logger = logging.getLogger(__name__)
 async def _append_trade_note_event(
     request: Request,
     *,
+    order_id: int | str | None,
     code: str,
     side: str,
     qty: int,
     price: float | None,
 ) -> None:
-    """Best-effort append of a broker event to trade_notes (NOTE-001).
+    """Best-effort UPSERT a broker event into trade_notes (NOTE-001).
+
+    Idempotent on `broker_<order_id>` so a later /backfill-today (or the
+    batch post-hook) won't double-record this same fill. order_id=None is a
+    no-op — without an order_id we can't dedupe, so we'd rather skip the
+    note than duplicate.
 
     Never raises — trading must not be blocked by note-taking failures. If
     GreptimeDB is down or the table is missing, we just log and move on.
     Strips .SZ/.SH suffix so notes are keyed by bare 6-digit code.
     """
+    if order_id is None:
+        logger.debug("trade-notes hook: no order_id, skipping note for %s", code)
+        return
     try:
         storage = getattr(request.app.state, "storage", None)
         if storage is None:
@@ -63,7 +72,8 @@ async def _append_trade_note_event(
 
         bare_code = code.split(".")[0] if "." in code else code
         store = TradeNoteStore(storage)
-        await store.append_broker_event(
+        await store.upsert_broker_event_by_order_id(
+            order_id=order_id,
             code=bare_code,
             side=side,
             qty=qty,
@@ -71,6 +81,42 @@ async def _append_trade_note_event(
         )
     except Exception as e:
         logger.warning(f"trade-notes hook failed for {code}: {e}", exc_info=True)
+
+
+async def _import_batch_orders_into_notes(
+    request: Request, codes: set[str]
+) -> None:
+    """Best-effort post-batch import: pull today's FILLED orders matching
+    `codes` from broker into trade_notes (NOTE-001).
+
+    Why a separate path from the single-order hook: place_batch_by_amount
+    returns aggregated per-leg results (filled_lots/avg_price/...) but no
+    single order_id we can dedupe on, since each leg may have driven multiple
+    market_convert attempts plus a residual resting order. Instead we read
+    `broker.get_orders()` after the batch settles and let upsert key by
+    `broker_<order_id>` for clean idempotency. Residual resting orders
+    eventually reach FILLED and get picked up by the next /backfill-today.
+    """
+    if not codes:
+        return
+    try:
+        storage = getattr(request.app.state, "storage", None)
+        broker = getattr(request.app.state, "broker", None)
+        if storage is None or broker is None:
+            logger.debug("trade-notes batch hook: storage/broker unavailable, skipping")
+            return
+        from src.notes.note_store import TradeNoteStore
+
+        bare_codes = {c.split(".")[0] for c in codes}
+        store = TradeNoteStore(storage)
+        written, skipped = await store.import_today_filled_orders(
+            broker, code_filter=bare_codes
+        )
+        logger.info(
+            f"trade-notes batch hook: written={written} skipped={skipped} codes={len(bare_codes)}"
+        )
+    except Exception as e:
+        logger.warning(f"trade-notes batch hook failed: {e}", exc_info=True)
 
 
 _trading_api_key_warned = False
@@ -3260,6 +3306,7 @@ def create_trading_router() -> APIRouter:
         # NOTE-001: append broker event to trade_notes (best-effort, never block return)
         await _append_trade_note_event(
             request,
+            order_id=result.order_id,
             code=stock_code,
             side="buy",
             qty=quantity,
@@ -3315,6 +3362,13 @@ def create_trading_router() -> APIRouter:
         logger.info(
             f"Batch BUY submitted: legs={len(legs)} amount={amount} summary={data.get('summary')}"
         )
+
+        # NOTE-001: import filled portions from broker (best-effort). Residuals
+        # placed as resting orders are picked up later by /backfill-today.
+        await _import_batch_orders_into_notes(
+            request, codes={leg["code"] for leg in legs}
+        )
+
         return data
 
     @router.post("/api/trading/sell")
@@ -3350,6 +3404,7 @@ def create_trading_router() -> APIRouter:
         # NOTE-001: append broker event to trade_notes (best-effort)
         await _append_trade_note_event(
             request,
+            order_id=result.order_id,
             code=stock_code,
             side="sell",
             qty=quantity,
