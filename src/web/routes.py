@@ -83,9 +83,7 @@ async def _append_trade_note_event(
         logger.warning(f"trade-notes hook failed for {code}: {e}", exc_info=True)
 
 
-async def _import_batch_orders_into_notes(
-    request: Request, codes: set[str]
-) -> None:
+async def _import_batch_orders_into_notes(request: Request, codes: set[str]) -> None:
     """Best-effort post-batch import: pull today's FILLED orders matching
     `codes` from broker into trade_notes (NOTE-001).
 
@@ -109,9 +107,7 @@ async def _import_batch_orders_into_notes(
 
         bare_codes = {c.split(".")[0] for c in codes}
         store = TradeNoteStore(storage)
-        written, skipped = await store.import_today_filled_orders(
-            broker, code_filter=bare_codes
-        )
+        written, skipped = await store.import_today_filled_orders(broker, code_filter=bare_codes)
         logger.info(
             f"trade-notes batch hook: written={written} skipped={skipped} codes={len(bare_codes)}"
         )
@@ -3365,9 +3361,7 @@ def create_trading_router() -> APIRouter:
 
         # NOTE-001: import filled portions from broker (best-effort). Residuals
         # placed as resting orders are picked up later by /backfill-today.
-        await _import_batch_orders_into_notes(
-            request, codes={leg["code"] for leg in legs}
-        )
+        await _import_batch_orders_into_notes(request, codes={leg["code"] for leg in legs})
 
         return data
 

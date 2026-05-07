@@ -348,6 +348,7 @@ class TradeNoteStore:
         new_title = title if title is not None else existing.title
         new_content = content if content is not None else existing.content
         new_event_type = event_type if event_type is not None else existing.event_type
+        new_side: str | None
         if event_type is not None and event_type in ("买入", "卖出"):
             new_side = "buy" if event_type == "买入" else "sell"
         else:
