@@ -2790,6 +2790,13 @@ footer {
     color: #222;
 }
 
+.tn-stock-name {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-weight: 500;
+    color: #555;
+    margin-left: 0.45rem;
+}
+
 .tn-stock-meta {
     font-size: 0.72rem;
     color: #888;

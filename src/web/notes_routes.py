@@ -64,8 +64,13 @@ def create_notes_router() -> APIRouter:
 
     @router.get("/api/notes/stocks")
     async def list_stocks(request: Request) -> dict:
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+
         store = _get_store(request)
         stocks = await store.list_stocks()
+        mapper = LocalConceptMapper()
+        for s in stocks:
+            s["name"] = mapper.get_stock_name(s["code"])
         return {"stocks": stocks}
 
     @router.get("/api/notes/{code}/events")

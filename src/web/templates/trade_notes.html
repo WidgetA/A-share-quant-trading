@@ -156,7 +156,10 @@
             }
             dom.stocks.innerHTML = data.stocks.map(s => `
                 <div class="tn-stock-row" data-code="${escapeHtml(s.code)}">
-                    <div class="tn-stock-code">${escapeHtml(s.code)}</div>
+                    <div class="tn-stock-code">
+                        ${escapeHtml(s.code)}
+                        ${s.name ? `<span class="tn-stock-name">${escapeHtml(s.name)}</span>` : ''}
+                    </div>
                     <div class="tn-stock-meta">
                         ${s.event_count} 事件 · ${formatDateTime(s.last_ts)}
                     </div>
