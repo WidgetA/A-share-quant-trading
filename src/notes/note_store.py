@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import calendar
 import logging
 import uuid
 from dataclasses import dataclass
@@ -59,11 +58,11 @@ class NoteEvent:
     code: str
     event_id: str
     event_type: str
-    source: str               # 'broker' | 'user' | 'ai'
+    source: str  # 'broker' | 'user' | 'ai'
     title: str
     price: float | None
     qty: int | None
-    side: str | None          # 'buy' | 'sell' | None
+    side: str | None  # 'buy' | 'sell' | None
     content: str
     author: str
     deleted: bool
@@ -140,11 +139,13 @@ class TradeNoteStore:
                 last_ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
             else:
                 last_ts = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
-            out.append({
-                "code": r["code"],
-                "last_ts": last_ts.isoformat(),
-                "event_count": int(r["event_count"]),
-            })
+            out.append(
+                {
+                    "code": r["code"],
+                    "last_ts": last_ts.isoformat(),
+                    "event_count": int(r["event_count"]),
+                }
+            )
         return out
 
     # ---------- middle pane: events for one stock ----------
@@ -182,7 +183,7 @@ class TradeNoteStore:
     async def append_broker_event(
         self,
         code: str,
-        side: str,        # 'buy' | 'sell'
+        side: str,  # 'buy' | 'sell'
         qty: int,
         price: float | None,
     ) -> str:
