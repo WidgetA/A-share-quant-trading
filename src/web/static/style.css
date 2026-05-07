@@ -2827,50 +2827,66 @@ footer {
     background: #fffbe8;
     border-left: 3px solid #ead97a;
     border-radius: 4px;
+    cursor: text;
     font-size: 0.9rem;
     color: #333;
     line-height: 1.5;
 }
-.tn-doc-cmt-text {
-    outline: none;
-    min-height: 1.4em;
-    white-space: pre-wrap;
-    word-wrap: break-word;
+.tn-doc-cmt:hover { background: #fff7d4; }
+.tn-doc-cmt-text p { margin: 0.25rem 0; }
+.tn-doc-cmt-time {
+    font-size: 0.7rem;
+    color: #aaa;
+    margin-top: 0.25rem;
 }
-.tn-doc-cmt-text:empty:before {
-    content: attr(data-placeholder);
-    color: #b5a76b;
-    font-style: italic;
+.tn-doc-cmt-edit {
+    width: 100%;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    padding: 0.3rem;
+    font-family: inherit;
+    font-size: 0.9rem;
+    box-sizing: border-box;
+    resize: vertical;
 }
-.tn-doc-cmt-text:focus {
-    background: #fff5cc40;
+.tn-doc-cmt-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+    justify-content: flex-end;
 }
-.tn-doc-cmt-foot {
+.tn-doc-cmt-actions button {
+    padding: 0.25rem 0.7rem;
+    border: 1px solid #ccc;
+    background: white;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+.tn-doc-cmt-actions .primary {
+    background: #4a8fe7;
+    color: white;
+    border-color: #4a8fe7;
+}
+.tn-doc-cmt-tslabel {
     display: flex;
     align-items: center;
     gap: 0.4rem;
     margin-top: 0.4rem;
-    font-size: 0.72rem;
-    color: #888;
+    font-size: 0.78rem;
+    color: #777;
 }
-.tn-doc-cmt-foot input[type="datetime-local"] {
-    padding: 0.15rem 0.3rem;
-    font-size: 0.72rem;
-    border: 1px solid #e0d8a0;
+.tn-doc-cmt-tslabel input {
+    padding: 0.2rem 0.3rem;
+    font-size: 0.78rem;
+    border: 1px solid #ddd;
     border-radius: 3px;
-    background: #fff;
 }
-.tn-doc-cmt-del {
-    margin-left: auto;
-    background: transparent;
-    border: 1px solid #e0c0b8;
-    color: #b8543a;
-    padding: 0.05rem 0.4rem;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 0.7rem;
+.tn-doc-cmt-delete {
+    margin-right: auto;
+    color: #c0392b !important;
+    border-color: #e0b8b1 !important;
 }
-.tn-doc-cmt-del:hover { background: #f8e8e2; }
 
 .tn-filter-bar {
     padding: 0.4rem 0.8rem;
