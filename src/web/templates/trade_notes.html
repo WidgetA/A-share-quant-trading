@@ -62,6 +62,9 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>时间
+                <input id="tnNewTs" type="datetime-local" step="60" />
+            </label>
             <label>标题（可选）
                 <input id="tnNewTitle" type="text" placeholder="事件简短描述" />
             </label>
@@ -102,6 +105,7 @@
         addStockBtn: document.getElementById('tnAddStock'),
         modal: document.getElementById('tnNewModal'),
         newType: document.getElementById('tnNewType'),
+        newTs: document.getElementById('tnNewTs'),
         newTitle: document.getElementById('tnNewTitle'),
         newContent: document.getElementById('tnNewContent'),
         newCancel: document.getElementById('tnNewCancel'),
@@ -314,9 +318,17 @@
         }
     }
 
+    function nowLocalDatetimeValue() {
+        // datetime-local wants 'YYYY-MM-DDTHH:mm' in *local* time, no TZ.
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
     function openNewEventModal() {
         if (!state.currentCode) return;
         dom.newType.value = '买入';
+        dom.newTs.value = nowLocalDatetimeValue();
         dom.newTitle.value = '';
         dom.newContent.value = '';
         dom.modal.hidden = false;
@@ -345,11 +357,20 @@
         const title = dom.newTitle.value;
         const content = dom.newContent.value;
         if (!event_type) { alert('请选择类型'); return; }
+        // datetime-local input is in local TZ; new Date(value) parses as
+        // local and getTime() returns epoch UTC ms — what the backend wants.
+        const tsRaw = dom.newTs.value;
+        const ts_ms = tsRaw ? new Date(tsRaw).getTime() : null;
+        if (tsRaw && Number.isNaN(ts_ms)) {
+            alert('时间格式错误'); return;
+        }
+        const body = { event_type, title, content, author: 'user', source: 'user' };
+        if (ts_ms !== null) body.ts_ms = ts_ms;
         try {
             const data = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ event_type, title, content, author: 'user', source: 'user' }),
+                body: JSON.stringify(body),
             });
             dom.modal.hidden = true;
             const code = state.currentCode;
