@@ -94,6 +94,8 @@ def create_notes_router() -> APIRouter:
                     "price": e.price,
                     "qty": e.qty,
                     "side": e.side,
+                    "content": e.content,
+                    "author": e.author,
                     "has_content": bool(e.content),
                 }
                 for e in events

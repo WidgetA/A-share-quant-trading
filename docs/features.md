@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.1 | 2026-05-07 | - | NOTE-001: Add 篇 document view for trade notes: stock selection opens one contenteditable document, trade events render as locked cards, and prose persists as `评论` segments between trades. |
 | 0.1.0 | 2026-01-27 | - | Initial document structure |
 | 0.1.1 | 2026-01-27 | - | Add THS SDK installation scripts |
 | 0.1.2 | 2026-01-27 | - | TRD-002: Add SQLite as trading data storage |

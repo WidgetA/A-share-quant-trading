@@ -92,6 +92,10 @@
         currentCode: null,
         currentEventId: null,
         editing: false,
+        documentEvents: [],
+        documentSaveTimer: null,
+        documentSaving: false,
+        documentDirtyWhileSaving: false,
     };
 
     const dom = {
@@ -147,6 +151,84 @@
         return `${yy}-${mm}-${dd} ${hh}:${mi}`;
     }
 
+    function eventTsMs(ev) {
+        return new Date(ev.ts).getTime();
+    }
+
+    function isTradeEvent(ev) {
+        return ev.event_type === '\u4e70\u5165' || ev.event_type === '\u5356\u51fa' ||
+            ev.side === 'buy' || ev.side === 'sell';
+    }
+
+    function isCommentEvent(ev) {
+        return ev.event_type === '\u8bc4\u8bba';
+    }
+
+    function tradeTypeLabel(ev) {
+        if (ev.event_type === '\u4e70\u5165' || ev.side === 'buy') return '\u4e70\u5165';
+        if (ev.event_type === '\u5356\u51fa' || ev.side === 'sell') return '\u5356\u51fa';
+        return ev.event_type || '\u4ea4\u6613';
+    }
+
+    function tradeMetaText(ev) {
+        const meta = [];
+        if (ev.price !== null && ev.price !== undefined) meta.push(`@${ev.price}`);
+        if (ev.qty !== null && ev.qty !== undefined) meta.push(`x ${ev.qty}`);
+        meta.push(formatDateTime(ev.ts));
+        return meta.join('  ');
+    }
+
+    function cmtTitle(content) {
+        const firstLine = (content || '').split(/\r?\n/).map(s => s.trim()).find(Boolean);
+        return firstLine ? firstLine.slice(0, 80) : '\u8bc4\u8bba';
+    }
+
+    function getSegmentText(el) {
+        return (el.innerText || '')
+            .replace(/\r\n/g, '\n')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\u200b/g, '')
+            .replace(/\n+$/g, '');
+    }
+
+    function setPlainText(el, text) {
+        el.textContent = text || '';
+    }
+
+    function adjacentTradeTimes(nodes, index) {
+        let prev = null;
+        let next = null;
+        for (let i = index - 1; i >= 0; i--) {
+            if (nodes[i].dataset.kind === 'trade') {
+                prev = Number(nodes[i].dataset.tsMs);
+                break;
+            }
+        }
+        for (let i = index + 1; i < nodes.length; i++) {
+            if (nodes[i].dataset.kind === 'trade') {
+                next = Number(nodes[i].dataset.tsMs);
+                break;
+            }
+        }
+        return { prev, next };
+    }
+
+    function midpointTsMs(prev, next) {
+        if (Number.isFinite(prev) && Number.isFinite(next)) return Math.floor((prev + next) / 2);
+        if (Number.isFinite(next)) return next - 60000;
+        if (Number.isFinite(prev)) return prev + 60000;
+        return Date.now();
+    }
+
+    function placeCaretAtStart(el) {
+        const range = document.createRange();
+        const selection = window.getSelection();
+        range.selectNodeContents(el);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
     async function fetchJSON(url, opts) {
         const resp = await fetch(url, Object.assign({ cache: 'no-store' }, opts || {}));
         if (!resp.ok) {
@@ -188,21 +270,28 @@
     async function selectStock(code) {
         state.currentCode = code;
         state.currentEventId = null;
+        state.editing = false;
         dom.stocks.querySelectorAll('.tn-stock-row').forEach(el => {
             el.classList.toggle('active', el.dataset.code === code);
         });
         dom.eventsTitle.textContent = `事件 · ${code}`;
         dom.addEventBtn.disabled = false;
         dom.events.innerHTML = '<div class="tn-empty">加载中…</div>';
-        clearContent();
+        dom.content.innerHTML = '<div class="tn-empty">加载中…</div>';
+        dom.editBtn.disabled = true;
+        dom.deleteBtn.disabled = true;
 
         try {
             const data = await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events`);
-            if (!data.events.length) {
+            state.documentEvents = (data.events || []).slice().sort((a, b) => eventTsMs(a) - eventTsMs(b));
+            renderDocumentEditor(code, state.documentEvents);
+
+            const trades = state.documentEvents.filter(isTradeEvent);
+            if (!trades.length) {
                 dom.events.innerHTML = '<div class="tn-empty">无事件，点 + 新增</div>';
                 return;
             }
-            dom.events.innerHTML = data.events.map(ev => {
+            dom.events.innerHTML = trades.map(ev => {
                 const sourceCls = ev.source === 'broker' ? 'broker' : (ev.source === 'ai' ? 'ai' : 'user');
                 const titleText = ev.title || ev.event_type;
                 const dot = ev.has_content ? '●' : '○';
@@ -225,7 +314,193 @@
         }
     }
 
+    function renderDocumentEditor(code, events) {
+        clearTimeout(state.documentSaveTimer);
+        dom.contentTitle.textContent = `\u7bc7 \u00b7 ${code}`;
+        dom.editBtn.disabled = true;
+        dom.deleteBtn.disabled = true;
+
+        const trades = events.filter(isTradeEvent).sort((a, b) => eventTsMs(a) - eventTsMs(b));
+        const comments = events.filter(isCommentEvent).sort((a, b) => eventTsMs(a) - eventTsMs(b));
+        const buckets = Array.from({ length: trades.length + 1 }, () => []);
+
+        comments.forEach(cmt => {
+            const ts = eventTsMs(cmt);
+            let index = trades.findIndex(trade => eventTsMs(trade) > ts);
+            if (index === -1) index = trades.length;
+            buckets[index].push(cmt);
+        });
+
+        const editor = document.createElement('div');
+        editor.id = 'tnDocumentEditor';
+        editor.className = 'tn-document-editor';
+        editor.contentEditable = 'true';
+        editor.spellcheck = false;
+
+        const appendSegment = (items) => {
+            const segment = document.createElement('div');
+            segment.className = 'tn-doc-segment tn-doc-node';
+            segment.dataset.kind = 'segment';
+            if (items.length) {
+                segment.dataset.cmtId = items[0].event_id;
+                segment.dataset.tsMs = String(eventTsMs(items[0]));
+                segment.dataset.originalContent = items[0].content || '';
+                if (items.length > 1) {
+                    segment.dataset.extraCmtIds = JSON.stringify(items.slice(1).map(item => item.event_id));
+                }
+            }
+            setPlainText(segment, items.map(item => item.content || '').filter(Boolean).join('\n\n'));
+            editor.appendChild(segment);
+        };
+
+        const appendTrade = (trade) => {
+            const card = document.createElement('div');
+            card.className = `tn-doc-trade-card tn-doc-node ${trade.side === 'sell' ? 'sell' : 'buy'}`;
+            card.contentEditable = 'false';
+            card.dataset.kind = 'trade';
+            card.dataset.eventId = trade.event_id;
+            card.dataset.tsMs = String(eventTsMs(trade));
+            card.tabIndex = 0;
+
+            const label = document.createElement('span');
+            label.className = 'tn-doc-trade-label';
+            label.textContent = tradeTypeLabel(trade);
+            const meta = document.createElement('span');
+            meta.className = 'tn-doc-trade-meta';
+            meta.textContent = tradeMetaText(trade);
+            card.appendChild(label);
+            card.appendChild(meta);
+            card.addEventListener('click', () => selectEvent(card.dataset.eventId));
+            card.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    selectEvent(card.dataset.eventId);
+                }
+            });
+            editor.appendChild(card);
+        };
+
+        trades.forEach((trade, index) => {
+            appendSegment(buckets[index]);
+            appendTrade(trade);
+        });
+        appendSegment(buckets[trades.length]);
+
+        editor.addEventListener('input', scheduleDocumentSave);
+        editor.addEventListener('blur', () => saveDocumentNow(), true);
+        // Enter must stay inside the current segment as a soft line break.
+        // Chrome's default would insert a sibling <div> at the editor level,
+        // which the save walker (':scope > .tn-doc-node') skips → text loss.
+        editor.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.isComposing) {
+                e.preventDefault();
+                document.execCommand('insertLineBreak');
+                scheduleDocumentSave();
+            }
+        });
+
+        dom.content.innerHTML = '';
+        dom.content.appendChild(editor);
+        editor.focus();
+        placeCaretAtStart(editor.querySelector('.tn-doc-segment') || editor);
+    }
+
+    function scheduleDocumentSave() {
+        if (!state.currentCode || state.currentEventId) return;
+        clearTimeout(state.documentSaveTimer);
+        state.documentSaveTimer = setTimeout(() => saveDocumentNow(), 800);
+    }
+
+    async function saveDocumentNow() {
+        clearTimeout(state.documentSaveTimer);
+        const editor = document.getElementById('tnDocumentEditor');
+        if (!editor || !state.currentCode || state.currentEventId) return;
+        if (state.documentSaving) {
+            state.documentDirtyWhileSaving = true;
+            return;
+        }
+
+        const code = state.currentCode;
+        const nodes = Array.from(editor.querySelectorAll(':scope > .tn-doc-node'));
+        const tasks = [];
+
+        nodes.forEach((node, index) => {
+            if (node.dataset.kind !== 'segment') return;
+            const content = getSegmentText(node);
+            const trimmed = content.trim();
+            const cmtId = node.dataset.cmtId || '';
+            const originalContent = node.dataset.originalContent || '';
+            const extras = node.dataset.extraCmtIds ? JSON.parse(node.dataset.extraCmtIds) : [];
+
+            extras.forEach(extraId => {
+                tasks.push(fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(extraId)}`, {
+                    method: 'DELETE',
+                }));
+            });
+            delete node.dataset.extraCmtIds;
+
+            if (cmtId && !trimmed) {
+                tasks.push(fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(cmtId)}`, {
+                    method: 'DELETE',
+                }).then(() => {
+                    delete node.dataset.cmtId;
+                    delete node.dataset.tsMs;
+                    node.dataset.originalContent = '';
+                }));
+                return;
+            }
+
+            if (cmtId && content !== originalContent) {
+                tasks.push(fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(cmtId)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: cmtTitle(content), content }),
+                }).then(() => {
+                    node.dataset.originalContent = content;
+                }));
+                return;
+            }
+
+            if (!cmtId && trimmed) {
+                const { prev, next } = adjacentTradeTimes(nodes, index);
+                const tsMs = midpointTsMs(prev, next);
+                tasks.push(fetchJSON(`/api/notes/${encodeURIComponent(code)}/events`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        event_type: '\u8bc4\u8bba',
+                        title: cmtTitle(content),
+                        content,
+                        author: 'user',
+                        source: 'user',
+                        ts_ms: tsMs,
+                    }),
+                }).then(data => {
+                    node.dataset.cmtId = data.event_id;
+                    node.dataset.tsMs = String(tsMs);
+                    node.dataset.originalContent = content;
+                }));
+            }
+        });
+
+        if (!tasks.length) return;
+
+        state.documentSaving = true;
+        state.documentDirtyWhileSaving = false;
+        try {
+            await Promise.all(tasks);
+            if (state.documentDirtyWhileSaving) {
+                scheduleDocumentSave();
+            }
+        } catch (e) {
+            console.error('document save failed', e);
+        } finally {
+            state.documentSaving = false;
+        }
+    }
+
     async function selectEvent(eventId) {
+        await saveDocumentNow();
         state.currentEventId = eventId;
         state.editing = false;
         dom.events.querySelectorAll('.tn-event-row').forEach(el => {

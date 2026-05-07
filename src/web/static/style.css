@@ -2938,6 +2938,72 @@ footer {
     font-size: 0.85rem;
 }
 
+.tn-document-editor {
+    min-height: 100%;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 0.4rem 0 4rem;
+    color: #242424;
+    font-size: 0.95rem;
+    line-height: 1.75;
+    outline: none;
+    white-space: pre-wrap;
+}
+
+.tn-doc-segment {
+    min-height: 1.75rem;
+    padding: 0.15rem 0;
+    outline: none;
+}
+
+.tn-doc-segment:empty::before {
+    content: "\00a0";
+}
+
+.tn-doc-trade-card {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0.45rem 0;
+    padding: 0.36rem 0.65rem;
+    border: 1px solid #d7e3d8;
+    border-radius: 6px;
+    background: #f6fbf7;
+    color: #254b2f;
+    cursor: pointer;
+    user-select: none;
+    white-space: normal;
+}
+
+.tn-doc-trade-card.sell {
+    border-color: #ead7d4;
+    background: #fff7f5;
+    color: #74352c;
+}
+
+.tn-doc-trade-card:hover,
+.tn-doc-trade-card:focus {
+    border-color: #9fb7d6;
+    box-shadow: 0 0 0 2px rgba(74, 143, 231, 0.14);
+}
+
+.tn-doc-trade-label {
+    flex: 0 0 auto;
+    font-weight: 700;
+    font-size: 0.82rem;
+}
+
+.tn-doc-trade-meta {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: inherit;
+    opacity: 0.78;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+}
+
 /* Edit form */
 .tn-edit-form label,
 .tn-modal label {
