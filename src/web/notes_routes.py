@@ -41,6 +41,7 @@ class UpdateEventRequest(BaseModel):
     title: str | None = Field(None, max_length=200)
     content: str | None = Field(None, max_length=100_000)
     ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
+    event_type: str | None = Field(None, min_length=1, max_length=32)
 
 
 def _get_store(request: Request) -> TradeNoteStore:
@@ -148,6 +149,7 @@ def create_notes_router() -> APIRouter:
             title=body.title,
             content=body.content,
             ts_ms=body.ts_ms,
+            event_type=body.event_type,
         )
         if not ok:
             raise HTTPException(status_code=404, detail="event not found")

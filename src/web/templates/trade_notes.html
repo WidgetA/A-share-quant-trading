@@ -608,8 +608,21 @@
         if (!state.currentCode || !state.currentEventId) return;
         const ev = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`);
         state.editing = true;
+        // Type options: always 买入/卖出, plus current type if it's something else
+        // (preserves rare cases like 评论 if someone opens its editor directly).
+        const typeChoices = ['买入', '卖出'];
+        if (ev.event_type && !typeChoices.includes(ev.event_type)) {
+            typeChoices.unshift(ev.event_type);
+        }
+        const typeOptions = typeChoices.map(t => {
+            const sel = t === ev.event_type ? ' selected' : '';
+            return `<option value="${escapeHtml(t)}"${sel}>${escapeHtml(t)}</option>`;
+        }).join('');
         dom.content.innerHTML = `
             <div class="tn-edit-form">
+                <label>类型
+                    <select id="tnEditType">${typeOptions}</select>
+                </label>
                 <label>时间
                     <input type="datetime-local" id="tnEditTs" step="60" value="${isoToLocalDatetimeValue(ev.ts)}" />
                 </label>
@@ -632,6 +645,7 @@
     async function saveEdit() {
         const title = document.getElementById('tnEditTitle').value;
         const content = document.getElementById('tnEditContent').value;
+        const eventType = document.getElementById('tnEditType').value;
         const tsRaw = document.getElementById('tnEditTs').value;
         const tsMs = tsRaw ? new Date(tsRaw).getTime() : null;
         if (tsRaw && Number.isNaN(tsMs)) {
@@ -639,7 +653,7 @@
         }
         const code = state.currentCode;
         const eventId = state.currentEventId;
-        const body = { title, content };
+        const body = { title, content, event_type: eventType };
         if (tsMs !== null) body.ts_ms = tsMs;
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(eventId)}`, {

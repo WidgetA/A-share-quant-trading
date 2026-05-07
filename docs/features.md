@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.3 | 2026-05-07 | - | NOTE-001: 编辑表单加「类型」select——可在 买入/卖出 之间切换 event_type；后端 `update_event` 同步翻转 `side` 保持数据一致（PATCH `/api/notes/{code}/events/{event_id}` 接受 `event_type` 字段）。 |
 | 0.16.2 | 2026-05-07 | - | NOTE-001: 篇 view 加 `+卡片` 按钮——弹窗输入时间+内容，作为 `【YYYY-MM-DD HH:mm】 …` 内联标记插入光标处；存为周边 `评论` 内容的一部分，不新建事件；时间戳标记在渲染时获得视觉样式。 |
 | 0.16.1 | 2026-05-07 | - | NOTE-001: Add 篇 document view for trade notes: stock selection opens one contenteditable document, trade events render as locked cards, and prose persists as `评论` segments between trades. |
 | 0.1.0 | 2026-01-27 | - | Initial document structure |

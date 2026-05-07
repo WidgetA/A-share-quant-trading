@@ -303,19 +303,29 @@ class TradeNoteStore:
         title: str | None = None,
         content: str | None = None,
         ts_ms: int | None = None,
+        event_type: str | None = None,
     ) -> bool:
-        """Update title, content, and/or ts. Other fields are immutable.
+        """Update title, content, ts, and/or event_type. Other fields immutable.
 
         Re-INSERT with same (code, event_id, ts) overwrites via mito dedup.
         Changing ts creates a row at the new ts; we soft-delete the row at
         the old ts to prevent both showing up in list_events (which scans
         all rows for the code, no GROUP BY).
+
+        When event_type toggles between 买入/卖出, `side` flips with it so the
+        two stay consistent (the events-list filter and dashboard meta both
+        read `side`).
         """
         existing = await self.get_event(code, event_id)
         if existing is None:
             return False
         new_title = title if title is not None else existing.title
         new_content = content if content is not None else existing.content
+        new_event_type = event_type if event_type is not None else existing.event_type
+        if event_type is not None and event_type in ("买入", "卖出"):
+            new_side = "buy" if event_type == "买入" else "sell"
+        else:
+            new_side = existing.side
         old_ts_ms = int(existing.ts.timestamp() * 1000)
         new_ts_ms = ts_ms if ts_ms is not None else old_ts_ms
         if new_ts_ms != old_ts_ms:
@@ -338,12 +348,12 @@ class TradeNoteStore:
             ts_ms=new_ts_ms,
             code=existing.code,
             event_id=existing.event_id,
-            event_type=existing.event_type,
+            event_type=new_event_type,
             source=existing.source,
             title=new_title,
             price=existing.price,
             qty=existing.qty,
-            side=existing.side,
+            side=new_side,
             content=new_content,
             author=existing.author,
             deleted=False,
