@@ -1,7 +1,7 @@
 # === MODULE PURPOSE ===
 # HTTP entry points for the trade-notes feature (NOTE-001).
 #
-# Three-pane master-detail UI backed by GreptimeDB `trade_notes`:
+# Three-pane master-detail UI backed by GreptimeDB `trade_notes` + `note_cards`:
 #   GET  /trade-notes                              → HTML page (vanilla JS)
 #   GET  /api/notes/stocks                         → left pane (stocks)
 #   PATCH /api/notes/stocks/{code}                 → rename a stock's code
@@ -10,6 +10,10 @@
 #   POST /api/notes/{code}/events                  → create manual event
 #   PATCH /api/notes/{code}/events/{event_id}      → edit title/content/type/ts
 #   DELETE /api/notes/{code}/events/{event_id}     → soft delete
+#   GET  /api/notes/{code}/cards                   → 篇 view: manual timestamped cards
+#   POST /api/notes/{code}/cards                   → create card
+#   PATCH /api/notes/{code}/cards/{card_id}        → edit card content/ts
+#   DELETE /api/notes/{code}/cards/{card_id}       → soft-delete card
 #
 # Auto-write of broker events happens in routes.py at the place_order success
 # point — not here.
@@ -47,6 +51,16 @@ class UpdateEventRequest(BaseModel):
 
 class RenameStockRequest(BaseModel):
     new_code: str = Field(..., pattern=r"^\d{6}$")
+
+
+class CreateCardRequest(BaseModel):
+    content: str = Field("", max_length=100_000)
+    ts_ms: int = Field(..., description="Epoch ms — required, the card's own ts")
+
+
+class UpdateCardRequest(BaseModel):
+    content: str | None = Field(None, max_length=100_000)
+    ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
 
 
 def _get_store(request: Request) -> TradeNoteStore:
@@ -178,6 +192,48 @@ def create_notes_router() -> APIRouter:
         ok = await store.delete_event(code, event_id)
         if not ok:
             raise HTTPException(status_code=404, detail="event not found")
+        return {"deleted": True}
+
+    @router.get("/api/notes/{code}/cards")
+    async def list_cards(code: str, request: Request) -> dict:
+        store = _get_store(request)
+        cards = await store.list_cards(code)
+        return {
+            "code": code,
+            "cards": [
+                {
+                    "ts": c.ts.isoformat(),
+                    "card_id": c.card_id,
+                    "content": c.content,
+                }
+                for c in cards
+            ],
+        }
+
+    @router.post("/api/notes/{code}/cards")
+    async def create_card(code: str, body: CreateCardRequest, request: Request) -> dict:
+        store = _get_store(request)
+        card_id = await store.create_card(code=code, content=body.content, ts_ms=body.ts_ms)
+        return {"card_id": card_id}
+
+    @router.patch("/api/notes/{code}/cards/{card_id}")
+    async def update_card(
+        code: str, card_id: str, body: UpdateCardRequest, request: Request
+    ) -> dict:
+        store = _get_store(request)
+        ok = await store.update_card(
+            code=code, card_id=card_id, content=body.content, ts_ms=body.ts_ms
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="card not found")
+        return {"updated": True}
+
+    @router.delete("/api/notes/{code}/cards/{card_id}")
+    async def delete_card(code: str, card_id: str, request: Request) -> dict:
+        store = _get_store(request)
+        ok = await store.delete_card(code, card_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="card not found")
         return {"deleted": True}
 
     @router.post("/api/notes/backfill-today")

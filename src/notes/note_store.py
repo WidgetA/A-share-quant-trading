@@ -39,6 +39,21 @@ CREATE TABLE IF NOT EXISTS trade_notes (
 """
 
 
+# Manually-inserted cards in 篇 view live in their own table — they aren't
+# trade events and don't belong in the events list. The 篇 view fetches
+# events + cards and interleaves them by ts.
+_CREATE_NOTE_CARDS_SQL = """
+CREATE TABLE IF NOT EXISTS note_cards (
+    ts          TIMESTAMP TIME INDEX,
+    code        STRING,
+    card_id     STRING,
+    content     STRING,
+    deleted     BOOLEAN,
+    PRIMARY KEY (code, card_id)
+)
+"""
+
+
 # Event types surfaced in the manual-add dropdown. Other thoughts (思考/复盘/
 # AI总结) belong in the 正文 of an existing event, not as separate types.
 DEFAULT_EVENT_TYPES = [
@@ -63,6 +78,15 @@ class NoteEvent:
     deleted: bool
 
 
+@dataclass
+class NoteCard:
+    ts: datetime
+    code: str
+    card_id: str
+    content: str
+    deleted: bool
+
+
 def _q(s: str | None) -> str:
     """SQL-escape a string for inlining: wrap in single quotes, double internal quotes."""
     if s is None:
@@ -72,6 +96,21 @@ def _q(s: str | None) -> str:
 
 def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _row_to_card(row) -> NoteCard:
+    ts_raw = row["ts"]
+    if isinstance(ts_raw, datetime):
+        ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
+    else:
+        ts = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
+    return NoteCard(
+        ts=ts,
+        code=row["code"],
+        card_id=row["card_id"],
+        content=row["content"] or "",
+        deleted=bool(row["deleted"]) if row["deleted"] is not None else False,
+    )
 
 
 def _row_to_event(row) -> NoteEvent:
@@ -116,6 +155,7 @@ class TradeNoteStore:
 
     async def ensure_schema(self) -> None:
         await self._db.execute(_CREATE_TRADE_NOTES_SQL)
+        await self._db.execute(_CREATE_NOTE_CARDS_SQL)
 
     # ---------- left pane: list of stocks with any event ----------
 
@@ -461,6 +501,101 @@ class TradeNoteStore:
             deleted=True,
         )
         return True
+
+    # ---------- cards (note_cards table) ----------
+
+    async def list_cards(self, code: str) -> list[NoteCard]:
+        sql = (
+            f"SELECT ts, code, card_id, content, deleted "
+            f"FROM note_cards "
+            f"WHERE code = {_q(code)} AND {_NOT_DELETED} "
+            f"ORDER BY ts ASC"
+        )
+        rows = await self._db.fetch(sql)
+        return [_row_to_card(r) for r in rows]
+
+    async def get_card(self, code: str, card_id: str) -> NoteCard | None:
+        sql = (
+            f"SELECT ts, code, card_id, content, deleted "
+            f"FROM note_cards "
+            f"WHERE code = {_q(code)} AND card_id = {_q(card_id)} "
+            f"AND {_NOT_DELETED} "
+            f"ORDER BY ts DESC LIMIT 1"
+        )
+        row = await self._db.fetchrow(sql)
+        if row is None:
+            return None
+        return _row_to_card(row)
+
+    async def create_card(self, code: str, content: str, ts_ms: int) -> str:
+        card_id = uuid.uuid4().hex
+        await self._raw_card_insert(
+            ts_ms=ts_ms, code=code, card_id=card_id, content=content, deleted=False
+        )
+        return card_id
+
+    async def update_card(
+        self,
+        code: str,
+        card_id: str,
+        content: str | None = None,
+        ts_ms: int | None = None,
+    ) -> bool:
+        existing = await self.get_card(code, card_id)
+        if existing is None:
+            return False
+        new_content = content if content is not None else existing.content
+        old_ts_ms = int(existing.ts.timestamp() * 1000)
+        new_ts_ms = ts_ms if ts_ms is not None else old_ts_ms
+        if new_ts_ms != old_ts_ms:
+            # Soft-delete the row at the old ts first; otherwise list_cards
+            # would see both. Same pattern as update_event.
+            await self._raw_card_insert(
+                ts_ms=old_ts_ms,
+                code=existing.code,
+                card_id=existing.card_id,
+                content=existing.content,
+                deleted=True,
+            )
+        await self._raw_card_insert(
+            ts_ms=new_ts_ms,
+            code=existing.code,
+            card_id=existing.card_id,
+            content=new_content,
+            deleted=False,
+        )
+        return True
+
+    async def delete_card(self, code: str, card_id: str) -> bool:
+        existing = await self.get_card(code, card_id)
+        if existing is None:
+            return False
+        ts_ms = int(existing.ts.timestamp() * 1000)
+        await self._raw_card_insert(
+            ts_ms=ts_ms,
+            code=existing.code,
+            card_id=existing.card_id,
+            content=existing.content,
+            deleted=True,
+        )
+        return True
+
+    async def _raw_card_insert(
+        self,
+        *,
+        ts_ms: int,
+        code: str,
+        card_id: str,
+        content: str,
+        deleted: bool,
+    ) -> None:
+        sql = (
+            "INSERT INTO note_cards "
+            "(ts, code, card_id, content, deleted) "
+            f"VALUES ({ts_ms}, {_q(code)}, {_q(card_id)}, "
+            f"{_q(content)}, {'true' if deleted else 'false'})"
+        )
+        await self._db.execute(sql)
 
     # ---------- internal ----------
 

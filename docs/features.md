@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.8 | 2026-05-07 | - | NOTE-001: 手插带时间戳的卡片改为独立持久化（新表 `note_cards`，与 `trade_notes` 解耦）；带 4 个新 endpoint（GET/POST/PATCH/DELETE `/api/notes/{code}/cards`），按自己的 ts 在 篇 view 与 买入/卖出 交错排序。点卡片可直接编辑/删除（modal 重用）。每个 cmt 现在也是独立 segment（之前同一时段多个 cmt 会合并丢数据）。 |
 | 0.16.7 | 2026-05-07 | - | NOTE-001: 篇 view 的 买入/卖出 卡片渲染自身的 `content`（之前只画 label+meta，content 被藏在单事件编辑器里）。卡片改成 column flex：header 行（label+meta）+ 可选 body（markdown 只读）。 |
 | 0.16.6 | 2026-05-07 | - | NOTE-001: 左栏股票头部加 ✎ 按钮——纠正输错的股票代码（`PATCH /api/notes/stocks/{code} {new_code}`）。把当前股票的所有 live 事件迁到新代码，旧代码下软删；新代码若已有事件则按 ts 合并。 |
 | 0.16.5 | 2026-05-07 | - | NOTE-001: 批量下单（/api/trading/buy-batch-by-amount）后自动写入 trade_notes（拉 broker.get_orders 的 FILLED 腿，按 broker_<order_id> 幂等）；同时单笔 hook 改用 upsert_broker_event_by_order_id，修掉单笔 hook + ⤓ 回补的重复计数 bug。 |
@@ -1036,6 +1037,17 @@ CREATE TABLE trade_notes (
     PRIMARY KEY (code, event_id)
 )
 PARTITION ON COLUMNS (code) ()
+
+-- 篇 view 手插的带时间戳卡片：和 trade_notes 解耦的独立 schema。
+-- 卡片不是事件——既不出现在中栏「事件」list，也不参与买卖统计。
+CREATE TABLE note_cards (
+    ts       TIMESTAMP TIME INDEX,    -- 用户选的时间，决定篇 view 排序
+    code     STRING,
+    card_id  STRING,                  -- uuid
+    content  STRING,                  -- markdown
+    deleted  BOOLEAN,
+    PRIMARY KEY (code, card_id)
+)
 ```
 
 **HTTP 接口**:
@@ -1049,6 +1061,10 @@ GET    /api/notes/{code}/events/{event_id}    # 右栏：单条事件正文
 POST   /api/notes/{code}/events               # 创建手动事件
 PATCH  /api/notes/{code}/events/{event_id}    # 编辑（content/title/event_type/ts）
 DELETE /api/notes/{code}/events/{event_id}    # 软删除
+GET    /api/notes/{code}/cards                # 篇 view 手插的带时间卡片
+POST   /api/notes/{code}/cards                # 创建卡片（content + ts_ms）
+PATCH  /api/notes/{code}/cards/{card_id}      # 编辑卡片
+DELETE /api/notes/{code}/cards/{card_id}      # 软删除卡片
 ```
 
 **自动 hook 位置**:

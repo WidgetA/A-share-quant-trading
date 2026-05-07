@@ -3043,6 +3043,29 @@ footer {
     line-height: 1.5;
 }
 
+.tn-doc-manual-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0.45rem 0;
+    padding: 0.4rem 0.65rem;
+    border: 1px solid #d7dde6;
+    border-radius: 6px;
+    background: #f7f9fc;
+    color: #344054;
+    cursor: pointer;
+    user-select: none;
+    white-space: normal;
+}
+
+.tn-doc-manual-card:hover,
+.tn-doc-manual-card:focus {
+    border-color: #9fb7d6;
+    box-shadow: 0 0 0 2px rgba(74, 143, 231, 0.14);
+}
+
 /* Edit form */
 .tn-edit-form label,
 .tn-modal label {
