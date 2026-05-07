@@ -177,11 +177,15 @@ class TradeNoteStore:
     # ---------- right pane: single event ----------
 
     async def get_event(self, code: str, event_id: str) -> NoteEvent | None:
+        # ORDER BY ts DESC LIMIT 1 because update_event with a changed ts
+        # leaves both rows in place (the old one soft-deleted) and we always
+        # want the latest. fetchrow without ordering would be arbitrary.
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, author, deleted "
             f"FROM trade_notes "
-            f"WHERE code = {_q(code)} AND event_id = {_q(event_id)}"
+            f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
+            f"ORDER BY ts DESC LIMIT 1"
         )
         row = await self._db.fetchrow(sql)
         if row is None:
@@ -299,19 +303,40 @@ class TradeNoteStore:
         event_id: str,
         title: str | None = None,
         content: str | None = None,
+        ts_ms: int | None = None,
     ) -> bool:
-        """Update title and/or content. Other fields are immutable."""
+        """Update title, content, and/or ts. Other fields are immutable.
+
+        Re-INSERT with same (code, event_id, ts) overwrites via mito dedup.
+        Changing ts creates a row at the new ts; we soft-delete the row at
+        the old ts to prevent both showing up in list_events (which scans
+        all rows for the code, no GROUP BY).
+        """
         existing = await self.get_event(code, event_id)
         if existing is None:
             return False
         new_title = title if title is not None else existing.title
         new_content = content if content is not None else existing.content
-        # GreptimeDB's mito engine deduplicates by PRIMARY KEY (code, event_id)
-        # via "last write wins on same ts" — but ts is part of dedup ordering,
-        # so re-INSERT with the SAME ts to overwrite cleanly.
-        ts_ms = int(existing.ts.timestamp() * 1000)
+        old_ts_ms = int(existing.ts.timestamp() * 1000)
+        new_ts_ms = ts_ms if ts_ms is not None else old_ts_ms
+        if new_ts_ms != old_ts_ms:
+            # Soft-delete the old-ts row first.
+            await self._raw_insert(
+                ts_ms=old_ts_ms,
+                code=existing.code,
+                event_id=existing.event_id,
+                event_type=existing.event_type,
+                source=existing.source,
+                title=existing.title,
+                price=existing.price,
+                qty=existing.qty,
+                side=existing.side,
+                content=existing.content,
+                author=existing.author,
+                deleted=True,
+            )
         await self._raw_insert(
-            ts_ms=ts_ms,
+            ts_ms=new_ts_ms,
             code=existing.code,
             event_id=existing.event_id,
             event_type=existing.event_type,

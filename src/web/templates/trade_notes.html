@@ -266,12 +266,23 @@
         dom.content.innerHTML = '<div class="tn-empty">← 选一条事件</div>';
     }
 
+    function isoToLocalDatetimeValue(iso) {
+        // Convert backend ISO (UTC) to a 'YYYY-MM-DDTHH:mm' string in local TZ
+        // for a datetime-local input.
+        const d = new Date(iso);
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
     async function enterEditMode() {
         if (!state.currentCode || !state.currentEventId) return;
         const ev = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`);
         state.editing = true;
         dom.content.innerHTML = `
             <div class="tn-edit-form">
+                <label>时间
+                    <input type="datetime-local" id="tnEditTs" step="60" value="${isoToLocalDatetimeValue(ev.ts)}" />
+                </label>
                 <label>标题
                     <input type="text" id="tnEditTitle" value="${escapeHtml(ev.title || '')}" />
                 </label>
@@ -291,13 +302,20 @@
     async function saveEdit() {
         const title = document.getElementById('tnEditTitle').value;
         const content = document.getElementById('tnEditContent').value;
+        const tsRaw = document.getElementById('tnEditTs').value;
+        const tsMs = tsRaw ? new Date(tsRaw).getTime() : null;
+        if (tsRaw && Number.isNaN(tsMs)) {
+            alert('时间格式错误'); return;
+        }
         const code = state.currentCode;
         const eventId = state.currentEventId;
+        const body = { title, content };
+        if (tsMs !== null) body.ts_ms = tsMs;
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(eventId)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title, content }),
+                body: JSON.stringify(body),
             });
             // Refresh middle pane (selectStock resets currentEventId to null,
             // so capture eventId above and re-pass it explicitly).
