@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     code        STRING,
     event_id    STRING,
     event_type  STRING,
-    source      STRING,
+    event_source STRING,
     title       STRING,
     price       FLOAT64,
     qty         INT64,
@@ -90,7 +90,7 @@ def _row_to_event(row) -> NoteEvent:
         code=row["code"],
         event_id=row["event_id"],
         event_type=row["event_type"] or "",
-        source=row["source"] or "",
+        source=row["event_source"] or "",
         title=row["title"] or "",
         price=row["price"],
         qty=row["qty"],
@@ -151,7 +151,7 @@ class TradeNoteStore:
 
     async def list_events(self, code: str) -> list[NoteEvent]:
         sql = (
-            f"SELECT ts, code, event_id, event_type, source, title, "
+            f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, author, deleted "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND {_NOT_DELETED} "
@@ -164,7 +164,7 @@ class TradeNoteStore:
 
     async def get_event(self, code: str, event_id: str) -> NoteEvent | None:
         sql = (
-            f"SELECT ts, code, event_id, event_type, source, title, "
+            f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, author, deleted "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)}"
@@ -341,7 +341,7 @@ class TradeNoteStore:
         side_lit = _q(side) if side else "NULL"
         sql = (
             "INSERT INTO trade_notes "
-            "(ts, code, event_id, event_type, source, title, "
+            "(ts, code, event_id, event_type, event_source, title, "
             " price, qty, side, content, author, deleted) "
             f"VALUES ({ts_ms}, {_q(code)}, {_q(event_id)}, {_q(event_type)}, "
             f"{_q(source)}, {_q(title)}, {price_lit}, {qty_lit}, {side_lit}, "
