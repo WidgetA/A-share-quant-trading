@@ -38,16 +38,11 @@ CREATE TABLE IF NOT EXISTS trade_notes (
 """
 
 
-# Default event types surfaced as a dropdown in the UI. Free-form strings are
-# also accepted — this list is just a hint.
+# Event types surfaced in the manual-add dropdown. Other thoughts (思考/复盘/
+# AI总结) belong in the 正文 of an existing event, not as separate types.
 DEFAULT_EVENT_TYPES = [
     "买入",
     "卖出",
-    "盘中",
-    "复盘",
-    "思考",
-    "AI总结",
-    "其他",
 ]
 
 

@@ -15,6 +15,7 @@
             <header class="tn-pane-header">
                 <span>股票</span>
                 <span class="tn-actions">
+                    <button id="tnAddStock" class="tn-icon-btn" title="新增股票（手工补一笔买入/卖出）">+</button>
                     <button id="tnBackfillToday" class="tn-icon-btn" title="回补今日成交订单到笔记（幂等）">⤓</button>
                     <button id="tnRefreshStocks" class="tn-icon-btn" title="刷新">↻</button>
                 </span>
@@ -98,6 +99,7 @@
         deleteBtn: document.getElementById('tnDeleteBtn'),
         refreshStocksBtn: document.getElementById('tnRefreshStocks'),
         backfillTodayBtn: document.getElementById('tnBackfillToday'),
+        addStockBtn: document.getElementById('tnAddStock'),
         modal: document.getElementById('tnNewModal'),
         newType: document.getElementById('tnNewType'),
         newTitle: document.getElementById('tnNewTitle'),
@@ -314,11 +316,28 @@
 
     function openNewEventModal() {
         if (!state.currentCode) return;
-        dom.newType.value = '思考';
+        dom.newType.value = '买入';
         dom.newTitle.value = '';
         dom.newContent.value = '';
         dom.modal.hidden = false;
         dom.newContent.focus();
+    }
+
+    function openAddStockFlow() {
+        const raw = prompt('输入股票代码（例 002008 或 002008.SZ）');
+        if (!raw) return;
+        const code = raw.trim().split('.')[0].toUpperCase();
+        if (!/^\d{6}$/.test(code)) {
+            alert('代码格式应为 6 位数字（如 002008）');
+            return;
+        }
+        state.currentCode = code;
+        state.currentEventId = null;
+        dom.eventsTitle.textContent = `事件 · ${code}`;
+        dom.addEventBtn.disabled = false;
+        dom.events.innerHTML = '<div class="tn-empty">未保存事件前不在列表中</div>';
+        clearContent();
+        openNewEventModal();
     }
 
     async function saveNewEvent() {
@@ -359,6 +378,7 @@
     // Wire up
     dom.refreshStocksBtn.addEventListener('click', loadStocks);
     dom.backfillTodayBtn.addEventListener('click', backfillToday);
+    dom.addStockBtn.addEventListener('click', openAddStockFlow);
     dom.addEventBtn.addEventListener('click', openNewEventModal);
     dom.editBtn.addEventListener('click', enterEditMode);
     dom.deleteBtn.addEventListener('click', deleteCurrentEvent);
