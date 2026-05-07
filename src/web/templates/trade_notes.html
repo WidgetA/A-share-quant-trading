@@ -44,6 +44,7 @@
             <header class="tn-pane-header">
                 <span id="tnContentTitle">正文</span>
                 <span class="tn-actions">
+                    <button id="tnAddCardBtn" class="tn-icon-btn" title="插入带时间的卡片（不新建事件）" disabled>+卡片</button>
                     <button id="tnEditBtn" class="tn-icon-btn" title="编辑" disabled>✎</button>
                     <button id="tnDeleteBtn" class="tn-icon-btn tn-danger" title="删除" disabled>🗑</button>
                 </span>
@@ -52,6 +53,23 @@
                 <div class="tn-empty">← 选一条事件</div>
             </div>
         </section>
+    </div>
+
+    <!-- Insert timestamped card modal (inline marker in 篇, NOT a new event) -->
+    <div class="tn-modal-backdrop" id="tnCardModal" hidden>
+        <div class="tn-modal">
+            <h3>插入带时间的卡片</h3>
+            <label>时间
+                <input id="tnCardTs" type="datetime-local" step="60" />
+            </label>
+            <label>内容
+                <textarea id="tnCardContent" rows="8" placeholder="想法 / 观察 / 提醒…"></textarea>
+            </label>
+            <div class="tn-modal-actions">
+                <button id="tnCardCancel">取消</button>
+                <button id="tnCardSave" class="primary">插入</button>
+            </div>
+        </div>
     </div>
 
     <!-- New event modal -->
@@ -96,6 +114,8 @@
         documentSaveTimer: null,
         documentSaving: false,
         documentDirtyWhileSaving: false,
+        // Cursor position captured when 插入卡片 modal opens (modal steals focus).
+        cardInsertRange: null,
     };
 
     const dom = {
@@ -118,6 +138,12 @@
         newContent: document.getElementById('tnNewContent'),
         newCancel: document.getElementById('tnNewCancel'),
         newSave: document.getElementById('tnNewSave'),
+        addCardBtn: document.getElementById('tnAddCardBtn'),
+        cardModal: document.getElementById('tnCardModal'),
+        cardTs: document.getElementById('tnCardTs'),
+        cardContent: document.getElementById('tnCardContent'),
+        cardCancel: document.getElementById('tnCardCancel'),
+        cardSave: document.getElementById('tnCardSave'),
     };
 
     function escapeHtml(s) {
@@ -191,8 +217,34 @@
             .replace(/\n+$/g, '');
     }
 
-    function setPlainText(el, text) {
-        el.textContent = text || '';
+    // Render segment text with inline-styled 【YYYY-MM-DD HH:mm】 markers.
+    // The marker spans are presentational only — innerText still extracts the
+    // raw bracketed text on save, so the persisted cmt content is unchanged.
+    const TS_MARKER_RE = /【\d{4}-\d{2}-\d{2} \d{2}:\d{2}】/g;
+    function renderSegmentText(el, text) {
+        el.textContent = '';
+        if (!text) return;
+        const lines = text.split('\n');
+        lines.forEach((line, idx) => {
+            if (idx > 0) el.appendChild(document.createElement('br'));
+            if (!line) return;
+            TS_MARKER_RE.lastIndex = 0;
+            let lastEnd = 0;
+            let m;
+            while ((m = TS_MARKER_RE.exec(line)) !== null) {
+                if (m.index > lastEnd) {
+                    el.appendChild(document.createTextNode(line.slice(lastEnd, m.index)));
+                }
+                const span = document.createElement('span');
+                span.className = 'tn-doc-marker-ts';
+                span.textContent = m[0];
+                el.appendChild(span);
+                lastEnd = m.index + m[0].length;
+            }
+            if (lastEnd < line.length) {
+                el.appendChild(document.createTextNode(line.slice(lastEnd)));
+            }
+        });
     }
 
     function adjacentTradeTimes(nodes, index) {
@@ -280,6 +332,7 @@
         dom.content.innerHTML = '<div class="tn-empty">加载中…</div>';
         dom.editBtn.disabled = true;
         dom.deleteBtn.disabled = true;
+        dom.addCardBtn.disabled = false;
 
         try {
             const data = await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events`);
@@ -349,7 +402,7 @@
                     segment.dataset.extraCmtIds = JSON.stringify(items.slice(1).map(item => item.event_id));
                 }
             }
-            setPlainText(segment, items.map(item => item.content || '').filter(Boolean).join('\n\n'));
+            renderSegmentText(segment, items.map(item => item.content || '').filter(Boolean).join('\n\n'));
             editor.appendChild(segment);
         };
 
@@ -513,6 +566,7 @@
             renderContent(ev);
             dom.editBtn.disabled = false;
             dom.deleteBtn.disabled = false;
+            dom.addCardBtn.disabled = true;
         } catch (e) {
             dom.content.innerHTML = `<div class="tn-empty tn-error">加载失败: ${escapeHtml(e.message)}</div>`;
         }
@@ -538,6 +592,7 @@
         dom.contentTitle.textContent = '正文';
         dom.editBtn.disabled = true;
         dom.deleteBtn.disabled = true;
+        dom.addCardBtn.disabled = true;
         dom.content.innerHTML = '<div class="tn-empty">← 选一条事件</div>';
     }
 
@@ -682,6 +737,105 @@
         }
     }
 
+    function formatTsForMarker(ts) {
+        const pad = n => String(n).padStart(2, '0');
+        return `${ts.getFullYear()}-${pad(ts.getMonth() + 1)}-${pad(ts.getDate())} ${pad(ts.getHours())}:${pad(ts.getMinutes())}`;
+    }
+
+    // Capture cursor on mousedown — by the click handler the editor has
+    // already lost focus and Chrome may have cleared the selection.
+    function captureCardInsertRange() {
+        const editor = document.getElementById('tnDocumentEditor');
+        const sel = window.getSelection();
+        if (editor && sel.rangeCount > 0 && editor.contains(sel.getRangeAt(0).startContainer)) {
+            state.cardInsertRange = sel.getRangeAt(0).cloneRange();
+        } else {
+            state.cardInsertRange = null;
+        }
+    }
+
+    function openCardModal() {
+        if (!state.currentCode || state.currentEventId) return;
+        dom.cardTs.value = nowLocalDatetimeValue();
+        dom.cardContent.value = '';
+        dom.cardModal.hidden = false;
+        setTimeout(() => dom.cardContent.focus(), 0);
+    }
+
+    function closeCardModal() {
+        dom.cardModal.hidden = true;
+        state.cardInsertRange = null;
+    }
+
+    function saveCard() {
+        const editor = document.getElementById('tnDocumentEditor');
+        if (!editor) { closeCardModal(); return; }
+        const tsRaw = dom.cardTs.value;
+        if (!tsRaw) { alert('请选择时间'); return; }
+        const ts = new Date(tsRaw);
+        if (Number.isNaN(ts.getTime())) { alert('时间格式错误'); return; }
+        const tsStr = formatTsForMarker(ts);
+        const content = dom.cardContent.value || '';
+
+        // Locate target segment + insertion range. Prefer the cursor position
+        // captured when the modal opened; otherwise append at end of last segment.
+        let targetSegment = null;
+        let range = null;
+        if (state.cardInsertRange && editor.contains(state.cardInsertRange.startContainer)) {
+            let node = state.cardInsertRange.startContainer;
+            while (node && node !== editor) {
+                if (node.classList && node.classList.contains('tn-doc-segment')) {
+                    targetSegment = node;
+                    range = state.cardInsertRange.cloneRange();
+                    break;
+                }
+                node = node.parentNode;
+            }
+        }
+        if (!targetSegment) {
+            const segments = editor.querySelectorAll(':scope > .tn-doc-segment');
+            targetSegment = segments[segments.length - 1] || segments[0];
+            if (!targetSegment) { closeCardModal(); return; }
+            range = document.createRange();
+            range.selectNodeContents(targetSegment);
+            range.collapse(false);
+        }
+
+        const fragment = document.createDocumentFragment();
+        const segHasContent = (targetSegment.innerText || '').trim() !== '';
+        if (segHasContent) {
+            // Blank line separator so the card stands on its own paragraph.
+            fragment.appendChild(document.createElement('br'));
+            fragment.appendChild(document.createElement('br'));
+        }
+        const header = document.createElement('span');
+        header.className = 'tn-doc-marker-ts';
+        header.textContent = `【${tsStr}】`;
+        fragment.appendChild(header);
+        const lines = content.split('\n');
+        if (lines.length === 1) {
+            if (lines[0]) fragment.appendChild(document.createTextNode(' ' + lines[0]));
+        } else {
+            lines.forEach(line => {
+                fragment.appendChild(document.createElement('br'));
+                if (line) fragment.appendChild(document.createTextNode(line));
+            });
+        }
+        // Trailing break so further typing starts on a fresh line.
+        fragment.appendChild(document.createElement('br'));
+
+        range.deleteContents();
+        range.insertNode(fragment);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        targetSegment.focus();
+
+        closeCardModal();
+        scheduleDocumentSave();
+    }
+
     async function backfillToday() {
         dom.backfillTodayBtn.disabled = true;
         try {
@@ -706,6 +860,11 @@
     dom.newCancel.addEventListener('click', () => { dom.modal.hidden = true; });
     dom.newSave.addEventListener('click', saveNewEvent);
     dom.modal.addEventListener('click', (e) => { if (e.target === dom.modal) dom.modal.hidden = true; });
+    dom.addCardBtn.addEventListener('mousedown', captureCardInsertRange);
+    dom.addCardBtn.addEventListener('click', openCardModal);
+    dom.cardCancel.addEventListener('click', closeCardModal);
+    dom.cardSave.addEventListener('click', saveCard);
+    dom.cardModal.addEventListener('click', (e) => { if (e.target === dom.cardModal) closeCardModal(); });
 
     loadStocks();
 })();

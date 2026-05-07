@@ -3004,6 +3004,19 @@ footer {
     font-size: 0.78rem;
 }
 
+.tn-doc-marker-ts {
+    display: inline-block;
+    margin-right: 0.25rem;
+    padding: 0.02rem 0.4rem;
+    border: 1px solid #d7dde6;
+    border-radius: 4px;
+    background: #f3f6fa;
+    color: #5b6a82;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+
 /* Edit form */
 .tn-edit-form label,
 .tn-modal label {
