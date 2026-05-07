@@ -64,7 +64,10 @@ async def _append_trade_note_event(
         bare_code = code.split(".")[0] if "." in code else code
         store = TradeNoteStore(storage)
         await store.append_broker_event(
-            code=bare_code, side=side, qty=qty, price=price,
+            code=bare_code,
+            side=side,
+            qty=qty,
+            price=price,
         )
     except Exception as e:
         logger.warning(f"trade-notes hook failed for {code}: {e}", exc_info=True)
@@ -3256,7 +3259,10 @@ def create_trading_router() -> APIRouter:
 
         # NOTE-001: append broker event to trade_notes (best-effort, never block return)
         await _append_trade_note_event(
-            request, code=stock_code, side="buy", qty=quantity,
+            request,
+            code=stock_code,
+            side="buy",
+            qty=quantity,
             price=float(price) if price else None,
         )
 
@@ -3343,7 +3349,11 @@ def create_trading_router() -> APIRouter:
 
         # NOTE-001: append broker event to trade_notes (best-effort)
         await _append_trade_note_event(
-            request, code=stock_code, side="sell", qty=quantity, price=None,
+            request,
+            code=stock_code,
+            side="sell",
+            qty=quantity,
+            price=None,
         )
 
         return {
