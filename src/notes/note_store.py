@@ -169,7 +169,7 @@ class TradeNoteStore:
             f"       price, qty, side, content, author, deleted "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND {_NOT_DELETED} "
-            f"ORDER BY ts DESC"
+            f"ORDER BY ts ASC"
         )
         rows = await self._db.fetch(sql)
         return [_row_to_event(r) for r in rows]
