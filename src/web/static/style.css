@@ -2849,19 +2849,19 @@ footer {
     font-weight: 600;
 }
 
-.tn-source-broker {
+.tn-tag-buy {
     background: #e6f4ea;
     color: #1d6f3a;
 }
 
-.tn-source-user {
-    background: #fff3e0;
-    color: #b06a13;
+.tn-tag-sell {
+    background: #fff7d6;
+    color: #8a6a0c;
 }
 
-.tn-source-ai {
-    background: #e8eafc;
-    color: #4747a8;
+.tn-tag-other {
+    background: #ececec;
+    color: #555;
 }
 
 .tn-event-dot {

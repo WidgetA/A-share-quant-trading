@@ -345,13 +345,14 @@
                 return;
             }
             dom.events.innerHTML = trades.map(ev => {
-                const sourceCls = ev.source === 'broker' ? 'broker' : (ev.source === 'ai' ? 'ai' : 'user');
+                const sideCls = ev.event_type === '买入' ? 'buy'
+                    : (ev.event_type === '卖出' ? 'sell' : 'other');
                 const titleText = ev.title || ev.event_type;
                 const dot = ev.has_content ? '●' : '○';
                 return `
                     <div class="tn-event-row" data-id="${escapeHtml(ev.event_id)}">
                         <div class="tn-event-line1">
-                            <span class="tn-event-type tn-source-${sourceCls}">${escapeHtml(ev.event_type)}</span>
+                            <span class="tn-event-type tn-tag-${sideCls}">${escapeHtml(ev.event_type)}</span>
                             <span class="tn-event-dot">${dot}</span>
                         </div>
                         <div class="tn-event-title">${escapeHtml(titleText)}</div>
