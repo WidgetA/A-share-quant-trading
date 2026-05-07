@@ -279,17 +279,18 @@
     async function saveEdit() {
         const title = document.getElementById('tnEditTitle').value;
         const content = document.getElementById('tnEditContent').value;
+        const code = state.currentCode;
+        const eventId = state.currentEventId;
         try {
-            await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`, {
+            await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(eventId)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ title, content }),
             });
-            await selectEvent(state.currentEventId);
-            // Refresh middle pane to update has_content dot
-            const code = state.currentCode;
+            // Refresh middle pane (selectStock resets currentEventId to null,
+            // so capture eventId above and re-pass it explicitly).
             await selectStock(code);
-            await selectEvent(state.currentEventId);
+            await selectEvent(eventId);
         } catch (e) {
             alert('保存失败: ' + e.message);
         }
