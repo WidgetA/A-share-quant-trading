@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.7 | 2026-05-07 | - | NOTE-001: 篇 view 的 买入/卖出 卡片渲染自身的 `content`（之前只画 label+meta，content 被藏在单事件编辑器里）。卡片改成 column flex：header 行（label+meta）+ 可选 body（markdown 只读）。 |
 | 0.16.6 | 2026-05-07 | - | NOTE-001: 左栏股票头部加 ✎ 按钮——纠正输错的股票代码（`PATCH /api/notes/stocks/{code} {new_code}`）。把当前股票的所有 live 事件迁到新代码，旧代码下软删；新代码若已有事件则按 ts 合并。 |
 | 0.16.5 | 2026-05-07 | - | NOTE-001: 批量下单（/api/trading/buy-batch-by-amount）后自动写入 trade_notes（拉 broker.get_orders 的 FILLED 腿，按 broker_<order_id> 幂等）；同时单笔 hook 改用 upsert_broker_event_by_order_id，修掉单笔 hook + ⤓ 回补的重复计数 bug。 |
 | 0.16.4 | 2026-05-07 | - | NOTE-001: 事件 tag 颜色改按 event_type 上色——买入=绿，卖出=黄（之前按 source broker/user/ai 分色，意义不直观）。来源仍可在右栏「来源:」行查到。 |

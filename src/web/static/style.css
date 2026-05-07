@@ -2962,8 +2962,8 @@ footer {
 
 .tn-doc-trade-card {
     display: flex;
-    align-items: center;
-    gap: 0.65rem;
+    flex-direction: column;
+    gap: 0.3rem;
     width: fit-content;
     max-width: 100%;
     margin: 0.45rem 0;
@@ -2975,6 +2975,32 @@ footer {
     cursor: pointer;
     user-select: none;
     white-space: normal;
+}
+
+.tn-doc-trade-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.tn-doc-trade-card-body {
+    color: inherit;
+    opacity: 0.95;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    user-select: text;
+    cursor: text;
+}
+
+.tn-doc-trade-card-body p {
+    margin: 0.15rem 0;
+}
+
+.tn-doc-trade-card-body h2,
+.tn-doc-trade-card-body h3,
+.tn-doc-trade-card-body h4 {
+    margin: 0.3rem 0 0.15rem;
+    font-size: 0.95rem;
 }
 
 .tn-doc-trade-card.sell {

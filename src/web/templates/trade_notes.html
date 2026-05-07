@@ -419,14 +419,28 @@
             card.dataset.tsMs = String(eventTsMs(trade));
             card.tabIndex = 0;
 
+            const header = document.createElement('div');
+            header.className = 'tn-doc-trade-card-header';
             const label = document.createElement('span');
             label.className = 'tn-doc-trade-label';
             label.textContent = tradeTypeLabel(trade);
             const meta = document.createElement('span');
             meta.className = 'tn-doc-trade-meta';
             meta.textContent = tradeMetaText(trade);
-            card.appendChild(label);
-            card.appendChild(meta);
+            header.appendChild(label);
+            header.appendChild(meta);
+            card.appendChild(header);
+
+            // If this trade has its own content (notes typed in the per-event
+            // editor), render it inline so 篇 view doesn't hide it. Read-only —
+            // editing still goes through the per-event editor on click.
+            if (trade.content) {
+                const body = document.createElement('div');
+                body.className = 'tn-doc-trade-card-body';
+                body.innerHTML = renderMarkdown(trade.content);
+                card.appendChild(body);
+            }
+
             card.addEventListener('click', () => selectEvent(card.dataset.eventId));
             card.addEventListener('keydown', e => {
                 if (e.key === 'Enter' || e.key === ' ') {
