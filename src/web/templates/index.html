@@ -670,8 +670,13 @@ function renderHoldings(holdings, pendingSells) {
                 '">撤单</button>' +
                 '<span class="order-status">' + statusLabel + ' ' + pending.qty + '股</span>';
         } else {
+            const halfQty = Math.floor(qty / 2 / 100) * 100;
             actionCell = '<button class="btn-sm btn-sell" data-code="' + esc(h.code) +
                 '" data-name="' + esc(h.name || '') + '" data-qty="' + qty + '">卖出</button>';
+            if (halfQty >= 100) {
+                actionCell += ' <button class="btn-sm btn-sell-half" data-code="' + esc(h.code) +
+                    '" data-name="' + esc(h.name || '') + '" data-qty="' + halfQty + '">卖一半</button>';
+            }
         }
         html += '<tr>' +
             '<td class="code">' + esc(h.code) + '</td>' +
@@ -685,7 +690,12 @@ function renderHoldings(holdings, pendingSells) {
 
     el.querySelectorAll('.btn-sell').forEach(function(btn) {
         btn.addEventListener('click', function() {
-            doSell(btn.dataset.code, btn.dataset.name, parseInt(btn.dataset.qty) || 0, btn);
+            doSell(btn.dataset.code, btn.dataset.name, parseInt(btn.dataset.qty) || 0, btn, '卖出');
+        });
+    });
+    el.querySelectorAll('.btn-sell-half').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            doSell(btn.dataset.code, btn.dataset.name, parseInt(btn.dataset.qty) || 0, btn, '卖一半');
         });
     });
     el.querySelectorAll('.btn-cancel').forEach(function(btn) {
@@ -695,7 +705,8 @@ function renderHoldings(holdings, pendingSells) {
     });
 }
 
-async function doSell(code, name, quantity, btn) {
+async function doSell(code, name, quantity, btn, label) {
+    label = label || '卖出';
     if (!confirm('确认市价卖出 ' + code + ' ' + name + ' ' + quantity + '股?')) return;
 
     btn.disabled = true;
@@ -712,7 +723,7 @@ async function doSell(code, name, quantity, btn) {
             try { detail = JSON.parse(errText).detail || errText; } catch(_) { detail = errText; }
             console.error('[doSell] server error:', resp.status, detail);
             showToast('卖出失败(' + resp.status + '): ' + detail, 'error');
-            btn.disabled = false; btn.textContent = '卖出';
+            btn.disabled = false; btn.textContent = label;
             return;
         }
         const data = await resp.json();
@@ -724,12 +735,12 @@ async function doSell(code, name, quantity, btn) {
         } else {
             console.error('[doSell] not success:', data);
             showToast('卖出失败: ' + (data.detail || '未知错误'), 'error');
-            btn.disabled = false; btn.textContent = '卖出';
+            btn.disabled = false; btn.textContent = label;
         }
     } catch (e) {
         console.error('[doSell] fetch error:', e);
         showToast('请求失败: ' + e.message, 'error');
-        btn.disabled = false; btn.textContent = '卖出';
+        btn.disabled = false; btn.textContent = label;
     }
 }
 
