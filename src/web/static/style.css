@@ -2766,6 +2766,20 @@ footer {
     color: #c43;
 }
 
+.tn-filter-bar {
+    padding: 0.4rem 0.8rem;
+    border-bottom: 1px solid #eee;
+    background: #fafbfc;
+}
+
+.tn-filter-bar input[type="date"] {
+    width: 100%;
+    padding: 0.25rem 0.4rem;
+    font-size: 0.8rem;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+}
+
 /* Stocks list (left) */
 .tn-stock-row {
     padding: 0.55rem 0.8rem;

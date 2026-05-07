@@ -11,10 +11,11 @@
 
 from __future__ import annotations
 
+import calendar
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +119,29 @@ class TradeNoteStore:
 
     # ---------- left pane: list of stocks with any event ----------
 
-    async def list_stocks(self) -> list[dict]:
-        """All stocks that have at least one event, ordered by most recent activity."""
+    async def list_stocks(self, beijing_date: str | None = None) -> list[dict]:
+        """All stocks that have at least one event, ordered by most recent activity.
+
+        If `beijing_date` (YYYY-MM-DD) is provided, only stocks with at least
+        one event during that Beijing day are returned. Times in the table are
+        stored as UTC epoch ms, so the filter window is converted to UTC ms
+        via calendar.timegm() per CLAUDE.md asyncpg/GreptimeDB rules.
+        """
+        where = _NOT_DELETED
+        if beijing_date:
+            try:
+                y, m, d = (int(p) for p in beijing_date.split("-"))
+            except (ValueError, AttributeError) as e:
+                raise ValueError(f"beijing_date must be YYYY-MM-DD, got {beijing_date!r}") from e
+            # Beijing 00:00 = UTC (date - 8h)
+            start_naive_utc = datetime(y, m, d) - timedelta(hours=8)
+            end_naive_utc = start_naive_utc + timedelta(days=1)
+            start_ms = calendar.timegm(start_naive_utc.timetuple()) * 1000
+            end_ms = calendar.timegm(end_naive_utc.timetuple()) * 1000
+            where = f"{_NOT_DELETED} AND ts >= {start_ms} AND ts < {end_ms}"
         sql = (
             f"SELECT code, MAX(ts) AS last_ts, COUNT(*) AS event_count "
-            f"FROM trade_notes WHERE {_NOT_DELETED} "
+            f"FROM trade_notes WHERE {where} "
             f"GROUP BY code ORDER BY last_ts DESC"
         )
         rows = await self._db.fetch(sql)

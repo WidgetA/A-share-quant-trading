@@ -64,11 +64,14 @@ def create_notes_router() -> APIRouter:
         )
 
     @router.get("/api/notes/stocks")
-    async def list_stocks(request: Request) -> dict:
+    async def list_stocks(request: Request, date: str | None = None) -> dict:
         from src.data.sources.local_concept_mapper import LocalConceptMapper
 
         store = _get_store(request)
-        stocks = await store.list_stocks()
+        try:
+            stocks = await store.list_stocks(beijing_date=date)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         mapper = LocalConceptMapper()
         for s in stocks:
             s["name"] = mapper.get_stock_name(s["code"])

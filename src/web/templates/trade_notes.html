@@ -20,6 +20,9 @@
                     <button id="tnRefreshStocks" class="tn-icon-btn" title="刷新">↻</button>
                 </span>
             </header>
+            <div class="tn-filter-bar">
+                <input id="tnFilterDate" type="date" title="只显示这天有事件的股票（清空=全部）" />
+            </div>
             <div class="tn-pane-body" id="tnStocks">
                 <div class="tn-empty">加载中…</div>
             </div>
@@ -103,6 +106,7 @@
         refreshStocksBtn: document.getElementById('tnRefreshStocks'),
         backfillTodayBtn: document.getElementById('tnBackfillToday'),
         addStockBtn: document.getElementById('tnAddStock'),
+        filterDate: document.getElementById('tnFilterDate'),
         modal: document.getElementById('tnNewModal'),
         newType: document.getElementById('tnNewType'),
         newTs: document.getElementById('tnNewTs'),
@@ -155,9 +159,11 @@
     async function loadStocks() {
         dom.stocks.innerHTML = '<div class="tn-empty">加载中…</div>';
         try {
-            const data = await fetchJSON('/api/notes/stocks');
+            const date = (dom.filterDate.value || '').trim();
+            const url = date ? `/api/notes/stocks?date=${encodeURIComponent(date)}` : '/api/notes/stocks';
+            const data = await fetchJSON(url);
             if (!data.stocks.length) {
-                dom.stocks.innerHTML = '<div class="tn-empty">暂无笔记</div>';
+                dom.stocks.innerHTML = `<div class="tn-empty">${date ? '该日期无事件' : '暂无笔记'}</div>`;
                 return;
             }
             dom.stocks.innerHTML = data.stocks.map(s => `
@@ -400,6 +406,7 @@
     dom.refreshStocksBtn.addEventListener('click', loadStocks);
     dom.backfillTodayBtn.addEventListener('click', backfillToday);
     dom.addStockBtn.addEventListener('click', openAddStockFlow);
+    dom.filterDate.addEventListener('change', loadStocks);
     dom.addEventBtn.addEventListener('click', openNewEventModal);
     dom.editBtn.addEventListener('click', enterEditMode);
     dom.deleteBtn.addEventListener('click', deleteCurrentEvent);
