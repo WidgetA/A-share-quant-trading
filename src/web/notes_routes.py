@@ -4,10 +4,11 @@
 # Three-pane master-detail UI backed by GreptimeDB `trade_notes`:
 #   GET  /trade-notes                              → HTML page (vanilla JS)
 #   GET  /api/notes/stocks                         → left pane (stocks)
+#   PATCH /api/notes/stocks/{code}                 → rename a stock's code
 #   GET  /api/notes/{code}/events                  → middle pane (events list)
 #   GET  /api/notes/{code}/events/{event_id}       → right pane (single event)
 #   POST /api/notes/{code}/events                  → create manual event
-#   PATCH /api/notes/{code}/events/{event_id}      → edit title/content
+#   PATCH /api/notes/{code}/events/{event_id}      → edit title/content/type/ts
 #   DELETE /api/notes/{code}/events/{event_id}     → soft delete
 #
 # Auto-write of broker events happens in routes.py at the place_order success
@@ -42,6 +43,10 @@ class UpdateEventRequest(BaseModel):
     content: str | None = Field(None, max_length=100_000)
     ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
     event_type: str | None = Field(None, min_length=1, max_length=32)
+
+
+class RenameStockRequest(BaseModel):
+    new_code: str = Field(..., pattern=r"^\d{6}$")
 
 
 def _get_store(request: Request) -> TradeNoteStore:
@@ -154,6 +159,18 @@ def create_notes_router() -> APIRouter:
         if not ok:
             raise HTTPException(status_code=404, detail="event not found")
         return {"updated": True}
+
+    @router.patch("/api/notes/stocks/{code}")
+    async def rename_stock(code: str, body: RenameStockRequest, request: Request) -> dict:
+        """Rename a stock's code — moves all live events from {code} to {new_code}.
+
+        Used to correct a typo'd code after the fact; if {new_code} already
+        has events the two are merged.
+        """
+        store = _get_store(request)
+        moved = await store.rename_stock_code(code, body.new_code)
+        logger.info(f"trade-notes rename: {code} -> {body.new_code} ({moved} events moved)")
+        return {"moved": moved, "new_code": body.new_code}
 
     @router.delete("/api/notes/{code}/events/{event_id}")
     async def delete_event(code: str, event_id: str, request: Request) -> dict:

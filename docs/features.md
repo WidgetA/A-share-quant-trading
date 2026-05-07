@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.16.6 | 2026-05-07 | - | NOTE-001: 左栏股票头部加 ✎ 按钮——纠正输错的股票代码（`PATCH /api/notes/stocks/{code} {new_code}`）。把当前股票的所有 live 事件迁到新代码，旧代码下软删；新代码若已有事件则按 ts 合并。 |
 | 0.16.5 | 2026-05-07 | - | NOTE-001: 批量下单（/api/trading/buy-batch-by-amount）后自动写入 trade_notes（拉 broker.get_orders 的 FILLED 腿，按 broker_<order_id> 幂等）；同时单笔 hook 改用 upsert_broker_event_by_order_id，修掉单笔 hook + ⤓ 回补的重复计数 bug。 |
 | 0.16.4 | 2026-05-07 | - | NOTE-001: 事件 tag 颜色改按 event_type 上色——买入=绿，卖出=黄（之前按 source broker/user/ai 分色，意义不直观）。来源仍可在右栏「来源:」行查到。 |
 | 0.16.3 | 2026-05-07 | - | NOTE-001: 编辑表单加「类型」select——可在 买入/卖出 之间切换 event_type；后端 `update_event` 同步翻转 `side` 保持数据一致（PATCH `/api/notes/{code}/events/{event_id}` 接受 `event_type` 字段）。 |
@@ -1041,10 +1042,11 @@ PARTITION ON COLUMNS (code) ()
 ```
 GET    /trade-notes                           # 三栏页面（HTML）
 GET    /api/notes/stocks                      # 左栏：所有有事件的股票，按 last_ts DESC
+PATCH  /api/notes/stocks/{code}               # 改股票代码：所有 live 事件迁到 {new_code}
 GET    /api/notes/{code}/events               # 中栏：股票全部事件，按 ts DESC
 GET    /api/notes/{code}/events/{event_id}    # 右栏：单条事件正文
 POST   /api/notes/{code}/events               # 创建手动事件
-PATCH  /api/notes/{code}/events/{event_id}    # 编辑（content/title）
+PATCH  /api/notes/{code}/events/{event_id}    # 编辑（content/title/event_type/ts）
 DELETE /api/notes/{code}/events/{event_id}    # 软删除
 ```
 

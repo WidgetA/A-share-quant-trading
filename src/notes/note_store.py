@@ -387,6 +387,59 @@ class TradeNoteStore:
         )
         return True
 
+    async def rename_stock_code(self, old_code: str, new_code: str) -> int:
+        """Move all LIVE events from old_code to new_code. Returns count moved.
+
+        For each event under old_code, INSERT a copy under new_code (same
+        event_id and ts, all other fields preserved), then soft-delete the
+        old row. PRIMARY KEY (code, event_id) means the new (new_code,
+        event_id) is a fresh row — no overwrite of any pre-existing data
+        under new_code.
+
+        If new_code already has events, the result is a merge — events
+        interleave by ts in the events list. That's the desired semantic
+        for "I logged trades under a typo'd code, fix them onto the real
+        code".
+
+        Soft-deleted rows under old_code stay where they are (already dead).
+        """
+        if old_code == new_code:
+            return 0
+        events = await self.list_events(old_code)  # live only
+        moved = 0
+        for ev in events:
+            old_ts_ms = int(ev.ts.timestamp() * 1000)
+            await self._raw_insert(
+                ts_ms=old_ts_ms,
+                code=new_code,
+                event_id=ev.event_id,
+                event_type=ev.event_type,
+                source=ev.source,
+                title=ev.title,
+                price=ev.price,
+                qty=ev.qty,
+                side=ev.side,
+                content=ev.content,
+                author=ev.author,
+                deleted=False,
+            )
+            await self._raw_insert(
+                ts_ms=old_ts_ms,
+                code=old_code,
+                event_id=ev.event_id,
+                event_type=ev.event_type,
+                source=ev.source,
+                title=ev.title,
+                price=ev.price,
+                qty=ev.qty,
+                side=ev.side,
+                content=ev.content,
+                author=ev.author,
+                deleted=True,
+            )
+            moved += 1
+        return moved
+
     async def delete_event(self, code: str, event_id: str) -> bool:
         """Soft delete: re-INSERT same row with deleted=true."""
         existing = await self.get_event(code, event_id)

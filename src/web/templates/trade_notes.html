@@ -16,6 +16,7 @@
                 <span>股票</span>
                 <span class="tn-actions">
                     <button id="tnAddStock" class="tn-icon-btn" title="新增股票（手工补一笔买入/卖出）">+</button>
+                    <button id="tnEditStockCode" class="tn-icon-btn" title="改正当前股票代码（输错纠正）" disabled>✎</button>
                     <button id="tnBackfillToday" class="tn-icon-btn" title="回补今日成交订单到笔记（幂等）">⤓</button>
                     <button id="tnRefreshStocks" class="tn-icon-btn" title="刷新">↻</button>
                 </span>
@@ -130,6 +131,7 @@
         refreshStocksBtn: document.getElementById('tnRefreshStocks'),
         backfillTodayBtn: document.getElementById('tnBackfillToday'),
         addStockBtn: document.getElementById('tnAddStock'),
+        editStockCodeBtn: document.getElementById('tnEditStockCode'),
         filterDate: document.getElementById('tnFilterDate'),
         modal: document.getElementById('tnNewModal'),
         newType: document.getElementById('tnNewType'),
@@ -328,6 +330,7 @@
         });
         dom.eventsTitle.textContent = `事件 · ${code}`;
         dom.addEventBtn.disabled = false;
+        dom.editStockCodeBtn.disabled = false;
         dom.events.innerHTML = '<div class="tn-empty">加载中…</div>';
         dom.content.innerHTML = '<div class="tn-empty">加载中…</div>';
         dom.editBtn.disabled = true;
@@ -704,6 +707,33 @@
         dom.newContent.focus();
     }
 
+    async function openEditStockCodeFlow() {
+        if (!state.currentCode) return;
+        const oldCode = state.currentCode;
+        const raw = prompt(`改正股票代码（当前 ${oldCode}）`, oldCode);
+        if (!raw) return;
+        const newCode = raw.trim().split('.')[0].toUpperCase();
+        if (!/^\d{6}$/.test(newCode)) {
+            alert('代码格式应为 6 位数字（如 002008）');
+            return;
+        }
+        if (newCode === oldCode) return;
+        try {
+            const data = await fetchJSON(`/api/notes/stocks/${encodeURIComponent(oldCode)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ new_code: newCode }),
+            });
+            state.currentCode = newCode;
+            state.currentEventId = null;
+            await loadStocks();
+            await selectStock(newCode);
+            alert(`已迁移 ${data.moved} 条事件到 ${newCode}`);
+        } catch (e) {
+            alert('改正失败: ' + e.message);
+        }
+    }
+
     function openAddStockFlow() {
         const raw = prompt('输入股票代码（例 002008 或 002008.SZ）');
         if (!raw) return;
@@ -868,6 +898,7 @@
     dom.refreshStocksBtn.addEventListener('click', loadStocks);
     dom.backfillTodayBtn.addEventListener('click', backfillToday);
     dom.addStockBtn.addEventListener('click', openAddStockFlow);
+    dom.editStockCodeBtn.addEventListener('click', openEditStockCodeFlow);
     dom.filterDate.addEventListener('change', loadStocks);
     dom.addEventBtn.addEventListener('click', openNewEventModal);
     dom.editBtn.addEventListener('click', enterEditMode);
