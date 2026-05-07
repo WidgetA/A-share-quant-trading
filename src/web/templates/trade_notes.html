@@ -14,7 +14,10 @@
         <section class="tn-pane tn-pane-stocks">
             <header class="tn-pane-header">
                 <span>股票</span>
-                <button id="tnRefreshStocks" class="tn-icon-btn" title="刷新">↻</button>
+                <span class="tn-actions">
+                    <button id="tnBackfillToday" class="tn-icon-btn" title="回补今日成交订单到笔记（幂等）">⤓</button>
+                    <button id="tnRefreshStocks" class="tn-icon-btn" title="刷新">↻</button>
+                </span>
             </header>
             <div class="tn-pane-body" id="tnStocks">
                 <div class="tn-empty">加载中…</div>
@@ -94,6 +97,7 @@
         editBtn: document.getElementById('tnEditBtn'),
         deleteBtn: document.getElementById('tnDeleteBtn'),
         refreshStocksBtn: document.getElementById('tnRefreshStocks'),
+        backfillTodayBtn: document.getElementById('tnBackfillToday'),
         modal: document.getElementById('tnNewModal'),
         newType: document.getElementById('tnNewType'),
         newTitle: document.getElementById('tnNewTitle'),
@@ -335,8 +339,22 @@
         }
     }
 
+    async function backfillToday() {
+        dom.backfillTodayBtn.disabled = true;
+        try {
+            const data = await fetchJSON('/api/notes/backfill-today', { method: 'POST' });
+            alert(`回补完成：新增 ${data.written} 条，跳过 ${data.skipped} 条（已存在）`);
+            loadStocks();
+        } catch (e) {
+            alert('回补失败: ' + e.message);
+        } finally {
+            dom.backfillTodayBtn.disabled = false;
+        }
+    }
+
     // Wire up
     dom.refreshStocksBtn.addEventListener('click', loadStocks);
+    dom.backfillTodayBtn.addEventListener('click', backfillToday);
     dom.addEventBtn.addEventListener('click', openNewEventModal);
     dom.editBtn.addEventListener('click', enterEditMode);
     dom.deleteBtn.addEventListener('click', deleteCurrentEvent);

@@ -206,6 +206,53 @@ class TradeNoteStore:
             ts_ms=_now_ms(),
         )
 
+    async def upsert_broker_event_by_order_id(
+        self,
+        *,
+        order_id: int | str,
+        code: str,
+        side: str,  # 'buy' | 'sell'
+        qty: int,
+        price: float | None,
+        ts_ms: int | None = None,
+    ) -> bool:
+        """Idempotent insert keyed by broker order_id.
+
+        Used by the manual backfill endpoint to import already-filled orders
+        from `broker.get_orders()` into trade_notes without creating dupes if
+        the operator triggers backfill twice. Returns True if newly written,
+        False if a row with this order_id already exists.
+        """
+        event_id = f"broker_{order_id}"
+        check_sql = (
+            f"SELECT 1 FROM trade_notes "
+            f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} LIMIT 1"
+        )
+        existing = await self._db.fetchrow(check_sql)
+        if existing is not None:
+            return False
+        side_lower = side.lower()
+        event_type = "买入" if side_lower == "buy" else "卖出"
+        if price is not None:
+            title = f"{event_type} @{price:.2f} x {qty}"
+        else:
+            title = f"{event_type} 市价 x {qty}"
+        await self._raw_insert(
+            ts_ms=ts_ms if ts_ms is not None else _now_ms(),
+            code=code,
+            event_id=event_id,
+            event_type=event_type,
+            source="broker",
+            title=title,
+            price=price,
+            qty=qty,
+            side=side_lower,
+            content="",
+            author="system",
+            deleted=False,
+        )
+        return True
+
     async def create_event(
         self,
         code: str,

@@ -147,4 +147,55 @@ def create_notes_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="event not found")
         return {"deleted": True}
 
+    @router.post("/api/notes/backfill-today")
+    async def backfill_today(request: Request) -> dict:
+        """Import today's FILLED broker orders into trade_notes.
+
+        Reads `broker.get_orders()` (same source the dashboard uses for the
+        今日订单 panel), keeps rows with status == 'FILLED', and writes one
+        broker event per order. Idempotent — re-running won't dupe because
+        each row uses event_id = broker_<order_id>.
+        """
+        from src.trading.broker_client import BrokerClient
+
+        store = _get_store(request)
+        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
+        if broker is None:
+            raise HTTPException(status_code=503, detail="Broker 未配置")
+        try:
+            orders = await broker.get_orders()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"broker.get_orders 失败: {e}") from e
+
+        written = 0
+        skipped = 0
+        for o in orders:
+            if str(o.get("status", "")).upper() != "FILLED":
+                continue
+            order_id = o.get("order_id")
+            code = o.get("code") or ""
+            side_raw = str(o.get("side", "")).lower()
+            qty = int(o.get("qty") or 0)
+            price = o.get("price")
+            try:
+                price_val = float(price) if price not in (None, 0, "0") else None
+            except (TypeError, ValueError):
+                price_val = None
+            if order_id is None or not code or side_raw not in ("buy", "sell") or qty <= 0:
+                continue
+            bare_code = code.split(".")[0]
+            inserted = await store.upsert_broker_event_by_order_id(
+                order_id=order_id,
+                code=bare_code,
+                side=side_raw,
+                qty=qty,
+                price=price_val,
+            )
+            if inserted:
+                written += 1
+            else:
+                skipped += 1
+        logger.info(f"trade-notes backfill-today: written={written} skipped={skipped}")
+        return {"written": written, "skipped": skipped}
+
     return router
