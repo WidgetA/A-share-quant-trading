@@ -2995,6 +2995,11 @@ footer {
     justify-content: center;
 }
 
+/* `display: flex` above overrides UA `[hidden] { display: none }`. Restore it. */
+.tn-modal-backdrop[hidden] {
+    display: none;
+}
+
 .tn-modal {
     background: #fff;
     padding: 1.4rem 1.6rem;

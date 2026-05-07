@@ -91,7 +91,7 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
 
         await TradeNoteStore(storage).ensure_schema()
     except Exception as e:
-        logger.warning(f"trade_notes schema ensure failed: {e}")
+        logger.exception(f"trade_notes schema ensure failed: {e}")
 
     app.state.pipeline = CachePipeline(
         storage=storage,

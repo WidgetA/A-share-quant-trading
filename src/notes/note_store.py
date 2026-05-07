@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     deleted     BOOLEAN,
     PRIMARY KEY (code, event_id)
 )
-PARTITION ON COLUMNS (code) ()
 """
 
 
