@@ -177,23 +177,22 @@ class TradeNoteStore:
     # ---------- right pane: single event ----------
 
     async def get_event(self, code: str, event_id: str) -> NoteEvent | None:
-        # ORDER BY ts DESC LIMIT 1 because update_event with a changed ts
-        # leaves both rows in place (the old one soft-deleted) and we always
-        # want the latest. fetchrow without ordering would be arbitrary.
+        # Filter deleted in WHERE: an edit that moves ts BACKWARDS leaves the
+        # old row at a higher ts with deleted=true. ORDER BY ts DESC alone
+        # would return that deleted row first. Using the _NOT_DELETED clause
+        # ensures we always get the latest LIVE row.
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, author, deleted "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
+            f"AND {_NOT_DELETED} "
             f"ORDER BY ts DESC LIMIT 1"
         )
         row = await self._db.fetchrow(sql)
         if row is None:
             return None
-        ev = _row_to_event(row)
-        if ev.deleted:
-            return None
-        return ev
+        return _row_to_event(row)
 
     # ---------- writes ----------
 
