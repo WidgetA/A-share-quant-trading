@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+
+{% block title %}交易笔记{% endblock %}
+
+{% block content %}
+<div class="trade-notes-root">
+    <div class="trade-notes-header">
+        <h2>交易笔记</h2>
+        <span class="hint">点股票看一脉相承的全部交易历史与思考。买入/卖出由系统自动记录，思考/复盘可手动追加。</span>
+    </div>
+
+    <div class="trade-notes-grid" id="tnGrid">
+        <!-- Left pane: stocks -->
+        <section class="tn-pane tn-pane-stocks">
+            <header class="tn-pane-header">
+                <span>股票</span>
+                <button id="tnRefreshStocks" class="tn-icon-btn" title="刷新">↻</button>
+            </header>
+            <div class="tn-pane-body" id="tnStocks">
+                <div class="tn-empty">加载中…</div>
+            </div>
+        </section>
+
+        <!-- Middle pane: events -->
+        <section class="tn-pane tn-pane-events">
+            <header class="tn-pane-header">
+                <span id="tnEventsTitle">事件</span>
+                <button id="tnAddEvent" class="tn-icon-btn" title="新增事件" disabled>+</button>
+            </header>
+            <div class="tn-pane-body" id="tnEvents">
+                <div class="tn-empty">← 选一只股票</div>
+            </div>
+        </section>
+
+        <!-- Right pane: content -->
+        <section class="tn-pane tn-pane-content">
+            <header class="tn-pane-header">
+                <span id="tnContentTitle">正文</span>
+                <span class="tn-actions">
+                    <button id="tnEditBtn" class="tn-icon-btn" title="编辑" disabled>✎</button>
+                    <button id="tnDeleteBtn" class="tn-icon-btn tn-danger" title="删除" disabled>🗑</button>
+                </span>
+            </header>
+            <div class="tn-pane-body" id="tnContent">
+                <div class="tn-empty">← 选一条事件</div>
+            </div>
+        </section>
+    </div>
+
+    <!-- New event modal -->
+    <div class="tn-modal-backdrop" id="tnNewModal" hidden>
+        <div class="tn-modal">
+            <h3>新增事件</h3>
+            <label>类型
+                <select id="tnNewType">
+                    {% for t in event_types %}
+                    <option value="{{ t }}">{{ t }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>标题（可选）
+                <input id="tnNewTitle" type="text" placeholder="事件简短描述" />
+            </label>
+            <label>正文 (markdown)
+                <textarea id="tnNewContent" rows="10" placeholder="思路 / 观察 / 反思…"></textarea>
+            </label>
+            <div class="tn-modal-actions">
+                <button id="tnNewCancel">取消</button>
+                <button id="tnNewSave" class="primary">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    'use strict';
+
+    const state = {
+        currentCode: null,
+        currentEventId: null,
+        editing: false,
+    };
+
+    const dom = {
+        stocks: document.getElementById('tnStocks'),
+        events: document.getElementById('tnEvents'),
+        content: document.getElementById('tnContent'),
+        eventsTitle: document.getElementById('tnEventsTitle'),
+        contentTitle: document.getElementById('tnContentTitle'),
+        addEventBtn: document.getElementById('tnAddEvent'),
+        editBtn: document.getElementById('tnEditBtn'),
+        deleteBtn: document.getElementById('tnDeleteBtn'),
+        refreshStocksBtn: document.getElementById('tnRefreshStocks'),
+        modal: document.getElementById('tnNewModal'),
+        newType: document.getElementById('tnNewType'),
+        newTitle: document.getElementById('tnNewTitle'),
+        newContent: document.getElementById('tnNewContent'),
+        newCancel: document.getElementById('tnNewCancel'),
+        newSave: document.getElementById('tnNewSave'),
+    };
+
+    function escapeHtml(s) {
+        return (s || '').replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+    }
+
+    // Minimal markdown render: headings, bold, italic, code, line breaks.
+    // Intentionally tiny — full markdown can come later if needed.
+    function renderMarkdown(md) {
+        let html = escapeHtml(md);
+        html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+        html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+        html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+        html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        html = html.replace(/\n\n/g, '</p><p>');
+        html = html.replace(/\n/g, '<br>');
+        return '<p>' + html + '</p>';
+    }
+
+    function formatDateTime(iso) {
+        const d = new Date(iso);
+        const yy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mi = String(d.getMinutes()).padStart(2, '0');
+        return `${yy}-${mm}-${dd} ${hh}:${mi}`;
+    }
+
+    async function fetchJSON(url, opts) {
+        const resp = await fetch(url, Object.assign({ cache: 'no-store' }, opts || {}));
+        if (!resp.ok) {
+            const text = await resp.text().catch(() => '');
+            throw new Error(`${resp.status} ${text}`);
+        }
+        return resp.json();
+    }
+
+    async function loadStocks() {
+        dom.stocks.innerHTML = '<div class="tn-empty">加载中…</div>';
+        try {
+            const data = await fetchJSON('/api/notes/stocks');
+            if (!data.stocks.length) {
+                dom.stocks.innerHTML = '<div class="tn-empty">暂无笔记</div>';
+                return;
+            }
+            dom.stocks.innerHTML = data.stocks.map(s => `
+                <div class="tn-stock-row" data-code="${escapeHtml(s.code)}">
+                    <div class="tn-stock-code">${escapeHtml(s.code)}</div>
+                    <div class="tn-stock-meta">
+                        ${s.event_count} 事件 · ${formatDateTime(s.last_ts)}
+                    </div>
+                </div>
+            `).join('');
+            dom.stocks.querySelectorAll('.tn-stock-row').forEach(el => {
+                el.addEventListener('click', () => selectStock(el.dataset.code));
+            });
+        } catch (e) {
+            dom.stocks.innerHTML = `<div class="tn-empty tn-error">加载失败: ${escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    async function selectStock(code) {
+        state.currentCode = code;
+        state.currentEventId = null;
+        dom.stocks.querySelectorAll('.tn-stock-row').forEach(el => {
+            el.classList.toggle('active', el.dataset.code === code);
+        });
+        dom.eventsTitle.textContent = `事件 · ${code}`;
+        dom.addEventBtn.disabled = false;
+        dom.events.innerHTML = '<div class="tn-empty">加载中…</div>';
+        clearContent();
+
+        try {
+            const data = await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events`);
+            if (!data.events.length) {
+                dom.events.innerHTML = '<div class="tn-empty">无事件，点 + 新增</div>';
+                return;
+            }
+            dom.events.innerHTML = data.events.map(ev => {
+                const sourceCls = ev.source === 'broker' ? 'broker' : (ev.source === 'ai' ? 'ai' : 'user');
+                const titleText = ev.title || ev.event_type;
+                const dot = ev.has_content ? '●' : '○';
+                return `
+                    <div class="tn-event-row" data-id="${escapeHtml(ev.event_id)}">
+                        <div class="tn-event-line1">
+                            <span class="tn-event-type tn-source-${sourceCls}">${escapeHtml(ev.event_type)}</span>
+                            <span class="tn-event-dot">${dot}</span>
+                        </div>
+                        <div class="tn-event-title">${escapeHtml(titleText)}</div>
+                        <div class="tn-event-time">${formatDateTime(ev.ts)}</div>
+                    </div>
+                `;
+            }).join('');
+            dom.events.querySelectorAll('.tn-event-row').forEach(el => {
+                el.addEventListener('click', () => selectEvent(el.dataset.id));
+            });
+        } catch (e) {
+            dom.events.innerHTML = `<div class="tn-empty tn-error">加载失败: ${escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    async function selectEvent(eventId) {
+        state.currentEventId = eventId;
+        state.editing = false;
+        dom.events.querySelectorAll('.tn-event-row').forEach(el => {
+            el.classList.toggle('active', el.dataset.id === eventId);
+        });
+        dom.content.innerHTML = '<div class="tn-empty">加载中…</div>';
+
+        try {
+            const ev = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(eventId)}`);
+            renderContent(ev);
+            dom.editBtn.disabled = false;
+            dom.deleteBtn.disabled = false;
+        } catch (e) {
+            dom.content.innerHTML = `<div class="tn-empty tn-error">加载失败: ${escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    function renderContent(ev) {
+        dom.contentTitle.textContent = `${ev.event_type} · ${formatDateTime(ev.ts)}`;
+        const meta = [];
+        if (ev.side) meta.push(ev.side === 'buy' ? '买' : '卖');
+        if (ev.price !== null && ev.price !== undefined) meta.push(`@${ev.price}`);
+        if (ev.qty !== null && ev.qty !== undefined) meta.push(`x ${ev.qty}`);
+        const metaLine = meta.length ? `<div class="tn-content-meta">${escapeHtml(meta.join(' '))}</div>` : '';
+        const sourceLabel = ev.source === 'broker' ? '系统记录' : (ev.source === 'ai' ? 'AI' : '手动');
+        const sourceLine = `<div class="tn-content-source">来源: ${escapeHtml(sourceLabel)}${ev.author ? ` · ${escapeHtml(ev.author)}` : ''}</div>`;
+        const titleLine = ev.title ? `<div class="tn-content-title-text">${escapeHtml(ev.title)}</div>` : '';
+        const body = ev.content
+            ? `<div class="tn-content-md">${renderMarkdown(ev.content)}</div>`
+            : '<div class="tn-empty">（暂无正文，点 ✎ 编辑添加）</div>';
+        dom.content.innerHTML = metaLine + titleLine + sourceLine + body;
+    }
+
+    function clearContent() {
+        dom.contentTitle.textContent = '正文';
+        dom.editBtn.disabled = true;
+        dom.deleteBtn.disabled = true;
+        dom.content.innerHTML = '<div class="tn-empty">← 选一条事件</div>';
+    }
+
+    async function enterEditMode() {
+        if (!state.currentCode || !state.currentEventId) return;
+        const ev = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`);
+        state.editing = true;
+        dom.content.innerHTML = `
+            <div class="tn-edit-form">
+                <label>标题
+                    <input type="text" id="tnEditTitle" value="${escapeHtml(ev.title || '')}" />
+                </label>
+                <label>正文 (markdown)
+                    <textarea id="tnEditContent" rows="20">${escapeHtml(ev.content || '')}</textarea>
+                </label>
+                <div class="tn-edit-actions">
+                    <button id="tnEditCancel">取消</button>
+                    <button id="tnEditSave" class="primary">保存</button>
+                </div>
+            </div>
+        `;
+        document.getElementById('tnEditCancel').addEventListener('click', () => selectEvent(state.currentEventId));
+        document.getElementById('tnEditSave').addEventListener('click', saveEdit);
+    }
+
+    async function saveEdit() {
+        const title = document.getElementById('tnEditTitle').value;
+        const content = document.getElementById('tnEditContent').value;
+        try {
+            await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, content }),
+            });
+            await selectEvent(state.currentEventId);
+            // Refresh middle pane to update has_content dot
+            const code = state.currentCode;
+            await selectStock(code);
+            await selectEvent(state.currentEventId);
+        } catch (e) {
+            alert('保存失败: ' + e.message);
+        }
+    }
+
+    async function deleteCurrentEvent() {
+        if (!state.currentCode || !state.currentEventId) return;
+        if (!confirm('确认删除该事件？（软删除，可数据库恢复）')) return;
+        try {
+            await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`, {
+                method: 'DELETE',
+            });
+            const code = state.currentCode;
+            state.currentEventId = null;
+            clearContent();
+            await selectStock(code);
+        } catch (e) {
+            alert('删除失败: ' + e.message);
+        }
+    }
+
+    function openNewEventModal() {
+        if (!state.currentCode) return;
+        dom.newType.value = '思考';
+        dom.newTitle.value = '';
+        dom.newContent.value = '';
+        dom.modal.hidden = false;
+        dom.newContent.focus();
+    }
+
+    async function saveNewEvent() {
+        const event_type = dom.newType.value;
+        const title = dom.newTitle.value;
+        const content = dom.newContent.value;
+        if (!event_type) { alert('请选择类型'); return; }
+        try {
+            const data = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ event_type, title, content, author: 'user', source: 'user' }),
+            });
+            dom.modal.hidden = true;
+            const code = state.currentCode;
+            await selectStock(code);
+            await selectEvent(data.event_id);
+            // Also refresh stocks pane for ordering
+            loadStocks();
+        } catch (e) {
+            alert('保存失败: ' + e.message);
+        }
+    }
+
+    // Wire up
+    dom.refreshStocksBtn.addEventListener('click', loadStocks);
+    dom.addEventBtn.addEventListener('click', openNewEventModal);
+    dom.editBtn.addEventListener('click', enterEditMode);
+    dom.deleteBtn.addEventListener('click', deleteCurrentEvent);
+    dom.newCancel.addEventListener('click', () => { dom.modal.hidden = true; });
+    dom.newSave.addEventListener('click', saveNewEvent);
+    dom.modal.addEventListener('click', (e) => { if (e.target === dom.modal) dom.modal.hidden = true; });
+
+    loadStocks();
+})();
+</script>
+{% endblock %}

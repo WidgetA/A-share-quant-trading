@@ -40,6 +40,36 @@ from src.strategy.filters.stock_blacklist import BLACKLISTED_STOCKS
 logger = logging.getLogger(__name__)
 
 
+async def _append_trade_note_event(
+    request: Request,
+    *,
+    code: str,
+    side: str,
+    qty: int,
+    price: float | None,
+) -> None:
+    """Best-effort append of a broker event to trade_notes (NOTE-001).
+
+    Never raises — trading must not be blocked by note-taking failures. If
+    GreptimeDB is down or the table is missing, we just log and move on.
+    Strips .SZ/.SH suffix so notes are keyed by bare 6-digit code.
+    """
+    try:
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            logger.debug("trade-notes hook: storage unavailable, skipping")
+            return
+        from src.notes.note_store import TradeNoteStore
+
+        bare_code = code.split(".")[0] if "." in code else code
+        store = TradeNoteStore(storage)
+        await store.append_broker_event(
+            code=bare_code, side=side, qty=qty, price=price,
+        )
+    except Exception as e:
+        logger.warning(f"trade-notes hook failed for {code}: {e}", exc_info=True)
+
+
 _trading_api_key_warned = False
 
 
@@ -3223,6 +3253,13 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
         logger.info(f"BUY order placed: {stock_code} qty={quantity} order_id={result.order_id}")
+
+        # NOTE-001: append broker event to trade_notes (best-effort, never block return)
+        await _append_trade_note_event(
+            request, code=stock_code, side="buy", qty=quantity,
+            price=float(price) if price else None,
+        )
+
         return {
             "success": True,
             "order_id": result.order_id,
@@ -3303,6 +3340,12 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
         logger.info(f"SELL order placed: {stock_code} qty={quantity} order_id={result.order_id}")
+
+        # NOTE-001: append broker event to trade_notes (best-effort)
+        await _append_trade_note_event(
+            request, code=stock_code, side="sell", qty=quantity, price=None,
+        )
+
         return {
             "success": True,
             "order_id": result.order_id,

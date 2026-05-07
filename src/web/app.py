@@ -22,6 +22,7 @@ from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.trading.broker_client import BrokerClient
 from src.web.analysis_routes import create_analysis_router
 from src.web.ml_routes import create_ml_router
+from src.web.notes_routes import create_notes_router
 from src.web.routes import (
     create_model_router,
     create_momentum_router,
@@ -81,6 +82,17 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
         return False
 
     app.state.storage = storage
+
+    # Ensure trade_notes table exists (NOTE-001). Failure here is non-fatal —
+    # the notes UI will return 503 until the table appears, but the rest of
+    # the app keeps working.
+    try:
+        from src.notes.note_store import TradeNoteStore
+
+        await TradeNoteStore(storage).ensure_schema()
+    except Exception as e:
+        logger.warning(f"trade_notes schema ensure failed: {e}")
+
     app.state.pipeline = CachePipeline(
         storage=storage,
         daily_source=TsanghiDailySource(),
@@ -278,6 +290,10 @@ def create_app(
     # Add analysis router (vision LLM K-line analysis via overseas Lambda)
     analysis_router = create_analysis_router()
     app.include_router(analysis_router)
+
+    # Add trade notes router (NOTE-001: per-stock event log + UI)
+    notes_router = create_notes_router()
+    app.include_router(notes_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():

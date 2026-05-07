@@ -50,6 +50,7 @@
 | 0.14.0 | 2026-05-04 | - | ANA-001: K-line technical analysis via overseas Lambda renderer + 柏拉图AI vision LLM (POST /api/analyze-kline) |
 | 0.14.1 | 2026-05-05 | - | ANA-001: web UI Settings for lambda-kline URL/token + bltcy key (zero-restart config); orchestrator reuses `app.state.storage`; gpt-5.5-pro locked; production-verified end-to-end |
 | 0.15.0 | 2026-05-05 | - | ANA-002: 盘前持仓日报——交易日 8am 自动扫描 broker 持仓→对每只调 ANA-001→飞书逐条推送 K 线 + 技术面分析；附 `POST /api/pre-market-report/run` 手动触发 |
+| 0.16.0 | 2026-05-07 | - | NOTE-001: 交易笔记——三栏 master-detail（股票/事件/正文），GreptimeDB `trade_notes` 表存储；`place_order` 成功 hook 自动追加买入/卖出事件；用户/AI 可自由追加思考/复盘事件 |
 | 0.17.0 | 2026-05-07 | - | SYS-005: `/api/trading/*` 加 `X-API-Key` 鉴权（`TRADING_API_KEY` 配置可选；未配置时仅在启动日志告警，配置后立即生效）；Settings 页可生成/保存 key；Dashboard JS 自动从 localStorage 注入 |
 
 ---
@@ -985,6 +986,91 @@ GET  /api/pre-market-report/status                         # 查状态
 
 **调度日志**: 与 cache/model 调度器共用 `scheduler_log` 表，name=`pre_market_report`，
 result ∈ `{success, no_positions, failed, skipped}`。
+
+---
+
+## Module: Notes
+
+### [NOTE-001] 交易笔记 (Trade Notes)
+
+**Status**: Implemented (2026-05-07)
+
+**Description**: 按股票组织的"一脉相承"交易历史 + 思考日志。三栏 master-detail UI：
+左栏所有有事件的股票（按最近活跃排序）→ 中栏选中股票的全部事件（时间倒序）→
+右栏选中事件的正文（markdown 渲染 + 编辑）。事件分两类：
+
+- **自动事件（broker source）**: `POST /api/trading/buy` / `POST /api/trading/sell` 成功后，
+  `routes.py` 立刻 INSERT 一行（`event_type='买入'/'卖出'`，price/qty/side 填入），
+  正文为空——你点进去再补思路/反思。批量 `/buy-batch-by-amount` 暂不 hook（V1 简化）。
+- **手动事件（user / ai source）**: 思考、盘中观察、复盘、AI 总结等，从前端 "+ 新事件"
+  按钮或后端 API `POST /api/notes/{code}/events` 创建。
+
+**Why GreptimeDB**: 数据 access pattern 是"按 code tag 过滤 + 按 ts 排序，append-mostly"，
+正好命中 GreptimeDB 时序工作负载。**与之前否决用 GreptimeDB 替换 Trilium SQLite 不矛盾**——
+那是 OLTP 全套（频繁 update / joins / FTS5 / triggers），这里只用 INSERT + UPSERT by
+PRIMARY KEY + 简单 WHERE，完全在 GreptimeDB 舒适区。
+
+**Schema**:
+
+```sql
+CREATE TABLE trade_notes (
+    ts          TIMESTAMP TIME INDEX,        -- 事件时间
+    code        STRING,                      -- 股票代码（无后缀，如 '605299'）
+    event_id    STRING,                      -- uuid，编辑/删除主键
+    event_type  STRING,                      -- 买入/卖出/盘中/复盘/思考/AI总结/其他
+    source      STRING,                      -- 'broker' / 'user' / 'ai'
+    title       STRING,                      -- 中栏短标签（如 "@18.30 x 500"）
+    price       FLOAT64,                     -- 成交价（broker 事件填，其他 NULL）
+    qty         INT64,                       -- 数量
+    side        STRING,                      -- 'buy' / 'sell'
+    content     STRING,                      -- 自由文本（markdown）
+    author      STRING,                      -- 创建者标识
+    deleted     BOOLEAN,                     -- 软删除（NULL 也视为未删，兼容老 ALTER）
+    PRIMARY KEY (code, event_id)
+)
+PARTITION ON COLUMNS (code) ()
+```
+
+**HTTP 接口**:
+
+```
+GET    /trade-notes                           # 三栏页面（HTML）
+GET    /api/notes/stocks                      # 左栏：所有有事件的股票，按 last_ts DESC
+GET    /api/notes/{code}/events               # 中栏：股票全部事件，按 ts DESC
+GET    /api/notes/{code}/events/{event_id}    # 右栏：单条事件正文
+POST   /api/notes/{code}/events               # 创建手动事件
+PATCH  /api/notes/{code}/events/{event_id}    # 编辑（content/title）
+DELETE /api/notes/{code}/events/{event_id}    # 软删除
+```
+
+**自动 hook 位置**:
+- `src/web/routes.py` 的两个 `place_order` 调用点（buy / sell endpoint），下单成功
+  立刻 `note_store.append_broker_event(code, side, price, qty)`。
+- 简化语义：**下单成功即写入**，不等成交回报。少数部分成交/撤单情况会失真，后期
+  加 reconciliation。
+
+**为什么不分两张表（`trade_fills` vs `trade_notes`）**: 中栏需要把自动事件和手动事件
+混排按时间倒序，单表 + `source` 列查询最简单；结构化字段（price/qty/side）对 manual
+事件设为 NULL 即可，GreptimeDB 原生支持。
+
+**未持久化历史交易**: broker 接口（`get_trades`）只返回今日成交，无历史 API。
+**从部署日开始累积**——过去交易需要的话，前端 "+ 新事件" 手动补一条 `event_type='买入'`
+即可。
+
+**Files**:
+- `src/notes/note_store.py` — GreptimeDB CRUD（复用 `app.state.storage` 连接池）
+- `src/web/notes_routes.py` — 7 个 endpoint（HTML + 6 个 API）
+- `src/web/templates/trade_notes.html` — 三栏布局 + vanilla JS
+- `src/web/static/style.css` — `.trade-notes-*` 三栏样式（响应式：手机下变 drill-down）
+- `src/web/routes.py` — buy/sell endpoint 内嵌 hook 调用（best-effort，失败只 log
+  不影响下单返回）
+
+**Backlog**:
+- 成交回报 reconciliation（修正委托价 → 实际成交价）
+- AI 自动写入（接入 AI 服务，定期/事件触发自动生成"复盘"事件）
+- T+n 复盘提醒（cron 扫所有股票最近一次买入，T+1/T+3/T+5 飞书推链接）
+- 全文搜索（GreptimeDB 暂无 FTS，先靠浏览器 ctrl+F；未来可加 like 模糊匹配）
+- 跨股票分析（"按 signal 类型回归胜率"——需要 event_type 标签更结构化）
 
 ---
 
