@@ -55,7 +55,7 @@ services:
       - "4000"
       - "4003"
     volumes:
-      - greptime-wal:/tmp/greptimedb
+      - greptime-data:/greptimedb_data
       - ./config/greptimedb.toml:/etc/greptimedb/config.toml:ro
     command: >
       standalone start
@@ -85,4 +85,4 @@ services:
 volumes:
   trading-data:
   trading-logs:
-  greptime-wal:
+  greptime-data:
