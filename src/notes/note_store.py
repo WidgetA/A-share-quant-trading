@@ -335,15 +335,20 @@ class TradeNoteStore:
         """
         written = 0
         skipped = 0
+        rejected: list[tuple[str, dict]] = []
         for o in orders:
-            if str(o.get("status", "")).upper() != "FILLED":
+            status_raw = str(o.get("status", ""))
+            if status_raw.upper() != "FILLED":
+                rejected.append((f"status={status_raw!r}", o))
                 continue
             order_id = o.get("order_id")
             code = o.get("code") or ""
             if not code:
+                rejected.append(("no_code", o))
                 continue
             bare_code = code.split(".")[0]
             if code_filter is not None and bare_code not in code_filter:
+                rejected.append(("filtered_out", o))
                 continue
             side_raw = str(o.get("side", "")).lower()
             qty = int(o.get("qty") or 0)
@@ -352,7 +357,14 @@ class TradeNoteStore:
                 price_val = float(price) if price not in (None, 0, "0") else None
             except (TypeError, ValueError):
                 price_val = None
-            if order_id is None or side_raw not in ("buy", "sell") or qty <= 0:
+            if order_id is None:
+                rejected.append(("no_order_id", o))
+                continue
+            if side_raw not in ("buy", "sell"):
+                rejected.append((f"bad_side={side_raw!r}", o))
+                continue
+            if qty <= 0:
+                rejected.append((f"bad_qty={qty}", o))
                 continue
             inserted = await self.upsert_broker_event_by_order_id(
                 order_id=order_id,
@@ -365,6 +377,13 @@ class TradeNoteStore:
                 written += 1
             else:
                 skipped += 1
+        if rejected and (written + skipped) == 0:
+            logger.warning(
+                "import_filled_orders_from_list: %d rows in, 0 imported. "
+                "Rejections: %s",
+                len(orders),
+                [(reason, o) for reason, o in rejected[:10]],
+            )
         return written, skipped
 
     async def create_event(
