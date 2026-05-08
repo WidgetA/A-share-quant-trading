@@ -361,21 +361,42 @@ class TradeNoteStore:
                     price_val = float(price)
                 except (TypeError, ValueError):
                     price_val = None
-            if order_id is None:
-                rejected.append(("no_order_id", o))
-                continue
             if side_raw not in ("buy", "sell"):
                 rejected.append((f"bad_side={side_raw!r}", o))
                 continue
             if qty <= 0:
                 rejected.append((f"bad_qty={qty}", o))
                 continue
+            # Orders placed in the broker's own client app come back with
+            # order_id=None — broker has no internal id for them. Synthesize
+            # a stable dedupe key from (code, side, qty, submit_time) and use
+            # submit_time as the note ts so the entry shows the actual fill
+            # moment, not the import-poll moment.
+            submit_time_raw = o.get("submit_time")
+            submit_ts_ms: int | None = None
+            if submit_time_raw:
+                try:
+                    submit_ts_ms = int(
+                        datetime.fromisoformat(str(submit_time_raw)).timestamp() * 1000
+                    )
+                except (TypeError, ValueError):
+                    submit_ts_ms = None
+            if order_id is None:
+                if submit_ts_ms is None:
+                    rejected.append(("no_order_id_and_no_submit_time", o))
+                    continue
+                effective_order_id: int | str = (
+                    f"manual_{bare_code}_{side_raw}_{qty}_{submit_ts_ms}"
+                )
+            else:
+                effective_order_id = order_id
             inserted = await self.upsert_broker_event_by_order_id(
-                order_id=order_id,
+                order_id=effective_order_id,
                 code=bare_code,
                 side=side_raw,
                 qty=qty,
                 price=price_val,
+                ts_ms=submit_ts_ms,
             )
             if inserted:
                 written += 1
