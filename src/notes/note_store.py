@@ -353,10 +353,14 @@ class TradeNoteStore:
             side_raw = str(o.get("side", "")).lower()
             qty = int(o.get("qty") or 0)
             price = o.get("price")
-            try:
-                price_val = float(price) if price not in (None, 0, "0") else None
-            except (TypeError, ValueError):
+            price_val: float | None
+            if price is None or price in (0, "0"):
                 price_val = None
+            else:
+                try:
+                    price_val = float(price)
+                except (TypeError, ValueError):
+                    price_val = None
             if order_id is None:
                 rejected.append(("no_order_id", o))
                 continue
@@ -379,8 +383,7 @@ class TradeNoteStore:
                 skipped += 1
         if rejected and (written + skipped) == 0:
             logger.warning(
-                "import_filled_orders_from_list: %d rows in, 0 imported. "
-                "Rejections: %s",
+                "import_filled_orders_from_list: %d rows in, 0 imported. Rejections: %s",
                 len(orders),
                 [(reason, o) for reason, o in rejected[:10]],
             )
