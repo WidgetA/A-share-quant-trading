@@ -320,6 +320,19 @@ class TradeNoteStore:
         Returns (written, skipped).
         """
         orders = await broker.get_orders()
+        return await self.import_filled_orders_from_list(orders, code_filter)
+
+    async def import_filled_orders_from_list(
+        self,
+        orders: list[dict],
+        code_filter: set[str] | None = None,
+    ) -> tuple[int, int]:
+        """Same as import_today_filled_orders but takes already-fetched orders.
+
+        Lets the /api/trading/orders endpoint reuse the orders it already
+        fetched for the UI, instead of double-calling broker.get_orders() on
+        every page poll.
+        """
         written = 0
         skipped = 0
         for o in orders:

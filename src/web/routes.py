@@ -3414,7 +3414,13 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/orders")
     async def get_orders(request: Request) -> dict:
-        """Return today's open orders from broker."""
+        """Return today's orders from broker.
+
+        Side-effect: pipe FILLED rows into trade_notes (idempotent on
+        broker_<order_id>). The main page polls this endpoint, so manual
+        sells placed outside our batch flow get auto-recorded without the
+        user having to click the ⤓ backfill button.
+        """
         from src.trading.broker_client import BrokerClient
 
         broker: BrokerClient | None = getattr(request.app.state, "broker", None)
@@ -3422,10 +3428,21 @@ def create_trading_router() -> APIRouter:
             return {"orders": []}
         try:
             orders = await broker.get_orders()
-            return {"orders": orders}
         except Exception as e:
             logger.warning(f"get_orders failed: {e}")
             return {"orders": []}
+
+        storage = getattr(request.app.state, "storage", None)
+        if storage is not None:
+            try:
+                from src.notes.note_store import TradeNoteStore
+
+                store = TradeNoteStore(storage)
+                await store.import_filled_orders_from_list(orders)
+            except Exception as e:
+                logger.warning(f"trade-notes auto-import on /orders failed: {e}")
+
+        return {"orders": orders}
 
     @router.delete("/api/trading/orders/{order_id}")
     async def cancel_order(request: Request, order_id: int) -> dict:
