@@ -2861,7 +2861,9 @@ def create_momentum_router() -> APIRouter:
                                 price_err = str(e)
                             else:
                                 price_err = (
-                                    "" if price_snapshots else f"Tushare 缓存中无 {date_key} 的日线数据"
+                                    ""
+                                    if price_snapshots
+                                    else f"Tushare 缓存中无 {date_key} 的日线数据"
                                 )
                         else:
                             (
