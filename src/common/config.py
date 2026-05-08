@@ -167,6 +167,7 @@ _iquant_key_override: str | None = None
 # Persistence file for iQuant API key (survives container restarts)
 IQUANT_KEY_FILE = PROJECT_ROOT / "data" / "iquant_api_key.txt"
 
+
 def load_secrets() -> Config:
     """
     Load secrets from config/secrets.yaml.

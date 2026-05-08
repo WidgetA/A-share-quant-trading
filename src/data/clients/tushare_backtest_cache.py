@@ -138,9 +138,7 @@ async def _tushare_call(
                         request=resp.request,
                         response=resp,
                     )
-                raise TushareBacktestError(
-                    f"Tushare {api_name} error: code={code}, msg={msg}"
-                )
+                raise TushareBacktestError(f"Tushare {api_name} error: code={code}, msg={msg}")
             return data
 
         except TushareBacktestError:
@@ -412,9 +410,7 @@ class TushareBacktestCache:
                 finally:
                     if os.path.exists(tmp_path):
                         os.unlink(tmp_path)
-            logger.info(
-                f"Cache saved to OSS: {len(self._daily)} daily, {len(self._minute)} minute"
-            )
+            logger.info(f"Cache saved to OSS: {len(self._daily)} daily, {len(self._minute)} minute")
             return None
         except Exception as e:
             msg = f"OSS 上传失败: {e}"
@@ -519,9 +515,7 @@ class TushareBacktestCache:
             codes = list(self._daily.keys())
             self._stock_codes = codes
             if codes:
-                await self._download_minute(
-                    client, token, codes, dl_start, end_date, progress_cb
-                )
+                await self._download_minute(client, token, codes, dl_start, end_date, progress_cb)
 
         total = len(self._stock_codes)
         if progress_cb:
@@ -810,9 +804,7 @@ class TushareBacktestCache:
                 f"{fail_count[0]} failed out of {total} stocks"
             )
         else:
-            logger.info(
-                f"tushare stk_mins download: {success_count} OK out of {total} stocks"
-            )
+            logger.info(f"tushare stk_mins download: {success_count} OK out of {total} stocks")
 
     async def save_to_oss(self) -> str | None:
         """Save cache to OSS. Returns None on success, error message on failure."""

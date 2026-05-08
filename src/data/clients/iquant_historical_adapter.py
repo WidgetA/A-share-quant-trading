@@ -50,8 +50,7 @@ class IQuantHistoricalAdapter:
         """
         if not hasattr(realtime_client, "as_ifind_format"):
             raise TypeError(
-                "realtime_client must implement as_ifind_format(). "
-                "Use TushareRealtimeClient."
+                "realtime_client must implement as_ifind_format(). Use TushareRealtimeClient."
             )
         self._realtime = realtime_client
 
@@ -180,9 +179,7 @@ class IQuantHistoricalAdapter:
                     continue
 
                 if data.get("code") != 0:
-                    logger.warning(
-                        f"tushare daily {ts_date} error: {data.get('msg', 'unknown')}"
-                    )
+                    logger.warning(f"tushare daily {ts_date} error: {data.get('msg', 'unknown')}")
                     self._daily_data[ds_iso] = {}
                     continue
 
