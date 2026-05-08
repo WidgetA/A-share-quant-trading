@@ -79,4 +79,4 @@ Thumbs.db
 *.parquet
 *.db
 *.sqlite
-data/tsanghi_token.txt
+data/tushare_token.txt

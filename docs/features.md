@@ -648,8 +648,8 @@ strategy:
 
 **Data Sources**:
 - Price (backtest, iFinD): iFinD `history_quotes` + `high_frequency` (9:40 price)
-- Price (backtest, free): tsanghi 沧海数据 (日线 + 5min bars for 9:40 price)
-- Price (live): iFinD `real_time_quotation`
+- Price (backtest, Tushare): Tushare Pro `daily` (历史日线) + `stk_mins` 1min bars (9:40 snapshot), pre-downloaded into `TushareBacktestCache`
+- Price (live): Tushare Pro `rt_min` / `rt_min_daily` via `TushareRealtimeClient`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 - Fundamentals (PE, 增长率等): PostgreSQL `stock_fundamentals` table (外部进程维护，本项目只读)
 
@@ -782,8 +782,8 @@ strategy:
 - Feishu notifications label this as "买入参考价(09:40)"
 
 **Data Sources**:
-- Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
-- Historical data: OSS cache (`TsanghiBacktestCache`) via `IQuantHistoricalAdapter`
+- Real-time quotes: Tushare via `TushareRealtimeClient` (`rt_min` / `rt_min_daily`)
+- Historical data: OSS-backed `TushareBacktestCache` (when pre-downloaded) + Tushare `daily` API via `IQuantHistoricalAdapter`
 - Board data: `LocalConceptMapper` (local JSON files)
 - Fundamentals (ST filter): PostgreSQL `stock_fundamentals` table
 - Trade calendar: akshare `tool_trade_date_hist_sina()` (cached in memory)

@@ -52,7 +52,7 @@ class V15ScanState:
     concept_mapper: Any = None
     stock_filter: Any = None
     v15_scan_db: Any = None
-    tsanghi_cache: Any = None
+    tushare_cache: Any = None
     universe_cache: list[str] | None = None
 
     # Scheduler task reference
@@ -164,7 +164,7 @@ async def init_scan_resources(scan_state: V15ScanState) -> None:
         scan_state.v15_scan_db = None
 
     # Build historical adapter with OSS cache if available
-    cache = scan_state.tsanghi_cache
+    cache = scan_state.tushare_cache
     scan_state.historical_adapter = IQuantHistoricalAdapter(tushare, cache=cache)
     scan_state.concept_mapper = LocalConceptMapper()
     # V16 filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
@@ -237,7 +237,7 @@ async def _fetch_prev_closes(
     prev_closes: dict[str, float] = {}
 
     # Source 1: OSS cache (instant, no API call)
-    cache = scan_state.tsanghi_cache
+    cache = scan_state.tushare_cache
     if cache and cache.is_ready:
         all_daily = cache.get_all_codes_with_daily(prev_trade_date)
         for code, daily in all_daily.items():
@@ -245,27 +245,24 @@ async def _fetch_prev_closes(
             if close_val and close_val > 0:
                 prev_closes[code] = close_val
 
-    # Source 2: tsanghi API fallback
+    # Source 2: Tushare `daily` API fallback
     if len(prev_closes) < 100:
-        from src.data.clients.tsanghi_client import TsanghiClient
-
-        ts_client = TsanghiClient()
-        await ts_client.start()
-        try:
-            for exchange in ("XSHG", "XSHE"):
-                records = await ts_client.daily_latest(exchange, prev_trade_date)
-                for row in records:
-                    ticker = str(row.get("ticker", ""))
-                    close_val = row.get("close")
-                    if ticker and len(ticker) == 6 and close_val:
-                        prev_closes[ticker] = float(close_val)
-        finally:
-            await ts_client.stop()
+        rt_client = scan_state.realtime_client
+        if rt_client is None:
+            raise RuntimeError(
+                f"V16 scan: prev_close cache miss for {prev_trade_date} and no "
+                f"Tushare client available to fall back to."
+            )
+        ts_date = prev_trade_date.replace("-", "")
+        api_closes = await rt_client.fetch_prev_closes(ts_date)
+        for bare, close_val in api_closes.items():
+            if bare and len(bare) == 6 and close_val:
+                prev_closes.setdefault(bare, float(close_val))
 
     if not prev_closes:
         raise RuntimeError(
             f"V16 scan: failed to get prev_close for {prev_trade_date} "
-            f"from both OSS cache and tsanghi API"
+            f"from both OSS cache and Tushare API"
         )
     logger.info(f"V16: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
     return prev_closes
@@ -774,7 +771,7 @@ def inject_cache(scan_state: V15ScanState, cache: Any) -> None:
     """Inject OSS cache and rebuild historical adapter if resources are ready."""
     from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
 
-    scan_state.tsanghi_cache = cache
+    scan_state.tushare_cache = cache
     if scan_state.realtime_client:
         scan_state.historical_adapter = IQuantHistoricalAdapter(
             scan_state.realtime_client, cache=cache

@@ -167,12 +167,6 @@ _iquant_key_override: str | None = None
 # Persistence file for iQuant API key (survives container restarts)
 IQUANT_KEY_FILE = PROJECT_ROOT / "data" / "iquant_api_key.txt"
 
-# Runtime override for Tsanghi (沧海数据) token (set via web UI)
-_tsanghi_token_override: str | None = None
-# Persistence file for Tsanghi token (survives container restarts)
-TSANGHI_TOKEN_FILE = PROJECT_ROOT / "data" / "tsanghi_token.txt"
-
-
 def load_secrets() -> Config:
     """
     Load secrets from config/secrets.yaml.
@@ -614,79 +608,6 @@ def get_iquant_key_source() -> str:
     return "not_configured"
 
 
-# === Tsanghi (沧海数据) Token ===
-
-
-def get_tsanghi_token() -> str:
-    """Get Tsanghi (沧海数据) API token for free backtest daily data.
-
-    Priority: runtime override > persisted file > env var > secrets.yaml.
-
-    Returns:
-        Tsanghi token string
-
-    Raises:
-        ValueError: If token is not configured
-    """
-    import os
-
-    if _tsanghi_token_override:
-        return _tsanghi_token_override
-
-    if TSANGHI_TOKEN_FILE.exists():
-        token = TSANGHI_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-
-    env_token = os.environ.get("TSANGHI_TOKEN", "")
-    if env_token:
-        return env_token
-
-    try:
-        secrets = load_secrets()
-        token = secrets.get_str("tsanghi.token")
-        if token:
-            return token
-    except FileNotFoundError:
-        pass
-
-    raise ValueError(
-        "Tsanghi token not configured. "
-        "Set via web UI Settings page, TSANGHI_TOKEN environment variable, "
-        "or configure tsanghi.token in config/secrets.yaml. "
-        "Register at https://tsanghi.com to get a free token."
-    )
-
-
-def set_tsanghi_token(token: str) -> None:
-    """Set Tsanghi token at runtime and persist to disk."""
-    global _tsanghi_token_override
-    _tsanghi_token_override = token
-
-    TSANGHI_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TSANGHI_TOKEN_FILE.write_text(token, encoding="utf-8")
-    logger.info("Tsanghi token updated via web UI and persisted to disk")
-
-
-def get_tsanghi_token_source() -> str:
-    """Return which source the current Tsanghi token comes from."""
-    import os
-
-    if _tsanghi_token_override:
-        return "web_ui"
-    if TSANGHI_TOKEN_FILE.exists() and TSANGHI_TOKEN_FILE.read_text(encoding="utf-8").strip():
-        return "persisted_file"
-    if os.environ.get("TSANGHI_TOKEN", ""):
-        return "env_var"
-    try:
-        secrets = load_secrets()
-        if secrets.get_str("tsanghi.token"):
-            return "secrets_yaml"
-    except FileNotFoundError:
-        pass
-    return "not_configured"
-
-
 # === Aliyun DashScope API Key ===
 
 _aliyun_key_override: str | None = None
@@ -761,45 +682,6 @@ def get_aliyun_api_key_source() -> str:
     except FileNotFoundError:
         pass
     return "not_configured"
-
-
-# === Monitor Data Source ===
-
-_monitor_ds_override: str | None = None
-MONITOR_DS_FILE = PROJECT_ROOT / "data" / "monitor_data_source.txt"
-
-
-def get_monitor_data_source() -> str:
-    """Get intraday monitor data source: 'ifind' or 'tushare'.
-
-    Priority: runtime override > persisted file > default ('tushare').
-    Legacy value 'sina' is treated as 'tushare' (Sina API defunct).
-    """
-    if _monitor_ds_override:
-        val = _monitor_ds_override
-    elif MONITOR_DS_FILE.exists():
-        val = MONITOR_DS_FILE.read_text(encoding="utf-8").strip()
-    else:
-        val = "tushare"
-
-    # Backward compat: "sina" → "tushare" (Sina free API removed)
-    if val == "sina":
-        return "tushare"
-    if val in ("ifind", "tushare"):
-        return val
-    return "tushare"
-
-
-def set_monitor_data_source(source: str) -> None:
-    """Set monitor data source and persist to disk."""
-    global _monitor_ds_override
-    if source not in ("ifind", "tushare"):
-        raise ValueError(f"Invalid data source: {source}. Must be 'ifind' or 'tushare'.")
-    _monitor_ds_override = source
-
-    MONITOR_DS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    MONITOR_DS_FILE.write_text(source, encoding="utf-8")
-    logger.info(f"Monitor data source set to '{source}' and persisted")
 
 
 def load_config(config_path: str | Path) -> Config:

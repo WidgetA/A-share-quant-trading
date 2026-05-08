@@ -222,7 +222,7 @@
     async function downloadCache(startDate, endDate, statusEl) {
         return new Promise((resolve, reject) => {
             const body = JSON.stringify({ start_date: startDate, end_date: endDate, force: false });
-            fetch('/api/momentum/tsanghi-prepare', {
+            fetch('/api/momentum/tushare-prepare', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: body,

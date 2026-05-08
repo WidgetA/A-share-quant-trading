@@ -86,7 +86,7 @@ uv run python scripts/audit_trading_safety.py
 - **位置**: `v15_scanner.py:768` + `tushare_realtime.py:459`
 - **现象**: TushareRealtimeClient 的 rt_min 接口没有昨收价（preClose），返回 None。`_fetch_constituent_prices()` 中 `if not prev_vals[0]` 跳过该股票
 - **后果**: 线上 L4 成分股扩展实际上**不会新增任何股票**，所有通过 `real_time_quotation` 获取的成分股全被跳过。L4 扩展形同虚设
-- **应修复为**: 从其他数据源补充昨收价（如 tsanghi 缓存或 GreptimeDB）
+- **应修复为**: 从其他数据源补充昨收价（如 `TushareBacktestCache` OSS 缓存或 Tushare `daily` API）
 
 ### 4. trend_10d 不足 11 天时默认 0.0（MEDIUM）
 - **位置**: `v15_scanner.py` ~L715-720
@@ -111,4 +111,4 @@ uv run python scripts/audit_trading_safety.py
 ## Past Incidents
 
 - **momentum_quality_filter.py**: Used fail-open pattern — API failure → no filtering → bad trades went through undetected. L2/L3 filters showed +0.00% because they silently did nothing.
-- **V15 回测数据管道不一致 (2026-03-26)**: 回测使用 MomentumSectorScanner 的 `_build_snapshots_from_cache()`（含 open_gain > -0.5% 预过滤），且 `TsanghiHistoricalAdapter.real_time_quotation()` 返回空数据，导致 L4 扩展失效。回测推 002014 永新股份，线上推 600332 白云山。根因：回测和线上用了不同的数据管道。
+- **V15 回测数据管道不一致 (2026-03-26)**: 回测使用 MomentumSectorScanner 的 `_build_snapshots_from_cache()`（含 open_gain > -0.5% 预过滤），且历史回测适配器（彼时为 `TsanghiHistoricalAdapter`，现已替换为 `TushareHistoricalAdapter`）的 `real_time_quotation()` 返回空数据，导致 L4 扩展失效。回测推 002014 永新股份，线上推 600332 白云山。根因：回测和线上用了不同的数据管道。

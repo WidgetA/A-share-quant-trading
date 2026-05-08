@@ -79,23 +79,24 @@ Rules:
 | Toggle Value | Source | Adapter |
 |-------------|--------|---------|
 | `"ifind"` | THS iFinD HTTP API | `IFinDHttpClient` |
-| `"tsanghi"` | 沧海数据 (日线 + 5分钟线) | `TsanghiHistoricalAdapter` |
+| `"tushare"` | Tushare Pro (`daily` + `stk_mins` 1min) | `TushareHistoricalAdapter` |
 
 Rules:
 1. **One source per session** — no mixing sources within a single backtest/scan
-2. **Adapter parity** — `TsanghiHistoricalAdapter` must support same indicator set as `IFinDHttpClient`
-3. **Live trading always uses iFinD** — toggle only affects backtesting
+2. **Adapter parity** — `TushareHistoricalAdapter` must support same indicator set as `IFinDHttpClient`
+3. **Live trading always uses Tushare** (`TushareRealtimeClient` via `rt_min` / `rt_min_daily`)
 4. **Non-trading data** has its own sources: PostgreSQL for fundamentals, local JSON for boards
-5. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
+5. **Tushare Pro token** — configured via Settings page, persisted in `data/tushare_token.txt`
 
 ## 9. Volume Unit Convention (CRITICAL)
 
-**ALL volume data in the system MUST be in 股 (shares), never in 手 (lots).**
+**ALL volume data exposed to scanners/strategies MUST be in 股 (shares), never in 手 (lots).**
 
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
-| **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
-| **tsanghi** `/5min` | **手** (1手=100股) | ×100 at download time in `TsanghiBacktestCache` |
+| **Tushare** `daily` (`vol`) | **手** (1手=100股) | ×100 at read time in `TushareHistoricalAdapter` / `IQuantHistoricalAdapter` |
+| **Tushare** `stk_mins` (`vol`) | **股** | None (already in 股) |
+| **Tushare** `rt_min` / `rt_min_daily` (`vol`) | **股** | None |
 | **iFinD** | **股** | None |
 
 - Conversion at **adapter read layer**, not storage (raw cache keeps original values).

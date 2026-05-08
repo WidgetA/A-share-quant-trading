@@ -3,11 +3,11 @@
 # Duck-types IFinDHttpClient so V15Scanner / MomentumSectorScanner work unchanged.
 
 # === DATA FLOW ===
-# - history_quotes(): Downloads from tsanghi daily_latest API (per-date batch).
-#   Data is held in memory for the current trading day so repeated calls
-#   within one scan don't re-download.
-# - real_time_quotation(): Delegates to realtime client (Tushare/Sina).
-# - Volume: tsanghi returns 手 (lots); converted to 股 (shares) at read time.
+# - history_quotes(): Downloads from Tushare Pro `daily` API (one call per trade_date,
+#   returns ALL stocks). Data is held in memory for the current trading day so
+#   repeated calls within one scan don't re-download.
+# - real_time_quotation(): Delegates to realtime client (TushareRealtimeClient).
+# - Volume: tushare `daily` returns 手 (lots); converted to 股 (shares) at read time.
 
 from __future__ import annotations
 
@@ -15,23 +15,29 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger(__name__)
+
+_TUSHARE_API_URL = "http://api.tushare.pro"
+_TUSHARE_DAILY_TIMEOUT = 30.0
 
 
 class IQuantHistoricalAdapter:
     """
     Duck-types IFinDHttpClient for monitor/live scan mode.
 
-    Data source: tsanghi daily_latest API (per-date batch, 2 calls per date).
-    Data is held in memory for the current trading day so repeated calls
-    within one scan don't re-download. Cleared automatically on new day.
+    Data source: Tushare Pro `daily` API (one call per trade_date — returns
+    all stocks). Data is held in memory for the current trading day so repeated
+    calls within one scan don't re-download. Cleared automatically on new day.
 
     Methods implemented:
-        - history_quotes(): From tsanghi daily_latest API
-        - real_time_quotation(): Delegates to realtime client (Tushare/Sina)
+        - history_quotes(): From Tushare `daily` API
+        - real_time_quotation(): Delegates to TushareRealtimeClient
         - high_frequency(): Returns empty (live mode uses real_time_quotation)
 
-    Volume convention: tsanghi returns 手 (lots); converted to 股 (shares) at read time.
+    Volume convention: tushare `daily` returns 手 (lots); converted to 股
+    (shares) at read time so callers see the same unit as iFinD / live snapshots.
     """
 
     def __init__(self, realtime_client: Any, cache: Any = None) -> None:
@@ -39,23 +45,23 @@ class IQuantHistoricalAdapter:
         Args:
             realtime_client: Duck-typed realtime client for real-time data delegation.
                 Must implement as_ifind_format(stock_codes, indicators) -> dict.
-                Typically TushareRealtimeClient or SinaRealtimeClient.
-            cache: Optional TsanghiBacktestCache (unused, kept for backward compat).
+                Typically TushareRealtimeClient.
+            cache: Optional TushareBacktestCache (unused, kept for backward compat).
         """
         if not hasattr(realtime_client, "as_ifind_format"):
             raise TypeError(
                 "realtime_client must implement as_ifind_format(). "
-                "Use TushareRealtimeClient or SinaRealtimeClient."
+                "Use TushareRealtimeClient."
             )
         self._realtime = realtime_client
 
-        # In-memory daily data downloaded from tsanghi API.
+        # In-memory daily data downloaded from Tushare API.
         # Keyed by date_str -> {bare_code -> {close, volume, ...}}
         # Populated on first history_quotes() call, reused within the same day.
         self._daily_data: dict[str, dict[str, dict]] = {}
         self._daily_data_loaded_date: str = ""  # YYYY-MM-DD of last load
 
-        logger.info("IQuantHistoricalAdapter: using tsanghi API for history_quotes")
+        logger.info("IQuantHistoricalAdapter: using Tushare Pro daily for history_quotes")
 
     @property
     def is_connected(self) -> bool:
@@ -63,10 +69,10 @@ class IQuantHistoricalAdapter:
         return client is not None
 
     async def start(self) -> None:
-        pass  # Sina client is managed externally
+        pass  # Realtime client is managed externally
 
     async def stop(self) -> None:
-        pass  # Sina client is managed externally
+        pass  # Realtime client is managed externally
 
     async def history_quotes(
         self,
@@ -76,10 +82,10 @@ class IQuantHistoricalAdapter:
         end_date: str,
         function_para: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Fetch historical daily data from tsanghi API (daily_latest).
+        """Fetch historical daily data from Tushare `daily` API.
 
-        Downloads all trading dates in [start_date, end_date] via
-        tsanghi daily_latest (2 calls per date: XSHG + XSHE).
+        Downloads all trading dates in [start_date, end_date] via Tushare
+        `daily` (one call per trade_date returns ALL stocks).
         Data is held in memory for the current trading day so repeated
         calls within one scan don't re-download.
         """
@@ -111,7 +117,7 @@ class IQuantHistoricalAdapter:
                     time_vals.append(ds)
                     for ind in indicator_list:
                         val = day.get(ind)
-                        # tsanghi volume is in 手; convert to 股 at read time
+                        # tushare `daily` volume is in 手; convert to 股 at read time
                         if ind == "volume" and val is not None:
                             val = val * 100
                         indicator_data[ind].append(val)
@@ -124,8 +130,8 @@ class IQuantHistoricalAdapter:
         return {"errorcode": 0, "tables": tables}
 
     async def _ensure_daily_range(self, start_date: str, end_date: str) -> None:
-        """Download missing dates from tsanghi daily_latest API."""
-        from src.data.clients.tsanghi_client import TsanghiClient
+        """Download missing dates from Tushare `daily` API (one call per trade_date)."""
+        from src.common.config import get_tushare_token
 
         d = datetime.strptime(start_date, "%Y-%m-%d").date()
         end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -134,62 +140,94 @@ class IQuantHistoricalAdapter:
         while d <= end_d:
             ds = d.strftime("%Y-%m-%d")
             if ds not in self._daily_data:
-                dates_needed.append(d)
+                # Skip weekends — Tushare returns empty so cache the marker.
+                if d.weekday() >= 5:
+                    self._daily_data[ds] = {}
+                else:
+                    dates_needed.append(d)
             d += timedelta(days=1)
 
         if not dates_needed:
             return
 
         logger.info(
-            f"Downloading {len(dates_needed)} dates from tsanghi API "
+            f"Downloading {len(dates_needed)} dates from Tushare `daily` "
             f"({dates_needed[0]} ~ {dates_needed[-1]})"
         )
 
-        client = TsanghiClient()
-        await client.start()
-        try:
+        token = get_tushare_token()
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(_TUSHARE_DAILY_TIMEOUT)) as client:
             for i, day_date in enumerate(dates_needed):
-                ds = day_date.strftime("%Y-%m-%d")
+                ds_iso = day_date.strftime("%Y-%m-%d")
+                ts_date = day_date.strftime("%Y%m%d")
                 day_data: dict[str, dict] = {}
 
-                for exchange in ("XSHG", "XSHE"):
-                    try:
-                        records = await client.daily_latest(exchange, ds)
-                    except RuntimeError:
-                        continue  # non-trading day
-                    for rec in records or []:
-                        ticker = str(rec.get("ticker", ""))
+                body = {
+                    "api_name": "daily",
+                    "token": token,
+                    "params": {"trade_date": ts_date},
+                    "fields": "ts_code,open,high,low,close,pre_close,vol",
+                }
+
+                try:
+                    resp = await client.post(_TUSHARE_API_URL, json=body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                except httpx.HTTPError as e:
+                    logger.warning(f"tushare daily {ts_date}: {e}")
+                    self._daily_data[ds_iso] = {}
+                    continue
+
+                if data.get("code") != 0:
+                    logger.warning(
+                        f"tushare daily {ts_date} error: {data.get('msg', 'unknown')}"
+                    )
+                    self._daily_data[ds_iso] = {}
+                    continue
+
+                fields = data.get("data", {}).get("fields", [])
+                items = data.get("data", {}).get("items", [])
+                if items:
+                    idx = {f: i for i, f in enumerate(fields)}
+                    for row in items:
+                        ts_code = row[idx.get("ts_code", -1)]
+                        if not ts_code:
+                            continue
+                        ticker = ts_code.split(".")[0]
                         if not ticker or len(ticker) != 6:
                             continue
-                        o = rec.get("open")
-                        c = rec.get("close")
+                        o = row[idx.get("open", -1)] if "open" in idx else None
+                        c = row[idx.get("close", -1)] if "close" in idx else None
                         if o is None or c is None:
                             continue
+                        h = row[idx.get("high", -1)] if "high" in idx else None
+                        lo = row[idx.get("low", -1)] if "low" in idx else None
+                        v = row[idx.get("vol", -1)] if "vol" in idx else None
                         day_data[ticker] = {
                             "open": float(o),
-                            "high": float(rec.get("high", o)),
-                            "low": float(rec.get("low", o)),
+                            "high": float(h) if h is not None else float(o),
+                            "low": float(lo) if lo is not None else float(o),
                             "close": float(c),
-                            "volume": float(rec.get("volume", 0)),
+                            # tushare `daily` vol in 手; ×100 conversion at read time.
+                            "volume": float(v) if v is not None else 0.0,
                         }
 
-                # Store even if empty (marks date as checked, avoids re-fetch)
-                self._daily_data[ds] = day_data
+                # Store even if empty — marks date as checked, avoids re-fetch.
+                self._daily_data[ds_iso] = day_data
 
                 if (i + 1) % 20 == 0:
-                    logger.info(f"  tsanghi progress: {i + 1}/{len(dates_needed)}")
+                    logger.info(f"  tushare daily progress: {i + 1}/{len(dates_needed)}")
 
-            trading_days = sum(1 for d in self._daily_data.values() if d)
-            logger.info(f"tsanghi daily data ready: {trading_days} trading days")
-        finally:
-            await client.stop()
+        trading_days = sum(1 for d in self._daily_data.values() if d)
+        logger.info(f"tushare daily data ready: {trading_days} trading days")
 
     async def real_time_quotation(
         self,
         codes: str,
         indicators: str,
     ) -> dict[str, Any]:
-        """Delegate to realtime client (Tushare or Sina)."""
+        """Delegate to realtime client (TushareRealtimeClient)."""
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         return await self._realtime.as_ifind_format(code_list, indicators)
 

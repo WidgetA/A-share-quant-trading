@@ -93,7 +93,7 @@ def create_app(
     oa_router = create_order_assistant_router()
     app.include_router(oa_router)
 
-    # Add momentum backtest/monitor router
+    # Add momentum backtest router
     momentum_router = create_momentum_router()
     app.include_router(momentum_router)
 
@@ -131,7 +131,6 @@ def create_app(
 
         from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-        from src.web.routes import _run_intraday_monitor
 
         logger.info("Web UI started")
         store.start_cleanup_task()
@@ -156,20 +155,20 @@ def create_app(
             logger.error(f"Failed to connect shared fundamentals DB: {e}")
             app.state.fundamentals_db = None
 
-        # Tsanghi backtest cache — load from OSS in background (non-blocking)
-        app.state.tsanghi_cache = None
-        app.state.tsanghi_cache_loading = True  # frontend polls this
+        # Tushare backtest cache — load from OSS in background (non-blocking)
+        app.state.tushare_cache = None
+        app.state.tushare_cache_loading = True  # frontend polls this
 
         async def _bg_load_oss_cache():
             try:
-                from src.data.clients.tsanghi_backtest_cache import TsanghiBacktestCache
+                from src.data.clients.tushare_backtest_cache import TushareBacktestCache
 
-                logger.info("Loading tsanghi cache from OSS (background)...")
-                oss_cache = await asyncio.to_thread(TsanghiBacktestCache.load_from_oss)
+                logger.info("Loading tushare cache from OSS (background)...")
+                oss_cache = await asyncio.to_thread(TushareBacktestCache.load_from_oss)
                 if oss_cache:
-                    app.state.tsanghi_cache = oss_cache
+                    app.state.tushare_cache = oss_cache
                     logger.info(
-                        f"Tsanghi cache pre-loaded from OSS: "
+                        f"Tushare cache pre-loaded from OSS: "
                         f"{len(oss_cache._daily)} daily, {len(oss_cache._minute)} minute, "
                         f"range [{oss_cache._start_date} ~ {oss_cache._end_date}]"
                     )
@@ -180,9 +179,9 @@ def create_app(
                 else:
                     logger.warning("load_from_oss returned None — check OSS config/logs")
             except Exception as e:
-                logger.warning(f"Failed to pre-load tsanghi cache from OSS: {e}")
+                logger.warning(f"Failed to pre-load tushare cache from OSS: {e}")
             finally:
-                app.state.tsanghi_cache_loading = False
+                app.state.tushare_cache_loading = False
 
         asyncio.create_task(_bg_load_oss_cache())
 
@@ -225,35 +224,10 @@ def create_app(
             start_scan_scheduler(v15_ss)
             logger.info("V15 scan scheduler started (autonomous)")
 
-        # Auto-start intraday momentum monitor as background task
-        # Pass shared clients via state dict so monitor doesn't create its own
-        app.state.momentum_monitor_state = {
-            "running": False,
-            "last_scan_time": None,
-            "last_result": None,
-            "today_results": [],
-            "task": None,
-            "ifind_client": app.state.ifind_client,
-            "fundamentals_db": app.state.fundamentals_db,
-            "_app_state": app.state,  # needed for tsanghi_cache access
-        }
-        task = asyncio.create_task(_run_intraday_monitor(app.state.momentum_monitor_state))
-        app.state.momentum_monitor_state["task"] = task
-        logger.info("Intraday momentum monitor auto-started")
-
     @app.on_event("shutdown")
     async def shutdown():
         logger.info("Web UI stopped")
         store.stop_cleanup_task()
-
-        # Stop momentum monitor
-        monitor_state = getattr(app.state, "momentum_monitor_state", None)
-        if monitor_state:
-            task = monitor_state.get("task")
-            if task and not task.done():
-                task.cancel()
-            monitor_state["running"] = False
-            logger.info("Intraday momentum monitor stopped")
 
         # Close shared iFinD client
         ifind_client = getattr(app.state, "ifind_client", None)

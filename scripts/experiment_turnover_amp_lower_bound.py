@@ -7,7 +7,7 @@
   - 下限阈值: 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1
   - 子集: 全市场 / 趋势下行(trend<0) / 趋势上行(trend>=0)
 
-数据源: 复用 experiment_turnover_amp_cache.pkl (tsanghi 日线 + baostock 5分钟线)
+数据源: 复用 experiment_turnover_amp_cache.pkl (历史归档；当时由 tsanghi 日线 + baostock 5分钟线生成)
 
 用法:
     uv run python scripts/experiment_turnover_amp_lower_bound.py

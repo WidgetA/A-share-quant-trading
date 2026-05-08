@@ -93,7 +93,7 @@ class BacktestScanRequest(BaseModel):
     """Request body for /api/iquant/backtest-scan."""
 
     trade_date: str  # YYYY-MM-DD
-    data_source: str = "tsanghi"  # "tsanghi" or "ifind"
+    data_source: str = "tushare"  # "tushare" or "ifind"
 
 
 # --- Feishu notification helpers ---
@@ -1115,7 +1115,7 @@ def create_iquant_router() -> APIRouter:
 
         Uses the old MomentumSectorScanner for backtest compatibility.
         """
-        from src.data.clients.tsanghi_backtest_cache import TsanghiHistoricalAdapter
+        from src.data.clients.tushare_backtest_cache import TushareHistoricalAdapter
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.board_relevance_filter import create_board_relevance_filter
         from src.strategy.strategies.momentum_sector_scanner import MomentumSectorScanner
@@ -1130,22 +1130,22 @@ def create_iquant_router() -> APIRouter:
         if not scan_state or not scan_state.fundamentals_db:
             raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
 
-        if body.data_source == "tsanghi":
-            ak_cache = getattr(request.app.state, "tsanghi_cache", None)
-            if not ak_cache and getattr(request.app.state, "tsanghi_cache_loading", False):
-                logger.info("backtest-scan: tsanghi cache loading from OSS, waiting...")
+        if body.data_source == "tushare":
+            ak_cache = getattr(request.app.state, "tushare_cache", None)
+            if not ak_cache and getattr(request.app.state, "tushare_cache_loading", False):
+                logger.info("backtest-scan: tushare cache loading from OSS, waiting...")
                 for _ in range(90):
                     await asyncio.sleep(1)
-                    ak_cache = getattr(request.app.state, "tsanghi_cache", None)
+                    ak_cache = getattr(request.app.state, "tushare_cache", None)
                     if ak_cache:
                         break
-                    if not getattr(request.app.state, "tsanghi_cache_loading", False):
+                    if not getattr(request.app.state, "tushare_cache_loading", False):
                         break
 
             if not ak_cache:
                 raise HTTPException(
                     status_code=503,
-                    detail="沧海缓存未加载。请先在 web 页面的回测页下载数据。",
+                    detail="Tushare 缓存未加载。请先在 web 页面的回测页下载数据。",
                 )
 
             date_key = trade_date.strftime("%Y-%m-%d")
@@ -1157,11 +1157,11 @@ def create_iquant_router() -> APIRouter:
             if not price_snapshots:
                 return {"recommendation": None, "reason": f"No data for {date_key}"}
 
-            adapter = TsanghiHistoricalAdapter(ak_cache)
+            adapter = TushareHistoricalAdapter(ak_cache)
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported data_source: {body.data_source}. Use 'tsanghi'.",
+                detail=f"Unsupported data_source: {body.data_source}. Use 'tushare'.",
             )
 
         concept_mapper = LocalConceptMapper()

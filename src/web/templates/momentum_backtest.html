@@ -15,29 +15,6 @@
         </div>
     </div>
 
-    <!-- Monitor Status -->
-    <section class="momentum-section">
-        <div class="monitor-card">
-            <div class="monitor-header">
-                <h3>盘中监控</h3>
-                <span id="monitor-status" class="status-indicator {{ 'running' if monitor_running else 'stopped' }}">
-                    {{ '运行中' if monitor_running else '已停止' }}
-                </span>
-            </div>
-            <p class="monitor-desc">每个交易日 9:40 自动运行动量选股，结果推送飞书</p>
-            <div style="display:flex;gap:16px;align-items:center;margin:8px 0">
-                <label style="font-weight:600;white-space:nowrap">监控数据源</label>
-                <label class="checkbox-label"><input type="radio" name="monitor_ds" value="tushare" checked> 沧海+baostock</label>
-                <label class="checkbox-label"><input type="radio" name="monitor_ds" value="ifind"> iFinD</label>
-            </div>
-            <div style="display:flex;gap:8px;margin:8px 0">
-                <button type="button" id="monitor-trigger-btn" class="btn btn-primary" style="background:#0284c7" onclick="triggerMonitorScan()">手动扫描</button>
-                <span id="monitor-trigger-status" style="color:#666;font-size:13px;line-height:32px"></span>
-            </div>
-            <div id="monitor-last-result"></div>
-        </div>
-    </section>
-
     <!-- Backtest Tabs -->
     <section class="momentum-section">
         <div class="sim-card">
@@ -51,14 +28,14 @@
                 <label style="font-weight:600;margin-bottom:6px;display:block">数据源</label>
                 <div style="display:flex;gap:16px;align-items:center">
                     <label class="checkbox-label"><input type="radio" name="data_source" value="ifind" checked> iFinD</label>
-                    <label class="checkbox-label"><input type="radio" name="data_source" value="tsanghi"> 沧海数据 + baostock (免费)</label>
+                    <label class="checkbox-label"><input type="radio" name="data_source" value="tushare"> Tushare Pro</label>
                 </div>
             </div>
 
-            <!-- Tsanghi Download Section (shown when akshare selected) -->
-            <div id="tsanghi-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
+            <!-- Tushare Download Section (shown when akshare selected) -->
+            <div id="tushare-download-section" style="display:none;margin-bottom:16px;padding:12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">
                 <!-- Loading from OSS indicator (shown during startup cache load) -->
-                <div id="tsanghi-oss-loading" style="display:none;margin-bottom:8px">
+                <div id="tushare-oss-loading" style="display:none;margin-bottom:8px">
                     <div style="display:flex;align-items:center;gap:8px">
                         <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
                         <span style="font-size:13px;color:#0369a1">正在从缓存加载数据...</span>
@@ -69,20 +46,20 @@
                     <style>@keyframes pulse-bar{0%,100%{opacity:.3}50%{opacity:1}}</style>
                 </div>
                 <!-- Normal download UI -->
-                <div id="tsanghi-download-ui">
-                    <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线和分钟数据均来自沧海数据 (tsanghi)</p>
+                <div id="tushare-download-ui">
+                    <p style="margin:0 0 8px;font-size:13px;color:#0369a1">日线和分钟数据均来自 Tushare Pro</p>
                     <div style="display:flex;gap:8px;align-items:center">
-                        <button type="button" class="btn btn-primary" id="tsanghi-download-btn" style="background:#0284c7" onclick="startTsanghiDownload()">预下载数据</button>
-                        <button type="button" id="tsanghi-redownload-btn" style="display:none;background:transparent;border:1px solid #94a3b8;color:#64748b;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer" onclick="startTsanghiDownload(true)">重新下载</button>
-                        <span id="tsanghi-status" style="font-size:13px;color:#64748b"></span>
+                        <button type="button" class="btn btn-primary" id="tushare-download-btn" style="background:#0284c7" onclick="startTushareDownload()">预下载数据</button>
+                        <button type="button" id="tushare-redownload-btn" style="display:none;background:transparent;border:1px solid #94a3b8;color:#64748b;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer" onclick="startTushareDownload(true)">重新下载</button>
+                        <span id="tushare-status" style="font-size:13px;color:#64748b"></span>
                     </div>
-                    <div id="tsanghi-progress" style="display:none;margin-top:10px">
+                    <div id="tushare-progress" style="display:none;margin-top:10px">
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
                             <div class="loading-spinner" style="width:14px;height:14px;border-width:2px"></div>
-                            <span id="tsanghi-progress-text" style="font-size:12px">准备中...</span>
+                            <span id="tushare-progress-text" style="font-size:12px">准备中...</span>
                         </div>
                         <div style="background:#e5e7eb;border-radius:4px;height:6px;overflow:hidden">
-                            <div id="tsanghi-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
+                            <div id="tushare-progress-bar" style="background:#0284c7;height:100%;width:0%;transition:width 0.3s"></div>
                         </div>
                     </div>
                 </div>
@@ -339,15 +316,6 @@
         </div>
     </section>
 
-    <!-- History (today's monitor results) -->
-    <section id="history-section" class="momentum-section">
-        <div class="sim-card">
-            <h3>今日监控记录</h3>
-            <div id="history-container">
-                <p class="empty-hint">暂无记录</p>
-            </div>
-        </div>
-    </section>
 </div>
 {% endblock %}
 
@@ -370,10 +338,10 @@ checkKeyStatus();
 
 // === Combined Results Store (for loss analysis) ===
 let combinedResults = [];
-let tsanghiReady = false;
-let tsanghiMinuteGaps = [];    // [[start, end], ...] of minute-data gaps
-let tsanghiCacheStart = null;  // cached date range start (string YYYY-MM-DD)
-let tsanghiCacheEnd = null;    // cached date range end
+let tushareReady = false;
+let tushareMinuteGaps = [];    // [[start, end], ...] of minute-data gaps
+let tushareCacheStart = null;  // cached date range start (string YYYY-MM-DD)
+let tushareCacheEnd = null;    // cached date range end
 
 // === Data Source Toggle ===
 function getDataSource() {
@@ -383,10 +351,10 @@ function getDataSource() {
 
 document.querySelectorAll('input[name="data_source"]').forEach(radio => {
     radio.addEventListener('change', () => {
-        const section = document.getElementById('tsanghi-download-section');
-        if (getDataSource() === 'tsanghi') {
+        const section = document.getElementById('tushare-download-section');
+        if (getDataSource() === 'tushare') {
             section.style.display = 'block';
-            checkTsanghiCache();
+            checkTushareCache();
         } else {
             section.style.display = 'none';
         }
@@ -394,14 +362,14 @@ document.querySelectorAll('input[name="data_source"]').forEach(radio => {
 });
 
 // Auto-check cache status on page load and when switching to akshare
-async function checkTsanghiCache() {
-    const ossLoading = document.getElementById('tsanghi-oss-loading');
-    const downloadUI = document.getElementById('tsanghi-download-ui');
-    const statusEl = document.getElementById('tsanghi-status');
-    const btn = document.getElementById('tsanghi-download-btn');
+async function checkTushareCache() {
+    const ossLoading = document.getElementById('tushare-oss-loading');
+    const downloadUI = document.getElementById('tushare-download-ui');
+    const statusEl = document.getElementById('tushare-status');
+    const btn = document.getElementById('tushare-download-btn');
 
     try {
-        const resp = await fetch('/api/momentum/tsanghi-cache-status');
+        const resp = await fetch('/api/momentum/tushare-cache-status');
         const data = await resp.json();
 
         if (data.status === 'loading') {
@@ -409,7 +377,7 @@ async function checkTsanghiCache() {
             ossLoading.style.display = 'block';
             downloadUI.style.display = 'none';
             // Poll until loaded
-            setTimeout(checkTsanghiCache, 1500);
+            setTimeout(checkTushareCache, 1500);
             return;
         }
 
@@ -417,27 +385,27 @@ async function checkTsanghiCache() {
         downloadUI.style.display = 'block';
 
         if (data.status === 'ready') {
-            tsanghiCacheStart = data.start_date;
-            tsanghiCacheEnd = data.end_date;
-            tsanghiMinuteGaps = data.minute_gaps || [];
+            tushareCacheStart = data.start_date;
+            tushareCacheEnd = data.end_date;
+            tushareMinuteGaps = data.minute_gaps || [];
             let readyText = `已就绪 (${data.daily_stocks} 只日线, ${data.minute_stocks} 只分钟, ${data.start_date} ~ ${data.end_date})`;
             if (data.has_gaps) {
-                const gapStr = tsanghiMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
+                const gapStr = tushareMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
                 readyText += ` | 分钟数据缺失: ${gapStr}`;
                 statusEl.style.color = '#d97706';
                 btn.textContent = '增量下载';
                 btn.style.background = '#f59e0b';
-                tsanghiReady = false;
+                tushareReady = false;
             } else {
                 statusEl.style.color = '#059669';
-                tsanghiReady = true;
+                tushareReady = true;
                 btn.textContent = '已缓存';
             }
             statusEl.textContent = readyText;
             btn.disabled = false;
-            const reBtn = document.getElementById('tsanghi-redownload-btn');
+            const reBtn = document.getElementById('tushare-redownload-btn');
             if (reBtn) reBtn.style.display = '';
-            checkTsanghiCoverage();
+            checkTushareCoverage();
         }
     } catch (e) {
         // Ignore — user can still manually download
@@ -447,12 +415,12 @@ async function checkTsanghiCache() {
 }
 
 // Check if form dates are covered by cached range; update button accordingly
-function checkTsanghiCoverage() {
-    if (!tsanghiCacheStart || !tsanghiCacheEnd) return;
-    if (getDataSource() !== 'tsanghi') return;
+function checkTushareCoverage() {
+    if (!tushareCacheStart || !tushareCacheEnd) return;
+    if (getDataSource() !== 'tushare') return;
 
-    const btn = document.getElementById('tsanghi-download-btn');
-    const statusEl = document.getElementById('tsanghi-status');
+    const btn = document.getElementById('tushare-download-btn');
+    const statusEl = document.getElementById('tushare-status');
 
     // Get selected dates from active tab
     let startDate, endDate;
@@ -466,54 +434,54 @@ function checkTsanghiCoverage() {
     }
     if (!startDate || !endDate) return;
 
-    const boundCovered = startDate >= tsanghiCacheStart && endDate <= tsanghiCacheEnd;
+    const boundCovered = startDate >= tushareCacheStart && endDate <= tushareCacheEnd;
     // Check if any minute gaps overlap with the requested range
-    const overlappingGaps = tsanghiMinuteGaps.filter(g => g[0] <= endDate && g[1] >= startDate);
+    const overlappingGaps = tushareMinuteGaps.filter(g => g[0] <= endDate && g[1] >= startDate);
     const covered = boundCovered && overlappingGaps.length === 0;
     if (covered) {
         btn.textContent = '已缓存';
         btn.style.background = '';
         statusEl.style.color = '#059669';
-        tsanghiReady = true;  // Selected range is fully covered — allow backtest
+        tushareReady = true;  // Selected range is fully covered — allow backtest
     } else {
         btn.textContent = '增量下载';
         btn.style.background = '#f59e0b';
         btn.disabled = false;
         const parts = [];
-        if (startDate < tsanghiCacheStart) parts.push(`${startDate} ~ ${tsanghiCacheStart}`);
-        if (endDate > tsanghiCacheEnd) parts.push(`${tsanghiCacheEnd} ~ ${endDate}`);
+        if (startDate < tushareCacheStart) parts.push(`${startDate} ~ ${tushareCacheStart}`);
+        if (endDate > tushareCacheEnd) parts.push(`${tushareCacheEnd} ~ ${endDate}`);
         if (overlappingGaps.length > 0) {
             parts.push('分钟缺失: ' + overlappingGaps.map(g => `${g[0]}~${g[1]}`).join(', '));
         }
-        statusEl.textContent = `缓存 ${tsanghiCacheStart} ~ ${tsanghiCacheEnd}，未覆盖: ${parts.join('; ')}`;
+        statusEl.textContent = `缓存 ${tushareCacheStart} ~ ${tushareCacheEnd}，未覆盖: ${parts.join('; ')}`;
         statusEl.style.color = '#d97706';
-        tsanghiReady = false;
+        tushareReady = false;
     }
 }
 
 // Listen to date changes to update cache coverage status
 ['trade_date', 'combined_start', 'combined_end'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener('change', checkTsanghiCoverage);
+    if (el) el.addEventListener('change', checkTushareCoverage);
 });
 // Also re-check when switching tabs
 document.querySelectorAll('.backtest-tab').forEach(tab => {
-    tab.addEventListener('click', () => setTimeout(checkTsanghiCoverage, 50));
+    tab.addEventListener('click', () => setTimeout(checkTushareCoverage, 50));
 });
 
 // Check on page load if akshare is selected
-if (getDataSource() === 'tsanghi') {
-    document.getElementById('tsanghi-download-section').style.display = 'block';
-    checkTsanghiCache();
+if (getDataSource() === 'tushare') {
+    document.getElementById('tushare-download-section').style.display = 'block';
+    checkTushareCache();
 }
 
-async function startTsanghiDownload(force = false) {
-    const btn = document.getElementById('tsanghi-download-btn');
-    const reBtn = document.getElementById('tsanghi-redownload-btn');
-    const progress = document.getElementById('tsanghi-progress');
-    const statusEl = document.getElementById('tsanghi-status');
-    const progressText = document.getElementById('tsanghi-progress-text');
-    const progressBar = document.getElementById('tsanghi-progress-bar');
+async function startTushareDownload(force = false) {
+    const btn = document.getElementById('tushare-download-btn');
+    const reBtn = document.getElementById('tushare-redownload-btn');
+    const progress = document.getElementById('tushare-progress');
+    const statusEl = document.getElementById('tushare-status');
+    const progressText = document.getElementById('tushare-progress-text');
+    const progressBar = document.getElementById('tushare-progress-bar');
 
     // Get date range from whichever tab is active
     let startDate, endDate;
@@ -537,10 +505,10 @@ async function startTsanghiDownload(force = false) {
     const spinner = progress.querySelector('.loading-spinner');
     if (spinner) spinner.style.display = '';
     statusEl.textContent = '';
-    tsanghiReady = false;
+    tushareReady = false;
 
     try {
-        const resp = await fetch('/api/momentum/tsanghi-prepare', {
+        const resp = await fetch('/api/momentum/tushare-prepare', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ start_date: startDate, end_date: endDate, force }),
@@ -582,33 +550,33 @@ async function startTsanghiDownload(force = false) {
                         progressBar.style.width = '100%';
                         progressText.textContent = '下载完成!';
                         progress.querySelector('.loading-spinner').style.display = 'none';
-                        if (data.start_date) tsanghiCacheStart = data.start_date;
-                        if (data.end_date) tsanghiCacheEnd = data.end_date;
-                        const rangeStr = tsanghiCacheStart && tsanghiCacheEnd ? `, ${tsanghiCacheStart} ~ ${tsanghiCacheEnd}` : '';
+                        if (data.start_date) tushareCacheStart = data.start_date;
+                        if (data.end_date) tushareCacheEnd = data.end_date;
+                        const rangeStr = tushareCacheStart && tushareCacheEnd ? `, ${tushareCacheStart} ~ ${tushareCacheEnd}` : '';
                         const readyText = `已就绪 (${data.daily_count} 只日线, ${data.minute_count} 只分钟${rangeStr})`;
                         statusEl.textContent = readyText;
                         statusEl.style.color = '#059669';
                         btn.style.background = '';
                         btn.disabled = false;
                         btn.textContent = '已缓存';
-                        tsanghiReady = true;
+                        tushareReady = true;
                         if (reBtn) reBtn.style.display = '';
                         // Re-fetch status to check for remaining minute gaps
                         // (non-blocking — button is already usable)
                         try {
                             const ctrl = new AbortController();
                             setTimeout(() => ctrl.abort(), 5000);
-                            const statusResp = await fetch('/api/momentum/tsanghi-status', { signal: ctrl.signal });
+                            const statusResp = await fetch('/api/momentum/tushare-status', { signal: ctrl.signal });
                             const statusData = await statusResp.json();
                             if (statusData.has_gaps) {
-                                tsanghiMinuteGaps = statusData.minute_gaps || [];
-                                const gapStr = tsanghiMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
+                                tushareMinuteGaps = statusData.minute_gaps || [];
+                                const gapStr = tushareMinuteGaps.map(g => `${g[0]}~${g[1]}`).join(', ');
                                 statusEl.textContent = readyText + ` | 分钟数据缺失: ${gapStr}`;
                                 statusEl.style.color = '#d97706';
                                 btn.textContent = '增量下载';
                                 btn.disabled = false;
                                 btn.style.background = '#f59e0b';
-                                tsanghiReady = false;
+                                tushareReady = false;
                             }
                         } catch (_) {
                             // Status check failed or timed out — already set as ready above
@@ -655,8 +623,8 @@ document.getElementById('backtest-form').addEventListener('submit', async (e) =>
     const newsCheck = document.getElementById('news_check_single').checked;
 
     if (!tradeDate) return;
-    if (getDataSource() === 'tsanghi' && !tsanghiReady) {
-        alert('请先点击"预下载数据"按钮下载 沧海数据');
+    if (getDataSource() === 'tushare' && !tushareReady) {
+        alert('请先点击"预下载数据"按钮下载 Tushare 数据');
         return;
     }
 
@@ -836,8 +804,8 @@ document.getElementById('combined-form').addEventListener('submit', async (e) =>
     if (!startDate || !endDate) return;
     if (endDate <= startDate) { alert('结束日期必须晚于起始日期'); return; }
     if (initialCapital < 1000) { alert('起始资金不能低于 1000 元'); return; }
-    if (getDataSource() === 'tsanghi' && !tsanghiReady) {
-        alert('请先点击"预下载数据"按钮下载 沧海数据');
+    if (getDataSource() === 'tushare' && !tushareReady) {
+        alert('请先点击"预下载数据"按钮下载 Tushare 数据');
         return;
     }
 
@@ -1150,107 +1118,6 @@ function renderCombinedFunnelSummary(summary, conclusions) {
 function formatMoney(val) {
     return val.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-
-// === Monitor Status Polling ===
-async function refreshMonitorStatus() {
-    try {
-        const resp = await fetch('/api/momentum/monitor-status');
-        const data = await resp.json();
-
-        const statusEl = document.getElementById('monitor-status');
-        statusEl.textContent = data.running ? '运行中' : '已停止';
-        statusEl.className = 'status-indicator ' + (data.running ? 'running' : 'stopped');
-
-        const lastEl = document.getElementById('monitor-last-result');
-        if (data.last_scan_time) {
-            const last = data.today_results[data.today_results.length - 1];
-            if (last) {
-                lastEl.innerHTML = `<p class="monitor-last">上次扫描: ${last.scan_time} | 选出 ${last.selected_count} 只</p>`;
-            }
-        } else {
-            lastEl.innerHTML = '';
-        }
-
-        const historyEl = document.getElementById('history-container');
-        if (data.today_results && data.today_results.length > 0) {
-            let hhtml = '';
-            data.today_results.forEach(r => {
-                hhtml += `
-                    <div class="history-item">
-                        <span class="history-time">${r.scan_time}</span>
-                        <span>初筛 ${r.initial_gainers} 只</span>
-                        <span>热门板块 ${r.hot_boards} 个</span>
-                        <span class="history-selected">选出 <strong>${r.selected_count}</strong> 只</span>
-                    </div>
-                `;
-                if (r.selected_stocks && r.selected_stocks.length > 0) {
-                    hhtml += '<div class="history-stocks">';
-                    r.selected_stocks.forEach(s => {
-                        hhtml += `<span class="history-stock">${s.stock_code} ${s.stock_name} +${s.open_gain_pct}%</span>`;
-                    });
-                    hhtml += '</div>';
-                }
-            });
-            historyEl.innerHTML = hhtml;
-        }
-    } catch (e) {
-        // Ignore poll errors
-    }
-}
-
-refreshMonitorStatus();
-
-// === Monitor Data Source Config ===
-(async function loadMonitorConfig() {
-    try {
-        const resp = await fetch('/api/momentum/monitor/config');
-        const data = await resp.json();
-        const radio = document.querySelector(`input[name="monitor_ds"][value="${data.data_source}"]`);
-        if (radio) radio.checked = true;
-    } catch (e) {}
-})();
-
-document.querySelectorAll('input[name="monitor_ds"]').forEach(radio => {
-    radio.addEventListener('change', async () => {
-        const val = document.querySelector('input[name="monitor_ds"]:checked').value;
-        try {
-            await fetch('/api/momentum/monitor/config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ data_source: val }),
-            });
-        } catch (e) {}
-    });
-});
-
-// === Manual Trigger ===
-async function triggerMonitorScan() {
-    const btn = document.getElementById('monitor-trigger-btn');
-    const statusEl = document.getElementById('monitor-trigger-status');
-    btn.disabled = true;
-    btn.textContent = '扫描中...';
-    statusEl.textContent = '';
-    try {
-        const resp = await fetch('/api/momentum/monitor/trigger', { method: 'POST' });
-        const data = await resp.json();
-        if (data.success) {
-            const r = data.result;
-            statusEl.textContent = `完成 (${r.elapsed_seconds}s) | 选出${r.selected_count}只 | ${r.data_source}`;
-            statusEl.style.color = '#16a34a';
-            refreshMonitorStatus();
-        } else {
-            statusEl.textContent = data.message || '无结果';
-            statusEl.style.color = '#dc2626';
-        }
-    } catch (e) {
-        statusEl.textContent = '请求失败: ' + e.message;
-        statusEl.style.color = '#dc2626';
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '手动扫描';
-    }
-}
-setInterval(refreshMonitorStatus, 30000);
 
 // === Loss Analysis (combined) ===
 async function startCombinedLossAnalysis() {

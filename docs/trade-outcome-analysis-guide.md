@@ -63,7 +63,7 @@ Scanner 日志按 Step 编号输出，关键步骤：
 
 | 文件 | 内容 | 来源 |
 |------|------|------|
-| `data/experiment_turnover_amp_cache.pkl` | 9 个月日线 + 分钟线（3196 只股票） | tsanghi 日线 + baostock 5 分钟线 |
+| `data/experiment_turnover_amp_cache.pkl` | 9 个月日线 + 分钟线（3196 只股票） | 历史归档：tsanghi 日线 + baostock 5 分钟线 |
 | `data/experiment_volume_profile_*.pkl` | 量价分布实验数据 | baostock |
 
 **加载方式：**
@@ -83,7 +83,7 @@ minute = raw["minute"] # {bare_code: {date_str: (close_940, cum_vol) or (close, 
 |------|-----------|-------------|
 | 9:30-9:40 分钟线 | `high_frequency(Interval=1)` | baostock `query_history_k_data_plus` |
 | 实时快照 | `real_time_quotation` | - |
-| 日线历史 | `cmd_history_quotation` | tsanghi `/daily` |
+| 日线历史 | `cmd_history_quotation` | Tushare `daily` |
 | 全天分钟线(复盘) | `high_frequency(09:30~15:00)` | baostock |
 
 ---

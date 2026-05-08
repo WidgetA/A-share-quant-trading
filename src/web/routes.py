@@ -32,7 +32,6 @@
 # GET  /momentum              - Momentum backtest page (HTML)
 # POST /api/momentum/backtest - Run single-day backtest (JSON)
 # POST /api/momentum/range-backtest - Run range backtest with SSE streaming
-# GET  /api/momentum/monitor-status - Get intraday monitor status (JSON)
 # POST /api/momentum/loss-analysis  - Analyze losing trades with LLM (SSE streaming)
 # POST /api/momentum/backfill         - Backfill scan stocks to DB (SSE streaming)
 # GET  /api/momentum/scan-stocks/csv  - Export scan selected stocks as CSV download
@@ -1095,7 +1094,7 @@ class MomentumBacktestRequest(BaseModel):
 
     trade_date: str  # YYYY-MM-DD format
     notify: bool = False  # Send Feishu notification
-    data_source: str = "ifind"  # "ifind" or "tsanghi"
+    data_source: str = "ifind"  # "ifind" or "tushare"
     news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
@@ -1122,12 +1121,12 @@ class CombinedAnalysisRequest(BaseModel):
     end_date: str  # YYYY-MM-DD format
     initial_capital: float  # Starting capital in yuan
     quality_filter: bool = True  # Enable momentum quality filter (动量质量过滤)
-    data_source: str = "ifind"  # "ifind" or "tsanghi"
+    data_source: str = "ifind"  # "ifind" or "tushare"
     news_check: bool = False  # Enable negative news check (Tavily + LLM)
 
 
-class TsanghiPrepareRequest(BaseModel):
-    """Request body for tsanghi data pre-download."""
+class TusharePrepareRequest(BaseModel):
+    """Request body for tushare data pre-download."""
 
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
@@ -1141,20 +1140,6 @@ def create_momentum_router() -> APIRouter:
     from datetime import datetime
 
     router = APIRouter(tags=["momentum"])
-
-    def _get_monitor_state(request: Request) -> dict[str, Any]:
-        """Get monitor state from app.state (created at startup)."""
-        return getattr(
-            request.app.state,
-            "momentum_monitor_state",
-            {
-                "running": False,
-                "last_scan_time": None,
-                "last_result": None,
-                "today_results": [],
-                "task": None,
-            },
-        )
 
     def _get_ifind_client(request: Request):
         """Get shared iFinD HTTP client from app.state."""
@@ -1226,24 +1211,20 @@ def create_momentum_router() -> APIRouter:
 
     @router.get("/momentum", response_class=HTMLResponse)
     async def momentum_page(request: Request):
-        """Momentum backtest and monitor page."""
+        """Momentum backtest page."""
         templates = request.app.state.templates
-        monitor_state = _get_monitor_state(request)
         resp = templates.TemplateResponse(
             "momentum_backtest.html",
-            {
-                "request": request,
-                "monitor_running": monitor_state["running"],
-            },
+            {"request": request},
         )
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
-    @router.get("/api/momentum/tsanghi-cache-status")
-    async def tsanghi_cache_status(request: Request):
-        """Return tsanghi cache state for frontend polling."""
-        loading = getattr(request.app.state, "tsanghi_cache_loading", False)
-        cache = getattr(request.app.state, "tsanghi_cache", None)
+    @router.get("/api/momentum/tushare-cache-status")
+    async def tushare_cache_status(request: Request):
+        """Return tushare cache state for frontend polling."""
+        loading = getattr(request.app.state, "tushare_cache_loading", False)
+        cache = getattr(request.app.state, "tushare_cache", None)
         if loading and cache is None:
             return {"status": "loading"}
         if cache is None:
@@ -1276,15 +1257,15 @@ def create_momentum_router() -> APIRouter:
             "debug_sample_dates": sample_dates,
         }
 
-    @router.post("/api/momentum/tsanghi-prepare")
-    async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
-        """Pre-download tsanghi data as SSE stream (incremental).
+    @router.post("/api/momentum/tushare-prepare")
+    async def tushare_prepare(request: Request, body: TusharePrepareRequest):
+        """Pre-download tushare data as SSE stream (incremental).
 
         Loads existing cache from memory / OSS, calculates which date
         ranges are missing, and only downloads the gaps.
         """
-        from src.data.clients.tsanghi_backtest_cache import (
-            TsanghiBacktestCache,
+        from src.data.clients.tushare_backtest_cache import (
+            TushareBacktestCache,
             check_oss_available,
         )
 
@@ -1298,10 +1279,10 @@ def create_momentum_router() -> APIRouter:
         # Don't load from OSS either — the whole point of force is to
         # discard potentially corrupted/misaligned cached data.
         if body.force:
-            request.app.state.tsanghi_cache = None
+            request.app.state.tushare_cache = None
             existing = None
         else:
-            existing = getattr(request.app.state, "tsanghi_cache", None)
+            existing = getattr(request.app.state, "tushare_cache", None)
 
         # 1) Try in-memory cache
         if existing and existing.covers_range(start_date, end_date):
@@ -1321,7 +1302,7 @@ def create_momentum_router() -> APIRouter:
         if not existing and not body.force:
             try:
                 existing = await asyncio.wait_for(
-                    asyncio.to_thread(TsanghiBacktestCache.load_from_oss), timeout=60
+                    asyncio.to_thread(TushareBacktestCache.load_from_oss), timeout=60
                 )
             except asyncio.TimeoutError:
                 logger.warning("load_from_oss timed out (60s), will re-download")
@@ -1330,7 +1311,7 @@ def create_momentum_router() -> APIRouter:
                 logger.warning("load_from_oss failed, will re-download", exc_info=True)
                 existing = None
         if existing and existing.covers_range(start_date, end_date):
-            request.app.state.tsanghi_cache = existing
+            request.app.state.tushare_cache = existing
 
             async def cached_stream():
                 msg = {
@@ -1360,12 +1341,12 @@ def create_momentum_router() -> APIRouter:
             gaps = existing.missing_ranges(start_date, end_date)
             working = existing.copy()
         else:
-            working = TsanghiBacktestCache()
+            working = TushareBacktestCache()
             gaps = [(start_date, end_date)]
 
         if not gaps:
             # Shouldn't happen (covers_range check above), but just in case
-            request.app.state.tsanghi_cache = working
+            request.app.state.tushare_cache = working
 
             async def nogap_stream():
                 msg = {
@@ -1399,7 +1380,7 @@ def create_momentum_router() -> APIRouter:
                         await progress_queue.put(
                             {"type": "info", "message": f"增量下载 {label} ({i + 1}/{len(gaps)})"}
                         )
-                        gap_cache = TsanghiBacktestCache()
+                        gap_cache = TushareBacktestCache()
                         await gap_cache.download_prices(gap_start, gap_end, queue_progress)
                         working.merge_from(gap_cache)
                     working._is_ready = True
@@ -1418,7 +1399,7 @@ def create_momentum_router() -> APIRouter:
                     yield sse(item)
             except (asyncio.CancelledError, GeneratorExit):
                 task.cancel()
-                logger.warning("tsanghi download cancelled (client disconnected)")
+                logger.warning("tushare download cancelled (client disconnected)")
                 return
 
             await task
@@ -1427,7 +1408,7 @@ def create_momentum_router() -> APIRouter:
                 yield sse({"type": "error", "message": download_error})
             else:
                 # Only assign to app.state on complete success (no partial mutation)
-                request.app.state.tsanghi_cache = working
+                request.app.state.tushare_cache = working
 
                 # Fire-and-forget OSS save — don't block SSE and won't be
                 # cancelled if the client disconnects
@@ -1435,13 +1416,13 @@ def create_momentum_router() -> APIRouter:
                     try:
                         err = await asyncio.wait_for(working.save_to_oss(), timeout=120)
                         if err:
-                            logger.warning(f"tsanghi OSS save failed: {err}")
+                            logger.warning(f"tushare OSS save failed: {err}")
                         else:
-                            logger.info("tsanghi cache saved to OSS OK")
+                            logger.info("tushare cache saved to OSS OK")
                     except asyncio.TimeoutError:
-                        logger.error("tsanghi OSS save timed out (120s)")
+                        logger.error("tushare OSS save timed out (120s)")
                     except Exception as exc:
-                        logger.error(f"tsanghi OSS save exception: {exc}")
+                        logger.error(f"tushare OSS save exception: {exc}")
 
                 asyncio.create_task(_bg_oss_save())
                 yield sse(
@@ -1483,17 +1464,17 @@ def create_momentum_router() -> APIRouter:
 
         try:
             concept_mapper = LocalConceptMapper()
-            if body.data_source == "tsanghi":
-                # --- Tsanghi path: read from pre-downloaded cache ---
-                from src.data.clients.tsanghi_backtest_cache import (
-                    TsanghiHistoricalAdapter,
+            if body.data_source == "tushare":
+                # --- Tushare path: read from pre-downloaded cache ---
+                from src.data.clients.tushare_backtest_cache import (
+                    TushareHistoricalAdapter,
                 )
 
-                ak_cache = getattr(request.app.state, "tsanghi_cache", None)
+                ak_cache = getattr(request.app.state, "tushare_cache", None)
                 if not ak_cache or not ak_cache.is_ready:
-                    raise HTTPException(status_code=400, detail="请先预下载沧海数据")
+                    raise HTTPException(status_code=400, detail="请先预下载Tushare 数据")
 
-                adapter = TsanghiHistoricalAdapter(ak_cache)
+                adapter = TushareHistoricalAdapter(ak_cache)
                 scanner = MomentumSectorScanner(
                     ifind_client=adapter,  # type: ignore[arg-type]
                     fundamentals_db=fundamentals_db,
@@ -1515,7 +1496,7 @@ def create_momentum_router() -> APIRouter:
                     return {
                         "success": False,
                         "trade_date": body.trade_date,
-                        "error": f"沧海缓存中无 {date_key} 的日线数据",
+                        "error": f"Tushare 缓存中无 {date_key} 的日线数据",
                     }
             else:
                 # --- iFinD path: original logic ---
@@ -1614,74 +1595,6 @@ def create_momentum_router() -> APIRouter:
             raise HTTPException(status_code=500, detail=f"回测出错: {str(e)}")
         finally:
             await _stop_news_checker(news_checker)
-
-    @router.get("/api/momentum/monitor-status")
-    async def get_monitor_status(request: Request) -> dict:
-        """Get intraday monitor status and latest results."""
-        monitor_state = _get_monitor_state(request)
-        return {
-            "running": monitor_state["running"],
-            "last_scan_time": monitor_state["last_scan_time"],
-            "today_results": monitor_state["today_results"],
-        }
-
-    @router.post("/api/momentum/monitor/start")
-    async def start_monitor(request: Request) -> dict:
-        """Manually start the intraday monitor."""
-        monitor_state = _get_monitor_state(request)
-        if monitor_state["running"]:
-            return {"success": True, "message": "监控已在运行中"}
-
-        # Store app_state ref so background task can access OSS cache
-        monitor_state["_app_state"] = request.app.state
-        task = asyncio.create_task(_run_intraday_monitor(monitor_state))
-        monitor_state["task"] = task
-        return {"success": True, "message": "监控已启动"}
-
-    @router.post("/api/momentum/monitor/stop")
-    async def stop_monitor(request: Request) -> dict:
-        """Manually stop the intraday monitor."""
-        monitor_state = _get_monitor_state(request)
-        task = monitor_state.get("task")
-        if task and not task.done():
-            task.cancel()
-        monitor_state["running"] = False
-        monitor_state["task"] = None
-        return {"success": True, "message": "监控已停止"}
-
-    @router.post("/api/momentum/monitor/trigger")
-    async def trigger_monitor_scan(request: Request) -> dict:
-        """Manually trigger a momentum scan right now (any time of day)."""
-        monitor_state = _get_monitor_state(request)
-        # Pass OSS cache for historical lookback (avoids unreliable API)
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-        try:
-            result = await _execute_monitor_scan(monitor_state, tsanghi_cache=tsanghi_cache)
-            if result:
-                return {"success": True, "result": result}
-            return {"success": False, "message": "扫描完成但无结果（无合格股票或数据源不可用）"}
-        except Exception as e:
-            logger.error(f"Manual trigger scan error: {e}", exc_info=True)
-            return {"success": False, "message": f"扫描出错: {type(e).__name__}: {e}"}
-
-    @router.get("/api/momentum/monitor/config")
-    async def get_monitor_config() -> dict:
-        """Get current monitor data source config."""
-        from src.common.config import get_monitor_data_source
-
-        return {"data_source": get_monitor_data_source()}
-
-    @router.post("/api/momentum/monitor/config")
-    async def set_monitor_config(request: Request) -> dict:
-        """Update monitor data source config."""
-        from src.common.config import set_monitor_data_source
-
-        body = await request.json()
-        source = body.get("data_source", "")
-        if source not in ("ifind", "tushare"):
-            raise HTTPException(status_code=400, detail="data_source must be 'ifind' or 'tushare'")
-        set_monitor_data_source(source)
-        return {"success": True, "data_source": source}
 
     @router.post("/api/momentum/range-backtest")
     async def run_range_backtest(request: Request, body: MomentumRangeBacktestRequest):
@@ -2050,14 +1963,14 @@ def create_momentum_router() -> APIRouter:
         losing_trades = body.get("losing_trades", [])
         data_source = body.get("data_source", "ifind")
 
-        if data_source == "tsanghi":
-            from src.data.clients.tsanghi_backtest_cache import (
-                TsanghiHistoricalAdapter,
+        if data_source == "tushare":
+            from src.data.clients.tushare_backtest_cache import (
+                TushareHistoricalAdapter,
             )
 
-            ak_cache = getattr(request.app.state, "tsanghi_cache", None)
+            ak_cache = getattr(request.app.state, "tushare_cache", None)
             if ak_cache and ak_cache.is_ready:
-                quote_client = TsanghiHistoricalAdapter(ak_cache)
+                quote_client = TushareHistoricalAdapter(ak_cache)
             else:
                 quote_client = _get_ifind_client(request)
         else:
@@ -2093,9 +2006,9 @@ def create_momentum_router() -> APIRouter:
                         }
                     )
 
-                    # Fetch board trend data (iFinD only — tsanghi has no board index)
+                    # Fetch board trend data (iFinD only — tushare has no board index)
                     board_data = {}
-                    if board_name and data_source != "tsanghi":
+                    if board_name and data_source != "tushare":
                         try:
                             board_data = await _fetch_board_trend(
                                 quote_client, board_name, trade_date_str
@@ -2841,19 +2754,19 @@ def create_momentum_router() -> APIRouter:
         ]
 
         concept_mapper = LocalConceptMapper()
-        use_tsanghi = body.data_source == "tsanghi"
-        if use_tsanghi:
-            from src.data.clients.tsanghi_backtest_cache import (
-                TsanghiHistoricalAdapter,
+        use_tushare = body.data_source == "tushare"
+        if use_tushare:
+            from src.data.clients.tushare_backtest_cache import (
+                TushareHistoricalAdapter,
             )
 
-            tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-            if not tsanghi_cache or not tsanghi_cache.is_ready:
-                raise HTTPException(status_code=400, detail="请先预下载沧海数据")
-            ifind_client = TsanghiHistoricalAdapter(tsanghi_cache)
+            tushare_cache = getattr(request.app.state, "tushare_cache", None)
+            if not tushare_cache or not tushare_cache.is_ready:
+                raise HTTPException(status_code=400, detail="请先预下载Tushare 数据")
+            ifind_client = TushareHistoricalAdapter(tushare_cache)
         else:
             ifind_client = _get_ifind_client(request)
-            tsanghi_cache = None
+            tushare_cache = None
 
         fundamentals_db = _get_fundamentals_db(request)
         try:
@@ -2936,11 +2849,11 @@ def create_momentum_router() -> APIRouter:
                     )
 
                     try:
-                        if use_tsanghi:
+                        if use_tushare:
                             date_key = trade_date.strftime("%Y-%m-%d")
                             try:
                                 price_snapshots = _build_snapshots_from_cache(
-                                    tsanghi_cache,
+                                    tushare_cache,
                                     date_key,
                                 )
                             except MinuteDataMissingError as e:
@@ -2948,7 +2861,7 @@ def create_momentum_router() -> APIRouter:
                                 price_err = str(e)
                             else:
                                 price_err = (
-                                    "" if price_snapshots else f"沧海缓存中无 {date_key} 的日线数据"
+                                    "" if price_snapshots else f"Tushare 缓存中无 {date_key} 的日线数据"
                                 )
                         else:
                             (
@@ -4340,9 +4253,9 @@ class MinuteDataMissingError(Exception):
 
 
 def _build_snapshots_from_cache(
-    tsanghi_cache, date_str: str, *, skip_open_gain_filter: bool = False
+    tushare_cache, date_str: str, *, skip_open_gain_filter: bool = False
 ) -> dict:
-    """Build PriceSnapshot dict from TsanghiBacktestCache for a given date.
+    """Build PriceSnapshot dict from TushareBacktestCache for a given date.
 
     Replaces the iwencai pre-filter + history_quotes + 9:40 fetch pipeline.
     Local filtering: open_gain_pct > -0.5% (same as iwencai query).
@@ -4359,12 +4272,12 @@ def _build_snapshots_from_cache(
     """
     from src.strategy.strategies.momentum_sector_scanner import PriceSnapshot
 
-    all_daily = tsanghi_cache.get_all_codes_with_daily(date_str)
+    all_daily = tushare_cache.get_all_codes_with_daily(date_str)
     snapshots: dict[str, PriceSnapshot] = {}
 
     if not all_daily:
         # Debug: log sample date keys to diagnose format mismatch
-        for code, dates in tsanghi_cache._daily.items():
+        for code, dates in tushare_cache._daily.items():
             if dates:
                 sample_keys = sorted(dates.keys())[:5]
                 logger.warning(
@@ -4376,7 +4289,7 @@ def _build_snapshots_from_cache(
         else:
             logger.warning(
                 f"_build_snapshots_from_cache: no data for date_str='{date_str}', "
-                f"_daily has {len(tsanghi_cache._daily)} stocks but all date dicts are empty"
+                f"_daily has {len(tushare_cache._daily)} stocks but all date dicts are empty"
             )
         return snapshots
 
@@ -4399,7 +4312,7 @@ def _build_snapshots_from_cache(
         daily_candidates += 1
 
         # 9:40 price from minute cache — NO fallback allowed
-        data_940 = tsanghi_cache.get_940_price(code, date_str)
+        data_940 = tushare_cache.get_940_price(code, date_str)
         if not data_940:
             continue
 
@@ -4547,338 +4460,6 @@ async def _run_momentum_scan_for_date(ifind_client, scanner, trade_date):
         return None
 
     return await scanner.scan(price_snapshots, trade_date=trade_date)
-
-
-async def _execute_monitor_scan(state: dict, tsanghi_cache: Any = None) -> dict | None:
-    """
-    Execute a single momentum scan using the configured data source.
-
-    Supports two data source modes:
-    - 'sina': Sina batch quotes (free) + IQuantHistoricalAdapter (tsanghi for lookback)
-    - 'ifind': iFinD iwencai polling + iFinD historical data
-
-    Returns result_entry dict on success, None on failure.
-    Both the auto-scheduler and the manual trigger button call this.
-    """
-    import time as time_module
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    from src.common.config import get_monitor_data_source
-    from src.common.feishu_bot import FeishuBot
-    from src.data.sources.local_concept_mapper import LocalConceptMapper
-    from src.strategy.strategies.momentum_sector_scanner import (
-        MomentumSectorScanner,
-        PriceSnapshot,
-    )
-
-    beijing_tz = ZoneInfo("Asia/Shanghai")
-    data_source = get_monitor_data_source()
-    logger.info(f"Monitor scan starting (data_source={data_source})")
-
-    start_time = time_module.monotonic()
-
-    if data_source == "tushare":
-        # --- Tushare path: batch fetch all main-board stocks ---
-        from datetime import timedelta
-
-        from src.common.config import get_tushare_token
-        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
-        from src.data.clients.tushare_realtime import TushareRealtimeClient
-        from src.strategy.filters.stock_filter import create_main_board_only_filter
-
-        # Quick weekday check — A-share market only opens Mon-Fri
-        now_bj = datetime.now(beijing_tz)
-        if now_bj.weekday() >= 5:  # Saturday=5, Sunday=6
-            day_name = "周六" if now_bj.weekday() == 5 else "周日"
-            logger.warning(f"Monitor (tushare): 今天是{day_name}，A股不开市")
-            raise RuntimeError(f"今天是{day_name}，A股不开市，无法扫描")
-
-        fundamentals_db = state.get("fundamentals_db")
-        if not fundamentals_db:
-            logger.error("Monitor: fundamentals DB not available")
-            return None
-
-        # Get universe: prefer OSS cache (complete, zero query), fallback to PG
-        stock_filter = create_main_board_only_filter()
-        cache_ready = tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)
-        if cache_ready and tsanghi_cache.stock_codes:
-            all_codes = tsanghi_cache.stock_codes
-            logger.info(f"Monitor (tushare): universe from OSS cache ({len(all_codes)} codes)")
-        else:
-            all_codes = await fundamentals_db.get_all_stock_codes()
-            logger.info(f"Monitor (tushare): universe from PG ({len(all_codes)} codes)")
-        universe = [c for c in all_codes if stock_filter.is_allowed(c)]
-        logger.info(f"Monitor (tushare): universe has {len(universe)} codes")
-
-        tushare_token = get_tushare_token()
-        tushare = TushareRealtimeClient(token=tushare_token)
-        await tushare.start()
-        try:
-            quotes = await tushare.batch_get_quotes(universe)
-            logger.info(f"Monitor (tushare): got {len(quotes)} quotes")
-
-            # Supplement preClose from OSS cache (rt_min doesn't provide it)
-            if not (tsanghi_cache and getattr(tsanghi_cache, "is_ready", False)):
-                raise RuntimeError("OSS 缓存未加载，无法进行扫描。请先在回测页面加载缓存数据。")
-
-            # Find prev trading day's close in cache (try last 7 days)
-            today = datetime.now(beijing_tz).date()
-            prev_daily: dict[str, dict[str, float]] = {}
-            for days_back in range(1, 8):
-                prev_date = today - timedelta(days=days_back)
-                prev_date_str = prev_date.strftime("%Y-%m-%d")
-                prev_daily = tsanghi_cache.get_all_codes_with_daily(prev_date_str)
-                if prev_daily:
-                    logger.info(
-                        f"Monitor (tushare): preClose from cache date {prev_date_str} "
-                        f"({len(prev_daily)} stocks)"
-                    )
-                    break
-
-            price_snapshots: dict[str, PriceSnapshot] = {}
-            skipped_no_prev = 0
-            for code, q in quotes.items():
-                if not q.is_trading:
-                    continue
-                # Get preClose from cache
-                cached_day = prev_daily.get(code)
-                prev_close = cached_day["close"] if cached_day else 0.0
-                if prev_close <= 0:
-                    skipped_no_prev += 1
-                    continue
-                price_snapshots[code] = PriceSnapshot(
-                    stock_code=code,
-                    stock_name="",
-                    open_price=q.open_price,
-                    prev_close=prev_close,
-                    latest_price=q.latest_price,
-                    early_volume=q.volume,
-                    high_price=q.high_price,
-                    low_price=q.low_price,
-                )
-
-            if skipped_no_prev:
-                logger.warning(
-                    f"Monitor (tushare): skipped {skipped_no_prev} stocks (no preClose in cache)"
-                )
-
-            if not price_snapshots:
-                not_trading = sum(1 for q in quotes.values() if not q.is_trading)
-                raise RuntimeError(
-                    f"盘中扫描数据异常：构建快照为空。"
-                    f"quotes={len(quotes)}, 停牌/无数据={not_trading}, "
-                    f"缺prev_close={skipped_no_prev}, prev_daily={len(prev_daily)}。"
-                    f"请检查Tushare数据和OSS缓存是否正常。"
-                )
-
-            adapter = IQuantHistoricalAdapter(tushare, cache=tsanghi_cache)
-            concept_mapper = LocalConceptMapper()
-            scanner = MomentumSectorScanner(
-                ifind_client=adapter,  # type: ignore[arg-type]
-                fundamentals_db=fundamentals_db,
-                concept_mapper=concept_mapper,
-                stock_filter=stock_filter,
-                board_relevance_filter=_create_board_relevance_filter_global(),
-            )
-            scan_result = await scanner.scan(price_snapshots, trade_date=None)
-        finally:
-            await tushare.stop()
-
-    else:
-        # --- iFinD path: original logic (iwencai pre-filter + iFinD history) ---
-        ifind_client = state.get("ifind_client")
-        fundamentals_db = state.get("fundamentals_db")
-
-        if not ifind_client or not fundamentals_db:
-            logger.error("Monitor: iFinD client or fundamentals DB not available")
-            return None
-
-        concept_mapper = LocalConceptMapper()
-
-        result = await ifind_client.smart_stock_picking("涨幅大于-0.5%的沪深主板非ST股票", "stock")
-        snapshots = await _parse_iwencai_realtime(ifind_client, result)
-        if not snapshots:
-            logger.info("Monitor (ifind): no pre-filtered stocks found")
-            return None
-
-        scanner = MomentumSectorScanner(
-            ifind_client=ifind_client,
-            fundamentals_db=fundamentals_db,
-            concept_mapper=concept_mapper,
-            board_relevance_filter=_create_board_relevance_filter_global(),
-        )
-        scan_result = await scanner.scan(snapshots, trade_date=None)
-
-    elapsed = time_module.monotonic() - start_time
-    scan_time = datetime.now(beijing_tz)
-
-    # Build result entry for state storage
-    rec = scan_result.recommended_stock
-    result_entry = {
-        "scan_time": scan_time.strftime("%Y-%m-%d %H:%M"),
-        "initial_gainers": len(scan_result.initial_gainers),
-        "hot_boards": len(scan_result.hot_boards),
-        "selected_count": len(scan_result.selected_stocks),
-        "elapsed_seconds": round(elapsed, 1),
-        "data_source": data_source,
-        "selected_stocks": [
-            {
-                "stock_code": s.stock_code,
-                "stock_name": s.stock_name,
-                "board_name": s.board_name,
-                "open_gain_pct": round(s.open_gain_pct, 2),
-                "pe_ttm": round(s.pe_ttm, 2),
-                "board_avg_pe": round(s.board_avg_pe, 2),
-            }
-            for s in scan_result.selected_stocks
-        ],
-        "scored_top5": [
-            {
-                "stock_code": c.stock_code,
-                "stock_name": c.stock_name,
-                "board_name": c.board_name,
-                "composite_score": round(c.composite_score, 2),
-                "gain_from_open_pct": round(c.gain_from_open_pct, 2),
-            }
-            for c in scan_result.scored_candidates[:5]
-        ],
-        "recommended_stock": {
-            "stock_code": rec.stock_code,
-            "stock_name": rec.stock_name,
-            "board_name": rec.board_name,
-            "board_stock_count": rec.board_stock_count,
-            "open_gain_pct": round(rec.open_gain_pct, 2),
-            "gain_from_open_pct": round(rec.gain_from_open_pct, 2),
-            "turnover_amp": round(rec.turnover_amp, 2),
-            "composite_score": round(rec.composite_score, 2),
-        }
-        if rec
-        else None,
-    }
-
-    state["last_result"] = result_entry
-    state["last_scan_time"] = scan_time.strftime("%Y-%m-%d %H:%M")
-    state["today_results"].append(result_entry)
-
-    # Send Feishu notification
-    bot = FeishuBot()
-    if bot.is_configured():
-        await bot.send_daily_pick_report(
-            scan_result=scan_result,
-            elapsed_seconds=elapsed,
-            scan_time=scan_time,
-        )
-        logger.info("Monitor: Feishu daily pick report sent")
-    else:
-        logger.warning(
-            "Monitor: Feishu bot NOT configured — set FEISHU_APP_ID, "
-            "FEISHU_APP_SECRET, FEISHU_CHAT_ID environment variables"
-        )
-
-    logger.info(
-        f"Monitor scan complete: {len(scan_result.selected_stocks)} selected, "
-        f"{elapsed:.1f}s elapsed (source={data_source})"
-    )
-    return result_entry
-
-
-async def _run_intraday_monitor(state: dict) -> None:
-    """
-    Background task: intraday momentum monitor.
-
-    Runs every trading day at ~9:40, executes momentum scan, sends Feishu notification.
-    Supports dual data source: 'sina' (free) or 'ifind' (paid).
-    """
-    import asyncio
-    from datetime import datetime, time, timedelta
-    from zoneinfo import ZoneInfo
-
-    beijing_tz = ZoneInfo("Asia/Shanghai")
-    SCAN_TIME = time(9, 40)
-
-    state["running"] = True
-    logger.info("Intraday momentum monitor started")
-
-    try:
-        while state["running"]:
-            now = datetime.now(beijing_tz)
-            current_time = now.time()
-
-            # Only run on weekdays
-            if now.weekday() >= 5:
-                await asyncio.sleep(3600)
-                continue
-
-            # Before scan time — wait
-            if current_time < SCAN_TIME:
-                delta = datetime.combine(now.date(), SCAN_TIME) - datetime.combine(
-                    now.date(), current_time
-                )
-                wait_secs = max(delta.total_seconds(), 10)
-                logger.debug(f"Monitor waiting {wait_secs:.0f}s until {SCAN_TIME}")
-                await asyncio.sleep(min(wait_secs, 60))
-                continue
-
-            # After scan window — wait for tomorrow
-            if current_time > time(9, 50):
-                tomorrow = now + timedelta(days=1)
-                target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
-                wait_secs = (target - now).total_seconds()
-                logger.debug(f"Monitor done for today, sleeping {wait_secs:.0f}s")
-                await asyncio.sleep(min(wait_secs, 3600))
-                continue
-
-            # 9:40-9:50 window — run scan once
-            logger.info("Monitor: entering scan window")
-            try:
-                app_state = state.get("_app_state")
-                tsanghi_cache = getattr(app_state, "tsanghi_cache", None) if app_state else None
-                result = await _execute_monitor_scan(state, tsanghi_cache=tsanghi_cache)
-                if result is None:
-                    # Silent failure (return None) — notify so user knows
-                    logger.warning("Monitor scan returned None (no result)")
-                    try:
-                        from src.common.feishu_bot import FeishuBot
-
-                        bot = FeishuBot()
-                        if bot.is_configured():
-                            await bot.send_alert(
-                                "盘中监控扫描无结果",
-                                "扫描完成但未产生结果（数据源不可用或无合格股票）",
-                            )
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.error(f"Monitor scan error: {e}", exc_info=True)
-                # Notify Feishu about the error
-                try:
-                    from src.common.feishu_bot import FeishuBot
-
-                    bot = FeishuBot()
-                    if bot.is_configured():
-                        await bot.send_alert(
-                            "盘中监控扫描失败",
-                            f"{type(e).__name__}: {e}",
-                        )
-                except Exception:
-                    pass
-
-            # After scan, wait until next day
-            tomorrow = now + timedelta(days=1)
-            target = datetime.combine(tomorrow.date(), time(9, 25), tzinfo=beijing_tz)
-            wait_secs = (target - datetime.now(beijing_tz)).total_seconds()
-            state["today_results"] = []  # Reset for next day
-            await asyncio.sleep(min(max(wait_secs, 10), 3600 * 18))
-
-    except asyncio.CancelledError:
-        logger.info("Intraday momentum monitor cancelled")
-    except Exception as e:
-        logger.error(f"Intraday momentum monitor error: {e}", exc_info=True)
-    finally:
-        state["running"] = False
-        state["task"] = None
-        logger.info("Intraday momentum monitor stopped")
 
 
 async def _parse_iwencai_realtime(ifind_client, iwencai_result: dict) -> dict:
@@ -5317,93 +4898,6 @@ def create_settings_router() -> APIRouter:
         set_iquant_api_key(key)
         return {"success": True, "message": "iQuant API Key 已保存"}
 
-    # === TSANGHI (沧海数据) TOKEN SETTINGS ===
-
-    @router.get("/api/settings/tsanghi-token")
-    async def get_tsanghi_token_status():
-        """Get current Tsanghi token status (masked)."""
-        from src.common.config import get_tsanghi_token, get_tsanghi_token_source
-
-        source = get_tsanghi_token_source()
-        source_labels = {
-            "web_ui": "Web UI (当前会话)",
-            "persisted_file": "Web UI (已持久化)",
-            "env_var": "环境变量",
-            "secrets_yaml": "secrets.yaml",
-            "not_configured": "未配置",
-        }
-
-        try:
-            token = get_tsanghi_token()
-            if len(token) > 20:
-                masked = token[:8] + "..." + token[-8:]
-            else:
-                masked = "***"
-            return {
-                "configured": True,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": masked,
-                "token_length": len(token),
-            }
-        except ValueError:
-            return {
-                "configured": False,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": "",
-                "token_length": 0,
-            }
-
-    @router.post("/api/settings/tsanghi-token")
-    async def update_tsanghi_token(body: TokenUpdateRequest):
-        """Save a new Tsanghi token."""
-        from src.common.config import set_tsanghi_token
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        set_tsanghi_token(token)
-        return {"success": True, "message": "Token 已保存，回测数据将使用此 token"}
-
-    @router.post("/api/settings/tsanghi-token/test")
-    async def test_tsanghi_token(body: TokenUpdateRequest):
-        """Test a Tsanghi token by fetching one stock's daily data."""
-        import httpx
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        try:
-            url = "https://tsanghi.com/api/fin/stock/XSHG/daily"
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    url,
-                    params={"token": token, "ticker": "600519", "order": 2},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                code = data.get("code")
-                if code == 200 and data.get("data"):
-                    count = len(data["data"])
-                    return {
-                        "success": True,
-                        "message": f"Token 验证成功，获取到 {count} 条日线数据",
-                    }
-                else:
-                    msg = data.get("msg", "未知错误")
-                    return {
-                        "success": False,
-                        "message": f"Token 验证失败: {msg} (code={code})",
-                    }
-        except httpx.TimeoutException:
-            return {"success": False, "message": "请求超时，请检查网络连接"}
-        except httpx.HTTPError as e:
-            return {"success": False, "message": f"HTTP 请求失败: {e}"}
-
     # === Aliyun DashScope API Key ===
 
     @router.get("/api/settings/aliyun-key")
@@ -5517,14 +5011,14 @@ def create_settings_router() -> APIRouter:
             get_ifind_token_source,
             get_iquant_key_source,
             get_tavily_key_source,
-            get_tsanghi_token_source,
+            get_tushare_token_source,
             load_secrets,
         )
 
         ifind_ok = get_ifind_token_source() != "not_configured"
         tavily_ok = get_tavily_key_source() != "not_configured"
         iquant_ok = get_iquant_key_source() != "not_configured"
-        tsanghi_ok = get_tsanghi_token_source() != "not_configured"
+        tushare_ok = get_tushare_token_source() != "not_configured"
         aliyun_src = get_aliyun_api_key_source()
         aliyun_ok = aliyun_src != "not_configured"
 
@@ -5541,7 +5035,7 @@ def create_settings_router() -> APIRouter:
             "tavily": {"configured": tavily_ok, "source": get_tavily_key_source()},
             "siliconflow": {"configured": sf_ok},
             "iquant": {"configured": iquant_ok, "source": get_iquant_key_source()},
-            "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
+            "tushare": {"configured": tushare_ok, "source": get_tushare_token_source()},
             "aliyun": {"configured": aliyun_ok, "source": aliyun_src},
             "news_check_ready": tavily_ok and sf_ok,
         }
@@ -5917,10 +5411,10 @@ def create_trade_backtest_router() -> APIRouter:
         if not rows_raw:
             raise HTTPException(400, "CSV 中没有交易记录")
 
-        # Use tsanghi cache for price lookup (already loaded at startup)
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-        if tsanghi_cache is None:
-            raise HTTPException(503, "沧海缓存尚未加载完成，请稍后再试")
+        # Use tushare cache for price lookup (already loaded at startup)
+        tushare_cache = getattr(request.app.state, "tushare_cache", None)
+        if tushare_cache is None:
+            raise HTTPException(503, "Tushare 缓存尚未加载完成，请稍后再试")
 
         # Collect all dates from CSV and check cache coverage
         all_dates: list[str] = []
@@ -5933,10 +5427,10 @@ def create_trade_backtest_router() -> APIRouter:
         csv_start = date.fromisoformat(all_dates[0])
         csv_end = date.fromisoformat(all_dates[-1])
 
-        if not tsanghi_cache.covers_range(csv_start, csv_end):
-            cache_start = str(tsanghi_cache._start_date) if tsanghi_cache._start_date else "无"
-            cache_end = str(tsanghi_cache._end_date) if tsanghi_cache._end_date else "无"
-            gaps = tsanghi_cache.missing_ranges(csv_start, csv_end)
+        if not tushare_cache.covers_range(csv_start, csv_end):
+            cache_start = str(tushare_cache._start_date) if tushare_cache._start_date else "无"
+            cache_end = str(tushare_cache._end_date) if tushare_cache._end_date else "无"
+            gaps = tushare_cache.missing_ranges(csv_start, csv_end)
             gap_strs = [f"{s}~{e}" for s, e in gaps] if gaps else [f"{csv_start}~{csv_end}"]
             return {
                 "needs_cache_update": True,
@@ -5979,8 +5473,8 @@ def create_trade_backtest_router() -> APIRouter:
                 buy_date = buy_time[:10]
                 sell_date = sell_time[:10]
 
-                buy_day = tsanghi_cache.get_daily(code, buy_date)
-                sell_day = tsanghi_cache.get_daily(code, sell_date)
+                buy_day = tushare_cache.get_daily(code, buy_date)
+                sell_day = tushare_cache.get_daily(code, sell_date)
                 if not buy_day or buy_day.get("open") is None:
                     raise HTTPException(
                         400,
@@ -6249,10 +5743,10 @@ def create_v15_backtest_router() -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
 
-        # Get tsanghi cache
-        tsanghi_cache = getattr(request.app.state, "tsanghi_cache", None)
-        if not tsanghi_cache or not tsanghi_cache.is_ready:
-            raise HTTPException(status_code=400, detail="请先预下载沧海数据")
+        # Get tushare cache
+        tushare_cache = getattr(request.app.state, "tushare_cache", None)
+        if not tushare_cache or not tushare_cache.is_ready:
+            raise HTTPException(status_code=400, detail="请先预下载Tushare 数据")
 
         # Get fundamentals DB
         fundamentals_db = getattr(request.app.state, "fundamentals_db", None)
@@ -6293,8 +5787,8 @@ def create_v15_backtest_router() -> APIRouter:
                 "message": "股票池为空",
             }
 
-        # Build V16StockData from tsanghi cache
-        all_daily = tsanghi_cache.get_all_codes_with_daily(body.trade_date)
+        # Build V16StockData from tushare cache
+        all_daily = tushare_cache.get_all_codes_with_daily(body.trade_date)
         if not all_daily:
             return {
                 "success": True,
@@ -6331,7 +5825,7 @@ def create_v15_backtest_router() -> APIRouter:
                 continue
 
             # Get 9:40 data
-            data_940 = tsanghi_cache.get_940_price(code, body.trade_date)
+            data_940 = tushare_cache.get_940_price(code, body.trade_date)
             if not data_940:
                 skipped_reasons["no_940"] += 1
                 continue
@@ -6343,13 +5837,13 @@ def create_v15_backtest_router() -> APIRouter:
 
             # Build 37d history DataFrame
             # Get trading dates before td
-            all_dates_for_code = sorted(tsanghi_cache._daily.get(code, {}).keys())
+            all_dates_for_code = sorted(tushare_cache._daily.get(code, {}).keys())
             hist_dates = [d for d in all_dates_for_code if d < body.trade_date]
             hist_dates = hist_dates[-lookback_days:]  # last 37
 
             rows = []
             for hd in hist_dates:
-                hday = tsanghi_cache._daily.get(code, {}).get(hd, {})
+                hday = tushare_cache._daily.get(code, {}).get(hd, {})
                 o = hday.get("open")
                 h = hday.get("high")
                 lo = hday.get("low")
@@ -6357,7 +5851,7 @@ def create_v15_backtest_router() -> APIRouter:
                 v = hday.get("volume")
                 if o and h and lo and c and v:
                     o, h, lo, c, v = float(o), float(h), float(lo), float(c), float(v)
-                    # tsanghi cache volume is in 手 (lots), convert to 股 (shares)
+                    # tushare cache volume is in 手 (lots), convert to 股 (shares)
                     v = v * 100
                     if o > 0 and c > 0:
                         rows.append({"open": o, "high": h, "low": lo, "close": c, "volume": v})
