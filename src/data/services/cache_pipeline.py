@@ -509,9 +509,7 @@ class CachePipeline:
         existing = await self.storage.get_existing_snapshot_dates()
         to_sync = [d for d in trading_dates if d not in existing]
         if not to_sync:
-            logger.info(
-                "stock_snapshot: all %d dates already synced", len(trading_dates)
-            )
+            logger.info("stock_snapshot: all %d dates already synced", len(trading_dates))
             return
 
         logger.info(
@@ -523,9 +521,7 @@ class CachePipeline:
         for i, td in enumerate(to_sync):
             self._raise_if_cancelled(cancel_event, "stock_snapshot sync cancelled")
 
-            await self.reporter.status(
-                f"stock_snapshot {td}: → bak_basic + daily + suspend_d ..."
-            )
+            await self.reporter.status(f"stock_snapshot {td}: → bak_basic + daily + suspend_d ...")
             t_fetch = time.monotonic()
 
             # Pull the three sources concurrently. Any individual failure
@@ -540,9 +536,7 @@ class CachePipeline:
             daily_records, failed_exchanges = await daily_task
             fetch_elapsed = time.monotonic() - t_fetch
 
-            if failed_exchanges and len(failed_exchanges) == len(
-                self.daily_source.EXCHANGES
-            ):
+            if failed_exchanges and len(failed_exchanges) == len(self.daily_source.EXCHANGES):
                 # All daily-source endpoints failed — daily set is unusable
                 # for this date. We still write what we have (bak ∪ susp),
                 # but log it so the operator knows the snapshot is partial.
@@ -563,8 +557,7 @@ class CachePipeline:
                 # leaked into the calendar. Skip; downstream gaps audit will
                 # still flag it if it really is a trading day.
                 logger.warning(
-                    "stock_snapshot %s: all 3 sources empty "
-                    "(bak=%d, daily=%d, susp=%d) — skipping",
+                    "stock_snapshot %s: all 3 sources empty (bak=%d, daily=%d, susp=%d) — skipping",
                     td,
                     len(bak_codes),
                     len(daily_codes),

@@ -110,9 +110,7 @@ def main() -> int:
         print(file=sys.stderr)
         print("=== 反例样本 (前 20 条) ===", file=sys.stderr)
         for sdb_d, code, ld in counterexamples[:20]:
-            print(
-                f"  sdb_date={sdb_d}  code={code}  真实 list_date={ld}", file=sys.stderr
-            )
+            print(f"  sdb_date={sdb_d}  code={code}  真实 list_date={ld}", file=sys.stderr)
         if len(counterexamples) > 20:
             print(f"  ... 及其余 {len(counterexamples) - 20} 条", file=sys.stderr)
 
@@ -149,12 +147,9 @@ def main() -> int:
         "fail": fail_count,
         "skip": skip_count,
         "counterexamples": [
-            {"sdb_date": d, "code": c, "real_list_date": ld}
-            for d, c, ld in counterexamples
+            {"sdb_date": d, "code": c, "real_list_date": ld} for d, c, ld in counterexamples
         ],
-        "not_found_codes_with_appearance_count": {
-            c: code_appearances.get(c, 0) for c in not_found
-        },
+        "not_found_codes_with_appearance_count": {c: code_appearances.get(c, 0) for c in not_found},
     }
     Path("data/audit/sdb_verification_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2),

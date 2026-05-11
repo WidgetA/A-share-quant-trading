@@ -1128,9 +1128,7 @@ class GreptimeBacktestStorage:
     async def get_snapshot_codes_for_date(self, day: date) -> set[str]:
         """Return all stock codes in stock_snapshot for a given date."""
         ts_ms = date_to_epoch_ms(day)
-        rows = await self.db.fetch(
-            f"SELECT stock_code FROM stock_snapshot WHERE ts = {ts_ms}"
-        )
+        rows = await self.db.fetch(f"SELECT stock_code FROM stock_snapshot WHERE ts = {ts_ms}")
         return {r["stock_code"] for r in rows}
 
     async def insert_snapshot_codes(
@@ -1282,9 +1280,7 @@ class GreptimeBacktestStorage:
         Coverage check (codes in snapshot not in listing_info) is logged
         separately so the operator knows when the answer is provisional.
         """
-        snap_rows = await self.db.fetch(
-            "SELECT ts, stock_code FROM stock_snapshot"
-        )
+        snap_rows = await self.db.fetch("SELECT ts, stock_code FROM stock_snapshot")
         if not snap_rows:
             return []
         snapshot_by_date: dict[date, set[str]] = {}
@@ -1342,9 +1338,7 @@ class GreptimeBacktestStorage:
                 gaps[0][1],
             )
         else:
-            logger.info(
-                "audit_daily_gaps: all %d dates complete", len(snapshot_by_date)
-            )
+            logger.info("audit_daily_gaps: all %d dates complete", len(snapshot_by_date))
         return gaps
 
     async def audit_minute_gaps(self) -> list[tuple[date, int, int]]:
