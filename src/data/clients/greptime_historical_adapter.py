@@ -87,7 +87,7 @@ class GreptimeHistoricalAdapter:
                 for ind in indicator_list:
                     col = ind_to_col.get(ind, ind)
                     val = r[col] if col in r.keys() else None
-                    # tsanghi volume is in 手; convert to 股 at read time
+                    # daily source stores volume in 手; convert to 股 at read time
                     if ind == "volume" and val is not None:
                         val = val * 100
                     indicator_data[ind].append(val)

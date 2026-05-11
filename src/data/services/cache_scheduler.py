@@ -242,6 +242,10 @@ class CacheScheduler:
     ) -> dict:
         """Find missing trading dates from CACHE_START_DATE to yesterday, download them.
 
+        Sends ONE Feishu summary at the end covering: detected gaps, per-range
+        result, actual rows written, post-task integrity. No per-range progress
+        spam.
+
         Returns:
             dict with keys: gaps_found, dates_downloaded, error (if any)
         """
@@ -252,7 +256,8 @@ class CacheScheduler:
             logger.warning(msg)
             return {"gaps_found": 0, "dates_downloaded": 0, "error": msg}
 
-        yesterday = datetime.now(BEIJING_TZ).date() - timedelta(days=1)
+        task_start = datetime.now(BEIJING_TZ)
+        yesterday = task_start.date() - timedelta(days=1)
         all_trading_days = await _get_trading_calendar(CACHE_START_DATE, yesterday)
         if not all_trading_days:
             return {"gaps_found": 0, "dates_downloaded": 0, "error": "No trading days found"}
@@ -264,9 +269,24 @@ class CacheScheduler:
         # Also check for minute data gaps (daily exists but minute sparse/missing)
         minute_gaps = await storage.find_minute_gaps()
 
+        # Pre-download row-level integrity (NULL fields, OHLC violations) —
+        # collected but only reported at the end as part of the single summary.
+        integrity_issues: list[dict] = []
+        try:
+            integrity_issues = await storage.check_data_integrity()
+        except Exception as e:
+            logger.warning(f"Pre-download integrity check failed: {e}", exc_info=True)
+
         if not missing and not minute_gaps:
             logger.info("CacheScheduler: no gaps found, cache is complete")
-            await _notify_feishu("[缓存补全] 缓存完整，无缺失数据")
+            await self._send_summary(
+                task_start=task_start,
+                missing_daily_days=0,
+                missing_minute_segments=0,
+                range_results=[],
+                integrity_issues_pre=integrity_issues,
+                storage=storage,
+            )
             return {"gaps_found": 0, "dates_downloaded": 0}
 
         # Merge daily gaps + minute gaps into unified download ranges
@@ -280,43 +300,34 @@ class CacheScheduler:
         if len(all_gaps) > 1:
             all_gaps.sort()
             merged: list[tuple[date, date]] = [all_gaps[0]]
-            for s, e in all_gaps[1:]:
+            for gap_s, gap_e in all_gaps[1:]:
                 prev_s, prev_e = merged[-1]
-                if s <= prev_e + timedelta(days=3):
-                    merged[-1] = (prev_s, max(prev_e, e))
+                if gap_s <= prev_e + timedelta(days=3):
+                    merged[-1] = (prev_s, max(prev_e, gap_e))
                 else:
-                    merged.append((s, e))
+                    merged.append((gap_s, gap_e))
             all_gaps = merged
 
-        parts = []
-        if missing:
-            parts.append(f"日线缺失: {len(missing)} 天")
-        if minute_gaps:
-            parts.append(f"分钟线缺失: {len(minute_gaps)} 段")
-        gap_summary = ", ".join(parts)
-
-        logger.info(f"CacheScheduler: {gap_summary}, downloading...")
-        await _notify_feishu(f"[缓存补全] 开始补全\n{gap_summary}\n下载范围: {len(all_gaps)} 段")
-
-        # Pre-download integrity check
-        try:
-            integrity_issues = await storage.check_data_integrity()
-            if integrity_issues:
-                error_issues = [i for i in integrity_issues if i["level"] == "error"]
-                if error_issues:
-                    issue_lines = [
-                        f"  [{i['level']}] {i['message']}" for i in integrity_issues[:10]
-                    ]
-                    await _notify_feishu(
-                        f"[缓存补全] 下载前完整性检查\n"
-                        f"发现 {len(integrity_issues)} 个问题:\n" + "\n".join(issue_lines)
-                    )
-        except Exception as e:
-            logger.warning(f"Pre-download integrity check failed: {e}", exc_info=True)
+        logger.info(
+            f"CacheScheduler: daily missing={len(missing)} days, "
+            f"minute gaps={len(minute_gaps)}, "
+            f"merged into {len(all_gaps)} download ranges"
+        )
 
         total_downloaded = 0
         total_ranges = len(all_gaps)
+        range_results: list[dict] = []
         for idx, (range_start, range_end) in enumerate(all_gaps, 1):
+            # Snapshot row counts before/after — detects "no exception but 0
+            # rows written" (e.g. stock_snapshot B∪D∪S returned empty).
+            daily_before = await storage.count_daily_rows_in_range(range_start, range_end)
+            minute_before = await storage.count_minute_rows_in_range(range_start, range_end)
+
+            entry: dict = {
+                "range": f"{range_start} ~ {range_end}",
+                "status": "ok",
+                "error": None,
+            }
             try:
                 logger.info(
                     f"CacheScheduler: downloading {range_start} ~ {range_end} "
@@ -335,60 +346,141 @@ class CacheScheduler:
                 )
                 range_days = len(await _get_trading_calendar(range_start, range_end))
                 total_downloaded += range_days
-                await _notify_feishu(
-                    f"[缓存补全] 进度 {idx}/{total_ranges}\n已完成: {range_start} ~ {range_end}"
-                )
             except asyncio.TimeoutError:
                 logger.error(
                     f"CacheScheduler: download {range_start}~{range_end} timed out "
                     f"after {DOWNLOAD_TIMEOUT_SECONDS}s"
                 )
-                await _notify_feishu(
-                    f"[缓存补全·定时任务] 超时 ({idx}/{total_ranges})\n"
-                    f"{range_start} ~ {range_end} "
-                    f"超过{DOWNLOAD_TIMEOUT_SECONDS // 3600}小时未完成，已跳过"
-                )
+                entry["status"] = "timeout"
+                entry["error"] = f"超过 {DOWNLOAD_TIMEOUT_SECONDS // 3600}h 未完成"
             except Exception as e:
                 logger.error(
                     f"CacheScheduler: failed to download {range_start}~{range_end}: {e}",
                     exc_info=True,
                 )
-                await _notify_feishu(
-                    f"[缓存补全·定时任务] 失败 ({idx}/{total_ranges})\n"
-                    f"{range_start} ~ {range_end}: {str(e)[:100]}"
-                )
+                entry["status"] = "error"
+                entry["error"] = str(e)[:120]
 
-        logger.info(
-            f"CacheScheduler: done. {gap_summary}, "
-            f"{total_downloaded}/{total_ranges} ranges downloaded."
+            daily_after = await storage.count_daily_rows_in_range(range_start, range_end)
+            minute_after = await storage.count_minute_rows_in_range(range_start, range_end)
+            entry["daily_rows_added"] = max(0, daily_after - daily_before)
+            entry["minute_rows_added"] = max(0, minute_after - minute_before)
+            range_results.append(entry)
+
+        logger.info(f"CacheScheduler: done. {total_downloaded}/{total_ranges} ranges ok.")
+
+        await self._send_summary(
+            task_start=task_start,
+            missing_daily_days=len(missing),
+            missing_minute_segments=len(minute_gaps),
+            range_results=range_results,
+            integrity_issues_pre=integrity_issues,
+            storage=storage,
         )
-
-        # Re-check minute gaps after download to see if they're resolved
-        remaining_minute_gaps = await storage.find_minute_gaps()
-
-        # Data integrity validation
-        integrity_warnings = await storage.validate_integrity()
-
-        failed_ranges = total_ranges - total_downloaded
-        if failed_ranges > 0 or remaining_minute_gaps or integrity_warnings:
-            fail_parts = []
-            if failed_ranges > 0:
-                fail_parts.append(f"下载失败: {failed_ranges}/{total_ranges} 段")
-            if remaining_minute_gaps:
-                fail_parts.append(f"分钟线仍缺失: {len(remaining_minute_gaps)} 段")
-            for w in integrity_warnings:
-                fail_parts.append(w)
-            next_retry = self._next_run_str()
-            await _notify_feishu(
-                "[缓存补全·定时任务] 部分失败\n"
-                + "\n".join(fail_parts)
-                + f"\n\n下次重试: {next_retry}"
-            )
-        else:
-            await _notify_feishu(f"[缓存补全·定时任务] 补全成功\n已补全: {total_downloaded} 段")
 
         total_gaps = len(missing) + len(minute_gaps)
         return {"gaps_found": total_gaps, "dates_downloaded": total_downloaded}
+
+    async def _send_summary(
+        self,
+        *,
+        task_start: datetime,
+        missing_daily_days: int,
+        missing_minute_segments: int,
+        range_results: list[dict],
+        integrity_issues_pre: list[dict],
+        storage,
+    ) -> None:
+        """Build the single end-of-task Feishu summary and send it."""
+        now = datetime.now(BEIJING_TZ)
+        elapsed_min = max(1, int((now - task_start).total_seconds() / 60))
+        total_ranges = len(range_results)
+
+        # Re-scan post-download (best-effort; failures shouldn't block the report)
+        remaining_minute_gaps: list = []
+        integrity_warnings: list[str] = []
+        try:
+            remaining_minute_gaps = await storage.find_minute_gaps()
+        except Exception as e:
+            logger.warning(f"Post-download find_minute_gaps failed: {e}", exc_info=True)
+        try:
+            integrity_warnings = await storage.validate_integrity()
+        except Exception as e:
+            logger.warning(f"Post-download validate_integrity failed: {e}", exc_info=True)
+
+        failed = [r for r in range_results if r["status"] != "ok"]
+        zero_row_ok = [
+            r
+            for r in range_results
+            if r["status"] == "ok" and r["daily_rows_added"] == 0 and r["minute_rows_added"] == 0
+        ]
+        pre_errors = [i for i in integrity_issues_pre if i.get("level") == "error"]
+
+        if total_ranges == 0:
+            header = "[缓存补全] ✅ 无缺失数据"
+        elif failed or zero_row_ok:
+            header = "[缓存补全] ⚠️ 部分失败"
+        else:
+            header = "[缓存补全] ✅ 补全成功"
+
+        lines = [
+            header,
+            f"时间: {task_start.strftime('%Y-%m-%d %H:%M')} ~ "
+            f"{now.strftime('%H:%M')} ({elapsed_min}min)",
+            "",
+            "本次任务:",
+        ]
+
+        if total_ranges == 0:
+            lines.append("  • 未检测到任何缺口")
+        else:
+            gap_desc = []
+            if missing_daily_days:
+                gap_desc.append(f"日线 {missing_daily_days} 天")
+            if missing_minute_segments:
+                gap_desc.append(f"分钟线 {missing_minute_segments} 段")
+            lines.append(f"  • 检测缺口: {', '.join(gap_desc) or '仅合并'} → {total_ranges} 段下载")
+
+            success_count = total_ranges - len(failed)
+            lines.append(
+                f"  • 下载结果: {success_count}/{total_ranges} 段成功"
+                + (f"  ({len(failed)} 段失败)" if failed else "")
+            )
+            for r in failed:
+                lines.append(f"      - {r['range']}: {r['status']} {r['error'] or ''}")
+
+            total_daily = sum(r["daily_rows_added"] for r in range_results)
+            total_minute = sum(r["minute_rows_added"] for r in range_results)
+            flag = "  ⚠️ 有段 0 行入库" if zero_row_ok else ""
+            lines.append(f"  • 实际入库: 日线 +{total_daily} 行, 分钟线 +{total_minute} 行{flag}")
+            for r in zero_row_ok:
+                lines.append(
+                    f"      - {r['range']}: 下载未抛错但 0 行入库 "
+                    f"(可能 stock_snapshot 三源都拉空 / 非交易日)"
+                )
+
+        # Library-wide health
+        library_lines: list[str] = []
+        if pre_errors:
+            sample = [f"[{i['level']}] {i['message']}" for i in pre_errors[:3]]
+            suffix = f" ...+{len(pre_errors) - 3}" if len(pre_errors) > 3 else ""
+            library_lines.append(
+                f"  • 行级错误: {len(pre_errors)} 项 — {'; '.join(sample)}{suffix}"
+            )
+        for w in integrity_warnings:
+            library_lines.append(f"  • {w}")
+        if remaining_minute_gaps:
+            library_lines.append(f"  • 分钟线下载后剩余: {len(remaining_minute_gaps)} 段")
+
+        if library_lines:
+            lines.append("")
+            lines.append("整库状态 (含历史遗留):")
+            lines.extend(library_lines)
+
+        lines.append("")
+        lines.append(f"下次执行: {self._next_run_str()}")
+
+        await _notify_feishu("\n".join(lines))
 
 
 def _group_contiguous_dates(dates: list[date]) -> list[tuple[date, date]]:

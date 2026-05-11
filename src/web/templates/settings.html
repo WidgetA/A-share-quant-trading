@@ -36,33 +36,31 @@
         </div>
     </section>
 
-    <!-- Tsanghi (沧海数据) Token Section -->
+    <!-- Audit Uploads: Kimi credentials + listing info -->
     <section class="settings-section">
         <div class="settings-card">
-            <h3>沧海数据 Token</h3>
-            <p class="settings-desc">用于免费回测日线数据源。注册获取 token：<a href="https://tsanghi.com" target="_blank">tsanghi.com</a></p>
+            <h3>Kimi 凭证 / 股票上市信息 上传</h3>
+            <p class="settings-desc">
+                本地 <code>kimi login</code> 后,上传 <code>~/.kimi/credentials/kimi-code.json</code> 让服务端 kimi-cli 可用；
+                以及上传 <code>verify_list_date_kimi.py</code> 跑出的合并 JSON,填充股票上市日期黑名单。
+            </p>
 
-            <!-- Current Status -->
-            <div class="token-status" id="tsanghiStatus">
-                <span class="token-status-label">当前状态：</span>
-                <span class="token-status-value" id="tsanghiStatusValue">加载中...</span>
-            </div>
-
-            <!-- Token Input -->
             <div class="form-group">
-                <label for="tsanghiInput">Token</label>
-                <input type="text" id="tsanghiInput" class="token-input"
-                    placeholder="粘贴沧海数据 token..." style="font-family: monospace;">
+                <label for="kimiCredFile">Kimi 凭证文件 (kimi-code.json)</label>
+                <input type="file" id="kimiCredFile" accept=".json">
+                <button class="btn btn-primary" onclick="uploadKimiCredentials()" id="kimiCredBtn">上传</button>
+                <div class="token-message hidden" id="kimiCredMessage"></div>
             </div>
 
-            <!-- Actions -->
-            <div class="token-actions">
-                <button class="btn btn-secondary" onclick="testTsanghiToken()" id="tsanghiTestBtn">验证 Token</button>
-                <button class="btn btn-primary" onclick="saveTsanghiToken()" id="tsanghiSaveBtn">保存</button>
+            <div class="form-group" style="margin-top: 1rem;">
+                <label for="listingInfoFile">股票 listing_info JSON</label>
+                <input type="file" id="listingInfoFile" accept=".json">
+                <button class="btn btn-primary" onclick="uploadListingInfo()" id="listingInfoBtn">上传</button>
+                <div class="token-message hidden" id="listingInfoMessage"></div>
+                <div class="settings-desc" style="margin-top: 0.5rem;" id="listingInfoStatus">
+                    listing_info 状态: 加载中...
+                </div>
             </div>
-
-            <!-- Result Message -->
-            <div class="token-message hidden" id="tsanghiMessage"></div>
         </div>
     </section>
 
@@ -379,11 +377,6 @@ function loadTushareStatus() { loadKeyStatus('/api/settings/tushare-token', 'tus
 function testTushareToken() { testKey('/api/settings/tushare-token/test', 'tushareInput', 'tushareMessage', 'tushareTestBtn', '验证 Token'); }
 function saveTushareToken() { saveKey('/api/settings/tushare-token', 'tushareInput', 'tushareMessage', 'tushareSaveBtn', loadTushareStatus); }
 
-// Tsanghi
-function loadTsanghiStatus() { loadKeyStatus('/api/settings/tsanghi-token', 'tsanghiStatusValue'); }
-function testTsanghiToken() { testKey('/api/settings/tsanghi-token/test', 'tsanghiInput', 'tsanghiMessage', 'tsanghiTestBtn', '验证 Token'); }
-function saveTsanghiToken() { saveKey('/api/settings/tsanghi-token', 'tsanghiInput', 'tsanghiMessage', 'tsanghiSaveBtn', loadTsanghiStatus); }
-
 // ML Strategy API Key
 function loadMlKeyStatus() { loadKeyStatus('/api/settings/ml-key', 'mlKeyStatusValue'); }
 function generateMlKey() {
@@ -592,10 +585,87 @@ async function saveXtquant() {
     } finally { btn.disabled = false; btn.textContent = '保存'; }
 }
 
+// ------------------------------------------------------------------
+// Audit uploads: Kimi credentials + listing_info JSON
+// ------------------------------------------------------------------
+
+function _audit_apiKey() {
+    try { return localStorage.getItem('tradingApiKey') || ''; } catch (e) { return ''; }
+}
+
+async function _uploadAuditFile(endpoint, inputId, messageId, btnId, onDone) {
+    const fileInput = document.getElementById(inputId);
+    const btn = document.getElementById(btnId);
+    if (!fileInput.files || !fileInput.files[0]) {
+        showMessage(messageId, '请先选择文件', false); return;
+    }
+    const file = fileInput.files[0];
+    const form = new FormData();
+    form.append('file', file);
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = '上传中…';
+    try {
+        const resp = await fetch(endpoint, {
+            method: 'POST',
+            body: form,
+            headers: { 'X-API-Key': _audit_apiKey() },
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage(messageId, data.message || '上传成功', true);
+            fileInput.value = '';
+            if (typeof onDone === 'function') onDone();
+        } else {
+            const errMsg = data.detail || data.message || ('HTTP ' + resp.status);
+            showMessage(messageId, '上传失败: ' + errMsg, false);
+        }
+    } catch (e) {
+        showMessage(messageId, '上传失败: ' + e.message, false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = oldText;
+    }
+}
+
+function uploadKimiCredentials() {
+    _uploadAuditFile(
+        '/api/audit/kimi-credentials/upload',
+        'kimiCredFile', 'kimiCredMessage', 'kimiCredBtn',
+        null,
+    );
+}
+
+function uploadListingInfo() {
+    _uploadAuditFile(
+        '/api/audit/listing-info/upload',
+        'listingInfoFile', 'listingInfoMessage', 'listingInfoBtn',
+        loadListingInfoStatus,
+    );
+}
+
+async function loadListingInfoStatus() {
+    const el = document.getElementById('listingInfoStatus');
+    try {
+        const resp = await fetch('/api/audit/listing-info/status');
+        const data = await resp.json();
+        if (!resp.ok || !data.ready) {
+            el.textContent = 'listing_info 状态: 不可用 (DB 未连接?)';
+            return;
+        }
+        el.textContent =
+            'listing_info 状态: 已收录 ' + data.total_codes +
+            ' 只 (已验证 ' + data.verified_codes +
+            ', 未验证 ' + data.unverified_codes + ')';
+    } catch (e) {
+        el.textContent = 'listing_info 状态: 加载失败 (' + e.message + ')';
+    }
+}
+
 // Load all on page load
 loadCacheSchedulerStatus();
 loadTushareStatus();
-loadTsanghiStatus();
+loadListingInfoStatus();
 loadMlKeyStatus();
 loadTradingKeyStatus();
 loadFcStatus();

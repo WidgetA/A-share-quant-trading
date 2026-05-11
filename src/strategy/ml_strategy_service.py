@@ -369,70 +369,91 @@ async def _resolve_prev_close(
     today: date,
     quote_count: int,
 ) -> dict[str, float]:
-    """Resolve prev_close from GreptimeDB (+ tsanghi fallback).
+    """Resolve prev_close by querying Tushare `daily` live for the prior trading day.
 
-    Build live PriceSnapshot dict from realtime quotes.
+    Why not read from GreptimeDB cache: cache fill may lag (the daily 3am
+    scheduler can fail silently, e.g. when its upstream data source is down).
+    A stale prev_close from N days ago causes silent mis-detection of
+    limit-up stocks — see the 2026-05-11 002975 incident, where prev_close
+    fell back to a 5-day-old cached value, so a stock already at limit-up
+    passed the 9.8% filter.
+
+    Failure here raises so the scan stops rather than running on bad data
+    (trading-safety principle: stop > trade incorrectly).
+
+    ``storage`` and ``quote_count`` are kept in the signature for backwards
+    compatibility but are no longer consulted.
+
+    KNOWN LIMITATION: Tushare ``daily`` returns the raw (un-adjusted) close
+    price. If a stock had an ex-dividend/split between the previous trading
+    day and today, today's true ``pre_close`` is the adjusted value (smaller
+    than the raw close). Until we layer ``adj_factor`` on top, scans on
+    ex-dividend days will compute the wrong ``gain_pct`` for affected
+    stocks. See note in CLAUDE.md.
     """
-    prev_closes: dict[str, float] = {}
+    from src.common.config import get_tushare_token
+    from src.data.clients.tushare_realtime import TushareRealtimeClient
 
+    # Candidate previous trading dates to query.
+    candidates: list[date]
     if trade_calendar:
         prev_dates = [d for d in trade_calendar if d < today]
         if not prev_dates:
             raise RuntimeError("ML live scan: no previous trading day in calendar")
-        prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
-
-        # Source 1: GreptimeDB storage
-        if storage and getattr(storage, "is_ready", False):
-            all_daily = await storage.get_all_codes_with_daily(prev_trade_date)
-            for code, daily in all_daily.items():
-                close_val = daily.close
-                if close_val and close_val > 0:
-                    prev_closes[code] = close_val
-
-        # Source 2: tsanghi API fallback (if storage coverage < 80%)
-        if len(prev_closes) < quote_count * 0.8:
-            from src.data.clients.tsanghi_client import TsanghiClient
-
-            ts_client = TsanghiClient()
-            await ts_client.start()
-            try:
-                for exchange in ("XSHG", "XSHE"):
-                    records = await ts_client.daily_latest(exchange, prev_trade_date)
-                    for row in records:
-                        ticker = str(row.get("ticker", ""))
-                        close_val = row.get("close")
-                        if ticker and len(ticker) == 6 and close_val:
-                            prev_closes[ticker] = float(close_val)
-            finally:
-                await ts_client.stop()
-
-        logger.info("ML live: prev_close (%s): %d stocks", prev_trade_date, len(prev_closes))
+        candidates = [prev_dates[-1]]
     else:
-        # Look back 1-7 days in GreptimeDB storage
-        if not storage or not getattr(storage, "is_ready", False):
-            raise RuntimeError("ML live scan: GreptimeDB storage not ready for prev_close")
-
-        prev_daily: dict = {}
-        for days_back in range(1, 8):
-            prev_date = today - timedelta(days=days_back)
-            prev_date_str = prev_date.strftime("%Y-%m-%d")
-            prev_daily = await storage.get_all_codes_with_daily(prev_date_str)
-            if prev_daily:
-                logger.info(
-                    "ML live: prev_close from %s (%d stocks)",
-                    prev_date_str,
-                    len(prev_daily),
-                )
+        # No calendar — walk back up to 7 weekdays. Tushare daily returns
+        # empty for non-trading days, so we just retry the next candidate.
+        candidates = []
+        for days_back in range(1, 14):
+            d = today - timedelta(days=days_back)
+            if d.weekday() < 5:
+                candidates.append(d)
+            if len(candidates) >= 7:
                 break
 
-        for code, cached_day in prev_daily.items():
-            if not cached_day:
-                continue
-            close_val = cached_day.close
-            if close_val and close_val > 0:
-                prev_closes[code] = close_val
+    client = TushareRealtimeClient(token=get_tushare_token())
+    await client.start()
+    try:
+        for d in candidates:
+            td_str = d.strftime("%Y%m%d")
+            try:
+                records = await client.fetch_daily(td_str)
+            except Exception as exc:
+                # Re-raise — trading-safety: better fail than use wrong data.
+                # logger.error → FeishuLogHandler picks it up automatically.
+                logger.error(
+                    "Tushare daily(%s) for prev_close FAILED: %s",
+                    td_str,
+                    exc,
+                )
+                raise RuntimeError(f"ML live scan: Tushare daily({td_str}) failed: {exc}") from exc
 
-    return prev_closes
+            if not records:
+                # Non-trading day; try the previous candidate.
+                continue
+
+            prev_closes: dict[str, float] = {}
+            for r in records:
+                ticker = r.get("ticker")
+                close_val = r.get("close")
+                if ticker and close_val and close_val > 0:
+                    prev_closes[ticker] = float(close_val)
+
+            logger.info(
+                "ML live: prev_close from Tushare daily(%s): %d stocks",
+                d,
+                len(prev_closes),
+            )
+            return prev_closes
+
+        raise RuntimeError(
+            f"ML live scan: no Tushare daily data found in last "
+            f"{len(candidates)} candidates (latest tried: "
+            f"{candidates[-1] if candidates else 'none'})"
+        )
+    finally:
+        await client.stop()
 
 
 def _get_prev_trade_date(trade_calendar: list[date] | None, today: date) -> date:

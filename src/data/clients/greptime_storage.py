@@ -215,6 +215,35 @@ CREATE TABLE IF NOT EXISTS stock_list (
 )
 """
 
+# stock_snapshot: per-day raw (B∪D∪S) snapshot. The "ground-truth set
+# of stock codes that appeared in any of bak_basic / daily / suspend_d
+# on that date" — superset of the real listed universe (still includes
+# bak_basic's future-stock pollution; that's filtered via blocklist).
+_CREATE_STOCK_SNAPSHOT_SQL = """
+CREATE TABLE IF NOT EXISTS stock_snapshot (
+    stock_code STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (stock_code)
+)
+"""
+
+# stock_listing_info: per-code metadata, populated by uploading a
+# kimi-cli-verified JSON. PK by stock_code (one row per code; later
+# uploads overwrite). `list_date` / `delist_date` drive the derived
+# blocklist (snapshot rows where ts < list_date or ts >= delist_date
+# are filtered out when computing the effective universe).
+_CREATE_STOCK_LISTING_INFO_SQL = """
+CREATE TABLE IF NOT EXISTS stock_listing_info (
+    stock_code STRING PRIMARY KEY,
+    ts TIMESTAMP TIME INDEX,
+    name STRING,
+    list_date TIMESTAMP,
+    delist_date TIMESTAMP,
+    verified BOOLEAN,
+    source STRING
+)
+"""
+
 _CREATE_SCHEDULER_LOG_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_log (
     "name" STRING PRIMARY KEY,
@@ -444,6 +473,8 @@ class GreptimeBacktestStorage:
         await self.db.execute(_CREATE_DAILY_SQL)
         await self.db.execute(_CREATE_MINUTE_SQL)
         await self.db.execute(_CREATE_STOCK_LIST_SQL)
+        await self.db.execute(_CREATE_STOCK_SNAPSHOT_SQL)
+        await self.db.execute(_CREATE_STOCK_LISTING_INFO_SQL)
         await self.db.execute(_CREATE_SCHEDULER_LOG_SQL)
         # Add is_suspended column if missing (CREATE IF NOT EXISTS won't alter)
         try:
@@ -644,6 +675,24 @@ class GreptimeBacktestStorage:
     async def get_daily_date_count(self) -> int:
         """Count distinct trading dates in daily table."""
         row = await self.db.fetchrow("SELECT COUNT(DISTINCT ts) as cnt FROM backtest_daily")
+        return int(row["cnt"]) if row else 0
+
+    async def count_daily_rows_in_range(self, start: date, end: date) -> int:
+        """Count rows in backtest_daily for [start, end] inclusive."""
+        start_ms = date_to_epoch_ms(start)
+        end_ms = date_to_epoch_ms(end) + 86_400_000
+        row = await self.db.fetchrow(
+            f"SELECT COUNT(*) as cnt FROM backtest_daily WHERE ts >= {start_ms} AND ts < {end_ms}"
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def count_minute_rows_in_range(self, start: date, end: date) -> int:
+        """Count rows in backtest_minute for [start, end] inclusive."""
+        start_ms = date_to_epoch_ms(start)
+        end_ms = date_to_epoch_ms(end) + 86_400_000
+        row = await self.db.fetchrow(
+            f"SELECT COUNT(*) as cnt FROM backtest_minute WHERE ts >= {start_ms} AND ts < {end_ms}"
+        )
         return int(row["cnt"]) if row else 0
 
     # ==================== Minute reads ====================
@@ -1069,40 +1118,233 @@ class GreptimeBacktestStorage:
             if on_progress is not None and (i % 200 == 0 or i == total):
                 await on_progress(i, total)
 
+    # ==================== stock_snapshot (B ∪ D ∪ S) ====================
+
+    async def get_existing_snapshot_dates(self) -> set[date]:
+        """Get dates that already have stock_snapshot data."""
+        rows = await self.db.fetch("SELECT DISTINCT ts FROM stock_snapshot")
+        return {ts_to_date(r["ts"]) for r in rows}
+
+    async def get_snapshot_codes_for_date(self, day: date) -> set[str]:
+        """Return all stock codes in stock_snapshot for a given date."""
+        ts_ms = date_to_epoch_ms(day)
+        rows = await self.db.fetch(
+            f"SELECT stock_code FROM stock_snapshot WHERE ts = {ts_ms}"
+        )
+        return {r["stock_code"] for r in rows}
+
+    async def insert_snapshot_codes(
+        self,
+        day: date,
+        codes: list[str],
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> None:
+        """INSERT stock_snapshot rows for a date.
+
+        Same pattern as insert_stock_list_codes (single-connection, sequential)
+        for the same GreptimeDB pgwire stability reasons.
+        """
+        ts_ms = date_to_epoch_ms(day)
+        total = len(codes)
+        for i, code in enumerate(codes, start=1):
+            await self.db.execute(
+                f"INSERT INTO stock_snapshot(stock_code,ts) VALUES ('{code}',{ts_ms})"
+            )
+            if on_progress is not None and (i % 200 == 0 or i == total):
+                await on_progress(i, total)
+
+    # ==================== stock_listing_info ====================
+
+    async def upsert_listing_info(self, entries: list[dict[str, Any]]) -> int:
+        """Bulk upsert per-code listing metadata.
+
+        Each entry: ``{code, name, list_date, delist_date, verified, source}``.
+        `list_date` / `delist_date` are "YYYY-MM-DD" or None.
+        Returns the number of rows written (= len(entries)).
+
+        Uses PRIMARY KEY upsert (GreptimeDB merge_mode=last_row).
+        """
+        if not entries:
+            return 0
+        written = 0
+        now_ms = int(time.time() * 1000)
+        for e in entries:
+            code = e.get("code")
+            if not code or len(code) != 6:
+                continue
+            name = e.get("name")
+            ld = e.get("list_date")
+            dd = e.get("delist_date")
+            verified = bool(e.get("verified", e.get("list_date") is not None))
+            source = e.get("source")
+
+            def _ts_or_null(s: str | None) -> str:
+                if not s:
+                    return "NULL"
+                try:
+                    ms = date_to_epoch_ms(parse_date_str(s))
+                    return str(ms)
+                except Exception:
+                    return "NULL"
+
+            def _str_or_null(s: str | None) -> str:
+                if s is None:
+                    return "NULL"
+                return "'" + s.replace("'", "''") + "'"
+
+            await self.db.execute(
+                "INSERT INTO stock_listing_info"
+                "(stock_code, ts, name, list_date, delist_date, verified, source) "
+                f"VALUES ('{code}', {now_ms}, {_str_or_null(name)}, "
+                f"{_ts_or_null(ld)}, {_ts_or_null(dd)}, "
+                f"{'true' if verified else 'false'}, {_str_or_null(source)})"
+            )
+            written += 1
+        return written
+
+    async def get_listing_info_all(self) -> dict[str, dict[str, Any]]:
+        """Load all listing info rows keyed by stock_code.
+
+        Returned dict per code:
+            {"name": str|None, "list_date": date|None,
+             "delist_date": date|None, "verified": bool, "source": str|None}
+        """
+        rows = await self.db.fetch(
+            "SELECT stock_code, name, list_date, delist_date, verified, source "
+            "FROM stock_listing_info"
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            ld = r["list_date"]
+            dd = r["delist_date"]
+            out[r["stock_code"]] = {
+                "name": r["name"],
+                "list_date": ts_to_date(ld) if ld is not None else None,
+                "delist_date": ts_to_date(dd) if dd is not None else None,
+                "verified": bool(r["verified"]) if r["verified"] is not None else False,
+                "source": r["source"],
+            }
+        return out
+
+    async def get_effective_universe_for_date(self, day: date) -> set[str]:
+        """Compute the effective listed universe for ``day``.
+
+        = stock_snapshot codes on that day, MINUS codes whose listing_info
+        says they weren't actually listed yet (list_date > day) or had
+        already been delisted (delist_date <= day).
+
+        This is the post-filter ground truth used by the new audit path.
+        """
+        snapshot = await self.get_snapshot_codes_for_date(day)
+        if not snapshot:
+            return set()
+        info = await self.get_listing_info_all()
+        blocked = set()
+        for code in snapshot:
+            meta = info.get(code)
+            if not meta:
+                continue
+            ld = meta.get("list_date")
+            dd = meta.get("delist_date")
+            if ld is not None and day < ld:
+                blocked.add(code)
+            elif dd is not None and day >= dd:
+                blocked.add(code)
+        return snapshot - blocked
+
+    async def get_unverified_codes_in_snapshot(self) -> set[str]:
+        """Codes appearing in stock_snapshot that have no listing_info row yet.
+
+        Used by the audit "coverage check": when the daily missing set
+        intersects this group we know the data isn't conclusively wrong —
+        it's just not yet verified — and we hold the alert instead of
+        firing immediately.
+        """
+        rows = await self.db.fetch(
+            "SELECT DISTINCT stock_code FROM stock_snapshot "
+            "WHERE stock_code NOT IN (SELECT stock_code FROM stock_listing_info)"
+        )
+        return {r["stock_code"] for r in rows}
+
     # ==================== Audits ====================
 
     async def audit_daily_gaps(self) -> list[tuple[date, int, int]]:
-        """Compare stock_list vs backtest_daily per date.
+        """Compare effective universe (snapshot minus listing_info-derived
+        blocklist) vs backtest_daily per date.
+
+        For each date we compute:
+          effective(d) = snapshot codes at d, minus codes whose
+                         listing_info says list_date > d or
+                         delist_date <= d.
+        Then gap = max(0, |effective(d)| - |backtest_daily(d)|).
 
         Returns: [(date, expected_count, actual_count), ...] where actual < expected.
+        Coverage check (codes in snapshot not in listing_info) is logged
+        separately so the operator knows when the answer is provisional.
         """
-        sl_rows = await self.db.fetch(
-            "SELECT ts, COUNT(*) as cnt FROM stock_list GROUP BY ts ORDER BY ts"
+        snap_rows = await self.db.fetch(
+            "SELECT ts, stock_code FROM stock_snapshot"
         )
-        if not sl_rows:
+        if not snap_rows:
             return []
-        expected = {ts_to_date(r["ts"]): int(r["cnt"]) for r in sl_rows}
+        snapshot_by_date: dict[date, set[str]] = {}
+        for r in snap_rows:
+            d = ts_to_date(r["ts"])
+            snapshot_by_date.setdefault(d, set()).add(r["stock_code"])
+
+        listing_info = await self.get_listing_info_all()
+
         daily_rows = await self.db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts ORDER BY ts"
         )
         actual = {ts_to_date(r["ts"]): int(r["cnt"]) for r in daily_rows}
-        gaps: list[tuple[date, int, int]] = []
-        for d, exp in expected.items():
-            act = actual.get(d, 0)
-            if act < exp:
-                gaps.append((d, exp, act))
 
+        # Coverage statistics: how many snapshot codes lack listing_info?
+        all_snap_codes: set[str] = set()
+        for codes in snapshot_by_date.values():
+            all_snap_codes.update(codes)
+        unverified = sum(1 for c in all_snap_codes if c not in listing_info)
+
+        gaps: list[tuple[date, int, int]] = []
+        for d, codes in snapshot_by_date.items():
+            # Apply blocklist filter
+            blocked = 0
+            for code in codes:
+                meta = listing_info.get(code)
+                if not meta:
+                    continue
+                ld = meta.get("list_date")
+                dd = meta.get("delist_date")
+                if ld is not None and d < ld:
+                    blocked += 1
+                elif dd is not None and d >= dd:
+                    blocked += 1
+            effective = len(codes) - blocked
+            act = actual.get(d, 0)
+            if act < effective:
+                gaps.append((d, effective, act))
+
+        if unverified:
+            logger.warning(
+                "audit_daily_gaps: %d/%d snapshot codes have no listing_info "
+                "(blocklist incomplete — upload kimi-verified JSON to /api/audit/"
+                "listing-info/upload to close coverage)",
+                unverified,
+                len(all_snap_codes),
+            )
         if gaps:
             logger.info(
                 "audit_daily_gaps: %d/%d dates have gaps (e.g. %s: %d/%d)",
                 len(gaps),
-                len(expected),
+                len(snapshot_by_date),
                 gaps[0][0],
                 gaps[0][2],
                 gaps[0][1],
             )
         else:
-            logger.info("audit_daily_gaps: all %d dates complete", len(expected))
+            logger.info(
+                "audit_daily_gaps: all %d dates complete", len(snapshot_by_date)
+            )
         return gaps
 
     async def audit_minute_gaps(self) -> list[tuple[date, int, int]]:

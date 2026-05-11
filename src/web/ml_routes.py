@@ -54,10 +54,15 @@ class QuoteRequest(BaseModel):
 
 
 class BacktestScanRequest(BaseModel):
-    """Request body for /api/iquant/backtest-scan."""
+    """Request body for /api/iquant/backtest-scan.
+
+    ``data_source`` is kept for backwards compatibility with iQuant scripts
+    that still send it. The value is ignored — all backtests now read from
+    GreptimeDB cache (fed by Tushare daily).
+    """
 
     trade_date: str  # YYYY-MM-DD
-    data_source: str = "tsanghi"
+    data_source: str = "tushare"
 
 
 # --- Feishu notification helpers ---
@@ -140,7 +145,6 @@ def create_ml_router() -> APIRouter:
             return _state
 
         from src.common.config import get_tushare_token
-        from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
         from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.data.sources.local_concept_mapper import LocalConceptMapper
         from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
@@ -158,7 +162,6 @@ def create_ml_router() -> APIRouter:
             raise
         _state["realtime_client"] = tushare
 
-        _state["historical_adapter"] = IQuantHistoricalAdapter(tushare)
         _state["concept_mapper"] = LocalConceptMapper()
         # Stock filter: main board + SME (002), exclude ChiNext (300) + STAR (688) + BSE
         _state["stock_filter"] = StockFilter(
@@ -559,11 +562,8 @@ def create_ml_router() -> APIRouter:
 
         await _ensure_resources()
 
-        if body.data_source != "tsanghi":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported data_source: {body.data_source}. Use 'tsanghi'.",
-            )
+        # body.data_source is accepted but ignored — all backtests read from
+        # GreptimeDB cache. Kept in the request schema for older iQuant clients.
 
         storage = getattr(request.app.state, "storage", None)
         if not storage or not storage.is_ready:

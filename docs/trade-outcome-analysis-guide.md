@@ -55,7 +55,7 @@ Scanner 日志按 Step 编号输出，关键步骤：
 
 | 文件 | 内容 | 来源 |
 |------|------|------|
-| GreptimeDB `backtest_daily` 表 | 日线 OHLCV（主板全量） | tsanghi 日线 |
+| GreptimeDB `backtest_daily` 表 | 日线 OHLCV（主板全量） | Tushare Pro `daily` |
 | GreptimeDB `backtest_minute` 表 | 9:40 快照（close_940, cum_volume, max_high, min_low） | Tushare Pro `stk_mins` 1 分钟线，由 `EarlyWindowAggregator` 聚合 09:31~09:40 |
 
 **加载方式（asyncpg）：**
@@ -76,7 +76,7 @@ snap = await storage.get_minute_snapshot("600519", "2024-06-01")
 |------|--------|
 | 9:30-9:40 分钟线 | Tushare Pro `stk_mins` 1min（聚合后）via GreptimeDB |
 | 实时快照 | Tushare `rt_min_daily` |
-| 日线历史 | tsanghi `/daily` via GreptimeDB |
+| 日线历史 | Tushare Pro `daily` via GreptimeDB |
 | 全天分钟线(复盘) | Tushare Pro `stk_mins` 1min via GreptimeDB |
 
 ---

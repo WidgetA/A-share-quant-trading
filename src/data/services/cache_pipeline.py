@@ -30,7 +30,7 @@ from src.data.services.cache_progress_reporter import (
     Phase,
     ProgressCallback,
 )
-from src.data.sources.tsanghi_daily_source import TsanghiDailySource
+from src.data.sources.tushare_daily_source import TushareDailySource
 from src.data.sources.tushare_metadata_source import TushareMetadataSource
 from src.data.sources.tushare_minute_source import TushareMinuteSource
 
@@ -64,7 +64,7 @@ def _suspended_record(pre_close: float) -> dict[str, Any]:
 
 
 def _normal_record(raw: dict[str, Any], pre_close: float) -> dict[str, Any] | None:
-    """Build a normal (non-suspended) record from a tsanghi-normalized row.
+    """Build a normal (non-suspended) record from a daily-source normalized row.
 
     Returns None if open/close are missing — the caller decides whether to skip
     or escalate.
@@ -92,8 +92,8 @@ class CachePipeline:
     Phase order in ``download_prices``:
         1. compact existing tables
         2. backfill historical ``is_suspended IS NULL`` rows (one-time fixup)
-        3. fetch trade calendar + sync stock_list baseline
-        4. audit daily gaps (stock_list count vs backtest_daily count per day)
+        3. fetch trade calendar + sync stock_snapshot (B ∪ D ∪ S 每日并集)
+        4. audit daily gaps (effective_universe count vs backtest_daily count per day)
            → download only gap days
         5. audit minute gaps (per-day 241-bar check)
            → full-range download for completely missing stocks
@@ -104,7 +104,7 @@ class CachePipeline:
     def __init__(
         self,
         storage: GreptimeBacktestStorage,
-        daily_source: TsanghiDailySource,
+        daily_source: TushareDailySource,
         minute_source: TushareMinuteSource,
         metadata_source: TushareMetadataSource,
         reporter: CacheProgressReporter,
@@ -148,7 +148,7 @@ class CachePipeline:
                 self.minute_source,
                 self.metadata_source,
             ):
-                # Phase 1: calendar + stock_list + daily (unified)
+                # Phase 1: calendar + stock_snapshot + daily (unified)
                 await self._download_daily_unified(start_date, end_date, cancel_event)
 
                 # Phase 2: minute (unified)
@@ -162,7 +162,7 @@ class CachePipeline:
             self.reporter = saved_reporter
 
     # ------------------------------------------------------------------
-    # Phase 1: daily (unified — calendar + stock_list + audit + download)
+    # Phase 1: daily (unified — calendar + stock_snapshot + audit + download)
     # ------------------------------------------------------------------
 
     async def _download_daily_unified(
@@ -196,12 +196,13 @@ class CachePipeline:
                 if (start_date + timedelta(days=i)).weekday() < 5
             )
 
-        # Sync stock_list baseline BEFORE gap audit (audit needs it)
-        await self._sync_stock_list(trading_dates, cancel_event)
+        # Sync stock_snapshot (B ∪ D ∪ S) BEFORE gap audit (audit needs it)
+        await self._sync_stock_snapshot(trading_dates, cancel_event)
 
-        # Audit: compare stock_list vs backtest_daily per date
+        # Audit: compare effective_universe (snapshot - listing_info filter)
+        # vs backtest_daily per date
         await self.reporter.progress(
-            Phase.DAILY_CHECK, 0, 1, "检查日线缺口 (扫 stock_list + backtest_daily) ..."
+            Phase.DAILY_CHECK, 0, 1, "检查日线缺口 (扫 stock_snapshot + backtest_daily) ..."
         )
         gaps = await self.storage.audit_daily_gaps()
         await self.reporter.status(f"日线缺口扫描完成，{len(gaps)} 天存在缺口")
@@ -243,7 +244,7 @@ class CachePipeline:
         prev_close_map = await self.storage.get_latest_closes()
         await self.reporter.status(f"prev_close 映射: {len(prev_close_map)} 只股票")
 
-        # --- Phase A: fill partial gaps locally (no tsanghi API) ---
+        # --- Phase A: fill partial gaps locally (no daily-source API call) ---
         if partial_gaps:
             await self._fill_partial_gaps(partial_gaps, prev_close_map, cancel_event)
 
@@ -265,7 +266,7 @@ class CachePipeline:
     ) -> None:
         """Fill partial gaps locally: query missing codes, fill suspended with prev_close.
 
-        No tsanghi API calls — only Tushare suspend_d + DB queries.
+        No daily-source API calls — only Tushare suspend_d + DB queries.
         """
         total = len(partial_gaps)
         filled_total = 0
@@ -275,8 +276,11 @@ class CachePipeline:
             self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
             date_str = gap_date.strftime("%Y-%m-%d")
 
-            # Compute missing codes
-            expected_codes = await self.storage.get_stock_list_codes_for_date(gap_date)
+            # Compute missing codes against the *effective* universe
+            # (stock_snapshot minus listing_info-derived blocklist), so
+            # we don't keep retrying codes that were never actually listed
+            # on this date.
+            expected_codes = await self.storage.get_effective_universe_for_date(gap_date)
             existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
             missing_codes = expected_codes - existing_codes
 
@@ -444,7 +448,7 @@ class CachePipeline:
             prev_close_map[ticker] = rec["close"]
             rows_written += 1
 
-        # Stocks in suspend_d but not returned by tsanghi: always insert suspended row.
+        # Stocks in suspend_d but not in daily-source response: always insert suspended row.
         # Never skip — the row must exist so backtest knows this stock is not tradable.
         for susp_code in suspended_codes:
             if susp_code in seen_codes:
@@ -464,7 +468,7 @@ class CachePipeline:
             await self.reporter.notify_suspended_stocks(date_str, suspended_codes)
         if null_codes:
             logger.warning(
-                f"tsanghi {date_str}: {len(null_codes)} stocks returned null open/close "
+                f"daily {date_str}: {len(null_codes)} stocks returned null open/close "
                 f"but NOT in suspend_d list, skipped"
             )
             await self.reporter.notify_null_data(date_str, null_codes)
@@ -480,41 +484,95 @@ class CachePipeline:
             await self.reporter.progress(
                 Phase.DAILY, current, total, f"{date_str} ⚠ API返回0条记录{null_part}{skip_part}"
             )
-            logger.warning(f"Daily {date_str}: 0 usable records from tsanghi API")
+            logger.warning(f"Daily {date_str}: 0 usable records from daily source")
 
     # ------------------------------------------------------------------
     # Stock list sync
     # ------------------------------------------------------------------
 
-    async def _sync_stock_list(
+    async def _sync_stock_snapshot(
         self, trading_dates: list[date], cancel_event: CancelChecker
     ) -> None:
-        existing = await self.storage.get_existing_stock_list_dates()
+        """For each missing trading date, fetch bak_basic ∪ daily ∪ suspend_d
+        and write the union into stock_snapshot.
+
+        Why three sources instead of just bak_basic:
+          - bak_basic alone leaks future stocks (codes that hadn't listed
+            yet on `td` but Tushare returns them anyway)
+          - bak_basic alone is missing 北交所 (920xxx / 430xxx / 830xxx) and
+            some Shenzhen edge codes
+          - daily ∪ suspend_d covers "real market activity that day"
+          - union of all three is the safest superset; the kimi-verified
+            stock_listing_info table later filters out the future-stock
+            pollution at read time (see get_effective_universe_for_date).
+        """
+        existing = await self.storage.get_existing_snapshot_dates()
         to_sync = [d for d in trading_dates if d not in existing]
         if not to_sync:
-            logger.info("stock_list: all %d dates already synced", len(trading_dates))
+            logger.info(
+                "stock_snapshot: all %d dates already synced", len(trading_dates)
+            )
             return
 
         logger.info(
-            "stock_list: syncing %d dates (%d already cached)",
+            "stock_snapshot: syncing %d dates (%d already cached)",
             len(to_sync),
             len(existing),
         )
 
         for i, td in enumerate(to_sync):
-            self._raise_if_cancelled(cancel_event, "stock_list sync cancelled")
+            self._raise_if_cancelled(cancel_event, "stock_snapshot sync cancelled")
 
-            await self.reporter.status(f"stock_list {td}: → 调用 bak_basic API ...")
+            await self.reporter.status(
+                f"stock_snapshot {td}: → bak_basic + daily + suspend_d ..."
+            )
             t_fetch = time.monotonic()
-            codes = await self.metadata_source.fetch_listed_stocks(td)
+
+            # Pull the three sources concurrently. Any individual failure
+            # raises here (e.g. suspend_d) so the caller fails fast — the
+            # FeishuLogHandler picks up the logger.error from each source.
+            bak_task = asyncio.create_task(self.metadata_source.fetch_listed_stocks(td))
+            susp_task = asyncio.create_task(self.metadata_source.fetch_suspended(td))
+            daily_task = asyncio.create_task(self.daily_source.fetch_day(td))
+
+            bak_codes = await bak_task
+            suspended_codes = await susp_task
+            daily_records, failed_exchanges = await daily_task
             fetch_elapsed = time.monotonic() - t_fetch
-            if not codes:
+
+            if failed_exchanges and len(failed_exchanges) == len(
+                self.daily_source.EXCHANGES
+            ):
+                # All daily-source endpoints failed — daily set is unusable
+                # for this date. We still write what we have (bak ∪ susp),
+                # but log it so the operator knows the snapshot is partial.
+                logger.error(
+                    "stock_snapshot %s: daily source ALL failed (%s); "
+                    "snapshot built from bak_basic ∪ suspend_d only",
+                    td,
+                    ", ".join(failed_exchanges),
+                )
+                daily_codes: set[str] = set()
+            else:
+                daily_codes = {r["ticker"] for r in daily_records}
+
+            union = set(bak_codes) | daily_codes | set(suspended_codes)
+
+            if not union:
+                # Nothing from any source — could be a non-trading day that
+                # leaked into the calendar. Skip; downstream gaps audit will
+                # still flag it if it really is a trading day.
                 logger.warning(
-                    "stock_list: bak_basic returned 0 codes for %s (fetch %.2fs)",
-                    td.strftime("%Y%m%d"),
-                    fetch_elapsed,
+                    "stock_snapshot %s: all 3 sources empty "
+                    "(bak=%d, daily=%d, susp=%d) — skipping",
+                    td,
+                    len(bak_codes),
+                    len(daily_codes),
+                    len(suspended_codes),
                 )
                 continue
+
+            codes_sorted = sorted(union)
 
             async def _on_insert(done: int, total: int, _td: date = td, _i: int = i) -> None:
                 await self.reporter.progress(
@@ -525,35 +583,35 @@ class CachePipeline:
                 )
 
             await self.reporter.status(
-                f"stock_list {td}: ← API {fetch_elapsed:.2f}s, "
-                f"→ 写入 GreptimeDB {len(codes)} 行 ..."
+                f"stock_snapshot {td}: ← fetch {fetch_elapsed:.2f}s "
+                f"(bak={len(bak_codes)}, daily={len(daily_codes)}, "
+                f"susp={len(suspended_codes)}, union={len(codes_sorted)}), 写入 ..."
             )
             t_insert = time.monotonic()
-            await self.storage.insert_stock_list_codes(td, codes, on_progress=_on_insert)
+            await self.storage.insert_snapshot_codes(td, codes_sorted, on_progress=_on_insert)
             insert_elapsed = time.monotonic() - t_insert
-            ms_per_row = (insert_elapsed * 1000.0) / max(len(codes), 1)
+            ms_per_row = (insert_elapsed * 1000.0) / max(len(codes_sorted), 1)
 
             await self.reporter.progress(
                 Phase.STOCK_LIST,
                 i + 1,
                 len(to_sync),
-                f"{td} ({len(codes)}只)",
-            )
-            await self.reporter.status(
-                f"stock_list {td}: fetch={fetch_elapsed:.2f}s "
-                f"insert={insert_elapsed:.2f}s rows={len(codes)} "
-                f"per_row={ms_per_row:.1f}ms"
+                f"{td} ({len(codes_sorted)}只)",
             )
             logger.info(
-                "stock_list: %s → %d codes (fetch %.2fs, insert %.2fs, %.1f ms/row)",
+                "stock_snapshot: %s → %d codes "
+                "(bak=%d daily=%d susp=%d; fetch %.2fs, insert %.2fs, %.1f ms/row)",
                 td,
-                len(codes),
+                len(codes_sorted),
+                len(bak_codes),
+                len(daily_codes),
+                len(suspended_codes),
                 fetch_elapsed,
                 insert_elapsed,
                 ms_per_row,
             )
 
-        logger.info("stock_list: sync complete, %d dates added", len(to_sync))
+        logger.info("stock_snapshot: sync complete, %d dates added", len(to_sync))
 
     # ------------------------------------------------------------------
     # is_suspended NULL backfill (one-time historical fixup)

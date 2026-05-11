@@ -156,7 +156,7 @@ class CacheProgressReporter:
         await self._send_feishu(
             f"[缓存下载] 数据异常\n"
             f"日期: {day_str}\n"
-            f"tsanghi 返回 {len(codes)} 只股票 open/close 为空，但 Tushare 未标记停牌\n"
+            f"日线数据源返回 {len(codes)} 只股票 open/close 为空，但 Tushare 未标记停牌\n"
             f"已跳过: {sample}{extra}"
         )
 

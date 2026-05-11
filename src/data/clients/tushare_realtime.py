@@ -321,6 +321,61 @@ class TushareRealtimeClient:
     # Tushare daily API (for prev_close)
     # ------------------------------------------------------------------
 
+    async def fetch_daily(self, trade_date: str) -> list[dict[str, Any]]:
+        """Fetch full daily OHLCV for ALL listed stocks on one trade date.
+
+        Single API call returns the entire market for that day. The volume
+        unit is **手** (lots, 1 手=100 股) — downstream adapters convert ×100
+        to 股 at read time (see CLAUDE.md volume convention).
+
+        Args:
+            trade_date: YYYYMMDD format.
+
+        Returns:
+            List of dicts: ``{ticker, open, high, low, close, pre_close, volume}``
+            Empty list for non-trading days. ``open``/``close`` may be ``None``
+            for halted stocks.
+
+        Raises:
+            TushareRealtimeError on API failure (caller decides retry / fallback).
+        """
+        data = await self._api_call(
+            "daily",
+            {"trade_date": trade_date},
+            fields="ts_code,open,high,low,close,pre_close,vol",
+        )
+
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+        if not fields or not items:
+            return []
+
+        idx = {f: i for i, f in enumerate(fields)}
+
+        def _f(row: list, key: str) -> float | None:
+            val = row[idx[key]]
+            return float(val) if val is not None else None
+
+        out: list[dict[str, Any]] = []
+        for row in items:
+            ts_code = str(row[idx["ts_code"]])
+            ticker = ts_code.split(".")[0]
+            if len(ticker) != 6:
+                continue
+            vol = _f(row, "vol")
+            out.append(
+                {
+                    "ticker": ticker,
+                    "open": _f(row, "open"),
+                    "high": _f(row, "high"),
+                    "low": _f(row, "low"),
+                    "close": _f(row, "close"),
+                    "pre_close": _f(row, "pre_close"),
+                    "volume": vol if vol is not None else 0.0,
+                }
+            )
+        return out
+
     async def fetch_prev_closes(self, trade_date: str) -> dict[str, float]:
         """
         Fetch previous trading day's close prices via Tushare 'daily' API.

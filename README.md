@@ -61,7 +61,7 @@ All config is in `docker-compose.yml`. Key variables:
 | `GREPTIME_HOST/PORT` | GreptimeDB backtest cache (default: greptimedb:4003) |
 | `WEB_BASE_URL` | Public URL for the web UI |
 
-API keys / endpoints (Tushare, Tsanghi, xtquant broker, AWS Lambda render
+API keys / endpoints (Tushare, xtquant broker, AWS Lambda render
 service, 柏拉图AI etc.) are configured **via the Settings page** at runtime
 and persisted under `data/`. Env vars (`LAMBDA_KLINE_URL`, `LAMBDA_KLINE_TOKEN`,
 `BLTCY_API_KEY`, …) remain a fallback for fresh container bootstrap before

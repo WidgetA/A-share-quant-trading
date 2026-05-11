@@ -4,7 +4,7 @@
 # Action: read app.state.broker_positions → for each holding, run analyze_kline()
 #         → push K-line image URL + 技术面分析 to Feishu, one message per stock.
 #
-# Why 8am instead of 15:00: tsanghi/Tushare daily endpoints are T-1, and
+# Why 8am instead of 15:00: Tushare daily endpoint is T-1, and
 # CacheScheduler fills the previous trading day's data at 3am. Running at 8am
 # means we always have a complete latest bar without forcing an extra refill.
 

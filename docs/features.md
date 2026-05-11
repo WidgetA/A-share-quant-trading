@@ -280,7 +280,7 @@ if bot.is_configured():
 |------|-----|---------|
 | Dashboard | `/` | iQuant connection status, broker positions/cash, data engine status, model management, recommendations |
 | Backtest | `/backtest` | Single-day scan, range backtest (SSE), CSV analysis |
-| Settings | `/settings` | tsanghi token, cache scheduler toggle, FC URL, S3 config |
+| Settings | `/settings` | Tushare token, cache scheduler toggle, FC URL, S3 config |
 | Database | `/database` | Embedded GreptimeDB dashboard |
 
 **Key API Endpoints**:
@@ -290,7 +290,7 @@ if bot.is_configured():
 | `/api/status` | GET | Health check |
 | `/api/iquant/status` | GET | iQuant connection status |
 | `/api/trading/recommendations` | GET | On-demand ML scan results (top-10) |
-| `/api/momentum/tsanghi-prepare` | POST | Download cache data (SSE stream) |
+| `/api/momentum/tsanghi-prepare` | POST | Download cache data (SSE stream; legacy URL — daily source is now Tushare) |
 | `/api/momentum/backtest` | POST | Single-day momentum scan |
 | `/api/momentum/combined-analysis` | POST | Range backtest (SSE stream) |
 | `/api/model/full-train` | POST | Trigger full ML training (SSE stream) |
@@ -353,7 +353,7 @@ services:
 - [x] FastAPI Web application with 6 routers
 - [x] Dashboard: iQuant status, broker positions, data engine card, model management
 - [x] Backtest page: single-day scan, range backtest, CSV analysis
-- [x] Settings page: tsanghi token, cache scheduler, FC URL, S3 config
+- [x] Settings page: Tushare token, cache scheduler, FC URL, S3 config
 - [x] Database page: embedded GreptimeDB dashboard
 - [x] On-demand recommendations (ML scan, no DB persistence)
 - [x] SSE streaming for downloads, training, backtests
@@ -439,7 +439,7 @@ SignalStore                                               (push signal → iQuan
 10. **Notification**: Send selection + recommendation via Feishu
 
 **Data Sources**:
-- Price (backtest): 日线 from tsanghi 沧海数据, 9:40 快照 from Tushare Pro `stk_mins` 1min (聚合 09:31~09:40 by `EarlyWindowAggregator`), via `GreptimeBacktestStorage` + `CachePipeline`
+- Price (backtest): 日线 from Tushare Pro `daily`, 9:40 快照 from Tushare Pro `stk_mins` 1min (聚合 09:31~09:40 by `EarlyWindowAggregator`), via `GreptimeBacktestStorage` + `CachePipeline`
 - Price (live): Tushare Pro `rt_min_daily`
 - Concept boards: Local JSON files (`data/sectors.json` + `data/board_constituents.json`), zero runtime API calls
 
@@ -556,7 +556,8 @@ SignalStore                                               (push signal → iQuan
 
 **Data Sources**:
 - Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
-- Historical data: GreptimeDB (`GreptimeBacktestStorage`) via `IQuantHistoricalAdapter`
+- Historical data: GreptimeDB (`GreptimeBacktestStorage.get_multi_day_history`)
+- prev_close: live from Tushare `daily` (never cached — see `_resolve_prev_close`)
 - Board data: `LocalConceptMapper` (local JSON files)
 - Trade calendar: Tushare `trade_cal` API (cached in memory)
 
@@ -587,7 +588,7 @@ SignalStore                                               (push signal → iQuan
 - `src/web/iquant_routes.py` — iQuant communication + monitoring
 - `src/web/routes.py` — Dashboard routes, delegates scan to ml_strategy_service
 - `src/web/app.py` — GreptimeDB cache injection into iQuant router
-- `src/data/clients/iquant_historical_adapter.py` — Historical data adapter
+- `src/data/clients/greptime_historical_adapter.py` — Historical data read adapter (HistoricalDataProvider)
 
 **Differences from STR-004**:
 - Pure parametric (no LLM board relevance filter)
@@ -708,10 +709,11 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 
 | Purpose | Source | Adapter / File |
 |---------|--------|----------------|
-| Backtest daily OHLCV | tsanghi 沧海数据 | `GreptimeHistoricalAdapter` via `CachePipeline` |
+| Backtest daily OHLCV | Tushare Pro `daily` | `TushareDailySource` via `CachePipeline` |
 | Backtest minute bars | Tushare Pro `stk_mins` 1min | `GreptimeBacktestStorage` via `CachePipeline` |
 | Live realtime quotes | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
-| Live historical | GreptimeDB cache | `IQuantHistoricalAdapter` |
+| Live prev_close | Tushare Pro `daily` (live, not cached) | `_resolve_prev_close` in `ml_strategy_service` |
+| Live 37d history | GreptimeDB cache | `GreptimeBacktestStorage.get_multi_day_history` |
 | Stock metadata | Tushare Pro `bak_basic` / `suspend_d` / `trade_cal` | `TushareMetadataSource` |
 | Board/concept mapping | Local JSON files | `LocalConceptMapper` |
 | Stock names | Local JSON files | `LocalConceptMapper.get_stock_name()` |
@@ -719,10 +721,9 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 **Files**:
 - `src/data/clients/greptime_storage.py` - GreptimeDB storage (asyncpg, CRUD)
 - `src/data/clients/greptime_historical_adapter.py` - Read-only adapter (HistoricalDataProvider Protocol)
-- `src/data/clients/iquant_historical_adapter.py` - Live historical adapter
-- `src/data/clients/tushare_realtime.py` - Tushare realtime quotes
+- `src/data/clients/tushare_realtime.py` - Tushare realtime quotes + `daily` full-market OHLCV
 - `src/data/clients/sina_realtime.py` - Sina realtime (fallback)
-- `src/data/sources/tsanghi_daily_source.py` - tsanghi daily OHLCV
+- `src/data/sources/tushare_daily_source.py` - Tushare `daily` full-market OHLCV
 - `src/data/sources/tushare_minute_source.py` - Tushare 1-min bars
 - `src/data/sources/tushare_metadata_source.py` - Stock metadata (trade_cal, suspend, stock_basic)
 - `src/data/sources/local_concept_mapper.py` - Board ↔ stock mapping (local JSON)
@@ -733,7 +734,7 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 
 **Status**: Completed
 
-**Description**: Automated data download and caching pipeline. Downloads daily OHLCV from tsanghi and minute bars from Tushare Pro into GreptimeDB for backtesting and ML training.
+**Description**: Automated data download and caching pipeline. Downloads daily OHLCV (Tushare `daily`) and minute bars (Tushare `stk_mins`) into GreptimeDB for backtesting and ML training.
 
 **GreptimeDB Tables**:
 
@@ -909,7 +910,7 @@ POST /api/analyze-kline
 
 **Description**: 交易日早 8 点自动扫描当前 broker 持仓，对每只持仓股调用 ANA-001
 生成 K 线图 + 技术面分析，并按【卖出 / 持有 / 增持】信号给出当日操作建议，逐只推送到
-飞书群。**为什么放 8am 不放 15:00**：tsanghi/Tushare 日线接口 T-1 出数据，
+飞书群。**为什么放 8am 不放 15:00**：Tushare 日线接口 T-1 出数据，
 `CacheScheduler` 3am 才把昨日数据补全；8am 跑可以直接用昨日收盘的完整 K 线，避免在
 15:00 触发还要额外补一次今日数据。
 
@@ -959,7 +960,7 @@ weekday fallback），周末/节假日不跑。
 | ANA-001 配置缺失（lambda/bltcy） | 发飞书告警 + `scheduler_log` 记 `failed` |
 | 节假日 | 不触发 |
 
-**速率**: 持仓串行处理（避免 tsanghi 2 并发限制 + LLM 同时跑撞超时），单只
+**速率**: 持仓串行处理（避免 LLM 同时跑撞超时），单只
 ~30s（图渲染 < 10s + LLM ~20s），10 只持仓约 5 分钟内全部发完。
 
 **Files**:

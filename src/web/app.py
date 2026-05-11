@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.trading.broker_client import BrokerClient
 from src.web.analysis_routes import create_analysis_router
+from src.web.audit_routes import create_audit_router
 from src.web.ml_routes import create_ml_router
 from src.web.notes_routes import create_notes_router
 from src.web.routes import (
@@ -52,6 +53,13 @@ if not _root_logger.handlers:
     _root_logger.addHandler(_handler)
     _root_logger.setLevel(logging.INFO)
 
+# Forward ERROR/CRITICAL log records to Feishu so silent failures (tsanghi
+# 余额不足, API hangs, etc.) page out instead of staying in container logs.
+# See src/common/feishu_log_handler.py for throttling details.
+from src.common.feishu_log_handler import install_root_handler as _install_feishu  # noqa: E402
+
+_install_feishu()
+
 logger = logging.getLogger(__name__)
 
 # Template and static file directories
@@ -70,7 +78,7 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     from src.data.clients.greptime_storage import create_storage_from_config
     from src.data.services.cache_pipeline import CachePipeline
     from src.data.services.cache_progress_reporter import CacheProgressReporter
-    from src.data.sources.tsanghi_daily_source import TsanghiDailySource
+    from src.data.sources.tushare_daily_source import TushareDailySource
     from src.data.sources.tushare_metadata_source import TushareMetadataSource
     from src.data.sources.tushare_minute_source import TushareMinuteSource
 
@@ -95,7 +103,7 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
 
     app.state.pipeline = CachePipeline(
         storage=storage,
-        daily_source=TsanghiDailySource(),
+        daily_source=TushareDailySource(),
         minute_source=TushareMinuteSource(),
         metadata_source=TushareMetadataSource(),
         reporter=CacheProgressReporter(),
@@ -294,6 +302,10 @@ def create_app(
     # Add trade notes router (NOTE-001: per-stock event log + UI)
     notes_router = create_notes_router()
     app.include_router(notes_router)
+
+    # Add audit router (kimi credentials + listing info uploads)
+    audit_router = create_audit_router()
+    app.include_router(audit_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():

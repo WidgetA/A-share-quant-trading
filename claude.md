@@ -77,17 +77,18 @@ Rules:
 
 | Purpose | Source | Adapter |
 |---------|--------|---------|
-| Backtest (daily) | 沧海数据 tsanghi | `GreptimeHistoricalAdapter` / `GreptimeBacktestStorage` + `CachePipeline` |
+| Backtest (daily) | Tushare Pro `daily` | `TushareDailySource` → `CachePipeline` → `GreptimeBacktestStorage` |
 | Backtest (minute) | Tushare Pro `stk_mins` 1min | via `GreptimeBacktestStorage` + `CachePipeline` |
 | Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
-| Live (historical) | GreptimeDB | `IQuantHistoricalAdapter` |
+| Live (prev_close) | Tushare Pro `daily` (live, not cached) | `_resolve_prev_close` in `ml_strategy_service.py` |
+| Live (37d history) | GreptimeDB cache | `GreptimeBacktestStorage.get_multi_day_history` |
 | Board/concept + stock names | Local JSON files | `LocalConceptMapper` |
 
 Rules:
 1. **Non-trading data** has its own sources: local JSON for boards and stock names
-2. **tsanghi token** — configured via Settings page, persisted in `data/tsanghi_token.txt`
-3. **tsanghi max concurrency = 2** (paid plan limit) — hardcoded in `_DEFAULT_CONCURRENCY`
-4. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
+2. **Single Tushare token** powers realtime quotes, daily OHLCV, suspend_d, bak_basic, stk_mins
+3. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
+4. **Live prev_close is always fetched live from Tushare `daily`** — never read from cache. Stale cache caused silent limit-up filter bypass on 2026-05-11 (002975 incident — see `MEMORY.md`)
 
 ## 9. Volume Unit Convention (CRITICAL)
 
@@ -95,7 +96,7 @@ Rules:
 
 | Data Source | Native Unit | Conversion |
 |------------|-------------|------------|
-| **tsanghi** `/daily/latest` | **手** (1手=100股) | ×100 at read time in `TsanghiHistoricalAdapter` |
+| **Tushare Pro** `daily` | **手** (1手=100股) | ×100 at read time in `GreptimeHistoricalAdapter` |
 | **Tushare Pro** `stk_mins` | **股** | None (already in 股) |
 | **Tushare Pro** `rt_min_daily` | **股** | None |
 

@@ -79,4 +79,6 @@ Thumbs.db
 *.parquet
 *.db
 *.sqlite
-data/tsanghi_token.txt
+
+# audit experiment data — not for repo
+/data/audit/

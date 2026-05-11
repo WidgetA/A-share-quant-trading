@@ -15,12 +15,16 @@
 # POST /api/momentum/backtest-export   - Export single-day funnel as CSV download
 # POST /api/momentum/combined-analysis - Run range backtest with SSE streaming
 # GET  /api/momentum/monitor-status    - Get intraday monitor status (JSON)
-# POST /api/momentum/tsanghi-prepare      - Start background download task (JSON)
-# GET  /api/momentum/tsanghi-stream       - SSE stream for task progress (reconnectable)
-# GET  /api/momentum/tsanghi-task-status  - Current task state (JSON)
-# POST /api/momentum/tsanghi-cancel       - Cancel running task (JSON)
-# POST /api/momentum/tsanghi-clear        - Clear FAILED state (JSON)
-# GET  /api/momentum/tsanghi-cache-status - Cache data coverage status (SSE)
+# POST /api/momentum/tsanghi-prepare      - Start cache download task (legacy path)
+# GET  /api/momentum/tsanghi-stream       - SSE stream for task progress (legacy path)
+# GET  /api/momentum/tsanghi-task-status  - Current task state (legacy path)
+# POST /api/momentum/tsanghi-cancel       - Cancel running task (legacy path)
+# POST /api/momentum/tsanghi-clear        - Clear FAILED state (legacy path)
+# GET  /api/momentum/tsanghi-cache-status - Cache data coverage status (legacy path)
+# NOTE: the `tsanghi-*` URL prefix is a historical artifact from when the
+# backtest daily source was tsanghi. Tushare `daily` is now the source; the
+# paths are kept to avoid breaking the deployed front-end. New endpoints
+# should not adopt this prefix.
 
 from __future__ import annotations
 
@@ -530,7 +534,8 @@ class RangeBacktestRequest(BaseModel):
 
 
 class TsanghiPrepareRequest(BaseModel):
-    """Request body for tsanghi data pre-download."""
+    """Request body for cache pre-download (legacy class name; new code
+    should not rely on the ``Tsanghi`` prefix — daily source is Tushare)."""
 
     start_date: str  # YYYY-MM-DD format
     end_date: str  # YYYY-MM-DD format
@@ -572,7 +577,7 @@ def create_momentum_router() -> APIRouter:
             },
         )
 
-    # === Tsanghi cache endpoints ===
+    # === Cache download endpoints (legacy `tsanghi-*` URL paths) ===
 
     @router.get("/api/momentum/tsanghi-cache-status")
     async def tsanghi_cache_status(request: Request):
@@ -808,21 +813,16 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/momentum/tsanghi-prepare")
     async def tsanghi_prepare(request: Request, body: TsanghiPrepareRequest):
-        """Start a background download task (or report cached/already-running).
+        """Start a background cache download task (or report cached/already-running).
 
         Returns JSON immediately; progress is observed via GET tsanghi-stream.
+        URL path keeps the legacy `tsanghi-` prefix for front-end compatibility;
+        the underlying daily source is Tushare `daily`.
         """
         import threading
         import time
 
-        from src.common.config import get_tsanghi_token_source
         from src.data.services.download_task import ActiveDownload
-
-        if get_tsanghi_token_source() == "not_configured":
-            raise HTTPException(
-                status_code=503,
-                detail="沧海数据 token 未配置，请先在设置页面配置 tsanghi token",
-            )
 
         try:
             start_date = datetime.strptime(body.start_date, "%Y-%m-%d").date()
@@ -1064,7 +1064,7 @@ def create_momentum_router() -> APIRouter:
             if not result.recommended and not result.all_scored:
                 ds = trade_date.strftime("%Y-%m-%d")
                 if result.skip_reason == "no_daily_data":
-                    msg = f"沧海缓存中无 {ds} 的日线数据（非交易日或数据缺失，请尝试补充下载）"
+                    msg = f"缓存中无 {ds} 的日线数据（非交易日或数据缺失，请尝试补充下载）"
                 elif result.skip_reason:
                     msg = f"{ds} 日线有数据但无有效候选股 ({result.skip_reason})"
                 else:
@@ -1324,7 +1324,7 @@ def create_momentum_router() -> APIRouter:
                             date_key = trade_date.strftime("%Y-%m-%d")
                             reason = scan_result.skip_reason or "no_data"
                             skip_msg = (
-                                f"沧海缓存中无 {date_key} 的日线数据"
+                                f"缓存中无 {date_key} 的日线数据"
                                 if reason == "no_daily_data"
                                 else f"{date_key} 无有效候选股 ({reason})"
                             )
@@ -2293,93 +2293,6 @@ def create_settings_router() -> APIRouter:
             "message": "Trading API Key 已保存，下次请求起 /api/trading/* 需要带 X-API-Key",
         }
 
-    # === TSANGHI TOKEN SETTINGS ===
-
-    @router.get("/api/settings/tsanghi-token")
-    async def get_tsanghi_token_status():
-        """Get current Tsanghi token status (masked)."""
-        from src.common.config import get_tsanghi_token, get_tsanghi_token_source
-
-        source = get_tsanghi_token_source()
-        source_labels = {
-            "web_ui": "Web UI (当前会话)",
-            "persisted_file": "Web UI (已持久化)",
-            "env_var": "环境变量",
-            "secrets_yaml": "secrets.yaml",
-            "not_configured": "未配置",
-        }
-
-        try:
-            token = get_tsanghi_token()
-            if len(token) > 20:
-                masked = token[:8] + "..." + token[-8:]
-            else:
-                masked = "***"
-            return {
-                "configured": True,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": masked,
-                "token_length": len(token),
-            }
-        except ValueError:
-            return {
-                "configured": False,
-                "source": source,
-                "source_label": source_labels.get(source, source),
-                "masked_token": "",
-                "token_length": 0,
-            }
-
-    @router.post("/api/settings/tsanghi-token")
-    async def update_tsanghi_token(body: TokenUpdateRequest):
-        """Save a new Tsanghi token."""
-        from src.common.config import set_tsanghi_token
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        set_tsanghi_token(token)
-        return {"success": True, "message": "Token 已保存，回测数据将使用此 token"}
-
-    @router.post("/api/settings/tsanghi-token/test")
-    async def test_tsanghi_token(body: TokenUpdateRequest):
-        """Test a Tsanghi token by fetching one stock's daily data."""
-        import httpx
-
-        token = body.token.strip()
-        if not token:
-            raise HTTPException(status_code=400, detail="Token 不能为空")
-
-        try:
-            url = "https://tsanghi.com/api/fin/stock/XSHG/daily"
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    url,
-                    params={"token": token, "ticker": "600519", "order": 2},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                code = data.get("code")
-                if code == 200 and data.get("data"):
-                    count = len(data["data"])
-                    return {
-                        "success": True,
-                        "message": f"Token 验证成功，获取到 {count} 条日线数据",
-                    }
-                else:
-                    msg = data.get("msg", "未知错误")
-                    return {
-                        "success": False,
-                        "message": f"Token 验证失败: {msg} (code={code})",
-                    }
-        except httpx.TimeoutException:
-            return {"success": False, "message": "请求超时，请检查网络连接"}
-        except httpx.HTTPError as e:
-            return {"success": False, "message": f"HTTP 请求失败: {e}"}
-
     # === CACHE SCHEDULER TOGGLE ===
 
     @router.get("/api/settings/cache-scheduler")
@@ -2569,17 +2482,12 @@ def create_settings_router() -> APIRouter:
     @router.get("/api/settings/keys-status")
     async def get_all_keys_status():
         """Get status of all API keys needed for live trading."""
-        from src.common.config import (
-            get_iquant_key_source,
-            get_tsanghi_token_source,
-        )
+        from src.common.config import get_iquant_key_source
 
         ml_key_ok = get_iquant_key_source() != "not_configured"
-        tsanghi_ok = get_tsanghi_token_source() != "not_configured"
 
         return {
             "ml_key": {"configured": ml_key_ok, "source": get_iquant_key_source()},
-            "tsanghi": {"configured": tsanghi_ok, "source": get_tsanghi_token_source()},
         }
 
     # === XTQUANT BROKER SETTINGS ===
