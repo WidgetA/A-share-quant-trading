@@ -40,13 +40,23 @@ async def run_ml_live(
     trade_calendar: list[date] | None = None,
     model_name: str = "full_latest",
 ) -> Any:
-    """Run ML scan using live Tushare quotes + GreptimeDB history.
+    """Run ML scan using ONLY live Tushare APIs (no GreptimeDB read path).
+
+    Decoupling note: the previous version pulled 37d history from the local
+    GreptimeDB cache, which made every live scan depend on the cache
+    scheduler being healthy. Cache hiccups (5/7-5/8 incident) silently
+    corrupted live recommendations. Now history is pulled live from
+    Tushare `daily` (one full-market call per trading date, 37 dates,
+    concurrent). Adds ~2-3s to a scan but removes the cache dependency.
 
     Args:
-        realtime_client: TushareRealtimeClient for fetching early quotes.
-        storage: GreptimeBacktestStorage for prev_close + 37d history.
+        realtime_client: TushareRealtimeClient — used for early quotes,
+            prev_close (live), suspended list, AND 37d daily history.
+        storage: kept in the signature for backward compatibility with
+            callers that pass it through (it's no longer consulted by
+            this path; backtest path still uses it).
         concept_mapper: For board ↔ stock mapping.
-        trade_calendar: Trading day calendar.
+        trade_calendar: Trading day calendar. If None, fetched inline.
         model_name: Which model to load (default "full_latest").
 
     Returns:
@@ -57,7 +67,7 @@ async def run_ml_live(
         FileNotFoundError: if model file doesn't exist.
     """
     from src.strategy.aggregators import EarlyWindowAggregator, Snapshot
-    from src.strategy.strategies.ml_scanner import DailyBar, MLScanner, MLScanResult
+    from src.strategy.strategies.ml_scanner import MLScanner, MLScanResult
 
     today = datetime.now(BEIJING_TZ).date()
     scanner = MLScanner(concept_mapper)
@@ -98,52 +108,56 @@ async def run_ml_live(
     if not early_data:
         return MLScanResult(model_name=model_name)
 
-    # Step 3: Resolve prev_close
+    # Step 3: Make sure we have a trade_calendar — the history fetch needs
+    # actual trading dates (weekday fallback would burn API calls on
+    # holidays). If the caller didn't pass one, pull a small window inline.
+    if trade_calendar is None:
+        from src.data.clients.tushare_realtime import get_tushare_trade_calendar
+
+        cal_start = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+        cal_end = today.strftime("%Y-%m-%d")
+        cal_strs = await get_tushare_trade_calendar(cal_start, cal_end)
+        trade_calendar = sorted(datetime.strptime(s, "%Y-%m-%d").date() for s in cal_strs)
+
+    # Step 4: Resolve prev_close (live from Tushare daily — no cache reads)
     prev_closes = await _resolve_prev_close(storage, trade_calendar, today, len(early_data))
 
     if not prev_closes:
         raise RuntimeError("ML live scan: failed to get any prev_close data")
 
-    # Step 4: Fetch 37d history from GreptimeDB
-    if not storage or not getattr(storage, "is_ready", False):
-        raise RuntimeError("ML live scan: GreptimeDB storage not ready for history")
-
+    # Step 5: Fetch 37d history live from Tushare `daily` (one full-market
+    # call per trading date). Concurrent so the total wall time is ~2-3s
+    # for 37 dates.
     prev_trade_date = _get_prev_trade_date(trade_calendar, today)
-    start_37d = _get_history_start_date(trade_calendar, today, days=50)
-    history_raw = await storage.get_multi_day_history(
-        start_37d.strftime("%Y-%m-%d"),
-        prev_trade_date.strftime("%Y-%m-%d"),
-    )
+    prev_trading_dates = [d for d in trade_calendar if d <= prev_trade_date]
+    if not prev_trading_dates:
+        raise RuntimeError(f"ML live scan: no previous trading days in calendar before {today}")
+    hist_dates = prev_trading_dates[-37:]
 
-    # Convert to ml_scanner.DailyBar
-    history_bars: dict[str, list[DailyBar]] = {}
-    for code, bars in history_raw.items():
-        history_bars[code] = [
-            DailyBar(date=d, open=o, high=h, low=lo, close=c, volume=v)
-            for d, o, h, lo, c, v in bars
-        ]
+    history_bars = await _fetch_history_live(realtime_client, hist_dates)
 
     logger.info(
-        "ML live scan: history %s..%s → %d stocks",
-        start_37d,
-        prev_trade_date,
+        "ML live scan: history %s..%s → %d stocks (live Tushare daily)",
+        hist_dates[0],
+        hist_dates[-1],
         len(history_bars),
     )
 
     # ── SAFETY: refuse to recommend if history data is severely incomplete ──
-    # If <20% of stocks with early data have history, GreptimeDB cache is
-    # likely missing recent dates. Better to fail loudly than recommend based
-    # on garbage data.
+    # With Tushare daily live we expect ~5000+ stocks per day; if the
+    # cross-day intersection drops below 20% of today's universe, something
+    # is wrong upstream (rate-limited, token expired, etc.) — better to
+    # fail loud than recommend on garbage.
     _MIN_HISTORY_COVERAGE = 0.20
     if early_data and len(history_bars) < len(early_data) * _MIN_HISTORY_COVERAGE:
         raise RuntimeError(
-            f"GreptimeDB 历史数据严重不足: "
-            f"仅 {len(history_bars)}/{len(early_data)} 只股票有37天历史 "
+            f"Tushare daily 历史拉取严重不足: "
+            f"仅 {len(history_bars)}/{len(early_data)} 只股票有 37 天历史 "
             f"(覆盖率 {len(history_bars) / len(early_data) * 100:.0f}% < 20%)。"
-            f"请检查缓存补全是否正常运行。"
+            f"请检查 Tushare token 是否有效 / 是否限流。"
         )
 
-    # Step 5: Build snapshots
+    # Step 6: Build snapshots
     snapshot_result = MLScanner.build_snapshots(
         universe.codes, prev_closes, early_data, history_bars
     )
@@ -151,14 +165,14 @@ async def run_ml_live(
     if not snapshot_result.snapshots:
         return MLScanResult(model_name=model_name)
 
-    # Step 6: Fetch suspended stocks (for data quality alerts)
+    # Step 7: Fetch suspended stocks (for data quality alerts)
     try:
         suspended = await realtime_client.fetch_suspended_stocks(today.strftime("%Y%m%d"))
     except Exception:
         logger.warning("ML live scan: failed to fetch suspended stocks", exc_info=True)
         suspended = set()
 
-    # Step 7: Run full scan pipeline
+    # Step 8: Run full scan pipeline
     return await scanner.scan(snapshot_result.snapshots, today, model_name, suspended)
 
 
@@ -361,6 +375,72 @@ async def run_ml_backtest(
 
 
 # ── Helpers ────────────────────────────────────────────────
+
+
+async def _fetch_history_live(
+    realtime_client: Any,
+    trade_dates: list[date],
+    concurrency: int = 4,
+) -> dict[str, Any]:
+    """Pull full-market daily OHLCV for each date and transpose into
+    {code: [DailyBar, ...]} (ascending by date).
+
+    Each date is one Tushare `daily` API call (~5000 rows). Calls are
+    bounded by ``concurrency`` so we don't blow Tushare's per-token rate
+    limit. Volume is converted from 手 (lots, Tushare's native unit) to
+    股 (shares) at read time — matches the convention used everywhere
+    else in the system.
+
+    Raises any underlying API error (FeishuLogHandler picks it up).
+    """
+    from src.strategy.strategies.ml_scanner import DailyBar
+
+    sem = asyncio.Semaphore(concurrency)
+    out: dict[str, list[DailyBar]] = {}
+    lock = asyncio.Lock()
+
+    async def _one(d: date) -> None:
+        td_str = d.strftime("%Y%m%d")
+        async with sem:
+            records = await realtime_client.fetch_daily(td_str)
+
+        if not records:
+            return
+
+        local: list[tuple[str, DailyBar]] = []
+        for r in records:
+            o = r.get("open")
+            c = r.get("close")
+            if o is None or c is None:
+                continue
+            ticker = r.get("ticker")
+            if not ticker or len(ticker) != 6:
+                continue
+            try:
+                bar = DailyBar(
+                    date=d,
+                    open=float(o),
+                    high=float(r.get("high") or o),
+                    low=float(r.get("low") or o),
+                    close=float(c),
+                    volume=float(r.get("volume") or 0) * 100,  # 手 -> 股
+                )
+            except (TypeError, ValueError):
+                continue
+            local.append((ticker, bar))
+
+        async with lock:
+            for code, bar in local:
+                out.setdefault(code, []).append(bar)
+
+    await asyncio.gather(*[_one(d) for d in trade_dates])
+
+    # Sort each code's bars ascending by date so downstream features that
+    # assume chronological order (avg_return_20d, trend_consistency) work.
+    for bars in out.values():
+        bars.sort(key=lambda b: b.date)
+
+    return out
 
 
 async def _resolve_prev_close(
