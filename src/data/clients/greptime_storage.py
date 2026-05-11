@@ -232,15 +232,20 @@ CREATE TABLE IF NOT EXISTS stock_snapshot (
 # uploads overwrite). `list_date` / `delist_date` drive the derived
 # blocklist (snapshot rows where ts < list_date or ts >= delist_date
 # are filtered out when computing the effective universe).
+#
+# Uses the trailing `PRIMARY KEY (col)` form (the form GreptimeDB's docs
+# document) and quotes column names that overlap SQL keywords ("name",
+# "source") to avoid the parser tripping during DDL execution.
 _CREATE_STOCK_LISTING_INFO_SQL = """
 CREATE TABLE IF NOT EXISTS stock_listing_info (
-    stock_code STRING PRIMARY KEY,
+    stock_code STRING,
     ts TIMESTAMP TIME INDEX,
-    name STRING,
+    "name" STRING,
     list_date TIMESTAMP,
     delist_date TIMESTAMP,
     verified BOOLEAN,
-    source STRING
+    "source" STRING,
+    PRIMARY KEY (stock_code)
 )
 """
 
@@ -470,12 +475,22 @@ class GreptimeBacktestStorage:
     async def start(self) -> None:
         """Connect to GreptimeDB and ensure tables exist."""
         await self.db.start()
-        await self.db.execute(_CREATE_DAILY_SQL)
-        await self.db.execute(_CREATE_MINUTE_SQL)
-        await self.db.execute(_CREATE_STOCK_LIST_SQL)
-        await self.db.execute(_CREATE_STOCK_SNAPSHOT_SQL)
-        await self.db.execute(_CREATE_STOCK_LISTING_INFO_SQL)
-        await self.db.execute(_CREATE_SCHEDULER_LOG_SQL)
+        for sql_name, sql in [
+            ("backtest_daily", _CREATE_DAILY_SQL),
+            ("backtest_minute", _CREATE_MINUTE_SQL),
+            ("stock_list", _CREATE_STOCK_LIST_SQL),
+            ("stock_snapshot", _CREATE_STOCK_SNAPSHOT_SQL),
+            ("stock_listing_info", _CREATE_STOCK_LISTING_INFO_SQL),
+            ("scheduler_log", _CREATE_SCHEDULER_LOG_SQL),
+        ]:
+            try:
+                await self.db.execute(sql)
+            except Exception as exc:
+                # Re-raise so the caller (web/app.py) knows storage is
+                # broken and refuses to set app.state.storage. The DDL
+                # name + error make it obvious which table failed.
+                logger.error("DDL failed for %s: %s", sql_name, exc)
+                raise
         # Add is_suspended column if missing (CREATE IF NOT EXISTS won't alter)
         try:
             await self.db.execute("ALTER TABLE backtest_daily ADD COLUMN is_suspended BOOLEAN")
@@ -1192,7 +1207,7 @@ class GreptimeBacktestStorage:
 
             await self.db.execute(
                 "INSERT INTO stock_listing_info"
-                "(stock_code, ts, name, list_date, delist_date, verified, source) "
+                '(stock_code, ts, "name", list_date, delist_date, verified, "source") '
                 f"VALUES ('{code}', {now_ms}, {_str_or_null(name)}, "
                 f"{_ts_or_null(ld)}, {_ts_or_null(dd)}, "
                 f"{'true' if verified else 'false'}, {_str_or_null(source)})"
@@ -1208,7 +1223,7 @@ class GreptimeBacktestStorage:
              "delist_date": date|None, "verified": bool, "source": str|None}
         """
         rows = await self.db.fetch(
-            "SELECT stock_code, name, list_date, delist_date, verified, source "
+            'SELECT stock_code, "name", list_date, delist_date, verified, "source" '
             "FROM stock_listing_info"
         )
         out: dict[str, dict[str, Any]] = {}
