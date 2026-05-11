@@ -385,6 +385,14 @@ async def _fetch_history_live(
     """Pull full-market daily OHLCV for each date and transpose into
     {code: [DailyBar, ...]} (ascending by date).
 
+    ⚠️ TEMPORARY — this exists to decouple live ML scan from the
+    GreptimeDB cache while the new stock_snapshot + stock_listing_info
+    + server-side kimi-cli auto-verify pipeline is being built. Once that
+    pipeline is healthy (snapshot stable, listing_info coverage > 95%,
+    a week of clean audits) this helper should be removed and run_ml_live
+    should switch back to `storage.get_multi_day_history` to save the
+    37 extra Tushare API calls per scan. Tracked in CLAUDE.md §8 rule 5.
+
     Each date is one Tushare `daily` API call (~5000 rows). Calls are
     bounded by ``concurrency`` so we don't blow Tushare's per-token rate
     limit. Volume is converted from 手 (lots, Tushare's native unit) to

@@ -81,7 +81,7 @@ Rules:
 | Backtest (minute) | Tushare Pro `stk_mins` 1min | via `GreptimeBacktestStorage` + `CachePipeline` |
 | Live (realtime) | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
 | Live (prev_close) | Tushare Pro `daily` (live, not cached) | `_resolve_prev_close` in `ml_strategy_service.py` |
-| Live (37d history) | GreptimeDB cache | `GreptimeBacktestStorage.get_multi_day_history` |
+| Live (37d history) | **临时**: Tushare Pro `daily` 实时并发拉 (37 calls/扫描) | `_fetch_history_live` in `ml_strategy_service.py` |
 | Board/concept + stock names | Local JSON files | `LocalConceptMapper` |
 
 Rules:
@@ -89,6 +89,11 @@ Rules:
 2. **Single Tushare token** powers realtime quotes, daily OHLCV, suspend_d, bak_basic, stk_mins
 3. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
 4. **Live prev_close is always fetched live from Tushare `daily`** — never read from cache. Stale cache caused silent limit-up filter bypass on 2026-05-11 (002975 incident — see `MEMORY.md`)
+5. **⚠️ Live 37d history 当前是临时方案** —— cache (stock_snapshot + stock_listing_info + 自动验证) 没完全跑通前,live 扫描走实时 Tushare `daily` 拉 37 次以解耦 cache 风险。等以下条件满足后**回退到读 cache**:
+   - `stock_snapshot` 三源并集稳定 (B∪D∪S 每天可靠入库)
+   - `stock_listing_info` 服务端自动验证流程上线 (路径 B, kimi-cli 自动跑覆盖未验证代码)
+   - 至少跑过一周连续无人工干预的 daily audit, gaps==0
+   切回 cache 时:  `_fetch_history_live` 删除, run_ml_live 改回 `storage.get_multi_day_history`
 
 ## 9. Volume Unit Convention (CRITICAL)
 

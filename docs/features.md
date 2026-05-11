@@ -556,7 +556,7 @@ SignalStore                                               (push signal → iQuan
 
 **Data Sources**:
 - Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
-- Historical data: GreptimeDB (`GreptimeBacktestStorage.get_multi_day_history`)
+- Historical data (37d): **临时**走 Tushare `daily` 实时并发拉 (`_fetch_history_live` in `ml_strategy_service.py`),解耦 cache 风险;cache 完整闭环后会回退到 `GreptimeBacktestStorage.get_multi_day_history`
 - prev_close: live from Tushare `daily` (never cached — see `_resolve_prev_close`)
 - Board data: `LocalConceptMapper` (local JSON files)
 - Trade calendar: Tushare `trade_cal` API (cached in memory)
@@ -713,7 +713,7 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 | Backtest minute bars | Tushare Pro `stk_mins` 1min | `GreptimeBacktestStorage` via `CachePipeline` |
 | Live realtime quotes | Tushare Pro `rt_min_daily` | `TushareRealtimeClient` |
 | Live prev_close | Tushare Pro `daily` (live, not cached) | `_resolve_prev_close` in `ml_strategy_service` |
-| Live 37d history | GreptimeDB cache | `GreptimeBacktestStorage.get_multi_day_history` |
+| Live 37d history | **临时**: Tushare Pro `daily` 实时并发拉 | `_fetch_history_live` in `ml_strategy_service` (cache 闭环后回退 `storage.get_multi_day_history`) |
 | Stock metadata | Tushare Pro `bak_basic` / `suspend_d` / `trade_cal` | `TushareMetadataSource` |
 | Board/concept mapping | Local JSON files | `LocalConceptMapper` |
 | Stock names | Local JSON files | `LocalConceptMapper.get_stock_name()` |
