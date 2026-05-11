@@ -36,30 +36,17 @@
         </div>
     </section>
 
-    <!-- Audit Uploads: Kimi credentials + listing info -->
+    <!-- Audit: stock_listing_info status (Kimi 凭证通过 PowerShell 脚本上传,
+         listing_info 由服务端 kimi-cli 自动验证写入, web 端只展示状态) -->
     <section class="settings-section">
         <div class="settings-card">
-            <h3>Kimi 凭证 / 股票上市信息 上传</h3>
+            <h3>Kimi 验证状态</h3>
             <p class="settings-desc">
-                本地 <code>kimi login</code> 后,上传 <code>~/.kimi/credentials/kimi-code.json</code> 让服务端 kimi-cli 可用；
-                以及上传 <code>verify_list_date_kimi.py</code> 跑出的合并 JSON,填充股票上市日期黑名单。
+                Kimi 凭证只能通过本地一键脚本 <code>scripts/kimi_login_and_upload.ps1</code> 上传(refresh_token 通常 7-30 天后才需要重新上传)。
+                <code>stock_listing_info</code> 由服务端 kimi-cli 自动验证未覆盖的股票代码后写入。
             </p>
-
-            <div class="form-group">
-                <label for="kimiCredFile">Kimi 凭证文件 (kimi-code.json)</label>
-                <input type="file" id="kimiCredFile" accept=".json">
-                <button class="btn btn-primary" onclick="uploadKimiCredentials()" id="kimiCredBtn">上传</button>
-                <div class="token-message hidden" id="kimiCredMessage"></div>
-            </div>
-
-            <div class="form-group" style="margin-top: 1rem;">
-                <label for="listingInfoFile">股票 listing_info JSON</label>
-                <input type="file" id="listingInfoFile" accept=".json">
-                <button class="btn btn-primary" onclick="uploadListingInfo()" id="listingInfoBtn">上传</button>
-                <div class="token-message hidden" id="listingInfoMessage"></div>
-                <div class="settings-desc" style="margin-top: 0.5rem;" id="listingInfoStatus">
-                    listing_info 状态: 加载中...
-                </div>
+            <div class="settings-desc" id="listingInfoStatus" style="margin-top: 0.5rem;">
+                listing_info 状态: 加载中...
             </div>
         </div>
     </section>
@@ -586,63 +573,8 @@ async function saveXtquant() {
 }
 
 // ------------------------------------------------------------------
-// Audit uploads: Kimi credentials + listing_info JSON
+// Audit: listing_info status (uploads moved to PS script / server-side kimi)
 // ------------------------------------------------------------------
-
-function _audit_apiKey() {
-    try { return localStorage.getItem('tradingApiKey') || ''; } catch (e) { return ''; }
-}
-
-async function _uploadAuditFile(endpoint, inputId, messageId, btnId, onDone) {
-    const fileInput = document.getElementById(inputId);
-    const btn = document.getElementById(btnId);
-    if (!fileInput.files || !fileInput.files[0]) {
-        showMessage(messageId, '请先选择文件', false); return;
-    }
-    const file = fileInput.files[0];
-    const form = new FormData();
-    form.append('file', file);
-    btn.disabled = true;
-    const oldText = btn.textContent;
-    btn.textContent = '上传中…';
-    try {
-        const resp = await fetch(endpoint, {
-            method: 'POST',
-            body: form,
-            headers: { 'X-API-Key': _audit_apiKey() },
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-            showMessage(messageId, data.message || '上传成功', true);
-            fileInput.value = '';
-            if (typeof onDone === 'function') onDone();
-        } else {
-            const errMsg = data.detail || data.message || ('HTTP ' + resp.status);
-            showMessage(messageId, '上传失败: ' + errMsg, false);
-        }
-    } catch (e) {
-        showMessage(messageId, '上传失败: ' + e.message, false);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = oldText;
-    }
-}
-
-function uploadKimiCredentials() {
-    _uploadAuditFile(
-        '/api/audit/kimi-credentials/upload',
-        'kimiCredFile', 'kimiCredMessage', 'kimiCredBtn',
-        null,
-    );
-}
-
-function uploadListingInfo() {
-    _uploadAuditFile(
-        '/api/audit/listing-info/upload',
-        'listingInfoFile', 'listingInfoMessage', 'listingInfoBtn',
-        loadListingInfoStatus,
-    );
-}
 
 async function loadListingInfoStatus() {
     const el = document.getElementById('listingInfoStatus');

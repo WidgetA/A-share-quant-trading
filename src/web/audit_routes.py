@@ -1,17 +1,19 @@
 # === MODULE PURPOSE ===
-# Endpoints for uploading audit artifacts produced offline:
+# Audit-related endpoints:
 #   1. POST /api/audit/kimi-credentials/upload
 #      Receive the kimi-cli OAuth credentials JSON (~/.kimi/credentials/
 #      kimi-code.json) so the container's kimi-cli can use it without a
-#      browser. The PowerShell helper script in scripts/ wraps `kimi login`
-#      + this upload behind one click.
-#   2. POST /api/audit/listing-info/upload
-#      Receive the kimi-verified stock listing metadata JSON produced by
-#      scripts/verify_list_date_kimi.py. Persists per-code list_date /
-#      delist_date into the stock_listing_info table, which drives the
-#      blocklist filter on the stock_snapshot universe.
+#      browser. The ONLY way to refresh the server-side kimi auth — driven
+#      by the PowerShell helper scripts/kimi_login_and_upload.ps1 (which
+#      runs `kimi login` locally and POSTs the resulting credentials).
+#   2. GET /api/audit/listing-info/status
+#      Read-only summary of the stock_listing_info table — surfaced in
+#      the settings page so the operator can see "how much of stock_snapshot
+#      has been verified by server-side kimi". The actual writes happen
+#      server-side once the kimi-cli auto-verification path is wired up
+#      (no upload endpoint — verification is owned by the server).
 #
-# Both endpoints are guarded by X-API-Key (verify_trading_api_key).
+# kimi-credentials upload is guarded by X-API-Key (verify_trading_api_key).
 
 from __future__ import annotations
 
@@ -119,94 +121,6 @@ def create_audit_router() -> APIRouter:
     # ------------------------------------------------------------------
     # Listing info upload (kimi verification result)
     # ------------------------------------------------------------------
-
-    @router.post(
-        "/listing-info/upload",
-        dependencies=[Depends(verify_trading_api_key)],
-    )
-    async def upload_listing_info(request: Request, file: UploadFile) -> JSONResponse:
-        """Receive the kimi-verified per-code list_date metadata.
-
-        Expected JSON schema (this is the format we own; matches what
-        scripts/verify_list_date_kimi.py + a small merge step produce):
-
-          {
-            "version": 1,
-            "generated_at": "2026-05-12T08:00:00",
-            "source": "kimi-cli",
-            "entries": [
-              {"code": "001220", "name": "世盟股份",
-               "list_date": "2026-02-03", "delist_date": null,
-               "source": "<URL>"},
-              {"code": "001237", "name": null,
-               "list_date": null, "delist_date": null,
-               "_unverified": true},
-              ...
-            ]
-          }
-        """
-        try:
-            raw = await file.read()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"读取上传文件失败: {e}")
-
-        if not raw:
-            raise HTTPException(status_code=400, detail="文件为空")
-
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"非合法 JSON: {e}")
-
-        entries_raw = payload.get("entries")
-        if not isinstance(entries_raw, list):
-            raise HTTPException(
-                status_code=400,
-                detail="JSON 缺少 'entries' 数组",
-            )
-
-        # Normalize: filter out entries with no code; mark unverified explicitly.
-        norm: list[dict[str, Any]] = []
-        for raw_e in entries_raw:
-            if not isinstance(raw_e, dict):
-                continue
-            code = raw_e.get("code")
-            if not isinstance(code, str) or len(code) != 6:
-                continue
-            list_date = raw_e.get("list_date")
-            delist_date = raw_e.get("delist_date")
-            unverified = bool(raw_e.get("_unverified", False))
-            verified = (list_date is not None) and not unverified
-            norm.append(
-                {
-                    "code": code,
-                    "name": raw_e.get("name"),
-                    "list_date": list_date,
-                    "delist_date": delist_date,
-                    "verified": verified,
-                    "source": raw_e.get("source"),
-                }
-            )
-
-        storage = getattr(request.app.state, "storage", None)
-        if storage is None or not getattr(storage, "is_ready", False):
-            raise HTTPException(status_code=503, detail="GreptimeDB storage 未连接")
-
-        try:
-            written = await storage.upsert_listing_info(norm)
-        except Exception as e:
-            logger.error("写 stock_listing_info 失败: %s", e, exc_info=True)
-            raise HTTPException(status_code=500, detail=f"写入数据库失败: {e}")
-
-        return JSONResponse(
-            {
-                "success": True,
-                "message": f"已写入 {written} 条 listing_info",
-                "input_entries": len(entries_raw),
-                "written": written,
-                "skipped": len(entries_raw) - written,
-            }
-        )
 
     @router.get("/listing-info/status")
     async def listing_info_status(request: Request) -> JSONResponse:
