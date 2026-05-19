@@ -89,7 +89,7 @@ async def test_run_once_manual_ignores_disabled_toggle():
     """Manual trigger always runs, even when the scheduled toggle is off —
     user explicitly clicked the button, signal of intent we don't override."""
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_positions=[],  # no positions → reaches no_positions branch
     )
@@ -137,7 +137,7 @@ async def test_run_once_scheduled_skips_non_trading_day():
 async def test_run_once_manual_runs_on_non_trading_day():
     """Manual trigger ignores trading-day filter — used for 补发 / testing."""
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),  # broker present
         broker_positions=[],  # but no positions → no_positions
     )
@@ -187,7 +187,7 @@ async def test_run_once_failed_when_storage_not_ready():
 @pytest.mark.asyncio
 async def test_run_once_failed_when_broker_missing():
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=None,
     )
     sched = PreMarketReportScheduler(state)
@@ -217,7 +217,7 @@ async def test_run_once_failed_on_broker_error_with_no_positions():
     """Empty positions + broker_last_error means we lost connectivity — fail loud,
     don't silently skip (trading-safety)."""
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_last_error="connection refused",
         broker_positions=[],
@@ -247,7 +247,7 @@ async def test_run_once_failed_on_broker_error_with_no_positions():
 @pytest.mark.asyncio
 async def test_run_once_no_positions_silent_skip():
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_last_error=None,
         broker_positions=[],
@@ -279,7 +279,7 @@ async def test_run_once_no_positions_silent_skip():
 @pytest.mark.asyncio
 async def test_run_once_success_per_stock_serial():
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_positions=[
             {"code": "000001.SZ", "volume": 1000, "avg_price": 12.5, "market_value": 13000.0},
@@ -335,7 +335,7 @@ async def test_run_once_success_per_stock_serial():
 @pytest.mark.asyncio
 async def test_run_once_partial_failure_one_stock_errors():
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_positions=[
             {"code": "000001.SZ", "volume": 1000, "avg_price": 12.5, "market_value": 13000.0},
@@ -425,7 +425,7 @@ async def test_trigger_one_stock_pushes_image_and_markdown():
     """Single-stock manual trigger pushes image + markdown to Feishu, just like
     the batch loop does for one position."""
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_positions=[
             {"code": "605299.SH", "volume": 4600, "avg_price": 25.0, "market_value": 119600.0},
@@ -465,7 +465,7 @@ async def test_trigger_one_stock_omits_position_table_for_unheld():
     """When the requested code isn't currently held, the markdown card should
     skip the position table (no zero-everything header)."""
     state = _make_app_state(
-        storage=_make_storage(existing_dates=[date(2026, 5, 1)]),
+        storage=_make_storage(existing_dates=[date.today()]),
         broker=MagicMock(),
         broker_positions=[],  # no positions
     )
