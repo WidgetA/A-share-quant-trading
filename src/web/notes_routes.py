@@ -41,6 +41,9 @@ class CreateEventRequest(BaseModel):
     author: str = Field("user", max_length=64)
     source: str = Field("user", pattern=r"^(user|ai)$")
     ts_ms: int | None = Field(None, description="Epoch ms; defaults to now if omitted")
+    price: float | None = Field(None, ge=0)
+    qty: int | None = Field(None, ge=0)
+    side: str | None = Field(None, pattern=r"^(buy|sell)$")
 
 
 class UpdateEventRequest(BaseModel):
@@ -158,6 +161,9 @@ def create_notes_router() -> APIRouter:
             author=body.author,
             source=body.source,
             ts_ms=body.ts_ms,
+            price=body.price,
+            qty=body.qty,
+            side=body.side,
         )
         logger.info(f"trade-notes: created {body.source} event for {code} ({body.event_type})")
         return {"event_id": event_id}

@@ -3103,6 +3103,15 @@ footer {
     margin-bottom: 0.7rem;
 }
 
+.tn-modal-row {
+    display: flex;
+    gap: 0.7rem;
+}
+
+.tn-modal-row > label {
+    flex: 1;
+}
+
 .tn-edit-form input,
 .tn-edit-form textarea,
 .tn-modal input,

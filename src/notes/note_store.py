@@ -424,6 +424,17 @@ class TradeNoteStore:
         qty: int | None = None,
         side: str | None = None,
     ) -> str:
+        # For 买入/卖出 events, keep side in sync with event_type and auto-fill
+        # the title in the same format the broker-import path uses, so manual
+        # entries and broker-imported entries render identically in the篇 view.
+        if event_type in ("买入", "卖出"):
+            if side is None:
+                side = "buy" if event_type == "买入" else "sell"
+            if not title and qty is not None:
+                if price is not None:
+                    title = f"{event_type} @{price:.2f} x {qty}"
+                else:
+                    title = f"{event_type} 市价 x {qty}"
         return await self._insert(
             code=code,
             event_type=event_type,
