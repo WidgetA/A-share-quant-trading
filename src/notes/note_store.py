@@ -16,8 +16,13 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Sentinel for update_event params that distinguishes "caller omitted this field"
+# (keep the existing value) from "caller explicitly passed None" (clear to None).
+_UNSET: Any = object()
 
 
 _CREATE_TRADE_NOTES_SQL = """
@@ -458,8 +463,10 @@ class TradeNoteStore:
         content_external: str | None = None,
         ts_ms: int | None = None,
         event_type: str | None = None,
+        price: Any = _UNSET,
+        qty: Any = _UNSET,
     ) -> bool:
-        """Update title, content (对内/对外), ts, and/or event_type.
+        """Update title, content (对内/对外), ts, event_type, price, and/or qty.
 
         Re-INSERT with same (code, event_id, ts) overwrites via mito dedup.
         Changing ts creates a row at the new ts; we soft-delete the row at
@@ -469,6 +476,9 @@ class TradeNoteStore:
         When event_type toggles between 买入/卖出, `side` flips with it so the
         two stay consistent (the events-list filter and dashboard meta both
         read `side`).
+
+        price/qty use _UNSET sentinel so the caller can clear them to None
+        (market price / unknown qty) explicitly, distinct from "keep existing".
         """
         existing = await self.get_event(code, event_id)
         if existing is None:
@@ -484,6 +494,8 @@ class TradeNoteStore:
             new_side = "buy" if event_type == "买入" else "sell"
         else:
             new_side = existing.side
+        new_price = price if price is not _UNSET else existing.price
+        new_qty = qty if qty is not _UNSET else existing.qty
         old_ts_ms = int(existing.ts.timestamp() * 1000)
         new_ts_ms = ts_ms if ts_ms is not None else old_ts_ms
         if new_ts_ms != old_ts_ms:
@@ -510,8 +522,8 @@ class TradeNoteStore:
             event_type=new_event_type,
             source=existing.source,
             title=new_title,
-            price=existing.price,
-            qty=existing.qty,
+            price=new_price,
+            qty=new_qty,
             side=new_side,
             content=new_content,
             content_external=new_content_external,

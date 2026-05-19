@@ -52,6 +52,10 @@ class UpdateEventRequest(BaseModel):
     content_external: str | None = Field(None, max_length=100_000)
     ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
     event_type: str | None = Field(None, min_length=1, max_length=32)
+    # For price/qty, distinguish "omitted" (keep existing) from "null" (clear to
+    # market/none) via `model_fields_set` in the route handler.
+    price: float | None = Field(None, ge=0)
+    qty: int | None = Field(None, ge=0)
 
 
 class RenameStockRequest(BaseModel):
@@ -173,6 +177,12 @@ def create_notes_router() -> APIRouter:
         code: str, event_id: str, body: UpdateEventRequest, request: Request
     ) -> dict:
         store = _get_store(request)
+        extra: dict = {}
+        fields = body.model_fields_set
+        if "price" in fields:
+            extra["price"] = body.price
+        if "qty" in fields:
+            extra["qty"] = body.qty
         ok = await store.update_event(
             code=code,
             event_id=event_id,
@@ -181,6 +191,7 @@ def create_notes_router() -> APIRouter:
             content_external=body.content_external,
             ts_ms=body.ts_ms,
             event_type=body.event_type,
+            **extra,
         )
         if not ok:
             raise HTTPException(status_code=404, detail="event not found")

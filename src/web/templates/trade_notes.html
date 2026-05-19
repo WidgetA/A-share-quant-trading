@@ -730,6 +730,9 @@
             const sel = t === ev.event_type ? ' selected' : '';
             return `<option value="${escapeHtml(t)}"${sel}>${escapeHtml(t)}</option>`;
         }).join('');
+        const priceVal = ev.price !== null && ev.price !== undefined ? ev.price : '';
+        const qtyVal = ev.qty !== null && ev.qty !== undefined ? ev.qty : '';
+        const isTrade = ev.event_type === '买入' || ev.event_type === '卖出';
         dom.content.innerHTML = `
             <div class="tn-edit-form">
                 <label>类型
@@ -738,6 +741,14 @@
                 <label>时间
                     <input type="datetime-local" id="tnEditTs" step="60" value="${isoToLocalDatetimeValue(ev.ts)}" />
                 </label>
+                <div id="tnEditTradeFields" class="tn-modal-row"${isTrade ? '' : ' hidden'}>
+                    <label>价格
+                        <input type="number" id="tnEditPrice" step="0.01" min="0" placeholder="留空=市价" value="${priceVal}" />
+                    </label>
+                    <label>数量
+                        <input type="number" id="tnEditQty" step="100" min="0" placeholder="股数" value="${qtyVal}" />
+                    </label>
+                </div>
                 <label>标题
                     <input type="text" id="tnEditTitle" value="${escapeHtml(ev.title || '')}" />
                 </label>
@@ -753,6 +764,10 @@
                 </div>
             </div>
         `;
+        document.getElementById('tnEditType').addEventListener('change', e => {
+            const t = e.target.value;
+            document.getElementById('tnEditTradeFields').hidden = !(t === '买入' || t === '卖出');
+        });
         document.getElementById('tnEditCancel').addEventListener('click', () => selectEvent(state.currentEventId));
         document.getElementById('tnEditSave').addEventListener('click', saveEdit);
     }
@@ -771,6 +786,27 @@
         const eventId = state.currentEventId;
         const body = { title, content, content_external: contentExternal, event_type: eventType };
         if (tsMs !== null) body.ts_ms = tsMs;
+        if (eventType === '买入' || eventType === '卖出') {
+            body.side = eventType === '买入' ? 'buy' : 'sell';
+            const priceEl = document.getElementById('tnEditPrice');
+            const qtyEl = document.getElementById('tnEditQty');
+            const priceRaw = priceEl ? priceEl.value.trim() : '';
+            const qtyRaw = qtyEl ? qtyEl.value.trim() : '';
+            if (priceRaw) {
+                const p = Number(priceRaw);
+                if (Number.isNaN(p) || p < 0) { alert('价格格式错误'); return; }
+                body.price = p;
+            } else {
+                body.price = null;  // explicit clear → 市价
+            }
+            if (qtyRaw) {
+                const q = parseInt(qtyRaw, 10);
+                if (Number.isNaN(q) || q < 0) { alert('数量格式错误'); return; }
+                body.qty = q;
+            } else {
+                body.qty = null;
+            }
+        }
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(eventId)}`, {
                 method: 'PATCH',
