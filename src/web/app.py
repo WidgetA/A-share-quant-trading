@@ -168,8 +168,7 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
         written, skipped = await TradeNoteStore(storage).import_filled_orders_from_list(orders)
         if written:
             logger.info(
-                "Broker order sync imported filled orders into trade_notes: "
-                "written=%d skipped=%d",
+                "Broker order sync imported filled orders into trade_notes: written=%d skipped=%d",
                 written,
                 skipped,
             )
