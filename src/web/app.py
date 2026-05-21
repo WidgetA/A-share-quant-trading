@@ -32,6 +32,7 @@ from src.web.routes import (
     create_trade_backtest_router,
     create_trading_router,
 )
+from src.web.trading_key_cookie import install_trading_api_key_cookie_middleware
 
 # Configure root logger so all project loggers (src.data.*, src.strategy.*, etc.)
 # emit to stdout. Without this, uvicorn only configures its own `uvicorn` /
@@ -253,6 +254,7 @@ def create_app(
         description="Web UI for trading signal confirmations",
         version="1.0.0",
     )
+    install_trading_api_key_cookie_middleware(app)
 
     # Use provided store or global singleton
     if store is None:
@@ -355,7 +357,6 @@ def create_app(
         # it sets app.state.storage / pipeline so all consumers pick it up.
         app.state.storage = None
         app.state.pipeline = None
-
         if not await _try_connect_greptime(app):
             app.state._greptime_reconnect_task = asyncio.create_task(_greptime_reconnect_loop(app))
 
