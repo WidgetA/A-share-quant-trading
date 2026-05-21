@@ -22,6 +22,7 @@ from src.common.pending_store import PendingConfirmationStore, get_pending_store
 from src.trading.broker_client import BrokerClient
 from src.web.analysis_routes import create_analysis_router
 from src.web.audit_routes import create_audit_router
+from src.web.broker_order_routes import create_broker_order_cache_router
 from src.web.ml_routes import create_ml_router
 from src.web.notes_routes import create_notes_router
 from src.web.routes import (
@@ -145,6 +146,38 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
     return None
 
 
+async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
+    """Fetch today's broker orders, cache them, and import filled orders into notes."""
+    broker: BrokerClient | None = getattr(app.state, "broker", None)
+    if broker is None:
+        return "broker not initialized"
+    try:
+        orders = await broker.get_orders()
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+    app.state.broker_orders = orders
+
+    storage = getattr(app.state, "storage", None)
+    if storage is None or not getattr(storage, "is_ready", False):
+        return None
+
+    try:
+        from src.notes.note_store import TradeNoteStore
+
+        written, skipped = await TradeNoteStore(storage).import_filled_orders_from_list(orders)
+        if written:
+            logger.info(
+                "Broker order sync imported filled orders into trade_notes: "
+                "written=%d skipped=%d",
+                written,
+                skipped,
+            )
+    except Exception as e:
+        logger.warning(f"Broker order sync failed to import trade notes: {e}", exc_info=True)
+    return None
+
+
 async def _init_broker(app: FastAPI) -> tuple[bool, str]:
     """(Re)initialize BrokerClient from persisted config.
 
@@ -188,9 +221,23 @@ async def _init_broker(app: FastAPI) -> tuple[bool, str]:
     else:
         app.state.broker_last_error = None
 
+    order_err = None
+    if err is None:
+        order_err = await _broker_fetch_orders_once(app)
+    if err is not None:
+        app.state.broker_orders_last_error = err
+    elif order_err:
+        app.state.broker_orders_last_error = order_err
+        logger.warning(f"BrokerClient warmup order fetch failed: {order_err}")
+    else:
+        app.state.broker_orders_last_error = None
+
     poll_task = getattr(app.state, "_broker_poll_task", None)
     if poll_task is None or poll_task.done():
         app.state._broker_poll_task = asyncio.create_task(_broker_position_poll_loop(app))
+    order_poll_task = getattr(app.state, "_broker_order_poll_task", None)
+    if order_poll_task is None or order_poll_task.done():
+        app.state._broker_order_poll_task = asyncio.create_task(_broker_order_poll_loop(app))
     logger.info(f"BrokerClient (re)initialized: {url} (warmup_err={err})")
     if err:
         return False, f"已配置但无法获取数据: {err}"
@@ -212,6 +259,24 @@ async def _broker_position_poll_loop(app: FastAPI) -> None:
             logger.warning(f"Broker position poll failed: {err}")
         else:
             app.state.broker_last_error = None
+        await asyncio.sleep(30)
+
+
+async def _broker_order_poll_loop(app: FastAPI) -> None:
+    """Poll xtquant-trade-server orders and import fills independent of browser views."""
+    import asyncio
+
+    while True:
+        broker: BrokerClient | None = getattr(app.state, "broker", None)
+        if broker is None:
+            await asyncio.sleep(30)
+            continue
+        err = await _broker_fetch_orders_once(app)
+        if err:
+            app.state.broker_orders_last_error = err
+            logger.warning(f"Broker order poll failed: {err}")
+        else:
+            app.state.broker_orders_last_error = None
         await asyncio.sleep(30)
 
 
@@ -284,6 +349,11 @@ def create_app(
     trade_bt_router = create_trade_backtest_router()
     app.include_router(trade_bt_router)
 
+    # Dashboard order display is cache-only; register before the trading router's
+    # legacy broker-backed route so browser polling cannot own order sync.
+    broker_order_cache_router = create_broker_order_cache_router()
+    app.include_router(broker_order_cache_router)
+
     # Add trading module router (dashboard buy/sell)
     trading_router = create_trading_router()
     app.include_router(trading_router)
@@ -325,8 +395,10 @@ def create_app(
         # Initialize xtquant-trade-server broker client
         app.state.broker = None
         app.state.broker_positions = []
+        app.state.broker_orders = []
         app.state.available_cash = 0.0
         app.state._broker_poll_task = None
+        app.state._broker_order_poll_task = None
         app.state.init_broker = _init_broker  # exposed for runtime reload via Settings UI
         ok, msg = await _init_broker(app)
         if not ok:
@@ -490,6 +562,11 @@ def create_app(
         broker_poll = getattr(app.state, "_broker_poll_task", None)
         if broker_poll and not broker_poll.done():
             broker_poll.cancel()
+
+        # Stop broker order sync poll
+        broker_order_poll = getattr(app.state, "_broker_order_poll_task", None)
+        if broker_order_poll and not broker_order_poll.done():
+            broker_order_poll.cancel()
 
         # Stop broker client
         broker = getattr(app.state, "broker", None)
