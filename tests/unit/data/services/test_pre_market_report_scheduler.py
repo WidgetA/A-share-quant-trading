@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import time as wall_time
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,8 @@ from src.data.services.pre_market_report_scheduler import (
     _latest_trading_day_with_data,
 )
 
+_MISSING = object()
+
 
 def _make_app_state(
     *,
@@ -27,12 +30,16 @@ def _make_app_state(
     broker=None,
     broker_last_error=None,
     broker_positions=None,
+    broker_positions_updated_at=_MISSING,
 ):
+    if broker_positions_updated_at is _MISSING:
+        broker_positions_updated_at = wall_time.time()
     return SimpleNamespace(
         storage=storage,
         broker=broker,
         broker_last_error=broker_last_error,
         broker_positions=broker_positions or [],
+        broker_positions_updated_at=broker_positions_updated_at,
     )
 
 
@@ -241,6 +248,40 @@ async def test_run_once_failed_on_broker_error_with_no_positions():
         await sched._run_once("scheduled")
 
     assert sched.last_run_result == "failed"
+    assert "connection refused" in sched.last_run_message
+
+
+@pytest.mark.asyncio
+async def test_run_once_failed_when_broker_positions_are_stale():
+    state = _make_app_state(
+        storage=_make_storage(existing_dates=[date.today()]),
+        broker=MagicMock(),
+        broker_last_error="connection refused",
+        broker_positions=[
+            {"code": "000001.SZ", "volume": 1000, "avg_price": 12.5, "market_value": 13000.0}
+        ],
+        broker_positions_updated_at=wall_time.time() - 600,
+    )
+    sched = PreMarketReportScheduler(state)
+
+    with (
+        patch(
+            "src.common.config.get_pre_market_report_enabled",
+            return_value=True,
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._is_trading_day",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "src.data.services.pre_market_report_scheduler._notify_feishu",
+            AsyncMock(),
+        ),
+    ):
+        await sched._run_once("scheduled")
+
+    assert sched.last_run_result == "failed"
+    assert "持仓缓存过期" in sched.last_run_message
     assert "connection refused" in sched.last_run_message
 
 

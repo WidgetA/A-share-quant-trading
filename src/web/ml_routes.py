@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import traceback
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -122,8 +121,9 @@ def _count_trading_days(calendar: list[date], from_date: date, to_date: date) ->
 def create_ml_router() -> APIRouter:
     """Create the ML strategy router.
 
-    Signal scheduler:
-    - 09:39-10:00: MOMENTUM SCAN (Feishu top-5 report only, no auto-trading)
+    Legacy API surface for scripts that need quotes, scans, and backtest scans.
+    Scheduled scans are owned by the app startup monitor, not by these request
+    handlers, so browser/API probes cannot start business schedulers.
 
     URL prefix kept as /api/iquant/ for backward compat with backtest scripts.
     """
@@ -132,7 +132,6 @@ def create_ml_router() -> APIRouter:
     # Isolated state (not shared with main app.state)
     _state: dict[str, Any] = {
         "initialized": False,
-        "scheduler_task": None,
         "universe_cache": None,
         "storage": None,  # injected from app.py after GreptimeDB connect
     }
@@ -140,7 +139,7 @@ def create_ml_router() -> APIRouter:
     # --- Resource management ---
 
     async def _ensure_resources() -> dict[str, Any]:
-        """Lazily initialize ML strategy resources and start scheduler."""
+        """Lazily initialize resources for explicit API requests only."""
         if _state["initialized"]:
             return _state
 
@@ -183,16 +182,13 @@ def create_ml_router() -> APIRouter:
             )
             raise
 
-        # Start momentum background scheduler
-        _state["scheduler_task"] = asyncio.create_task(_signal_scheduler())
-
         _state["initialized"] = True
-        logger.info("ML strategy resources initialized + scheduler started")
+        logger.info("ML strategy resources initialized")
         return _state
 
     async def _cleanup_resources() -> None:
         """Cleanup on shutdown."""
-        for key in ("scheduler_task", "monitoring_task"):
+        for key in ("monitoring_task",):
             task = _state.get(key)
             if task and not task.done():
                 task.cancel()
@@ -379,91 +375,6 @@ def create_ml_router() -> APIRouter:
 
     router._get_status = _get_status  # type: ignore[attr-defined]
 
-    # --- ML background scheduler (trading operations only) ---
-
-    async def _signal_scheduler() -> None:
-        """ML trading scheduler — scan + Feishu report only.
-
-        Trading window:
-        - SCAN (09:39-10:00): Run ML scan → push Feishu report
-        """
-        SCAN_WINDOW = (time(9, 39), time(10, 0))
-
-        logger.info("ML signal scheduler started")
-
-        scan_done_date = ""
-
-        try:
-            while True:
-                now_bj = datetime.now(BEIJING_TZ)
-                ex_date = now_bj.strftime("%Y-%m-%d")
-                ex_time = now_bj.time().replace(second=0, microsecond=0)
-
-                # --- Skip non-trading days (weekends + holidays) ---
-                if now_bj.weekday() >= 5:
-                    await asyncio.sleep(3600)
-                    continue
-                try:
-                    cal = await _get_trade_calendar()
-                    if now_bj.date() not in cal:
-                        if scan_done_date != ex_date:
-                            logger.info(f"ML strategy: {ex_date} is not a trading day")
-                            scan_done_date = ex_date
-                        await asyncio.sleep(3600)
-                        continue
-                except Exception as e:
-                    logger.warning(f"Trade calendar check failed, proceeding: {e}")
-
-                # --- SCAN: 09:39-10:00 ---
-                if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
-                    from src.common.config import get_daily_scan_enabled
-
-                    if not get_daily_scan_enabled():
-                        logger.info("ML strategy: daily scan disabled, skipping")
-                        scan_done_date = ex_date
-                        await asyncio.sleep(120)
-                        continue
-
-                    if not _state["initialized"]:
-                        await asyncio.sleep(10)
-                        continue
-
-                    scan_done_date = ex_date
-
-                    try:
-                        rec = await _run_ml_scan()
-                        if rec:
-                            logger.info(
-                                f"ML scan: recommends {rec['stock_code']} "
-                                f"(auto-trading disabled, no order placed)"
-                            )
-                        else:
-                            logger.info("ML scan: no recommendation today")
-                            await _notify_feishu_error(
-                                "ML扫描结果",
-                                "今日ML扫描完成，无符合条件的推荐股票",
-                            )
-                    except Exception as e:
-                        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                        logger.error(f"ML scan failed: {error_detail}")
-                        await _notify_feishu_error("ML扫描失败", error_detail)
-
-                # Scan deadline
-                if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
-                    scan_done_date = ex_date
-
-                await asyncio.sleep(120 if scan_done_date == ex_date else 30)
-
-        except asyncio.CancelledError:
-            logger.info("ML signal scheduler stopped")
-        except Exception as e:
-            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.critical(f"Signal scheduler CRASHED: {error_detail}")
-            await _notify_feishu_error(
-                "交易调度器崩溃",
-                f"信号调度器意外退出!\n{error_detail}\n今日将无法自动交易，请立即检查",
-            )
-
     # --- Endpoints ---
 
     @router.get("/ping")
@@ -471,13 +382,13 @@ def create_ml_router() -> APIRouter:
         request: Request,
         api_key: str = Depends(_verify_api_key),
     ) -> dict:
-        """Health check + trigger lazy init."""
-        await _ensure_resources()
+        """Health check without initializing external resources."""
         now = datetime.now(BEIJING_TZ)
         broker_positions = getattr(request.app.state, "broker_positions", [])
         return {
             "status": "ok",
             "service": "ml-strategy",
+            "initialized": _state["initialized"],
             "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "broker_positions": len(broker_positions),
         }

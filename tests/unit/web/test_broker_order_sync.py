@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from src.web.app import _broker_fetch_orders_once
+from src.web.routes import create_trading_router
 
 
 class _Broker:
@@ -51,3 +52,13 @@ async def test_broker_order_sync_only_caches_when_storage_not_ready(monkeypatch)
 
     assert err is None
     assert app.state.broker_orders == orders
+
+
+def test_trading_router_does_not_register_legacy_orders_get():
+    router = create_trading_router()
+
+    assert not any(
+        getattr(route, "path", None) == "/api/trading/orders"
+        and "GET" in (getattr(route, "methods", set()) or set())
+        for route in router.routes
+    )

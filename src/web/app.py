@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -143,6 +144,7 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
     app.state.available_cash = account.cash
     app.state.broker_total_asset = account.total_asset
     app.state.broker_account_id = account.account_id
+    app.state.broker_positions_updated_at = time.time()
     return None
 
 
@@ -394,6 +396,7 @@ def create_app(
         # Initialize xtquant-trade-server broker client
         app.state.broker = None
         app.state.broker_positions = []
+        app.state.broker_positions_updated_at = None
         app.state.broker_orders = []
         app.state.available_cash = 0.0
         app.state._broker_poll_task = None
@@ -497,6 +500,8 @@ def create_app(
             "last_scan_result": None,  # "success" | "failed" | "no_result"
             "last_scan_message": None,
             "last_result": None,
+            "today_recommendations_date": None,
+            "today_recommendations": [],
             "today_results": [],
             "task": None,
             "_app_state": app.state,  # needed for storage access

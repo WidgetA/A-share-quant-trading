@@ -810,9 +810,9 @@ async function loadRecommendations() {
     document.getElementById('recTitle').textContent =
         (isToday ? '今日' : selectedDate) + ' 推荐 (Top 10)';
 
-    // Show loading state (on-demand compute may take 30-60s for today)
+    // Show loading state. Today's data is read from the background monitor cache.
     document.getElementById('recContainer').innerHTML =
-        '<div class="empty-state">正在计算推荐...</div>';
+        '<div class="empty-state">正在加载推荐...</div>';
     document.getElementById('recCount').textContent = '...';
 
     try {

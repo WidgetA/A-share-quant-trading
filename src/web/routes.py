@@ -1896,6 +1896,12 @@ async def _execute_monitor_scan(state: dict, storage: Any = None) -> dict | None
     }
 
     state["last_result"] = result_entry
+    state["today_recommendations_date"] = scan_time.strftime("%Y-%m-%d")
+    state["today_recommendations"] = _scan_result_to_recs(
+        state["today_recommendations_date"],
+        scan_result,
+        n=10,
+    )
     # last_scan_time is set by the caller (_run_intraday_monitor / trigger endpoint)
     # to ensure it's always set even on failure.
     # Manual trigger also sets it here as fallback:
@@ -3150,13 +3156,29 @@ def create_trading_router() -> APIRouter:
         """
         from src.common.config import get_recommendations_enabled
 
+        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         if date is None:
-            date = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+            date = today
 
         if not get_recommendations_enabled():
             return {"date": date, "recommendations": [], "error": "推荐功能已关闭"}
 
         storage = getattr(request.app.state, "storage", None)
+
+        if date == today:
+            monitor_state = getattr(request.app.state, "momentum_monitor_state", {})
+            if monitor_state.get("today_recommendations_date") == date:
+                return {
+                    "date": date,
+                    "recommendations": monitor_state.get("today_recommendations", []),
+                    "source": "background_monitor",
+                }
+            return {
+                "date": date,
+                "recommendations": [],
+                "source": "background_monitor",
+                "message": monitor_state.get("last_scan_message"),
+            }
 
         try:
             recs, _scan_result = await _compute_ml_scan(
@@ -3319,38 +3341,6 @@ def create_trading_router() -> APIRouter:
             "status": result.status,
             "quantity": quantity,
         }
-
-    @router.get("/api/trading/orders")
-    async def get_orders(request: Request) -> dict:
-        """Return today's orders from broker.
-
-        Side-effect: pipe FILLED rows into trade_notes (idempotent on
-        broker_<order_id>). The main page polls this endpoint, so manual
-        sells placed outside our batch flow get auto-recorded without the
-        user having to click the ⤓ backfill button.
-        """
-        from src.trading.broker_client import BrokerClient
-
-        broker: BrokerClient | None = getattr(request.app.state, "broker", None)
-        if broker is None:
-            return {"orders": []}
-        try:
-            orders = await broker.get_orders()
-        except Exception as e:
-            logger.warning(f"get_orders failed: {e}")
-            return {"orders": []}
-
-        storage = getattr(request.app.state, "storage", None)
-        if storage is not None:
-            try:
-                from src.notes.note_store import TradeNoteStore
-
-                store = TradeNoteStore(storage)
-                await store.import_filled_orders_from_list(orders)
-            except Exception as e:
-                logger.warning(f"trade-notes auto-import on /orders failed: {e}")
-
-        return {"orders": orders}
 
     @router.delete("/api/trading/orders/{order_id}")
     async def cancel_order(request: Request, order_id: int) -> dict:

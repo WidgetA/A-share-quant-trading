@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as wall_time
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -26,6 +27,7 @@ SCHEDULE_HOUR = 8  # 8am Beijing
 _STARTUP_DELAY_SECONDS = 60
 _ANALYZE_DAYS = 30
 _AS_OF_LOOKBACK_DAYS = 14  # how far back to search for the latest cached trading day
+_BROKER_POSITION_MAX_AGE_SECONDS = 5 * 60
 
 
 async def _notify_feishu(message: str) -> None:
@@ -300,12 +302,31 @@ class PreMarketReportScheduler:
         broker = getattr(self._app_state, "broker", None)
         broker_err = getattr(self._app_state, "broker_last_error", None)
         positions = list(getattr(self._app_state, "broker_positions", []) or [])
+        positions_updated_at = getattr(self._app_state, "broker_positions_updated_at", None)
 
         if broker is None:
             self.last_run_time = run_time
             self.last_run_result = "failed"
             self.last_run_message = "Broker 未初始化"
             await _notify_feishu(f"[盘前持仓日报] 失败 ({trigger})\nBroker 未初始化，无法获取持仓")
+            return
+
+        if not positions_updated_at:
+            self.last_run_time = run_time
+            self.last_run_result = "failed"
+            self.last_run_message = "Broker 持仓尚未同步"
+            await _notify_feishu(
+                f"[盘前持仓日报] 失败 ({trigger})\nBroker 持仓尚未完成后台同步，无法生成报告"
+            )
+            return
+
+        positions_age = wall_time.time() - float(positions_updated_at)
+        if positions_age > _BROKER_POSITION_MAX_AGE_SECONDS:
+            self.last_run_time = run_time
+            self.last_run_result = "failed"
+            detail = broker_err or f"最近一次持仓同步已超过 {int(positions_age)} 秒"
+            self.last_run_message = f"Broker 持仓缓存过期: {detail}"
+            await _notify_feishu(f"[盘前持仓日报] 失败 ({trigger})\n{self.last_run_message}")
             return
 
         # Genuine "no positions" vs broker error: positions list is updated only
