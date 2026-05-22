@@ -6,11 +6,28 @@ from src.web.routes import create_trading_router
 
 
 class _Broker:
-    def __init__(self, orders):
+    def __init__(self, orders, positions=None):
         self.orders = orders
+        self.positions = positions or [
+            SimpleNamespace(
+                code="000001.SZ",
+                volume=100,
+                can_use_volume=100,
+                avg_price=12.3,
+                market_value=1230.0,
+            )
+        ]
+        self.position_fetches = 0
 
     async def get_orders(self):
         return self.orders
+
+    async def get_positions(self):
+        self.position_fetches += 1
+        return self.positions
+
+    async def get_account(self):
+        return SimpleNamespace(cash=1000.0, total_asset=2230.0, account_id="acct")
 
 
 class _Storage:
@@ -67,6 +84,31 @@ async def test_broker_order_sync_only_caches_when_storage_not_ready(monkeypatch)
 
     assert err is None
     assert app.state.broker_orders == orders
+
+
+async def test_broker_order_sync_refreshes_positions_when_fills_change():
+    orders = [{"order_id": 1, "code": "000001.SZ", "status": "FILLED"}]
+    broker = _Broker(orders)
+    app = SimpleNamespace(state=SimpleNamespace(broker=broker, storage=None))
+
+    err = await _broker_fetch_orders_once(app)
+
+    assert err is None
+    assert broker.position_fetches == 1
+    assert app.state.broker_positions == [
+        {
+            "code": "000001.SZ",
+            "volume": 100,
+            "can_use_volume": 100,
+            "avg_price": 12.3,
+            "market_value": 1230.0,
+        }
+    ]
+
+    err = await _broker_fetch_orders_once(app)
+
+    assert err is None
+    assert broker.position_fetches == 1
 
 
 def test_trading_router_does_not_register_legacy_orders_get():

@@ -3238,6 +3238,9 @@ def create_trading_router() -> APIRouter:
             qty=quantity,
             price=float(price) if price else None,
         )
+        from src.web.app import schedule_broker_post_order_refresh
+
+        schedule_broker_post_order_refresh(request.app)
 
         return {
             "success": True,
@@ -3292,6 +3295,9 @@ def create_trading_router() -> APIRouter:
         # NOTE-001: import filled portions from broker (best-effort). Residuals
         # placed as resting orders are picked up later by /backfill-today.
         await _import_batch_orders_into_notes(request, codes={leg["code"] for leg in legs})
+        from src.web.app import schedule_broker_post_order_refresh
+
+        schedule_broker_post_order_refresh(request.app)
 
         return data
 
@@ -3334,6 +3340,9 @@ def create_trading_router() -> APIRouter:
             qty=quantity,
             price=None,
         )
+        from src.web.app import schedule_broker_post_order_refresh
+
+        schedule_broker_post_order_refresh(request.app)
 
         return {
             "success": True,
@@ -3353,6 +3362,9 @@ def create_trading_router() -> APIRouter:
 
         try:
             result = await broker.cancel_order(order_id)
+            from src.web.app import schedule_broker_post_order_refresh
+
+            schedule_broker_post_order_refresh(request.app)
             return {"success": True, "result": result}
         except BrokerError as e:
             raise HTTPException(status_code=400, detail=e.message)

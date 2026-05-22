@@ -67,6 +67,7 @@ _install_feishu()
 
 logger = logging.getLogger(__name__)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+_POSITION_AFFECTING_ORDER_STATUSES = {"FILLED", "PARTIALLY_FILLED", "PARTIAL_FILLED"}
 
 # Template and static file directories
 WEB_DIR = Path(__file__).parent
@@ -187,6 +188,43 @@ def _filter_orders_for_beijing_date(
     return filtered
 
 
+def _filled_order_fingerprint(orders: list[dict]) -> tuple[tuple[str, ...], ...]:
+    """Return a stable signature for filled orders that should affect positions."""
+    items: list[tuple[str, ...]] = []
+    for order in orders:
+        status = str(order.get("status") or "").upper()
+        if status not in _POSITION_AFFECTING_ORDER_STATUSES:
+            continue
+        order_key = order.get("order_id") or order.get("seq")
+        if order_key is None:
+            order_key = ":".join(
+                str(order.get(key) or "")
+                for key in ("code", "side", "qty", "traded_qty", "submit_time")
+            )
+        items.append(
+            (
+                str(order_key),
+                str(order.get("code") or ""),
+                str(order.get("side") or ""),
+                str(order.get("qty") or ""),
+                str(order.get("traded_qty") or ""),
+                str(order.get("avg_traded_price") or ""),
+                str(order.get("submit_time") or ""),
+            )
+        )
+    return tuple(sorted(items))
+
+
+async def _refresh_broker_positions_for_order_change(app: FastAPI) -> None:
+    """Refresh position/account cache after order state changes."""
+    err = await _broker_fetch_once(app)
+    if err:
+        app.state.broker_last_error = err
+        logger.warning(f"Broker position refresh after order sync failed: {err}")
+    else:
+        app.state.broker_last_error = None
+
+
 async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     """Fetch today's broker orders, cache them, and import filled orders into notes."""
     broker: BrokerClient | None = getattr(app.state, "broker", None)
@@ -206,6 +244,12 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
         )
     app.state.broker_orders = orders
 
+    filled_fingerprint = _filled_order_fingerprint(orders)
+    previous_fingerprint = getattr(app.state, "broker_filled_orders_fingerprint", ())
+    app.state.broker_filled_orders_fingerprint = filled_fingerprint
+    if filled_fingerprint != previous_fingerprint:
+        await _refresh_broker_positions_for_order_change(app)
+
     storage = getattr(app.state, "storage", None)
     if storage is None or not getattr(storage, "is_ready", False):
         return None
@@ -223,6 +267,36 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     except Exception as e:
         logger.warning(f"Broker order sync failed to import trade notes: {e}", exc_info=True)
     return None
+
+
+async def _broker_post_order_refresh_loop(app: FastAPI) -> None:
+    """Refresh broker snapshots shortly after an explicit order/cancel request."""
+    import asyncio
+
+    for delay in (0.5, 2.0, 5.0, 10.0):
+        await asyncio.sleep(delay)
+        order_err = await _broker_fetch_orders_once(app)
+        if order_err:
+            app.state.broker_orders_last_error = order_err
+            logger.warning(f"Broker post-order order refresh failed: {order_err}")
+        else:
+            app.state.broker_orders_last_error = None
+
+        # Fill/cancel settlement can update cash and can-use volume even before
+        # the filled-order fingerprint changes, so always refresh positions too.
+        await _refresh_broker_positions_for_order_change(app)
+
+
+def schedule_broker_post_order_refresh(app: FastAPI) -> None:
+    """Schedule backend broker cache refresh after a submitted order."""
+    import asyncio
+
+    task = getattr(app.state, "_broker_post_order_refresh_task", None)
+    if task is not None and not task.done():
+        return
+    app.state._broker_post_order_refresh_task = asyncio.create_task(
+        _broker_post_order_refresh_loop(app)
+    )
 
 
 async def _init_broker(app: FastAPI) -> tuple[bool, str]:
@@ -444,9 +518,11 @@ def create_app(
         app.state.broker_positions = []
         app.state.broker_positions_updated_at = None
         app.state.broker_orders = []
+        app.state.broker_filled_orders_fingerprint = ()
         app.state.available_cash = 0.0
         app.state._broker_poll_task = None
         app.state._broker_order_poll_task = None
+        app.state._broker_post_order_refresh_task = None
         app.state.init_broker = _init_broker  # exposed for runtime reload via Settings UI
         ok, msg = await _init_broker(app)
         if not ok:
@@ -617,6 +693,10 @@ def create_app(
         broker_order_poll = getattr(app.state, "_broker_order_poll_task", None)
         if broker_order_poll and not broker_order_poll.done():
             broker_order_poll.cancel()
+
+        broker_post_order_refresh = getattr(app.state, "_broker_post_order_refresh_task", None)
+        if broker_post_order_refresh and not broker_post_order_refresh.done():
+            broker_post_order_refresh.cancel()
 
         # Stop broker client
         broker = getattr(app.state, "broker", None)
