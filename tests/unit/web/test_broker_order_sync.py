@@ -1,6 +1,7 @@
+from datetime import date
 from types import SimpleNamespace
 
-from src.web.app import _broker_fetch_orders_once
+from src.web.app import _broker_fetch_orders_once, _filter_orders_for_beijing_date
 from src.web.routes import create_trading_router
 
 
@@ -14,6 +15,20 @@ class _Broker:
 
 class _Storage:
     is_ready = True
+
+
+def test_filter_orders_for_beijing_date_removes_stale_submitted_orders():
+    orders = [
+        {"code": "old", "submit_time": "2026-05-21T09:32:44+08:00"},
+        {"code": "today", "submit_time": "2026-05-22T09:32:44+08:00"},
+        {"code": "utc-today", "submit_time": "2026-05-22T01:32:44Z"},
+        {"code": "unknown"},
+        {"code": "bad", "submit_time": "not-a-time"},
+    ]
+
+    filtered = _filter_orders_for_beijing_date(orders, target_date=date(2026, 5, 22))
+
+    assert [order["code"] for order in filtered] == ["today", "utc-today", "unknown", "bad"]
 
 
 async def test_broker_order_sync_caches_orders_and_imports_fills(monkeypatch):
