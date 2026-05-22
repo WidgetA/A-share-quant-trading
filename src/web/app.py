@@ -13,9 +13,7 @@ import logging
 import os
 import sys
 import time
-from datetime import date, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -66,7 +64,6 @@ from src.common.feishu_log_handler import install_root_handler as _install_feish
 _install_feishu()
 
 logger = logging.getLogger(__name__)
-BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 _POSITION_AFFECTING_ORDER_STATUSES = {"FILLED", "PARTIALLY_FILLED", "PARTIAL_FILLED"}
 
 # Template and static file directories
@@ -152,42 +149,6 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
     return None
 
 
-def _filter_orders_for_beijing_date(
-    orders: list[dict],
-    target_date: date | None = None,
-) -> list[dict]:
-    """Keep orders for a Beijing trading date; retain rows with no parseable submit_time."""
-    if target_date is None:
-        target_date = datetime.now(BEIJING_TZ).date()
-
-    filtered: list[dict] = []
-    for order in orders:
-        raw_submit_time = order.get("submit_time")
-        if not raw_submit_time:
-            filtered.append(order)
-            continue
-
-        try:
-            if isinstance(raw_submit_time, datetime):
-                submit_dt = raw_submit_time
-            else:
-                submit_text = str(raw_submit_time).strip()
-                if submit_text.endswith("Z"):
-                    submit_text = f"{submit_text[:-1]}+00:00"
-                submit_dt = datetime.fromisoformat(submit_text)
-            if submit_dt.tzinfo is None:
-                submit_dt = submit_dt.replace(tzinfo=BEIJING_TZ)
-            submit_date = submit_dt.astimezone(BEIJING_TZ).date()
-        except (TypeError, ValueError):
-            filtered.append(order)
-            continue
-
-        if submit_date == target_date:
-            filtered.append(order)
-
-    return filtered
-
-
 def _filled_order_fingerprint(orders: list[dict]) -> tuple[tuple[str, ...], ...]:
     """Return a stable signature for filled orders that should affect positions."""
     items: list[tuple[str, ...]] = []
@@ -226,22 +187,15 @@ async def _refresh_broker_positions_for_order_change(app: FastAPI) -> None:
 
 
 async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
-    """Fetch today's broker orders, cache them, and import filled orders into notes."""
+    """Fetch broker orders, cache them, and import filled orders into notes."""
     broker: BrokerClient | None = getattr(app.state, "broker", None)
     if broker is None:
         return "broker not initialized"
     try:
-        raw_orders = await broker.get_orders()
+        orders = await broker.get_orders()
     except Exception as e:
         return f"{type(e).__name__}: {e}"
 
-    orders = _filter_orders_for_beijing_date(raw_orders)
-    if len(orders) != len(raw_orders):
-        logger.info(
-            "Broker order sync filtered non-today orders: kept=%d raw=%d",
-            len(orders),
-            len(raw_orders),
-        )
     app.state.broker_orders = orders
 
     filled_fingerprint = _filled_order_fingerprint(orders)
