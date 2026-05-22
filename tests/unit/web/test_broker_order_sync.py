@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from src.web.app import _broker_fetch_orders_once
+from src.web.app import _broker_fetch_once, _broker_fetch_orders_once
 from src.web.routes import create_trading_router
 
 
@@ -31,6 +31,11 @@ class _Broker:
 
 class _Storage:
     is_ready = True
+
+
+class _NotReadyBroker(_Broker):
+    async def readiness_error(self):
+        return "trader not ready"
 
 
 async def test_broker_order_sync_caches_orders_and_imports_fills(monkeypatch):
@@ -94,6 +99,45 @@ async def test_broker_order_sync_refreshes_positions_when_fills_change():
 
     assert err is None
     assert broker.position_fetches == 1
+
+
+async def test_broker_position_sync_clears_stale_holdings_when_not_ready():
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            broker=_NotReadyBroker([]),
+            broker_positions=[{"code": "old", "volume": 100}],
+            available_cash=123.0,
+            broker_total_asset=456.0,
+            broker_account_id="old-acct",
+            broker_positions_updated_at=1.0,
+        )
+    )
+
+    err = await _broker_fetch_once(app)
+
+    assert err == "broker not ready: trader not ready"
+    assert app.state.broker_positions == []
+    assert app.state.available_cash == 0.0
+    assert app.state.broker_total_asset == 0.0
+    assert app.state.broker_account_id is None
+    assert app.state.broker_positions_updated_at is None
+
+
+async def test_broker_order_sync_clears_stale_orders_when_not_ready():
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            broker=_NotReadyBroker([]),
+            broker_orders=[{"code": "old"}],
+            broker_filled_orders_fingerprint=(("old",),),
+            storage=None,
+        )
+    )
+
+    err = await _broker_fetch_orders_once(app)
+
+    assert err == "broker not ready: trader not ready"
+    assert app.state.broker_orders == []
+    assert app.state.broker_filled_orders_fingerprint == ()
 
 
 def test_trading_router_does_not_register_legacy_orders_get():

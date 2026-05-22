@@ -98,13 +98,31 @@ class BrokerClient:
             raise BrokerError(resp_json["code"], resp_json.get("message", "unknown error"))
         return resp_json.get("data")
 
-    async def is_ready(self) -> bool:
-        """Return True if xtquant-trade-server broker connection is ready."""
+    async def readiness_error(self) -> str | None:
+        """Return None when the remote trader is ready, otherwise an error string."""
         try:
             resp = await self._c().get("/readyz")
-            return resp.status_code == 200
-        except Exception:
-            return False
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+
+        if not isinstance(payload, dict):
+            return "readyz returned invalid payload"
+
+        code = payload.get("code", 0)
+        if code != 0:
+            return str(payload.get("message") or f"readyz code {code}")
+
+        data = payload.get("data")
+        if isinstance(data, dict) and data.get("ready") is False:
+            return str(data.get("message") or payload.get("message") or "trader not ready")
+
+        return None
+
+    async def is_ready(self) -> bool:
+        """Return True if xtquant-trade-server broker connection is ready."""
+        return await self.readiness_error() is None
 
     async def get_account(self) -> AccountInfo:
         resp = await self._c().get("/v1/account")

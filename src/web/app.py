@@ -126,10 +126,27 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
     broker: BrokerClient | None = getattr(app.state, "broker", None)
     if broker is None:
         return "broker not initialized"
+
+    readiness_error = getattr(broker, "readiness_error", None)
+    if readiness_error is not None:
+        ready_err = await readiness_error()
+        if ready_err:
+            app.state.broker_positions = []
+            app.state.available_cash = 0.0
+            app.state.broker_total_asset = 0.0
+            app.state.broker_account_id = None
+            app.state.broker_positions_updated_at = None
+            return f"broker not ready: {ready_err}"
+
     try:
         positions = await broker.get_positions()
         account = await broker.get_account()
     except Exception as e:
+        app.state.broker_positions = []
+        app.state.available_cash = 0.0
+        app.state.broker_total_asset = 0.0
+        app.state.broker_account_id = None
+        app.state.broker_positions_updated_at = None
         return f"{type(e).__name__}: {e}"
     app.state.broker_positions = [
         {
@@ -191,9 +208,20 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     broker: BrokerClient | None = getattr(app.state, "broker", None)
     if broker is None:
         return "broker not initialized"
+
+    readiness_error = getattr(broker, "readiness_error", None)
+    if readiness_error is not None:
+        ready_err = await readiness_error()
+        if ready_err:
+            app.state.broker_orders = []
+            app.state.broker_filled_orders_fingerprint = ()
+            return f"broker not ready: {ready_err}"
+
     try:
         orders = await broker.get_orders()
     except Exception as e:
+        app.state.broker_orders = []
+        app.state.broker_filled_orders_fingerprint = ()
         return f"{type(e).__name__}: {e}"
 
     app.state.broker_orders = orders

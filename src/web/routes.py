@@ -2566,16 +2566,36 @@ def create_settings_router() -> APIRouter:
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{url}/readyz")
-                if resp.status_code == 200:
+                resp = await client.get(f"{url}/readyz", headers={"X-API-Key": key})
+                payload = resp.json()
+                ready = (
+                    resp.status_code == 200
+                    and isinstance(payload, dict)
+                    and payload.get("code", 0) == 0
+                    and not (
+                        isinstance(payload.get("data"), dict)
+                        and payload["data"].get("ready") is False
+                    )
+                )
+                if ready:
                     return {"success": True, "message": "连接成功，Broker 已就绪"}
-                elif resp.status_code == 503:
+
+                message = None
+                if isinstance(payload, dict):
+                    message = payload.get("message")
+                    data = payload.get("data")
+                    if isinstance(data, dict):
+                        message = data.get("message") or message
+
+                if resp.status_code in (200, 503):
                     return {
                         "success": False,
-                        "message": "服务器在线但 Broker 未就绪（QMT 可能未登录）",
+                        "message": f"服务器在线但 Broker 未就绪（{message or 'QMT 可能未登录'}）",
                     }
                 else:
                     return {"success": False, "message": f"服务器返回 {resp.status_code}"}
+        except ValueError:
+            return {"success": False, "message": "服务器返回的 readyz 不是 JSON"}
         except httpx.ConnectError:
             return {"success": False, "message": f"无法连接到 {url}，请检查 IP 和端口"}
         except httpx.TimeoutException:
