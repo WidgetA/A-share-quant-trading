@@ -268,40 +268,65 @@ class TradeNoteStore:
         price: float | None,
         ts_ms: int | None = None,
     ) -> bool:
-        """Idempotent insert keyed by broker order_id.
+        """Upsert a broker fill event keyed by order_id.
 
-        Used by the manual backfill endpoint to import already-filled orders
-        from `broker.get_orders()` into trade_notes without creating dupes if
-        the operator triggers backfill twice. Returns True if newly written,
-        False if a row with this order_id already exists.
+        New row → INSERT. Existing row → re-INSERT to overwrite broker fields
+        (price/qty/title), preserving the user's content/content_external/ts.
+        Re-INSERT on same (code, event_id, ts) upserts in place via the PK.
+
+        Always returns True (it always writes).
         """
         event_id = f"broker_{order_id}"
-        check_sql = (
-            f"SELECT 1 FROM trade_notes "
-            f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} LIMIT 1"
+        existing_sql = (
+            f"SELECT ts, event_type, event_source AS source, "
+            f"       content, content_external, author "
+            f"FROM trade_notes "
+            f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
+            f"ORDER BY ts DESC LIMIT 1"
         )
-        existing = await self._db.fetchrow(check_sql)
-        if existing is not None:
-            return False
+        existing = await self._db.fetchrow(existing_sql)
         side_lower = side.lower()
         event_type = "买入" if side_lower == "buy" else "卖出"
         if price is not None:
             title = f"{event_type} @{price:.2f} x {qty}"
         else:
             title = f"{event_type} 市价 x {qty}"
+
+        if existing is not None:
+            old_ts = existing["ts"]
+            if isinstance(old_ts, datetime):
+                row_ts_ms = int(
+                    (old_ts if old_ts.tzinfo else old_ts.replace(tzinfo=timezone.utc))
+                    .timestamp() * 1000
+                )
+            else:
+                row_ts_ms = int(old_ts)
+            row_event_type = existing["event_type"] or event_type
+            row_source = existing["source"] or "broker"
+            row_content = existing["content"] or ""
+            row_content_external = existing["content_external"] or ""
+            row_author = existing["author"] or "system"
+        else:
+            row_ts_ms = ts_ms if ts_ms is not None else _now_ms()
+            row_event_type = event_type
+            row_source = "broker"
+            row_content = ""
+            row_content_external = ""
+            row_author = "system"
+
         await self._raw_insert(
-            ts_ms=ts_ms if ts_ms is not None else _now_ms(),
+            ts_ms=row_ts_ms,
             code=code,
             event_id=event_id,
-            event_type=event_type,
-            source="broker",
+            event_type=row_event_type,
+            source=row_source,
             title=title,
             price=price,
             qty=qty,
             side=side_lower,
-            content="",
-            content_external="",
-            author="system",
+            content=row_content,
+            content_external=row_content_external,
+            author=row_author,
             deleted=False,
         )
         return True
