@@ -296,8 +296,8 @@ class TradeNoteStore:
             old_ts = existing["ts"]
             if isinstance(old_ts, datetime):
                 row_ts_ms = int(
-                    (old_ts if old_ts.tzinfo else old_ts.replace(tzinfo=timezone.utc))
-                    .timestamp() * 1000
+                    (old_ts if old_ts.tzinfo else old_ts.replace(tzinfo=timezone.utc)).timestamp()
+                    * 1000
                 )
             else:
                 row_ts_ms = int(old_ts)
