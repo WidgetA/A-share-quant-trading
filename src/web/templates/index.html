@@ -80,8 +80,9 @@
     position: fixed; top: 20px; right: 20px; padding: 0.7rem 1.2rem;
     border-radius: 6px; color: white; font-size: 0.85rem;
     z-index: 1000; opacity: 0; transition: opacity 0.3s;
+    pointer-events: none;
 }
-.toast.show { opacity: 1; }
+.toast.show { opacity: 1; pointer-events: auto; }
 .toast.success { background: #2e7d32; }
 .toast.error { background: #d32f2f; }
 
