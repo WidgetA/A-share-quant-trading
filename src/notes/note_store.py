@@ -368,9 +368,6 @@ class TradeNoteStore:
         rejected: list[tuple[str, dict]] = []
         for o in orders:
             status_raw = str(o.get("status", ""))
-            if status_raw.upper() != "FILLED":
-                rejected.append((f"status={status_raw!r}", o))
-                continue
             order_id = o.get("order_id")
             code = o.get("code") or ""
             if not code:
@@ -379,6 +376,23 @@ class TradeNoteStore:
             bare_code = code.split(".")[0]
             if code_filter is not None and bare_code not in code_filter:
                 rejected.append(("filtered_out", o))
+                continue
+            # Non-FILLED single-order (REJECTED / CANCELLED / etc.): if an
+            # earlier place_order hook wrote a note for this order_id (back
+            # when we wrote notes on submit rather than on fill), soft-delete
+            # the orphan so it stops showing up. Today these statuses produce
+            # no notes; this branch only cleans up historical pollution.
+            if status_raw.upper() != "FILLED":
+                if order_id is not None:
+                    deleted = await self.delete_event(bare_code, f"broker_{order_id}")
+                    if deleted:
+                        logger.info(
+                            "trade-notes: soft-deleted orphan broker_%s on %s (status=%s)",
+                            order_id,
+                            bare_code,
+                            status_raw,
+                        )
+                rejected.append((f"status={status_raw!r}", o))
                 continue
             side_raw = str(o.get("side", "")).lower()
             qty = int(o.get("qty") or 0)
