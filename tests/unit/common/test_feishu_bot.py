@@ -387,7 +387,7 @@ class TestGetFeishuConfig:
             config = get_feishu_config()
 
             # Should have default bot_url and empty strings for others
-            assert "leapcell.dev" in config["bot_url"]
+            assert "fly.dev" in config["bot_url"]
             assert config["app_id"] == ""
             assert config["app_secret"] == ""
             assert config["chat_id"] == ""
