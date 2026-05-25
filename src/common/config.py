@@ -231,7 +231,7 @@ def get_feishu_config() -> dict[str, str]:
     return {
         "bot_url": os.getenv(
             "FEISHU_BOT_URL",
-            "https://feishugroupbot-widgetinp950-g352rogo.leapcell.dev",
+            "https://feishu-groupbot.fly.dev",
         ),
         "app_id": os.getenv("FEISHU_APP_ID", ""),
         "app_secret": os.getenv("FEISHU_APP_SECRET", ""),
