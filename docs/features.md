@@ -193,7 +193,7 @@ scheduler.add_session_callback(on_change)
 | `FEISHU_APP_ID` | No | - | Feishu app ID |
 | `FEISHU_APP_SECRET` | No | - | Feishu app secret |
 | `FEISHU_CHAT_ID` | No | - | Target chat ID for alerts |
-| `FEISHU_BOT_URL` | No | `https://feishugroupbot-widgetinp950-g352rogo.leapcell.dev` | Bot relay service URL |
+| `FEISHU_BOT_URL` | No | `https://feishu-groupbot.fly.dev` | Bot relay service URL |
 
 **Alert Types**:
 | Type | Trigger | Format |
