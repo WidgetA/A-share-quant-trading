@@ -1065,19 +1065,23 @@ function renderTodayOrders(orders) {
     }
 
     let html = '<table class="trading-table"><thead><tr>' +
-        '<th>方向</th><th>代码</th><th>数量</th><th>价格</th><th>状态</th><th>操作</th>' +
+        '<th>方向</th><th>代码</th><th>数量</th><th>委托价</th><th>成交价</th><th>状态</th><th>操作</th>' +
         '</tr></thead><tbody>';
 
     for (const o of orders) {
         const dir = o.side === 'BUY' ? '买入' : '卖出';
         const dirClass = o.side === 'BUY' ? 'gain-pos' : 'gain-neg';
-        const priceStr = o.price > 0 ? o.price.toFixed(2) : '市价';
+        const orderPx = Number(o.price) || 0;
+        const fillPx = Number(o.avg_traded_price) || 0;
+        const orderPxStr = orderPx > 0 ? orderPx.toFixed(2) : '市价';
+        const fillPxStr = fillPx > 0 ? fillPx.toFixed(2) : '--';
         const canCancel = _CANCELLABLE.has(o.status);
         html += '<tr>' +
             '<td class="' + dirClass + '">' + dir + '</td>' +
             '<td class="code">' + esc(o.code) + '</td>' +
             '<td>' + o.qty + '</td>' +
-            '<td class="price">' + priceStr + '</td>' +
+            '<td class="price">' + orderPxStr + '</td>' +
+            '<td class="price">' + fillPxStr + '</td>' +
             '<td>' + esc(o.status) + '</td>' +
             '<td>' + (canCancel
                 ? '<button class="btn-sm btn-sell" onclick="cancelOrder(' + o.order_id + ')">撤单</button>'

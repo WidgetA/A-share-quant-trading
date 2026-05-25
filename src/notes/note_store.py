@@ -357,7 +357,9 @@ class TradeNoteStore:
                 continue
             side_raw = str(o.get("side", "")).lower()
             qty = int(o.get("qty") or 0)
-            price = o.get("price")
+            # FILLED 单的真实成交价在 avg_traded_price 字段；price 是委托价（市价单为 0）。
+            # 笔记记录的是已成交事件，必须用成交均价。
+            price = o.get("avg_traded_price") or o.get("price")
             price_val: float | None
             if price is None or price in (0, "0"):
                 price_val = None
