@@ -91,10 +91,7 @@ async def main(apply: bool) -> int:
             f"title={keeper['title']!r}"
         )
         for s in shadows:
-            print(
-                f"    DROP  ts={s['ts']!s} content_len={_content_len(s)} "
-                f"title={s['title']!r}"
-            )
+            print(f"    DROP  ts={s['ts']!s} content_len={_content_len(s)} title={s['title']!r}")
         shadows_to_delete.extend(shadows)
 
     print(f"\nTotal shadow rows to soft-delete: {len(shadows_to_delete)}")
