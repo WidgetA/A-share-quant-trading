@@ -720,6 +720,12 @@
         if (!state.currentCode || !state.currentEventId) return;
         const ev = await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`);
         state.editing = true;
+        // Remember the prefilled ts string so saveEdit can detect whether the
+        // user actually changed it. The input has minute precision; if we
+        // always sent ts_ms the round-trip would shift the row by the seconds
+        // dropped by the prefill (broker_<order_id> events have a sub-minute
+        // submit_time), producing a soft-deleted shadow at the old ts.
+        state.editTsOriginal = isoToLocalDatetimeValue(ev.ts);
         // Type options: always 买入/卖出, plus current type if it's something else
         // (preserves rare cases like 评论 if someone opens its editor directly).
         const typeChoices = ['买入', '卖出'];
@@ -785,7 +791,10 @@
         const code = state.currentCode;
         const eventId = state.currentEventId;
         const body = { title, content, content_external: contentExternal, event_type: eventType };
-        if (tsMs !== null) body.ts_ms = tsMs;
+        // Only send ts_ms when the user actually changed the field — otherwise
+        // the minute-precision round-trip drops the original sub-minute part
+        // and the backend treats it as a ts change.
+        if (tsMs !== null && tsRaw !== state.editTsOriginal) body.ts_ms = tsMs;
         if (eventType === '买入' || eventType === '卖出') {
             body.side = eventType === '买入' ? 'buy' : 'sell';
             const priceEl = document.getElementById('tnEditPrice');

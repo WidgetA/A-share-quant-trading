@@ -277,11 +277,16 @@ class TradeNoteStore:
         Always returns True (it always writes).
         """
         event_id = f"broker_{order_id}"
+        # Filter to live rows only — without this, if `update_event` moved the
+        # live row to a new ts (leaving a soft-deleted shadow at the old ts),
+        # ORDER BY ts DESC would return the shadow and we'd re-insert at the
+        # old ts with deleted=False, resurrecting it as a duplicate.
         existing_sql = (
             f"SELECT ts, event_type, event_source AS source, "
             f"       content, content_external, author "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
+            f"AND {_NOT_DELETED} "
             f"ORDER BY ts DESC LIMIT 1"
         )
         existing = await self._db.fetchrow(existing_sql)
