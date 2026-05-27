@@ -20,13 +20,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from src.notes.note_store import DEFAULT_EVENT_TYPES, TradeNoteStore
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 logger = logging.getLogger(__name__)
 
@@ -279,5 +286,53 @@ def create_notes_router() -> APIRouter:
             raise HTTPException(status_code=502, detail=f"backfill 失败: {e}") from e
         logger.info(f"trade-notes backfill-today: written={written} skipped={skipped}")
         return {"written": written, "skipped": skipped}
+
+    @router.get("/api/notes/export")
+    async def export_notes(request: Request, start: str, end: str) -> Response:
+        """Export all live events in Beijing date [start, end] as a JSON file.
+
+        Filters: deleted=false; all stocks; events only (no cards). Timestamps
+        in the response are Beijing-local ISO strings to match how users read
+        the data offline.
+        """
+        if not _DATE_RE.match(start) or not _DATE_RE.match(end):
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+        if start > end:
+            raise HTTPException(status_code=400, detail="start must be <= end")
+        store = _get_store(request)
+        try:
+            events = await store.list_events_in_range(start, end)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        payload = {
+            "exported_at": datetime.now(_BEIJING_TZ).isoformat(),
+            "range": {"start": start, "end": end},
+            "count": len(events),
+            "events": [
+                {
+                    "ts": e.ts.astimezone(_BEIJING_TZ).isoformat(),
+                    "code": e.code,
+                    "event_id": e.event_id,
+                    "event_type": e.event_type,
+                    "source": e.source,
+                    "title": e.title,
+                    "price": e.price,
+                    "qty": e.qty,
+                    "side": e.side,
+                    "content": e.content,
+                    "content_external": e.content_external,
+                    "author": e.author,
+                }
+                for e in events
+            ],
+        }
+        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        filename = f"trade_notes_{start}_{end}.json"
+        logger.info(f"trade-notes export: {start}..{end} count={len(events)}")
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     return router

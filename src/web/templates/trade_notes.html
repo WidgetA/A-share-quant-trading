@@ -7,6 +7,12 @@
     <div class="trade-notes-header">
         <h2>交易笔记</h2>
         <span class="hint">点股票看一脉相承的全部交易历史与思考。买入/卖出由系统自动记录，思考/复盘可手动追加。</span>
+        <span class="tn-export">
+            <input id="tnExportStart" type="date" title="导出开始日期（北京时间）" />
+            <span>→</span>
+            <input id="tnExportEnd" type="date" title="导出结束日期（北京时间，含当天）" />
+            <button id="tnExportBtn" class="tn-icon-btn" title="导出区间内所有事件为 JSON 日志">⬇ 导出</button>
+        </span>
     </div>
 
     <div class="trade-notes-grid" id="tnGrid">
@@ -166,6 +172,9 @@
         cardCancel: document.getElementById('tnCardCancel'),
         cardSave: document.getElementById('tnCardSave'),
         cardDelete: document.getElementById('tnCardDelete'),
+        exportStart: document.getElementById('tnExportStart'),
+        exportEnd: document.getElementById('tnExportEnd'),
+        exportBtn: document.getElementById('tnExportBtn'),
     };
 
     function escapeHtml(s) {
@@ -1073,6 +1082,52 @@
     dom.cardSave.addEventListener('click', saveCard);
     dom.cardDelete.addEventListener('click', deleteCard);
     dom.cardModal.addEventListener('click', (e) => { if (e.target === dom.cardModal) closeCardModal(); });
+
+    // Export — default range = last 30 days, ending today (Beijing local).
+    function localDateStr(d) {
+        const yy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${yy}-${mm}-${dd}`;
+    }
+    (function initExportDates() {
+        const today = new Date();
+        const start = new Date(today.getTime() - 30 * 24 * 3600 * 1000);
+        dom.exportStart.value = localDateStr(start);
+        dom.exportEnd.value = localDateStr(today);
+    })();
+    dom.exportBtn.addEventListener('click', async () => {
+        const start = dom.exportStart.value;
+        const end = dom.exportEnd.value;
+        if (!start || !end) { alert('请选择开始/结束日期'); return; }
+        if (start > end) { alert('开始日期必须 ≤ 结束日期'); return; }
+        const origText = dom.exportBtn.textContent;
+        dom.exportBtn.disabled = true;
+        dom.exportBtn.textContent = '导出中…';
+        try {
+            const r = await fetch(`/api/notes/export?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+            if (!r.ok) {
+                let msg = `导出失败 (${r.status})`;
+                try { const j = await r.json(); if (j.detail) msg += `: ${j.detail}`; } catch (_) {}
+                alert(msg);
+                return;
+            }
+            const blob = await r.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `trade_notes_${start}_${end}.json`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            alert('导出失败: ' + (e && e.message ? e.message : e));
+        } finally {
+            dom.exportBtn.disabled = false;
+            dom.exportBtn.textContent = origText;
+        }
+    });
 
     loadStocks();
 })();

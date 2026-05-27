@@ -236,6 +236,47 @@ class TradeNoteStore:
         rows = await self._db.fetch(sql)
         return [_row_to_event(r) for r in rows]
 
+    # ---------- export: all live events across all stocks in a date range ----------
+
+    async def list_events_in_range(
+        self, start_beijing_date: str, end_beijing_date: str
+    ) -> list[NoteEvent]:
+        """All live events with ts falling in Beijing date [start, end] inclusive.
+
+        Both bounds are YYYY-MM-DD Beijing days; the window is closed on the
+        start side and the end day is included by extending to end+1 day 00:00
+        Beijing time. UTC epoch ms conversion follows the same calendar.timegm()
+        pattern as list_stocks() — see CLAUDE.md §7.
+        """
+        def _parse(d: str) -> tuple[int, int, int]:
+            try:
+                y, m, dd = (int(p) for p in d.split("-"))
+                return y, m, dd
+            except (ValueError, AttributeError) as e:
+                raise ValueError(f"date must be YYYY-MM-DD, got {d!r}") from e
+
+        sy, sm, sd = _parse(start_beijing_date)
+        ey, em, ed = _parse(end_beijing_date)
+        # Beijing 00:00 = UTC (date - 8h)
+        start_naive_utc = datetime(sy, sm, sd) - timedelta(hours=8)
+        end_naive_utc = datetime(ey, em, ed) - timedelta(hours=8) + timedelta(days=1)
+        start_ms = calendar.timegm(start_naive_utc.timetuple()) * 1000
+        end_ms = calendar.timegm(end_naive_utc.timetuple()) * 1000
+        if end_ms <= start_ms:
+            raise ValueError(
+                f"end_beijing_date must be >= start_beijing_date "
+                f"(got {start_beijing_date} → {end_beijing_date})"
+            )
+        sql = (
+            f"SELECT ts, code, event_id, event_type, event_source, title, "
+            f"       price, qty, side, content, content_external, author, deleted "
+            f"FROM trade_notes "
+            f"WHERE {_NOT_DELETED} AND ts >= {start_ms} AND ts < {end_ms} "
+            f"ORDER BY ts ASC"
+        )
+        rows = await self._db.fetch(sql)
+        return [_row_to_event(r) for r in rows]
+
     # ---------- right pane: single event ----------
 
     async def get_event(self, code: str, event_id: str) -> NoteEvent | None:
