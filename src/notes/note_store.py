@@ -248,6 +248,7 @@ class TradeNoteStore:
         Beijing time. UTC epoch ms conversion follows the same calendar.timegm()
         pattern as list_stocks() — see CLAUDE.md §7.
         """
+
         def _parse(d: str) -> tuple[int, int, int]:
             try:
                 y, m, dd = (int(p) for p in d.split("-"))
