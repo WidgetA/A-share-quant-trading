@@ -2877,6 +2877,17 @@ footer {
     color: #555;
 }
 
+.tn-event-line1-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.tn-event-pnl {
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+}
+
 .tn-event-dot {
     color: #4a8fe7;
     font-size: 0.75rem;

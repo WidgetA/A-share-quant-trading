@@ -446,11 +446,21 @@
                     : (ev.event_type === '卖出' ? 'sell' : 'other');
                 const titleText = ev.title || ev.event_type;
                 const dot = ev.has_content ? '●' : '○';
+                const isSell = ev.side === 'sell' || ev.event_type === '卖出';
+                let pnlHtml = '';
+                if (isSell && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
+                    const pnlCls = ev.realized_pnl >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
+                    const sign = ev.realized_pnl >= 0 ? '+' : '';
+                    pnlHtml = `<span class="tn-event-pnl ${pnlCls}">${sign}${Number(ev.realized_pnl).toFixed(2)}</span>`;
+                }
                 return `
                     <div class="tn-event-row" data-id="${escapeHtml(ev.event_id)}">
                         <div class="tn-event-line1">
                             <span class="tn-event-type tn-tag-${sideCls}">${escapeHtml(ev.event_type)}</span>
-                            <span class="tn-event-dot">${dot}</span>
+                            <span class="tn-event-line1-right">
+                                ${pnlHtml}
+                                <span class="tn-event-dot">${dot}</span>
+                            </span>
                         </div>
                         <div class="tn-event-title">${escapeHtml(titleText)}</div>
                         <div class="tn-event-time">${formatDateTime(ev.ts)}</div>
