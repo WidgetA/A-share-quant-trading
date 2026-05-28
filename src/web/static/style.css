@@ -3122,6 +3122,12 @@ footer {
     flex-wrap: wrap;
 }
 
+/* `display: flex` on .tn-modal-row beats the UA `[hidden]` rule, so [hidden]
+   stopped working on rows we toggle (e.g. #tnNewSellFields). Force precedence. */
+[hidden] {
+    display: none !important;
+}
+
 .tn-modal-row > label {
     flex: 1 1 calc(50% - 0.35rem);
     min-width: 7rem;
