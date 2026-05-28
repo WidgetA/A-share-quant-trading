@@ -99,7 +99,7 @@ class NoteEvent:
     deleted: bool
     # Fee/dividend/P&L fields. All optional — NULL for legacy rows and for
     # broker-imported events (broker fill data doesn't include these).
-    commission: float | None  # 手续费 (买/卖)
+    commission: float | None  # 佣金 (买/卖)
     transfer_fee: float | None  # 过户费 (买/卖)
     stamp_tax: float | None  # 印花税 (仅卖出)
     dividend: float | None  # 股息 (仅卖出事件登记)

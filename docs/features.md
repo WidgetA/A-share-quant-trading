@@ -61,7 +61,7 @@
 | 0.15.0 | 2026-05-05 | - | ANA-002: 盘前持仓日报——交易日 8am 自动扫描 broker 持仓→对每只调 ANA-001→飞书逐条推送 K 线 + 技术面分析；附 `POST /api/pre-market-report/run` 手动触发 |
 | 0.16.0 | 2026-05-07 | - | NOTE-001: 交易笔记——三栏 master-detail（股票/事件/正文），GreptimeDB `trade_notes` 表存储；`place_order` 成功 hook 自动追加买入/卖出事件；用户/AI 可自由追加思考/复盘事件 |
 | 0.17.0 | 2026-05-07 | - | SYS-005: `/api/trading/*` 加 `X-API-Key` 鉴权（`TRADING_API_KEY` 配置可选；未配置时仅在启动日志告警，配置后立即生效）；Settings 页可生成/保存 key；Dashboard JS 自动从 localStorage 注入 |
-| 0.17.1 | 2026-05-28 | - | NOTE-001: 买入/卖出 表单加 手续费、过户费；卖出额外加 印花税、股息、平仓收益 + 一键「计算」按钮（按上一次买入按比例分摊成本：`(sell_qty/buy_qty) × buy_fees + buy_price×sell_qty` 与 `sell_amt − sell_fees + dividend` 做差）。schema 加 5 列 `commission/transfer_fee/stamp_tax/dividend/realized_pnl FLOAT64`，幂等 ALTER 兼容老库。 |
+| 0.17.1 | 2026-05-28 | - | NOTE-001: 买入/卖出 表单加 佣金、过户费；卖出额外加 印花税、股息、平仓收益 + 一键「计算」按钮（按上一次买入按比例分摊成本：`(sell_qty/buy_qty) × buy_fees + buy_price×sell_qty` 与 `sell_amt − sell_fees + dividend` 做差）。schema 加 5 列 `commission/transfer_fee/stamp_tax/dividend/realized_pnl FLOAT64`，幂等 ALTER 兼容老库。 |
 
 ---
 
@@ -1038,7 +1038,7 @@ CREATE TABLE trade_notes (
     content_external STRING,                 -- 对外 markdown（分享版本，仅 买入/卖出 用）
     author      STRING,                      -- 创建者标识
     deleted     BOOLEAN,                     -- 软删除（NULL 也视为未删，兼容老 ALTER）
-    commission   FLOAT64,                    -- 手续费 (买/卖)，元
+    commission   FLOAT64,                    -- 佣金 (买/卖)，元
     transfer_fee FLOAT64,                    -- 过户费 (买/卖)，元
     stamp_tax    FLOAT64,                    -- 印花税 (仅卖)，元
     dividend     FLOAT64,                    -- 持仓期间收到的股息 (仅卖出事件登记)，元

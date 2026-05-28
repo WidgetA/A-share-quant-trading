@@ -102,7 +102,7 @@
                     <label>数量
                         <input id="tnNewQty" type="number" step="100" min="0" placeholder="股数" />
                     </label>
-                    <label>手续费
+                    <label>佣金
                         <input id="tnNewCommission" type="number" step="0.01" min="0" placeholder="元" />
                     </label>
                     <label>过户费
@@ -270,7 +270,7 @@
         const parts = [];
         const fmt = (v) => Number(v).toFixed(2);
         if (ev.commission !== null && ev.commission !== undefined) {
-            parts.push(`手续费 ${fmt(ev.commission)}`);
+            parts.push(`佣金 ${fmt(ev.commission)}`);
         }
         if (ev.transfer_fee !== null && ev.transfer_fee !== undefined) {
             parts.push(`过户费 ${fmt(ev.transfer_fee)}`);
@@ -833,7 +833,7 @@
                         <label>数量
                             <input type="number" id="tnEditQty" step="100" min="0" placeholder="股数" value="${qtyVal}" />
                         </label>
-                        <label>手续费
+                        <label>佣金
                             <input type="number" id="tnEditCommission" step="0.01" min="0" placeholder="元" value="${numOrBlank(ev.commission)}" />
                         </label>
                         <label>过户费
@@ -925,7 +925,7 @@
             // 卖出→买入 类型切换且旧值非空，会顺手清掉（语义上也对，sell-only 字段
             // 对买入没意义）。
             const editFeeMap = [
-                ['commission', 'tnEditCommission', '手续费', false],
+                ['commission', 'tnEditCommission', '佣金', false],
                 ['transfer_fee', 'tnEditTransferFee', '过户费', false],
                 ['stamp_tax', 'tnEditStampTax', '印花税', false],
                 ['dividend', 'tnEditDividend', '股息', false],
@@ -1205,7 +1205,7 @@
             }
             // 5 个数值费用/股息/收益字段：留空不发，非空校验后发。买入只用前 2 个。
             const feeMap = [
-                ['commission', dom.newCommission, '手续费'],
+                ['commission', dom.newCommission, '佣金'],
                 ['transfer_fee', dom.newTransferFee, '过户费'],
             ];
             if (event_type === '卖出') {
