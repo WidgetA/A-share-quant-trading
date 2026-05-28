@@ -94,13 +94,35 @@
             <label>时间
                 <input id="tnNewTs" type="datetime-local" step="60" />
             </label>
-            <div id="tnNewTradeFields" class="tn-modal-row" hidden>
-                <label>价格
-                    <input id="tnNewPrice" type="number" step="0.01" min="0" placeholder="留空=市价" />
-                </label>
-                <label>数量
-                    <input id="tnNewQty" type="number" step="100" min="0" placeholder="股数" />
-                </label>
+            <div id="tnNewTradeFields" hidden>
+                <div class="tn-modal-row">
+                    <label>价格
+                        <input id="tnNewPrice" type="number" step="0.01" min="0" placeholder="留空=市价" />
+                    </label>
+                    <label>数量
+                        <input id="tnNewQty" type="number" step="100" min="0" placeholder="股数" />
+                    </label>
+                    <label>手续费
+                        <input id="tnNewCommission" type="number" step="0.01" min="0" placeholder="元" />
+                    </label>
+                    <label>过户费
+                        <input id="tnNewTransferFee" type="number" step="0.01" min="0" placeholder="元" />
+                    </label>
+                </div>
+                <div id="tnNewSellFields" class="tn-modal-row" hidden>
+                    <label>印花税
+                        <input id="tnNewStampTax" type="number" step="0.01" min="0" placeholder="元 (仅卖)" />
+                    </label>
+                    <label>股息
+                        <input id="tnNewDividend" type="number" step="0.01" min="0" placeholder="持仓期间元" />
+                    </label>
+                    <label class="tn-pnl-label">平仓收益
+                        <span class="tn-pnl-input-group">
+                            <input id="tnNewRealizedPnl" type="number" step="0.01" placeholder="元" />
+                            <button id="tnNewCalcPnlBtn" type="button" class="tn-calc-btn" title="按上一次买入按比例分摊成本计算">计算</button>
+                        </span>
+                    </label>
+                </div>
             </div>
             <label>标题（可选，留空自动生成）
                 <input id="tnNewTitle" type="text" placeholder="买入/卖出 自动按 @价格 x 数量 拼接" />
@@ -157,8 +179,15 @@
         newType: document.getElementById('tnNewType'),
         newTs: document.getElementById('tnNewTs'),
         newTradeFields: document.getElementById('tnNewTradeFields'),
+        newSellFields: document.getElementById('tnNewSellFields'),
         newPrice: document.getElementById('tnNewPrice'),
         newQty: document.getElementById('tnNewQty'),
+        newCommission: document.getElementById('tnNewCommission'),
+        newTransferFee: document.getElementById('tnNewTransferFee'),
+        newStampTax: document.getElementById('tnNewStampTax'),
+        newDividend: document.getElementById('tnNewDividend'),
+        newRealizedPnl: document.getElementById('tnNewRealizedPnl'),
+        newCalcPnlBtn: document.getElementById('tnNewCalcPnlBtn'),
         newTitle: document.getElementById('tnNewTitle'),
         newContent: document.getElementById('tnNewContent'),
         newContentExternal: document.getElementById('tnNewContentExternal'),
@@ -233,6 +262,35 @@
         if (ev.qty !== null && ev.qty !== undefined) meta.push(`x ${ev.qty}`);
         meta.push(formatDateTime(ev.ts));
         return meta.join('  ');
+    }
+
+    // 费用/股息/平仓收益小一行，只在至少有一项非空时渲染。
+    function feeRowHtml(ev) {
+        const isSell = ev.side === 'sell' || ev.event_type === '卖出';
+        const parts = [];
+        const fmt = (v) => Number(v).toFixed(2);
+        if (ev.commission !== null && ev.commission !== undefined) {
+            parts.push(`手续费 ${fmt(ev.commission)}`);
+        }
+        if (ev.transfer_fee !== null && ev.transfer_fee !== undefined) {
+            parts.push(`过户费 ${fmt(ev.transfer_fee)}`);
+        }
+        if (isSell) {
+            if (ev.stamp_tax !== null && ev.stamp_tax !== undefined) {
+                parts.push(`印花税 ${fmt(ev.stamp_tax)}`);
+            }
+            if (ev.dividend !== null && ev.dividend !== undefined) {
+                parts.push(`股息 ${fmt(ev.dividend)}`);
+            }
+        }
+        let pnlHtml = '';
+        if (isSell && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
+            const cls = ev.realized_pnl >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
+            pnlHtml = `<span class="${cls}">平仓收益 ${fmt(ev.realized_pnl)}</span>`;
+        }
+        if (!parts.length && !pnlHtml) return '';
+        const sep = parts.length && pnlHtml ? ' · ' : '';
+        return `<div class="tn-doc-trade-fees">${parts.map(escapeHtml).join(' · ')}${sep}${pnlHtml}</div>`;
     }
 
     function cmtTitle(content) {
@@ -476,6 +534,14 @@
             header.appendChild(meta);
             card.appendChild(header);
 
+            // 费用/股息/平仓收益小一行，紧贴 header 下、正文 markdown 上
+            const fees = feeRowHtml(trade);
+            if (fees) {
+                const feeDiv = document.createElement('div');
+                feeDiv.innerHTML = fees;
+                if (feeDiv.firstChild) card.appendChild(feeDiv.firstChild);
+            }
+
             // If this trade has its own content (notes typed in the per-event
             // editor), render both 对内 / 对外 inline so 篇 view doesn't hide
             // them. Read-only — editing goes through the per-event editor on
@@ -693,6 +759,7 @@
         if (ev.price !== null && ev.price !== undefined) meta.push(`@${ev.price}`);
         if (ev.qty !== null && ev.qty !== undefined) meta.push(`x ${ev.qty}`);
         const metaLine = meta.length ? `<div class="tn-content-meta">${escapeHtml(meta.join(' '))}</div>` : '';
+        const feeLine = feeRowHtml(ev);
         const sourceLabel = ev.source === 'broker' ? '系统记录' : (ev.source === 'ai' ? 'AI' : '手动');
         const sourceLine = `<div class="tn-content-source">来源: ${escapeHtml(sourceLabel)}${ev.author ? ` · ${escapeHtml(ev.author)}` : ''}</div>`;
         const titleLine = ev.title ? `<div class="tn-content-title-text">${escapeHtml(ev.title)}</div>` : '';
@@ -706,7 +773,7 @@
         const body = sections.length
             ? sections.join('')
             : '<div class="tn-empty">（暂无正文，点 ✎ 编辑添加）</div>';
-        dom.content.innerHTML = metaLine + titleLine + sourceLine + body;
+        dom.content.innerHTML = metaLine + feeLine + titleLine + sourceLine + body;
     }
 
     function clearContent() {
@@ -748,6 +815,8 @@
         const priceVal = ev.price !== null && ev.price !== undefined ? ev.price : '';
         const qtyVal = ev.qty !== null && ev.qty !== undefined ? ev.qty : '';
         const isTrade = ev.event_type === '买入' || ev.event_type === '卖出';
+        const isSell = ev.event_type === '卖出';
+        const numOrBlank = (v) => (v !== null && v !== undefined ? v : '');
         dom.content.innerHTML = `
             <div class="tn-edit-form">
                 <label>类型
@@ -756,13 +825,35 @@
                 <label>时间
                     <input type="datetime-local" id="tnEditTs" step="60" value="${isoToLocalDatetimeValue(ev.ts)}" />
                 </label>
-                <div id="tnEditTradeFields" class="tn-modal-row"${isTrade ? '' : ' hidden'}>
-                    <label>价格
-                        <input type="number" id="tnEditPrice" step="0.01" min="0" placeholder="留空=市价" value="${priceVal}" />
-                    </label>
-                    <label>数量
-                        <input type="number" id="tnEditQty" step="100" min="0" placeholder="股数" value="${qtyVal}" />
-                    </label>
+                <div id="tnEditTradeFields"${isTrade ? '' : ' hidden'}>
+                    <div class="tn-modal-row">
+                        <label>价格
+                            <input type="number" id="tnEditPrice" step="0.01" min="0" placeholder="留空=市价" value="${priceVal}" />
+                        </label>
+                        <label>数量
+                            <input type="number" id="tnEditQty" step="100" min="0" placeholder="股数" value="${qtyVal}" />
+                        </label>
+                        <label>手续费
+                            <input type="number" id="tnEditCommission" step="0.01" min="0" placeholder="元" value="${numOrBlank(ev.commission)}" />
+                        </label>
+                        <label>过户费
+                            <input type="number" id="tnEditTransferFee" step="0.01" min="0" placeholder="元" value="${numOrBlank(ev.transfer_fee)}" />
+                        </label>
+                    </div>
+                    <div id="tnEditSellFields" class="tn-modal-row"${isSell ? '' : ' hidden'}>
+                        <label>印花税
+                            <input type="number" id="tnEditStampTax" step="0.01" min="0" placeholder="元 (仅卖)" value="${numOrBlank(ev.stamp_tax)}" />
+                        </label>
+                        <label>股息
+                            <input type="number" id="tnEditDividend" step="0.01" min="0" placeholder="持仓期间元" value="${numOrBlank(ev.dividend)}" />
+                        </label>
+                        <label class="tn-pnl-label">平仓收益
+                            <span class="tn-pnl-input-group">
+                                <input type="number" id="tnEditRealizedPnl" step="0.01" placeholder="元" value="${numOrBlank(ev.realized_pnl)}" />
+                                <button id="tnEditCalcPnlBtn" type="button" class="tn-calc-btn" title="按上一次买入按比例分摊成本计算">计算</button>
+                            </span>
+                        </label>
+                    </div>
                 </div>
                 <label>标题
                     <input type="text" id="tnEditTitle" value="${escapeHtml(ev.title || '')}" />
@@ -781,10 +872,13 @@
         `;
         document.getElementById('tnEditType').addEventListener('change', e => {
             const t = e.target.value;
-            document.getElementById('tnEditTradeFields').hidden = !(t === '买入' || t === '卖出');
+            const trade = (t === '买入' || t === '卖出');
+            document.getElementById('tnEditTradeFields').hidden = !trade;
+            document.getElementById('tnEditSellFields').hidden = (t !== '卖出');
         });
         document.getElementById('tnEditCancel').addEventListener('click', () => selectEvent(state.currentEventId));
         document.getElementById('tnEditSave').addEventListener('click', saveEdit);
+        document.getElementById('tnEditCalcPnlBtn').addEventListener('click', () => calcPnlInEditMode(ev));
     }
 
     async function saveEdit() {
@@ -824,6 +918,28 @@
             } else {
                 body.qty = null;
             }
+            // 费用 + 股息：5 个字段统一处理。空 → null（显式清空到 NULL），非空 → 数值。
+            // 印花税/股息/平仓收益 即便从 卖出 切到 买入 也透传 null 以保持一致。
+            const editFeeMap = [
+                ['commission', 'tnEditCommission', '手续费', false],
+                ['transfer_fee', 'tnEditTransferFee', '过户费', false],
+                ['stamp_tax', 'tnEditStampTax', '印花税', false],
+                ['dividend', 'tnEditDividend', '股息', false],
+                ['realized_pnl', 'tnEditRealizedPnl', '平仓收益', true],  // can be negative
+            ];
+            for (const [key, id, label, allowNeg] of editFeeMap) {
+                const el = document.getElementById(id);
+                const raw = el ? el.value.trim() : '';
+                if (raw === '') {
+                    body[key] = null;
+                } else {
+                    const v = Number(raw);
+                    if (Number.isNaN(v) || (!allowNeg && v < 0)) {
+                        alert(`${label}格式错误`); return;
+                    }
+                    body[key] = v;
+                }
+            }
         }
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(code)}/events/${encodeURIComponent(eventId)}`, {
@@ -856,6 +972,122 @@
         }
     }
 
+    // ---- 平仓收益计算 ----
+    // 策略口径：一买对一卖（一卖可能分多次平仓）。
+    // 本次卖出 → 找它之前最近的一次 buy 事件 → 按 sell_qty/buy_qty 比例分摊买入成本。
+    //   ratio   = sell_qty / buy_qty
+    //   sellNet = sell_price * sell_qty − (commission + transfer_fee + stamp_tax)
+    //   buyPart = buy.price * sell_qty + ratio * ((buy.commission||0) + (buy.transfer_fee||0))
+    //   pnl     = sellNet − buyPart + (dividend||0)
+    function findLatestBuyBefore(events, beforeMs, excludeEventId) {
+        let latest = null;
+        for (const ev of events) {
+            if (excludeEventId && ev.event_id === excludeEventId) continue;
+            const isBuy = (ev.side === 'buy') || (ev.event_type === '买入');
+            if (!isBuy) continue;
+            const t = new Date(ev.ts).getTime();
+            if (!(t < beforeMs)) continue;
+            if (latest === null || t > new Date(latest.ts).getTime()) {
+                latest = ev;
+            }
+        }
+        return latest;
+    }
+
+    function computeRealizedPnl(sellInputs, buy) {
+        const ratio = sellInputs.qty / buy.qty;
+        const sellGross = sellInputs.price * sellInputs.qty;
+        const sellFees = (sellInputs.commission || 0)
+            + (sellInputs.transfer_fee || 0)
+            + (sellInputs.stamp_tax || 0);
+        const buyMatchedAmt = buy.price * sellInputs.qty;
+        const buyMatchedFees = ratio * ((buy.commission || 0) + (buy.transfer_fee || 0));
+        return sellGross - sellFees - (buyMatchedAmt + buyMatchedFees) + (sellInputs.dividend || 0);
+    }
+
+    function readSellInputsFromIds(ids) {
+        const num = (id) => {
+            const el = document.getElementById(id);
+            if (!el) return NaN;
+            const raw = el.value.trim();
+            return raw === '' ? NaN : Number(raw);
+        };
+        return {
+            price: num(ids.price),
+            qty: num(ids.qty),
+            commission: num(ids.commission),
+            transfer_fee: num(ids.transferFee),
+            stamp_tax: num(ids.stampTax),
+            dividend: num(ids.dividend),
+        };
+    }
+
+    function doCalcPnl({ ids, sellTsMs, excludeEventId, targetInputId }) {
+        const inputs = readSellInputsFromIds(ids);
+        if (Number.isNaN(inputs.price) || Number.isNaN(inputs.qty)) {
+            alert('请先填写本次卖出的价格和数量');
+            return;
+        }
+        if (inputs.qty <= 0 || inputs.price < 0) {
+            alert('价格 / 数量 不合法');
+            return;
+        }
+        const buy = findLatestBuyBefore(state.documentEvents || [], sellTsMs, excludeEventId);
+        if (!buy) {
+            alert('未找到对应买入事件，请先记录买入');
+            return;
+        }
+        if (buy.price === null || buy.price === undefined || !buy.qty) {
+            alert('上一次买入缺少价格或数量，无法计算');
+            return;
+        }
+        if (inputs.qty > buy.qty) {
+            alert(`本次卖出 ${inputs.qty} 股，超过上一次买入 ${buy.qty} 股，请检查`);
+            return;
+        }
+        const pnl = computeRealizedPnl(inputs, buy);
+        const targetEl = document.getElementById(targetInputId);
+        if (targetEl) targetEl.value = pnl.toFixed(2);
+    }
+
+    function calcPnlInNewMode() {
+        // 新建模式：sell ts = 表单里填的（默认 now）；不排除任何 event
+        const tsRaw = dom.newTs.value;
+        const sellTsMs = tsRaw ? new Date(tsRaw).getTime() : Date.now();
+        doCalcPnl({
+            ids: {
+                price: 'tnNewPrice',
+                qty: 'tnNewQty',
+                commission: 'tnNewCommission',
+                transferFee: 'tnNewTransferFee',
+                stampTax: 'tnNewStampTax',
+                dividend: 'tnNewDividend',
+            },
+            sellTsMs,
+            excludeEventId: null,
+            targetInputId: 'tnNewRealizedPnl',
+        });
+    }
+
+    function calcPnlInEditMode(originalEv) {
+        // 编辑模式：sell ts = 表单里的 ts（用户可能改过）；排除自身（本次 sell 不算先前事件）
+        const tsRaw = document.getElementById('tnEditTs').value;
+        const sellTsMs = tsRaw ? new Date(tsRaw).getTime() : new Date(originalEv.ts).getTime();
+        doCalcPnl({
+            ids: {
+                price: 'tnEditPrice',
+                qty: 'tnEditQty',
+                commission: 'tnEditCommission',
+                transferFee: 'tnEditTransferFee',
+                stampTax: 'tnEditStampTax',
+                dividend: 'tnEditDividend',
+            },
+            sellTsMs,
+            excludeEventId: originalEv.event_id,
+            targetInputId: 'tnEditRealizedPnl',
+        });
+    }
+
     function nowLocalDatetimeValue() {
         // datetime-local wants 'YYYY-MM-DDTHH:mm' in *local* time, no TZ.
         const d = new Date();
@@ -870,6 +1102,11 @@
         dom.newTitle.value = '';
         dom.newPrice.value = '';
         dom.newQty.value = '';
+        dom.newCommission.value = '';
+        dom.newTransferFee.value = '';
+        dom.newStampTax.value = '';
+        dom.newDividend.value = '';
+        dom.newRealizedPnl.value = '';
         dom.newContent.value = '';
         dom.newContentExternal.value = '';
         updateNewTradeFieldsVisibility();
@@ -879,7 +1116,10 @@
 
     function updateNewTradeFieldsVisibility() {
         const t = dom.newType.value;
-        dom.newTradeFields.hidden = !(t === '买入' || t === '卖出');
+        const isTrade = (t === '买入' || t === '卖出');
+        dom.newTradeFields.hidden = !isTrade;
+        // 印花税/股息/平仓收益 仅卖出显示
+        dom.newSellFields.hidden = (t !== '卖出');
     }
 
     async function openEditStockCodeFlow() {
@@ -919,6 +1159,10 @@
         }
         state.currentCode = code;
         state.currentEventId = null;
+        // Clear cached events from any previously-selected stock so the calc-PnL
+        // button doesn't accidentally find a buy from a different ticker.
+        state.documentEvents = [];
+        state.documentCards = [];
         dom.eventsTitle.textContent = `事件 · ${code}`;
         dom.addEventBtn.disabled = false;
         dom.events.innerHTML = '<div class="tn-empty">未保存事件前不在列表中</div>';
@@ -954,6 +1198,33 @@
                 const q = parseInt(qtyRaw, 10);
                 if (Number.isNaN(q) || q < 0) { alert('数量格式错误'); return; }
                 body.qty = q;
+            }
+            // 5 个数值费用/股息/收益字段：留空不发，非空校验后发。买入只用前 2 个。
+            const feeMap = [
+                ['commission', dom.newCommission, '手续费'],
+                ['transfer_fee', dom.newTransferFee, '过户费'],
+            ];
+            if (event_type === '卖出') {
+                feeMap.push(
+                    ['stamp_tax', dom.newStampTax, '印花税'],
+                    ['dividend', dom.newDividend, '股息'],
+                );
+            }
+            for (const [key, el, label] of feeMap) {
+                const raw = el.value.trim();
+                if (raw === '') continue;
+                const v = Number(raw);
+                if (Number.isNaN(v) || v < 0) { alert(`${label}格式错误`); return; }
+                body[key] = v;
+            }
+            // realized_pnl 可正可负，单独处理
+            if (event_type === '卖出') {
+                const pnlRaw = dom.newRealizedPnl.value.trim();
+                if (pnlRaw !== '') {
+                    const pnl = Number(pnlRaw);
+                    if (Number.isNaN(pnl)) { alert('平仓收益格式错误'); return; }
+                    body.realized_pnl = pnl;
+                }
             }
         }
         try {
@@ -1076,6 +1347,7 @@
     dom.newType.addEventListener('change', updateNewTradeFieldsVisibility);
     dom.newCancel.addEventListener('click', () => { dom.modal.hidden = true; });
     dom.newSave.addEventListener('click', saveNewEvent);
+    dom.newCalcPnlBtn.addEventListener('click', calcPnlInNewMode);
     dom.modal.addEventListener('click', (e) => { if (e.target === dom.modal) dom.modal.hidden = true; });
     dom.addCardBtn.addEventListener('click', openCardModal);
     dom.cardCancel.addEventListener('click', closeCardModal);

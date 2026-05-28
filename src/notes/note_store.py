@@ -40,14 +40,23 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     content_external STRING,
     author      STRING,
     deleted     BOOLEAN,
+    commission   FLOAT64,
+    transfer_fee FLOAT64,
+    stamp_tax    FLOAT64,
+    dividend     FLOAT64,
+    realized_pnl FLOAT64,
     PRIMARY KEY (code, event_id)
 )
 """
 
-# Existing deploys created the table without `content_external`. Add it
-# idempotently — GreptimeDB returns an error if the column already exists,
-# which we swallow.
+# Idempotent ALTERs for existing deploys. GreptimeDB errors if the column
+# already exists; ensure_schema() swallows that case only.
 _ALTER_ADD_CONTENT_EXTERNAL_SQL = "ALTER TABLE trade_notes ADD COLUMN content_external STRING"
+_ALTER_ADD_COMMISSION_SQL = "ALTER TABLE trade_notes ADD COLUMN commission FLOAT64"
+_ALTER_ADD_TRANSFER_FEE_SQL = "ALTER TABLE trade_notes ADD COLUMN transfer_fee FLOAT64"
+_ALTER_ADD_STAMP_TAX_SQL = "ALTER TABLE trade_notes ADD COLUMN stamp_tax FLOAT64"
+_ALTER_ADD_DIVIDEND_SQL = "ALTER TABLE trade_notes ADD COLUMN dividend FLOAT64"
+_ALTER_ADD_REALIZED_PNL_SQL = "ALTER TABLE trade_notes ADD COLUMN realized_pnl FLOAT64"
 
 
 # Manually-inserted cards in 篇 view live in their own table — they aren't
@@ -88,6 +97,13 @@ class NoteEvent:
     content_external: str  # 对外 — for sharing; only used for 买入/卖出
     author: str
     deleted: bool
+    # Fee/dividend/P&L fields. All optional — NULL for legacy rows and for
+    # broker-imported events (broker fill data doesn't include these).
+    commission: float | None  # 手续费 (买/卖)
+    transfer_fee: float | None  # 过户费 (买/卖)
+    stamp_tax: float | None  # 印花税 (仅卖出)
+    dividend: float | None  # 股息 (仅卖出事件登记)
+    realized_pnl: float | None  # 平仓收益 (仅卖出)
 
 
 @dataclass
@@ -132,6 +148,14 @@ def _row_to_event(row) -> NoteEvent:
     else:
         # epoch ms int fallback
         ts = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
+    # Defensive: legacy rows / pre-ALTER rows may not have these keys at all
+    # if the result mapping is dict-backed; .get() returns None either way.
+    def _opt(name: str) -> float | None:
+        try:
+            return row[name]
+        except (KeyError, IndexError):
+            return None
+
     return NoteEvent(
         ts=ts,
         code=row["code"],
@@ -146,6 +170,11 @@ def _row_to_event(row) -> NoteEvent:
         content_external=row["content_external"] or "",
         author=row["author"] or "",
         deleted=bool(row["deleted"]) if row["deleted"] is not None else False,
+        commission=_opt("commission"),
+        transfer_fee=_opt("transfer_fee"),
+        stamp_tax=_opt("stamp_tax"),
+        dividend=_opt("dividend"),
+        realized_pnl=_opt("realized_pnl"),
     )
 
 
@@ -169,15 +198,23 @@ class TradeNoteStore:
     async def ensure_schema(self) -> None:
         await self._db.execute(_CREATE_TRADE_NOTES_SQL)
         await self._db.execute(_CREATE_NOTE_CARDS_SQL)
-        # Idempotent ALTER for deploys created before content_external existed.
+        # Idempotent ALTERs for deploys created before these columns existed.
         # GreptimeDB raises if the column is already there — swallow that case
         # only; surface anything else.
-        try:
-            await self._db.execute(_ALTER_ADD_CONTENT_EXTERNAL_SQL)
-        except Exception as e:
-            msg = str(e).lower()
-            if "exists" not in msg and "duplicate" not in msg:
-                logger.warning(f"trade_notes ALTER content_external: {e}")
+        for label, sql in (
+            ("content_external", _ALTER_ADD_CONTENT_EXTERNAL_SQL),
+            ("commission", _ALTER_ADD_COMMISSION_SQL),
+            ("transfer_fee", _ALTER_ADD_TRANSFER_FEE_SQL),
+            ("stamp_tax", _ALTER_ADD_STAMP_TAX_SQL),
+            ("dividend", _ALTER_ADD_DIVIDEND_SQL),
+            ("realized_pnl", _ALTER_ADD_REALIZED_PNL_SQL),
+        ):
+            try:
+                await self._db.execute(sql)
+            except Exception as e:
+                msg = str(e).lower()
+                if "exists" not in msg and "duplicate" not in msg:
+                    logger.warning(f"trade_notes ALTER {label}: {e}")
 
     # ---------- left pane: list of stocks with any event ----------
 
@@ -228,7 +265,8 @@ class TradeNoteStore:
     async def list_events(self, code: str) -> list[NoteEvent]:
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
-            f"       price, qty, side, content, content_external, author, deleted "
+            f"       price, qty, side, content, content_external, author, deleted, "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND {_NOT_DELETED} "
             f"ORDER BY ts ASC"
@@ -270,7 +308,8 @@ class TradeNoteStore:
             )
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
-            f"       price, qty, side, content, content_external, author, deleted "
+            f"       price, qty, side, content, content_external, author, deleted, "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
             f"FROM trade_notes "
             f"WHERE {_NOT_DELETED} AND ts >= {start_ms} AND ts < {end_ms} "
             f"ORDER BY ts ASC"
@@ -287,7 +326,8 @@ class TradeNoteStore:
         # ensures we always get the latest LIVE row.
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
-            f"       price, qty, side, content, content_external, author, deleted "
+            f"       price, qty, side, content, content_external, author, deleted, "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
             f"AND {_NOT_DELETED} "
@@ -325,7 +365,8 @@ class TradeNoteStore:
         # old ts with deleted=False, resurrecting it as a duplicate.
         existing_sql = (
             f"SELECT ts, event_type, event_source AS source, "
-            f"       content, content_external, author "
+            f"       content, content_external, author, "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
             f"AND {_NOT_DELETED} "
@@ -353,6 +394,18 @@ class TradeNoteStore:
             row_content = existing["content"] or ""
             row_content_external = existing["content_external"] or ""
             row_author = existing["author"] or "system"
+
+            def _existing_opt(name: str) -> float | None:
+                try:
+                    return existing[name]
+                except (KeyError, IndexError):
+                    return None
+
+            row_commission = _existing_opt("commission")
+            row_transfer_fee = _existing_opt("transfer_fee")
+            row_stamp_tax = _existing_opt("stamp_tax")
+            row_dividend = _existing_opt("dividend")
+            row_realized_pnl = _existing_opt("realized_pnl")
         else:
             row_ts_ms = ts_ms if ts_ms is not None else _now_ms()
             row_event_type = event_type
@@ -360,6 +413,11 @@ class TradeNoteStore:
             row_content = ""
             row_content_external = ""
             row_author = "system"
+            row_commission = None
+            row_transfer_fee = None
+            row_stamp_tax = None
+            row_dividend = None
+            row_realized_pnl = None
 
         await self._raw_insert(
             ts_ms=row_ts_ms,
@@ -375,6 +433,11 @@ class TradeNoteStore:
             content_external=row_content_external,
             author=row_author,
             deleted=False,
+            commission=row_commission,
+            transfer_fee=row_transfer_fee,
+            stamp_tax=row_stamp_tax,
+            dividend=row_dividend,
+            realized_pnl=row_realized_pnl,
         )
         return True
 
@@ -516,6 +579,11 @@ class TradeNoteStore:
         price: float | None = None,
         qty: int | None = None,
         side: str | None = None,
+        commission: float | None = None,
+        transfer_fee: float | None = None,
+        stamp_tax: float | None = None,
+        dividend: float | None = None,
+        realized_pnl: float | None = None,
     ) -> str:
         # For 买入/卖出 events, keep side in sync with event_type and auto-fill
         # the title in the same format the broker-import path uses, so manual
@@ -540,6 +608,11 @@ class TradeNoteStore:
             content_external=content_external,
             author=author,
             ts_ms=ts_ms if ts_ms is not None else _now_ms(),
+            commission=commission,
+            transfer_fee=transfer_fee,
+            stamp_tax=stamp_tax,
+            dividend=dividend,
+            realized_pnl=realized_pnl,
         )
 
     async def update_event(
@@ -553,8 +626,13 @@ class TradeNoteStore:
         event_type: str | None = None,
         price: Any = _UNSET,
         qty: Any = _UNSET,
+        commission: Any = _UNSET,
+        transfer_fee: Any = _UNSET,
+        stamp_tax: Any = _UNSET,
+        dividend: Any = _UNSET,
+        realized_pnl: Any = _UNSET,
     ) -> bool:
-        """Update title, content (对内/对外), ts, event_type, price, and/or qty.
+        """Update title, content (对内/对外), ts, event_type, price/qty, and fees.
 
         Re-INSERT with same (code, event_id, ts) overwrites via mito dedup.
         Changing ts creates a row at the new ts; we soft-delete the row at
@@ -565,8 +643,9 @@ class TradeNoteStore:
         two stay consistent (the events-list filter and dashboard meta both
         read `side`).
 
-        price/qty use _UNSET sentinel so the caller can clear them to None
-        (market price / unknown qty) explicitly, distinct from "keep existing".
+        Numeric fields use the _UNSET sentinel so the caller can clear them
+        to None (market price / unknown qty / no fee) explicitly, distinct
+        from "keep existing".
         """
         existing = await self.get_event(code, event_id)
         if existing is None:
@@ -584,6 +663,11 @@ class TradeNoteStore:
             new_side = existing.side
         new_price = price if price is not _UNSET else existing.price
         new_qty = qty if qty is not _UNSET else existing.qty
+        new_commission = commission if commission is not _UNSET else existing.commission
+        new_transfer_fee = transfer_fee if transfer_fee is not _UNSET else existing.transfer_fee
+        new_stamp_tax = stamp_tax if stamp_tax is not _UNSET else existing.stamp_tax
+        new_dividend = dividend if dividend is not _UNSET else existing.dividend
+        new_realized_pnl = realized_pnl if realized_pnl is not _UNSET else existing.realized_pnl
         old_ts_ms = int(existing.ts.timestamp() * 1000)
         new_ts_ms = ts_ms if ts_ms is not None else old_ts_ms
         if new_ts_ms != old_ts_ms:
@@ -602,6 +686,11 @@ class TradeNoteStore:
                 content_external=existing.content_external,
                 author=existing.author,
                 deleted=True,
+                commission=existing.commission,
+                transfer_fee=existing.transfer_fee,
+                stamp_tax=existing.stamp_tax,
+                dividend=existing.dividend,
+                realized_pnl=existing.realized_pnl,
             )
         await self._raw_insert(
             ts_ms=new_ts_ms,
@@ -617,6 +706,11 @@ class TradeNoteStore:
             content_external=new_content_external,
             author=existing.author,
             deleted=False,
+            commission=new_commission,
+            transfer_fee=new_transfer_fee,
+            stamp_tax=new_stamp_tax,
+            dividend=new_dividend,
+            realized_pnl=new_realized_pnl,
         )
         return True
 
@@ -656,6 +750,11 @@ class TradeNoteStore:
                 content_external=ev.content_external,
                 author=ev.author,
                 deleted=False,
+                commission=ev.commission,
+                transfer_fee=ev.transfer_fee,
+                stamp_tax=ev.stamp_tax,
+                dividend=ev.dividend,
+                realized_pnl=ev.realized_pnl,
             )
             await self._raw_insert(
                 ts_ms=old_ts_ms,
@@ -671,6 +770,11 @@ class TradeNoteStore:
                 content_external=ev.content_external,
                 author=ev.author,
                 deleted=True,
+                commission=ev.commission,
+                transfer_fee=ev.transfer_fee,
+                stamp_tax=ev.stamp_tax,
+                dividend=ev.dividend,
+                realized_pnl=ev.realized_pnl,
             )
             moved += 1
         return moved
@@ -695,6 +799,11 @@ class TradeNoteStore:
             content_external=existing.content_external,
             author=existing.author,
             deleted=True,
+            commission=existing.commission,
+            transfer_fee=existing.transfer_fee,
+            stamp_tax=existing.stamp_tax,
+            dividend=existing.dividend,
+            realized_pnl=existing.realized_pnl,
         )
         return True
 
@@ -809,6 +918,11 @@ class TradeNoteStore:
         content_external: str,
         author: str,
         ts_ms: int,
+        commission: float | None = None,
+        transfer_fee: float | None = None,
+        stamp_tax: float | None = None,
+        dividend: float | None = None,
+        realized_pnl: float | None = None,
     ) -> str:
         event_id = uuid.uuid4().hex
         await self._raw_insert(
@@ -825,6 +939,11 @@ class TradeNoteStore:
             content_external=content_external,
             author=author,
             deleted=False,
+            commission=commission,
+            transfer_fee=transfer_fee,
+            stamp_tax=stamp_tax,
+            dividend=dividend,
+            realized_pnl=realized_pnl,
         )
         return event_id
 
@@ -844,17 +963,29 @@ class TradeNoteStore:
         content_external: str,
         author: str,
         deleted: bool,
+        commission: float | None = None,
+        transfer_fee: float | None = None,
+        stamp_tax: float | None = None,
+        dividend: float | None = None,
+        realized_pnl: float | None = None,
     ) -> None:
         price_lit = "NULL" if price is None else f"{price}"
         qty_lit = "NULL" if qty is None else f"{int(qty)}"
         side_lit = _q(side) if side else "NULL"
+
+        def _flit(v: float | None) -> str:
+            return "NULL" if v is None else f"{float(v)}"
+
         sql = (
             "INSERT INTO trade_notes "
             "(ts, code, event_id, event_type, event_source, title, "
-            " price, qty, side, content, content_external, author, deleted) "
+            " price, qty, side, content, content_external, author, deleted, "
+            " commission, transfer_fee, stamp_tax, dividend, realized_pnl) "
             f"VALUES ({ts_ms}, {_q(code)}, {_q(event_id)}, {_q(event_type)}, "
             f"{_q(source)}, {_q(title)}, {price_lit}, {qty_lit}, {side_lit}, "
             f"{_q(content)}, {_q(content_external)}, {_q(author)}, "
-            f"{'true' if deleted else 'false'})"
+            f"{'true' if deleted else 'false'}, "
+            f"{_flit(commission)}, {_flit(transfer_fee)}, {_flit(stamp_tax)}, "
+            f"{_flit(dividend)}, {_flit(realized_pnl)})"
         )
         await self._db.execute(sql)

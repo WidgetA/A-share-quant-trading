@@ -51,6 +51,14 @@ class CreateEventRequest(BaseModel):
     price: float | None = Field(None, ge=0)
     qty: int | None = Field(None, ge=0)
     side: str | None = Field(None, pattern=r"^(buy|sell)$")
+    # Fees / dividend / realized P&L. All optional — 买入 leaves stamp_tax /
+    # dividend / realized_pnl as None (UI hides them).
+    commission: float | None = Field(None, ge=0)
+    transfer_fee: float | None = Field(None, ge=0)
+    stamp_tax: float | None = Field(None, ge=0)
+    dividend: float | None = Field(None, ge=0)
+    # realized_pnl can legitimately be negative (loss), so no ge=0.
+    realized_pnl: float | None = Field(None)
 
 
 class UpdateEventRequest(BaseModel):
@@ -59,10 +67,15 @@ class UpdateEventRequest(BaseModel):
     content_external: str | None = Field(None, max_length=100_000)
     ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
     event_type: str | None = Field(None, min_length=1, max_length=32)
-    # For price/qty, distinguish "omitted" (keep existing) from "null" (clear to
-    # market/none) via `model_fields_set` in the route handler.
+    # For numeric fields, distinguish "omitted" (keep existing) from "null"
+    # (clear to market/none) via `model_fields_set` in the route handler.
     price: float | None = Field(None, ge=0)
     qty: int | None = Field(None, ge=0)
+    commission: float | None = Field(None, ge=0)
+    transfer_fee: float | None = Field(None, ge=0)
+    stamp_tax: float | None = Field(None, ge=0)
+    dividend: float | None = Field(None, ge=0)
+    realized_pnl: float | None = Field(None)
 
 
 class RenameStockRequest(BaseModel):
@@ -134,6 +147,11 @@ def create_notes_router() -> APIRouter:
                     "content_external": e.content_external,
                     "author": e.author,
                     "has_content": bool(e.content or e.content_external),
+                    "commission": e.commission,
+                    "transfer_fee": e.transfer_fee,
+                    "stamp_tax": e.stamp_tax,
+                    "dividend": e.dividend,
+                    "realized_pnl": e.realized_pnl,
                 }
                 for e in events
             ],
@@ -158,6 +176,11 @@ def create_notes_router() -> APIRouter:
             "content": ev.content,
             "content_external": ev.content_external,
             "author": ev.author,
+            "commission": ev.commission,
+            "transfer_fee": ev.transfer_fee,
+            "stamp_tax": ev.stamp_tax,
+            "dividend": ev.dividend,
+            "realized_pnl": ev.realized_pnl,
         }
 
     @router.post("/api/notes/{code}/events")
@@ -175,6 +198,11 @@ def create_notes_router() -> APIRouter:
             price=body.price,
             qty=body.qty,
             side=body.side,
+            commission=body.commission,
+            transfer_fee=body.transfer_fee,
+            stamp_tax=body.stamp_tax,
+            dividend=body.dividend,
+            realized_pnl=body.realized_pnl,
         )
         logger.info(f"trade-notes: created {body.source} event for {code} ({body.event_type})")
         return {"event_id": event_id}
@@ -186,10 +214,19 @@ def create_notes_router() -> APIRouter:
         store = _get_store(request)
         extra: dict = {}
         fields = body.model_fields_set
-        if "price" in fields:
-            extra["price"] = body.price
-        if "qty" in fields:
-            extra["qty"] = body.qty
+        # Same "field present → forward; absent → keep" pattern as price/qty.
+        # Lets the client explicitly clear a fee to NULL by sending `null`.
+        for name in (
+            "price",
+            "qty",
+            "commission",
+            "transfer_fee",
+            "stamp_tax",
+            "dividend",
+            "realized_pnl",
+        ):
+            if name in fields:
+                extra[name] = getattr(body, name)
         ok = await store.update_event(
             code=code,
             event_id=event_id,
@@ -322,6 +359,11 @@ def create_notes_router() -> APIRouter:
                     "content": e.content,
                     "content_external": e.content_external,
                     "author": e.author,
+                    "commission": e.commission,
+                    "transfer_fee": e.transfer_fee,
+                    "stamp_tax": e.stamp_tax,
+                    "dividend": e.dividend,
+                    "realized_pnl": e.realized_pnl,
                 }
                 for e in events
             ],

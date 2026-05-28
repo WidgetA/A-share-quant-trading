@@ -3119,10 +3119,58 @@ footer {
 .tn-modal-row {
     display: flex;
     gap: 0.7rem;
+    flex-wrap: wrap;
 }
 
 .tn-modal-row > label {
+    flex: 1 1 calc(50% - 0.35rem);
+    min-width: 7rem;
+}
+
+/* 平仓收益 input + 计算按钮 紧邻一行 */
+.tn-pnl-input-group {
+    display: flex;
+    gap: 0.4rem;
+    align-items: stretch;
+    margin-top: 0.25rem;
+}
+
+.tn-pnl-input-group input {
     flex: 1;
+    margin-top: 0 !important;
+}
+
+.tn-calc-btn {
+    padding: 0 0.8rem;
+    border: 1px solid #888;
+    border-radius: 4px;
+    background: #f0f0f0;
+    cursor: pointer;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.tn-calc-btn:hover {
+    background: #e2e2e2;
+}
+
+/* 篇 view 卡片里的费用一行 + 右栏单事件费用一行 */
+.tn-doc-trade-fees {
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    color: #666;
+    padding: 0.15rem 0 0.25rem;
+    line-height: 1.4;
+}
+
+.tn-pnl-positive {
+    color: #c0392b; /* A 股惯例：红涨绿跌，平仓收益正用红 */
+    font-weight: 600;
+}
+
+.tn-pnl-negative {
+    color: #27ae60;
+    font-weight: 600;
 }
 
 .tn-edit-form input,
