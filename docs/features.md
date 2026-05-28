@@ -1041,7 +1041,7 @@ CREATE TABLE trade_notes (
     commission   FLOAT64,                    -- 佣金 (买/卖)，元
     transfer_fee FLOAT64,                    -- 过户费 (买/卖)，元
     stamp_tax    FLOAT64,                    -- 印花税 (仅卖)，元
-    dividend     FLOAT64,                    -- 持仓期间收到的股息 (仅卖出事件登记)，元
+    dividend     FLOAT64,                    -- 股息/股息税 净到手 (派息额 − 已扣税)，可负，仅卖出登记，元
     realized_pnl FLOAT64,                    -- 平仓收益 (仅卖)，元；按 上一次买入 比例分摊成本计算，用户可改
     PRIMARY KEY (code, event_id)
 )

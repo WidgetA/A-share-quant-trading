@@ -113,8 +113,8 @@
                     <label>印花税
                         <input id="tnNewStampTax" type="number" step="0.01" min="0" placeholder="元 (仅卖)" />
                     </label>
-                    <label>股息
-                        <input id="tnNewDividend" type="number" step="0.01" min="0" placeholder="持仓期间元" />
+                    <label>股息/股息税
+                        <input id="tnNewDividend" type="number" step="0.01" placeholder="净到手，可负" />
                     </label>
                     <label class="tn-pnl-label">平仓收益
                         <span class="tn-pnl-input-group">
@@ -280,7 +280,7 @@
                 parts.push(`印花税 ${fmt(ev.stamp_tax)}`);
             }
             if (ev.dividend !== null && ev.dividend !== undefined) {
-                parts.push(`股息 ${fmt(ev.dividend)}`);
+                parts.push(`股息/税 ${fmt(ev.dividend)}`);
             }
         }
         let pnlHtml = '';
@@ -844,8 +844,8 @@
                         <label>印花税
                             <input type="number" id="tnEditStampTax" step="0.01" min="0" placeholder="元 (仅卖)" value="${numOrBlank(ev.stamp_tax)}" />
                         </label>
-                        <label>股息
-                            <input type="number" id="tnEditDividend" step="0.01" min="0" placeholder="持仓期间元" value="${numOrBlank(ev.dividend)}" />
+                        <label>股息/股息税
+                            <input type="number" id="tnEditDividend" step="0.01" placeholder="净到手，可负" value="${numOrBlank(ev.dividend)}" />
                         </label>
                         <label class="tn-pnl-label">平仓收益
                             <span class="tn-pnl-input-group">
@@ -928,7 +928,7 @@
                 ['commission', 'tnEditCommission', '佣金', false],
                 ['transfer_fee', 'tnEditTransferFee', '过户费', false],
                 ['stamp_tax', 'tnEditStampTax', '印花税', false],
-                ['dividend', 'tnEditDividend', '股息', false],
+                ['dividend', 'tnEditDividend', '股息/股息税', true],  // 可负：派息−已扣税净额
                 ['realized_pnl', 'tnEditRealizedPnl', '平仓收益', true],  // can be negative
             ];
             for (const [key, id, label, allowNeg] of editFeeMap) {
@@ -1204,21 +1204,24 @@
                 body.qty = q;
             }
             // 5 个数值费用/股息/收益字段：留空不发，非空校验后发。买入只用前 2 个。
+            // [key, el, label, allowNeg]. 股息/股息税 可负（派息−已扣税）。
             const feeMap = [
-                ['commission', dom.newCommission, '佣金'],
-                ['transfer_fee', dom.newTransferFee, '过户费'],
+                ['commission', dom.newCommission, '佣金', false],
+                ['transfer_fee', dom.newTransferFee, '过户费', false],
             ];
             if (event_type === '卖出') {
                 feeMap.push(
-                    ['stamp_tax', dom.newStampTax, '印花税'],
-                    ['dividend', dom.newDividend, '股息'],
+                    ['stamp_tax', dom.newStampTax, '印花税', false],
+                    ['dividend', dom.newDividend, '股息/股息税', true],
                 );
             }
-            for (const [key, el, label] of feeMap) {
+            for (const [key, el, label, allowNeg] of feeMap) {
                 const raw = el.value.trim();
                 if (raw === '') continue;
                 const v = Number(raw);
-                if (Number.isNaN(v) || v < 0) { alert(`${label}格式错误`); return; }
+                if (Number.isNaN(v) || (!allowNeg && v < 0)) {
+                    alert(`${label}格式错误`); return;
+                }
                 body[key] = v;
             }
             // realized_pnl 可正可负，单独处理

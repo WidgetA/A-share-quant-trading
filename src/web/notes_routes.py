@@ -56,7 +56,8 @@ class CreateEventRequest(BaseModel):
     commission: float | None = Field(None, ge=0)
     transfer_fee: float | None = Field(None, ge=0)
     stamp_tax: float | None = Field(None, ge=0)
-    dividend: float | None = Field(None, ge=0)
+    # dividend = 派息额 − 股息税净到手；扣税多于派息时可为负，所以不加 ge=0。
+    dividend: float | None = Field(None)
     # realized_pnl can legitimately be negative (loss), so no ge=0.
     realized_pnl: float | None = Field(None)
 
@@ -74,7 +75,7 @@ class UpdateEventRequest(BaseModel):
     commission: float | None = Field(None, ge=0)
     transfer_fee: float | None = Field(None, ge=0)
     stamp_tax: float | None = Field(None, ge=0)
-    dividend: float | None = Field(None, ge=0)
+    dividend: float | None = Field(None)  # 净到手，可负（见 CreateEventRequest）
     realized_pnl: float | None = Field(None)
 
 

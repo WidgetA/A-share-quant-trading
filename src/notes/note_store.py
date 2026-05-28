@@ -102,7 +102,7 @@ class NoteEvent:
     commission: float | None  # 佣金 (买/卖)
     transfer_fee: float | None  # 过户费 (买/卖)
     stamp_tax: float | None  # 印花税 (仅卖出)
-    dividend: float | None  # 股息 (仅卖出事件登记)
+    dividend: float | None  # 股息/股息税 净到手 (派息额 − 已扣税)，可负，仅卖出登记
     realized_pnl: float | None  # 平仓收益 (仅卖出)
 
 
