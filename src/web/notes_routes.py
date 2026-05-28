@@ -361,7 +361,6 @@ def create_notes_router() -> APIRouter:
                     "price": e.price,
                     "qty": e.qty,
                     "side": e.side,
-                    "content": e.content,
                     "content_external": e.content_external,
                     "author": e.author,
                     "commission": e.commission,
