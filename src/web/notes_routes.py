@@ -333,6 +333,8 @@ def create_notes_router() -> APIRouter:
         in the response are Beijing-local ISO strings to match how users read
         the data offline.
         """
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+
         if not _DATE_RE.match(start) or not _DATE_RE.match(end):
             raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
         if start > end:
@@ -342,6 +344,7 @@ def create_notes_router() -> APIRouter:
             events = await store.list_events_in_range(start, end)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        mapper = LocalConceptMapper()
         payload = {
             "exported_at": datetime.now(_BEIJING_TZ).isoformat(),
             "range": {"start": start, "end": end},
@@ -350,6 +353,7 @@ def create_notes_router() -> APIRouter:
                 {
                     "ts": e.ts.astimezone(_BEIJING_TZ).isoformat(),
                     "code": e.code,
+                    "name": mapper.get_stock_name(e.code),
                     "event_id": e.event_id,
                     "event_type": e.event_type,
                     "source": e.source,
