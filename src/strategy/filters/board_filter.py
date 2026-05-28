@@ -187,6 +187,7 @@ JUNK_BOARDS: set[str] = {
     "新股与次新股",
     "科创次新股",
     "摘帽",
+    "专精特新",
 }
 
 # Boards that ARE real technology/industry themes but have too many constituents
@@ -217,7 +218,6 @@ BROAD_CONCEPT_BOARDS: set[str] = {
     "风电",  # 413
     "医疗器械概念",  # 400
     # ---- 政策标签/地区概念，成分股过多 ----
-    "专精特新",  # 1160
     "数字经济",  # 503
 }
 
