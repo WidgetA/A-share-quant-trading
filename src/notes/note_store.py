@@ -148,6 +148,7 @@ def _row_to_event(row) -> NoteEvent:
     else:
         # epoch ms int fallback
         ts = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
+
     # Defensive: legacy rows / pre-ALTER rows may not have these keys at all
     # if the result mapping is dict-backed; .get() returns None either way.
     def _opt(name: str) -> float | None:
