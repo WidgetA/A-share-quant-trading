@@ -3122,10 +3122,13 @@ footer {
     flex-wrap: wrap;
 }
 
-/* `display: flex` on .tn-modal-row beats the UA `[hidden]` rule, so [hidden]
-   stopped working on rows we toggle (e.g. #tnNewSellFields). Force precedence. */
-[hidden] {
-    display: none !important;
+/* `display: flex` above beats the UA `[hidden] { display: none }` rule on
+   .tn-modal-row, so [hidden] silently does nothing on those rows (the
+   sell-only block #tnNewSellFields / #tnEditSellFields). Restore it via
+   attribute-selector specificity — same pattern as .tn-modal-backdrop[hidden]
+   further down. */
+.tn-modal-row[hidden] {
+    display: none;
 }
 
 .tn-modal-row > label {

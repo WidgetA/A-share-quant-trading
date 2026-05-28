@@ -918,8 +918,12 @@
             } else {
                 body.qty = null;
             }
-            // 费用 + 股息：5 个字段统一处理。空 → null（显式清空到 NULL），非空 → 数值。
-            // 印花税/股息/平仓收益 即便从 卖出 切到 买入 也透传 null 以保持一致。
+            // 费用 + 股息：空 → null（显式清空到 NULL），非空 → 数值。
+            // 5 个 input 始终在 DOM 里（卖出 only 那 3 个只是隐藏不删），所以编辑买入
+            // 事件时 stamp_tax/dividend/realized_pnl 会读到隐藏 input 的值并照样回传 ——
+            // 买入事件的旧 sell-only 列通常本就是 NULL，回写 null 是 no-op；如果是
+            // 卖出→买入 类型切换且旧值非空，会顺手清掉（语义上也对，sell-only 字段
+            // 对买入没意义）。
             const editFeeMap = [
                 ['commission', 'tnEditCommission', '手续费', false],
                 ['transfer_fee', 'tnEditTransferFee', '过户费', false],
