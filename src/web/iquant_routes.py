@@ -1006,13 +1006,19 @@ def create_iquant_router() -> APIRouter:
         }
 
     @router.post("/trigger-scan")
-    async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
+    async def trigger_scan() -> dict:
         """Manually trigger V16 scan + Feishu top-10 report (bypasses time window).
 
         This is a scan-only re-run for inspecting today's selection / report. It
         deliberately does NOT push a BUY signal — placing trades is left to the
         normal trading scheduler. The recommendation is still recorded in
         ``scan_state.today_recommendation`` for the scheduler to act on.
+
+        No API key required: unlike the trading-control endpoints in this router
+        (ack-signal / manual-order / report-trade), this performs no trade-side
+        action — it only re-runs the scan and pushes the Feishu report. Gating a
+        "look at today's selection" action behind the trading key was just an
+        accident of living in the same router.
         """
         from src.web.v15_scan_service import run_v16_scan
 
