@@ -71,20 +71,22 @@
 
 **Status**: Completed
 
-**Description**: FastAPI web application as the sole entry point, serving dashboard UI, backtest API, iQuant trading API, and background schedulers.
+**Description**: FastAPI web application as the sole entry point, serving dashboard UI, backtest API, ML strategy API, broker order API, and background schedulers.
 
 **Entry Point**:
 ```bash
 uv run uvicorn src.web.app:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-**Startup Flow** (`src/web/app.py` → `create_app()`):
+**Startup Flow** (`src/web/app.py` → `create_app()` + `startup`):
 1. Configure root logger (idempotent for pytest)
-2. Mount 6 routers (main, momentum, settings, trade-backtest, trading, model)
-3. Initialize GreptimeDB storage + CachePipeline
-4. Start background schedulers: iQuant monitoring, cache scheduler (3am), model training scheduler
-5. Run trading safety audit
-6. Send Feishu startup notification
+2. Mount routers (main, momentum, settings, trade-backtest, broker-order-cache, trading, model, ML, analysis, notes, audit)
+3. Initialize broker client (xtquant-trade-server) + start position/order poll loops (every 30s)
+4. Send Feishu startup notification
+5. Start ML monitoring scheduler (daily readiness report + broker health check) — **before** cache loading + audit (safety-critical, see trading-safety-patterns.md)
+6. Connect GreptimeDB storage + CachePipeline (background retry if unavailable)
+7. Run trading safety audit (Feishu alert on CRITICAL)
+8. Start cache scheduler (3am), model training scheduler, pre-market report scheduler (8am), intraday momentum monitor
 
 **Files**:
 - `src/web/app.py` - FastAPI application factory
@@ -103,8 +105,8 @@ uv run uvicorn src.web.app:create_app --factory --host 0.0.0.0 --port 8000
 | State | Storage | File/Table |
 |-------|---------|------------|
 | Backtest cache (daily/minute OHLCV) | GreptimeDB | `backtest_daily`, `backtest_minute`, `stock_list` |
-| iQuant holdings | JSON file | `data/v15_holdings.json` |
-| Trading signals | In-memory | `SignalStore` (no persistence — signals expire) |
+| Broker positions / cash | In-memory | `app.state.broker_positions` / `available_cash` (polled from xtquant-trade-server every 30s) |
+| Broker orders | In-memory | `app.state.broker_orders` (polled every 30s; fills imported into trade notes) |
 | Configuration | Environment vars + YAML | `config/secrets.yaml`, `config/database-config.yaml` |
 | ML models | Local files + S3 | `data/models/*.lgb` |
 | Cache scheduler state | Disk file | `data/cache_scheduler_enabled.txt`, `data/last_finetune_date.txt` |
@@ -234,7 +236,7 @@ if bot.is_configured():
 
 **Integration Points**:
 - `src/web/app.py` - Startup/shutdown notifications
-- `src/web/iquant_routes.py` - iQuant signal/heartbeat alerts
+- `src/web/ml_routes.py` - ML monitoring: daily readiness report + broker health alerts
 - `src/data/services/cache_pipeline.py` - Download progress/failure alerts
 - `src/data/services/model_training_scheduler.py` - Training success/failure alerts
 
@@ -255,7 +257,7 @@ if bot.is_configured():
 
 **Description**: Web-based user interaction for trading confirmations, replacing command-line stdin input to support containerized deployment.
 
-**Description**: FastAPI web application serving dashboard UI, backtest tools, iQuant trading API, and background schedulers. All user interaction via browser; Feishu for push notifications.
+**Description**: FastAPI web application serving dashboard UI, backtest tools, ML strategy API, broker order API, and background schedulers. All user interaction via browser; Feishu for push notifications.
 
 **Architecture**:
 ```
@@ -269,8 +271,8 @@ if bot.is_configured():
 │         │                   │                    │          │
 │         ▼                   ▼                    ▼          │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │  HTML Pages  │    │  Feishu Bot  │    │  SignalStore  │  │
-│  │  (Jinja2)    │    │  (通知+链接) │    │  (push/poll) │  │
+│  │  HTML Pages  │    │  Feishu Bot  │    │ BrokerClient │  │
+│  │  (Jinja2)    │    │  (通知+链接) │    │ (xtquant)    │  │
 │  └──────────────┘    └──────────────┘    └──────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -279,7 +281,7 @@ if bot.is_configured():
 
 | Page | URL | Content |
 |------|-----|---------|
-| Dashboard | `/` | iQuant connection status, broker positions/cash, data engine status, model management, recommendations |
+| Dashboard | `/` | broker connection status, broker positions/cash, data engine status, model management, recommendations |
 | Backtest | `/backtest` | Single-day scan, range backtest (SSE), CSV analysis |
 | Settings | `/settings` | Tushare token, cache scheduler toggle, FC URL, S3 config |
 | Database | `/database` | Embedded GreptimeDB dashboard |
@@ -289,16 +291,16 @@ if bot.is_configured():
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/api/status` | GET | Health check |
-| `/api/iquant/status` | GET | iQuant connection status |
+| `/api/stock/status` | GET | Broker connection status (public, no key) |
 | `/api/trading/recommendations` | GET | On-demand ML scan results (top-10) |
 | `/api/momentum/tsanghi-prepare` | POST | Download cache data (SSE stream; legacy URL — daily source is now Tushare) |
 | `/api/momentum/backtest` | POST | Single-day momentum scan |
 | `/api/momentum/combined-analysis` | POST | Range backtest (SSE stream) |
 | `/api/model/full-train` | POST | Trigger full ML training (SSE stream) |
 | `/api/model/finetune` | POST | Trigger ML fine-tuning (SSE stream) |
-| `/api/iquant/pending-signals` | GET | iQuant polls for signals |
-| `/api/iquant/ack-signal` | POST | iQuant acknowledges signal execution |
-| `/api/iquant/heartbeat` | POST | iQuant heartbeat + positions/cash sync |
+| `/api/stock/trigger-scan` | POST | Manually run ML scan + Feishu top-5 report; **需 `X-API-Key`** (STOCK_API_KEY) |
+| `/api/stock/quote` | POST | Real-time quotes for given stock codes; **需 `X-API-Key`** |
+| `/api/stock/backtest-scan` | POST | Run ML backtest scan for a past trade date; **需 `X-API-Key`** |
 | `/api/trading/buy` / `sell` / `buy-batch-by-amount` | POST | 下单（dashboard + 外部服务）；**需 `X-API-Key`** |
 | `/api/trading/holdings` / `recommendations` / `orders` | GET | 持仓/推荐/委托查询；**需 `X-API-Key`** |
 | `/api/trading/orders/{order_id}` | DELETE | 撤单；**需 `X-API-Key`** |
@@ -329,12 +331,15 @@ if bot.is_configured():
 | `FEISHU_BOT_URL` | (leapcell) | Feishu bot relay URL |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID` | - | Feishu credentials |
 | `FC_URL` | - | Alibaba Cloud FC training endpoint |
+| `STOCK_API_KEY` | - | `/api/stock/*` ML 策略端点鉴权 key（亦可经 Settings 持久化到 `data/stock_api_key.txt`） |
 | `TRADING_API_KEY` | - | `/api/trading/*` 鉴权 key（亦可经 Settings 持久化到 `data/trading_api_key.txt`） |
 
 **Files**:
 - `src/web/app.py` - FastAPI application factory + startup lifecycle
-- `src/web/routes.py` - Dashboard, backtest, settings, model management routes
-- `src/web/iquant_routes.py` - iQuant communication + monitoring (isolated, own DB pool)
+- `src/web/routes.py` - Dashboard, backtest, settings, model management, `/api/trading/*` order routes
+- `src/web/ml_routes.py` - ML strategy API (`/api/stock/*`: scan / quote / backtest) + monitoring scheduler
+- `src/web/broker_order_routes.py` - Read-only cached broker order list (`/api/trading/orders`)
+- `src/trading/broker_client.py` - HTTP client for xtquant-trade-server (positions / cash / orders / place / cancel)
 - `src/common/pending_store.py` - Pending confirmation store
 - `src/web/templates/` - Jinja2 HTML templates
 - `src/web/static/` - CSS styles
@@ -351,8 +356,8 @@ services:
 ```
 
 **Checklist**:
-- [x] FastAPI Web application with 6 routers
-- [x] Dashboard: iQuant status, broker positions, data engine card, model management
+- [x] FastAPI Web application with multiple routers (dashboard, momentum, settings, backtest, broker orders, trading, model, ML, analysis, notes, audit)
+- [x] Dashboard: broker connection status, broker positions, data engine card, model management
 - [x] Backtest page: single-day scan, range backtest, CSV analysis
 - [x] Settings page: Tushare token, cache scheduler, FC URL, S3 config
 - [x] Database page: embedded GreptimeDB dashboard
@@ -373,7 +378,7 @@ services:
 
 **Architecture**:
 ```
-iquant_routes.py / routes.py
+ml_routes.py / routes.py
         │
         ▼
 ml_strategy_service.py / momentum_strategy_service.py   (data prep + invocation)
@@ -382,7 +387,7 @@ ml_strategy_service.py / momentum_strategy_service.py   (data prep + invocation)
 ml_scanner.py / momentum_scanner.py                      (filter pipeline + scoring)
         │
         ▼
-SignalStore                                               (push signal → iQuant polls)
+scored stock list → dashboard / Feishu report           (returned to caller; no auto order push)
 ```
 
 **Key Components**:
@@ -393,7 +398,6 @@ SignalStore                                               (push signal → iQuan
 | `MomentumScanner` | `src/strategy/strategies/momentum_scanner.py` | 7-layer funnel + V3 regression scoring |
 | `MLStrategyService` | `src/strategy/ml_strategy_service.py` | Stateless: `run_ml_live()` / `run_ml_backtest()` |
 | `MomentumStrategyService` | `src/strategy/momentum_strategy_service.py` | Stateless: `run_momentum_live()` / `run_momentum_backtest()` |
-| `SignalStore` | `src/strategy/signal_store.py` | In-memory signal queue (push/poll/ack/expire lifecycle) |
 | `EarlyWindowAggregator` | `src/strategy/aggregators/early_window_aggregator.py` | Aggregates raw 1-min bars → 09:31~09:40 snapshot |
 
 **Shared Data Models** (`src/strategy/models.py`):
@@ -497,11 +501,11 @@ SignalStore                                               (push signal → iQuan
 
 ---
 
-### [STR-005] Momentum Live Trading Interface (iQuant API)
+### [STR-005] Live Trading Interface (Broker / xtquant-trade-server)
 
 **Status**: In Progress
 
-**Description**: Live trading interface for momentum board scanning strategy, deployed as a set of HTTP API endpoints (iQuant API). QMT polls these endpoints for buy/sell signals and acknowledges execution. Uses T+2 adaptive sell with T+1 early exit on large gap-down.
+**Description**: Live trading interface for the scanning strategy. Order execution goes through `BrokerClient` → an `xtquant-trade-server` running on a Windows QMT box (positions/cash/orders polled every 30s, orders placed via `/api/trading/*`). Recommendations are computed on demand and surfaced on the dashboard / via Feishu; auto-order push is currently disabled (`trigger-scan` returns `signal_pushed: false`).
 
 **Strategy: Seven-Layer Parametric Funnel + V3 Regression Scoring**
 
@@ -542,21 +546,15 @@ SignalStore                                               (push signal → iQuan
 | SCAN | 09:39-10:00 | If no holdings → run momentum scan → push BUY signal |
 | SELL | 14:50-14:58 | Push SELL signal for all marked holdings |
 
-**Signal Flow**:
-1. Server pushes signal to `_state["pending_signals"]`
-2. QMT polls `GET /api/iquant/pending-signals` → receives signal
-3. QMT executes order, then `POST /api/iquant/ack-signal` with signal_id
-4. BUY ack: record entry_price, save holdings to disk
-5. SELL ack: remove from holdings, save to disk
-
-**Holdings Persistence** (trading safety):
-- Written to `data/v15_holdings.json` after every mutation
-- Loaded on startup from file (survives service restart)
-- File corruption → raise RuntimeError (fail-fast, no silent degradation)
-- Structure: `{code, name, buy_date, entry_price, marked_sell_today, early_exit}`
+**Order Flow** (via xtquant-trade-server):
+1. Dashboard / external service calls `POST /api/trading/buy|sell|buy-batch-by-amount` with `X-API-Key` (TRADING_API_KEY)
+2. `BrokerClient` forwards the order to xtquant-trade-server, which places it through QMT
+3. A 30s poll loop (`_broker_order_poll_loop`) refreshes `app.state.broker_orders`; new fills are imported into trade notes
+4. A 30s poll loop (`_broker_position_poll_loop`) refreshes `app.state.broker_positions` / `available_cash`
+5. Positions/cash are held only in memory (no holdings file); they are re-fetched from the broker on every restart
 
 **Data Sources**:
-- Real-time quotes: Tushare via `TushareRealtimeClient` / `SinaRealtimeClient`
+- Real-time quotes: Tushare via `TushareRealtimeClient`
 - Historical data (37d): **临时**走 Tushare `daily` 实时并发拉 (`_fetch_history_live` in `ml_strategy_service.py`),解耦 cache 风险;cache 完整闭环后会回退到 `GreptimeBacktestStorage.get_multi_day_history`
 - prev_close: live from Tushare `daily` (never cached — see `_resolve_prev_close`)
 - Board data: `LocalConceptMapper` (local JSON files)
@@ -566,15 +564,11 @@ SignalStore                                               (push signal → iQuan
 
 | Alert | Trigger | Content |
 |-------|---------|---------|
-| 每日就绪报告 | 09:30 | iQuant连接状态、持仓数、今日计划(扫描/跳过) |
-| 买入/卖出信号推送 | Signal pushed | 股票代码、价格、板块、ML评分 |
-| 信号执行确认 | Signal acked | 股票代码、价格、推送→执行时间差 |
-| 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
-| iQuant未连接 | 09:33 无心跳 | 提示检查QMT是否启动 |
-| iQuant掉线 | Poll间隔 > 3min | 最后心跳时间、失联时长 |
-| Dashboard状态 | 页面每10s刷新 | 在线/离线、最后心跳、持仓/待执行数 |
-| 扫描无推荐 | Scan returns None | 通知今日无符合条件股票 |
-| 扫描/跳空失败 | Exception | 完整错误堆栈 |
+| 每日就绪报告 | 09:30 | Broker就绪状态、当前持仓数、今日计划 |
+| Broker未就绪 | 交易时段内 `broker.is_ready()` (xtquant `/readyz`) 失败 | 检查 Windows 上 xtquant-trade-server,30 分钟冷却去重 |
+| ML扫描Top5报告 | 扫描产出结果 | top-5 股票代码、价格、ML评分 |
+| 扫描失败 | Exception | 完整错误堆栈 |
+| Dashboard状态 | 页面每10s刷新 `/api/stock/status` | Broker 在线/离线、持仓数、可用现金 |
 
 **Dashboard Recommendations (On-Demand Compute)**:
 - `GET /api/trading/recommendations?date=YYYY-MM-DD` — returns top-10 ML scan results
@@ -585,10 +579,11 @@ SignalStore                                               (push signal → iQuan
 **Key Files**:
 - `src/strategy/strategies/ml_scanner.py` — ML 8-layer filter + LightGBM LambdaRank scoring
 - `src/strategy/ml_strategy_service.py` — Stateless ML scan service (backtest + live)
-- `src/strategy/signal_store.py` — In-memory signal queue (push/poll/ack/expire lifecycle)
-- `src/web/iquant_routes.py` — iQuant communication + monitoring
-- `src/web/routes.py` — Dashboard routes, delegates scan to ml_strategy_service
-- `src/web/app.py` — GreptimeDB cache injection into iQuant router
+- `src/web/ml_routes.py` — `/api/stock/*` ML strategy API + monitoring scheduler (readiness + broker health)
+- `src/web/broker_order_routes.py` — Read-only cached broker orders (`/api/trading/orders`)
+- `src/trading/broker_client.py` — HTTP client for xtquant-trade-server (positions/cash/orders/place/cancel)
+- `src/web/routes.py` — Dashboard routes + `/api/trading/*` order placement, delegates scan to ml_strategy_service
+- `src/web/app.py` — Broker init + position/order poll loops; GreptimeDB cache injection into ML router
 - `src/data/clients/greptime_historical_adapter.py` — Historical data read adapter (HistoricalDataProvider)
 
 **Differences from STR-004**:
@@ -602,12 +597,12 @@ SignalStore                                               (push signal → iQuan
 
 **Checklist**:
 - [x] MomentumScanner: 7-layer funnel + V3 scoring
-- [x] iQuant routes: T+2 adaptive scheduler with three windows
-- [x] Holdings persistence to JSON file
+- [x] Broker order routes (`/api/trading/buy|sell|batch`) via BrokerClient → xtquant-trade-server
+- [x] Position/order poll loops (30s) into app.state
 - [x] Trade calendar via Tushare trade_cal
 - [x] GreptimeDB cache injection from app.py
 - [x] Feishu notification
-- [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
+- [x] Monitoring: daily readiness report + broker health check
 - [ ] Unit tests
 - [ ] Production deployment verification
 
@@ -685,7 +680,7 @@ FC training (`serverless/app.py`) MUST replicate `lgbrank_scorer.py`'s feature c
 - [x] `MLScanResult` / `MLScoredStock` dataclasses for structured output
 - [x] Feishu ML top-5 report (`send_ml_top5_report`)
 - [x] `/api/ml/model-info` endpoint for model listing
-- [x] V15 momentum scan fully replaced in iquant_routes + routes
+- [x] V15 momentum scan fully replaced by ML scan in ml_routes + routes
 - [ ] Sell strategy
 - [ ] Unit tests
 - [ ] Production deployment
@@ -694,7 +689,7 @@ FC training (`serverless/app.py`) MUST replicate `lgbrank_scorer.py`'s feature c
 
 ## Module: Trading
 
-Trading is handled entirely through the iQuant interface (STR-005). There is no standalone trading module — the `src/web/iquant_routes.py` manages signal pushing, position tracking, and order acknowledgment. Holdings are persisted to `data/v15_holdings.json`.
+Trading is handled through the broker interface (STR-005). Order placement lives in `src/web/routes.py` (`/api/trading/*`) backed by `src/trading/broker_client.py`, which talks to an `xtquant-trade-server` on a Windows QMT box. Positions, cash, and orders are polled from the broker every 30s into `app.state` (no local holdings file).
 
 ---
 
@@ -723,7 +718,6 @@ Trading is handled entirely through the iQuant interface (STR-005). There is no 
 - `src/data/clients/greptime_storage.py` - GreptimeDB storage (asyncpg, CRUD)
 - `src/data/clients/greptime_historical_adapter.py` - Read-only adapter (HistoricalDataProvider Protocol)
 - `src/data/clients/tushare_realtime.py` - Tushare realtime quotes + `daily` full-market OHLCV
-- `src/data/clients/sina_realtime.py` - Sina realtime (fallback)
 - `src/data/sources/tushare_daily_source.py` - Tushare `daily` full-market OHLCV
 - `src/data/sources/tushare_minute_source.py` - Tushare 1-min bars
 - `src/data/sources/tushare_metadata_source.py` - Stock metadata (trade_cal, suspend, stock_basic)

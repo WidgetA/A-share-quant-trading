@@ -526,6 +526,16 @@ def create_app(
                 git_branch=os.environ.get("GIT_BRANCH"),
             )
 
+        # Auto-start ML monitoring scheduler (readiness, broker alerts).
+        # CRITICAL: must start before non-critical tasks (cache loading + audit) —
+        # safety monitoring cannot be skipped (see docs/trading-safety-patterns.md
+        # "Startup Ordering Rule"). Only depends on broker state (set above), not
+        # on GreptimeDB storage, so it is safe to start before the cache pipeline.
+        ml_rtr = getattr(app.state, "ml_router", None)
+        if ml_rtr and hasattr(ml_rtr, "_start_monitoring"):
+            ml_rtr._start_monitoring(app.state)
+            logger.info("ML monitoring scheduler started")
+
         # GreptimeDB storage + cache pipeline — wired here so the dependency
         # graph (storage → sources → aggregator → reporter → pipeline) lives
         # in one place. Routes / schedulers consume them via app.state.
@@ -537,13 +547,6 @@ def create_app(
         app.state.pipeline = None
         if not await _try_connect_greptime(app):
             app.state._greptime_reconnect_task = asyncio.create_task(_greptime_reconnect_loop(app))
-
-        # Auto-start ML monitoring scheduler (readiness, broker alerts)
-        # CRITICAL: must start before anything else — safety monitoring cannot be skipped
-        ml_rtr = getattr(app.state, "ml_router", None)
-        if ml_rtr and hasattr(ml_rtr, "_start_monitoring"):
-            ml_rtr._start_monitoring(app.state)
-            logger.info("ML monitoring scheduler started")
 
         # Run trading safety audit at startup → notify Feishu if CRITICAL
         try:

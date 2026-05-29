@@ -2204,9 +2204,9 @@ def create_settings_router() -> APIRouter:
     @router.get("/api/settings/ml-key")
     async def get_ml_key_status():
         """Get current ML strategy API key status (masked)."""
-        from src.common.config import get_iquant_api_key, get_iquant_key_source
+        from src.common.config import get_stock_api_key, get_stock_api_key_source
 
-        source = get_iquant_key_source()
+        source = get_stock_api_key_source()
         source_labels = {
             "web_ui": "Web UI (当前会话)",
             "persisted_file": "Web UI (已持久化)",
@@ -2215,7 +2215,7 @@ def create_settings_router() -> APIRouter:
         }
 
         try:
-            key = get_iquant_api_key()
+            key = get_stock_api_key()
             if len(key) > 16:
                 masked = key[:4] + "..." + key[-4:]
             else:
@@ -2239,13 +2239,13 @@ def create_settings_router() -> APIRouter:
     @router.post("/api/settings/ml-key")
     async def update_ml_key(body: TokenUpdateRequest):
         """Save a new ML strategy API key."""
-        from src.common.config import set_iquant_api_key
+        from src.common.config import set_stock_api_key
 
         key = body.token.strip()
         if not key:
             raise HTTPException(status_code=400, detail="API Key 不能为空")
 
-        set_iquant_api_key(key)
+        set_stock_api_key(key)
         return {"success": True, "message": "ML 策略 API Key 已保存"}
 
     # === TRADING API KEY SETTINGS (gates /api/trading/*) ===
@@ -2488,12 +2488,12 @@ def create_settings_router() -> APIRouter:
     @router.get("/api/settings/keys-status")
     async def get_all_keys_status():
         """Get status of all API keys needed for live trading."""
-        from src.common.config import get_iquant_key_source
+        from src.common.config import get_stock_api_key_source
 
-        ml_key_ok = get_iquant_key_source() != "not_configured"
+        ml_key_ok = get_stock_api_key_source() != "not_configured"
 
         return {
-            "ml_key": {"configured": ml_key_ok, "source": get_iquant_key_source()},
+            "ml_key": {"configured": ml_key_ok, "source": get_stock_api_key_source()},
         }
 
     # === XTQUANT BROKER SETTINGS ===

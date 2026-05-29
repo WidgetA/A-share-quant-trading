@@ -69,58 +69,21 @@ uv run python scripts/audit_trading_safety.py
 
 ## Startup Ordering Rule
 
-Safety-critical background tasks (monitoring, heartbeat, alerting) **MUST** start before non-critical tasks (audit, cache loading) in `app.py` startup. Non-critical tasks must be wrapped in `try/except` so they cannot block safety tasks.
+Safety-critical background tasks (monitoring, alerting) **MUST** start before non-critical tasks (audit, cache loading) in `app.py` startup. Non-critical tasks must be wrapped in `try/except` so they cannot block safety tasks.
 
 ```python
 # CORRECT: monitoring first, audit wrapped
 async def startup():
-    iquant_rtr._start_monitoring()  # safety-critical, start first
+    ml_rtr._start_monitoring(app.state)  # safety-critical, start first
     try:
-        run_audit()                 # non-critical, wrapped
+        run_audit()                      # non-critical, wrapped
     except Exception:
         logger.error("audit failed")
 
 # FORBIDDEN: unprotected non-critical task before monitoring
 async def startup():
-    run_audit()                     # if this crashes...
-    iquant_rtr._start_monitoring()  # ...this never runs!
-```
-
-## QMT API Thread Safety
-
-QMT's `get_trade_detail_data` and `passorder` **only work on the main thread**. Calling from `threading.Thread` silently returns empty results (no exception).
-
-```python
-# FORBIDDEN: QMT API from background thread
-def _heartbeat_loop():
-    while True:
-        positions = get_trade_detail_data(accID, 'stock', 'position')  # Always []!
-        cash = get_trade_detail_data(accID, 'stock', 'account')        # Always []!
-        send_to_server(positions, cash)
-        time.sleep(30)
-
-# CORRECT: Main thread queries broker → shared dict → background thread sends HTTP
-_state = {"positions": [], "cash": 0}
-
-def handlebar(ContextInfo):          # main thread
-    _state["positions"] = _get_all_positions(accID)
-    _state["cash"] = _get_available_cash(accID)
-
-def _state_sync_loop():              # background thread
-    while True:
-        _api_call("/heartbeat", "POST", {    # pure HTTP, no QMT API
-            "positions": _state["positions"],
-            "available_cash": _state["cash"],
-        })
-        time.sleep(30)
-```
-
-After trade execution, **immediately** refresh and sync:
-```python
-if success:
-    _ack_signal(sig_id)
-    _refresh_broker_state()   # re-query broker (main thread)
-    _sync_state_now()         # push to server immediately
+    run_audit()                          # if this crashes...
+    ml_rtr._start_monitoring(app.state)  # ...this never runs!
 ```
 
 ## Silent Skip — Data Pipeline

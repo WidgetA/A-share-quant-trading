@@ -1,6 +1,6 @@
 # === MODULE PURPOSE ===
 # Fetches real-time A-share price data from Tushare Pro.
-# Replaces the defunct SinaRealtimeClient for the monitor/live scan subsystem.
+# Real-time price source for the monitor / live scan subsystem.
 
 # === DEPENDENCIES ===
 # - httpx: Async HTTP client for Tushare Pro REST API
@@ -286,7 +286,7 @@ class TushareRealtimeClient:
         return bars
 
     # ------------------------------------------------------------------
-    # Response format adapter (used by IQuantHistoricalAdapter)
+    # Response format adapter (matches the HistoricalDataProvider response shape)
     # ------------------------------------------------------------------
 
     async def as_standard_quote_format(

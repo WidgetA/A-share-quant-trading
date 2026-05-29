@@ -165,10 +165,10 @@ class Config:
 
 _secrets_cache: Config | None = None
 
-# Runtime override for iQuant API key (set via web UI)
-_iquant_key_override: str | None = None
-# Persistence file for iQuant API key (survives container restarts)
-IQUANT_KEY_FILE = PROJECT_ROOT / "data" / "iquant_api_key.txt"
+# Runtime override for the stock (ML strategy) API key (set via web UI)
+_stock_api_key_override: str | None = None
+# Persistence file for the stock API key (survives container restarts)
+STOCK_API_KEY_FILE = PROJECT_ROOT / "data" / "stock_api_key.txt"
 
 # Runtime override for Trading API key (gates /api/trading/* routes)
 _trading_api_key_override: str | None = None
@@ -323,53 +323,55 @@ def get_tushare_token_source() -> str:
     return "not_configured"
 
 
-# === iQuant API Key ===
+# === Stock (ML Strategy) API Key ===
+# Gates the /api/stock/* ML-strategy endpoints (scan / quote / backtest).
+# Independent of TRADING_API_KEY, which gates actual order placement.
 
 
-def get_iquant_api_key() -> str:
-    """Get iQuant API key for authenticating iQuant script requests.
+def get_stock_api_key() -> str:
+    """Get the stock (ML strategy) API key for authenticating /api/stock/* requests.
 
     Priority: runtime override > persisted file > env var > not configured.
     """
     import os
 
-    if _iquant_key_override:
-        return _iquant_key_override
+    if _stock_api_key_override:
+        return _stock_api_key_override
 
-    if IQUANT_KEY_FILE.exists():
-        key = IQUANT_KEY_FILE.read_text(encoding="utf-8").strip()
+    if STOCK_API_KEY_FILE.exists():
+        key = STOCK_API_KEY_FILE.read_text(encoding="utf-8").strip()
         if key:
             return key
 
-    env_key = os.environ.get("IQUANT_API_KEY", "")
+    env_key = os.environ.get("STOCK_API_KEY", "")
     if env_key:
         return env_key
 
     raise ValueError(
-        "iQuant API key not configured. "
-        "Set via web UI Settings page or IQUANT_API_KEY environment variable."
+        "Stock API key not configured. "
+        "Set via web UI Settings page or STOCK_API_KEY environment variable."
     )
 
 
-def set_iquant_api_key(key: str) -> None:
-    """Set iQuant API key at runtime and persist to disk."""
-    global _iquant_key_override
-    _iquant_key_override = key
+def set_stock_api_key(key: str) -> None:
+    """Set the stock (ML strategy) API key at runtime and persist to disk."""
+    global _stock_api_key_override
+    _stock_api_key_override = key
 
-    IQUANT_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    IQUANT_KEY_FILE.write_text(key, encoding="utf-8")
-    logger.info("iQuant API key updated via web UI and persisted to disk")
+    STOCK_API_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STOCK_API_KEY_FILE.write_text(key, encoding="utf-8")
+    logger.info("Stock API key updated via web UI and persisted to disk")
 
 
-def get_iquant_key_source() -> str:
-    """Return which source the current iQuant API key comes from."""
+def get_stock_api_key_source() -> str:
+    """Return which source the current stock API key comes from."""
     import os
 
-    if _iquant_key_override:
+    if _stock_api_key_override:
         return "web_ui"
-    if IQUANT_KEY_FILE.exists() and IQUANT_KEY_FILE.read_text(encoding="utf-8").strip():
+    if STOCK_API_KEY_FILE.exists() and STOCK_API_KEY_FILE.read_text(encoding="utf-8").strip():
         return "persisted_file"
-    if os.environ.get("IQUANT_API_KEY", ""):
+    if os.environ.get("STOCK_API_KEY", ""):
         return "env_var"
     return "not_configured"
 

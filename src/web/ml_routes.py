@@ -3,7 +3,7 @@
 # Trading execution has moved to BrokerClient (xtquant-trade-server).
 #
 # === AUTHENTICATION ===
-# All endpoints require X-API-Key header matching IQUANT_API_KEY env var.
+# All endpoints require X-API-Key header matching the STOCK_API_KEY env var.
 
 from __future__ import annotations
 
@@ -30,13 +30,13 @@ _API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
 
 def _verify_api_key(api_key: str = Depends(_API_KEY_HEADER)) -> str:
     """Verify the API key from X-API-Key header."""
-    from src.common.config import get_iquant_api_key
+    from src.common.config import get_stock_api_key
 
     try:
-        expected = get_iquant_api_key()
+        expected = get_stock_api_key()
     except ValueError:
         raise HTTPException(
-            status_code=500, detail="IQUANT_API_KEY not configured — set via Settings page"
+            status_code=500, detail="STOCK_API_KEY not configured — set via Settings page"
         )
     if api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -47,17 +47,17 @@ def _verify_api_key(api_key: str = Depends(_API_KEY_HEADER)) -> str:
 
 
 class QuoteRequest(BaseModel):
-    """Request body for /api/iquant/quote."""
+    """Request body for /api/stock/quote."""
 
     stock_codes: list[str]
 
 
 class BacktestScanRequest(BaseModel):
-    """Request body for /api/iquant/backtest-scan.
+    """Request body for /api/stock/backtest-scan.
 
-    ``data_source`` is kept for backwards compatibility with iQuant scripts
-    that still send it. The value is ignored — all backtests now read from
-    GreptimeDB cache (fed by Tushare daily).
+    ``data_source`` is kept for backwards compatibility with older backtest
+    scripts that still send it. The value is ignored — all backtests now read
+    from GreptimeDB cache (fed by Tushare daily).
     """
 
     trade_date: str  # YYYY-MM-DD
@@ -121,13 +121,11 @@ def _count_trading_days(calendar: list[date], from_date: date, to_date: date) ->
 def create_ml_router() -> APIRouter:
     """Create the ML strategy router.
 
-    Legacy API surface for scripts that need quotes, scans, and backtest scans.
+    API surface for scripts that need quotes, scans, and backtest scans.
     Scheduled scans are owned by the app startup monitor, not by these request
     handlers, so browser/API probes cannot start business schedulers.
-
-    URL prefix kept as /api/iquant/ for backward compat with backtest scripts.
     """
-    router = APIRouter(prefix="/api/iquant", tags=["ml-strategy"])
+    router = APIRouter(prefix="/api/stock", tags=["ml-strategy"])
 
     # Isolated state (not shared with main app.state)
     _state: dict[str, Any] = {
@@ -474,7 +472,7 @@ def create_ml_router() -> APIRouter:
         await _ensure_resources()
 
         # body.data_source is accepted but ignored — all backtests read from
-        # GreptimeDB cache. Kept in the request schema for older iQuant clients.
+        # GreptimeDB cache. Kept in the request schema for older backtest clients.
 
         storage = getattr(request.app.state, "storage", None)
         if not storage or not storage.is_ready:

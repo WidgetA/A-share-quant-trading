@@ -94,13 +94,13 @@ async def test_ml_resource_init_does_not_start_signal_scheduler(monkeypatch):
 
 
 def test_ml_ping_is_pure_status_read(monkeypatch):
-    monkeypatch.setattr("src.common.config.get_iquant_api_key", lambda: "secret-key")
+    monkeypatch.setattr("src.common.config.get_stock_api_key", lambda: "secret-key")
 
     app = FastAPI()
     app.state.broker_positions = []
     app.include_router(create_ml_router())
 
-    response = TestClient(app).get("/api/iquant/ping", headers={"X-API-Key": "secret-key"})
+    response = TestClient(app).get("/api/stock/ping", headers={"X-API-Key": "secret-key"})
 
     assert response.status_code == 200
     body = response.json()

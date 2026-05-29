@@ -45,7 +45,7 @@ Comment principles:
 
 ## System Architecture
 
-FastAPI web application serving dashboard, backtest tools, and iQuant trading API. GreptimeDB stores all backtest cache data.
+FastAPI web application serving dashboard, backtest tools, ML strategy API, and broker order API. GreptimeDB stores all backtest cache data.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -60,12 +60,13 @@ FastAPI web application serving dashboard, backtest tools, and iQuant trading AP
 │         ▼                   ▼                   ▼               │
 │  [ML Scanner]        [Dashboard]         [GreptimeDB]          │
 │  [Momentum Scanner]  [Backtest]          [CachePipeline]       │
-│  [SignalStore]        [iQuant API]       [Tushare Pro]         │
-│                       [Model Mgmt]       [Local JSON]          │
+│  [Filters]           [Broker API]        [Tushare Pro]         │
+│                      [Model Mgmt]        [Local JSON]          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
-iQuant (Windows QMT) ←──poll/ack──→ /api/iquant/* endpoints
+Browser / scripts ←──X-API-Key──→ /api/stock/* (ML scan) + /api/trading/* (orders)
+trading-service ──HTTP──→ xtquant-trade-server (Windows QMT) for order execution
 FC Serverless ←──callback──→ /api/model/* endpoints
 ```
 
@@ -73,8 +74,8 @@ FC Serverless ←──callback──→ /api/model/* endpoints
 
 | Module | Responsibility |
 |--------|---------------|
-| **Strategy** (`src/strategy/`) | Stateless scanners (ML + momentum), filters, signal store |
-| **Web** (`src/web/`) | FastAPI routes, dashboard, backtest, iQuant communication |
+| **Strategy** (`src/strategy/`) | Stateless scanners (ML + momentum), filters, aggregators |
+| **Web** (`src/web/`) | FastAPI routes, dashboard, backtest, ML strategy API, broker order API |
 | **Data** (`src/data/`) | GreptimeDB storage, cache pipeline, data sources |
 | **Common** (`src/common/`) | Config, Feishu notifications, S3 client, scheduler |
 
@@ -110,7 +111,6 @@ A-share-quant-trading/
 │   │   ├── models.py        # Shared data models (PriceSnapshot, DailyBar, etc.)
 │   │   ├── base.py          # Base strategy interface
 │   │   ├── signals.py       # Signal types
-│   │   ├── signal_store.py  # In-memory signal queue (push/poll/ack/expire)
 │   │   ├── ml_strategy_service.py       # Stateless ML scan (backtest + live)
 │   │   ├── momentum_strategy_service.py # Stateless momentum scan (backtest + live)
 │   │   ├── strategies/
@@ -126,8 +126,7 @@ A-share-quant-trading/
 │   │   ├── clients/         # Storage + read-only adapters
 │   │   │   ├── greptime_storage.py            # GreptimeDB storage (asyncpg, CRUD)
 │   │   │   ├── greptime_historical_adapter.py # Read-only adapter (HistoricalDataProvider)
-│   │   │   ├── tushare_realtime.py            # Tushare realtime quotes + `daily` full-market
-│   │   │   └── sina_realtime.py               # Sina realtime (fallback)
+│   │   │   └── tushare_realtime.py            # Tushare realtime quotes + `daily` full-market
 │   │   ├── sources/         # Upstream API wrappers
 │   │   │   ├── tushare_daily_source.py        # Tushare `daily` full-market OHLCV
 │   │   │   ├── tushare_minute_source.py       # Tushare stk_mins (1min bars)
@@ -141,8 +140,9 @@ A-share-quant-trading/
 │   │       └── model_training_scheduler.py  # ML model training scheduler (FC async)
 │   ├── web/                 # Web UI
 │   │   ├── app.py           # FastAPI application factory + startup
-│   │   ├── routes.py        # Dashboard, backtest, settings, model management
-│   │   ├── iquant_routes.py # iQuant communication + monitoring (isolated)
+│   │   ├── routes.py        # Dashboard, backtest, settings, model mgmt, /api/trading/* orders
+│   │   ├── ml_routes.py     # /api/stock/* ML strategy API + monitoring scheduler
+│   │   ├── broker_order_routes.py # Read-only cached broker orders (/api/trading/orders)
 │   │   ├── templates/       # Jinja2 templates
 │   │   └── static/          # CSS styles
 │   └── common/              # Shared utilities
@@ -163,8 +163,6 @@ A-share-quant-trading/
 │   ├── database-config.yaml # GreptimeDB connection config
 │   └── secrets.yaml         # API keys (gitignored)
 ├── scripts/
-│   ├── iquant_live.py       # iQuant live trading script (Windows)
-│   ├── iquant_strategy.py   # iQuant strategy class
 │   └── audit_trading_safety.py  # Safety audit
 └── .github/
     └── workflows/
