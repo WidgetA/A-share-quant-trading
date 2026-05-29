@@ -8,7 +8,8 @@
 
 # === KEY CONCEPTS ===
 # - Read-only: This project only reads from stock_fundamentals, never writes
-# - ST detection: company_name containing "ST" indicates ST stock
+# - ST detection: queried LIVE from Tushare stock_basic (NOT from PG). ST status
+#   flips week-to-week, so the cached company_name column is too stale.
 # - PE filtering: Used by momentum sector strategy for board-level PE comparison
 
 import logging
@@ -18,8 +19,51 @@ from decimal import Decimal
 from typing import Any
 
 import asyncpg
+import httpx
+
+from src.common.config import get_tushare_token
 
 logger = logging.getLogger(__name__)
+
+_TUSHARE_URL = "http://api.tushare.pro"
+_ST_PREFIXES = ("ST", "*ST")
+
+
+def _to_ts_code(code: str) -> str:
+    """Convert bare 6-digit code to ts_code with market suffix.
+
+    Codes starting with 5, 6, or 9 are SH; everything else (0, 3, 8) is SZ.
+    """
+    return f"{code}.SH" if code and code[0] in "569" else f"{code}.SZ"
+
+
+async def _fetch_tushare_names(stock_codes: list[str]) -> dict[str, str]:
+    """Fetch current company names from Tushare ``stock_basic``.
+
+    Returns a ``{6-digit code: name}`` map. Tushare's ``ts_code`` parameter
+    accepts a comma-separated list (verified up to ~1000 codes/request). Codes
+    that Tushare doesn't return (delisted, unknown, etc.) are absent from the
+    resulting dict.
+    """
+    if not stock_codes:
+        return {}
+    ts_codes = [_to_ts_code(c) for c in stock_codes]
+    body = {
+        "api_name": "stock_basic",
+        "token": get_tushare_token(),
+        "params": {"ts_code": ",".join(ts_codes)},
+        "fields": "ts_code,name",
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(_TUSHARE_URL, json=body)
+        resp.raise_for_status()
+        data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(
+            f"Tushare stock_basic error: code={data.get('code')}, msg={data.get('msg')}"
+        )
+    items = data.get("data", {}).get("items", []) or []
+    return {row[0][:6]: row[1] for row in items}
 
 
 @dataclass
@@ -249,24 +293,16 @@ class FundamentalsDB:
 
     async def is_st(self, stock_code: str) -> bool:
         """
-        Check if a stock is ST based on company_name.
+        Check if a stock is ST based on its current Tushare name.
 
-        Returns True if ST or if stock not found (fail-safe: exclude unknown stocks).
+        Returns True if name is prefixed with ``ST``/``*ST``, or if Tushare
+        doesn't return the stock (fail-safe: exclude unknown stocks).
         """
-        async with self._db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT company_name FROM {self._schema}.stock_fundamentals
-                WHERE stock_code = $1
-                """,
-                stock_code,
-            )
-
-        if not row:
-            # Fail-safe: unknown stock treated as excluded
-            return True
-
-        return "ST" in row["company_name"].upper()
+        names = await _fetch_tushare_names([stock_code])
+        name = names.get(stock_code)
+        if name is None:
+            return True  # fail-safe: unknown stock treated as excluded
+        return name.startswith(_ST_PREFIXES)
 
     async def get_all_stock_codes(self) -> list[str]:
         """
@@ -283,29 +319,24 @@ class FundamentalsDB:
 
     async def batch_filter_st(self, stock_codes: list[str]) -> list[str]:
         """
-        Filter out ST stocks from a list.
+        Filter out ST stocks from a list using live Tushare ``stock_basic``.
+
+        ST status is volatile (a stock may be ST one week and not the next), so
+        we ask Tushare for the current company name on every call rather than
+        relying on the cached ``stock_fundamentals.company_name`` column.
 
         Args:
-            stock_codes: List of stock codes.
+            stock_codes: List of bare 6-digit stock codes.
 
         Returns:
-            List of non-ST stock codes (stocks not found in DB are excluded).
+            List of non-ST stock codes. Codes Tushare doesn't return are
+            excluded (fail-safe).
         """
         if not stock_codes:
             return []
 
-        async with self._db_pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT stock_code FROM {self._schema}.stock_fundamentals
-                WHERE stock_code = ANY($1)
-                  AND company_name NOT LIKE '%ST%'
-                  AND company_name NOT LIKE '%st%'
-                """,
-                stock_codes,
-            )
-
-        return [row["stock_code"] for row in rows]
+        names = await _fetch_tushare_names(stock_codes)
+        return [c for c in stock_codes if c in names and not names[c].startswith(_ST_PREFIXES)]
 
     def _row_to_model(self, row: asyncpg.Record) -> StockFundamentals:
         """Convert database row to StockFundamentals."""

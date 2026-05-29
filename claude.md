@@ -129,3 +129,4 @@ Key endpoints: `basic_data_service`, `date_sequence`, `cmd_history_quotation`, `
 - **All fundamentals (PE, growth, etc.) from PG table `stock_fundamentals`** — NEVER call iwencai/smart_stock_picking at runtime
 - Read methods in `src/data/database/fundamentals_db.py`
 - Fields: stock_code, company_name, pe_ttm, ps_ttm, pb, total_market_cap, roe, annual_revenue_yoy, quarterly_revenue_yoy, annual_net_profit_yoy, quarterly_net_profit_yoy, report_date_annual, report_date_quarterly, updated_at
+- **EXCEPTION — ST filter is NOT from PG.** `is_st` / `batch_filter_st` query live Tushare `stock_basic` (current name, `ST`/`*ST` prefix). ST status flips week-to-week, so the cached `company_name` column is too stale. `ts_code` param accepts a comma-separated batch (≤1000/request).

@@ -785,7 +785,8 @@ strategy:
 - Real-time quotes: Tushare via `TushareRealtimeClient` (`rt_min` / `rt_min_daily`)
 - Historical data: OSS-backed `TushareBacktestCache` (when pre-downloaded) + Tushare `daily` API via `IQuantHistoricalAdapter`
 - Board data: `LocalConceptMapper` (local JSON files)
-- Fundamentals (ST filter): PostgreSQL `stock_fundamentals` table
+- Fundamentals (PE, growth, etc.): PostgreSQL `stock_fundamentals` table
+- ST filter: live Tushare `stock_basic` (current name, `ST`/`*ST` prefix) — queried per scan since ST status is volatile
 - Trade calendar: akshare `tool_trade_date_hist_sina()` (cached in memory)
 
 **Monitoring & Alerting** (Feishu notifications):
