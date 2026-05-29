@@ -1007,7 +1007,13 @@ def create_iquant_router() -> APIRouter:
 
     @router.post("/trigger-scan")
     async def trigger_scan(api_key: str = Depends(_verify_api_key)) -> dict:
-        """Manually trigger V16 scan + Feishu top-10 report (bypasses time window)."""
+        """Manually trigger V16 scan + Feishu top-10 report (bypasses time window).
+
+        This is a scan-only re-run for inspecting today's selection / report. It
+        deliberately does NOT push a BUY signal — placing trades is left to the
+        normal trading scheduler. The recommendation is still recorded in
+        ``scan_state.today_recommendation`` for the scheduler to act on.
+        """
         from src.web.v15_scan_service import run_v16_scan
 
         scan_state = _state.get("scan_state")
@@ -1022,27 +1028,7 @@ def create_iquant_router() -> APIRouter:
 
         scan_state.today_recommendation = rec
 
-        result: dict = {"success": True, "recommendation": None}
-        if rec:
-            result["recommendation"] = rec
-            if not _state["holdings"]:
-                _push_signal(
-                    {
-                        "type": "buy",
-                        "stock_code": rec["stock_code"],
-                        "stock_name": rec["stock_name"],
-                        "board_name": rec["board_name"],
-                        "latest_price": rec["latest_price"],
-                        "lgb_score": rec.get("lgb_score", 0),
-                        "reason": f"V16手动扫描 (板块={rec['board_name']}, "
-                        f"LGB={rec.get('lgb_score', 0):.4f})",
-                    }
-                )
-                await _notify_feishu_signal(_state["pending_signals"][-1])
-                result["signal_pushed"] = True
-            else:
-                result["signal_pushed"] = False
-                result["reason"] = "holdings exist, BUY signal suppressed"
+        result: dict = {"success": True, "recommendation": rec}
         return result
 
     @router.get("/universe")
