@@ -40,14 +40,28 @@
          listing_info 由服务端 kimi-cli 自动验证写入, web 端只展示状态) -->
     <section class="settings-section">
         <div class="settings-card">
-            <h3>Kimi 验证状态</h3>
-            <p class="settings-desc">
-                Kimi 凭证只能通过本地一键脚本 <code>scripts/kimi_login_and_upload.ps1</code> 上传(refresh_token 通常 7-30 天后才需要重新上传)。
-                <code>stock_listing_info</code> 由服务端 kimi-cli 自动验证未覆盖的股票代码后写入。
-            </p>
+            <div class="toggle-row">
+                <div class="toggle-info">
+                    <h3>Kimi 上市日自动验证（路径 B）</h3>
+                    <p class="settings-desc">
+                        每日凌晨 4 点（缓存补全之后）服务端 kimi-cli 自动验证 <code>stock_snapshot</code> 里未覆盖代码的真实上市日，写入 <code>stock_listing_info</code>。
+                        Kimi 凭证只能通过本地脚本 <code>scripts/kimi_login_and_upload.ps1</code> 上传。
+                    </p>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="listingVerifyToggle" onchange="toggleListingVerify(this)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
             <div class="settings-desc" id="listingInfoStatus" style="margin-top: 0.5rem;">
                 listing_info 状态: 加载中...
             </div>
+            <div class="settings-desc" id="listingVerifySchedulerStatus" style="margin-top: 0.25rem;"></div>
+            <div class="token-actions" style="margin-top: 0.5rem;">
+                <button class="btn btn-secondary" onclick="triggerListingVerify(false)" id="listingVerifyBtn">立即验证</button>
+                <button class="btn btn-secondary" onclick="triggerListingVerify(true)" id="listingVerifyFailedBtn">重验失败项</button>
+            </div>
+            <div class="token-message hidden" id="listingVerifyMessage"></div>
         </div>
     </section>
 
@@ -578,19 +592,73 @@ async function saveXtquant() {
 
 async function loadListingInfoStatus() {
     const el = document.getElementById('listingInfoStatus');
+    const schedEl = document.getElementById('listingVerifySchedulerStatus');
     try {
-        const resp = await fetch('/api/audit/listing-info/status');
+        const resp = await fetch('/api/audit/listing-info/status', {cache: 'no-store'});
         const data = await resp.json();
         if (!resp.ok || !data.ready) {
             el.textContent = 'listing_info 状态: 不可用 (DB 未连接?)';
+            if (schedEl) schedEl.textContent = '';
             return;
         }
         el.textContent =
             'listing_info 状态: 已收录 ' + data.total_codes +
             ' 只 (已验证 ' + data.verified_codes +
             ', 未验证 ' + data.unverified_codes + ')';
+        if (schedEl) {
+            const s = data.scheduler;
+            if (s) {
+                let line = '验证任务: ' + (s.in_progress ? '运行中…' : '空闲');
+                if (s.last_run_time) {
+                    line += ' | 上次 ' + s.last_run_time + ' (' + (s.last_run_result || '') + ')';
+                }
+                if (s.last_run_result === 'success') {
+                    line += ' | 本次验证 ' + s.last_verified + ' / 失败 ' + s.last_failed +
+                        ' / 剩余 ' + s.last_remaining;
+                }
+                schedEl.textContent = line;
+            } else {
+                schedEl.textContent = '';
+            }
+        }
     } catch (e) {
         el.textContent = 'listing_info 状态: 加载失败 (' + e.message + ')';
+    }
+}
+
+// Listing-verify scheduler toggle
+async function loadListingVerifyToggle() {
+    try {
+        const resp = await fetch('/api/settings/listing-verify');
+        const data = await resp.json();
+        document.getElementById('listingVerifyToggle').checked = data.enabled;
+    } catch (e) {
+        console.error('Failed to load listing-verify status', e);
+    }
+}
+async function toggleListingVerify(el) {
+    try {
+        const resp = await fetch('/api/settings/listing-verify', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: el.checked})
+        });
+        const data = await resp.json();
+        showMessage('listingVerifyMessage', data.message, data.success);
+    } catch (e) {
+        showMessage('listingVerifyMessage', '操作失败: ' + e.message, false);
+        el.checked = !el.checked;
+    }
+}
+async function triggerListingVerify(includeFailed) {
+    const apiKey = (function () { try { return localStorage.getItem('tradingApiKey') || ''; } catch (e) { return ''; } })();
+    const url = '/api/audit/listing-info/verify' + (includeFailed ? '?include_failed=1' : '');
+    try {
+        const resp = await fetch(url, {method: 'POST', headers: apiKey ? {'X-API-Key': apiKey} : {}});
+        const data = await resp.json();
+        showMessage('listingVerifyMessage', data.message || (data.detail || '已触发'), data.success !== false);
+        setTimeout(loadListingInfoStatus, 1500);
+    } catch (e) {
+        showMessage('listingVerifyMessage', '触发失败: ' + e.message, false);
     }
 }
 
@@ -598,6 +666,7 @@ async function loadListingInfoStatus() {
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadListingInfoStatus();
+loadListingVerifyToggle();
 loadMlKeyStatus();
 loadTradingKeyStatus();
 loadFcStatus();

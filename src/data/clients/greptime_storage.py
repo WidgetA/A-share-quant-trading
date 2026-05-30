@@ -1279,6 +1279,18 @@ class GreptimeBacktestStorage:
         )
         return {r["stock_code"] for r in rows}
 
+    async def get_failed_verified_codes(self) -> set[str]:
+        """Codes whose listing_info row is a verified=false placeholder.
+
+        Written by the auto-verify job when kimi couldn't confirm a
+        list_date. Used by the manual ``include_failed=1`` re-verify path
+        to retry these without re-scanning the whole snapshot.
+        """
+        rows = await self.db.fetch(
+            "SELECT stock_code FROM stock_listing_info WHERE verified = false"
+        )
+        return {r["stock_code"] for r in rows}
+
     # ==================== Audits ====================
 
     async def audit_daily_gaps(self) -> list[tuple[date, int, int]]:

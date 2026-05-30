@@ -90,10 +90,20 @@ Rules:
 3. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
 4. **Live prev_close is always fetched live from Tushare `daily`** — never read from cache. Stale cache caused silent limit-up filter bypass on 2026-05-11 (002975 incident — see `MEMORY.md`)
 5. **⚠️ Live 37d history 当前是临时方案** —— cache (stock_snapshot + stock_listing_info + 自动验证) 没完全跑通前,live 扫描走实时 Tushare `daily` 拉 37 次以解耦 cache 风险。等以下条件满足后**回退到读 cache**:
-   - `stock_snapshot` 三源并集稳定 (B∪D∪S 每天可靠入库)
-   - `stock_listing_info` 服务端自动验证流程上线 (路径 B, kimi-cli 自动跑覆盖未验证代码)
-   - 至少跑过一周连续无人工干预的 daily audit, gaps==0
+   - `stock_snapshot` 三源并集稳定 (B∪D∪S 每天可靠入库) ✅
+   - `stock_listing_info` 服务端自动验证流程上线 (路径 B, kimi-cli 自动跑覆盖未验证代码) ✅ `ListingVerifyScheduler` (每日 4am, 见 §12)
+   - 至少跑过一周连续无人工干预的 daily audit, gaps==0 ← **剩余唯一门槛**
    切回 cache 时:  `_fetch_history_live` 删除, run_ml_live 改回 `storage.get_multi_day_history`
+
+## 12. Listing-Info Auto-Verification (路径 B)
+
+**目的**: 把 `stock_snapshot` 里还没验证的代码自动喂给容器内 kimi-cli 查真实上市日,写回 `stock_listing_info`,让 `audit_daily_gaps` 能算出干净的 effective universe。
+
+- **Scheduler**: `ListingVerifyScheduler` (`src/data/services/listing_verify_scheduler.py`),每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。
+- **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,强制 SearchWeb 实证,解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
+- **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
+- **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥 (1.58G 小机器)、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、并发保守 (默认 3)、`upsert_listing_info` 小批 ≤200 行。
+- **手动触发**: `POST /api/audit/listing-info/verify` (X-API-Key);状态见 `GET /api/audit/listing-info/status` + 设置页卡片。
 
 ## 9. Volume Unit Convention (CRITICAL)
 

@@ -600,6 +600,16 @@ def create_app(
         app.state.pre_market_report_scheduler_task = asyncio.create_task(pre_market_scheduler.run())
         logger.info("Pre-market report scheduler started (8am daily)")
 
+        # Auto-start listing-info auto-verify scheduler (4am daily, path B)
+        from src.data.services.listing_verify_scheduler import ListingVerifyScheduler
+
+        listing_verify_scheduler = ListingVerifyScheduler(app.state)
+        app.state.listing_verify_scheduler = listing_verify_scheduler
+        app.state.listing_verify_scheduler_task = asyncio.create_task(
+            listing_verify_scheduler.run()
+        )
+        logger.info("Listing-info auto-verify scheduler started (4am daily)")
+
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
             "running": False,
@@ -647,6 +657,12 @@ def create_app(
         if pre_market_task and not pre_market_task.done():
             pre_market_task.cancel()
             logger.info("Pre-market report scheduler stopped")
+
+        # Stop listing-info auto-verify scheduler
+        listing_verify_task = getattr(app.state, "listing_verify_scheduler_task", None)
+        if listing_verify_task and not listing_verify_task.done():
+            listing_verify_task.cancel()
+            logger.info("Listing-info auto-verify scheduler stopped")
 
         # Stop momentum monitor
         monitor_state = getattr(app.state, "momentum_monitor_state", None)

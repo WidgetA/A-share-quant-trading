@@ -785,6 +785,46 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 
 ---
 
+### [DAT-004] Listing-Info Auto-Verification (路径 B)
+
+**Status**: Implemented (2026-05-30)
+
+**Description**: 服务端后台 job,自动把 `stock_snapshot` 里尚未验证的代码喂给容器内 kimi-cli 查真实上市日 (IPO 首日),写回 `stock_listing_info`。`audit_daily_gaps` 用 `effective_universe = stock_snapshot − (list_date 未到 / delist_date 已过 的代码)` 算干净缺口;没有这张表,审计只能打 coverage warning。这是 CLAUDE.md §8#5 "live 扫描回退到读 cache" 三个前置条件里的第二条。
+
+**GreptimeDB Tables** (补 DAT-002 未列的两张):
+
+| Table | Content | Key |
+|-------|---------|-----|
+| `stock_snapshot` | 每日 B∪D∪S 三源并集 (bak_basic ∪ daily ∪ suspend_d) | `(ts, stock_code)` |
+| `stock_listing_info` | 每代码 list_date / delist_date / verified / source | `stock_code` |
+
+**验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,prompt 强制 SearchWeb 实证;解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
+
+**Scheduling**: `ListingVerifyScheduler` 每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。守卫:enable 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥、单次 `MAX_CODES_PER_RUN`(默认 500)上限、并发保守(默认 3)、`upsert_listing_info` 小批 ≤200 行。
+
+**失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
+
+**Endpoints**:
+- `POST /api/audit/listing-info/verify` (X-API-Key) — 后台触发一次验证 (支持 `?include_failed=1`)
+- `GET /api/audit/listing-info/status` — 覆盖率 + scheduler 状态 (设置页卡片消费)
+- `POST /api/audit/kimi-credentials/upload` (X-API-Key) — 由 `scripts/kimi_login_and_upload.ps1` 上传 kimi OAuth 凭证 (容器内 kimi-cli 无浏览器,靠此刷新)
+
+**Files**:
+- `src/data/services/kimi_listing_verifier.py` - 共享 kimi 验证 (verify_one_code / kimi_available)
+- `src/data/services/listing_verify_scheduler.py` - 4am 自动验证 scheduler
+- `src/web/audit_routes.py` - 触发 / 状态 / 凭证端点
+- `src/data/clients/greptime_storage.py` - upsert_listing_info / get_unverified_codes_in_snapshot / get_failed_verified_codes / get_effective_universe_for_date
+
+**Checklist**:
+- [x] 共享 kimi 验证模块 (脚本 + scheduler 复用)
+- [x] ListingVerifyScheduler (4am + startup,enable 开关,与 cache fill 互斥)
+- [x] 单次上限截断 (不静默,log + 飞书)
+- [x] 失败写占位行 + 飞书 failed 清单
+- [x] 手动触发端点 + 状态端点 + 设置页卡片
+- [x] kimi 输出解析 + verify_unverified 流程单测
+
+---
+
 ---
 
 ## Infrastructure

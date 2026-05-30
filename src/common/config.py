@@ -525,6 +525,34 @@ def set_cache_scheduler_enabled(enabled: bool) -> None:
     logger.info(f"Cache scheduler {'enabled' if enabled else 'disabled'} via web UI")
 
 
+# --- Listing-Info Auto-Verify Toggle (路径 B) ---
+
+_listing_verify_enabled_override: bool | None = None
+LISTING_VERIFY_FILE = PROJECT_ROOT / "data" / "listing_verify_enabled.txt"
+
+
+def get_listing_verify_enabled() -> bool:
+    """Return whether the listing-info auto-verify scheduler is enabled. Default: True."""
+    global _listing_verify_enabled_override
+    if _listing_verify_enabled_override is not None:
+        return _listing_verify_enabled_override
+    if LISTING_VERIFY_FILE.exists():
+        val = LISTING_VERIFY_FILE.read_text(encoding="utf-8").strip().lower()
+        if val in ("false", "0", "off", "no"):
+            return False
+        return True
+    return True
+
+
+def set_listing_verify_enabled(enabled: bool) -> None:
+    """Set listing-info auto-verify enabled state and persist to disk."""
+    global _listing_verify_enabled_override
+    _listing_verify_enabled_override = enabled
+    LISTING_VERIFY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LISTING_VERIFY_FILE.write_text(str(enabled).lower(), encoding="utf-8")
+    logger.info(f"Listing-info auto-verify {'enabled' if enabled else 'disabled'} via web UI")
+
+
 # --- Daily Scan Toggle ---
 
 _daily_scan_enabled_override: bool | None = None

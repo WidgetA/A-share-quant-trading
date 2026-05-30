@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -124,7 +125,7 @@ def create_audit_router() -> APIRouter:
 
     @router.get("/listing-info/status")
     async def listing_info_status(request: Request) -> JSONResponse:
-        """Quick read of how many listing_info entries are stored."""
+        """Coverage stats + path-B scheduler status for the settings card."""
         storage = getattr(request.app.state, "storage", None)
         if storage is None or not getattr(storage, "is_ready", False):
             return JSONResponse({"ready": False})
@@ -135,13 +136,37 @@ def create_audit_router() -> APIRouter:
             return JSONResponse({"ready": False, "error": str(e)})
 
         verified = sum(1 for v in info.values() if v.get("verified"))
+        payload: dict[str, Any] = {
+            "ready": True,
+            "total_codes": len(info),
+            "verified_codes": verified,
+            "unverified_codes": len(info) - verified,
+        }
+        scheduler = getattr(request.app.state, "listing_verify_scheduler", None)
+        if scheduler is not None:
+            payload["scheduler"] = scheduler.get_status()
+        return JSONResponse(payload)
+
+    @router.post(
+        "/listing-info/verify",
+        dependencies=[Depends(verify_trading_api_key)],
+    )
+    async def trigger_listing_verify(request: Request) -> JSONResponse:
+        """Trigger an immediate path-B verify run in the background.
+
+        Does NOT receive offline verification results — verification is owned
+        by the server-side kimi-cli; this only kicks the scheduler. Pass
+        ``?include_failed=1`` to also re-verify existing verified=false rows.
+        """
+        scheduler = getattr(request.app.state, "listing_verify_scheduler", None)
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="验证调度器未就绪")
+        if scheduler.in_progress:
+            return JSONResponse({"success": False, "message": "验证正在进行中，请稍后"})
+        include_failed = request.query_params.get("include_failed") in ("1", "true", "yes")
+        asyncio.create_task(scheduler.trigger_manual(include_failed=include_failed))
         return JSONResponse(
-            {
-                "ready": True,
-                "total_codes": len(info),
-                "verified_codes": verified,
-                "unverified_codes": len(info) - verified,
-            }
+            {"success": True, "message": "已触发后台验证", "include_failed": include_failed}
         )
 
     return router
