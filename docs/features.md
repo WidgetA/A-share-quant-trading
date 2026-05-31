@@ -830,6 +830,9 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 
 **stock_snapshot 历史回填**: `stock_snapshot` (索引基表) 是 2026-05-12 新增,历史几乎为空 → 索引在历史上不存在。`POST /api/audit/snapshot-backfill?start=2023-01-01&end=...` 把它回填到历史:只跑 snapshot (B∪D∪S,不碰分钟线)、resume-safe (跳已存在日期)、撞 Tushare 限频自动 sleep 续跑、后台执行起止发飞书。复用 `CachePipeline._sync_stock_snapshot`。与缓存补全互斥 (共享 `daily_source`/`metadata_source` httpx client,不能并发)。
 
+**数据缺口诊断报告**: `POST /api/audit/diagnose-gaps` (+ `scripts/diagnose_gaps.py`) 把每日补全报的三类问题(股票数偏多 / 日线缺 / 分钟缺)逐条核查,产出"问题→根因→真实应该是多少→怎么修"的飞书报告。把每个缺的 (天,股) 用 `gap_classifier` 归成 **A 名单错**(未上市/已退市还挂在名单 → AI 上市日剔除)、**B 真缺**(在市未停牌却无数据 → 精准重下)、**C 本就无完整数据**(停牌补占位 / 上市首日半天交易记为已知正常)、**待 AI 核对**。分钟缺口天数多,详细分类抽样最近 N 天(透明标注,不静默截断)。
+- 配套修复 `validate_integrity` 的"股票数"检查:从"全库历史累计 > 5500 报警"(误报,累计含退市股属正常)改为"**单日**在册数 > 5500 才报警";累计数仅作说明。
+
 ---
 
 ---

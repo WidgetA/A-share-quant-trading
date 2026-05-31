@@ -650,6 +650,27 @@ class GreptimeBacktestStorage:
         row = await self.db.fetchrow("SELECT COUNT(DISTINCT stock_code) as cnt FROM backtest_daily")
         return int(row["cnt"]) if row else 0
 
+    async def get_daily_counts_per_day(self) -> dict[date, int]:
+        """Per-trading-day row count in backtest_daily (date -> stock count).
+
+        Used by the gap-diagnosis report to show the real per-day universe size
+        (the meaningful number) vs the all-time distinct count (which legitimately
+        grows with delistings and is NOT a useful upper-bound).
+        """
+        rows = await self.db.fetch("SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts")
+        return {ts_to_date(r["ts"]): int(r["cnt"]) for r in rows}
+
+    async def get_minute_bar_counts(self, d: date) -> dict[str, int]:
+        """Per-stock minute-bar count for one day (code -> bars). Lets the
+        gap-diagnosis report tell 'no bars at all' from 'partial day'."""
+        day_start = date_to_epoch_ms(d)
+        day_end = day_start + 86_400_000
+        rows = await self.db.fetch(
+            f"SELECT stock_code, COUNT(*) as cnt FROM backtest_minute "
+            f"WHERE ts >= {day_start} AND ts < {day_end} GROUP BY stock_code"
+        )
+        return {r["stock_code"]: int(r["cnt"]) for r in rows}
+
     async def get_minute_stock_count(self) -> int:
         """Count distinct stock codes with minute data on the most recent day.
 
@@ -1547,16 +1568,27 @@ class GreptimeBacktestStorage:
         total_stocks = await self.get_daily_stock_count()
         if total_stocks < _MIN_EXPECTED_STOCKS:
             warnings.append(f"日线股票数偏少: {total_stocks} (预期 >={_MIN_EXPECTED_STOCKS})")
-        elif total_stocks > _MAX_EXPECTED_STOCKS:
-            warnings.append(f"日线股票数异常多: {total_stocks} (预期 <={_MAX_EXPECTED_STOCKS})")
+        # NOTE: do NOT flag a large all-time distinct count. Over multiple years
+        # the cumulative number of codes legitimately exceeds _MAX_EXPECTED_STOCKS
+        # because of delistings + new IPOs — it is NOT an anomaly. The meaningful
+        # upper-bound is per-day (checked below).
 
-        # Per-day stock count consistency: anomaly = day count well below the median
+        # Per-day stock count consistency: too-FEW = below half the median (real
+        # gap); too-MANY = a single day exceeding the per-day cap (the real
+        # anomaly, vs the harmless all-time cumulative count).
         daily_rows = await self.db.fetch(
             "SELECT ts, COUNT(*) as cnt FROM backtest_daily GROUP BY ts ORDER BY cnt"
         )
         if daily_rows:
             counts = [int(r["cnt"]) for r in daily_rows]
             median_count = counts[len(counts) // 2]
+            max_count = counts[-1]
+            if max_count > _MAX_EXPECTED_STOCKS:
+                busiest = max(daily_rows, key=lambda r: int(r["cnt"]))
+                warnings.append(
+                    f"单日股票数异常多: {max_count} 只 @ {ts_to_date(busiest['ts'])} "
+                    f"(预期每日 <={_MAX_EXPECTED_STOCKS};全库累计 {total_stocks} 含退市股属正常)"
+                )
             threshold = max(1, int(median_count * 0.5))
             anomaly_days: list[str] = []
             for r in daily_rows:
