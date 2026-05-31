@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.data.services import listing_verify_scheduler as mod
+from src.data.services.kimi_listing_verifier import KimiToolError
 from src.data.services.listing_verify_scheduler import ListingVerifyScheduler
 
 
@@ -39,8 +40,8 @@ def _scheduler(storage):
 
 
 def _kimi_stub(found: dict[str, str]):
-    """Return a fake run_kimi_for_code that resolves `found[code]` → a real
-    list_date, anything else → None (parse failure)."""
+    """Fake run_kimi_for_code: `found[code]` → a real date; anything else →
+    a genuine 'searched but not found' answer (NOT a tool error)."""
 
     async def _run(code, timeout_sec=180, raw_dir=None):
         if code in found:
@@ -50,7 +51,16 @@ def _kimi_stub(found: dict[str, str]):
                 "list_date": found[code],
                 "source": "http://x",
             }
-        return None
+        return {"code": code, "name": None, "list_date": None, "source": None, "error": "not found"}
+
+    return _run
+
+
+def _kimi_tool_error_stub(reason="kimi 未授权/登录或凭证问题"):
+    """Fake run_kimi_for_code that always raises KimiToolError (kimi broken)."""
+
+    async def _run(code, timeout_sec=180, raw_dir=None):
+        raise KimiToolError(f"{reason} — code={code}")
 
     return _run
 
@@ -123,3 +133,39 @@ async def test_storage_not_ready_returns_error(monkeypatch):
     sched = _scheduler(storage)
     result = await sched.verify_unverified()
     assert result["error"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_tool_error_aborts_without_placeholders(monkeypatch):
+    """When kimi itself fails (e.g. no credentials), DON'T mask it as '查不到':
+    abort, write NO placeholders, return an error, and alert."""
+    codes = [f"{1 + i:06d}" for i in range(20)]
+    storage = _FakeStorage(codes)
+    sched = _scheduler(storage)
+    monkeypatch.setattr(mod, "run_kimi_for_code", _kimi_tool_error_stub())
+    with patch.object(mod, "_notify_feishu", new=AsyncMock()) as feishu:
+        result = await sched.verify_unverified()
+
+    assert result["verified"] == 0
+    assert result["failed"] == 0  # NOT counted as 查不到
+    assert result["tool_errors"] >= mod._TOOL_ERROR_ABORT
+    assert "kimi" in result["error"] and "凭证" in result["error"]
+    assert storage.written == []  # no bogus placeholders written
+    # checked stops early at the abort threshold, not the full batch
+    assert result["checked"] <= mod._TOOL_ERROR_ABORT
+    msg = feishu.await_args.args[0]
+    assert "已中止" in msg and "未写任何占位" in msg
+
+
+@pytest.mark.asyncio
+async def test_genuine_not_found_writes_placeholder(monkeypatch):
+    """kimi searched and genuinely didn't find → verified=false placeholder."""
+    storage = _FakeStorage(["999999"])
+    sched = _scheduler(storage)
+    monkeypatch.setattr(mod, "run_kimi_for_code", _kimi_stub({}))  # all not-found
+    with patch.object(mod, "_notify_feishu", new=AsyncMock()):
+        result = await sched.verify_unverified()
+    assert result["verified"] == 0
+    assert result["failed"] == 1  # genuine not-found
+    assert result["tool_errors"] == 0
+    assert storage.written[0]["verified"] is False

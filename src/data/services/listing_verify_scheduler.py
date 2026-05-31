@@ -18,7 +18,11 @@ import logging
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from src.data.services.kimi_listing_verifier import kimi_available, run_kimi_for_code
+from src.data.services.kimi_listing_verifier import (
+    KimiToolError,
+    kimi_available,
+    run_kimi_for_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,10 @@ CONCURRENCY = 1
 _UPSERT_BATCH = 200  # GreptimeDB drops rows silently above ~200 per INSERT
 _FAILED_SOURCE = "kimi-not-found"
 _FEISHU_FAILED_DISPLAY = 50  # cap failed-code list in the Feishu message
+# If kimi itself fails (auth/tool error) this many times in a row with zero
+# successes, abort the whole run and alert — don't grind through hundreds of
+# stocks masking a broken/unauthenticated kimi as "查不到".
+_TOOL_ERROR_ABORT = 5
 
 
 async def _notify_feishu(message: str) -> None:
@@ -297,21 +305,57 @@ class ListingVerifyScheduler:
         else:
             await _log(f"待验证 {len(batch)} 只代码 (并发 {CONCURRENCY})")
 
-        sem = asyncio.Semaphore(CONCURRENCY)
-        verified_entries: list[dict] = []
-        failed_codes: list[str] = []
-        done = 0
+        # Serial (CONCURRENCY=1 on the small box). Three outcomes per code:
+        #   - real date          → verified=True row
+        #   - kimi 'not found'   → verified=False placeholder (genuine, kimi searched)
+        #   - KimiToolError      → tool/auth failure: DO NOT write a placeholder,
+        #                          it's not "查不到". Abort early if it keeps failing.
+        verified_entries: list[dict] = []  # rows to upsert (true + genuine not-found)
+        not_found_codes: list[str] = []  # kimi searched, genuinely not found
+        tool_errors: list[tuple[str, str]] = []  # (code, reason) — kimi itself failed
+        verified_n = 0
 
-        async def _worker(code: str) -> None:
-            nonlocal done
-            async with sem:
-                result = None
-                try:
-                    result = await run_kimi_for_code(code)
-                except Exception as e:
-                    logger.warning("kimi verify %s raised: %s", code, e)
-            ld = result.get("list_date") if result else None
-            if result is not None and isinstance(ld, str) and len(ld) == 10 and ld[4] == "-":
+        def _abort(reason: str, checked: int) -> dict:
+            self.last_verified = verified_n
+            self.last_failed = len(not_found_codes)
+            self.last_remaining = remaining
+            return {
+                "checked": checked,
+                "verified": verified_n,
+                "failed": len(not_found_codes),
+                "tool_errors": len(tool_errors),
+                "remaining": remaining,
+                "error": reason,
+            }
+
+        for idx, code in enumerate(batch, 1):
+            try:
+                result = await run_kimi_for_code(code)
+            except KimiToolError as e:
+                tool_errors.append((code, str(e)))
+                # kimi is clearly broken/unauthenticated → stop, don't write
+                # garbage placeholders for hundreds of stocks.
+                broken = len(tool_errors) >= _TOOL_ERROR_ABORT
+                if broken and verified_n == 0 and not not_found_codes:
+                    reason = tool_errors[0][1]
+                    await _log(f"kimi 连续 {len(tool_errors)} 次工具错误且零成功 → 中止: {reason}")
+                    await _notify_feishu(
+                        "[上市日验证·路径B] 已中止 — kimi 工具/凭证失败\n"
+                        f"前 {len(tool_errors)} 只全部是 kimi 工具错误、0 成功,"
+                        "未写任何占位(不是'查不到')。\n"
+                        f"原因: {reason}\n"
+                        "请检查容器内 kimi 是否已登录 / 凭证是否有效。"
+                    )
+                    return _abort(f"kimi 工具/凭证失败: {reason}", idx)
+                continue
+            except Exception as e:  # noqa: BLE001 — unexpected; treat as tool error
+                logger.warning("kimi verify %s unexpected error: %s", code, e)
+                tool_errors.append((code, f"未预期错误: {e}"))
+                continue
+
+            ld = result.get("list_date")
+            if isinstance(ld, str) and len(ld) == 10 and ld[4] == "-":
+                verified_n += 1
                 verified_entries.append(
                     {
                         "code": code,
@@ -323,22 +367,19 @@ class ListingVerifyScheduler:
                     }
                 )
             else:
-                failed_codes.append(code)
+                not_found_codes.append(code)
                 verified_entries.append(
                     {
                         "code": code,
-                        "name": result.get("name") if result else None,
+                        "name": result.get("name"),
                         "list_date": None,
                         "delist_date": None,
                         "verified": False,
                         "source": _FAILED_SOURCE,
                     }
                 )
-            done += 1
-            if done % 50 == 0:
-                await _log(f"进度 {done}/{len(batch)}")
-
-        await asyncio.gather(*[_worker(c) for c in batch])
+            if idx % 50 == 0:
+                await _log(f"进度 {idx}/{len(batch)}")
 
         # Write back in small batches (GreptimeDB silently drops big INSERTs).
         written = 0
@@ -346,30 +387,34 @@ class ListingVerifyScheduler:
             chunk = verified_entries[i : i + _UPSERT_BATCH]
             written += await storage.upsert_listing_info(chunk)
 
-        verified_n = len(verified_entries) - len(failed_codes)
         await _log(
-            f"完成: 验证 {verified_n} / 失败 {len(failed_codes)} / "
-            f"写入 {written} / 剩余 {remaining}"
+            f"完成: 验证 {verified_n} / 查不到 {len(not_found_codes)} / "
+            f"kimi工具错误 {len(tool_errors)} / 写入 {written} / 剩余 {remaining}"
         )
 
-        # Feishu summary (per user: notify with the failed-code list).
         summary = (
-            f"[上市日验证·路径B] 本次完成\n"
-            f"验证成功: {verified_n}\n失败(写占位): {len(failed_codes)}\n剩余待验证: {remaining}"
+            "[上市日验证·路径B] 本次完成\n"
+            f"验证成功: {verified_n}\n"
+            f"查不到(已搜过,写占位): {len(not_found_codes)}\n"
+            f"kimi工具错误(未写,需排查): {len(tool_errors)}\n"
+            f"剩余待验证: {remaining}"
         )
-        if failed_codes:
-            shown = failed_codes[:_FEISHU_FAILED_DISPLAY]
-            extra = len(failed_codes) - len(shown)
+        if not_found_codes:
+            shown = not_found_codes[:_FEISHU_FAILED_DISPLAY]
+            extra = len(not_found_codes) - len(shown)
             more = f" …(+{extra})" if extra > 0 else ""
             summary += "\n查不到上市日的代码: " + ", ".join(shown) + more
+        if tool_errors:
+            summary += f"\n⚠ kimi 工具错误样本: {tool_errors[0][1]}"
         await _notify_feishu(summary)
 
         self.last_verified = verified_n
-        self.last_failed = len(failed_codes)
+        self.last_failed = len(not_found_codes)
         self.last_remaining = remaining
         return {
             "checked": len(batch),
             "verified": verified_n,
-            "failed": len(failed_codes),
+            "failed": len(not_found_codes),
+            "tool_errors": len(tool_errors),
             "remaining": remaining,
         }

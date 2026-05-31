@@ -31,6 +31,33 @@ KIMI_PROMPT_TMPL = (
 
 _REAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Markers that mean kimi-cli itself failed (not authenticated / not working),
+# as opposed to "kimi searched and found nothing". If these appear we must
+# raise loudly, never silently treat the stock as "查不到".
+_TOOL_ERROR_MARKERS = (
+    "login",
+    "log in",
+    "unauthorized",
+    "未登录",
+    "登录",
+    "凭证",
+    "credential",
+    "access token",
+    "refresh token",
+    "401",
+    "403",
+    "authenticat",
+    "api key",
+    "quota",
+    "rate limit",
+)
+
+
+class KimiToolError(RuntimeError):
+    """kimi-cli itself failed (timeout / nonzero exit / no auth / unparseable
+    output) — distinct from a valid 'searched but not found' answer. Callers
+    MUST surface this as an error, never write a 'not found' placeholder."""
+
 
 def parse_kimi_output(text: str, code: str) -> dict | None:
     """Extract the answer JSON for ``code`` from kimi --print raw stdout.
@@ -88,18 +115,18 @@ async def run_kimi_for_code(
     code: str,
     timeout_sec: int = 180,
     raw_dir: Path | None = None,
-) -> dict | None:
+) -> dict:
     """Invoke kimi-cli print mode for one code, parse the JSON it returns.
 
-    Args:
-        code: 6-digit A-share code.
-        timeout_sec: kill the subprocess after this many seconds.
-        raw_dir: if given, save raw stdout to ``raw_dir/<code>.txt`` for
-            offline diagnosis on parse failure.
+    Returns the parsed dict on a VALID answer — either a found date
+    (``{code, name, list_date, source}``) or kimi's explicit "searched but
+    not found" (``{code, ..., error: "not found"}``).
 
-    Returns the parsed dict (``{code, name, list_date, source}`` or a
-    ``{code, ..., error: "not found"}`` shape), or None on timeout / parse
-    failure (caller decides whether to retry or write a placeholder).
+    Raises ``KimiToolError`` when kimi-cli itself failed to produce a usable
+    answer (timeout / nonzero exit / empty output / auth-error markers /
+    unparseable). This is NOT "查不到" — it means the tool is broken/
+    unauthenticated, and the caller must surface it loudly, never write a
+    "not found" placeholder.
     """
     prompt = KIMI_PROMPT_TMPL.format(code=code)
     # Force UTF-8 stdio so kimi can print Chinese / replacement chars on
@@ -124,7 +151,7 @@ async def run_kimi_for_code(
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
-        return None
+        raise KimiToolError(f"kimi 超时 (>{timeout_sec}s) — code={code}") from None
 
     text = out_bytes.decode("utf-8", errors="replace")
 
@@ -132,4 +159,23 @@ async def run_kimi_for_code(
         raw_dir.mkdir(parents=True, exist_ok=True)
         (raw_dir / f"{code}.txt").write_text(text, encoding="utf-8")
 
-    return parse_kimi_output(text, code)
+    parsed = parse_kimi_output(text, code)
+    if parsed is not None:
+        # kimi gave a usable answer (found date OR explicit "not found").
+        return parsed
+
+    # No parseable answer → the tool itself failed. Distinguish auth/tool
+    # failure (the common case when credentials are missing) so the operator
+    # gets a real reason instead of a fake "查不到".
+    rc = proc.returncode
+    snippet = " ".join(text.split())[:200]
+    low = text.lower()
+    if any(mark in low for mark in _TOOL_ERROR_MARKERS):
+        reason = "kimi 未授权/登录或凭证问题"
+    elif not text.strip():
+        reason = "kimi 无任何输出"
+    elif rc not in (0, None):
+        reason = f"kimi 退出码 {rc}"
+    else:
+        reason = "kimi 输出无法解析(非有效答案)"
+    raise KimiToolError(f"{reason} — code={code}; 输出片段: {snippet!r}")
