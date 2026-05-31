@@ -29,12 +29,18 @@ from src.common.config import get_tushare_token  # noqa: E402
 from src.data.clients.greptime_storage import create_storage_from_config  # noqa: E402
 from src.data.clients.tushare_realtime import (  # noqa: E402
     TushareRealtimeClient,
+    TushareRealtimeError,
     get_tushare_trade_calendar,
 )
 
 REPORT_FILE = Path("data/audit/index_compare_report.json")
 _SAMPLE = 20  # how many delta codes to surface per direction
-_CONCURRENCY = 4  # conservative — bak_basic is one API call per day
+_CONCURRENCY = 4  # bak_basic is one API call per day
+# Tushare's per-minute rate limit comes back as an API-level error (code!=0),
+# which TushareRealtimeClient does NOT retry. A full-history run (~820 days)
+# will hit it, so we retry per-day here with backoff instead of dying.
+_RATE_LIMIT_RETRIES = 6
+_RATE_LIMIT_SLEEP = 15.0  # seconds
 
 
 def _reason_for_code(code: str, day: date, listing_info: dict) -> str:
@@ -69,9 +75,27 @@ async def compare_index_range(
     listing_info = await storage.get_listing_info_all()
     sem = asyncio.Semaphore(concurrency)
 
+    async def _fetch_bak_with_retry(day: date) -> set[str]:
+        """bak_basic with rate-limit retry (client itself doesn't retry code!=0)."""
+        yyyymmdd = day.strftime("%Y%m%d")
+        for attempt in range(1, _RATE_LIMIT_RETRIES + 1):
+            try:
+                return set(await client.fetch_bak_basic(yyyymmdd))
+            except TushareRealtimeError as e:
+                if attempt >= _RATE_LIMIT_RETRIES:
+                    raise
+                print(
+                    f"⚠ bak_basic {yyyymmdd} 限频/失败 (第{attempt}次): {e}; "
+                    f"{_RATE_LIMIT_SLEEP:.0f}s 后重试",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        raise TushareRealtimeError("unreachable")
+
     async def _one(day: date) -> dict:
         async with sem:
-            old = set(await client.fetch_bak_basic(day.strftime("%Y%m%d")))
+            old = await _fetch_bak_with_retry(day)
         new = await storage.get_effective_universe_for_date(day)
         return {
             "date": day.isoformat(),
