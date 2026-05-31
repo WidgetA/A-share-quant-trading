@@ -152,11 +152,20 @@ def format_feishu_summary(result: dict) -> str:
         return "[索引对照] 无可对照的交易日"
     rng = result.get("range", {})
     agg = result["agg"]
+    per_day = result.get("per_day", [])
+    old_sizes = [r["old_n"] for r in per_day] or [0]
+    new_sizes = [r["new_n"] for r in per_day] or [0]
+
+    def _span(xs: list[int]) -> str:
+        return str(xs[0]) if min(xs) == max(xs) else f"{min(xs)}~{max(xs)}"
+
     lines = [
         "[新旧索引对照] 完成",
         f"范围: {rng.get('start')} ~ {rng.get('end')} ({result['days']} 天)",
-        f"旧索引(bak_basic) 独有: distinct {agg['distinct_only_old']} / 累计 {agg['total_only_old']}",
-        f"新索引(三合一-kimi) 独有: distinct {agg['distinct_only_new']} / 累计 {agg['total_only_new']}",
+        # Denominator first, so the delta below has context (差 N out of ~M).
+        f"每日规模: 旧 bak_basic {_span(old_sizes)} 只 / 新 三合一 {_span(new_sizes)} 只",
+        f"旧索引独有(新索引漏了): distinct {agg['distinct_only_old']} / 累计 {agg['total_only_old']}",
+        f"新索引独有(bak_basic 没收): distinct {agg['distinct_only_new']} / 累计 {agg['total_only_new']}",
     ]
 
     def _fmt(samples: list) -> str:
