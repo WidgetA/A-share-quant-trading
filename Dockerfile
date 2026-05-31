@@ -1,5 +1,6 @@
 # Multi-stage build for smaller image
-FROM python:3.11-slim AS builder
+# Python 3.13: required by kimi-cli (path B server-side verify needs it on PATH).
+FROM python:3.13-slim AS builder
 
 # Build arguments for version tracking
 ARG GIT_COMMIT=unknown
@@ -18,8 +19,14 @@ COPY src/ ./src/
 # Install dependencies
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
+# Build-time gate: kimi-cli MUST be installed + runnable in this (slim) env.
+# Path B's server-side verification depends on the `kimi` binary; if the
+# install is broken or a system lib is missing, fail the BUILD here so a
+# dead-on-arrival image never ships. (CI's docker build runs this.)
+RUN /app/.venv/bin/kimi --version
+
 # Runtime stage
-FROM python:3.11-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 # Inherit build arguments for version tracking
 ARG GIT_COMMIT=unknown

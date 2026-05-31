@@ -100,7 +100,9 @@ Rules:
 **目的**: 把 `stock_snapshot` 里还没验证的代码自动喂给容器内 kimi-cli 查真实上市日,写回 `stock_listing_info`,让 `audit_daily_gaps` 能算出干净的 effective universe。
 
 - **Scheduler**: `ListingVerifyScheduler` (`src/data/services/listing_verify_scheduler.py`),每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。
-- **硬门 (CRITICAL)**: app.py 启动时先 `kimi_available()` 探测,**容器里没有 kimi-cli 就根本不启动这个调度器** (不开机、不跑)。但会**在启动时发一条**飞书告警让你知道"path B 没起、因为没 kimi"——区别于之前的 spam:**一次性启动告警** vs 调度器开着每次跑都刷。生产镜像 (`Dockerfile`) 默认不含 kimi-cli → 这台不起 path B,但启动会提醒一次。要让它真跑,必须先把 kimi-cli 装进镜像。**绝不能让一个依赖不在镜像里的调度器常驻线上反复刷告警,但也别闷声关掉不告知。**
+- **kimi-cli 是镜像里的硬依赖 (CRITICAL)**: kimi-cli 要 Python ≥3.13,所以整个 service 迁到 **Python 3.13**(`Dockerfile` 用 `python:3.13-slim`,`requires-python>=3.13`)。kimi-cli 是 `pyproject` 声明依赖 → `uv sync` 装进镜像。**CI 强制**:`tests/unit/data/services/test_kimi_cli_installed.py` 断言 `kimi --version` 能跑,Dockerfile builder 也 `RUN kimi --version`——没装/装坏直接 CI 红、镜像 build 失败,**杜绝部署出 path B 跑不起来的镜像**。
+- **运行期安全网**: app.py 启动仍 `kimi_available()` 探测,万一缺失则不启动调度器 + 发一条启动告警(正常情况 kimi 已在镜像里,这条不该触发)。是否真跑由 `get_listing_verify_enabled()` 开关决定。
+- **教训**: 别上线一个运行依赖不在部署镜像里的常驻调度器;CI 绿 ≠ 线上能跑——所以把"依赖可运行"做成 CI 断言。见 `MEMORY.md`。
 - **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,强制 SearchWeb 实证,解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
 - **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
 - **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥 (1.58G 小机器)、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、并发保守 (默认 3)、`upsert_listing_info` 小批 ≤200 行。

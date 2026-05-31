@@ -3,7 +3,7 @@ name = "a-share-quant-trading"
 version = "0.1.0"
 description = "A quantitative trading system for China A-share market"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "pyyaml>=6.0",
     "httpx>=0.27.0",
@@ -14,6 +14,7 @@ dependencies = [
     "python-multipart>=0.0.22",
     "lightgbm>=4.0",
     "boto3>=1.35.0",
+    "kimi-cli>=1.46.0",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +28,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -37,7 +38,7 @@ select = ["E", "F", "I", "W"]
 "scripts/*.py" = ["E402", "E501"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 # Relaxed mode for gradual type adoption
 strict = false
 ignore_missing_imports = true

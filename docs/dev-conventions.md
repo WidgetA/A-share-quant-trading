@@ -186,7 +186,7 @@ Before starting any development task:
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Language | Python 3.11+ | Ecosystem, quant libraries |
+| Language | Python 3.13+ | Ecosystem, quant libraries (3.13 required by kimi-cli — path B server-side verify) |
 | Package Manager | uv | Fast, reliable, replaces pip/venv/pip-tools |
 | Backtest Cache | GreptimeDB (asyncpg pgwire port 4003) | Time-series optimized, OSS object storage, no in-memory caching |
 | Config Format | YAML | Human-readable, supports hot-reload |
