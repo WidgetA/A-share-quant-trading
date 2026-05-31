@@ -356,10 +356,18 @@ def create_audit_router() -> APIRouter:
         if getattr(request.app.state, "diagnose_gaps_running", False):
             return JSONResponse({"success": False, "message": "诊断正在进行中，请稍后"})
 
-        try:
-            minute_detail_days = int(request.query_params.get("minute_detail_days", "0"))
-        except ValueError:
-            minute_detail_days = 0
+        # Bounded by default so a manual trigger can't blow Tushare's 500/min
+        # limit (suspend_d per daily-gap day + stk_mins per missing minute stock).
+        # Override via query params for a deliberate bigger run.
+        def _qint(name: str, default: int) -> int:
+            try:
+                return int(request.query_params.get(name, str(default)))
+            except ValueError:
+                return default
+
+        daily_detail_days = _qint("daily_detail_days", 30)
+        minute_detail_days = _qint("minute_detail_days", 30)
+        max_minute_source_checks = _qint("max_minute_source_checks", 60)
 
         async def _run() -> None:
             from scripts.diagnose_gaps import _notify_feishu, run_diagnosis_report
@@ -369,7 +377,9 @@ def create_audit_router() -> APIRouter:
                 await run_diagnosis_report(
                     storage,
                     feishu=True,
+                    daily_detail_days=daily_detail_days,
                     minute_detail_days=minute_detail_days,
+                    max_minute_source_checks=max_minute_source_checks,
                 )
             except Exception as e:
                 logger.error("diagnose-gaps 失败: %s", e, exc_info=True)
