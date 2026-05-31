@@ -247,4 +247,99 @@ def create_audit_router() -> APIRouter:
             {"success": True, "message": "已触发后台对照", "start": start, "end": end}
         )
 
+    # ------------------------------------------------------------------
+    # stock_snapshot 历史回填 (POST /api/audit/snapshot-backfill)
+    # 把索引基表 stock_snapshot 回填到历史区间(默认 2023-01-01~昨天)。
+    # 只跑 snapshot(B∪D∪S 三源并集),不碰分钟线;resume-safe(跳已存在日期);
+    # 撞 Tushare 限频自动 sleep 后靠 resume 续跑。后台执行,起止发飞书。
+    # ------------------------------------------------------------------
+
+    @router.post("/snapshot-backfill")
+    async def trigger_snapshot_backfill(request: Request) -> JSONResponse:
+        """Backfill stock_snapshot over a historical range (snapshot-only)."""
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        storage = getattr(request.app.state, "storage", None)
+        pipeline = getattr(request.app.state, "pipeline", None)
+        if storage is None or pipeline is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="storage/pipeline 未就绪")
+        if getattr(request.app.state, "snapshot_backfill_running", False):
+            return JSONResponse({"success": False, "message": "snapshot 回填正在进行中，请稍后"})
+        if getattr(request.app.state, "cache_fill_running", False):
+            return JSONResponse(
+                {"success": False, "message": "缓存补全正在运行，待其结束后再试(避免抢内存)"}
+            )
+
+        qp = request.query_params
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        start = qp.get("start") or "2023-01-01"
+        end = qp.get("end") or (today - timedelta(days=1)).isoformat()
+
+        async def _run() -> None:
+            from scripts.compare_index_old_new import _notify_feishu
+            from src.data.clients.tushare_realtime import get_tushare_trade_calendar
+
+            request.app.state.snapshot_backfill_running = True
+            try:
+                cal = await get_tushare_trade_calendar(start, end)
+                dates = sorted(datetime.strptime(s, "%Y-%m-%d").date() for s in cal)
+                if not dates:
+                    await _notify_feishu("[snapshot 回填] 无交易日,跳过")
+                    return
+
+                async def _missing() -> int:
+                    existing = await storage.get_existing_snapshot_dates()
+                    return sum(1 for d in dates if d not in existing)
+
+                miss0 = await _missing()
+                await _notify_feishu(
+                    f"[snapshot 回填] 开始 {start}~{end}: 目标 {len(dates)} 天, "
+                    f"待回填 {miss0} 天(只跑 snapshot,resume-safe)"
+                )
+
+                # daily_source + metadata_source must be entered (httpx clients);
+                # minute_source is NOT needed for snapshot.
+                stale = 0
+                async with pipeline.daily_source, pipeline.metadata_source:
+                    while True:
+                        prev = await _missing()
+                        if prev == 0:
+                            break
+                        try:
+                            # resume-safe: re-running skips already-synced dates,
+                            # so a rate-limit mid-run just continues next round.
+                            await pipeline._sync_stock_snapshot(dates, None)
+                        except Exception as e:  # noqa: BLE001 — backfill, keep going
+                            logger.warning("snapshot-backfill 中断(resume 续跑): %s", e)
+                            await asyncio.sleep(20)
+                        now_missing = await _missing()
+                        if now_missing >= prev:  # no progress this round
+                            stale += 1
+                            if stale >= 5:
+                                logger.error(
+                                    "snapshot-backfill 连续 5 轮无进展,停止 (还缺 %d 天)",
+                                    now_missing,
+                                )
+                                break
+                            await asyncio.sleep(30)
+                        else:
+                            stale = 0
+
+                done = len(dates) - await _missing()
+                await _notify_feishu(
+                    f"[snapshot 回填] 完成 {start}~{end}: 目标 {len(dates)} 天, "
+                    f"已入库 {done} 天, 仍缺 {len(dates) - done} 天"
+                )
+            except Exception as e:
+                logger.error("snapshot-backfill 失败: %s", e, exc_info=True)
+                await _notify_feishu(f"[snapshot 回填] 异常\n{e}")
+            finally:
+                request.app.state.snapshot_backfill_running = False
+
+        asyncio.create_task(_run())
+        return JSONResponse(
+            {"success": True, "message": "已触发 snapshot 回填", "start": start, "end": end}
+        )
+
     return router

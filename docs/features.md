@@ -828,6 +828,8 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 - 输出每日 `only_in_old` (新索引丢/挡的) 与 `only_in_new` (bak_basic 漏的,如北交所),delta 用 listing_info 标注原因 (未上市/已退市/未验证)。
 - **修复 (补缺 + 清理 `backtest_daily` 里不该存在的行) 为后续步骤**,必须先通过本对照验证、且带人工确认闸 (删除不可逆) 才执行。确认完毕后此脚本 + 接口可删。
 
+**stock_snapshot 历史回填**: `stock_snapshot` (索引基表) 是 2026-05-12 新增,历史几乎为空 → 索引在历史上不存在。`POST /api/audit/snapshot-backfill?start=2023-01-01&end=...` 把它回填到历史:只跑 snapshot (B∪D∪S,不碰分钟线)、resume-safe (跳已存在日期)、撞 Tushare 限频自动 sleep 续跑、后台执行起止发飞书。复用 `CachePipeline._sync_stock_snapshot`。与缓存补全互斥 (共享 `daily_source`/`metadata_source` httpx client,不能并发)。
+
 ---
 
 ---

@@ -193,10 +193,14 @@ class CacheScheduler:
             await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
             return
 
-        # Skip if any download is already running
+        # Skip if any download is already running. Also defer when a snapshot
+        # backfill is in flight — it shares pipeline.daily_source/metadata_source,
+        # and entering those httpx-client contexts twice concurrently corrupts them.
         active = getattr(self._app_state, "active_download", None)
-        if getattr(self._app_state, "cache_fill_running", False) or (
-            active is not None and active.state.value == "running"
+        if (
+            getattr(self._app_state, "cache_fill_running", False)
+            or getattr(self._app_state, "snapshot_backfill_running", False)
+            or (active is not None and active.state.value == "running")
         ):
             logger.info("CacheScheduler: download already in progress, skipping (%s)", trigger)
             self.last_run_time = run_time
