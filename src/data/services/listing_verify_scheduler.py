@@ -26,7 +26,11 @@ BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 SCHEDULE_HOUR = 4  # 4am Beijing time — after the 3am cache fill
 _STARTUP_DELAY_SECONDS = 90  # wait for storage to initialize
 MAX_CODES_PER_RUN = 500  # bound runtime/cost on the 1.58G machine
-CONCURRENCY = 3  # conservative — kimi subprocesses are heavy
+# 1, NOT more: each kimi run is a full LLM-agent subprocess. The prod box has
+# only 1.58G shared with GreptimeDB + trading-service; running several kimi
+# processes concurrently risks OOM (and an OOM→restart→startup-run→OOM loop).
+# Serial is slow but safe — a multi-hour 4am run is fine.
+CONCURRENCY = 1
 _UPSERT_BATCH = 200  # GreptimeDB drops rows silently above ~200 per INSERT
 _FAILED_SOURCE = "kimi-not-found"
 _FEISHU_FAILED_DISPLAY = 50  # cap failed-code list in the Feishu message

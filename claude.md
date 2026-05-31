@@ -105,7 +105,7 @@ Rules:
 - **教训**: 别上线一个运行依赖不在部署镜像里的常驻调度器;CI 绿 ≠ 线上能跑——所以把"依赖可运行"做成 CI 断言。见 `MEMORY.md`。
 - **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,强制 SearchWeb 实证,解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
 - **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
-- **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥 (1.58G 小机器)、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、并发保守 (默认 3)、`upsert_listing_info` 小批 ≤200 行。
+- **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥 (1.58G 小机器)、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、**并发 1**(每个 kimi 是完整 LLM-agent 子进程,1.58G 小机器跑多个会 OOM→重启死循环,串行慢但安全)、`upsert_listing_info` 小批 ≤200 行。
 - **手动触发**: `POST /api/audit/listing-info/verify` (X-API-Key);状态见 `GET /api/audit/listing-info/status` + 设置页卡片。
 
 ## 9. Volume Unit Convention (CRITICAL)
