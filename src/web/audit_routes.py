@@ -169,4 +169,81 @@ def create_audit_router() -> APIRouter:
             {"success": True, "message": "已触发后台验证", "include_failed": include_failed}
         )
 
+    # ------------------------------------------------------------------
+    # TEMPORARY: 新旧索引对照验证 (POST /api/audit/index-compare)
+    # 触发后台任务,把新索引(三合一-kimi)逐日跟旧索引(Tushare bak_basic)对照,
+    # 结果发飞书。用来在「索引驱动修复」上线前确认新索引可信。确认完即可删此段
+    # + scripts/compare_index_old_new.py。
+    # ------------------------------------------------------------------
+
+    @router.post(
+        "/index-compare",
+        dependencies=[Depends(verify_trading_api_key)],
+    )
+    async def trigger_index_compare(request: Request) -> JSONResponse:
+        """Kick a background old-vs-new index comparison; result → Feishu.
+
+        Query params: start / end (YYYY-MM-DD, optional), max_days (default 30).
+        """
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage 未就绪")
+        if getattr(request.app.state, "index_compare_running", False):
+            return JSONResponse({"success": False, "message": "对照任务正在进行中，请稍后"})
+
+        qp = request.query_params
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        start = qp.get("start") or (today - timedelta(days=45)).isoformat()
+        end = qp.get("end") or today.isoformat()
+        try:
+            max_days = int(qp.get("max_days", "30"))
+        except ValueError:
+            max_days = 30
+
+        async def _run() -> None:
+            from scripts.compare_index_old_new import (
+                _notify_feishu,
+                compare_index_range,
+                format_feishu_summary,
+            )
+            from src.common.config import get_tushare_token
+            from src.data.clients.tushare_realtime import (
+                TushareRealtimeClient,
+                get_tushare_trade_calendar,
+            )
+
+            request.app.state.index_compare_running = True
+            client = TushareRealtimeClient(token=get_tushare_token())
+            try:
+                cal = await get_tushare_trade_calendar(start, end)
+                dates = sorted(datetime.strptime(s, "%Y-%m-%d").date() for s in cal)
+                if len(dates) > max_days:
+                    logger.warning(
+                        "index-compare: %d 交易日超过 max_days=%d, 只对照最近 %d 天",
+                        len(dates),
+                        max_days,
+                        max_days,
+                    )
+                    dates = dates[-max_days:]
+                if not dates:
+                    await _notify_feishu("[新旧索引对照] 无可对照的交易日")
+                    return
+                await client.start()
+                result = await compare_index_range(storage, client, dates)
+                await _notify_feishu(format_feishu_summary(result))
+            except Exception as e:
+                logger.error("index-compare 失败: %s", e, exc_info=True)
+                await _notify_feishu(f"[新旧索引对照] 执行异常\n{e}")
+            finally:
+                await client.stop()
+                request.app.state.index_compare_running = False
+
+        asyncio.create_task(_run())
+        return JSONResponse(
+            {"success": True, "message": "已触发后台对照", "start": start, "end": end}
+        )
+
     return router

@@ -823,6 +823,11 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 - [x] 手动触发端点 + 状态端点 + 设置页卡片
 - [x] kimi 输出解析 + verify_unverified 流程单测
 
+**临时工具 — 新旧索引对照验证 (TEMPORARY)**: 在用新索引 (三合一−kimi = `effective_universe`) 驱动历史数据的**补全/清理**之前,先把它跟旧索引 (之前用的 Tushare 列表 = `bak_basic` 每日权威列表) 逐日对照,确认新索引可信。
+- 脚本 `scripts/compare_index_old_new.py` (`--start/--end/--feishu/--max-days`) + 临时接口 `POST /api/audit/index-compare` (X-API-Key,后台跑→飞书),共用 `compare_index_range`。
+- 输出每日 `only_in_old` (新索引丢/挡的) 与 `only_in_new` (bak_basic 漏的,如北交所),delta 用 listing_info 标注原因 (未上市/已退市/未验证)。
+- **修复 (补缺 + 清理 `backtest_daily` 里不该存在的行) 为后续步骤**,必须先通过本对照验证、且带人工确认闸 (删除不可逆) 才执行。确认完毕后此脚本 + 接口可删。
+
 ---
 
 ---
