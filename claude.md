@@ -100,6 +100,7 @@ Rules:
 **目的**: 把 `stock_snapshot` 里还没验证的代码自动喂给容器内 kimi-cli 查真实上市日,写回 `stock_listing_info`,让 `audit_daily_gaps` 能算出干净的 effective universe。
 
 - **Scheduler**: `ListingVerifyScheduler` (`src/data/services/listing_verify_scheduler.py`),每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。
+- **硬门 (CRITICAL)**: app.py 启动时先 `kimi_available()` 探测,**容器里没有 kimi-cli 就根本不启动这个调度器** (不开机、不跑、不告警)。生产镜像 (`Dockerfile`) 默认不含 kimi-cli → 这台不会起 path B。要让它在线上跑,必须先把 kimi-cli 装进镜像。**绝不能让一个依赖不在镜像里的调度器常驻线上刷告警。**
 - **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,强制 SearchWeb 实证,解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
 - **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
 - **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥 (1.58G 小机器)、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、并发保守 (默认 3)、`upsert_listing_info` 小批 ≤200 行。

@@ -601,14 +601,28 @@ def create_app(
         logger.info("Pre-market report scheduler started (8am daily)")
 
         # Auto-start listing-info auto-verify scheduler (4am daily, path B)
+        # HARD GATE: only boot it if kimi-cli is actually present in the
+        # container. No kimi → don't start the scheduler at all (no startup
+        # run, no 4am run, no Feishu alert). The prod image ships without
+        # kimi-cli, so running it there is dead-on-arrival and just spams
+        # alerts — kimi presence is a precondition for the feature to exist.
+        from src.data.services.kimi_listing_verifier import kimi_available
         from src.data.services.listing_verify_scheduler import ListingVerifyScheduler
 
-        listing_verify_scheduler = ListingVerifyScheduler(app.state)
-        app.state.listing_verify_scheduler = listing_verify_scheduler
-        app.state.listing_verify_scheduler_task = asyncio.create_task(
-            listing_verify_scheduler.run()
-        )
-        logger.info("Listing-info auto-verify scheduler started (4am daily)")
+        if kimi_available():
+            listing_verify_scheduler = ListingVerifyScheduler(app.state)
+            app.state.listing_verify_scheduler = listing_verify_scheduler
+            app.state.listing_verify_scheduler_task = asyncio.create_task(
+                listing_verify_scheduler.run()
+            )
+            logger.info("Listing-info auto-verify scheduler started (4am daily)")
+        else:
+            app.state.listing_verify_scheduler = None
+            app.state.listing_verify_scheduler_task = None
+            logger.info(
+                "Listing-info auto-verify scheduler NOT started — kimi-cli "
+                "absent in container (path B disabled, no alerts)"
+            )
 
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
