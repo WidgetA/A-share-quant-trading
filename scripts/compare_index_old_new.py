@@ -113,17 +113,29 @@ async def compare_index_range(
     distinct_new: set[str] = set()
     total_only_old = 0
     total_only_new = 0
+    empty_new_days = 0  # days where the new index (snapshot) is empty — NOT a
+    # real discrepancy, it means stock_snapshot wasn't synced for that date.
     # First-seen (date, code) for sampling with a reason.
     sample_old: list[tuple[str, str, str]] = []  # (date, code, reason)
     sample_new: list[tuple[str, str, str]] = []
     for r in per_day:
         d = date.fromisoformat(r["date"])
+        day_new_empty = r["new_n"] == 0
+        if day_new_empty:
+            empty_new_days += 1
         for c in r["only_in_old"]:
             total_only_old += 1
             if c not in distinct_old:
                 distinct_old.add(c)
                 if len(sample_old) < _SAMPLE:
-                    sample_old.append((r["date"], c, _reason_for_code(c, d, listing_info)))
+                    # If the whole day's new index is empty, that's the real
+                    # reason — don't mislabel each code as "[无 listing_info]".
+                    reason = (
+                        "新索引当天为空(snapshot 未同步)"
+                        if day_new_empty
+                        else _reason_for_code(c, d, listing_info)
+                    )
+                    sample_old.append((r["date"], c, reason))
         for c in r["only_in_new"]:
             total_only_new += 1
             if c not in distinct_new:
@@ -140,6 +152,7 @@ async def compare_index_range(
             "distinct_only_new": len(distinct_new),
             "total_only_old": total_only_old,
             "total_only_new": total_only_new,
+            "empty_new_days": empty_new_days,
             "sample_only_old": sample_old,
             "sample_only_new": sample_new,
         },
@@ -164,6 +177,18 @@ def format_feishu_summary(result: dict) -> str:
         f"范围: {rng.get('start')} ~ {rng.get('end')} ({result['days']} 天)",
         # Denominator first, so the delta below has context (差 N out of ~M).
         f"每日规模: 旧 bak_basic {_span(old_sizes)} 只 / 新 三合一 {_span(new_sizes)} 只",
+    ]
+    # Headline the real failure mode loudly: if the new index is empty on many
+    # days, stock_snapshot wasn't backfilled there → the comparison is moot
+    # (every bak_basic code shows as "missing"), NOT a listing_info/kimi issue.
+    empty_days = agg.get("empty_new_days", 0)
+    if empty_days:
+        lines.append(
+            f"⚠ 新索引(snapshot)有 {empty_days}/{result['days']} 天为空 "
+            f"—— stock_snapshot 未回填到这些历史日,下面的'旧索引独有'大多是这个,"
+            f"不是 kimi/listing 问题。先回填 snapshot 再谈对照。"
+        )
+    lines += [
         f"旧索引独有(新索引漏了): distinct {agg['distinct_only_old']} / 累计 {agg['total_only_old']}",
         f"新索引独有(bak_basic 没收): distinct {agg['distinct_only_new']} / 累计 {agg['total_only_new']}",
     ]

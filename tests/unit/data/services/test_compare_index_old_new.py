@@ -68,10 +68,12 @@ async def test_per_day_diffs_and_aggregate():
 
 @pytest.mark.asyncio
 async def test_reason_annotation_from_listing_info():
+    # New index must be NON-empty for the per-code listing_info reason to apply
+    # (an all-empty day is reported as "snapshot 未同步" instead).
     d = date(2026, 5, 6)
-    client = _FakeClient({"20260506": {"830001"}})
+    client = _FakeClient({"20260506": {"600519", "830001"}})
     storage = _FakeStorage(
-        {d: set()},
+        {d: {"600519"}},  # new index has 600519 but not 830001
         listing_info={
             "830001": {"list_date": date(2027, 1, 1), "delist_date": None, "verified": True}
         },
@@ -80,6 +82,20 @@ async def test_reason_annotation_from_listing_info():
     sample = result["agg"]["sample_only_old"]
     assert sample and sample[0][1] == "830001"
     assert "未上市" in sample[0][2]
+
+
+@pytest.mark.asyncio
+async def test_empty_new_index_day_flagged():
+    """A day where the new index (snapshot) is empty is counted + labelled as
+    'snapshot 未同步', not mislabelled per-code, and headlined in the summary."""
+    d = date(2023, 1, 3)
+    client = _FakeClient({"20230103": {"000001", "000002"}})
+    storage = _FakeStorage({d: set()})  # snapshot empty that day
+    result = await compare_index_range(storage, client, [d])
+    assert result["agg"]["empty_new_days"] == 1
+    reasons = [why for _, _, why in result["agg"]["sample_only_old"]]
+    assert reasons and all("snapshot" in r for r in reasons)
+    assert "未同步" in format_feishu_summary(result)
 
 
 @pytest.mark.asyncio
