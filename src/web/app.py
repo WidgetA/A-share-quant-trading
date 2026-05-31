@@ -619,10 +619,18 @@ def create_app(
         else:
             app.state.listing_verify_scheduler = None
             app.state.listing_verify_scheduler_task = None
-            logger.info(
-                "Listing-info auto-verify scheduler NOT started — kimi-cli "
-                "absent in container (path B disabled, no alerts)"
+            # Don't run it (no per-run spam) — but DO alert ONCE at startup so
+            # the operator knows path B is silently off. Not-running is itself
+            # a state worth a single notification; only the per-run repeat was
+            # the spam we removed.
+            from src.data.services.listing_verify_scheduler import _notify_feishu
+
+            msg = (
+                "[上市日验证·路径B] 未启动 — 容器内没有 kimi-cli,path B 不运行,"
+                "listing_info 不会被自动验证。要启用请先把 kimi-cli 装进镜像。"
             )
+            logger.warning(msg)
+            await _notify_feishu(msg)
 
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
