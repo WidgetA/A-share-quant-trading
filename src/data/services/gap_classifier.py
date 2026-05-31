@@ -50,24 +50,47 @@ def classify_minute_gap(
     day: date,
     listing_meta: dict | None,
     minute_bar_count: int,
+    source_bar_count: int | None,
 ) -> tuple[str, str]:
     """某只票有当天日线(在交易)、但分钟不足 241 根 —— 归类 + 原因。
 
     minute_bar_count: 当天已存的分钟根数 (0 表示一根都没有)。
+    source_bar_count: Tushare stk_mins 当天实际返回的 1min 根数。
     """
     ld = listing_meta.get("list_date") if listing_meta else None
 
     if ld is not None and day == ld:
         return CLASS_C, "上市首日,当天半天交易,分钟本就不满 241 根 → 已知正常"
-    if minute_bar_count <= 0:
-        return CLASS_B, "当天一根分钟都没有 → 真缺,重下分钟"
-    if minute_bar_count < _EXPECTED_BARS_PER_DAY:
+
+    if source_bar_count is None:
+        return PENDING, "待核对数据商 stk_mins 当天实际根数后再判"
+
+    if source_bar_count >= _EXPECTED_BARS_PER_DAY:
+        if minute_bar_count <= 0:
+            return CLASS_B, "数据商有 241 根,库里一根都没有 → 库漏存,重下分钟"
+        if minute_bar_count < _EXPECTED_BARS_PER_DAY:
+            return (
+                CLASS_B,
+                f"数据商有 241 根,库里只有 {minute_bar_count}/{_EXPECTED_BARS_PER_DAY}"
+                " → 库漏存,重下分钟",
+            )
+        return CLASS_B, "数据商有完整分钟,库侧缺口 → 重下分钟"
+
+    if minute_bar_count < source_bar_count:
         return (
             CLASS_B,
-            f"分钟不足({minute_bar_count}/{_EXPECTED_BARS_PER_DAY})→ 重下;"
-            "重下后仍不足则记为半天正常(C)",
+            f"库里 {minute_bar_count} 根少于数据商 {source_bar_count} 根"
+            " → 库漏存,重下到源头实际根数",
         )
-    return CLASS_B, "分钟缺 → 重下"
+
+    if source_bar_count == 0:
+        return CLASS_C, "数据商当天也无 1min 数据 → 源头不足/停牌口径,不是库漏存"
+
+    return (
+        CLASS_C,
+        f"数据商当天仅返回 {source_bar_count}/{_EXPECTED_BARS_PER_DAY} 根,"
+        "库里已与源头一致 → 源头不足/低成交量按成交分钟返回,不是错",
+    )
 
 
 def summarize_classes(items: list[dict]) -> dict[str, int]:

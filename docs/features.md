@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.17.0 | 2026-05-31 | - | DAT-002: 缓存补全/完整性检查结束后自动发送“按天详报”到飞书; `/api/audit/diagnose-gaps` 手动触发同一报告; 日线问题逐日展开,分钟 B 类库漏存逐日摘要,C/PENDING 类归类汇总,完整逐天明细写入 `data/audit/gap_diagnosis_report.{json,md}`。 |
 | 0.16.9 | 2026-05-07 | - | NOTE-001: 买入/卖出 事件正文拆 对内 / 对外 两栏（schema 加 `content_external` 列，幂等 ALTER 兼容老部署）；新增/编辑表单都给两个 textarea，单事件查看 + 篇 view trade card 都展示双栏（两栏都填时显示「对内/对外」分节标签）。 |
 | 0.16.8 | 2026-05-07 | - | NOTE-001: 手插带时间戳的卡片改为独立持久化（新表 `note_cards`，与 `trade_notes` 解耦）；带 4 个新 endpoint（GET/POST/PATCH/DELETE `/api/notes/{code}/cards`），按自己的 ts 在 篇 view 与 买入/卖出 交错排序。点卡片可直接编辑/删除（modal 重用）。每个 cmt 现在也是独立 segment（之前同一时段多个 cmt 会合并丢数据）。 |
 | 0.16.7 | 2026-05-07 | - | NOTE-001: 篇 view 的 买入/卖出 卡片渲染自身的 `content`（之前只画 label+meta，content 被藏在单事件编辑器里）。卡片改成 column flex：header 行（label+meta）+ 可选 body（markdown 只读）。 |
@@ -754,12 +755,19 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 
 **Scheduling**: 3am daily auto-fill via `CacheScheduler` (toggle on/off in Settings page).
 
+**Gap Diagnosis Report**:
+- 手动: `POST /api/audit/diagnose-gaps` 后台运行同一套诊断并发飞书。
+- 自动: `CacheScheduler` 每次补全/完整性检查汇总发送后,立即运行按天详报并发飞书。
+- 飞书正文: 日线问题日逐日列出“问题 / 根因 / 正确数字 / 怎么修”;分钟线只逐日展开 B 类“库漏存、可重下”的真错,C/PENDING 类按源头不足、半天/低成交量口径、待核对归类汇总,避免几百天明细刷屏。
+- 完整明细: 每次运行覆盖写入 `data/audit/gap_diagnosis_report.json` 与 `data/audit/gap_diagnosis_report.md`,包含所有问题日、关键股票、分类原因、本地/源头分钟根数和修复动作。
+
 **Files**:
 - `src/data/services/cache_pipeline.py` - Download orchestration
 - `src/data/services/cache_scheduler.py` - 3am auto gap-fill
 - `src/data/services/cache_progress_reporter.py` - Phase tracking + Feishu notifications
 - `src/data/services/download_task.py` - Background task state machine
 - `src/data/clients/greptime_storage.py` - GreptimeDB storage (asyncpg pool)
+- `scripts/diagnose_gaps.py` - 按天详报生成、完整明细落盘、飞书通知
 
 **Checklist**:
 - [x] GreptimeDB storage with asyncpg (3 mandatory overrides — see dev-conventions.md)
@@ -769,6 +777,7 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 - [x] Per-day minute audit + backfill
 - [x] Integrity validation on write
 - [x] Feishu notifications for all scenarios
+- [x] Post-run per-day gap diagnosis report to Feishu + full detail files
 - [x] Dashboard data engine status card
 - [x] Manual download with SSE progress + stop button
 - [x] Suspended stock prev_close chaining (per-stock latest close, not global MAX date)

@@ -240,8 +240,9 @@ class CachePipeline:
             f"全量下载{len(full_gaps)}天, 部分缺口{len(partial_gaps)}天(本地补)",
         )
 
-        await self.reporter.status("加载 prev_close 映射 (get_latest_closes) ...")
-        prev_close_map = await self.storage.get_latest_closes()
+        first_gap_date = min(d for d, _exp, _act in gaps)
+        await self.reporter.status(f"加载 {first_gap_date} 前的 prev_close 映射 (历史口径) ...")
+        prev_close_map = await self.storage.get_previous_closes_before(first_gap_date)
         await self.reporter.status(f"prev_close 映射: {len(prev_close_map)} 只股票")
 
         # --- Phase A: fill partial gaps locally (no daily-source API call) ---
@@ -300,10 +301,15 @@ class CachePipeline:
                 await self.reporter.notify_suspend_d_failure(date_str, e)
                 raise
 
+            day_prev_close_map = {
+                **prev_close_map,
+                **await self.storage.get_previous_closes_before(gap_date),
+            }
+
             filled = 0
             unfillable: list[str] = []
             for code in missing_codes:
-                pre_close = prev_close_map.get(code, 0.0)
+                pre_close = day_prev_close_map.get(code, 0.0)
                 if code in suspended_codes:
                     await self.storage.insert_daily_record(
                         code, gap_date, _suspended_record(pre_close)
@@ -408,6 +414,10 @@ class CachePipeline:
     ) -> None:
         """Insert pre-fetched daily data into storage. Updates prev_close_map in-place."""
         date_str = day.strftime("%Y-%m-%d")
+        day_prev_close_map = {
+            **prev_close_map,
+            **await self.storage.get_previous_closes_before(day),
+        }
 
         if failed_exchanges:
             await self.reporter.progress(
@@ -433,7 +443,7 @@ class CachePipeline:
             if skip_codes and ticker in skip_codes:
                 continue
 
-            pre_close = prev_close_map.get(ticker, 0.0)
+            pre_close = day_prev_close_map.get(ticker, 0.0)
 
             rec: dict[str, Any] | None
             if ticker in suspended_codes:
@@ -455,7 +465,7 @@ class CachePipeline:
                 continue
             if skip_codes and susp_code in skip_codes:
                 continue
-            pre_close = prev_close_map.get(susp_code, 0.0)
+            pre_close = day_prev_close_map.get(susp_code, 0.0)
             rec = _suspended_record(pre_close)
             await self.storage.insert_daily_record(susp_code, day, rec)
             if rec["close"] is not None:

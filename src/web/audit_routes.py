@@ -357,32 +357,24 @@ def create_audit_router() -> APIRouter:
             return JSONResponse({"success": False, "message": "诊断正在进行中，请稍后"})
 
         try:
-            minute_detail_days = int(request.query_params.get("minute_detail_days", "50"))
+            minute_detail_days = int(request.query_params.get("minute_detail_days", "0"))
         except ValueError:
-            minute_detail_days = 50
+            minute_detail_days = 0
 
         async def _run() -> None:
-            from scripts.diagnose_gaps import _notify_feishu, build_report, diagnose_gaps
-            from src.common.config import get_tushare_token
-            from src.data.clients.tushare_realtime import TushareRealtimeClient
+            from scripts.diagnose_gaps import _notify_feishu, run_diagnosis_report
 
             request.app.state.diagnose_gaps_running = True
-            client = TushareRealtimeClient(token=get_tushare_token())
             try:
-                await client.start()
-
-                async def _fetch_suspended(day):
-                    return await client.fetch_suspended_stocks(day.strftime("%Y%m%d"))
-
-                diag = await diagnose_gaps(
-                    storage, _fetch_suspended, minute_detail_days=minute_detail_days
+                await run_diagnosis_report(
+                    storage,
+                    feishu=True,
+                    minute_detail_days=minute_detail_days,
                 )
-                await _notify_feishu(build_report(diag))
             except Exception as e:
                 logger.error("diagnose-gaps 失败: %s", e, exc_info=True)
                 await _notify_feishu(f"[数据诊断报告] 执行异常\n{e}")
             finally:
-                await client.stop()
                 request.app.state.diagnose_gaps_running = False
 
         asyncio.create_task(_run())

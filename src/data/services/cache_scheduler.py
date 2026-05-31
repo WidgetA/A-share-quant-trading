@@ -32,6 +32,29 @@ async def _notify_feishu(message: str) -> None:
         logger.warning("Failed to send Feishu cache scheduler notification", exc_info=True)
 
 
+async def _send_gap_detail_report(storage) -> None:
+    """Send the detailed per-day gap diagnosis after the cache job finishes.
+
+    Bounded for the 1.58G box: only the most-recent N minute-gap days are
+    classified per run, and the Tushare source-check (one stk_mins call per
+    missing stock) is hard-capped — so the auto report never hammers the API
+    or the box. Beyond the caps, items show "待核对" (honest), and the full
+    per-day detail is always written to data/audit/ regardless.
+    """
+    try:
+        from scripts.diagnose_gaps import run_diagnosis_report
+
+        await run_diagnosis_report(
+            storage,
+            feishu=True,
+            minute_detail_days=30,
+            max_minute_source_checks=60,
+        )
+    except Exception as e:
+        logger.error("Failed to send detailed gap diagnosis report: %s", e, exc_info=True)
+        await _notify_feishu(f"[数据诊断报告] 自动生成失败\n{e}")
+
+
 async def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
     """Get trading days via Tushare trade_cal, fallback to weekdays."""
     try:
@@ -485,6 +508,7 @@ class CacheScheduler:
         lines.append(f"下次执行: {self._next_run_str()}")
 
         await _notify_feishu("\n".join(lines))
+        await _send_gap_detail_report(storage)
 
 
 def _group_contiguous_dates(dates: list[date]) -> list[tuple[date, date]]:

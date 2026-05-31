@@ -60,18 +60,48 @@ def test_daily_listed_not_suspended_is_B():
 
 def test_minute_ipo_day_is_C():
     meta = {"list_date": D, "delist_date": None, "verified": True}
-    cls, why = classify_minute_gap(D, meta, minute_bar_count=120)
+    cls, why = classify_minute_gap(D, meta, minute_bar_count=120, source_bar_count=120)
     assert cls == CLASS_C and "上市首日" in why
 
 
-def test_minute_zero_bars_is_B():
-    cls, why = classify_minute_gap(D, None, minute_bar_count=0)
-    assert cls == CLASS_B and "重下" in why
+def test_minute_missing_source_check_is_pending():
+    cls, why = classify_minute_gap(D, None, minute_bar_count=0, source_bar_count=None)
+    assert cls == PENDING and "数据商" in why
 
 
-def test_minute_partial_bars_is_B():
-    cls, why = classify_minute_gap(D, {"list_date": date(2010, 1, 1), "verified": True}, 200)
-    assert cls == CLASS_B and "200/241" in why
+def test_minute_source_has_full_bars_but_local_zero_is_B():
+    cls, why = classify_minute_gap(D, None, minute_bar_count=0, source_bar_count=241)
+    assert cls == CLASS_B and "数据商有 241 根" in why and "库漏存" in why
+
+
+def test_minute_source_has_full_bars_but_local_partial_is_B():
+    cls, why = classify_minute_gap(
+        D,
+        {"list_date": date(2010, 1, 1), "verified": True},
+        minute_bar_count=200,
+        source_bar_count=241,
+    )
+    assert cls == CLASS_B and "200/241" in why and "库漏存" in why
+
+
+def test_minute_local_less_than_short_source_is_B():
+    cls, why = classify_minute_gap(
+        D,
+        {"list_date": date(2010, 1, 1), "verified": True},
+        minute_bar_count=198,
+        source_bar_count=200,
+    )
+    assert cls == CLASS_B and "少于数据商 200 根" in why
+
+
+def test_minute_source_short_and_local_matches_is_C():
+    cls, why = classify_minute_gap(
+        D,
+        {"list_date": date(2010, 1, 1), "verified": True},
+        minute_bar_count=200,
+        source_bar_count=200,
+    )
+    assert cls == CLASS_C and "源头不足" in why and "不是错" in why
 
 
 # ---------------- summary ----------------

@@ -1029,15 +1029,15 @@ class GreptimeBacktestStorage:
         """
         ts_ms = date_to_epoch_ms(day)
         rows = await self.db.fetch(
-            f"SELECT stock_code, close_price FROM backtest_daily "
-            f"WHERE ts < {ts_ms} ORDER BY ts DESC LIMIT {limit}"
+            "SELECT b.stock_code, b.close_price FROM backtest_daily b "
+            "INNER JOIN ("
+            "  SELECT stock_code, MAX(ts) as max_ts FROM backtest_daily "
+            f"  WHERE ts < {ts_ms} AND close_price IS NOT NULL "
+            "  GROUP BY stock_code"
+            ") m ON b.stock_code = m.stock_code AND b.ts = m.max_ts "
+            f"LIMIT {limit}"
         )
-        result: dict[str, float] = {}
-        for r in rows:
-            code = r["stock_code"]
-            if code not in result:
-                result[code] = float(r["close_price"])
-        return result
+        return {r["stock_code"]: float(r["close_price"]) for r in rows}
 
     # ==================== Write Primitives ====================
 
@@ -1690,10 +1690,11 @@ class GreptimeBacktestStorage:
         )
         await _count_and_sample(
             "backtest_daily",
-            "is_suspended = false AND (open_price = 0 OR close_price = 0)",
+            "is_suspended = false AND "
+            "(open_price <= 0 OR high_price <= 0 OR low_price <= 0 OR close_price <= 0)",
             "error",
             "zero_price_active",
-            "日线: {cnt} 条非停牌记录 open/close 为 0",
+            "日线: {cnt} 条非停牌记录 OHLC 价格 <= 0",
         )
         await _count_and_sample(
             "backtest_daily",
@@ -1725,6 +1726,13 @@ class GreptimeBacktestStorage:
             "negative_volume",
             "日线: {cnt} 条记录 vol 为负数",
         )
+        await _count_and_sample(
+            "backtest_daily",
+            "amount < 0",
+            "error",
+            "negative_amount",
+            "日线: {cnt} 条记录 amount 为负数",
+        )
 
         row = await self.db.fetchrow(
             "SELECT COUNT(*) as cnt FROM backtest_daily WHERE is_suspended = false AND vol = 0"
@@ -1738,6 +1746,24 @@ class GreptimeBacktestStorage:
                     "message": (f"日线: {zero_vol_cnt} 条非停牌记录 vol=0（涨跌停无成交属正常）"),
                     "count": zero_vol_cnt,
                     "samples": [],
+                }
+            )
+
+        daily_duplicate_rows = await self.db.fetch(
+            "SELECT stock_code, ts, COUNT(*) as cnt FROM backtest_daily "
+            "GROUP BY stock_code, ts HAVING COUNT(*) > 1 LIMIT 100"
+        )
+        if daily_duplicate_rows:
+            details = [
+                f"  {r['stock_code']}@{ts_to_date(r['ts'])}: {int(r['cnt'])} 条"
+                for r in daily_duplicate_rows
+            ]
+            issues.append(
+                {
+                    "level": "error",
+                    "check": "duplicate_daily_rows",
+                    "message": "日线: 存在重复 (stock_code, ts) 记录:\n" + "\n".join(details),
+                    "count": len(daily_duplicate_rows),
                 }
             )
 
@@ -1758,6 +1784,14 @@ class GreptimeBacktestStorage:
             )
             await _count_and_sample(
                 "backtest_minute",
+                "open_price > high_price OR open_price < low_price "
+                "OR close_price > high_price OR close_price < low_price",
+                "error",
+                "minute_ohlc_range_violation",
+                "分钟线: {cnt} 条记录 open/close 超出 [low,high] 范围",
+            )
+            await _count_and_sample(
+                "backtest_minute",
                 "open_price IS NULL OR high_price IS NULL OR low_price IS NULL "
                 "OR close_price IS NULL",
                 "error",
@@ -1771,6 +1805,32 @@ class GreptimeBacktestStorage:
                 "negative_minute_vol",
                 "分钟线: {cnt} 条记录 vol 为负数",
             )
+            await _count_and_sample(
+                "backtest_minute",
+                "amount < 0",
+                "error",
+                "negative_minute_amount",
+                "分钟线: {cnt} 条记录 amount 为负数",
+            )
+
+            duplicate_rows = await self.db.fetch(
+                "SELECT stock_code, ts, COUNT(*) as cnt FROM backtest_minute "
+                "GROUP BY stock_code, ts HAVING COUNT(*) > 1 LIMIT 100"
+            )
+            if duplicate_rows:
+                details = [
+                    f"  {r['stock_code']}@{epoch_ms_to_minute_str(ts_to_epoch_ms(r['ts']))}: "
+                    f"{int(r['cnt'])} 条"
+                    for r in duplicate_rows
+                ]
+                issues.append(
+                    {
+                        "level": "error",
+                        "check": "duplicate_minute_rows",
+                        "message": "分钟线: 存在重复 (stock_code, ts) 记录:\n" + "\n".join(details),
+                        "count": len(duplicate_rows),
+                    }
+                )
 
         return issues
 
