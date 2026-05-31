@@ -176,12 +176,13 @@ def create_audit_router() -> APIRouter:
     # + scripts/compare_index_old_new.py。
     # ------------------------------------------------------------------
 
-    @router.post(
-        "/index-compare",
-        dependencies=[Depends(verify_trading_api_key)],
-    )
+    @router.post("/index-compare")
     async def trigger_index_compare(request: Request) -> JSONResponse:
         """Kick a background old-vs-new index comparison; result → Feishu.
+
+        TEMPORARY tool — intentionally un-gated (read-only compare + Feishu),
+        no X-API-Key needed, so it can be triggered freely while we validate
+        the new index. Delete with the rest of the index-compare code.
 
         Query params: start / end (YYYY-MM-DD, optional), max_days (default 30).
         """
