@@ -51,6 +51,7 @@ async def diagnose_gaps(
     fetch_suspended,
     fetch_minute_source_count: MinuteSourceCountFetcher | None = None,
     *,
+    daily_detail_days: int | None = None,
     minute_detail_days: int = _MINUTE_DETAIL_DAYS,
     max_minute_source_checks: int | None = None,
 ):
@@ -59,11 +60,16 @@ async def diagnose_gaps(
     all_time_count = await storage.get_daily_stock_count()
     per_day_counts = await storage.get_daily_counts_per_day()
 
-    # --- 日线缺口:全量分类(天数少) ---
+    # --- 日线缺口分类 ---
+    # 每个缺口天要查一次 suspend_d(Tushare 限 500 次/分钟)。AI 未核完前缺口天
+    # 可能成百上千,所以 daily_detail_days 限定只详分最近 N 天(其余只计数),
+    # suspend_d 调用随之被限,绝不超频。完整逐天明细另写文件。
     daily_gaps = await storage.audit_daily_gaps()  # [(date, expected, actual)]
+    daily_sorted = sorted(daily_gaps, key=lambda g: g[0])
+    daily_detail = daily_sorted[-daily_detail_days:] if daily_detail_days else daily_sorted
     daily_items: list[dict] = []
     daily_days: list[dict] = []
-    for gday, expected_count, actual_count in daily_gaps:
+    for gday, expected_count, actual_count in daily_detail:
         expected_codes = await storage.get_effective_universe_for_date(gday)
         have = await storage.get_codes_for_daily_date(gday)
         missing = expected_codes - have
@@ -167,6 +173,8 @@ async def diagnose_gaps(
         "listing_total": len(listing_info),
         "listing_verified": verified,
         "daily_gap_days": len(daily_gaps),
+        "daily_detail_days": len(daily_detail),
+        "daily_detail_is_full": len(daily_detail) == len(daily_gaps),
         "daily_days": daily_days,
         "daily_items": daily_items,
         "minute_gap_days": len(minute_gaps),
@@ -527,6 +535,7 @@ async def run_diagnosis_report(
     storage,
     *,
     feishu: bool,
+    daily_detail_days: int | None = None,
     minute_detail_days: int = _MINUTE_DETAIL_DAYS,
     max_minute_source_checks: int | None = None,
     stop_storage: bool = False,
@@ -563,6 +572,7 @@ async def run_diagnosis_report(
             storage,
             _fetch_suspended,
             _fetch_minute_source_count,
+            daily_detail_days=daily_detail_days,
             minute_detail_days=minute_detail_days,
             max_minute_source_checks=max_minute_source_checks,
         )

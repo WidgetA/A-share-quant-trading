@@ -35,11 +35,12 @@ async def _notify_feishu(message: str) -> None:
 async def _send_gap_detail_report(storage) -> None:
     """Send the detailed per-day gap diagnosis after the cache job finishes.
 
-    Bounded for the 1.58G box: only the most-recent N minute-gap days are
-    classified per run, and the Tushare source-check (one stk_mins call per
-    missing stock) is hard-capped — so the auto report never hammers the API
-    or the box. Beyond the caps, items show "待核对" (honest), and the full
-    per-day detail is always written to data/audit/ regardless.
+    Bounded for the 1.58G box: only the most-recent 30 daily-gap days and 30
+    minute-gap days are classified per run, and both Tushare calls — suspend_d
+    (one per daily-gap day) and stk_mins source-check (one per missing minute
+    stock) — are kept well under the 500/min limit. Beyond the caps, items show
+    "待核对" (honest), and the full per-day detail is always written to
+    data/audit/ regardless.
     """
     try:
         from scripts.diagnose_gaps import run_diagnosis_report
@@ -47,6 +48,7 @@ async def _send_gap_detail_report(storage) -> None:
         await run_diagnosis_report(
             storage,
             feishu=True,
+            daily_detail_days=30,
             minute_detail_days=30,
             max_minute_source_checks=60,
         )
