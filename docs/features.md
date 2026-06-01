@@ -34,6 +34,7 @@
 | 0.10.2 | 2026-02-20 | - | STR-004: Sync docs with code (fix scoring formula, add Step 5.5/5.6/limit-up docs) |
 | 0.10.3 | 2026-03-05 | - | STR-004: Add Step 5.7 LLM board relevance filter + flip scoring to +Z(gfo)+Z(amp) + board leader bonus |
 | 0.10.4 | 2026-06-01 | - | STR-004: Blacklist 专精特新 board — move into JUNK_BOARDS so is_junk_board() actually excludes it (was leaking via un-filtered BROAD_CONCEPT_BOARDS, dominating universe + best-board labels) |
+| 0.10.5 | 2026-06-01 | - | STR-004: V16 Feishu top-10 report marks picks whose best-board is a BROAD_CONCEPT_BOARD with ⭐ + adds a legend, so vague wide-theme picks are visible at a glance (still un-filtered, just flagged) |
 
 ---
 

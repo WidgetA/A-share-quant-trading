@@ -407,6 +407,13 @@ Limit-up (skipped):
         time_str = now.strftime("%Y-%m-%d %H:%M")
         board_gains = scan_result.step2_board_avg_gains
 
+        # ⭐ flags picks whose best-board is a broad concept board (≥400
+        # constituents, vague theme — see BROAD_CONCEPT_BOARDS). Local import
+        # keeps feishu_bot decoupled from the strategy layer at module load.
+        from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS
+
+        broad_shown = False
+
         lines = [
             f"[V16] 每日扫描报告 ({time_str})",
             (
@@ -421,6 +428,8 @@ Limit-up (skipped):
             top1 = recommended[0]
             board = scan_result.stock_best_board.get(top1.code, "-")
             bg = board_gains.get(board, 0)
+            top1_star = "⭐" if board in BROAD_CONCEPT_BOARDS else ""
+            broad_shown = broad_shown or bool(top1_star)
             cci_map = getattr(scan_result, "stock_cci", {})
             evol_map = getattr(scan_result, "stock_early_vol", {})
             top1_cci = cci_map.get(top1.code)
@@ -430,7 +439,7 @@ Limit-up (skipped):
             cci_str = f" | CCI: {top1_cci:.0f}" if top1_cci is not None else ""
             evol_str = f" | 7min量: {top1_evol / 10000:.0f}万股" if top1_evol else ""
             lines.append(
-                f"  板块: {board}(均涨{bg:+.2f}%) | "
+                f"  板块: {top1_star}{board}(均涨{bg:+.2f}%) | "
                 f"LGB: {top1.score:.4f} | "
                 f"买入价: {top1.buy_price:.2f} (9:40)"
                 f"{cci_str}{evol_str}"
@@ -441,6 +450,8 @@ Limit-up (skipped):
             for s in recommended:
                 board = scan_result.stock_best_board.get(s.code, "-")
                 bg = board_gains.get(board, 0)
+                star = "⭐" if board in BROAD_CONCEPT_BOARDS else ""
+                broad_shown = broad_shown or bool(star)
                 s_cci = cci_map.get(s.code)
                 s_evol = evol_map.get(s.code)
                 cci_part = f"  CCI={s_cci:.0f}" if s_cci is not None else ""
@@ -449,12 +460,16 @@ Limit-up (skipped):
                     f"{s.rank}. {s.code} {s.name}  "
                     f"LGB={s.score:.4f}  "
                     f"买入:{s.buy_price:.2f}  "
-                    f"{board}({bg:+.2f}%)"
+                    f"{star}{board}({bg:+.2f}%)"
                     f"{cci_part}{evol_part}"
                 )
         else:
             lines.append("")
             lines.append("推荐: 无")
+
+        if broad_shown:
+            lines.append("")
+            lines.append("⭐=宽泛板块(成分≥400,题材偏泛,仅供参考)")
 
         return await self.send_message("\n".join(lines))
 
