@@ -196,6 +196,7 @@ JUNK_BOARDS: set[str] = {
     "海南自贸区",
     "中俄贸易概念",
     "碳中和",
+    "专精特新",  # 1160只成分，太宽泛无实际主题（policy label, not a tradable theme）
 }
 
 # Boards that ARE real technology/industry themes but have too many constituents
@@ -226,7 +227,8 @@ BROAD_CONCEPT_BOARDS: set[str] = {
     "风电",  # 413
     "医疗器械概念",  # 400
     # ---- 政策标签/地区概念，成分股过多 ----
-    "专精特新",  # 1160
+    # NOTE: 专精特新 moved to JUNK_BOARDS (policy label, not a tradable theme) —
+    # it was leaking through here because BROAD_CONCEPT_BOARDS is not filtered.
     "数字经济",  # 503
 }
 
