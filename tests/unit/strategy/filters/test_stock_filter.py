@@ -78,11 +78,22 @@ class TestStockFilter:
         assert default_filter.get_exchange("689009") == Exchange.STAR
 
     def test_get_exchange_bse(self, default_filter):
-        """Test BSE detection."""
+        """Test BSE detection — legacy 8xxxxx/4xxxxx AND new 920xxx range."""
         assert default_filter.get_exchange("830001") == Exchange.BSE
         assert default_filter.get_exchange("430001") == Exchange.BSE
         assert default_filter.get_exchange("871001") == Exchange.BSE
         assert default_filter.get_exchange("430047") == Exchange.BSE
+        # 北交所 migrated to the 920xxx range (2024+) — must be detected too.
+        assert default_filter.get_exchange("920000") == Exchange.BSE
+        assert default_filter.get_exchange("920001") == Exchange.BSE
+        assert default_filter.get_exchange("920992") == Exchange.BSE
+
+    def test_bse_920_range_excluded_by_default(self, default_filter):
+        """The whole point: new 北交所 920xxx must be excluded (exclude_bse=True)."""
+        assert not default_filter.is_allowed("920000")
+        assert not default_filter.is_allowed("920001")
+        # a real main-board code is still allowed (sanity)
+        assert default_filter.is_allowed("600000")
 
     def test_get_exchange_unknown(self, default_filter):
         """Test unknown stock codes."""

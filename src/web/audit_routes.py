@@ -390,4 +390,36 @@ def create_audit_router() -> APIRouter:
         asyncio.create_task(_run())
         return JSONResponse({"success": True, "message": "已触发数据诊断,结果发飞书"})
 
+    # ------------------------------------------------------------------
+    # 灌权威上市索引 (POST /api/audit/listing-info/load-tushare)
+    # 用 Tushare stock_basic(在市+已退市 2 次调用)把每只票的上市/退市日灌进
+    # stock_listing_info,建成「一查即知」的权威 list。无需 kimi。
+    # ------------------------------------------------------------------
+
+    @router.post("/listing-info/load-tushare")
+    async def trigger_load_listing(request: Request) -> JSONResponse:
+        """Build the queryable listing index from Tushare stock_basic (background)."""
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage 未就绪")
+        if getattr(request.app.state, "load_listing_running", False):
+            return JSONResponse({"success": False, "message": "正在灌入中,请稍后"})
+
+        async def _run() -> None:
+            from scripts.load_listing_from_tushare import run_load_listing
+
+            request.app.state.load_listing_running = True
+            try:
+                await run_load_listing(storage, feishu=True)
+            except Exception as e:
+                logger.error("load-tushare listing 失败: %s", e, exc_info=True)
+                from scripts.load_listing_from_tushare import _notify_feishu
+
+                await _notify_feishu(f"[上市索引] 灌入失败\n{e}")
+            finally:
+                request.app.state.load_listing_running = False
+
+        asyncio.create_task(_run())
+        return JSONResponse({"success": True, "message": "已触发:从 Tushare 灌权威上市索引"})
+
     return router

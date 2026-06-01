@@ -634,6 +634,50 @@ class TushareRealtimeClient:
 
         return codes
 
+    async def fetch_stock_basic_full(self, list_status: str = "L") -> list[dict[str, Any]]:
+        """Fetch stock_basic with listing metadata (authoritative list/delist dates).
+
+        Args:
+            list_status: "L" listed, "D" delisted, "P" paused.
+
+        Returns:
+            List of ``{code, name, list_date, delist_date}`` — dates as
+            "YYYY-MM-DD" or None. Bare 6-digit codes. Covers all exchanges
+            including 北交所 (920xxx / .BJ). This is the authoritative source
+            for the queryable listing index — no per-stock inference needed.
+        """
+        data = await self._api_call(
+            "stock_basic",
+            {"list_status": list_status},
+            fields="ts_code,name,list_date,delist_date",
+        )
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+        if not fields or not items:
+            return []
+        idx = {f: i for i, f in enumerate(fields)}
+
+        def _iso(v: Any) -> str | None:
+            s = str(v) if v is not None else ""
+            return f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 and s.isdigit() else None
+
+        out: list[dict[str, Any]] = []
+        for row in items:
+            bare = str(row[idx["ts_code"]]).split(".")[0]
+            if len(bare) != 6:
+                continue
+            out.append(
+                {
+                    "code": bare,
+                    "name": row[idx["name"]] if "name" in idx else None,
+                    "list_date": _iso(row[idx["list_date"]]) if "list_date" in idx else None,
+                    "delist_date": (
+                        _iso(row[idx["delist_date"]]) if "delist_date" in idx else None
+                    ),
+                }
+            )
+        return out
+
     async def fetch_bak_basic(self, trade_date: str) -> list[str]:
         """Fetch all listed stock codes for a given date via Tushare bak_basic.
 

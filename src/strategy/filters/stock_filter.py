@@ -9,7 +9,8 @@
 # - 中小板 (SME): 002xxx
 # - 创业板 (ChiNext/GEM): 300xxx - EXCLUDED
 # - 科创板 (STAR): 688xxx - Allowed by default
-# - 北交所 (BSE): 8xxxxx, 4xxxxx (e.g., 830xxx, 430xxx) - EXCLUDED
+# - 北交所 (BSE): 920xxx (new unified range, 2024+), plus legacy 8xxxxx
+#   (83/87/88) and 4xxxxx (43xxxx) - EXCLUDED
 
 import logging
 import re
@@ -48,7 +49,7 @@ class StockFilter:
     Filters stocks by exchange rules.
 
     Default filtering rules:
-        - Exclude 北交所 (BSE): Codes starting with 8 or 4
+        - Exclude 北交所 (BSE): Codes starting with 920 (new), 8, or 4
         - Exclude 创业板 (ChiNext): Codes starting with 300
         - Allow 科创板 (STAR): Codes starting with 688 (configurable)
 
@@ -91,8 +92,10 @@ class StockFilter:
     # STAR Market (科创板): 688xxx, 689xxx
     _STAR_PATTERNS = [r"^68[89]\d{3}$"]
 
-    # BSE (北交所): 8xxxxx, 4xxxxx
-    _BSE_PATTERNS = [r"^[84]\d{5}$"]
+    # BSE (北交所): 920xxx (new unified range, 2024+) + legacy 8xxxxx / 4xxxxx.
+    # The 920-prefix is the real gap: 北交所 migrated to 920xxx and the old
+    # ^[84] pattern silently let every new 北交所 stock through.
+    _BSE_PATTERNS = [r"^[84]\d{5}$", r"^92\d{4}$"]
 
     def __init__(self, config: StockFilterConfig | None = None):
         """
