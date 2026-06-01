@@ -265,22 +265,26 @@ class CachePipeline:
         prev_close_map: dict[str, float],
         cancel_event: CancelChecker,
     ) -> None:
-        """Fill partial gaps locally: query missing codes, fill suspended with prev_close.
+        """Fill partial gaps.
 
-        No daily-source API calls — only Tushare suspend_d + DB queries.
+        Two cases per date:
+          - Only SUSPENDED stocks missing → fast local fill (a suspended
+            placeholder needs no OHLCV, so no daily-source call).
+          - Non-suspended (real-trading) stocks missing → these genuinely need
+            their data downloaded (e.g. 北交所 920xxx that Tushare added to the
+            day's `daily` after this date was first cached). Re-fetch the day's
+            daily and insert the missing ones via the same path as a full
+            download (skip_codes = what we already have). We do NOT give up on
+            them — that was the old bug that left 北交所 permanently missing.
         """
         total = len(partial_gaps)
-        filled_total = 0
-        unfillable_total = 0
+        filled_suspended = 0
+        downloaded_real = 0
 
         for i, (gap_date, expected, actual) in enumerate(partial_gaps):
             self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
             date_str = gap_date.strftime("%Y-%m-%d")
 
-            # Compute missing codes against the *effective* universe
-            # (stock_snapshot minus listing_info-derived blocklist), so
-            # we don't keep retrying codes that were never actually listed
-            # on this date.
             expected_codes = await self.storage.get_effective_universe_for_date(gap_date)
             existing_codes = await self.storage.get_codes_for_daily_date(gap_date)
             missing_codes = expected_codes - existing_codes
@@ -289,7 +293,7 @@ class CachePipeline:
                 await self.reporter.progress(Phase.DAILY, i + 1, total, f"{date_str} 缺口已消失 ✓")
                 continue
 
-            # Fetch suspended list (Tushare, fast)
+            # Suspended list (Tushare, fast) — fail-fast on API error.
             try:
                 suspended_codes = await self.metadata_source.fetch_suspended(gap_date)
             except Exception as e:
@@ -301,49 +305,64 @@ class CachePipeline:
                 await self.reporter.notify_suspend_d_failure(date_str, e)
                 raise
 
-            day_prev_close_map = {
-                **prev_close_map,
-                **await self.storage.get_previous_closes_before(gap_date),
-            }
+            real_missing = missing_codes - suspended_codes
 
-            filled = 0
-            unfillable: list[str] = []
-            for code in missing_codes:
-                pre_close = day_prev_close_map.get(code, 0.0)
-                if code in suspended_codes:
+            if real_missing:
+                # Real-trading stocks missing → re-download the day and insert
+                # them (reuses _process_daily_date: handles normal + suspended,
+                # skips what we already have).
+                records, failed_exchanges = await self.daily_source.fetch_day(gap_date)
+                before = await self.storage.get_codes_for_daily_date(gap_date)
+                await self._process_daily_date(
+                    gap_date,
+                    suspended_codes,
+                    records,
+                    failed_exchanges,
+                    skip_codes=existing_codes,
+                    prev_close_map=prev_close_map,
+                    current=i + 1,
+                    total=total,
+                )
+                after = await self.storage.get_codes_for_daily_date(gap_date)
+                added = len(after - before)
+                downloaded_real += added
+                still = sorted((expected_codes - after))
+                parts = [f"缺{len(missing_codes)}只", f"重下补{added}只"]
+                if still:
+                    # Not in Tushare daily either → genuinely not at the source
+                    # that day (honest residue, not a code bug).
+                    parts.append(f"源头也无{len(still)}只")
+                    logger.info(
+                        "partial %s: re-downloaded %d, %d still absent at source: %s",
+                        date_str,
+                        added,
+                        len(still),
+                        ", ".join(still[:10]),
+                    )
+                await self.reporter.progress(
+                    Phase.DAILY, i + 1, total, f"{date_str} ({', '.join(parts)}) ✓"
+                )
+            else:
+                # Only suspended missing → fast local placeholder fill.
+                day_prev_close_map = {
+                    **prev_close_map,
+                    **await self.storage.get_previous_closes_before(gap_date),
+                }
+                for code in missing_codes:
+                    pre_close = day_prev_close_map.get(code, 0.0)
                     await self.storage.insert_daily_record(
                         code, gap_date, _suspended_record(pre_close)
                     )
-                    filled += 1
-                else:
-                    unfillable.append(code)
-
-            filled_total += filled
-            unfillable_total += len(unfillable)
-
-            parts = [f"缺{len(missing_codes)}只"]
-            if filled:
-                parts.append(f"补停牌{filled}只")
-            if unfillable:
-                parts.append(f"无法补{len(unfillable)}只")
-                logger.info(
-                    "partial %s: %d missing, %d filled (suspended), %d unfillable: %s",
-                    date_str,
-                    len(missing_codes),
-                    filled,
-                    len(unfillable),
-                    ", ".join(unfillable[:10]),
+                    filled_suspended += 1
+                await self.reporter.progress(
+                    Phase.DAILY, i + 1, total, f"{date_str} (补停牌{len(missing_codes)}只) ✓"
                 )
 
-            await self.reporter.progress(
-                Phase.DAILY, i + 1, total, f"{date_str} ({', '.join(parts)}) ✓"
-            )
-
         logger.info(
-            "Partial gaps: %d dates, filled %d suspended, %d unfillable",
+            "Partial gaps: %d dates, re-downloaded %d real, filled %d suspended",
             total,
-            filled_total,
-            unfillable_total,
+            downloaded_real,
+            filled_suspended,
         )
 
     async def _download_full_gap_dates(
