@@ -249,6 +249,14 @@ CREATE TABLE IF NOT EXISTS stock_listing_info (
 )
 """
 
+# Fixed time index for every stock_listing_info row. GreptimeDB dedups by
+# PRIMARY KEY + TIME INDEX, so a varying `ts` would keep every historical
+# write as a SEPARATE version (one code → many rows), and reads would pick
+# a version nondeterministically (the count-flicker bug). Pinning `ts` to a
+# constant makes (stock_code, ts) collapse to exactly one row per code, i.e.
+# a real last-write-wins upsert.
+_LISTING_INFO_TS = 0
+
 _CREATE_SCHEDULER_LOG_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_log (
     "name" STRING PRIMARY KEY,
@@ -1189,6 +1197,16 @@ class GreptimeBacktestStorage:
 
     # ==================== stock_listing_info ====================
 
+    async def truncate_listing_info(self) -> None:
+        """Drop ALL rows in stock_listing_info.
+
+        Called at the start of an authoritative full reload (Tushare
+        stock_basic) so the table ends up with exactly one clean row per
+        code — removing stale verified=false placeholders AND any pre-fix
+        duplicate rows left over from the varying-ts bug.
+        """
+        await self.db.execute("TRUNCATE TABLE stock_listing_info")
+
     async def upsert_listing_info(self, entries: list[dict[str, Any]]) -> int:
         """Bulk upsert per-code listing metadata.
 
@@ -1201,7 +1219,6 @@ class GreptimeBacktestStorage:
         if not entries:
             return 0
         written = 0
-        now_ms = int(time.time() * 1000)
         for e in entries:
             code = e.get("code")
             if not code or len(code) != 6:
@@ -1229,7 +1246,7 @@ class GreptimeBacktestStorage:
             await self.db.execute(
                 "INSERT INTO stock_listing_info"
                 '(stock_code, ts, "name", list_date, delist_date, verified, "source") '
-                f"VALUES ('{code}', {now_ms}, {_str_or_null(name)}, "
+                f"VALUES ('{code}', {_LISTING_INFO_TS}, {_str_or_null(name)}, "
                 f"{_ts_or_null(ld)}, {_ts_or_null(dd)}, "
                 f"{'true' if verified else 'false'}, {_str_or_null(source)})"
             )

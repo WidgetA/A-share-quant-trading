@@ -54,6 +54,11 @@ class _FakeClient:
 class _FakeStorage:
     def __init__(self):
         self.written: list[dict] = []
+        self.truncated = False
+
+    async def truncate_listing_info(self):
+        self.truncated = True
+        self.written = []
 
     async def upsert_listing_info(self, entries):
         self.written.extend(entries)
@@ -67,3 +72,5 @@ async def test_load_listing_writes_listed_and_delisted():
     assert result == {"listed": 1, "delisted": 1, "total_entries": 2, "written": 2}
     codes = {e["code"] for e in storage.written}
     assert codes == {"600000", "000003"}
+    # full rebuild must clear stale rows first (one clean row per code)
+    assert storage.truncated is True

@@ -53,6 +53,11 @@ async def load_listing(storage, client) -> dict:
     delisted = await client.fetch_stock_basic_full("D")
     entries = build_entries(listed, delisted)
 
+    # Authoritative full rebuild: fetch FIRST (so a fetch failure leaves the
+    # existing table intact), then clear and rewrite so the table holds
+    # exactly one clean row per code — no stale placeholders, no duplicates.
+    await storage.truncate_listing_info()
+
     written = 0
     for i in range(0, len(entries), _UPSERT_BATCH):
         written += await storage.upsert_listing_info(entries[i : i + _UPSERT_BATCH])
