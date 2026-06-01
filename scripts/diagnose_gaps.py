@@ -40,7 +40,13 @@ REPORT_FILE = REPORT_JSON_FILE
 _MINUTE_DETAIL_DAYS = 0  # 0 = 分钟缺口全量分类;完整逐天明细写入 data/audit/
 _SAMPLE_LINES = 8  # 报告里每类列几条样本
 _DAILY_CODES_IN_FEISHU = 10
-_MINUTE_B_DAYS_IN_FEISHU = 30
+_DAILY_DAYS_IN_FEISHU = 10  # cap per-day daily blocks in the Feishu msg (full list → file)
+_MINUTE_B_DAYS_IN_FEISHU = 10
+# Hard ceiling on the Feishu message. The relay/Feishu silently rejects very
+# large text (then send_message burns 20 retries and _notify_feishu swallows
+# the failure → "报告啥都没有"). Keep the message well under the limit; the
+# complete per-day detail always lives in the markdown file.
+_FEISHU_MAX_CHARS = 8000
 
 
 MinuteSourceCountFetcher = Callable[[date, str], Awaitable[int]]
@@ -333,17 +339,24 @@ def _minute_source_stats(items: list[dict]) -> dict[str, int]:
     return out
 
 
+def _clip(text: object, n: int = 160) -> str:
+    """Clip a per-day field for the Feishu message (full text → file)."""
+    s = str(text)
+    return s if len(s) <= n else s[:n] + "…"
+
+
 def _daily_day_lines(days: list[dict]) -> list[str]:
     if not days:
         return ["  逐日: 无"]
     lines = ["  逐日:"]
-    for day in days:
+    shown = days[:_DAILY_DAYS_IN_FEISHU]
+    for day in shown:
         by_class = day["missing_by_class"]
         lines += [
-            f"  - {day['date']}: {day['problem']}",
-            f"    根因: {day['root_cause']}",
-            f"    正确数字: {day['correct_number']}",
-            f"    怎么修: {day['fix']}",
+            f"  - {day['date']}: {_clip(day['problem'])}",
+            f"    根因: {_clip(day['root_cause'])}",
+            f"    正确数字: {_clip(day['correct_number'])}",
+            f"    怎么修: {_clip(day['fix'])}",
         ]
         if by_class[CLASS_B]:
             lines.append(f"    关键真缺: {_codes(by_class[CLASS_B], _DAILY_CODES_IN_FEISHU)}")
@@ -351,6 +364,8 @@ def _daily_day_lines(days: list[dict]) -> list[str]:
             lines.append(f"    关键停牌占位: {_codes(by_class[CLASS_C], _DAILY_CODES_IN_FEISHU)}")
         if by_class[CLASS_A]:
             lines.append(f"    关键名单误报: {_codes(by_class[CLASS_A], _DAILY_CODES_IN_FEISHU)}")
+    if len(days) > len(shown):
+        lines.append(f"  - 其余 {len(days) - len(shown)} 个问题日见完整明细文件。")
     return lines
 
 
@@ -584,7 +599,13 @@ async def run_diagnosis_report(
     files = write_report_files(diag)
     report = build_report(diag)
     if feishu:
-        await _notify_feishu(report)
+        feishu_msg = report
+        if len(feishu_msg) > _FEISHU_MAX_CHARS:
+            feishu_msg = (
+                feishu_msg[:_FEISHU_MAX_CHARS]
+                + f"\n\n…(报告过长已截断,完整逐日明细见文件 {files['markdown']})"
+            )
+        await _notify_feishu(feishu_msg)
     return {"diag": diag, "report": report, "files": files}
 
 
