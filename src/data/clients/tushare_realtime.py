@@ -312,8 +312,7 @@ class TushareRealtimeClient:
                 val = self._quote_to_indicator(quote, ind)
                 table_data[ind] = [val]
 
-            suffix = ".SH" if bare_code.startswith("6") else ".SZ"
-            tables.append({"thscode": f"{bare_code}{suffix}", "table": table_data})
+            tables.append({"thscode": self._to_ts_code(bare_code), "table": table_data})
 
         return {"errorcode": 0, "tables": tables}
 
@@ -714,9 +713,19 @@ class TushareRealtimeClient:
 
     @staticmethod
     def _to_ts_code(bare_code: str) -> str:
-        """Convert bare code to Tushare format: 600519 -> 600519.SH."""
+        """Convert a bare 6-digit code to Tushare ts_code.
+
+        600519 -> 600519.SH, 000001 -> 000001.SZ, 920000 -> 920000.BJ.
+
+        北交所 codes (4xxxxx / 8xxxxx / 92xxxx) MUST map to ``.BJ``. Mapping
+        them to ``.SZ`` makes Tushare query a non-existent symbol and return
+        an EMPTY result — which silently looked like "北交所 数据缺失" on the
+        per-code minute path even though Tushare actually has the data.
+        """
         if bare_code.startswith("6"):
             return f"{bare_code}.SH"
+        if bare_code[:1] in ("4", "8") or bare_code.startswith("92"):
+            return f"{bare_code}.BJ"
         return f"{bare_code}.SZ"
 
 
