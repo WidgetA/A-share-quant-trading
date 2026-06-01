@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 _TUSHARE_URL = "http://api.tushare.pro"
 _ST_PREFIXES = ("ST", "*ST")
+# Tushare ``stock_basic`` caps ``ts_code`` at 1000 codes/request (error 50101).
+# Chunk below that with margin so a single oversized batch can't blow the limit.
+_STOCK_BASIC_BATCH_SIZE = 900
 
 
 def _to_ts_code(code: str) -> str:
@@ -41,29 +44,34 @@ async def _fetch_tushare_names(stock_codes: list[str]) -> dict[str, str]:
     """Fetch current company names from Tushare ``stock_basic``.
 
     Returns a ``{6-digit code: name}`` map. Tushare's ``ts_code`` parameter
-    accepts a comma-separated list (verified up to ~1000 codes/request). Codes
-    that Tushare doesn't return (delisted, unknown, etc.) are absent from the
-    resulting dict.
+    accepts a comma-separated list but caps it at 1000 codes/request (error
+    50101). Requests are split into ``_STOCK_BASIC_BATCH_SIZE`` chunks and the
+    results merged. Codes that Tushare doesn't return (delisted, unknown, etc.)
+    are absent from the resulting dict.
     """
     if not stock_codes:
         return {}
     ts_codes = [_to_ts_code(c) for c in stock_codes]
-    body = {
-        "api_name": "stock_basic",
-        "token": get_tushare_token(),
-        "params": {"ts_code": ",".join(ts_codes)},
-        "fields": "ts_code,name",
-    }
+    names: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(_TUSHARE_URL, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(
-            f"Tushare stock_basic error: code={data.get('code')}, msg={data.get('msg')}"
-        )
-    items = data.get("data", {}).get("items", []) or []
-    return {row[0][:6]: row[1] for row in items}
+        for start in range(0, len(ts_codes), _STOCK_BASIC_BATCH_SIZE):
+            batch = ts_codes[start : start + _STOCK_BASIC_BATCH_SIZE]
+            body = {
+                "api_name": "stock_basic",
+                "token": get_tushare_token(),
+                "params": {"ts_code": ",".join(batch)},
+                "fields": "ts_code,name",
+            }
+            resp = await client.post(_TUSHARE_URL, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") != 0:
+                raise RuntimeError(
+                    f"Tushare stock_basic error: code={data.get('code')}, msg={data.get('msg')}"
+                )
+            items = data.get("data", {}).get("items", []) or []
+            names.update({row[0][:6]: row[1] for row in items})
+    return names
 
 
 @dataclass
