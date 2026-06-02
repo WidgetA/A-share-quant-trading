@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.18.0 | 2026-06-02 | - | DAT-006: 交易日历真值表 `trading_calendar` —— 每「交易日 × 股票」一行的物化权威真值(在册/停牌/日线状态/预留分钟状态),由 roster(Tushare 上市日) ∩ suspend_d ∩ Tushare daily ∩ backtest_daily 复合而来;存全+读时筛(视图);检查/补全改为对照它,手动触发=重建。配套: `_to_ts_code` 北交所→`.BJ`(原 `.SZ` 致分钟空);日线-only 历史回填 `POST /api/audit/backfill-daily`;诊断报告飞书消息体积上限(超限静默丢弃修复);`stock_listing_info` 固定 ts + 重建前 truncate(同码双行/读闪修复)。 |
 | 0.17.0 | 2026-05-31 | - | DAT-002: 缓存补全/完整性检查结束后自动发送“按天详报”到飞书; `/api/audit/diagnose-gaps` 手动触发同一报告; 日线问题逐日展开,分钟 B 类库漏存逐日摘要,C/PENDING 类归类汇总,完整逐天明细写入 `data/audit/gap_diagnosis_report.{json,md}`。 |
 | 0.16.9 | 2026-05-07 | - | NOTE-001: 买入/卖出 事件正文拆 对内 / 对外 两栏（schema 加 `content_external` 列，幂等 ALTER 兼容老部署）；新增/编辑表单都给两个 textarea，单事件查看 + 篇 view trade card 都展示双栏（两栏都填时显示「对内/对外」分节标签）。 |
 | 0.16.8 | 2026-05-07 | - | NOTE-001: 手插带时间戳的卡片改为独立持久化（新表 `note_cards`，与 `trade_notes` 解耦）；带 4 个新 endpoint（GET/POST/PATCH/DELETE `/api/notes/{code}/cards`），按自己的 ts 在 篇 view 与 买入/卖出 交错排序。点卡片可直接编辑/删除（modal 重用）。每个 cmt 现在也是独立 segment（之前同一时段多个 cmt 会合并丢数据）。 |
@@ -841,6 +842,57 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 
 **数据缺口诊断报告**: `POST /api/audit/diagnose-gaps` (+ `scripts/diagnose_gaps.py`) 把每日补全报的三类问题(股票数偏多 / 日线缺 / 分钟缺)逐条核查,产出"问题→根因→真实应该是多少→怎么修"的飞书报告。把每个缺的 (天,股) 用 `gap_classifier` 归成 **A 名单错**(未上市/已退市还挂在名单 → AI 上市日剔除)、**B 真缺**(在市未停牌却无数据 → 精准重下)、**C 本就无完整数据**(停牌补占位 / 上市首日半天交易记为已知正常)、**待 AI 核对**。分钟缺口天数多,详细分类抽样最近 N 天(透明标注,不静默截断)。
 - 配套修复 `validate_integrity` 的"股票数"检查:从"全库历史累计 > 5500 报警"(误报,累计含退市股属正常)改为"**单日**在册数 > 5500 才报警";累计数仅作说明。
+
+---
+
+### [DAT-006] 交易日历真值表 (Trading Calendar Truth Table)
+
+**Status**: In progress (2026-06-02)
+
+**Description**: 维护一张**物化的、每天的权威真值表** `trading_calendar`,每个「交易日 × 股票」一行,如实记录这只票这天的真实状态。把"每天该有哪些票、各是什么状态"一次性算清存下,**所有缺口检查和数据补全都对照它做**,不再每次临时推断——"一查即知,不靠复杂推断"。取代 DAT-002/DAT-004 里 `audit_daily_gaps` 的即时重算 + 逐个堵窟窿。
+
+**核心性质**: 表的"正确"= 每天的股票集合对 + 每只的真实状态如实记。某只票停牌、或源头无数据,**不影响表的正确性**——"停牌""源头无"本身就是被如实记录的状态,不是缺陷。
+
+**复合 (reconcile) —— 全用权威源,不推断**。每个交易日 D:
+1. **在册名单 (roster)** = `stock_listing_info` 中 `list_date ≤ D < delist_date` 的代码(Tushare stock_basic 官方上市/退市日)。
+2. **停牌** = Tushare `suspend_d`(D)。
+3. **真有成交** = Tushare `daily`(D)(整批,含所有板块,成交量>0)。
+4. **库里有什么** = `backtest_daily`(D)(区分 `is_suspended`)。
+三者一碰定状态:
+- daily 有真实成交 → `trade_status=trading`;库有真实行=`ok` / 库标成停牌=`wrong_suspended` / 库无=`missing`(真缺待补)。
+- suspend_d 停牌、daily 无成交 → `trade_status=suspended`;库有占位=`ok` / 库无=`missing`(停牌没占位待补)。
+- 在册、不停牌、daily 也查无 → `source_none`(源头也无,长期挂,不假装解决)。
+- 有库数据但**不在当天 roster** → `orphan`(有数据却不在册,`listed=false`)。
+
+**Schema** (`trading_calendar`, GreptimeDB):
+
+| Column | 说明 |
+|--------|------|
+| `stock_code` | PRIMARY KEY (tag) |
+| `ts` | TIME INDEX = **交易日本身** (epoch ms, naive-UTC)。`(stock_code, 交易日)` 唯一一行,重建某天**原样覆盖**——**不用写入时刻当 ts**(避免 `stock_listing_info` 那种同码双行/读闪 bug) |
+| `listed` | 当天是否在册 (roster=true / orphan=false) |
+| `trade_status` | `trading` 正常交易 / `suspended` 停牌 / `unknown` 源头无法定性 —— 这只票这天**共享**的标记 |
+| `daily_state` | `ok` / `missing` 真缺 / `wrong_suspended` 标了停牌却有数据 / `orphan` 有数据却不在册 / `source_none` 源头也无 |
+| `minute_state` | **预留**(后续):`ok` / `missing` / `source_short` 源头不足241 / `pending` |
+| `reason` | 备注 |
+
+**存全 + 读时筛(不在写入期筛选)**: 凡当天在任一源冒头的代码都进表打状态;写入**不做"该不该要"判断**——躲开历史上"筛选悄悄漏行"的坑(`is_suspended=NULL` 被 `WHERE` 排除、北交所被排除)。筛选只在"当索引用"时(读)发生,是这张全量表的视图:
+- 「当天该有日线的名单」= `listed=true AND daily_state≠source_none`;
+- 「当天能交易的名单」= `trade_status=trading`;
+- 「当天数据问题」= `daily_state IN (missing, wrong_suspended, orphan)`。
+
+**用法**: 检查/补全对照"该有日线"视图比 `backtest_daily`,只补/只纠差异;**手动触发 = 重建索引**(重新复合);每天新补全从它起步。历史某天复合好即不变真值,只最近/新增日需重做。
+
+**Endpoints** (规划): `POST /api/audit/calendar/rebuild?start=&end=`(后台重建→飞书);`GET /api/audit/calendar/status`(概览)。
+
+**Files** (规划): `src/data/services/trading_calendar.py`(复合纯逻辑,可单测) / `greptime_storage.py`(建表 + upsert + 视图查询) / `audit_routes.py`(端点)。
+
+**Checklist**:
+- [ ] 建表(`stock_code` PK + 交易日 TIME INDEX,固定交易日为 ts 避免双行)
+- [ ] 复合流程(roster ∩ 停牌 ∩ 成交 ∩ 库 → 状态),纯逻辑单测
+- [ ] 全历史重建端点 + 状态端点
+- [ ] 检查/补全改为对照真值表视图
+- [ ] `minute_state` 接入(后续)
 
 ---
 

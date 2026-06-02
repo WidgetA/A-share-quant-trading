@@ -479,4 +479,90 @@ def create_audit_router() -> APIRouter:
             {"success": True, "message": f"已触发日线补全 {start}~{end}(只日线),结果发飞书"}
         )
 
+    # ------------------------------------------------------------------
+    # 重建交易日历真值表 (POST /api/audit/calendar/rebuild) — DAT-006
+    # 每(交易日 × 股票)复合一行真值:roster(Tushare 上市日) ∩ suspend_d ∩
+    # Tushare daily ∩ backtest_daily → 状态。范围 ?start=&end=,默认 2024-01-01~昨天。
+    # ------------------------------------------------------------------
+
+    @router.post("/calendar/rebuild")
+    async def trigger_calendar_rebuild(request: Request) -> JSONResponse:
+        """Rebuild the trading_calendar truth table over a range (DAT-006)."""
+        from datetime import date, datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage 未就绪")
+        if getattr(request.app.state, "calendar_rebuild_running", False):
+            return JSONResponse({"success": False, "message": "真值表重建正在进行中,请稍后"})
+
+        def _qdate(name: str, default: date) -> date:
+            v = request.query_params.get(name)
+            if not v:
+                return default
+            try:
+                return datetime.strptime(v, "%Y-%m-%d").date()
+            except ValueError:
+                return default
+
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        start = _qdate("start", date(2024, 1, 1))
+        end = _qdate("end", today - timedelta(days=1))
+
+        async def _run() -> None:
+            from src.common.config import get_tushare_token
+            from src.data.clients.tushare_realtime import (
+                TushareRealtimeClient,
+                get_tushare_trade_calendar,
+            )
+            from src.data.services.trading_calendar import build_calendar
+
+            request.app.state.calendar_rebuild_running = True
+            client = TushareRealtimeClient(token=get_tushare_token())
+            await client.start()
+            try:
+                cal = await get_tushare_trade_calendar(
+                    start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), token=get_tushare_token()
+                )
+                trading_days = [datetime.strptime(d, "%Y%m%d").date() for d in cal]
+
+                async def fetch_suspended(day: date) -> set[str]:
+                    return await client.fetch_suspended_stocks(day.strftime("%Y%m%d"))
+
+                async def fetch_traded(day: date) -> set[str]:
+                    recs = await client.fetch_daily(day.strftime("%Y%m%d"))
+                    return {r["ticker"] for r in recs if (r.get("volume") or 0) > 0}
+
+                result = await build_calendar(
+                    storage,
+                    trading_days=trading_days,
+                    fetch_suspended=fetch_suspended,
+                    fetch_traded=fetch_traded,
+                )
+                msg = (
+                    f"[交易日历] 重建完成 {start}~{end}\n"
+                    f"{result['days']} 天, 写入 {result['rows']} 行, "
+                    f"问题行 {result['problem_rows']}"
+                )
+            except Exception as e:
+                logger.error("calendar rebuild 失败: %s", e, exc_info=True)
+                msg = f"[交易日历] 重建失败 {start}~{end}\n{e}"
+            finally:
+                await client.stop()
+                request.app.state.calendar_rebuild_running = False
+            try:
+                from src.common.feishu_bot import FeishuBot
+
+                bot = FeishuBot()
+                if bot.is_configured():
+                    await bot.send_message(msg)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("calendar rebuild 飞书通知失败: %s", e)
+
+        asyncio.create_task(_run())
+        return JSONResponse(
+            {"success": True, "message": f"已触发交易日历真值表重建 {start}~{end},结果发飞书"}
+        )
+
     return router

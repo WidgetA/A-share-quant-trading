@@ -257,6 +257,23 @@ CREATE TABLE IF NOT EXISTS stock_listing_info (
 # a real last-write-wins upsert.
 _LISTING_INFO_TS = 0
 
+# trading_calendar (DAT-006): the materialized per-(day, code) truth table. ts is
+# the TRADE DATE itself (epoch ms), so (stock_code, ts) dedups to one row per code
+# per day and re-reconciling a day overwrites cleanly. NEVER stamp write-time here
+# (that caused the stock_listing_info dual-row/read-flicker bug).
+_CREATE_TRADING_CALENDAR_SQL = """
+CREATE TABLE IF NOT EXISTS trading_calendar (
+    stock_code STRING,
+    ts TIMESTAMP TIME INDEX,
+    listed BOOLEAN,
+    trade_status STRING,
+    daily_state STRING,
+    minute_state STRING,
+    "reason" STRING,
+    PRIMARY KEY (stock_code)
+)
+"""
+
 _CREATE_SCHEDULER_LOG_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_log (
     "name" STRING PRIMARY KEY,
@@ -489,6 +506,7 @@ class GreptimeBacktestStorage:
             ("stock_list", _CREATE_STOCK_LIST_SQL),
             ("stock_snapshot", _CREATE_STOCK_SNAPSHOT_SQL),
             ("stock_listing_info", _CREATE_STOCK_LISTING_INFO_SQL),
+            ("trading_calendar", _CREATE_TRADING_CALENDAR_SQL),
             ("scheduler_log", _CREATE_SCHEDULER_LOG_SQL),
         ]:
             try:
@@ -968,6 +986,68 @@ class GreptimeBacktestStorage:
         ts_ms = date_to_epoch_ms(day)
         rows = await self.db.fetch(f"SELECT stock_code FROM backtest_daily WHERE ts = {ts_ms}")
         return {r["stock_code"] for r in rows}
+
+    async def get_daily_split_for_date(self, day: date) -> tuple[set[str], set[str]]:
+        """Return (normal_codes, suspended_codes) in backtest_daily for a day.
+
+        is_suspended NULL (old rows) counts as normal — a row with data is a real
+        bar unless explicitly flagged suspended. Used by the trading_calendar
+        reconcile (DAT-006) to compare DB state against the authoritative sources.
+        """
+        ts_ms = date_to_epoch_ms(day)
+        rows = await self.db.fetch(
+            f"SELECT stock_code, is_suspended FROM backtest_daily WHERE ts = {ts_ms}"
+        )
+        normal: set[str] = set()
+        suspended: set[str] = set()
+        for r in rows:
+            if r["is_suspended"]:
+                suspended.add(r["stock_code"])
+            else:
+                normal.add(r["stock_code"])
+        return normal, suspended
+
+    async def upsert_trading_calendar(self, day: date, rows: list[dict[str, Any]]) -> int:
+        """Upsert one day's reconciled truth rows into trading_calendar (DAT-006).
+
+        ts = the trade date for ALL rows → (stock_code, ts) overwrites on rebuild.
+        Multi-row INSERT in batches of ≤200 (GreptimeDB silently drops larger
+        batches). Each row: {code, listed, trade_status, daily_state, reason}.
+        """
+        if not rows:
+            return 0
+        ts_ms = date_to_epoch_ms(day)
+
+        def _str_or_null(s: Any) -> str:
+            if s is None:
+                return "NULL"
+            return "'" + str(s).replace("'", "''") + "'"
+
+        written = 0
+        batch = 200
+        for i in range(0, len(rows), batch):
+            values: list[str] = []
+            for r in rows[i : i + batch]:
+                code = r.get("code")
+                if not code or len(code) != 6:
+                    continue
+                listed = "true" if r.get("listed") else "false"
+                values.append(
+                    f"('{code}', {ts_ms}, {listed}, "
+                    f"{_str_or_null(r.get('trade_status'))}, "
+                    f"{_str_or_null(r.get('daily_state'))}, "
+                    f"{_str_or_null(r.get('minute_state'))}, "
+                    f"{_str_or_null(r.get('reason'))})"
+                )
+            if not values:
+                continue
+            await self.db.execute(
+                "INSERT INTO trading_calendar "
+                '(stock_code, ts, listed, trade_status, daily_state, minute_state, "reason") '
+                "VALUES " + ", ".join(values)
+            )
+            written += len(values)
+        return written
 
     async def get_stock_list_codes_for_date(self, day: date) -> set[str]:
         """Return all stock codes in stock_list for a given date."""
