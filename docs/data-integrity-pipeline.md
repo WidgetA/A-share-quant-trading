@@ -41,7 +41,7 @@
 |----|------|------|-----------|
 | 上市/退市日 | Tushare `stock_basic`(L+D 两次调用) | roster 基准 = 权威在册名单 | 含北交所;由 `scripts/load_listing_from_tushare.py` 灌入 `stock_listing_info`,**无需 kimi 逐只查** |
 | 停牌 | Tushare `suspend_d`(按日) | 当天停牌名单 | — |
-| 日线 | Tushare `daily`(**按交易日整批**) | 当天真有成交的票 + OHLCV | **按日期查,自带所有板块**(主板/创业板/科创板/北交所);单位**手**,读层 ×100 转股 |
+| 日线 | Tushare `daily`(**按交易日整批**) | 当天真有成交的票 + OHLCV | **按日期查,自带所有板块**(主板/创业板/科创板/北交所);单位**手**,读层 ×100 转股;**接口最新只到 T-1**——今天的日线还没发布,补全/重建的结束日默认必须 = 昨天(T-1),否则会把今天整批误标 missing |
 | 分钟 | Tushare `stk_mins`(**按单只代码**) | 分钟 bar | 按代码查,代码后缀错=查空(见 §8 北交所 .BJ) |
 | 三合一快照 | `stock_snapshot` = bak_basic ∪ daily ∪ suspend_d | 历史每日候选(旧审计用) | 真值表的 roster 现在用 `stock_listing_info` 而非 snapshot |
 
