@@ -179,17 +179,34 @@ class ListingVerifyScheduler:
         except asyncio.CancelledError:
             logger.info("ListingVerifyScheduler cancelled")
 
-    async def trigger_manual(self, include_failed: bool = False) -> None:
+    async def trigger_manual(
+        self,
+        include_failed: bool = False,
+        codes: set[str] | None = None,
+        max_codes: int | None = None,
+    ) -> None:
         """Manual one-shot run (settings-page button / API). Bypasses the
         enable toggle since the operator asked for it explicitly, but keeps
-        the kimi-availability, cache-fill and in-progress guards."""
-        await self._run_once("manual", force_enabled=True, include_failed=include_failed)
+        the kimi-availability, cache-fill and in-progress guards.
+
+        If ``codes`` is given, verify exactly those (e.g. the truth-table's
+        source_none/orphan backstop set) instead of snapshot-unverified.
+        """
+        await self._run_once(
+            "manual",
+            force_enabled=True,
+            include_failed=include_failed,
+            codes=codes,
+            max_codes=max_codes,
+        )
 
     async def _run_once(
         self,
         trigger: str,
         force_enabled: bool = False,
         include_failed: bool = False,
+        codes: set[str] | None = None,
+        max_codes: int | None = None,
     ) -> None:
         """Execute one verify cycle, with guards. trigger: startup|scheduled|manual."""
         from src.common.config import get_listing_verify_enabled
@@ -228,7 +245,9 @@ class ListingVerifyScheduler:
 
         self.in_progress = True
         try:
-            result = await self.verify_unverified(include_failed=include_failed)
+            result = await self.verify_unverified(
+                include_failed=include_failed, codes=codes, max_codes=max_codes
+            )
             self.last_run_time = run_time
             if result.get("error"):
                 self.last_run_result = "failed"
@@ -260,12 +279,18 @@ class ListingVerifyScheduler:
         self,
         progress_cb=None,
         include_failed: bool = False,
+        codes: set[str] | None = None,
+        max_codes: int | None = None,
     ) -> dict:
-        """Verify snapshot codes lacking a listing_info row via kimi-cli.
+        """Verify codes via kimi-cli (the listing-date backstop).
 
         Args:
             progress_cb: optional async callable(msg) for live progress.
             include_failed: also re-verify existing verified=false placeholders.
+            codes: explicit code set to verify (e.g. the truth-table's
+                source_none/orphan backstop set). If None, defaults to
+                snapshot codes lacking a listing_info row.
+            max_codes: per-run cap (defaults to MAX_CODES_PER_RUN).
 
         Returns dict: {checked, verified, failed, remaining, error?}.
         """
@@ -284,16 +309,18 @@ class ListingVerifyScheduler:
             if progress_cb:
                 await progress_cb(msg)
 
-        codes = await storage.get_unverified_codes_in_snapshot()
-        if include_failed:
-            codes = codes | await storage.get_failed_verified_codes()
+        if codes is None:
+            codes = await storage.get_unverified_codes_in_snapshot()
+            if include_failed:
+                codes = codes | await storage.get_failed_verified_codes()
         all_codes = sorted(codes)
         total = len(all_codes)
         if total == 0:
-            await _log("无未验证代码，跳过")
+            await _log("无待验证代码，跳过")
             return {"checked": 0, "verified": 0, "failed": 0, "remaining": 0}
 
-        batch = all_codes[:MAX_CODES_PER_RUN]
+        cap = max_codes if max_codes is not None else MAX_CODES_PER_RUN
+        batch = all_codes[:cap]
         truncated = total - len(batch)
         remaining = truncated
         if truncated > 0:

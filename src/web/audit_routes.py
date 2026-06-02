@@ -169,6 +169,47 @@ def create_audit_router() -> APIRouter:
             {"success": True, "message": "已触发后台验证", "include_failed": include_failed}
         )
 
+    @router.post("/listing-info/verify-problems")
+    async def trigger_verify_problems(request: Request) -> JSONResponse:
+        """Run kimi on the truth-table's listing-date-ambiguous codes — the backstop
+        for cases Tushare stock_basic can't resolve (DAT-006).
+
+        These are codes the calendar marks ``source_none`` (在册却源头无数据 → list_date
+        suspect, e.g. 920 迁移代码) or ``orphan`` (有数据却不在册 → 退市/迁移代码). kimi
+        web-searches the real listing/delisting and writes it back to stock_listing_info;
+        the next calendar rebuild then reclassifies them.
+
+        ``?states=source_none,orphan`` (default), ``?max=`` per-run cap.
+        """
+        scheduler = getattr(request.app.state, "listing_verify_scheduler", None)
+        storage = getattr(request.app.state, "storage", None)
+        if scheduler is None or storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="验证调度器/存储未就绪")
+        if scheduler.in_progress:
+            return JSONResponse({"success": False, "message": "验证正在进行中，请稍后"})
+        states_raw = request.query_params.get("states", "source_none,orphan")
+        states = {s.strip() for s in states_raw.split(",") if s.strip()}
+        max_codes: int | None
+        try:
+            max_codes = int(request.query_params["max"]) if "max" in request.query_params else None
+        except ValueError:
+            max_codes = None
+        try:
+            codes = await storage.get_calendar_problem_codes(states)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not codes:
+            return JSONResponse(
+                {"success": True, "message": f"真值表里没有 {states_raw} 代码,无需验证"}
+            )
+        asyncio.create_task(scheduler.trigger_manual(codes=codes, max_codes=max_codes))
+        return JSONResponse(
+            {
+                "success": True,
+                "message": f"已触发 kimi 兜底验证 {len(codes)} 只({states_raw}),结果发飞书",
+            }
+        )
+
     # ------------------------------------------------------------------
     # TEMPORARY: 新旧索引对照验证 (POST /api/audit/index-compare)
     # 触发后台任务,把新索引(三合一-kimi)逐日跟旧索引(Tushare bak_basic)对照,

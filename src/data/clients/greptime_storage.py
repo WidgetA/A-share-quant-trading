@@ -1113,6 +1113,24 @@ class GreptimeBacktestStorage:
             for r in rows
         ]
 
+    async def get_calendar_problem_codes(self, states: set[str]) -> set[str]:
+        """Distinct codes whose trading_calendar daily_state is in ``states``.
+
+        Used to hand the listing-date-ambiguous codes (source_none + orphan) to
+        the kimi backstop — cases Tushare stock_basic alone can't resolve (DAT-006).
+        """
+        valid = {"missing", "wrong_suspended", "wrong_traded", "orphan", "source_none", "ok"}
+        bad = states - valid
+        if bad:
+            raise ValueError(f"unknown daily_state(s): {sorted(bad)}")
+        if not states:
+            return set()
+        in_list = ", ".join("'" + s + "'" for s in sorted(states))
+        rows = await self.db.fetch(
+            f"SELECT DISTINCT stock_code FROM trading_calendar WHERE daily_state IN ({in_list})"
+        )
+        return {r["stock_code"] for r in rows}
+
     async def get_stock_list_codes_for_date(self, day: date) -> set[str]:
         """Return all stock codes in stock_list for a given date."""
         ts_ms = date_to_epoch_ms(day)
