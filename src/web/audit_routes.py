@@ -119,6 +119,42 @@ def create_audit_router() -> APIRouter:
             }
         )
 
+    @router.post("/kimi-auth-bundle")
+    async def upload_kimi_auth_bundle(request: Request) -> JSONResponse:
+        """TEMPORARY, keyless: write kimi credentials + device_id into the
+        container in one shot, so headless kimi can REFRESH the 15-min OAuth
+        token (refresh is device-bound → it needs device_id, which the keyed
+        credentials-upload never sent). Body JSON:
+        ``{"credentials": {<kimi-code.json>}, "device_id": "<hex>"}``.
+        Remove this endpoint once kimi auth is confirmed working.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="非法 JSON body")
+        written: list[str] = []
+
+        creds = body.get("credentials")
+        if isinstance(creds, dict):
+            err = _validate_kimi_credentials(creds)
+            if err:
+                raise HTTPException(status_code=400, detail=f"credentials 校验失败: {err}")
+            dest = _kimi_credentials_path()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(creds), encoding="utf-8")
+            written.append(str(dest))
+
+        device_id = body.get("device_id")
+        if isinstance(device_id, str) and device_id.strip():
+            did_dest = _kimi_credentials_path().parent.parent / "device_id"
+            did_dest.parent.mkdir(parents=True, exist_ok=True)
+            did_dest.write_text(device_id.strip(), encoding="utf-8")
+            written.append(str(did_dest))
+
+        if not written:
+            raise HTTPException(status_code=400, detail="未提供 credentials 或 device_id")
+        return JSONResponse({"success": True, "written": written})
+
     # ------------------------------------------------------------------
     # Listing info upload (kimi verification result)
     # ------------------------------------------------------------------
