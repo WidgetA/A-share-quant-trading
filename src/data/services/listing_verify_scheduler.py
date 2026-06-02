@@ -427,12 +427,12 @@ class ListingVerifyScheduler:
 
         ok_emoji = "✅" if tool_errors == [] else "⚠️"
         summary = (
-            f"【阶段一·索引建设｜上市日核验】{ok_emoji} 完成\n"
-            f"任务: 用 kimi 查 source_none/orphan 代码的真实上市日\n"
+            f"【阶段一·索引建设·核对上市日】{ok_emoji} 完成\n"
+            "任务: 用大模型(kimi)核对「在册却源头没数据 / 有数据却不在册」这些票的真实上市日\n"
             f"结果: 查到并写入 {verified_n} 只 / 搜过仍查不到 {len(not_found_codes)} 只 / "
-            f"kimi 出错(超时·认证,未写) {len(tool_errors)} 只 / 还剩 {remaining} 只待核\n"
-            f"含义: '查到' 的上市日早于其无数据日期 → 确认是真上市、源头缺(source_none 坐实);"
-            f"晚于 → 那时未上市,下次重建索引自动剔除"
+            f"出错(超时或认证,未写) {len(tool_errors)} 只 / 还剩 {remaining} 只待核\n"
+            "含义: 查到的上市日若早于它没数据的那些天 → 确认确实上市了、只是接口缺数据(保留标记);"
+            "若晚于 → 那时其实还没上市,下次重建索引会自动从名单剔除"
         )
         if not_found_codes:
             shown = not_found_codes[:_FEISHU_FAILED_DISPLAY]

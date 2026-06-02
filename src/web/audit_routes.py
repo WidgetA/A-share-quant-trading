@@ -550,10 +550,11 @@ def create_audit_router() -> APIRouter:
         async def _run_index() -> str:
             result = await pipeline.fill_daily_from_calendar(quiet=True)
             return (
-                "【阶段二·补日线｜索引驱动】✅ 完成\n"
-                "任务: 照真值表只补 missing(源头有·库没有)的日线,跳过 ok 和 source_none\n"
+                "【阶段二·补日线】✅ 完成\n"
+                "任务: 照索引补「源头有、库里没有」的日线\n"
+                "(已经齐的、以及「源头本就没有」的都跳过)\n"
                 f"结果: 补回 {result['filled']:,} 行 / 跨 {result['dates']} 个有缺口的交易日\n"
-                "(再跑阶段一·真值表复合 可确认 missing 归零;source_none 源头不可抗已跳过)"
+                "(随后重建一次索引即可确认这些缺口归零)"
             )
 
         async def _run_full() -> str:
@@ -578,8 +579,8 @@ def create_audit_router() -> APIRouter:
             end = _qdate("end", today - timedelta(days=1))
             result = await pipeline.download_prices(start, end, skip_minute=True, quiet=True)
             return (
-                "【阶段二·补日线｜全量审计】✅ 完成\n"
-                f"范围: {start} ~ {end}(全量重下,bootstrap/扩范围用)\n"
+                "【阶段二·补日线·全量】✅ 完成\n"
+                f"范围: {start} ~ {end}(全量重下,用于建底/扩大范围)\n"
                 f"{result.get('verify_msg')}"
             )
 
@@ -684,16 +685,16 @@ def create_audit_router() -> APIRouter:
                     f"  · {_labels.get(k, k)}: {v:,}" for k, v in sorted(bd.items()) if v
                 )
                 msg = (
-                    "【阶段一·索引建设｜真值表复合】✅ 重建完成\n"
-                    "任务: 把每天每只票复合成一行真值(在册 / 停牌 / 数据状态)\n"
+                    "【阶段一·索引建设】✅ 重建完成\n"
+                    "任务: 把每天每只票汇总成一行真值(是否在册 / 是否停牌 / 数据对不对)\n"
                     f"范围: {start} ~ {end}\n"
                     f"规模: {result['days']} 个交易日, 写入 {result['rows']:,} 行\n"
-                    f"本次范围内分状态:\n{lines}\n"
-                    f"(问题行合计 {result['problem_rows']:,};除「源头也无」外均待修)"
+                    f"本次范围内分类:\n{lines}\n"
+                    f"(有问题的合计 {result['problem_rows']:,};除「源头也无」外都待修)"
                 )
             except Exception as e:
                 logger.error("calendar rebuild 失败: %s", e, exc_info=True)
-                msg = f"【阶段一·索引建设｜真值表复合】❌ 重建失败 {start}~{end}\n{e}"
+                msg = f"【阶段一·索引建设】❌ 重建失败 {start}~{end}\n{e}"
             finally:
                 await client.stop()
                 request.app.state.calendar_rebuild_running = False
