@@ -144,7 +144,7 @@ async def build_calendar(
     """
     listing_info = await storage.get_listing_info_all()
     total_rows = 0
-    problem_rows = 0
+    by_state: dict[str, int] = {}
     for day in trading_days:
         roster = roster_for_day(listing_info, day)
         suspended = await fetch_suspended(day)
@@ -152,9 +152,14 @@ async def build_calendar(
         db_normal, db_suspended = await storage.get_daily_split_for_date(day)
         rows = reconcile_day(roster, suspended, traded, db_normal, db_suspended)
         total_rows += await storage.upsert_trading_calendar(day, rows)
-        problem_rows += sum(1 for r in rows if r["daily_state"] not in (OK, SOURCE_NONE))
+        for r in rows:
+            st = r["daily_state"]
+            by_state[st] = by_state.get(st, 0) + 1
+    # "problem" = anything that isn't clean-ok or the known-OK source_none gap.
+    problem_rows = sum(v for k, v in by_state.items() if k not in (OK, SOURCE_NONE))
     return {
         "days": len(trading_days),
         "rows": total_rows,
         "problem_rows": problem_rows,
+        "by_state": by_state,
     }

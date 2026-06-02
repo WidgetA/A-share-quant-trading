@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from src.data.services.trading_calendar import (
     MISSING,
     OK,
@@ -17,6 +19,7 @@ from src.data.services.trading_calendar import (
     UNKNOWN,
     WRONG_SUSPENDED,
     WRONG_TRADED,
+    build_calendar,
     reconcile_day,
     roster_for_day,
 )
@@ -152,3 +155,48 @@ def test_roster_for_day_respects_list_and_delist_dates():
     assert early == {"600000"}  # 920001 not listed yet, 000003 already delisted
     later = roster_for_day(info, date(2023, 1, 3))
     assert later == {"600000", "920001"}
+
+
+class _FakeCalStorage:
+    """Minimal storage for build_calendar: 600000 has real data, 300001 missing."""
+
+    def __init__(self):
+        self.upserts: list = []
+
+    async def get_listing_info_all(self):
+        return {
+            "600000": {"list_date": date(1999, 1, 1), "delist_date": None},
+            "300001": {"list_date": date(2009, 1, 1), "delist_date": None},
+        }
+
+    async def get_daily_split_for_date(self, day):
+        return ({"600000"}, set())  # 600000 normal; 300001 absent
+
+    async def upsert_trading_calendar(self, day, rows):
+        self.upserts.append((day, rows))
+        return len(rows)
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_aggregates_by_state():
+    storage = _FakeCalStorage()
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return {"600000", "300001"}  # both traded per Tushare
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+    )
+    assert result["days"] == 1
+    assert result["rows"] == 2
+    # 600000 traded + has real → ok; 300001 traded + absent → missing (真缺)
+    assert result["by_state"][OK] == 1
+    assert result["by_state"][MISSING] == 1
+    assert result["problem_rows"] == 1
+    assert len(storage.upserts) == 1

@@ -541,10 +541,13 @@ def create_audit_router() -> APIRouter:
                     fetch_suspended=fetch_suspended,
                     fetch_traded=fetch_traded,
                 )
+                bd = result.get("by_state", {})
+                breakdown = " / ".join(f"{k}={v}" for k, v in sorted(bd.items()))
                 msg = (
                     f"[交易日历] 重建完成 {start}~{end}\n"
                     f"{result['days']} 天, 写入 {result['rows']} 行, "
-                    f"问题行 {result['problem_rows']}"
+                    f"问题行 {result['problem_rows']}\n"
+                    f"分状态: {breakdown}"
                 )
             except Exception as e:
                 logger.error("calendar rebuild 失败: %s", e, exc_info=True)
@@ -565,5 +568,23 @@ def create_audit_router() -> APIRouter:
         return JSONResponse(
             {"success": True, "message": f"已触发交易日历真值表重建 {start}~{end},结果发飞书"}
         )
+
+    @router.get("/calendar/status")
+    async def calendar_status(request: Request) -> JSONResponse:
+        """Query the trading_calendar truth table: per-state / per-trade-status
+        counts + covered date range + whether a rebuild is running (DAT-006)."""
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            return JSONResponse({"ready": False})
+        try:
+            summary = await storage.get_trading_calendar_summary()
+        except Exception as e:
+            logger.warning("calendar_status 读取失败: %s", e, exc_info=True)
+            return JSONResponse({"ready": False, "error": str(e)})
+        summary["ready"] = True
+        summary["rebuild_running"] = bool(
+            getattr(request.app.state, "calendar_rebuild_running", False)
+        )
+        return JSONResponse(summary)
 
     return router

@@ -1049,6 +1049,31 @@ class GreptimeBacktestStorage:
             written += len(values)
         return written
 
+    async def get_trading_calendar_summary(self) -> dict[str, Any]:
+        """Summarize the trading_calendar truth table (DAT-006) for queries/logs.
+
+        Returns total rows, per daily_state counts, per trade_status counts, and the
+        covered date range — so you can 'query the truth' without a rebuild.
+        """
+        by_daily = await self.db.fetch(
+            "SELECT daily_state, COUNT(*) as cnt FROM trading_calendar GROUP BY daily_state"
+        )
+        by_trade = await self.db.fetch(
+            "SELECT trade_status, COUNT(*) as cnt FROM trading_calendar GROUP BY trade_status"
+        )
+        rng = await self.db.fetchrow("SELECT MIN(ts) as mn, MAX(ts) as mx FROM trading_calendar")
+        daily_state = {r["daily_state"]: int(r["cnt"]) for r in by_daily}
+        trade_status = {r["trade_status"]: int(r["cnt"]) for r in by_trade}
+        mn = rng["mn"] if rng else None
+        mx = rng["mx"] if rng else None
+        return {
+            "total_rows": sum(daily_state.values()),
+            "by_daily_state": daily_state,
+            "by_trade_status": trade_status,
+            "min_date": ts_to_date(mn).isoformat() if mn is not None else None,
+            "max_date": ts_to_date(mx).isoformat() if mx is not None else None,
+        }
+
     async def get_stock_list_codes_for_date(self, day: date) -> set[str]:
         """Return all stock codes in stock_list for a given date."""
         ts_ms = date_to_epoch_ms(day)
