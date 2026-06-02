@@ -210,6 +210,27 @@ def create_audit_router() -> APIRouter:
             }
         )
 
+    @router.get("/listing-info/kimi-raw")
+    async def kimi_raw(request: Request) -> JSONResponse:
+        """Observability: return the FULL raw kimi output (the tool trace —
+        SearchWeb/FetchURL/Shell calls + results) from a code's last verify run,
+        so a "查不到" can be INSPECTED instead of guessed at. ?code=XXXXXX."""
+        from src.data.services.listing_verify_scheduler import KIMI_RAW_DIR
+
+        code = request.query_params.get("code", "").strip()
+        if not (len(code) == 6 and code.isdigit()):
+            raise HTTPException(status_code=400, detail="code 必须是 6 位数字")
+        path = KIMI_RAW_DIR / f"{code}.txt"
+        if not path.exists():
+            return JSONResponse(
+                {"code": code, "found": False, "message": "暂无 kimi 原始记录(尚未验证过该代码)"}
+            )
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取失败: {e}")
+        return JSONResponse({"code": code, "found": True, "chars": len(text), "raw": text})
+
     # ------------------------------------------------------------------
     # TEMPORARY: 新旧索引对照验证 (POST /api/audit/index-compare)
     # 触发后台任务,把新索引(三合一-kimi)逐日跟旧索引(Tushare bak_basic)对照,

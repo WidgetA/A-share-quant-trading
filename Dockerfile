@@ -39,8 +39,11 @@ ENV GIT_BRANCH=${GIT_BRANCH}
 ENV BUILD_TIME=${BUILD_TIME}
 
 # Runtime system libs required by ML wheels (sklearn/xgboost/lightgbm need libgomp)
+# libgomp1: lightgbm runtime. curl: kimi-cli's Shell-fallback tool — when its
+# SearchWeb fails, kimi reasons its way to `curl`-ing financial sites (verified
+# manually for 920039); without curl that fallback is unavailable in-container.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

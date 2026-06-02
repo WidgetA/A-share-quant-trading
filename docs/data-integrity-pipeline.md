@@ -189,6 +189,14 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 | `POST /backfill-daily` | 阶段2 | **默认索引驱动**:只补真值表 `daily_state=missing`(先跑阶段1);`ok`+`source_none` 跳过 |
 | `POST /backfill-daily?mode=full&start=&end=` | bootstrap | 旧的全量审计式重下(建底/扩新范围,默认 CACHE_START~今天) |
 | `POST /diagnose-gaps` | — | 逐日诊断报告(问题→根因→正确数字→修法)→ 飞书 |
+| `POST /listing-info/verify-problems?states=&max=` | kimi兜底 | 把真值表 source_none/orphan 代码喂 kimi 查真实上市日 |
+| `GET  /listing-info/kimi-raw?code=` | **可观测** | 拉某代码上次 kimi 验证的**完整原始输出(工具调用全过程)**——"查不到"时调它看 kimi 到底做了什么,**别猜** |
+
+**kimi 兜底的教训(别把大模型捆死、别靠"查不到"猜)**: kimi 本能查到北交所代码(本地实测 920039=国义招标),
+但服务端 path-B 曾(1)prompt **强制 SearchWeb-only** + `--no-thinking` → SearchWeb 一挂就"查不到",不会绕道;
+(2)容器**没 curl** → kimi 的 Shell 退路也断。修法:prompt 放开用全工具(搜索失败→FetchURL 抓财经页→Shell)、
+去掉 `--no-thinking`、镜像装 curl,并**把每只代码的 kimi 原始 trace 落盘 + 开 `kimi-raw` 接口**——
+以后失败先调 trace 看,不猜。
 
 > 索引驱动补全 = `CachePipeline.fill_daily_from_calendar()`(读 `get_calendar_missing_by_date()`,
 > 复用 `_process_daily_date` 写真实行+停牌占位)。补全只改 `backtest_daily`,**不更新日历**——

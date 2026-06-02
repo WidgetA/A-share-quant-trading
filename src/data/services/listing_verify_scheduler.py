@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.data.services.kimi_listing_verifier import (
@@ -42,6 +43,10 @@ _FEISHU_FAILED_DISPLAY = 50  # cap failed-code list in the Feishu message
 # successes, abort the whole run and alert — don't grind through hundreds of
 # stocks masking a broken/unauthenticated kimi as "查不到".
 _TOOL_ERROR_ABORT = 5
+# Observability: keep each code's FULL raw kimi output (the tool trace —
+# SearchWeb/FetchURL/Shell calls + results) so a "查不到" can be inspected
+# (GET /api/audit/listing-info/kimi-raw?code=) instead of guessed at.
+KIMI_RAW_DIR = Path("data/audit/kimi_raw")
 
 
 async def _notify_feishu(message: str) -> None:
@@ -357,7 +362,8 @@ class ListingVerifyScheduler:
 
         for idx, code in enumerate(batch, 1):
             try:
-                result = await run_kimi_for_code(code)
+                # raw_dir → keep the full tool trace per code for observability
+                result = await run_kimi_for_code(code, raw_dir=KIMI_RAW_DIR)
             except KimiToolError as e:
                 tool_errors.append((code, str(e)))
                 # kimi is clearly broken/unauthenticated → stop, don't write

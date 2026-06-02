@@ -19,13 +19,16 @@ import shutil
 from pathlib import Path
 
 KIMI_PROMPT_TMPL = (
-    "查 A 股股票代码 {code} 的真实首次挂牌交易日期 (IPO 首日)。"
-    "必须用 SearchWeb 工具至少搜索一次实际网页 (新浪财经/东方财富/雪球/巨潮资讯/"
-    "同花顺/钛媒体/交易所公告等),不要凭印象答。"
+    "查 A 股股票代码 {code} 的真实首次挂牌交易日期(IPO 首日 / 上市日)。"
+    "请实证查证、绝不凭印象,用你能用的**全部**工具:先 SearchWeb 搜索;"
+    "**若搜索失败或无果,改用 FetchURL 抓取财经页面**(东方财富个股资料页、新浪财经、"
+    "同花顺、雪球、巨潮资讯、北交所/交易所公告等),从中找'上市日期/首发上市日期';"
+    "也可用 Shell(如 curl)取数据。**一个工具/来源失败就换下一个,多试几个再下结论,"
+    "不要因为某个工具不可用就放弃。**"
     "先简要列出你找到的信息,再在最后一行单独输出一行 JSON:\n"
     '{{"code":"{code}","name":"<公司中文名,如不知填 null>","list_date":"YYYY-MM-DD",'
     '"source":"<URL>"}}\n'
-    "如果搜索后仍找不到该代码的实际挂牌日,输出 list_date 为 null:\n"
+    "只有在确实多方查证都找不到时,才输出 list_date 为 null(绝不编造日期):\n"
     '{{"code":"{code}","name":null,"list_date":null,"source":null,"error":"not found"}}'
 )
 
@@ -139,7 +142,10 @@ async def run_kimi_for_code(
         "kimi",
         "--print",
         "--afk",
-        "--no-thinking",  # faster + cheaper; SearchWeb still works
+        # NOTE: thinking left ON. With --no-thinking, when SearchWeb fails kimi
+        # gives up ("查不到") instead of reasoning its way to a FetchURL/Shell
+        # fallback (which works — verified manually for 920039). Slower but it
+        # actually finds answers.
         "-p",
         prompt,
         stdout=asyncio.subprocess.PIPE,
