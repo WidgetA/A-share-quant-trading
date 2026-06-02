@@ -68,6 +68,18 @@ _NO_LLM_MARKERS = (
     "未配置模型",
 )
 
+# Auth/runtime failure phrases — SPECIFIC enough not to match a 6-digit code or
+# a YYYY-MM-DD date (so safe to check before parsing). "Invalid Authentication"
+# = the 401 seen when the 15-min OAuth token is expired and refresh failed.
+_AUTH_FAIL_PHRASES = (
+    "invalid authentication",
+    "invalid_authentication",
+    "unauthorized",
+    "error code: 401",
+    "error code: 403",
+    "stepinterrupted",
+)
+
 
 class KimiToolError(RuntimeError):
     """kimi-cli itself failed (timeout / nonzero exit / no auth / unparseable
@@ -191,6 +203,14 @@ async def run_kimi_for_code(
             f"kimi 未配置模型 (LLM not set) — code={code};"
             " 容器缺 ~/.kimi/config.toml(只上传了凭证,没带模型/provider 配置)"
         )
+    # Auth/runtime failure: kimi started but the API rejected the token (expired
+    # 15-min OAuth, refresh failed — e.g. missing device_id) or the step was
+    # interrupted. Specific phrases (won't match a 6-digit code or a date).
+    # Catch BEFORE parsing — else parse_kimi_output matches the prompt-echo's
+    # example "not found" JSON and falsely reports 查不到.
+    if any(m in low_all for m in _AUTH_FAIL_PHRASES):
+        snippet = " ".join(text.split())[-200:]
+        raise KimiToolError(f"kimi 认证/运行失败(API 拒绝)— code={code}; 输出尾: {snippet!r}")
 
     parsed = parse_kimi_output(text, code)
     if parsed is not None:
