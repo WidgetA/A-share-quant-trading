@@ -172,11 +172,12 @@ class CacheScheduler:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Main loop: check gaps on startup, then daily at 3am.
+        """Main loop: fill gaps daily at 3am (recent window only).
 
-        The startup check ensures that if the container restarts after 3am
-        (OOM, watchtower, crash), gaps are still filled that day instead of
-        waiting until the next 3am — which may also be missed.
+        Deliberately NO startup fill: with frequent watchtower redeploys a
+        startup fill would run on every restart, holding cache_fill_running and
+        blocking kimi/path-B. Recent freshness is the 3am run's job; historical
+        backfill is deliberate (index-driven endpoints).
         """
         logger.info("CacheScheduler started, will run daily at 3am Beijing time")
         try:
@@ -184,8 +185,11 @@ class CacheScheduler:
             await asyncio.sleep(_STARTUP_DELAY_SECONDS)
             await self._restore_status_from_db()
 
-            # ── Startup check: fill gaps immediately ──
-            await self._run_once("startup")
+            # NO startup fill. watchtower auto-deploys often, so a startup fill
+            # would run on EVERY restart — holding cache_fill_running (and thus
+            # blocking kimi/path-B) while it scans/downloads. Recent freshness is
+            # the 3am run's job; historical backfill is deliberate (endpoints).
+            # A restart no longer triggers any fill → kimi is free immediately.
 
             # ── Daily 3am loop ──
             while True:
