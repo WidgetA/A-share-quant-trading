@@ -550,9 +550,10 @@ def create_audit_router() -> APIRouter:
         async def _run_index() -> str:
             result = await pipeline.fill_daily_from_calendar(quiet=True)
             return (
-                "[日线补全·索引驱动] 完成\n"
-                f"补回 {result['filled']} 行 / 跨 {result['dates']} 个有缺口的交易日\n"
-                "(再跑一次阶段1 重建索引可确认 missing 归零;source_none 源头不可抗已跳过)"
+                "【阶段二·补日线｜索引驱动】✅ 完成\n"
+                "任务: 照真值表只补 missing(源头有·库没有)的日线,跳过 ok 和 source_none\n"
+                f"结果: 补回 {result['filled']:,} 行 / 跨 {result['dates']} 个有缺口的交易日\n"
+                "(再跑阶段一·真值表复合 可确认 missing 归零;source_none 源头不可抗已跳过)"
             )
 
         async def _run_full() -> str:
@@ -574,7 +575,11 @@ def create_audit_router() -> APIRouter:
             start = _qdate("start", CACHE_START_DATE)
             end = _qdate("end", today)
             result = await pipeline.download_prices(start, end, skip_minute=True, quiet=True)
-            return f"[日线补全·全量] 完成 {start}~{end}\n{result.get('verify_msg')}"
+            return (
+                "【阶段二·补日线｜全量审计】✅ 完成\n"
+                f"范围: {start} ~ {end}(全量重下,bootstrap/扩范围用)\n"
+                f"{result.get('verify_msg')}"
+            )
 
         async def _run() -> None:
             request.app.state.backfill_daily_running = True
@@ -582,7 +587,7 @@ def create_audit_router() -> APIRouter:
                 msg = await (_run_full() if mode == "full" else _run_index())
             except Exception as e:
                 logger.error("backfill-daily 失败: %s", e, exc_info=True)
-                msg = f"[日线补全] 失败\n{e}"
+                msg = f"【阶段二·补日线】❌ 失败\n{e}"
             finally:
                 request.app.state.backfill_daily_running = False
             try:
@@ -663,16 +668,28 @@ def create_audit_router() -> APIRouter:
                     fetch_traded=fetch_traded,
                 )
                 bd = result.get("by_state", {})
-                breakdown = " / ".join(f"{k}={v}" for k, v in sorted(bd.items()))
+                _labels = {
+                    "ok": "正常",
+                    "missing": "真缺待补(源头有·库没有)",
+                    "wrong_suspended": "标错停牌(库标停牌·实际有成交)",
+                    "wrong_traded": "标错交易",
+                    "orphan": "有数据却不在册",
+                    "source_none": "源头也无(接口数据不全·已标记,无需修)",
+                }
+                lines = "\n".join(
+                    f"  · {_labels.get(k, k)}: {v:,}" for k, v in sorted(bd.items()) if v
+                )
                 msg = (
-                    f"[交易日历] 重建完成 {start}~{end}\n"
-                    f"{result['days']} 天, 写入 {result['rows']} 行, "
-                    f"问题行 {result['problem_rows']}\n"
-                    f"分状态: {breakdown}"
+                    "【阶段一·索引建设｜真值表复合】✅ 重建完成\n"
+                    "任务: 把每天每只票复合成一行真值(在册 / 停牌 / 数据状态)\n"
+                    f"范围: {start} ~ {end}\n"
+                    f"规模: {result['days']} 个交易日, 写入 {result['rows']:,} 行\n"
+                    f"本次范围内分状态:\n{lines}\n"
+                    f"(问题行合计 {result['problem_rows']:,};除「源头也无」外均待修)"
                 )
             except Exception as e:
                 logger.error("calendar rebuild 失败: %s", e, exc_info=True)
-                msg = f"[交易日历] 重建失败 {start}~{end}\n{e}"
+                msg = f"【阶段一·索引建设｜真值表复合】❌ 重建失败 {start}~{end}\n{e}"
             finally:
                 await client.stop()
                 request.app.state.calendar_rebuild_running = False

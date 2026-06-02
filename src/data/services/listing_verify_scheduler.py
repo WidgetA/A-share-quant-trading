@@ -232,7 +232,7 @@ class ListingVerifyScheduler:
             self.last_run_message = "容器内未找到 kimi-cli，跳过"
             logger.warning("ListingVerifyScheduler: kimi-cli not on PATH, skipping (%s)", trigger)
             await self._persist_status(trigger)
-            await _notify_feishu("[上市日验证·路径B] 容器内未找到 kimi-cli，本次跳过")
+            await _notify_feishu("【阶段一·索引建设｜上市日核验】 容器内未找到 kimi-cli，本次跳过")
             return
 
         # Don't compete with a running cache fill for memory on the small box.
@@ -271,7 +271,7 @@ class ListingVerifyScheduler:
             self.last_run_time = run_time
             self.last_run_result = "failed"
             self.last_run_message = str(e)[:120]
-            await _notify_feishu(f"[上市日验证·路径B] 执行异常 ({trigger})\n{e}")
+            await _notify_feishu(f"【阶段一·索引建设｜上市日核验】 执行异常 ({trigger})\n{e}")
         finally:
             self.in_progress = False
             await self._persist_status(trigger)
@@ -373,7 +373,7 @@ class ListingVerifyScheduler:
                     reason = tool_errors[0][1]
                     await _log(f"kimi 连续 {len(tool_errors)} 次工具错误且零成功 → 中止: {reason}")
                     await _notify_feishu(
-                        "[上市日验证·路径B] 已中止 — kimi 工具/凭证失败\n"
+                        "【阶段一·索引建设｜上市日核验】 已中止 — kimi 工具/凭证失败\n"
                         f"前 {len(tool_errors)} 只全部是 kimi 工具错误、0 成功,"
                         "未写任何占位(不是'查不到')。\n"
                         f"原因: {reason}\n"
@@ -425,12 +425,14 @@ class ListingVerifyScheduler:
             f"kimi工具错误 {len(tool_errors)} / 写入 {written} / 剩余 {remaining}"
         )
 
+        ok_emoji = "✅" if tool_errors == [] else "⚠️"
         summary = (
-            "[上市日验证·路径B] 本次完成\n"
-            f"验证成功: {verified_n}\n"
-            f"查不到(已搜过,写占位): {len(not_found_codes)}\n"
-            f"kimi工具错误(未写,需排查): {len(tool_errors)}\n"
-            f"剩余待验证: {remaining}"
+            f"【阶段一·索引建设｜上市日核验】{ok_emoji} 完成\n"
+            f"任务: 用 kimi 查 source_none/orphan 代码的真实上市日\n"
+            f"结果: 查到并写入 {verified_n} 只 / 搜过仍查不到 {len(not_found_codes)} 只 / "
+            f"kimi 出错(超时·认证,未写) {len(tool_errors)} 只 / 还剩 {remaining} 只待核\n"
+            f"含义: '查到' 的上市日早于其无数据日期 → 确认是真上市、源头缺(source_none 坐实);"
+            f"晚于 → 那时未上市,下次重建索引自动剔除"
         )
         if not_found_codes:
             shown = not_found_codes[:_FEISHU_FAILED_DISPLAY]
