@@ -432,8 +432,10 @@ def create_audit_router() -> APIRouter:
     @router.post("/backfill-daily")
     async def trigger_backfill_daily(request: Request) -> JSONResponse:
         """Daily-only historical backfill (all boards), minute untouched."""
-        from datetime import date, datetime, timedelta
+        from datetime import date, datetime
         from zoneinfo import ZoneInfo
+
+        from src.data.services.cache_scheduler import CACHE_START_DATE
 
         storage = getattr(request.app.state, "storage", None)
         pipeline = getattr(request.app.state, "pipeline", None)
@@ -452,8 +454,8 @@ def create_audit_router() -> APIRouter:
                 return default
 
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-        start = _qdate("start", date(2024, 1, 1))
-        end = _qdate("end", today - timedelta(days=1))
+        start = _qdate("start", CACHE_START_DATE)
+        end = _qdate("end", today)
 
         async def _run() -> None:
             request.app.state.backfill_daily_running = True
@@ -488,8 +490,10 @@ def create_audit_router() -> APIRouter:
     @router.post("/calendar/rebuild")
     async def trigger_calendar_rebuild(request: Request) -> JSONResponse:
         """Rebuild the trading_calendar truth table over a range (DAT-006)."""
-        from datetime import date, datetime, timedelta
+        from datetime import date, datetime
         from zoneinfo import ZoneInfo
+
+        from src.data.services.cache_scheduler import CACHE_START_DATE
 
         storage = getattr(request.app.state, "storage", None)
         if storage is None or not getattr(storage, "is_ready", False):
@@ -507,8 +511,8 @@ def create_audit_router() -> APIRouter:
                 return default
 
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-        start = _qdate("start", date(2024, 1, 1))
-        end = _qdate("end", today - timedelta(days=1))
+        start = _qdate("start", CACHE_START_DATE)
+        end = _qdate("end", today)
 
         async def _run() -> None:
             from src.common.config import get_tushare_token

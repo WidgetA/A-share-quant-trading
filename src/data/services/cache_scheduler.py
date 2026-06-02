@@ -14,7 +14,9 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
-CACHE_START_DATE = date(2024, 1, 1)
+# Daily coverage starts 2023-01-01 by default (backfill/rebuild endpoints reuse
+# this); pass ?start= to an endpoint to go earlier.
+CACHE_START_DATE = date(2023, 1, 1)
 SCHEDULE_HOUR = 3  # 3am Beijing time
 DOWNLOAD_TIMEOUT_SECONDS = 4 * 3600  # 4 hours max per range
 _STARTUP_DELAY_SECONDS = 60  # wait for storage/pipeline to initialize
