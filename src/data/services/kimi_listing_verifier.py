@@ -55,6 +55,19 @@ _TOOL_ERROR_MARKERS = (
     "rate limit",
 )
 
+# Output markers meaning kimi never ran the model in this (headless) invocation —
+# no default model/provider configured (~/.kimi/config.toml missing). Distinct
+# from auth errors; must raise (never a "查不到").
+_NO_LLM_MARKERS = (
+    "llm not set",
+    "llm not configured",
+    "no llm configured",
+    "model not set",
+    "no model configured",
+    "未设置模型",
+    "未配置模型",
+)
+
 
 class KimiToolError(RuntimeError):
     """kimi-cli itself failed (timeout / nonzero exit / no auth / unparseable
@@ -164,6 +177,20 @@ async def run_kimi_for_code(
     if raw_dir is not None:
         raw_dir.mkdir(parents=True, exist_ok=True)
         (raw_dir / f"{code}.txt").write_text(text, encoding="utf-8")
+
+    # "LLM not set": the headless --print run had no model configured (no
+    # ~/.kimi/config.toml in the container — only credentials were uploaded), so
+    # kimi never ran the model/tools and just echoed the prompt. The prompt
+    # itself contains an example {"...","error":"not found"} JSON, which the
+    # parser below would otherwise FALSELY return as a "查不到". This is a TOOL
+    # ERROR (kimi couldn't run), never a real "not found" — raise loudly so we
+    # never write a bogus placeholder.
+    low_all = text.lower()
+    if any(m in low_all for m in _NO_LLM_MARKERS):
+        raise KimiToolError(
+            f"kimi 未配置模型 (LLM not set) — code={code};"
+            " 容器缺 ~/.kimi/config.toml(只上传了凭证,没带模型/provider 配置)"
+        )
 
     parsed = parse_kimi_output(text, code)
     if parsed is not None:
