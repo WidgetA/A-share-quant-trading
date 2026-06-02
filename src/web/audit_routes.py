@@ -557,7 +557,7 @@ def create_audit_router() -> APIRouter:
             )
 
         async def _run_full() -> str:
-            from datetime import date, datetime
+            from datetime import date, datetime, timedelta
             from zoneinfo import ZoneInfo
 
             from src.data.services.cache_scheduler import CACHE_START_DATE
@@ -573,7 +573,9 @@ def create_audit_router() -> APIRouter:
 
             today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
             start = _qdate("start", CACHE_START_DATE)
-            end = _qdate("end", today)
+            # daily interface only goes to T-1 (today's daily isn't published yet);
+            # ending at "today" would falsely mark all of today's roster as missing.
+            end = _qdate("end", today - timedelta(days=1))
             result = await pipeline.download_prices(start, end, skip_minute=True, quiet=True)
             return (
                 "【阶段二·补日线｜全量审计】✅ 完成\n"
@@ -612,7 +614,7 @@ def create_audit_router() -> APIRouter:
     @router.post("/calendar/rebuild")
     async def trigger_calendar_rebuild(request: Request) -> JSONResponse:
         """Rebuild the trading_calendar truth table over a range (DAT-006)."""
-        from datetime import date, datetime
+        from datetime import date, datetime, timedelta
         from zoneinfo import ZoneInfo
 
         from src.data.services.cache_scheduler import CACHE_START_DATE
@@ -634,7 +636,9 @@ def create_audit_router() -> APIRouter:
 
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         start = _qdate("start", CACHE_START_DATE)
-        end = _qdate("end", today)
+        # daily interface only goes to T-1; ending at "today" would falsely mark
+        # all of today's roster as missing (today's daily isn't published yet).
+        end = _qdate("end", today - timedelta(days=1))
 
         async def _run() -> None:
             from src.common.config import get_tushare_token
