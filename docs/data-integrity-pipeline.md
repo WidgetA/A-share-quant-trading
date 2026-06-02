@@ -154,6 +154,11 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   `download_prices → audit_daily_gaps → _fill_partial_gaps` 里,或现在的索引驱动补全里。
 - **watchtower(机器 2026-06 升级后能自动部署了)CI 一绿就重启容器**,会**打断正在跑的长补全/重建**。
   规则:跑长任务期间不推代码;先把代码 push 稳定,再触发长任务。见 MEMORY.md。
+- **调度器自动补全(startup + 3am)只补最近窗口(`AUTO_FILL_LOOKBACK_DAYS=30` 天),不做全量**。
+  教训:`CACHE_START=2023` 后,启动补全里的 `find_minute_gaps` 会扒出 2023→今天一大片历史分钟缺口
+  → 每次重启就想下几小时分钟 → 把 kimi/路径B(`cache_fill_running` 互斥)死卡。所以 **auto = 只顶最近;
+  历史补全(日线/分钟)是 deliberate 端点的事**,不是调度器每次重启该干的。手动 `/api/cache/trigger`
+  仍走全量(`start_date=None → CACHE_START`)。
 - **历史日线曾只存主板**:创业板(300/301)/科创板(688)/北交所(920)在早期一大段没下进来
   (2026-03-03 实测:Tushare 有 5472 只交易,库里只 3194)。根因 = 部分缺口没人补 + 名单不全无法定性。
   靠"干净 roster + 索引驱动补全"修掉。

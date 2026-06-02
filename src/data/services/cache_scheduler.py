@@ -17,6 +17,11 @@ BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 # Daily coverage starts 2023-01-01 by default (backfill/rebuild endpoints reuse
 # this); pass ?start= to an endpoint to go earlier.
 CACHE_START_DATE = date(2023, 1, 1)
+# AUTO runs (startup + 3am) only keep this recent window current — they must NOT
+# re-audit/re-download all of history on every restart (esp. minute over 2023→now,
+# which blocks kimi/path-B for hours). Historical backfill is deliberate (the
+# index-driven endpoints), not the scheduler's job.
+AUTO_FILL_LOOKBACK_DAYS = 30
 SCHEDULE_HOUR = 3  # 3am Beijing time
 DOWNLOAD_TIMEOUT_SECONDS = 4 * 3600  # 4 hours max per range
 _STARTUP_DELAY_SECONDS = 60  # wait for storage/pipeline to initialize
@@ -239,7 +244,11 @@ class CacheScheduler:
 
         self._app_state.cache_fill_running = True
         try:
-            result = await self.check_and_fill_gaps()
+            # AUTO runs (startup/scheduled) only top up the recent window so a
+            # restart can't trigger a full-history (minute) re-audit that blocks
+            # kimi for hours. Historical backfill is deliberate (endpoints).
+            recent_start = datetime.now(BEIJING_TZ).date() - timedelta(days=AUTO_FILL_LOOKBACK_DAYS)
+            result = await self.check_and_fill_gaps(start_date=recent_start)
             self.last_run_time = run_time
             if result.get("error"):
                 self.last_run_result = "failed"
@@ -270,15 +279,17 @@ class CacheScheduler:
     async def check_and_fill_gaps(
         self,
         progress_callback=None,
+        start_date: date | None = None,
     ) -> dict:
-        """Find missing trading dates from CACHE_START_DATE to yesterday, download them.
+        """Find missing trading dates from ``start_date`` to yesterday, download them.
 
-        Sends ONE Feishu summary at the end covering: detected gaps, per-range
-        result, actual rows written, post-task integrity. No per-range progress
-        spam.
+        ``start_date`` defaults to CACHE_START_DATE (full history) — used by the
+        manual trigger. The AUTO runs (startup + 3am) pass a RECENT window so a
+        restart doesn't re-audit/re-download all of history (esp. minute over
+        2023→now), which would run for hours and block kimi/path-B. Historical
+        backfill is deliberate (index-driven endpoints), not the scheduler's job.
 
-        Returns:
-            dict with keys: gaps_found, dates_downloaded, error (if any)
+        Sends ONE Feishu summary at the end. Returns {gaps_found, dates_downloaded, error?}.
         """
         storage = self._get_storage()
         pipeline = self._get_pipeline()
@@ -287,9 +298,10 @@ class CacheScheduler:
             logger.warning(msg)
             return {"gaps_found": 0, "dates_downloaded": 0, "error": msg}
 
+        start = start_date or CACHE_START_DATE
         task_start = datetime.now(BEIJING_TZ)
         yesterday = task_start.date() - timedelta(days=1)
-        all_trading_days = await _get_trading_calendar(CACHE_START_DATE, yesterday)
+        all_trading_days = await _get_trading_calendar(start, yesterday)
         if not all_trading_days:
             return {"gaps_found": 0, "dates_downloaded": 0, "error": "No trading days found"}
 
@@ -297,8 +309,10 @@ class CacheScheduler:
         existing_dates = await storage.get_existing_daily_dates()
         missing = [d for d in all_trading_days if d not in existing_dates]
 
-        # Also check for minute data gaps (daily exists but minute sparse/missing)
-        minute_gaps = await storage.find_minute_gaps()
+        # Minute gaps, bounded to the same window — otherwise an auto run would
+        # try to fill ALL historical minute (2023→now), the exact hours-long
+        # blocker we're avoiding. Historical minute = deliberate 阶段3.
+        minute_gaps = [(s, e) for (s, e) in await storage.find_minute_gaps() if e >= start]
 
         # Pre-download row-level integrity (NULL fields, OHLC violations) —
         # collected but only reported at the end as part of the single summary.
