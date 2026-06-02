@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from src.data.services.kimi_listing_verifier import (
     KimiToolError,
+    finding_from_result,
     kimi_available,
     run_kimi_for_code,
 )
@@ -47,6 +48,14 @@ _TOOL_ERROR_ABORT = 5
 # SearchWeb/FetchURL/Shell calls + results) so a "查不到" can be inspected
 # (GET /api/audit/listing-info/kimi-raw?code=) instead of guessed at.
 KIMI_RAW_DIR = Path("data/audit/kimi_raw")
+# kimi's PARSED, human-readable verdict per code ("怎么回事" — name/status/note/
+# dates). This is what flows into the report the user reads and what
+# GET /api/audit/listing-info/findings returns. One JSON file per code,
+# overwritten on re-verify (latest verdict wins).
+KIMI_FINDINGS_DIR = Path("data/audit/kimi_findings")
+# How many per-code "怎么回事" lines to inline in the Feishu report before
+# pointing at the full list (keeps the message under Feishu's size limit).
+_FEISHU_FINDINGS_DISPLAY = 30
 
 
 async def _notify_feishu(message: str) -> None:
@@ -100,6 +109,24 @@ class ListingVerifyScheduler:
         if len(self.log_lines) > 100:
             self.log_lines = self.log_lines[-100:]
         logger.info("ListingVerify: %s", msg)
+
+    @staticmethod
+    def _save_finding(finding: dict) -> None:
+        """Persist kimi's plain-Chinese verdict for one code (best-effort).
+
+        One JSON file per code under KIMI_FINDINGS_DIR, overwritten on
+        re-verify. Read back by GET /api/audit/listing-info/findings so the
+        user can see "怎么回事" per code without re-running kimi."""
+        try:
+            import json
+
+            KIMI_FINDINGS_DIR.mkdir(parents=True, exist_ok=True)
+            code = finding.get("code", "unknown")
+            (KIMI_FINDINGS_DIR / f"{code}.json").write_text(
+                json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            logger.warning("Failed to persist kimi finding", exc_info=True)
 
     def _next_run_str(self) -> str:
         now = datetime.now(BEIJING_TZ)
@@ -345,6 +372,7 @@ class ListingVerifyScheduler:
         verified_entries: list[dict] = []  # rows to upsert (true + genuine not-found)
         not_found_codes: list[str] = []  # kimi searched, genuinely not found
         tool_errors: list[tuple[str, str]] = []  # (code, reason) — kimi itself failed
+        findings: list[dict] = []  # kimi's plain-Chinese "怎么回事" per code → report
         verified_n = 0
 
         def _abort(reason: str, checked: int) -> dict:
@@ -385,6 +413,12 @@ class ListingVerifyScheduler:
                 logger.warning("kimi verify %s unexpected error: %s", code, e)
                 tool_errors.append((code, f"未预期错误: {e}"))
                 continue
+
+            # kimi's plain-Chinese verdict ("怎么回事") — persist + collect for
+            # the report so the user reads kimi's own explanation, not a guess.
+            finding = finding_from_result(code, result)
+            findings.append(finding)
+            self._save_finding(finding)
 
             ld = result.get("list_date")
             if isinstance(ld, str) and len(ld) == 10 and ld[4] == "-":
@@ -427,18 +461,28 @@ class ListingVerifyScheduler:
 
         ok_emoji = "✅" if tool_errors == [] else "⚠️"
         summary = (
-            f"【阶段一·索引建设·核对上市日】{ok_emoji} 完成\n"
-            "任务: 用大模型(kimi)核对「在册却源头没数据 / 有数据却不在册」这些票的真实上市日\n"
-            f"结果: 查到并写入 {verified_n} 只 / 搜过仍查不到 {len(not_found_codes)} 只 / "
+            f"【阶段一·索引建设·核对股票身份】{ok_emoji} 完成\n"
+            "任务: 让大模型(kimi)逐只查清这些代码到底是什么、现在什么情况(在交易 / 已退市 / "
+            "迁去新代码 / 更名),并写清上市日,以便把名单修准\n"
+            f"结果: 查清 {len(findings)} 只 / 其中确认上市日并写入 {verified_n} 只 / "
+            f"搜过仍查不清 {len(not_found_codes)} 只 / "
             f"出错(超时或认证,未写) {len(tool_errors)} 只 / 还剩 {remaining} 只待核\n"
-            "含义: 查到的上市日若早于它没数据的那些天 → 确认确实上市了、只是接口缺数据(保留标记);"
-            "若晚于 → 那时其实还没上市,下次重建索引会自动从名单剔除"
         )
-        if not_found_codes:
-            shown = not_found_codes[:_FEISHU_FAILED_DISPLAY]
-            extra = len(not_found_codes) - len(shown)
-            more = f" …(+{extra})" if extra > 0 else ""
-            summary += "\n查不到上市日的代码: " + ", ".join(shown) + more
+        # kimi 自己查到的"怎么回事",逐条放进报告给用户看(这才是放 kimi 上去的目的)。
+        if findings:
+            summary += "\n逐只情况(kimi 查证):"
+            for f in findings[:_FEISHU_FINDINGS_DISPLAY]:
+                name = f.get("name") or "(名字未知)"
+                line = f"\n· {f['code']} {name}｜{f['status']}｜{f['note']}"
+                if f.get("list_date"):
+                    line += f"(上市 {f['list_date']}"
+                    if f.get("delist_date"):
+                        line += f"、退市/迁移 {f['delist_date']}"
+                    line += ")"
+                summary += line
+            extra = len(findings) - min(len(findings), _FEISHU_FINDINGS_DISPLAY)
+            if extra > 0:
+                summary += f"\n…另有 {extra} 只,完整清单见设置页 / 「逐只情况」接口"
         if tool_errors:
             summary += f"\n⚠ kimi 工具错误样本: {tool_errors[0][1]}"
         await _notify_feishu(summary)

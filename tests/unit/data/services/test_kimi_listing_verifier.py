@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
-from src.data.services.kimi_listing_verifier import parse_kimi_output
+from src.data.services.kimi_listing_verifier import (
+    finding_from_result,
+    parse_kimi_output,
+)
 
 
 def test_parses_clean_success_json():
@@ -63,3 +66,47 @@ def test_no_matching_code_returns_none():
 
 def test_empty_output_returns_none():
     assert parse_kimi_output("", "600519") is None
+
+
+def test_parses_enriched_status_and_note():
+    # New prompt asks for status + note + delist_date — they must ride along.
+    raw = (
+        "830779 是老北交所代码,已迁到 920XXX。\n"
+        '{"code":"830779","name":"武汉蓝电","list_date":"2015-06-01",'
+        '"delist_date":"2023-09-01","status":"迁移新代码",'
+        '"note":"老北交所代码,2023年迁到新代码继续交易","source":"http://x"}'
+    )
+    out = parse_kimi_output(raw, "830779")
+    assert out is not None
+    assert out["status"] == "迁移新代码"
+    assert out["delist_date"] == "2023-09-01"
+    assert "迁到新代码" in out["note"]
+
+
+def test_finding_uses_kimi_status_and_note():
+    result = {
+        "code": "830779",
+        "name": "武汉蓝电",
+        "list_date": "2015-06-01",
+        "delist_date": "2023-09-01",
+        "status": "迁移新代码",
+        "note": "老北交所代码,已迁到新代码",
+        "source": "http://x",
+    }
+    f = finding_from_result("830779", result)
+    assert f["status"] == "迁移新代码"
+    assert f["note"] == "老北交所代码,已迁到新代码"
+    assert f["delist_date"] == "2023-09-01"
+
+
+def test_finding_infers_status_for_old_style_answer():
+    # Old answer with no status field → infer a coarse status from dates.
+    delisted = finding_from_result(
+        "600355", {"code": "600355", "list_date": "2000-01-01", "delist_date": "2026-04-27"}
+    )
+    assert delisted["status"] == "已退市"
+    trading = finding_from_result("600519", {"code": "600519", "list_date": "2001-08-27"})
+    assert trading["status"] == "在交易"
+    nf = finding_from_result("999999", {"code": "999999", "error": "not found"})
+    assert nf["status"] == "查不到"
+    assert nf["note"] == "(kimi 未给出说明)"

@@ -19,17 +19,25 @@ import shutil
 from pathlib import Path
 
 KIMI_PROMPT_TMPL = (
-    "查 A 股股票代码 {code} 的真实首次挂牌交易日期(IPO 首日 / 上市日)。"
+    "查清楚 A 股股票代码 {code} 到底是什么、现在是什么情况。"
     "请实证查证、绝不凭印象,用你能用的**全部**工具:先 SearchWeb 搜索;"
     "**若搜索失败或无果,改用 FetchURL 抓取财经页面**(东方财富个股资料页、新浪财经、"
-    "同花顺、雪球、巨潮资讯、北交所/交易所公告等),从中找'上市日期/首发上市日期';"
-    "也可用 Shell(如 curl)取数据。**一个工具/来源失败就换下一个,多试几个再下结论,"
-    "不要因为某个工具不可用就放弃。**"
+    "同花顺、雪球、巨潮资讯、北交所/交易所公告等);也可用 Shell(如 curl)取数据。"
+    "**一个工具/来源失败就换下一个,多试几个再下结论,不要因为某个工具不可用就放弃。**\n"
+    "需要查清这几点:\n"
+    "① 公司中文名;\n"
+    "② 首次上市日(IPO 首日);\n"
+    "③ 现在的状态:仍在交易 / 已退市 / 老代码已迁到新代码(北交所 8、4 开头常迁到 92 开头)/ 更名;\n"
+    "④ 若已退市或迁移,退市日 / 迁移日(知道就填)。\n"
     "先简要列出你找到的信息,再在最后一行单独输出一行 JSON:\n"
-    '{{"code":"{code}","name":"<公司中文名,如不知填 null>","list_date":"YYYY-MM-DD",'
+    '{{"code":"{code}","name":"<公司中文名,如不知填 null>","list_date":"YYYY-MM-DD 或 null",'
+    '"delist_date":"YYYY-MM-DD 或 null(仅已退市/迁移时填)",'
+    '"status":"<在交易|已退市|迁移新代码|更名|查不到>",'
+    '"note":"<一句中文话说清这个代码现在到底怎么回事,给人看的,别写代号>",'
     '"source":"<URL>"}}\n'
-    "只有在确实多方查证都找不到时,才输出 list_date 为 null(绝不编造日期):\n"
-    '{{"code":"{code}","name":null,"list_date":null,"source":null,"error":"not found"}}'
+    "只有确实多方查证都查不到时,status 填 查不到、其余可为 null(绝不编造日期):\n"
+    '{{"code":"{code}","name":null,"list_date":null,"delist_date":null,'
+    '"status":"查不到","note":"多方查证仍无结果","source":null,"error":"not found"}}'
 )
 
 _REAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -132,6 +140,37 @@ def parse_kimi_output(text: str, code: str) -> dict | None:
         if obj.get("error") == "not found":
             return obj
     return candidates[-1]
+
+
+def finding_from_result(code: str, result: dict) -> dict:
+    """Normalize kimi's parsed answer into a plain-Chinese "怎么回事" record.
+
+    This is what flows into the report the user reads — so it carries the
+    human one-liner (``note``) + status, not just the machine dates. Pure
+    function (no I/O) so it's unit-testable.
+    """
+    status = result.get("status")
+    if not isinstance(status, str) or not status.strip():
+        # Old-style answers (no status field) — infer a coarse one from dates.
+        ld = result.get("list_date")
+        if result.get("error") == "not found" or not ld:
+            status = "查不到"
+        elif result.get("delist_date"):
+            status = "已退市"
+        else:
+            status = "在交易"
+    note = result.get("note")
+    if not isinstance(note, str) or not note.strip():
+        note = "(kimi 未给出说明)"
+    return {
+        "code": code,
+        "name": result.get("name"),
+        "status": status.strip(),
+        "note": note.strip(),
+        "list_date": result.get("list_date"),
+        "delist_date": result.get("delist_date"),
+        "source": result.get("source"),
+    }
 
 
 def kimi_available() -> bool:

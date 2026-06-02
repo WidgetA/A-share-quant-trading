@@ -267,6 +267,43 @@ def create_audit_router() -> APIRouter:
             raise HTTPException(status_code=500, detail=f"读取失败: {e}")
         return JSONResponse({"code": code, "found": True, "chars": len(text), "raw": text})
 
+    @router.get("/listing-info/findings")
+    async def kimi_findings(request: Request) -> JSONResponse:
+        """kimi 逐只查到的"怎么回事"(名字 / 状态 / 一句话说明 / 上市退市日)。
+
+        这是放 kimi 上去的目的——它自己查清每个代码现在到底是什么情况,写成
+        人能看懂的清单。?code=XXXXXX 看单只;不带 code 返回全部(按状态归类)。
+        """
+        import json as _json
+
+        from src.data.services.listing_verify_scheduler import KIMI_FINDINGS_DIR
+
+        code = request.query_params.get("code", "").strip()
+        if code:
+            if not (len(code) == 6 and code.isdigit()):
+                raise HTTPException(status_code=400, detail="code 必须是 6 位数字")
+            path = KIMI_FINDINGS_DIR / f"{code}.json"
+            if not path.exists():
+                return JSONResponse(
+                    {"code": code, "found": False, "message": "kimi 尚未查过这个代码"}
+                )
+            return JSONResponse(
+                {"code": code, "found": True, "finding": _json.loads(path.read_text("utf-8"))}
+            )
+
+        if not KIMI_FINDINGS_DIR.exists():
+            return JSONResponse({"total": 0, "by_status": {}, "findings": []})
+        items: list[dict] = []
+        for p in sorted(KIMI_FINDINGS_DIR.glob("*.json")):
+            try:
+                items.append(_json.loads(p.read_text("utf-8")))
+            except Exception:
+                continue
+        by_status: dict[str, int] = {}
+        for it in items:
+            by_status[it.get("status", "?")] = by_status.get(it.get("status", "?"), 0) + 1
+        return JSONResponse({"total": len(items), "by_status": by_status, "findings": items})
+
     # ------------------------------------------------------------------
     # TEMPORARY: 新旧索引对照验证 (POST /api/audit/index-compare)
     # 触发后台任务,把新索引(三合一-kimi)逐日跟旧索引(Tushare bak_basic)对照,

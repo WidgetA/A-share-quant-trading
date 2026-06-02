@@ -189,14 +189,23 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 | `POST /backfill-daily` | 阶段2 | **默认索引驱动**:只补真值表 `daily_state=missing`(先跑阶段1);`ok`+`source_none` 跳过 |
 | `POST /backfill-daily?mode=full&start=&end=` | bootstrap | 旧的全量审计式重下(建底/扩新范围,默认 CACHE_START~今天) |
 | `POST /diagnose-gaps` | — | 逐日诊断报告(问题→根因→正确数字→修法)→ 飞书 |
-| `POST /listing-info/verify-problems?states=&max=` | kimi兜底 | 把真值表 source_none/orphan 代码喂 kimi 查真实上市日 |
+| `POST /listing-info/verify-problems?states=&max=` | kimi兜底 | 把真值表 source_none/orphan 代码喂 kimi 查清「这代码是什么、现在什么情况」 |
 | `GET  /listing-info/kimi-raw?code=` | **可观测** | 拉某代码上次 kimi 验证的**完整原始输出(工具调用全过程)**——"查不到"时调它看 kimi 到底做了什么,**别猜** |
+| `GET  /listing-info/findings[?code=]` | **可观测** | kimi 逐只查到的**"怎么回事"清单**(名字/状态/一句话说明/上市退市日)——这才是放 kimi 上去的目的 |
 
 **kimi 兜底的教训(别把大模型捆死、别靠"查不到"猜)**: kimi 本能查到北交所代码(本地实测 920039=国义招标),
 但服务端 path-B 曾(1)prompt **强制 SearchWeb-only** + `--no-thinking` → SearchWeb 一挂就"查不到",不会绕道;
 (2)容器**没 curl** → kimi 的 Shell 退路也断。修法:prompt 放开用全工具(搜索失败→FetchURL 抓财经页→Shell)、
 去掉 `--no-thinking`、镜像装 curl,并**把每只代码的 kimi 原始 trace 落盘 + 开 `kimi-raw` 接口**——
 以后失败先调 trace 看,不猜。
+
+**kimi 要自己把「怎么回事」写进报告,不是给我私下看(2026-06)**: 放大模型上去的目的,是让它**逐只查清**
+这些异常代码到底是什么(公司名)、现在什么状态(在交易/已退市/迁去新代码/更名)、关键日期,并把这句
+**人能看懂的结论直接写进报告**。所以 prompt 除了上市日,还要 kimi 回 `status`+`note`(一句中文说明)+
+`delist_date`;每只的结论落盘 `data/audit/kimi_findings/<code>.json`,飞书报告**逐条列出 kimi 的「怎么回事」**,
+完整清单走 `findings` 接口。**禁止**我自己拿 Tushare/网页去逐只核异常代码当结论——那又变成"我猜/我查",
+kimi 就白放了。`delist_date` 查到即写回 `stock_listing_info` → 下次重建,这些"有数据却不在册"的退市/迁移老代码
+被名单正确排除,orphan 自动收敛。
 
 > 索引驱动补全 = `CachePipeline.fill_daily_from_calendar()`(读 `get_calendar_missing_by_date()`,
 > 复用 `_process_daily_date` 写真实行+停牌占位)。补全只改 `backtest_daily`,**不更新日历**——
