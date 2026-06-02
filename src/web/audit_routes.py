@@ -422,4 +422,61 @@ def create_audit_router() -> APIRouter:
         asyncio.create_task(_run())
         return JSONResponse({"success": True, "message": "已触发:从 Tushare 灌权威上市索引"})
 
+    # ------------------------------------------------------------------
+    # 只补日线的历史回填 (POST /api/audit/backfill-daily)
+    # 日线按交易日整批拉(自带主板/创业板/科创板/北交所),所以重下即可补全
+    # 那些"只存了主板"的历史日子。分钟线 NOT 触碰(单独跑,免得拖垮小机器)。
+    # 范围 ?start=YYYY-MM-DD&end=YYYY-MM-DD,默认 2024-01-01 ~ 昨天。
+    # ------------------------------------------------------------------
+
+    @router.post("/backfill-daily")
+    async def trigger_backfill_daily(request: Request) -> JSONResponse:
+        """Daily-only historical backfill (all boards), minute untouched."""
+        from datetime import date, datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        storage = getattr(request.app.state, "storage", None)
+        pipeline = getattr(request.app.state, "pipeline", None)
+        if storage is None or pipeline is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage/pipeline 未就绪")
+        if getattr(request.app.state, "backfill_daily_running", False):
+            return JSONResponse({"success": False, "message": "日线补全正在进行中,请稍后"})
+
+        def _qdate(name: str, default: date) -> date:
+            v = request.query_params.get(name)
+            if not v:
+                return default
+            try:
+                return datetime.strptime(v, "%Y-%m-%d").date()
+            except ValueError:
+                return default
+
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        start = _qdate("start", date(2024, 1, 1))
+        end = _qdate("end", today - timedelta(days=1))
+
+        async def _run() -> None:
+            request.app.state.backfill_daily_running = True
+            try:
+                result = await pipeline.download_prices(start, end, skip_minute=True)
+                msg = f"[日线补全] 完成 {start}~{end}\n{result.get('verify_msg')}"
+            except Exception as e:
+                logger.error("backfill-daily 失败: %s", e, exc_info=True)
+                msg = f"[日线补全] 失败 {start}~{end}\n{e}"
+            finally:
+                request.app.state.backfill_daily_running = False
+            try:
+                from src.common.feishu_bot import FeishuBot
+
+                bot = FeishuBot()
+                if bot.is_configured():
+                    await bot.send_message(msg)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("backfill-daily 飞书通知失败: %s", e)
+
+        asyncio.create_task(_run())
+        return JSONResponse(
+            {"success": True, "message": f"已触发日线补全 {start}~{end}(只日线),结果发飞书"}
+        )
+
     return router

@@ -125,6 +125,7 @@ class CachePipeline:
         end_date: date,
         progress_cb: ProgressCallback | None = None,
         cancel_event: CancelChecker = None,
+        skip_minute: bool = False,
     ) -> dict[str, int | bool | str]:
         """Download daily + minute data for the given range.
 
@@ -134,6 +135,11 @@ class CachePipeline:
         ``progress_cb`` (optional) overrides the reporter's progress callback
         for this single call. Feishu notifications still go through the
         pipeline's permanent reporter.
+
+        ``skip_minute=True`` runs ONLY the daily phase (calendar + snapshot +
+        daily audit + daily fill). Use this for a large historical daily
+        backfill where pulling minute over the same span would overwhelm a
+        small box — minute is a separate follow-up.
         """
         saved_reporter = self.reporter
         if progress_cb is not None:
@@ -151,13 +157,18 @@ class CachePipeline:
                 # Phase 1: calendar + stock_snapshot + daily (unified)
                 await self._download_daily_unified(start_date, end_date, cancel_event)
 
-                # Phase 2: minute (unified)
-                no_data_reasons = await self._download_minute_unified(
-                    start_date, end_date, cancel_event
-                )
+                # Phase 2: minute (unified) — skipped for a daily-only backfill
+                if skip_minute:
+                    no_data_reasons = {}
+                else:
+                    no_data_reasons = await self._download_minute_unified(
+                        start_date, end_date, cancel_event
+                    )
 
             # Phase 3: verification + report
-            return await self._verify_and_report(start_date, end_date, no_data_reasons)
+            return await self._verify_and_report(
+                start_date, end_date, no_data_reasons, daily_only=skip_minute
+            )
         finally:
             self.reporter = saved_reporter
 
@@ -1175,12 +1186,30 @@ class CachePipeline:
         start_date: date,
         end_date: date,
         no_data_reasons: dict[str, str],
+        daily_only: bool = False,
     ) -> dict[str, int | bool | str]:
         await self.reporter.progress(Phase.DOWNLOAD, 0, 1, "最终验证中...")
 
         daily_count = await self.storage.get_daily_stock_count()
-        minute_count = await self.storage.get_minute_stock_count()
         daily_dates = await self.storage.get_daily_date_count()
+
+        # Daily-only backfill: don't compute/report minute "missing" (minute was
+        # intentionally not touched, so every code would falsely look missing).
+        if daily_only:
+            self.storage.invalidate_cache_status()
+            verify_msg = (
+                f"日线补全完成: 日线 {daily_count}只/{daily_dates}天 (本次只补日线,分钟线未动)"
+            )
+            logger.info(verify_msg)
+            await self.reporter.progress(Phase.DOWNLOAD, 1, 1, verify_msg)
+            return {
+                "daily_count": daily_count,
+                "minute_count": -1,
+                "verified": True,
+                "verify_msg": verify_msg,
+            }
+
+        minute_count = await self.storage.get_minute_stock_count()
 
         active_codes = await self.storage.get_active_daily_codes(start_date, end_date)
         existing_minute = await self.storage.get_existing_minute_codes(start_date, end_date)
