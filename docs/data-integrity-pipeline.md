@@ -1,0 +1,191 @@
+# 数据完整性管线架构 (Data Integrity Pipeline)
+
+> 这套管线负责维护一个**正确的、可直接查询的每日数据源**。改动前先读本文——逻辑复杂,
+> 多处是踩坑后才定下来的设计,改错一处会静默丢数据。配套:`docs/features.md` DAT-006、
+> CLAUDE.md §8(数据源)/§9(成交量单位)。
+
+---
+
+## 1. 目标
+
+一句话:**一查就知道"某天某只票该不该有数据、库里对不对、错在哪类",不用每次复杂推断。**
+
+之前的做法是每次缺口检查都临时重算 `effective_universe − backtest_daily`,名单不全时只能标
+"待核对",补全只补整空的日子、补不了"有一半缺一半"的日子,而且对补不出来的票每次都空跑重试。
+现在改成**物化一张真值表 (`trading_calendar`),所有检查/补全都对照它做**。
+
+---
+
+## 2. 核心架构:真值表为中心
+
+```
+  权威源 (Tushare)                        物化真值                 用途
+  ─────────────────                       ──────────              ──────
+  stock_basic  ──┐  上市/退市日(roster)
+  suspend_d    ──┤  当天停牌
+  daily(按日)  ──┼──►  复合 reconcile  ──►  trading_calendar  ──►  检查 / 补全 / 回测
+  ───────────    │     (每天每只定状态)      (每天×每只一行)        都对照它
+  backtest_daily ┘  库里实际有什么
+```
+
+- **`trading_calendar` 是索引/真值**:每个「交易日 × 股票」一行,记录这只票这天**应该**是什么状态。
+- **`backtest_daily` 是数据**:库里**实际**存了什么(有行=有数据)。
+- **检查/补全 = 拿"应该"(日历)比"实际"(backtest_daily),差异就是要补/要纠的。**
+- 两张表职责分开:日历能表达"该有、但真缺"(那种情况 `backtest_daily` 根本没有行)。
+
+---
+
+## 3. 数据源与各自的坑
+
+| 源 | 接口 | 用途 | 坑(必读) |
+|----|------|------|-----------|
+| 上市/退市日 | Tushare `stock_basic`(L+D 两次调用) | roster 基准 = 权威在册名单 | 含北交所;由 `scripts/load_listing_from_tushare.py` 灌入 `stock_listing_info`,**无需 kimi 逐只查** |
+| 停牌 | Tushare `suspend_d`(按日) | 当天停牌名单 | — |
+| 日线 | Tushare `daily`(**按交易日整批**) | 当天真有成交的票 + OHLCV | **按日期查,自带所有板块**(主板/创业板/科创板/北交所);单位**手**,读层 ×100 转股 |
+| 分钟 | Tushare `stk_mins`(**按单只代码**) | 分钟 bar | 按代码查,代码后缀错=查空(见 §8 北交所 .BJ) |
+| 三合一快照 | `stock_snapshot` = bak_basic ∪ daily ∪ suspend_d | 历史每日候选(旧审计用) | 真值表的 roster 现在用 `stock_listing_info` 而非 snapshot |
+
+---
+
+## 4. 三阶段流程(每阶段只发一条飞书:成功与否 + 摘要)
+
+1. **阶段1 索引建设** —— 重建 `trading_calendar`:对照 Tushare 重新核每天每只的状态。
+   `POST /api/audit/calendar/rebuild`。
+2. **阶段2 补日线** —— **读索引**,只补 `daily_state=missing`(真缺),跳过 `ok` 和 `source_none`。
+   `POST /api/audit/backfill-daily`(只日线,不碰分钟)。
+3. **阶段3 补分钟** —— 同理,补分钟(依赖日线先齐;分钟"该补谁"是从日线推的)。**(待建)**
+
+**手动触发 = 重新做一遍索引(阶段1),然后补全(阶段2/3)对照新索引。每日增量也从索引起步。**
+
+> 飞书噪音治理:补全过程中的逐日"停牌记录/数据异常/lifecycle"**不再发**(`download_prices(quiet=True)`
+> → reporter `silent_feishu()`,feishu=None)。每阶段只发一条由端点自己拼的总结。
+
+---
+
+## 5. 真值表 schema 与状态定义
+
+表 `trading_calendar`(GreptimeDB):
+
+| 列 | 含义 |
+|----|------|
+| `stock_code` | PRIMARY KEY (tag) |
+| `ts` | TIME INDEX = **交易日本身**(epoch ms)。`(stock_code, 交易日)` 唯一一行,重建某天**原样覆盖**。**绝不用写入时刻当 ts**(否则同码多版本、读出来闪——见 §8 listing 双行 bug) |
+| `listed` | 当天是否在册(roster=true / orphan=false) |
+| `trade_status` | `trading` 正常交易 / `suspended` 停牌 / `unknown` 源头无法定性 —— 这只票这天**共享**的标记 |
+| `daily_state` | 见下表 |
+| `minute_state` | **预留**:`ok` / `missing` / `source_short`(源头不足241) / `pending` |
+| `reason` | 备注 |
+
+`daily_state` 取值(= "不全的原因"):
+
+| 值 | 含义 | 可补? |
+|----|------|-------|
+| `ok` | 库里数据和源头对得上 | — |
+| `missing` | 源头(Tushare daily)**有**、库里**没有** → 真缺 | ✅ 补(阶段2) |
+| `wrong_suspended` | 库标了停牌、但源头当天**有成交** → 该是真实行 | ⚠️ 纠正(删占位+插真实) |
+| `wrong_traded` | 库有真实行、但源头当天**查无**且停牌 → 可疑 | ⚠️ 核查 |
+| `orphan` | 有数据、却**不在当天在册名单**(未上市/已退市) | ⚠️ 核查(多为退市边界) |
+| `source_none` | 在册、不停牌、源头**也查无** → 不可抗 | ❌ 跳过(见 §7) |
+
+---
+
+## 6. 复合逻辑 (reconcile) —— 全用权威源,不推断
+
+`src/data/services/trading_calendar.py::reconcile_day()`(纯函数,单测覆盖)。每个交易日 D:
+
+```
+roster      = stock_listing_info 中 list_date ≤ D < delist_date 的代码
+suspended   = Tushare suspend_d(D)
+traded      = Tushare daily(D) 中成交量>0 的代码
+db_normal   = backtest_daily(D) 中 is_suspended=false
+db_suspended= backtest_daily(D) 中 is_suspended=true
+
+对 roster 里每只:
+  若 traded:    trade_status=trading
+                daily_state = ok(库有真实) / wrong_suspended(库标停牌) / missing(库无)
+  elif suspended: trade_status=suspended
+                daily_state = ok(库有占位) / wrong_traded(库有真实) / missing(库无)
+  else(在册,源头既无成交也未停牌):
+                trade_status = suspended(库有占位) 否则 unknown
+                daily_state  = wrong_traded(库有真实) 否则 source_none
+
+对"库有数据但不在 roster"的: listed=false, daily_state=orphan
+```
+
+要点:**"它到底交易没交易"以 Tushare daily 为准**;库里有没有、标得对不对,是拿库去比这个权威结果。
+
+---
+
+## 7. 存全 + 读时筛(关键原则)
+
+- **写入不筛**:凡当天在任一源冒头的代码都进表打状态。**写入阶段不做"该不该要"的判断**——
+  历史上反复踩的坑就是"筛选时悄悄把行漏掉"(`is_suspended=NULL` 被 `WHERE` 排除、北交所被排除)。
+- **筛选只在"当索引用"时(读)发生**,是这张全量表的视图:
+  - 「当天该有日线的名单」= `listed=true AND daily_state≠source_none`
+  - 「当天能交易的名单」= `trade_status=trading`
+  - 「当天数据问题」= `daily_state IN (missing, wrong_suspended, orphan)`
+
+## 7.1 索引驱动的补全(阶段2 行为)
+
+- 补全**读索引**,只对 `daily_state=missing` 的(天,股)动手:按那天 `daily(D)` 重下、插库。
+- `ok` 跳过(已齐);`source_none` 跳过(源头不可抗,**下次也不空跑重试**)。
+- **`source_none` 为什么能安全地长期跳过、又不会永久放弃**:每次"阶段1 建索引"都重新拿 Tushare 核一遍——
+  源头还是没有就保持 `source_none`、补全跳过;**哪天源头真有了,重建会把它从 `source_none` 翻成 `missing`,
+  下一轮补全自动捡起来补**。即"源头没有就不空跑,源头一有就自动补"。
+
+---
+
+## 8. 关键修复与教训(改之前先看这条,别重蹈)
+
+- **北交所代码后缀必须 `.BJ`(`tushare_realtime._to_ts_code`)**:北交所 = `4xxxxx / 8xxxxx / 92xxxx`。
+  曾把"非6开头"一律拼 `.SZ` → `920000.SZ` 是不存在的代码 → Tushare 返回空 → 按代码查的**分钟**全空,
+  被误判成"源头没有北交所"。其实 Tushare **有**(920000 在 2026-04-15 有 241 根分钟)。日线不受影响
+  (按日期整批拉)。
+- **`stock_listing_info` / `trading_calendar` 的 ts 必须是"业务日期/固定值",不能是写入时刻**:
+  GreptimeDB 按 `PRIMARY KEY + TIME INDEX` 去重。listing 表曾用 `now_ms` 当 ts → 同一只票老占位行
+  (verified=false)和新行(verified=true)成了两行 → 读出来随机挑一行 → 状态数字来回闪。修法:
+  listing 用固定 `ts=0`;calendar 用 `ts=交易日`;重建前对全量表先 truncate。
+- **飞书消息有体积上限,超了会被静默拒收**:大报告(每天几百代码全塞一条)发不出去,`send_message`
+  还闷头重试 20 次、错误被吞 → "啥都没有"。修法:报告瘦身(逐日上限 + 每类代码上限)+ 硬截断
+  (`_FEISHU_MAX_CHARS`)+ 完整明细落文件。
+- **Tushare `trade_cal` 返回的是 `YYYY-MM-DD`(带横杠)**:别用 `%Y%m%d` 解析(会崩在第一个日期)。
+- **缓存调度器 (`cache_scheduler.check_and_fill_gaps`) 只认"整天一行都没有"的缺口**,
+  看不见"有一半缺一半"的部分缺口 → 这类历史窟窿它永远不补。部分缺口的补全只发生在
+  `download_prices → audit_daily_gaps → _fill_partial_gaps` 里,或现在的索引驱动补全里。
+- **watchtower(机器 2026-06 升级后能自动部署了)CI 一绿就重启容器**,会**打断正在跑的长补全/重建**。
+  规则:跑长任务期间不推代码;先把代码 push 稳定,再触发长任务。见 MEMORY.md。
+- **历史日线曾只存主板**:创业板(300/301)/科创板(688)/北交所(920)在早期一大段没下进来
+  (2026-03-03 实测:Tushare 有 5472 只交易,库里只 3194)。根因 = 部分缺口没人补 + 名单不全无法定性。
+  靠"干净 roster + 索引驱动补全"修掉。
+
+---
+
+## 9. 表与键一览
+
+| 表 | 内容 | 键 |
+|----|------|----|
+| `backtest_daily` | 日线 OHLCV + is_suspended | `(stock_code, ts=交易日)` |
+| `backtest_minute` | 分钟 bar | `(stock_code, ts=bar时间)` |
+| `stock_snapshot` | 每日 B∪D∪S 三源并集 | `(stock_code, ts=日)` |
+| `stock_listing_info` | 每代码 上市/退市日/verified/source | `stock_code`,ts 固定 0 |
+| `trading_calendar` | **真值表**:每(日×股)状态 | `stock_code` + ts=交易日 |
+
+---
+
+## 10. 端点一览(都在 `src/web/audit_routes.py`,前缀 `/api/audit`)
+
+| 端点 | 阶段 | 作用 |
+|------|------|------|
+| `POST /listing-info/load-tushare` | 前置 | 从 Tushare stock_basic 灌权威上市索引 |
+| `POST /calendar/rebuild?start=&end=` | 阶段1 | 重建真值表(默认 2023-01-01~今天) |
+| `GET  /calendar/status` | — | 查真值表:分状态/分交易状态计数 + 日期范围 + 是否在重建 |
+| `GET  /calendar/problems?state=&limit=` | — | 列出某状态(missing/wrong_suspended/orphan/source_none…)的具体(日期×代码),供核查/修复 |
+| `POST /backfill-daily` | 阶段2 | **默认索引驱动**:只补真值表 `daily_state=missing`(先跑阶段1);`ok`+`source_none` 跳过 |
+| `POST /backfill-daily?mode=full&start=&end=` | bootstrap | 旧的全量审计式重下(建底/扩新范围,默认 CACHE_START~今天) |
+| `POST /diagnose-gaps` | — | 逐日诊断报告(问题→根因→正确数字→修法)→ 飞书 |
+
+> 索引驱动补全 = `CachePipeline.fill_daily_from_calendar()`(读 `get_calendar_missing_by_date()`,
+> 复用 `_process_daily_date` 写真实行+停牌占位)。补全只改 `backtest_daily`,**不更新日历**——
+> 要刷新索引状态,补完再跑一次阶段1(重建)。收敛环:阶段1 建 → 阶段2 补 → 阶段1 重建确认。
+
+> 默认范围由 `cache_scheduler.CACHE_START_DATE`(= 2023-01-01)统一,改它即改全部默认;`?start=` 可补更早。

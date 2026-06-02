@@ -107,6 +107,15 @@ class CacheProgressReporter:
         """
         return CacheProgressReporter(progress_cb=progress_cb, feishu=self._feishu)
 
+    def silent_feishu(self) -> "CacheProgressReporter":
+        """Return a sibling that keeps the progress callback but sends NO Feishu.
+
+        For bulk backfills: the caller emits ONE phase-summary message itself, so
+        the pipeline's per-event Feishu (停牌记录 / 数据异常 / lifecycle) is just
+        noise — silence it.
+        """
+        return CacheProgressReporter(progress_cb=self._progress_cb, feishu=None)
+
     # ------------------------------------------------------------------
     # Feishu
     # ------------------------------------------------------------------

@@ -126,6 +126,7 @@ class CachePipeline:
         progress_cb: ProgressCallback | None = None,
         cancel_event: CancelChecker = None,
         skip_minute: bool = False,
+        quiet: bool = False,
     ) -> dict[str, int | bool | str]:
         """Download daily + minute data for the given range.
 
@@ -140,10 +141,18 @@ class CachePipeline:
         daily audit + daily fill). Use this for a large historical daily
         backfill where pulling minute over the same span would overwhelm a
         small box — minute is a separate follow-up.
+
+        ``quiet=True`` silences the pipeline's per-event Feishu (停牌记录 /
+        数据异常 / lifecycle). For bulk backfills where the CALLER sends one
+        phase-summary message itself — no per-day spam.
         """
         saved_reporter = self.reporter
+        reporter = saved_reporter
         if progress_cb is not None:
-            self.reporter = saved_reporter.with_progress_cb(progress_cb)
+            reporter = reporter.with_progress_cb(progress_cb)
+        if quiet:
+            reporter = reporter.silent_feishu()
+        self.reporter = reporter
         try:
             await self.reporter.progress(Phase.INIT, 0, 0, "压缩表文件 (COMPACT) ...")
             await self.storage.compact_tables()
@@ -169,6 +178,72 @@ class CachePipeline:
             return await self._verify_and_report(
                 start_date, end_date, no_data_reasons, daily_only=skip_minute
             )
+        finally:
+            self.reporter = saved_reporter
+
+    # ------------------------------------------------------------------
+    # Index-driven daily fill (DAT-006 阶段2)
+    # ------------------------------------------------------------------
+
+    async def fill_daily_from_calendar(
+        self,
+        cancel_event: CancelChecker = None,
+        quiet: bool = False,
+    ) -> dict[str, int]:
+        """Fill daily gaps the trading_calendar marks as ``daily_state=missing``.
+
+        Index-driven (see docs/data-integrity-pipeline.md §7.1): only the dates
+        that have at least one ``missing`` code are re-downloaded; for each, the
+        missing real rows + suspended placeholders are written via the shared
+        ``_process_daily_date`` (skip_codes = what we already have). Dates whose
+        only gaps are ``source_none`` (源头不可抗) are NOT in the missing set, so
+        they are never fetched and never retried.
+
+        The calendar must be freshly rebuilt first (阶段1) — this acts on its
+        verdict. ``quiet=True`` silences per-event Feishu (the caller sends one
+        summary). Returns ``{dates, filled}``.
+        """
+        saved_reporter = self.reporter
+        if quiet:
+            self.reporter = saved_reporter.silent_feishu()
+        try:
+            missing_by_date = await self.storage.get_calendar_missing_by_date()
+            dates = sorted(missing_by_date)
+            total = len(dates)
+            filled = 0
+            if total == 0:
+                return {"dates": 0, "filled": 0}
+            async with self.daily_source, self.metadata_source:
+                for i, day in enumerate(dates):
+                    self._raise_if_cancelled(cancel_event, "Calendar-driven fill cancelled")
+                    existing = await self.storage.get_codes_for_daily_date(day)
+                    # fail-fast on suspend_d error (never write wrong suspension data)
+                    try:
+                        suspended = await self.metadata_source.fetch_suspended(day)
+                    except Exception as e:
+                        logger.critical(
+                            "FATAL: suspend_d failed for %s: %s — aborting calendar fill",
+                            day,
+                            e,
+                            exc_info=True,
+                        )
+                        raise
+                    records, failed_exchanges = await self.daily_source.fetch_day(day)
+                    before = await self.storage.get_codes_for_daily_date(day)
+                    await self._process_daily_date(
+                        day,
+                        suspended,
+                        records,
+                        failed_exchanges,
+                        skip_codes=existing,
+                        prev_close_map={},
+                        current=i + 1,
+                        total=total,
+                    )
+                    after = await self.storage.get_codes_for_daily_date(day)
+                    filled += len(after - before)
+            logger.info("Calendar-driven daily fill: %d dates, %d rows filled", total, filled)
+            return {"dates": total, "filled": filled}
         finally:
             self.reporter = saved_reporter
 

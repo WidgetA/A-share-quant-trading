@@ -1074,6 +1074,45 @@ class GreptimeBacktestStorage:
             "max_date": ts_to_date(mx).isoformat() if mx is not None else None,
         }
 
+    async def get_calendar_missing_by_date(self) -> dict[date, set[str]]:
+        """Codes with daily_state='missing' (fixable 真缺) grouped by trade date.
+
+        Drives the index-driven daily fill (DAT-006 阶段2): only these (day, code)
+        get re-downloaded. ok / source_none are NOT returned → never retried.
+        """
+        rows = await self.db.fetch(
+            "SELECT ts, stock_code FROM trading_calendar WHERE daily_state = 'missing'"
+        )
+        out: dict[date, set[str]] = {}
+        for r in rows:
+            out.setdefault(ts_to_date(r["ts"]), set()).add(r["stock_code"])
+        return out
+
+    async def get_calendar_problems(self, state: str, limit: int = 2000) -> list[dict[str, Any]]:
+        """List trading_calendar rows for one daily_state (for inspection/fixing).
+
+        ``state`` is validated against the known set to keep it out of the SQL.
+        """
+        valid = {"missing", "wrong_suspended", "wrong_traded", "orphan", "source_none", "ok"}
+        if state not in valid:
+            raise ValueError(f"unknown daily_state: {state}")
+        lim = max(1, min(int(limit), 20000))
+        rows = await self.db.fetch(
+            'SELECT ts, stock_code, trade_status, daily_state, "reason" '
+            f"FROM trading_calendar WHERE daily_state = '{state}' ORDER BY ts, stock_code "
+            f"LIMIT {lim}"
+        )
+        return [
+            {
+                "date": ts_to_date(r["ts"]).isoformat(),
+                "code": r["stock_code"],
+                "trade_status": r["trade_status"],
+                "daily_state": r["daily_state"],
+                "reason": r["reason"],
+            }
+            for r in rows
+        ]
+
     async def get_stock_list_codes_for_date(self, day: date) -> set[str]:
         """Return all stock codes in stock_list for a given date."""
         ts_ms = date_to_epoch_ms(day)

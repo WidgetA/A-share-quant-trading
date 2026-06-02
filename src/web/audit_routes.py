@@ -431,12 +431,15 @@ def create_audit_router() -> APIRouter:
 
     @router.post("/backfill-daily")
     async def trigger_backfill_daily(request: Request) -> JSONResponse:
-        """Daily-only historical backfill (all boards), minute untouched."""
-        from datetime import date, datetime
-        from zoneinfo import ZoneInfo
+        """Daily backfill (DAT-006 阶段2). Minute untouched.
 
-        from src.data.services.cache_scheduler import CACHE_START_DATE
+        Default = INDEX-DRIVEN: fill only trading_calendar ``daily_state=missing``
+        (run ``/calendar/rebuild`` 阶段1 first); ``ok`` + ``source_none`` skipped,
+        so 源头不可抗 is never retried.
 
+        ``?mode=full&start=&end=`` = audit-based full-range re-download (bootstrap
+        or extend to a new range; default range = CACHE_START_DATE~today).
+        """
         storage = getattr(request.app.state, "storage", None)
         pipeline = getattr(request.app.state, "pipeline", None)
         if storage is None or pipeline is None or not getattr(storage, "is_ready", False):
@@ -444,27 +447,44 @@ def create_audit_router() -> APIRouter:
         if getattr(request.app.state, "backfill_daily_running", False):
             return JSONResponse({"success": False, "message": "日线补全正在进行中,请稍后"})
 
-        def _qdate(name: str, default: date) -> date:
-            v = request.query_params.get(name)
-            if not v:
-                return default
-            try:
-                return datetime.strptime(v, "%Y-%m-%d").date()
-            except ValueError:
-                return default
+        mode = request.query_params.get("mode", "index")
 
-        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-        start = _qdate("start", CACHE_START_DATE)
-        end = _qdate("end", today)
+        async def _run_index() -> str:
+            result = await pipeline.fill_daily_from_calendar(quiet=True)
+            return (
+                "[日线补全·索引驱动] 完成\n"
+                f"补回 {result['filled']} 行 / 跨 {result['dates']} 个有缺口的交易日\n"
+                "(再跑一次阶段1 重建索引可确认 missing 归零;source_none 源头不可抗已跳过)"
+            )
+
+        async def _run_full() -> str:
+            from datetime import date, datetime
+            from zoneinfo import ZoneInfo
+
+            from src.data.services.cache_scheduler import CACHE_START_DATE
+
+            def _qdate(name: str, default: date) -> date:
+                v = request.query_params.get(name)
+                if not v:
+                    return default
+                try:
+                    return datetime.strptime(v, "%Y-%m-%d").date()
+                except ValueError:
+                    return default
+
+            today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+            start = _qdate("start", CACHE_START_DATE)
+            end = _qdate("end", today)
+            result = await pipeline.download_prices(start, end, skip_minute=True, quiet=True)
+            return f"[日线补全·全量] 完成 {start}~{end}\n{result.get('verify_msg')}"
 
         async def _run() -> None:
             request.app.state.backfill_daily_running = True
             try:
-                result = await pipeline.download_prices(start, end, skip_minute=True)
-                msg = f"[日线补全] 完成 {start}~{end}\n{result.get('verify_msg')}"
+                msg = await (_run_full() if mode == "full" else _run_index())
             except Exception as e:
                 logger.error("backfill-daily 失败: %s", e, exc_info=True)
-                msg = f"[日线补全] 失败 {start}~{end}\n{e}"
+                msg = f"[日线补全] 失败\n{e}"
             finally:
                 request.app.state.backfill_daily_running = False
             try:
@@ -477,9 +497,8 @@ def create_audit_router() -> APIRouter:
                 logger.warning("backfill-daily 飞书通知失败: %s", e)
 
         asyncio.create_task(_run())
-        return JSONResponse(
-            {"success": True, "message": f"已触发日线补全 {start}~{end}(只日线),结果发飞书"}
-        )
+        label = "全量" if mode == "full" else "索引驱动"
+        return JSONResponse({"success": True, "message": f"已触发日线补全({label}),结果发飞书"})
 
     # ------------------------------------------------------------------
     # 重建交易日历真值表 (POST /api/audit/calendar/rebuild) — DAT-006
@@ -590,5 +609,29 @@ def create_audit_router() -> APIRouter:
             getattr(request.app.state, "calendar_rebuild_running", False)
         )
         return JSONResponse(summary)
+
+    @router.get("/calendar/problems")
+    async def calendar_problems(request: Request) -> JSONResponse:
+        """List trading_calendar problem rows for one state (DAT-006), to inspect/fix.
+
+        ``?state=missing|wrong_suspended|wrong_traded|orphan|source_none`` (default
+        missing), ``?limit=`` (default 2000, max 20000).
+        """
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            return JSONResponse({"ready": False})
+        state = request.query_params.get("state", "missing")
+        try:
+            limit = int(request.query_params.get("limit", "2000"))
+        except ValueError:
+            limit = 2000
+        try:
+            rows = await storage.get_calendar_problems(state, limit=limit)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.warning("calendar_problems 读取失败: %s", e, exc_info=True)
+            return JSONResponse({"ready": False, "error": str(e)})
+        return JSONResponse({"ready": True, "state": state, "count": len(rows), "rows": rows})
 
     return router
