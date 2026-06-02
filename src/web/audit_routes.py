@@ -525,7 +525,8 @@ def create_audit_router() -> APIRouter:
                 cal = await get_tushare_trade_calendar(
                     start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), token=get_tushare_token()
                 )
-                trading_days = [datetime.strptime(d, "%Y%m%d").date() for d in cal]
+                # get_tushare_trade_calendar returns YYYY-MM-DD; tolerate YYYYMMDD too.
+                trading_days = [datetime.strptime(d.replace("-", ""), "%Y%m%d").date() for d in cal]
 
                 async def fetch_suspended(day: date) -> set[str]:
                     return await client.fetch_suspended_stocks(day.strftime("%Y%m%d"))
