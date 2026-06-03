@@ -66,6 +66,14 @@ class _Storage:
     async def get_calendar_fillable_by_date(self) -> dict[date, set[str]]:
         return {d: set(c) for d, c in self._fillable.items()}
 
+    async def get_listing_info_all(self) -> dict:
+        # Roster every code that appears (list_date None = always listed) — these
+        # tests use suspended=set(), so roster only needs to exist, not gate.
+        codes = set(self.daily)
+        for c in self._fillable.values():
+            codes |= c
+        return {c: {"list_date": None, "delist_date": None} for c in codes}
+
     async def get_codes_for_daily_date(self, day: date) -> set[str]:
         return set(self.daily)
 

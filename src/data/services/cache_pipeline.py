@@ -210,6 +210,8 @@ class CachePipeline:
         saved_reporter = self.reporter
         if quiet:
             self.reporter = saved_reporter.silent_feishu()
+        from src.data.services.trading_calendar import roster_for_day
+
         try:
             fillable_by_date = await self.storage.get_calendar_fillable_by_date()
             dates = sorted(fillable_by_date)
@@ -217,6 +219,9 @@ class CachePipeline:
             filled = 0
             if total == 0:
                 return {"dates": 0, "filled": 0}
+            # Roster (authoritative listing) gates suspended placeholders so we
+            # don't re-create orphans for de-rostered codes suspend_d still lists.
+            listing_info = await self.storage.get_listing_info_all()
             async with self.daily_source, self.metadata_source:
                 for i, day in enumerate(dates):
                     self._raise_if_cancelled(cancel_event, "Calendar-driven fill cancelled")
@@ -246,6 +251,7 @@ class CachePipeline:
                         prev_close_map={},
                         current=i + 1,
                         total=total,
+                        roster=roster_for_day(listing_info, day),
                     )
                     after = await self.storage.get_codes_for_daily_date(day)
                     filled += len(after - before)
@@ -415,6 +421,7 @@ class CachePipeline:
                     prev_close_map=prev_close_map,
                     current=i + 1,
                     total=total,
+                    roster=expected_codes,  # effective universe = the roster
                 )
                 after = await self.storage.get_codes_for_daily_date(gap_date)
                 added = len(after - before)
@@ -490,7 +497,11 @@ class CachePipeline:
                 records, failed_exchanges = await daily_task
                 return gap_date, suspended_codes, records, failed_exchanges
 
+        from src.data.services.trading_calendar import roster_for_day
+
         tasks = [asyncio.create_task(_prefetch(d)) for d, _exp, _act in full_gaps]
+        # Roster gates suspended placeholders (skip de-rostered codes suspend_d lists).
+        listing_info = await self.storage.get_listing_info_all()
 
         try:
             for i, task in enumerate(tasks):
@@ -505,6 +516,7 @@ class CachePipeline:
                     prev_close_map,
                     i + 1,
                     len(full_gaps),
+                    roster=roster_for_day(listing_info, gap_date),
                 )
         except BaseException:
             for t in tasks:
@@ -523,8 +535,15 @@ class CachePipeline:
         prev_close_map: dict[str, float],
         current: int,
         total: int,
+        roster: set[str] | None = None,
     ) -> None:
-        """Insert pre-fetched daily data into storage. Updates prev_close_map in-place."""
+        """Insert pre-fetched daily data into storage. Updates prev_close_map in-place.
+
+        ``roster`` (codes the authoritative listing lists for ``day``) gates the
+        suspended-placeholder write: Tushare ``suspend_d`` still lists de-rostered
+        codes (e.g. old 北交所 43x/83x/87x after the 2025-10-09 → 920x migration),
+        and placeholdering those just creates orphan rows. When ``roster`` is given,
+        only codes it contains get a suspended placeholder. ``None`` = old behavior."""
         date_str = day.strftime("%Y-%m-%d")
         day_prev_close_map = {
             **prev_close_map,
@@ -557,14 +576,21 @@ class CachePipeline:
 
             pre_close = day_prev_close_map.get(ticker, 0.0)
 
-            rec: dict[str, Any] | None
-            if ticker in suspended_codes:
+            rec: dict[str, Any] | None = _normal_record(raw, pre_close)
+            # Tushare daily can contradict suspend_d: a code with a real bar +
+            # volume>0 DID trade that day, even if suspend_d also lists it. Trust
+            # the bar (write the real record), not the suspension flag — otherwise
+            # a traded stock gets stored as halted (wrong_suspended, and wrong
+            # backtest data). Only fall back to a placeholder when there's no real
+            # traded bar.
+            if rec is not None and rec["volume"] > 0:
+                pass  # real traded bar wins over suspend_d
+            elif ticker in suspended_codes:
                 rec = _suspended_record(pre_close)
-            else:
-                rec = _normal_record(raw, pre_close)
-                if rec is None:
-                    null_codes.append(ticker)
-                    continue
+            elif rec is None:
+                null_codes.append(ticker)
+                continue
+            # else: real bar with volume == 0 and not suspended → keep it as real
 
             await self.storage.insert_daily_record(ticker, day, rec)
             prev_close_map[ticker] = rec["close"]
@@ -576,6 +602,11 @@ class CachePipeline:
             if susp_code in seen_codes:
                 continue
             if skip_codes and susp_code in skip_codes:
+                continue
+            # suspend_d still lists de-rostered codes (old 北交所 43x/83x/87x after
+            # the 920x migration). A placeholder for a code not in the authoritative
+            # roster is just an orphan row — only placeholder codes the roster lists.
+            if roster is not None and susp_code not in roster:
                 continue
             pre_close = day_prev_close_map.get(susp_code, 0.0)
             rec = _suspended_record(pre_close)

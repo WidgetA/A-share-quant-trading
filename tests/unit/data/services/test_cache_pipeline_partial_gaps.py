@@ -96,6 +96,55 @@ async def test_real_trading_missing_stock_is_redownloaded():
 
 
 @pytest.mark.asyncio
+async def test_traded_stock_in_suspend_d_written_as_real():
+    """Tushare contradiction: a code has a real bar (volume>0) AND is in suspend_d.
+    It DID trade → store the real bar, not a suspended placeholder (else
+    wrong_suspended + wrong backtest data)."""
+    day = date(2023, 1, 19)
+    storage = _Storage(expected=set(), existing=set())
+    pipe = _pipeline(storage, _DailySource([]), _MetadataSource(set()))
+    records = [
+        {"ticker": "688435", "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 137146}
+    ]
+    await pipe._process_daily_date(
+        day,
+        suspended_codes={"688435"},  # suspend_d ALSO lists it — contradiction
+        records=records,
+        failed_exchanges=[],
+        skip_codes=None,
+        prev_close_map={},
+        current=1,
+        total=1,
+        roster={"688435"},
+    )
+    by_code = {c: r for c, r in storage.inserted}
+    assert by_code["688435"]["is_suspended"] is False  # real bar wins over suspend_d
+
+
+@pytest.mark.asyncio
+async def test_suspended_code_not_in_roster_gets_no_placeholder():
+    """suspend_d lists a de-rostered code (old 北交所 code after 920 migration) →
+    no placeholder written (otherwise it'd be an orphan row)."""
+    day = date(2023, 1, 19)
+    storage = _Storage(expected=set(), existing=set())
+    pipe = _pipeline(storage, _DailySource([]), _MetadataSource(set()))
+    await pipe._process_daily_date(
+        day,
+        suspended_codes={"600000", "830964"},  # 600000 rostered, 830964 NOT
+        records=[],
+        failed_exchanges=[],
+        skip_codes=None,
+        prev_close_map={},
+        current=1,
+        total=1,
+        roster={"600000"},
+    )
+    codes = {c for c, _ in storage.inserted}
+    assert "600000" in codes  # rostered + suspended → placeholder written
+    assert "830964" not in codes  # de-rostered → skipped, no orphan
+
+
+@pytest.mark.asyncio
 async def test_suspended_only_gap_takes_fast_path_no_daily_call():
     """Only suspended stocks missing → fast placeholder fill, no daily API call."""
     day = date(2026, 4, 15)

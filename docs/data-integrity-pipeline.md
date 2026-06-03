@@ -175,6 +175,13 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   **source_none 暴涨 5.5 万**。**正解 = 认 Tushare 为准、统一到 920**:`load-tushare` 重载权威名单
   (老代码自动消失)+ `purge-orphan-rows` 删老代码冗余日线(数据已在 920 下)。**别去补老代码**(Tushare 没有)。
   同理 300114(中航电测)2025 重组更名迁 302132、个股退市后残留占位行,都靠"权威名单 + 删孤儿"收敛。
+- **补全别盲信 Tushare `suspend_d`(2026-06)**:Tushare `daily` 与 `suspend_d` 会**自相矛盾**——
+  实测 `688435 @2023-01-19` daily 有成交量(确实交易了),`suspend_d` 却也列它为停牌。补全若按
+  `suspend_d` 写成停牌占位 → 把"交易过的票"存成停牌(`wrong_suspended`,且回测数据错)。修法:
+  `_process_daily_date` 里**有真实成交(volume>0)就写真实行,无视 suspend_d**(只有真没成交才回退占位)。
+  另外 `suspend_d` **仍返回老北交所代码**(43x/83x/87x,没像 daily 那样迁 920)→ 给这些**不在册**的码
+  写停牌占位 = 凭空造 orphan。修法:`_process_daily_date` 收一个 `roster`(当天权威在册集),
+  **只给在册的码写停牌占位**;三个调用点(索引补全/部分缺口/全量补全)都把 roster 传进去。
 - **重建真值表必须"写前先清当天旧行",否则 de-roster 的代码残留(2026-06 大坑)**:
   `upsert_trading_calendar` 原本是纯 INSERT,按 `(代码,日期)` 只**覆盖**它重新算出的行。一旦某代码
   **离开名单**(如 load-tushare 用 920 替换老代码),reconcile 不再产出它 → 它的旧行(source_none 等)
