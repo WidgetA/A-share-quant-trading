@@ -207,6 +207,16 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 kimi 就白放了。`delist_date` 查到即写回 `stock_listing_info` → 下次重建,这些"有数据却不在册"的退市/迁移老代码
 被名单正确排除,orphan 自动收敛。
 
+**kimi 认证 = 静态 API key,告别 OAuth(2026-06)**: 旧方案上传 OAuth 凭证,access_token 只活 **15 分钟**、
+refresh 设备绑定,无人值守跑着 refresh_token 一失效就废、只能人工重登(这正是之前 path-B 老报认证失败的根因)。
+新方案:一把 **Kimi-Code API key**(`sk-kimi-…`,授权 `api.kimi.com/coding/v1`),容器启动时
+`kimi_config.ensure_kimi_config_from_env()` 读环境变量 `KIMI_API_KEY` **现生成** `~/.kimi/config.toml`——
+provider `type="kimi"` + `api_key=<key>` + **不写 `oauth`**(源码:无 oauth 就直接用明文 key),且
+`[services.moonshot_search]`/`[services.moonshot_fetch]` 配同一 key → **原生 SearchWeb/FetchURL 照常能用**
+(实测同一 key 同时授权聊天端点和搜索端点,920039 端到端跑通)。key **只走 `KIMI_API_KEY` 环境变量**(线上写在
+gitignore 的 `docker-compose.yml`),不进仓库不进镜像;缺 key → 不启动调度器 + 告警。**静态 key 永不过期、零交互
+登录**,15 分钟过期那套故障路径整个消失。**教训**:别给无人值守常驻任务用 15 分钟过期、要交互续期的凭证。
+
 > 索引驱动补全 = `CachePipeline.fill_daily_from_calendar()`(读 `get_calendar_missing_by_date()`,
 > 复用 `_process_daily_date` 写真实行+停牌占位)。补全只改 `backtest_daily`,**不更新日历**——
 > 要刷新索引状态,补完再跑一次阶段1(重建)。收敛环:阶段1 建 → 阶段2 补 → 阶段1 重建确认。

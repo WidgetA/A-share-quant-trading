@@ -58,12 +58,11 @@ COPY config/ ./config/
 # Static data files — placed outside /app/data which is a volume mount
 COPY data/sectors.json data/board_constituents.json data/board_relevance_cache.json ./bundled_data/
 
-# kimi-cli config (provider + default model "kimi-for-coding"/Kimi-k2.6). NOT a
-# secret (all api_key=""); auth is the OAuth token uploaded at runtime to
-# /root/.kimi/credentials/kimi-code.json. Without this, a headless `kimi --print`
-# run has no model → "LLM not set" → it never runs (path B can't verify).
-RUN mkdir -p /root/.kimi
-COPY deploy/kimi-config.toml /root/.kimi/config.toml
+# kimi-cli config is generated at RUNTIME, not baked here: app startup calls
+# kimi_config.ensure_kimi_config_from_env(), which writes ~/.kimi/config.toml
+# from the KIMI_API_KEY env var (a static Kimi-Code API key — no OAuth, no
+# 15-min token, no interactive login). The key is NEVER in the image; it comes
+# from the deploy env (gitignored docker-compose.yml). See CLAUDE.md §12.
 
 # Set PATH to use virtual environment
 ENV PATH="/app/.venv/bin:$PATH"

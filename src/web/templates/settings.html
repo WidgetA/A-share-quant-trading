@@ -36,8 +36,9 @@
         </div>
     </section>
 
-    <!-- Audit: stock_listing_info status (Kimi 凭证通过 PowerShell 脚本上传,
-         listing_info 由服务端 kimi-cli 自动验证写入, web 端只展示状态) -->
+    <!-- Audit: stock_listing_info status (kimi 认证用静态 API key,启动时由
+         KIMI_API_KEY 环境变量生成配置; listing_info 由服务端 kimi-cli 自动验证写入,
+         web 端只展示状态) -->
     <section class="settings-section">
         <div class="settings-card">
             <div class="toggle-row">
@@ -45,7 +46,7 @@
                     <h3>Kimi 上市日自动验证（路径 B）</h3>
                     <p class="settings-desc">
                         每日凌晨 4 点（缓存补全之后）服务端 kimi-cli 自动验证 <code>stock_snapshot</code> 里未覆盖代码的真实上市日，写入 <code>stock_listing_info</code>。
-                        Kimi 凭证只能通过本地脚本 <code>scripts/kimi_login_and_upload.ps1</code> 上传。
+                        Kimi 认证用静态 API key（部署环境的 <code>KIMI_API_KEY</code>），启动时自动生成配置，无需上传凭证。
                     </p>
                 </div>
                 <label class="toggle-switch">

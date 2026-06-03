@@ -816,13 +816,17 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 
 **Endpoints**:
 - `POST /api/audit/listing-info/verify` (X-API-Key) — 后台触发一次验证 (支持 `?include_failed=1`)
+- `POST /api/audit/listing-info/verify-problems?states=&max=` — 把真值表异常代码喂 kimi 查清「怎么回事」
 - `GET /api/audit/listing-info/status` — 覆盖率 + scheduler 状态 (设置页卡片消费)
-- `POST /api/audit/kimi-credentials/upload` (X-API-Key) — 由 `scripts/kimi_login_and_upload.ps1` 上传 kimi OAuth 凭证 (容器内 kimi-cli 无浏览器,靠此刷新)
+- `GET /api/audit/listing-info/findings[?code=]` — kimi 逐只查到的「怎么回事」(名字/状态/说明/上市退市日)
+- `GET /api/audit/listing-info/kimi-raw?code=` — 某代码上次 kimi 验证的完整原始 trace
+- **认证**: 静态 Kimi-Code API key,容器启动时由 `KIMI_API_KEY` 环境变量生成 `~/.kimi/config.toml` (`kimi_config.ensure_kimi_config_from_env`);无 OAuth、无凭证上传端点 (旧的 upload/auth-bundle 端点已删)
 
 **Files**:
-- `src/data/services/kimi_listing_verifier.py` - 共享 kimi 验证 (verify_one_code / kimi_available)
-- `src/data/services/listing_verify_scheduler.py` - 4am 自动验证 scheduler
-- `src/web/audit_routes.py` - 触发 / 状态 / 凭证端点
+- `src/data/services/kimi_listing_verifier.py` - 共享 kimi 验证 (run_kimi_for_code / finding_from_result / kimi_available)
+- `src/data/services/kimi_config.py` - 启动时从 KIMI_API_KEY 现生成 kimi 配置 (静态 key,无 OAuth)
+- `src/data/services/listing_verify_scheduler.py` - 4am 自动验证 scheduler (含 kimi findings 报告)
+- `src/web/audit_routes.py` - 触发 / 状态 / findings / kimi-raw 端点
 - `src/data/clients/greptime_storage.py` - upsert_listing_info / get_unverified_codes_in_snapshot / get_failed_verified_codes / get_effective_universe_for_date
 
 **Checklist**:

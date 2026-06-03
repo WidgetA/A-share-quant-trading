@@ -102,12 +102,16 @@ Rules:
 
 - **Scheduler**: `ListingVerifyScheduler` (`src/data/services/listing_verify_scheduler.py`),每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。
 - **kimi-cli 是镜像里的硬依赖 (CRITICAL)**: kimi-cli 要 Python ≥3.13,所以整个 service 迁到 **Python 3.13**(`Dockerfile` 用 `python:3.13-slim`,`requires-python>=3.13`)。kimi-cli 是 `pyproject` 声明依赖 → `uv sync` 装进镜像。**CI 强制**:`tests/unit/data/services/test_kimi_cli_installed.py` 断言 `kimi --version` 能跑,Dockerfile builder 也 `RUN kimi --version`——没装/装坏直接 CI 红、镜像 build 失败,**杜绝部署出 path B 跑不起来的镜像**。
-- **运行期安全网**: app.py 启动仍 `kimi_available()` 探测,万一缺失则不启动调度器 + 发一条启动告警(正常情况 kimi 已在镜像里,这条不该触发)。是否真跑由 `get_listing_verify_enabled()` 开关决定。
-- **教训**: 别上线一个运行依赖不在部署镜像里的常驻调度器;CI 绿 ≠ 线上能跑——所以把"依赖可运行"做成 CI 断言。见 `MEMORY.md`。
-- **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,强制 SearchWeb 实证,解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
-- **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
-- **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥 (1.58G 小机器)、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、**并发 1**(每个 kimi 是完整 LLM-agent 子进程,1.58G 小机器跑多个会 OOM→重启死循环,串行慢但安全)、`upsert_listing_info` 小批 ≤200 行。
-- **手动触发**: `POST /api/audit/listing-info/verify` (X-API-Key);状态见 `GET /api/audit/listing-info/status` + 设置页卡片。
+- **认证 = 静态 API key,不走 OAuth (CRITICAL, 2026-06 改)**: kimi 的认证用一个 **Kimi-Code API key**(`sk-kimi-…`,授权 `api.kimi.com/coding/v1`)。容器启动时 `ensure_kimi_config_from_env()`(`src/data/services/kimi_config.py`)读环境变量 `KIMI_API_KEY` **现生成** `~/.kimi/config.toml`:provider `type="kimi"` + `api_key=<key>` + **不写 `oauth` 字段**(无 oauth → kimi 直接用明文 key,源码 `llm.py:create_llm`),并把 `[services.moonshot_search]`/`[services.moonshot_fetch]` 也配上同一 key → **原生 SearchWeb/FetchURL 照常可用**(实测同一 key 同时授权聊天和搜索端点)。
+  - **为什么换掉 OAuth**: 旧方案上传 OAuth 凭证,access_token 只活 **15 分钟**、refresh 设备绑定,无人值守跑着跑着 refresh_token 失效就废,只能人工重登。静态 key **永不过期、零交互登录**,这套故障路径整个消失。
+  - **key 不进仓库/不进镜像**:只经 `KIMI_API_KEY` 环境变量注入(线上写在 `docker-compose.yml`,该文件 gitignore 且用户手管)。仓库和镜像里都没有 key。缺 key → 启动不起调度器 + 发一条告警(同"无 kimi-cli"的处理)。
+- **运行期安全网**: app.py 启动 `kimi_available()` 探测 + `KIMI_API_KEY` 是否就绪;缺任一则不启动调度器 + 发一条启动告警。是否真跑由 `get_listing_verify_enabled()` 开关决定。
+- **教训**: ① 别上线一个运行依赖不在部署镜像里的常驻调度器;CI 绿 ≠ 线上能跑——把"依赖可运行"做成 CI 断言。② 别给无人值守的常驻任务用 15 分钟过期、要交互续期的凭证;能用静态 key 就用静态 key。见 `MEMORY.md`。
+- **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `run_kimi_for_code()` —— spawn `kimi --print --afk`(thinking 留开,关了它搜索失败就放弃不绕道),让 kimi 用全部工具(SearchWeb→FetchURL→Shell curl)实证查清**这代码是什么、现在什么情况(在交易/已退市/迁移/更名)+ 上市退市日**,解析失败**绝不猜**。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
+- **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知。**kimi 工具/认证错误**(key 失效等)单独识别,**绝不**当"查不到"写占位,而是报错中止。手动 `?include_failed=1` 可重验占位行。
+- **报告 = kimi 自己写的「怎么回事」**: 每只代码 kimi 回一句人话(名字/状态/说明/日期)→ 落盘 `data/audit/kimi_findings/<code>.json`,飞书报告逐条列出,完整清单 `GET /api/audit/listing-info/findings`。**不准我自己拿 Tushare/网页逐只核异常代码当结论**——放 kimi 上去就是让它查、它写。
+- **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()`+`KIMI_API_KEY` 探测、与 `cache_fill_running` 互斥、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、**并发 1**、`upsert_listing_info` 小批 ≤200 行。
+- **手动触发**: `POST /api/audit/listing-info/verify` (X-API-Key) 或 `POST /api/audit/listing-info/verify-problems?states=` (查真值表异常代码);状态见 `GET /api/audit/listing-info/status` + 设置页卡片;kimi 逐只结论见 `GET /api/audit/listing-info/findings`,原始 trace 见 `?code=` 的 `kimi-raw`。
 
 ## 9. Volume Unit Convention (CRITICAL)
 

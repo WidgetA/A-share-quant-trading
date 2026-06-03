@@ -606,10 +606,15 @@ def create_app(
         # run, no 4am run, no Feishu alert). The prod image ships without
         # kimi-cli, so running it there is dead-on-arrival and just spams
         # alerts — kimi presence is a precondition for the feature to exist.
+        from src.data.services.kimi_config import ensure_kimi_config_from_env
         from src.data.services.kimi_listing_verifier import kimi_available
         from src.data.services.listing_verify_scheduler import ListingVerifyScheduler
 
-        if kimi_available():
+        # Generate kimi-cli's config from the static API key (KIMI_API_KEY env).
+        # No key → no config → kimi can't authenticate → don't start path B.
+        kimi_key_ready = ensure_kimi_config_from_env()
+
+        if kimi_available() and kimi_key_ready:
             listing_verify_scheduler = ListingVerifyScheduler(app.state)
             app.state.listing_verify_scheduler = listing_verify_scheduler
             app.state.listing_verify_scheduler_task = asyncio.create_task(
@@ -625,9 +630,13 @@ def create_app(
             # the spam we removed.
             from src.data.services.listing_verify_scheduler import _notify_feishu
 
+            if not kimi_available():
+                reason = "容器内没有 kimi-cli,要启用请先把 kimi-cli 装进镜像"
+            else:
+                reason = "未配置 KIMI_API_KEY,kimi 无法认证,请在部署环境设置该密钥"
             msg = (
-                "[上市日验证·路径B] 未启动 — 容器内没有 kimi-cli,path B 不运行,"
-                "listing_info 不会被自动验证。要启用请先把 kimi-cli 装进镜像。"
+                "[上市日验证·路径B] 未启动 — " + reason + "。"
+                "listing_info 不会被自动验证。"
             )
             logger.warning(msg)
             await _notify_feishu(msg)
