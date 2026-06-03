@@ -1259,6 +1259,42 @@ class GreptimeBacktestStorage:
             f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
 
+    async def purge_orphan_daily_rows(self, execute: bool = False) -> dict[str, Any]:
+        """Delete the backtest_daily rows the truth-table marks ``orphan`` (有数据
+        却不在册 — data for a (code, day) that the authoritative roster says
+        shouldn't exist).
+
+        Reads orphan (code, ts) from trading_calendar and deletes ONLY those exact
+        (code, day) rows from backtest_daily — so a delisted stock keeps its valid
+        pre-delist history (only its post-delist stale placeholder rows are orphan),
+        while a fully-dead code (e.g. 北交所 老代码 migrated to 920) loses all its
+        rows (all of them are orphan). After a rebuild, orphan → 0.
+
+        ``execute=False`` (default) is a DRY RUN: returns the breakdown without
+        deleting. ``execute=True`` performs the deletes (grouped by code, ts IN
+        batches of ≤200). Returns ``{executed, codes, rows[, deleted], by_code}``."""
+        rows = await self.db.fetch(
+            "SELECT stock_code, ts FROM trading_calendar WHERE daily_state = 'orphan'"
+        )
+        by_code: dict[str, list[int]] = {}
+        for r in rows:
+            day = ts_to_date(r["ts"])
+            by_code.setdefault(r["stock_code"], []).append(date_to_epoch_ms(day))
+        total = sum(len(v) for v in by_code.values())
+        sample = sorted(((c, len(v)) for c, v in by_code.items()), key=lambda x: -x[1])[:15]
+        if not execute:
+            return {"executed": False, "codes": len(by_code), "rows": total, "by_code": sample}
+        deleted = 0
+        for code, ts_list in by_code.items():
+            for i in range(0, len(ts_list), 200):
+                chunk = ts_list[i : i + 200]
+                in_list = ",".join(str(t) for t in chunk)
+                await self.db.execute(
+                    f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts IN ({in_list})"
+                )
+                deleted += len(chunk)
+        return {"executed": True, "codes": len(by_code), "deleted": deleted, "by_code": sample}
+
     async def delete_daily_by_codes(self, codes: list[str]) -> dict[str, int]:
         """DELETE *all* backtest_daily rows for the given stock codes (irreversible).
 

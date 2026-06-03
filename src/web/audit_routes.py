@@ -668,6 +668,42 @@ def create_audit_router() -> APIRouter:
             logger.warning("purge-codes-data 飞书通知失败", exc_info=True)
         return JSONResponse({"success": True, **result})
 
+    @router.post("/calendar/purge-orphan-rows")
+    async def purge_orphan_rows(request: Request) -> JSONResponse:
+        """Delete the backtest_daily rows the truth-table marks ``orphan`` (有数据
+        却不在册). Precise: deletes ONLY the orphan (code, day) rows, so a delisted
+        stock keeps its valid pre-delist history while dead codes lose everything.
+
+        ``?execute=1`` performs the delete; without it this is a DRY RUN (returns
+        the breakdown so you can review before deleting anything). Run a calendar
+        rebuild afterwards to reflect orphan → 0."""
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage 未就绪")
+        execute = request.query_params.get("execute") in ("1", "true", "yes")
+        result = await storage.purge_orphan_daily_rows(execute=execute)
+        if execute:
+            msg = (
+                "【数据清理】已删除「有数据却不在册」的孤儿日线\n"
+                f"涉及 {result['codes']} 只代码 / 删除 {result.get('deleted', 0):,} 行\n"
+                "(退市后残留的占位行 + 北交所改代码/重组后废弃老代码的冗余数据)\n"
+                "下一步: 重建真值表 → 孤儿应归零"
+            )
+            logger.info(
+                "purge-orphan-rows executed: %s codes, %s rows",
+                result["codes"],
+                result.get("deleted"),
+            )
+            try:
+                from src.common.feishu_bot import FeishuBot
+
+                bot = FeishuBot()
+                if bot.is_configured():
+                    await bot.send_message(msg)
+            except Exception:  # noqa: BLE001
+                logger.warning("purge-orphan-rows 飞书通知失败", exc_info=True)
+        return JSONResponse({"success": True, **result})
+
     @router.get("/calendar/status")
     async def calendar_status(request: Request) -> JSONResponse:
         """Query the trading_calendar truth table: per-state / per-trade-status
