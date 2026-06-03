@@ -167,6 +167,20 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 - **历史日线曾只存主板**:创业板(300/301)/科创板(688)/北交所(920)在早期一大段没下进来
   (2026-03-03 实测:Tushare 有 5472 只交易,库里只 3194)。根因 = 部分缺口没人补 + 名单不全无法定性。
   靠"干净 roster + 索引驱动补全"修掉。
+- **北交所 2025-10-09 全面改代码 → 老代码(43x/83x/87x)整体迁到 920x(2026-06 大坑)**:
+  Tushare **把这些公司的全部历史(含 2023)都重挂到 920 新代码下,老代码彻底查不到**
+  (实测:`430198.BJ` 2023H1 返回 0 条,`920198.BJ` 返回 118 条;`daily` 按交易日在**任何**日期都只
+  返回 920 代码;`stock_basic` 里 920198 在市、原始上市日 2020-07-27,而 430198 根本不在名单)。
+  后果:kimi 把老代码查清后写回名单 → 重建时老代码"在册却源头永远查不到"(daily 不返回它)→
+  **source_none 暴涨 5.5 万**。**正解 = 认 Tushare 为准、统一到 920**:`load-tushare` 重载权威名单
+  (老代码自动消失)+ `purge-orphan-rows` 删老代码冗余日线(数据已在 920 下)。**别去补老代码**(Tushare 没有)。
+  同理 300114(中航电测)2025 重组更名迁 302132、个股退市后残留占位行,都靠"权威名单 + 删孤儿"收敛。
+- **重建真值表必须"写前先清当天旧行",否则 de-roster 的代码残留(2026-06 大坑)**:
+  `upsert_trading_calendar` 原本是纯 INSERT,按 `(代码,日期)` 只**覆盖**它重新算出的行。一旦某代码
+  **离开名单**(如 load-tushare 用 920 替换老代码),reconcile 不再产出它 → 它的旧行(source_none 等)
+  **永远残留**,重建多少次 source_none 都降不下来(卡在 5.5 万)。修法:`upsert_trading_calendar` 写前先
+  `DELETE FROM trading_calendar WHERE ts=当天`,再插 reconcile 结果,使每天真值表与 reconcile 完全一致
+  (空 rows 也照清)。**教训:做"快照/重算"型写入时,要么先清范围再写、要么显式删差集,纯 upsert 会留残留。**
 
 ---
 
@@ -192,6 +206,8 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 | `GET  /calendar/problems?state=&limit=` | — | 列出某状态(missing/wrong_suspended/orphan/source_none…)的具体(日期×代码),供核查/修复 |
 | `POST /backfill-daily` | 阶段2 | **默认索引驱动**:补真值表 `missing`+`wrong_suspended`(先跑阶段1);`ok`+`source_none` 跳过 |
 | `POST /backfill-daily?mode=full&start=&end=` | bootstrap | 旧的全量审计式重下(建底/扩新范围,默认 CACHE_START~今天) |
+| `POST /calendar/purge-orphan-rows[?execute=1]` | 清理 | 删真值表 `orphan` 对应的 backtest_daily 行(只删孤儿行,退市股保留退市前历史)。不带 execute = dry-run 出清单 |
+| `POST /calendar/purge-codes-data {codes:[...]}` | 清理 | 按显式代码清单删其全部日线(删整只死代码用;上限 500) |
 | `POST /diagnose-gaps` | — | 逐日诊断报告(问题→根因→正确数字→修法)→ 飞书 |
 | `POST /listing-info/verify-problems?states=&max=` | kimi兜底 | 把真值表 source_none/orphan 代码喂 kimi 查清「这代码是什么、现在什么情况」 |
 | `GET  /listing-info/kimi-raw?code=` | **可观测** | 拉某代码上次 kimi 验证的**完整原始输出(工具调用全过程)**——"查不到"时调它看 kimi 到底做了什么,**别猜** |
