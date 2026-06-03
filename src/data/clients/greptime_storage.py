@@ -1044,7 +1044,15 @@ class GreptimeBacktestStorage:
         stale row. Deleting-then-inserting makes the day match the reconcile exactly.
         """
         ts_ms = date_to_epoch_ms(day)
-        await self.db.execute(f"DELETE FROM trading_calendar WHERE ts = {ts_ms}")
+        # Delete the WHOLE UTC day [ts_ms, ts_ms+1day), NOT just ts == midnight.
+        # Legacy rows can carry a non-midnight ts (still mapping to this date);
+        # an exact-midnight delete misses them, so a rebuild can't overwrite them
+        # and they linger as phantom flags with no backing data. A range delete
+        # clears those too — and legit rows (always midnight) fall in-range and
+        # get re-inserted, so no data is lost.
+        await self.db.execute(
+            f"DELETE FROM trading_calendar WHERE ts >= {ts_ms} AND ts < {ts_ms + 86_400_000}"
+        )
         if not rows:
             return 0
 

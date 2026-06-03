@@ -37,10 +37,16 @@ def test_deletes_day_before_inserting():
             "reason": None,
         },
     ]
+    from src.data.clients.greptime_storage import date_to_epoch_ms
+
     asyncio.run(st.upsert_trading_calendar(date(2024, 1, 2), rows))
     executed = st.db.executed  # type: ignore[attr-defined]
-    # the FIRST statement must clear the day
-    assert executed[0].startswith("DELETE FROM trading_calendar WHERE ts =")
+    # the FIRST statement must clear the WHOLE day as a range (so non-midnight
+    # legacy/phantom rows are caught too), not just the exact-midnight ts.
+    ms = date_to_epoch_ms(date(2024, 1, 2))
+    assert executed[0] == (
+        f"DELETE FROM trading_calendar WHERE ts >= {ms} AND ts < {ms + 86_400_000}"
+    )
     assert any("INSERT INTO trading_calendar" in s for s in executed)
 
 
@@ -50,4 +56,4 @@ def test_empty_rows_still_clears_the_day():
     asyncio.run(st.upsert_trading_calendar(date(2024, 1, 2), []))
     executed = st.db.executed  # type: ignore[attr-defined]
     assert len(executed) == 1
-    assert executed[0].startswith("DELETE FROM trading_calendar WHERE ts =")
+    assert executed[0].startswith("DELETE FROM trading_calendar WHERE ts >=")
