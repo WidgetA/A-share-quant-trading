@@ -624,6 +624,52 @@ def create_audit_router() -> APIRouter:
             {"success": True, "message": f"已触发交易日历真值表重建 {start}~{end},结果发飞书"}
         )
 
+    @router.post("/calendar/purge-codes-data")
+    async def purge_codes_data(request: Request) -> JSONResponse:
+        """DESTRUCTIVE: delete *all* backtest_daily rows for the given codes.
+
+        For purging dead-alias codes — 北交所 老代码 (43x/83x/87x) globally migrated
+        to 920x on 2025-10-09. Tushare serves their full history under the 920 code,
+        so the old-code rows are redundant orphans (left over after load-tushare
+        drops them from the roster). Their data is re-derivable under the 920 code,
+        so this is recoverable in practice — but still requires an EXPLICIT code
+        list (no auto-purge) and is capped + logged + Feishu'd.
+
+        Body: ``{"codes": ["430198", "830964", ...]}``.
+        """
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage 未就绪")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="非法 JSON body")
+        raw = body.get("codes") or []
+        codes = [
+            s for c in raw if (s := str(c).strip()).isdigit() and len(s) == 6
+        ]
+        if not codes:
+            raise HTTPException(status_code=400, detail="需提供 6 位数字代码清单 (codes)")
+        if len(codes) > 500:
+            raise HTTPException(status_code=400, detail="一次最多清理 500 只,请分批")
+        result = await storage.delete_daily_by_codes(codes)
+        msg = (
+            "【数据清理】已删除迁移老代码的冗余日线\n"
+            f"删除 {result['codes']} 只代码 / 共 {result['deleted']:,} 行\n"
+            "(这些是北交所改代码后的废弃老代码,数据已在 920 新代码下,删的是冗余副本)\n"
+            "下一步: 补全 920 新代码全历史 → 重建真值表"
+        )
+        logger.info("purge-codes-data: %s codes, %s rows", result["codes"], result["deleted"])
+        try:
+            from src.common.feishu_bot import FeishuBot
+
+            bot = FeishuBot()
+            if bot.is_configured():
+                await bot.send_message(msg)
+        except Exception:  # noqa: BLE001
+            logger.warning("purge-codes-data 飞书通知失败", exc_info=True)
+        return JSONResponse({"success": True, **result})
+
     @router.get("/calendar/status")
     async def calendar_status(request: Request) -> JSONResponse:
         """Query the trading_calendar truth table: per-state / per-trade-status

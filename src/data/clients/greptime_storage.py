@@ -1252,6 +1252,28 @@ class GreptimeBacktestStorage:
             f"DELETE FROM backtest_daily WHERE stock_code = '{code}' AND ts = {ts_ms}"
         )
 
+    async def delete_daily_by_codes(self, codes: list[str]) -> dict[str, int]:
+        """DELETE *all* backtest_daily rows for the given stock codes (irreversible).
+
+        Used to purge dead-alias codes — e.g. 北交所 老代码 (43x/83x/87x) that were
+        globally migrated to 920x on 2025-10-09; Tushare now serves their full
+        history under the 920 code, so the old-code rows are redundant orphans.
+
+        Only 6-digit numeric codes are acted on (keeps arbitrary input out of the
+        SQL). Counts rows per code first so the caller can report the impact.
+        Returns ``{codes, deleted}`` (codes acted on, total rows removed)."""
+        safe = [c for c in codes if isinstance(c, str) and len(c) == 6 and c.isdigit()]
+        deleted = 0
+        for code in safe:
+            rows = await self.db.fetch(
+                f"SELECT COUNT(*) AS n FROM backtest_daily WHERE stock_code = '{code}'"
+            )
+            n = int(rows[0]["n"]) if rows else 0
+            if n > 0:
+                await self.db.execute(f"DELETE FROM backtest_daily WHERE stock_code = '{code}'")
+            deleted += n
+        return {"codes": len(safe), "deleted": deleted}
+
     # Stay well below GreptimeDB's silent 200-row batch INSERT cliff.
     _MINUTE_INSERT_BATCH = 100
 
