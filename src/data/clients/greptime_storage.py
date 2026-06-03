@@ -284,6 +284,28 @@ CREATE TABLE IF NOT EXISTS scheduler_log (
 )
 """
 
+# code_alias: old (delisted/changed) stock code → its current canonical code.
+# Drives "consolidate everything under the live code" so a code-change event
+# (北交所 920 迁移 / 个股重组改名换号) never leaves orphan rows:
+#   - at ingestion, a record under an old_code is re-keyed to new_code before write
+#   - a one-time migration moves existing old_code rows onto new_code
+# Fed by kimi (path-B): when it finds a "查无此码" code that 迁号/改名, it writes
+# the mapping here. This table is SEPARATE from stock_listing_info, so a
+# load-tushare roster reload does NOT wipe it (the whole point — it must survive).
+# ts pinned to 0 for the same last-write-wins reason as stock_listing_info.
+_CREATE_CODE_ALIAS_SQL = """
+CREATE TABLE IF NOT EXISTS code_alias (
+    old_code STRING,
+    ts TIMESTAMP TIME INDEX,
+    new_code STRING,
+    change_date TIMESTAMP,
+    "note" STRING,
+    "source" STRING,
+    PRIMARY KEY (old_code)
+)
+"""
+_CODE_ALIAS_TS = 0
+
 
 # ---------------------------------------------------------------------------
 # Low-level GreptimeDB connection pool
@@ -508,6 +530,7 @@ class GreptimeBacktestStorage:
             ("stock_listing_info", _CREATE_STOCK_LISTING_INFO_SQL),
             ("trading_calendar", _CREATE_TRADING_CALENDAR_SQL),
             ("scheduler_log", _CREATE_SCHEDULER_LOG_SQL),
+            ("code_alias", _CREATE_CODE_ALIAS_SQL),
         ]:
             try:
                 await self.db.execute(sql)
@@ -1509,6 +1532,67 @@ class GreptimeBacktestStorage:
                 "verified": bool(r["verified"]) if r["verified"] is not None else False,
                 "source": r["source"],
             }
+        return out
+
+    async def upsert_code_alias(self, entries: list[dict[str, Any]]) -> int:
+        """Upsert old_code → new_code aliases (code-change mappings). Each entry:
+        ``{old_code, new_code, change_date?(date|None), note?, source?}``. ts pinned
+        to 0 (last-write-wins per old_code). Only 6-digit old/new codes are written
+        (keeps junk out of the SQL). Small batches (≤200)."""
+        if not entries:
+            return 0
+
+        def _s(v: Any) -> str:
+            return "NULL" if v is None else "'" + str(v).replace("'", "''") + "'"
+
+        def _cd(v: date | None) -> str:
+            return "NULL" if v is None else str(date_to_epoch_ms(v))
+
+        written = 0
+        for i in range(0, len(entries), 200):
+            vals: list[str] = []
+            for e in entries[i : i + 200]:
+                oc = e.get("old_code")
+                nc = e.get("new_code")
+                if not (isinstance(oc, str) and len(oc) == 6 and oc.isdigit()):
+                    continue
+                if not (isinstance(nc, str) and len(nc) == 6 and nc.isdigit()):
+                    continue
+                vals.append(
+                    f"({_s(oc)}, {_CODE_ALIAS_TS}, {_s(nc)}, {_cd(e.get('change_date'))}, "
+                    f"{_s(e.get('note'))}, {_s(e.get('source'))})"
+                )
+            if not vals:
+                continue
+            await self.db.execute(
+                'INSERT INTO code_alias (old_code, ts, new_code, change_date, "note", "source") '
+                "VALUES " + ", ".join(vals)
+            )
+            written += len(vals)
+        return written
+
+    async def get_code_alias_map(self) -> dict[str, str]:
+        """``{old_code: new_code}`` — used to re-key old codes to their canonical code."""
+        rows = await self.db.fetch("SELECT old_code, new_code FROM code_alias")
+        return {r["old_code"]: r["new_code"] for r in rows if r["new_code"]}
+
+    async def get_code_alias_all(self) -> list[dict[str, Any]]:
+        """All aliases (for inspection / the future-proofing endpoint)."""
+        rows = await self.db.fetch(
+            'SELECT old_code, new_code, change_date, "note", "source" FROM code_alias'
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            cd = r["change_date"]
+            out.append(
+                {
+                    "old_code": r["old_code"],
+                    "new_code": r["new_code"],
+                    "change_date": ts_to_date(cd).isoformat() if cd is not None else None,
+                    "note": r["note"],
+                    "source": r["source"],
+                }
+            )
         return out
 
     async def get_effective_universe_for_date(self, day: date) -> set[str]:

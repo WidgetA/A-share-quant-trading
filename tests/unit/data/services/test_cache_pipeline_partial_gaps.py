@@ -51,6 +51,9 @@ class _Storage:
     async def get_effective_universe_for_date(self, day: date) -> set[str]:
         return set(self._expected)
 
+    async def get_code_alias_map(self) -> dict[str, str]:
+        return {}
+
     async def get_codes_for_daily_date(self, day: date) -> set[str]:
         return set(self.daily)
 
@@ -119,6 +122,30 @@ async def test_traded_stock_in_suspend_d_written_as_real():
     )
     by_code = {c: r for c, r in storage.inserted}
     assert by_code["688435"]["is_suspended"] is False  # real bar wins over suspend_d
+
+
+@pytest.mark.asyncio
+async def test_code_alias_remaps_old_code_to_new_on_write():
+    """A record under an old code (重组改名换号) is stored under its current
+    canonical code, so it lands in the roster instead of becoming an orphan."""
+    day = date(2024, 6, 3)
+    storage = _Storage(expected=set(), existing=set())
+    pipe = _pipeline(storage, _DailySource([]), _MetadataSource(set()))
+    records = [{"ticker": "300114", "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 500}]
+    await pipe._process_daily_date(
+        day,
+        suspended_codes=set(),
+        records=records,
+        failed_exchanges=[],
+        skip_codes=None,
+        prev_close_map={},
+        current=1,
+        total=1,
+        code_alias={"300114": "302132"},
+    )
+    codes = {c for c, _ in storage.inserted}
+    assert "302132" in codes  # stored under the new canonical code
+    assert "300114" not in codes  # NOT under the old code
 
 
 @pytest.mark.asyncio

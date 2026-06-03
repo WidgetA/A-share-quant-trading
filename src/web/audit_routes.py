@@ -704,6 +704,53 @@ def create_audit_router() -> APIRouter:
                 logger.warning("purge-orphan-rows 飞书通知失败", exc_info=True)
         return JSONResponse({"success": True, **result})
 
+    @router.get("/calendar/code-alias")
+    async def list_code_alias(request: Request) -> JSONResponse:
+        """View the old→new code-change map (重组改名换号). kimi auto-fills it;
+        ingestion re-keys old codes to new so they never become orphans."""
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            return JSONResponse({"ready": False})
+        aliases = await storage.get_code_alias_all()
+        return JSONResponse({"ready": True, "count": len(aliases), "aliases": aliases})
+
+    @router.post("/calendar/code-alias")
+    async def add_code_alias(request: Request) -> JSONResponse:
+        """Add/overwrite one old→new alias manually. Body:
+        ``{"old_code","new_code","note"?,"change_date"?("YYYY-MM-DD")}``."""
+        from datetime import date as _date
+
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage 未就绪")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="非法 JSON body")
+        old = str(body.get("old_code", "")).strip()
+        new = str(body.get("new_code", "")).strip()
+        if not (old.isdigit() and len(old) == 6 and new.isdigit() and len(new) == 6):
+            raise HTTPException(status_code=400, detail="old_code / new_code 必须是 6 位数字")
+        change_date = None
+        cds = body.get("change_date")
+        if isinstance(cds, str) and len(cds) == 10 and cds[4] == "-":
+            try:
+                change_date = _date.fromisoformat(cds)
+            except ValueError:
+                change_date = None
+        n = await storage.upsert_code_alias(
+            [
+                {
+                    "old_code": old,
+                    "new_code": new,
+                    "change_date": change_date,
+                    "note": body.get("note"),
+                    "source": body.get("source", "manual"),
+                }
+            ]
+        )
+        return JSONResponse({"success": True, "written": n, "old_code": old, "new_code": new})
+
     @router.get("/calendar/status")
     async def calendar_status(request: Request) -> JSONResponse:
         """Query the trading_calendar truth table: per-state / per-trade-status

@@ -27,17 +27,20 @@ KIMI_PROMPT_TMPL = (
     "需要查清这几点:\n"
     "① 公司中文名;\n"
     "② 首次上市日(IPO 首日);\n"
-    "③ 现在的状态:仍在交易 / 已退市 / 老代码已迁到新代码(北交所 8、4 开头常迁到 92 开头)/ 更名;\n"
-    "④ 若已退市或迁移,退市日 / 迁移日(知道就填)。\n"
+    "③ 现在的状态:仍在交易 / 已退市 / 老代码已迁到新代码"
+    "(北交所 8、4 开头常迁到 92 开头)/ 更名换号;\n"
+    "④ 若已退市或迁移,退市日 / 迁移日(知道就填);\n"
+    "⑤ 若是迁号/更名换号,**新代码是多少**(6 位数字;只是更名但代码没变就填 null)。\n"
     "先简要列出你找到的信息,再在最后一行单独输出一行 JSON:\n"
     '{{"code":"{code}","name":"<公司中文名,如不知填 null>","list_date":"YYYY-MM-DD 或 null",'
     '"delist_date":"YYYY-MM-DD 或 null(仅已退市/迁移时填)",'
     '"status":"<在交易|已退市|迁移新代码|更名|查不到>",'
+    '"new_code":"<迁号/更名换号后的新代码 6 位,否则 null>",'
     '"note":"<一句中文话说清这个代码现在到底怎么回事,给人看的,别写代号>",'
     '"source":"<URL>"}}\n'
     "只有确实多方查证都查不到时,status 填 查不到、其余可为 null(绝不编造日期):\n"
-    '{{"code":"{code}","name":null,"list_date":null,"delist_date":null,'
-    '"status":"查不到","note":"多方查证仍无结果","source":null,"error":"not found"}}'
+    '{{"code":"{code}","name":null,"list_date":null,"delist_date":null,"status":"查不到",'
+    '"new_code":null,"note":"多方查证仍无结果","source":null,"error":"not found"}}'
 )
 
 _REAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -162,6 +165,11 @@ def finding_from_result(code: str, result: dict) -> dict:
     note = result.get("note")
     if not isinstance(note, str) or not note.strip():
         note = "(kimi 未给出说明)"
+    # new_code only when it's a real 6-digit code change (迁号/更名换号).
+    nc = result.get("new_code")
+    new_code = (
+        nc if (isinstance(nc, str) and len(nc) == 6 and nc.isdigit() and nc != code) else None
+    )
     return {
         "code": code,
         "name": result.get("name"),
@@ -169,6 +177,7 @@ def finding_from_result(code: str, result: dict) -> dict:
         "note": note.strip(),
         "list_date": result.get("list_date"),
         "delist_date": result.get("delist_date"),
+        "new_code": new_code,
         "source": result.get("source"),
     }
 

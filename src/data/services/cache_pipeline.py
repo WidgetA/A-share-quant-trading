@@ -222,6 +222,7 @@ class CachePipeline:
             # Roster (authoritative listing) gates suspended placeholders so we
             # don't re-create orphans for de-rostered codes suspend_d still lists.
             listing_info = await self.storage.get_listing_info_all()
+            code_alias = await self.storage.get_code_alias_map()  # old→new re-key
             async with self.daily_source, self.metadata_source:
                 for i, day in enumerate(dates):
                     self._raise_if_cancelled(cancel_event, "Calendar-driven fill cancelled")
@@ -252,6 +253,7 @@ class CachePipeline:
                         current=i + 1,
                         total=total,
                         roster=roster_for_day(listing_info, day),
+                        code_alias=code_alias,
                     )
                     after = await self.storage.get_codes_for_daily_date(day)
                     filled += len(after - before)
@@ -379,6 +381,7 @@ class CachePipeline:
         total = len(partial_gaps)
         filled_suspended = 0
         downloaded_real = 0
+        code_alias = await self.storage.get_code_alias_map()  # old→new re-key
 
         for i, (gap_date, expected, actual) in enumerate(partial_gaps):
             self._raise_if_cancelled(cancel_event, "Daily download cancelled by user")
@@ -422,6 +425,7 @@ class CachePipeline:
                     current=i + 1,
                     total=total,
                     roster=expected_codes,  # effective universe = the roster
+                    code_alias=code_alias,
                 )
                 after = await self.storage.get_codes_for_daily_date(gap_date)
                 added = len(after - before)
@@ -502,6 +506,7 @@ class CachePipeline:
         tasks = [asyncio.create_task(_prefetch(d)) for d, _exp, _act in full_gaps]
         # Roster gates suspended placeholders (skip de-rostered codes suspend_d lists).
         listing_info = await self.storage.get_listing_info_all()
+        code_alias = await self.storage.get_code_alias_map()  # old→new re-key
 
         try:
             for i, task in enumerate(tasks):
@@ -517,6 +522,7 @@ class CachePipeline:
                     i + 1,
                     len(full_gaps),
                     roster=roster_for_day(listing_info, gap_date),
+                    code_alias=code_alias,
                 )
         except BaseException:
             for t in tasks:
@@ -536,6 +542,7 @@ class CachePipeline:
         current: int,
         total: int,
         roster: set[str] | None = None,
+        code_alias: dict[str, str] | None = None,
     ) -> None:
         """Insert pre-fetched daily data into storage. Updates prev_close_map in-place.
 
@@ -543,7 +550,12 @@ class CachePipeline:
         suspended-placeholder write: Tushare ``suspend_d`` still lists de-rostered
         codes (e.g. old 北交所 43x/83x/87x after the 2025-10-09 → 920x migration),
         and placeholdering those just creates orphan rows. When ``roster`` is given,
-        only codes it contains get a suspended placeholder. ``None`` = old behavior."""
+        only codes it contains get a suspended placeholder. ``None`` = old behavior.
+
+        ``code_alias`` ({old_code: new_code}) re-keys a record's code to its current
+        canonical code BEFORE writing — so a code-change (个股重组改名换号, where
+        Tushare daily still returns the OLD code for historical dates) lands under
+        the live code instead of leaving an orphan. Empty/None = no remap (no-op)."""
         date_str = day.strftime("%Y-%m-%d")
         day_prev_close_map = {
             **prev_close_map,
@@ -568,6 +580,10 @@ class CachePipeline:
 
         for raw in records:
             ticker = raw["ticker"]
+            # Re-key an old code to its current canonical code (code-change alias),
+            # so 重组改名换号 history lands under the live code, not as an orphan.
+            if code_alias:
+                ticker = code_alias.get(ticker, ticker)
             seen_codes.add(ticker)
 
             # Skip codes already in DB (partial backfill mode)

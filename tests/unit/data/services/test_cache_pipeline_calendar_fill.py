@@ -74,6 +74,9 @@ class _Storage:
             codes |= c
         return {c: {"list_date": None, "delist_date": None} for c in codes}
 
+    async def get_code_alias_map(self) -> dict[str, str]:
+        return {}
+
     async def get_codes_for_daily_date(self, day: date) -> set[str]:
         return set(self.daily)
 

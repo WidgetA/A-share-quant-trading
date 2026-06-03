@@ -93,10 +93,19 @@ def test_finding_uses_kimi_status_and_note():
         "note": "老北交所代码,已迁到新代码",
         "source": "http://x",
     }
+    result["new_code"] = "920779"
     f = finding_from_result("830779", result)
     assert f["status"] == "迁移新代码"
     assert f["note"] == "老北交所代码,已迁到新代码"
     assert f["delist_date"] == "2023-09-01"
+    assert f["new_code"] == "920779"  # captured for the code-change alias
+
+
+def test_finding_new_code_rejected_when_bogus():
+    # new_code must be a real 6-digit code different from the old one.
+    for bogus in (None, "92077", "abcdef", "830779"):
+        f = finding_from_result("830779", {"code": "830779", "new_code": bogus})
+        assert f["new_code"] is None
 
 
 def test_finding_infers_status_for_old_style_answer():

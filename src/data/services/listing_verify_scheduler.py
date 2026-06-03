@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -454,9 +454,34 @@ class ListingVerifyScheduler:
             chunk = verified_entries[i : i + _UPSERT_BATCH]
             written += await storage.upsert_listing_info(chunk)
 
+        # Auto-maintain the code-change map: when kimi reports a 迁号/更名换号 with a
+        # concrete new code, record old→new so future ingestion re-keys it (the
+        # "接住未来的重组换号" mechanism). Additive + safe — only real 6-digit pairs.
+        aliases: list[dict] = []
+        for f in findings:
+            if not f.get("new_code"):
+                continue
+            dd = f.get("delist_date")  # use the migration date as the change date
+            change_date = (
+                date.fromisoformat(dd)
+                if isinstance(dd, str) and len(dd) == 10 and dd[4] == "-"
+                else None
+            )
+            aliases.append(
+                {
+                    "old_code": f["code"],
+                    "new_code": f["new_code"],
+                    "change_date": change_date,
+                    "note": f.get("note"),
+                    "source": "kimi",
+                }
+            )
+        alias_written = await storage.upsert_code_alias(aliases) if aliases else 0
+
         await _log(
             f"完成: 验证 {verified_n} / 查不到 {len(not_found_codes)} / "
-            f"kimi工具错误 {len(tool_errors)} / 写入 {written} / 剩余 {remaining}"
+            f"kimi工具错误 {len(tool_errors)} / 写入 {written} / 换号映射 {alias_written} / "
+            f"剩余 {remaining}"
         )
 
         ok_emoji = "✅" if tool_errors == [] else "⚠️"
