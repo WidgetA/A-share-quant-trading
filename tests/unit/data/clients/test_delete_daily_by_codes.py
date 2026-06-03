@@ -33,9 +33,7 @@ def _storage_with(counts: dict[str, int]) -> GreptimeBacktestStorage:
 
 def test_only_six_digit_codes_acted_on():
     st = _storage_with({"430198": 5, "830964": 7})
-    res = asyncio.run(
-        st.delete_daily_by_codes(["430198", "abc", "12345", "9201980", "830964", ""])
-    )
+    res = asyncio.run(st.delete_daily_by_codes(["430198", "abc", "12345", "9201980", "830964", ""]))
     # only 430198 + 830964 are valid 6-digit
     assert res["codes"] == 2
     assert res["deleted"] == 12  # 5 + 7

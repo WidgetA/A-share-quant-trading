@@ -29,8 +29,13 @@ def _storage() -> GreptimeBacktestStorage:
 def test_deletes_day_before_inserting():
     st = _storage()
     rows = [
-        {"code": "600000", "listed": True, "trade_status": "trading",
-         "daily_state": "ok", "reason": None},
+        {
+            "code": "600000",
+            "listed": True,
+            "trade_status": "trading",
+            "daily_state": "ok",
+            "reason": None,
+        },
     ]
     asyncio.run(st.upsert_trading_calendar(date(2024, 1, 2), rows))
     executed = st.db.executed  # type: ignore[attr-defined]

@@ -645,9 +645,7 @@ def create_audit_router() -> APIRouter:
         except Exception:
             raise HTTPException(status_code=400, detail="非法 JSON body")
         raw = body.get("codes") or []
-        codes = [
-            s for c in raw if (s := str(c).strip()).isdigit() and len(s) == 6
-        ]
+        codes = [s for c in raw if (s := str(c).strip()).isdigit() and len(s) == 6]
         if not codes:
             raise HTTPException(status_code=400, detail="需提供 6 位数字代码清单 (codes)")
         if len(codes) > 500:
