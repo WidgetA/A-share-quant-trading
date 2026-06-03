@@ -634,10 +634,7 @@ def create_app(
                 reason = "容器内没有 kimi-cli,要启用请先把 kimi-cli 装进镜像"
             else:
                 reason = "未配置 KIMI_API_KEY,kimi 无法认证,请在部署环境设置该密钥"
-            msg = (
-                "[上市日验证·路径B] 未启动 — " + reason + "。"
-                "listing_info 不会被自动验证。"
-            )
+            msg = "[上市日验证·路径B] 未启动 — " + reason + "。listing_info 不会被自动验证。"
             logger.warning(msg)
             await _notify_feishu(msg)
 
