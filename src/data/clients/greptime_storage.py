@@ -1074,14 +1074,21 @@ class GreptimeBacktestStorage:
             "max_date": ts_to_date(mx).isoformat() if mx is not None else None,
         }
 
-    async def get_calendar_missing_by_date(self) -> dict[date, set[str]]:
-        """Codes with daily_state='missing' (fixable 真缺) grouped by trade date.
+    async def get_calendar_fillable_by_date(self) -> dict[date, set[str]]:
+        """Codes that a daily re-download can FIX, grouped by trade date.
+
+        Two states both mean "源头当天有真实成交、但库里不对,重下即可修":
+          - ``missing``         (库里根本没有这只的当天行)
+          - ``wrong_suspended`` (库里是停牌占位,但源头当天其实在交易 → 该是真实行)
 
         Drives the index-driven daily fill (DAT-006 阶段2): only these (day, code)
         get re-downloaded. ok / source_none are NOT returned → never retried.
+        wrong_suspended rows already exist in the DB as placeholders, so the
+        caller must NOT skip them — the real bar upserts over the placeholder.
         """
         rows = await self.db.fetch(
-            "SELECT ts, stock_code FROM trading_calendar WHERE daily_state = 'missing'"
+            "SELECT ts, stock_code FROM trading_calendar "
+            "WHERE daily_state IN ('missing', 'wrong_suspended')"
         )
         out: dict[date, set[str]] = {}
         for r in rows:

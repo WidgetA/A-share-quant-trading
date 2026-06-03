@@ -190,14 +190,18 @@ class CachePipeline:
         cancel_event: CancelChecker = None,
         quiet: bool = False,
     ) -> dict[str, int]:
-        """Fill daily gaps the trading_calendar marks as ``daily_state=missing``.
+        """Fill daily gaps the trading_calendar marks as fixable by a re-download.
 
         Index-driven (see docs/data-integrity-pipeline.md §7.1): only the dates
-        that have at least one ``missing`` code are re-downloaded; for each, the
-        missing real rows + suspended placeholders are written via the shared
-        ``_process_daily_date`` (skip_codes = what we already have). Dates whose
-        only gaps are ``source_none`` (源头不可抗) are NOT in the missing set, so
-        they are never fetched and never retried.
+        with at least one ``missing`` or ``wrong_suspended`` code are
+        re-downloaded. For each, the real rows + suspended placeholders are
+        written via the shared ``_process_daily_date``.
+
+        skip_codes = (existing in DB) MINUS (fillable this day): we keep skipping
+        codes we already have correctly, but do NOT skip ``wrong_suspended`` codes
+        (which exist as a bogus placeholder) — re-downloading upserts the real bar
+        over the placeholder. ``missing`` codes aren't in the DB anyway. Dates
+        whose only gaps are ``source_none`` (源头不可抗) are never fetched/retried.
 
         The calendar must be freshly rebuilt first (阶段1) — this acts on its
         verdict. ``quiet=True`` silences per-event Feishu (the caller sends one
@@ -207,8 +211,8 @@ class CachePipeline:
         if quiet:
             self.reporter = saved_reporter.silent_feishu()
         try:
-            missing_by_date = await self.storage.get_calendar_missing_by_date()
-            dates = sorted(missing_by_date)
+            fillable_by_date = await self.storage.get_calendar_fillable_by_date()
+            dates = sorted(fillable_by_date)
             total = len(dates)
             filled = 0
             if total == 0:
@@ -216,7 +220,10 @@ class CachePipeline:
             async with self.daily_source, self.metadata_source:
                 for i, day in enumerate(dates):
                     self._raise_if_cancelled(cancel_event, "Calendar-driven fill cancelled")
+                    # Keep skipping correct existing rows, but force-rewrite the
+                    # wrong_suspended placeholders (existing ∩ fillable).
                     existing = await self.storage.get_codes_for_daily_date(day)
+                    existing = existing - fillable_by_date[day]
                     # fail-fast on suspend_d error (never write wrong suspension data)
                     try:
                         suspended = await self.metadata_source.fetch_suspended(day)
