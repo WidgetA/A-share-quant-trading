@@ -1013,10 +1013,17 @@ class GreptimeBacktestStorage:
         ts = the trade date for ALL rows → (stock_code, ts) overwrites on rebuild.
         Multi-row INSERT in batches of ≤200 (GreptimeDB silently drops larger
         batches). Each row: {code, listed, trade_status, daily_state, reason}.
+
+        The rebuild is AUTHORITATIVE for the whole day, so we DELETE the day's
+        existing rows first. A plain upsert only overwrites codes it re-emits;
+        a code that LEFT the roster (e.g. a dead 北交所 老代码 after a load-tushare
+        replaces it with its 920 successor) would otherwise linger forever as a
+        stale row. Deleting-then-inserting makes the day match the reconcile exactly.
         """
+        ts_ms = date_to_epoch_ms(day)
+        await self.db.execute(f"DELETE FROM trading_calendar WHERE ts = {ts_ms}")
         if not rows:
             return 0
-        ts_ms = date_to_epoch_ms(day)
 
         def _str_or_null(s: Any) -> str:
             if s is None:
