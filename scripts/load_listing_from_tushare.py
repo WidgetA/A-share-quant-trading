@@ -48,25 +48,62 @@ def build_entries(rows_listed: list[dict], rows_delisted: list[dict]) -> list[di
 
 
 async def load_listing(storage, client) -> dict:
-    """Fetch stock_basic (L + D) and upsert into stock_listing_info. Returns counts."""
+    """Fetch stock_basic (L + D) and rebuild stock_listing_info. Returns counts.
+
+    Authoritative for every code Tushare lists. But kimi's path-B rows — for codes
+    Tushare does NOT cover (dead/migrated codes kimi marked "查不到", or codes kimi
+    confirmed on its own) — are PRESERVED across the reload. Otherwise the truncate
+    wipes them and the nightly kimi step re-burns the same dead codes every night.
+    We keep only NON-tushare-sourced rows whose code isn't in the fresh Tushare set,
+    so a migrated 北交所 老代码 (previously a tushare row, now gone) is correctly
+    dropped, while kimi's placeholders survive.
+    """
     listed = await client.fetch_stock_basic_full("L")
     delisted = await client.fetch_stock_basic_full("D")
+    # Fail-fast: an empty 在市 list means the interface answered but returned nothing
+    # (malformed/empty 200-OK) — a real HTTP/quota/auth failure already raised before
+    # here. Truncating on an empty result would wipe the authoritative index, so abort.
+    if not listed:
+        raise RuntimeError("Tushare stock_basic 在市列表为空,疑似接口异常,跳过重建以免清空索引")
     entries = build_entries(listed, delisted)
+    tushare_codes = {e["code"] for e in entries}
 
-    # Authoritative full rebuild: fetch FIRST (so a fetch failure leaves the
-    # existing table intact), then clear and rewrite so the table holds
-    # exactly one clean row per code — no stale placeholders, no duplicates.
+    # Snapshot kimi-written rows to re-apply after the truncate. The fetch above
+    # already happened, so a fetch failure aborts before we touch the table.
+    existing = await storage.get_listing_info_all()
+    preserved: list[dict] = []
+    for code, meta in existing.items():
+        if (meta.get("source") or "") == _SOURCE:
+            continue  # a prior Tushare row — let the fresh reload replace/drop it
+        if code in tushare_codes:
+            continue  # Tushare now covers it — authoritative wins
+        ld = meta.get("list_date")
+        dd = meta.get("delist_date")
+        preserved.append(
+            {
+                "code": code,
+                "name": meta.get("name"),
+                "list_date": ld.isoformat() if ld else None,
+                "delist_date": dd.isoformat() if dd else None,
+                "verified": meta.get("verified", False),
+                "source": meta.get("source"),
+            }
+        )
+
     await storage.truncate_listing_info()
 
     written = 0
     for i in range(0, len(entries), _UPSERT_BATCH):
         written += await storage.upsert_listing_info(entries[i : i + _UPSERT_BATCH])
+    for i in range(0, len(preserved), _UPSERT_BATCH):
+        await storage.upsert_listing_info(preserved[i : i + _UPSERT_BATCH])
 
     return {
         "listed": len(listed),
         "delisted": len(delisted),
         "total_entries": len(entries),
         "written": written,
+        "preserved_kimi": len(preserved),
     }
 
 

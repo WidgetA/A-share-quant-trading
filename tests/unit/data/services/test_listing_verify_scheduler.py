@@ -98,7 +98,7 @@ async def test_no_codes_short_circuits(monkeypatch):
     monkeypatch.setattr(mod, "run_kimi_for_code", _kimi_stub({}))
     with patch.object(mod, "_notify_feishu", new=AsyncMock()):
         result = await sched.verify_unverified()
-    assert result == {"checked": 0, "verified": 0, "failed": 0, "remaining": 0}
+    assert result == {"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}
     assert storage.written == []
 
 

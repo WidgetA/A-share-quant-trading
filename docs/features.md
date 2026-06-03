@@ -754,7 +754,7 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 | 7 | `minute_backfill` | Audit + refetch missing (day, code) pairs |
 | 8 | `download` | Final verification + Feishu report |
 
-**Scheduling**: 3am daily auto-fill via `CacheScheduler` (toggle on/off in Settings page).
+**Scheduling**: 凌晨 3 点 `CacheScheduler` 跑**统一的每日数据维护流水线**(toggle in Settings):刷名单(load-tushare)→ kimi 核新代码 + 回填 code_alias → 重建真值表(全历史**查漏**)→ 索引驱动**补缺**(只补 missing/wrong_suspended,绝不全量重下)→ 重建被补过的天确认 → 一条飞书汇总。查漏全量、补缺精准;步骤失败隔离;只在 3 点跑、不在 startup 跑;分钟线不在本流程(阶段三,单独触发)。详见 `docs/data-integrity-pipeline.md` §4.1。
 
 **Gap Diagnosis Report**:
 - 手动: `POST /api/audit/diagnose-gaps` 后台运行同一套诊断并发飞书。
@@ -808,9 +808,9 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 | `stock_snapshot` | 每日 B∪D∪S 三源并集 (bak_basic ∪ daily ∪ suspend_d) | `(ts, stock_code)` |
 | `stock_listing_info` | 每代码 list_date / delist_date / verified / source | `stock_code` |
 
-**验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `verify_one_code()` —— spawn `kimi --print --afk --no-thinking`,prompt 强制 SearchWeb 实证;解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
+**验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `run_kimi_for_code()` —— spawn `kimi --print --afk`(thinking **留开**,关了它搜索失败就放弃不绕道),让 kimi 用**全部工具**(SearchWeb→FetchURL→Shell)实证查清代码身份(在交易/退市/迁移/更名)+ 上市/退市日;解析失败**绝不猜** list_date。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
 
-**Scheduling**: `ListingVerifyScheduler` 每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。守卫:enable 开关、`kimi_available()` 探测、与 `cache_fill_running` 互斥、单次 `MAX_CODES_PER_RUN`(默认 500)上限、并发保守(默认 3)、`upsert_listing_info` 小批 ≤200 行。
+**Scheduling (已并入统一流水线, 2026-06)**: kimi 核验 `verify_unverified()` 现在是**每日凌晨 3 点数据维护流水线的第 ② 步**(`CacheScheduler` 顺序调用,刷名单后/重建前),原独立的 4 点 `ListingVerifyScheduler.run()` loop **已退休**(无独立 4 点跑、无 startup 跑)。守卫:`get_listing_verify_enabled()` 开关(管第 ② 步是否跑 kimi)、`kimi_available()`+`KIMI_API_KEY` 探测、单次 `MAX_CODES_PER_RUN`(默认 500)上限、**并发 1**、`upsert_listing_info` 小批 ≤200 行。(原 `cache_fill_running` 互斥锁已无意义——顺序跑不再并发抢内存。)`ListingVerifyScheduler` 类与方法保留,供流水线调用 + 手动端点 + 状态卡片。详见 `docs/data-integrity-pipeline.md` §4.1。
 
 **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知该批 failed 代码清单。手动 `?include_failed=1` 可重验占位行。
 
@@ -825,13 +825,13 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 **Files**:
 - `src/data/services/kimi_listing_verifier.py` - 共享 kimi 验证 (run_kimi_for_code / finding_from_result / kimi_available)
 - `src/data/services/kimi_config.py` - 启动时从 KIMI_API_KEY 现生成 kimi 配置 (静态 key,无 OAuth)
-- `src/data/services/listing_verify_scheduler.py` - 4am 自动验证 scheduler (含 kimi findings 报告)
+- `src/data/services/listing_verify_scheduler.py` - kimi 验证逻辑 `verify_unverified()`(现由 3 点统一流水线调用;含 kimi findings 报告)
 - `src/web/audit_routes.py` - 触发 / 状态 / findings / kimi-raw 端点
 - `src/data/clients/greptime_storage.py` - upsert_listing_info / get_unverified_codes_in_snapshot / get_failed_verified_codes / get_effective_universe_for_date
 
 **Checklist**:
 - [x] 共享 kimi 验证模块 (脚本 + scheduler 复用)
-- [x] ListingVerifyScheduler (4am + startup,enable 开关,与 cache fill 互斥)
+- [x] kimi 验证并入 3 点统一流水线第 ② 步(独立 4 点 loop 已退休;enable 开关保留)
 - [x] 单次上限截断 (不静默,log + 飞书)
 - [x] 失败写占位行 + 飞书 failed 清单
 - [x] 手动触发端点 + 状态端点 + 设置页卡片

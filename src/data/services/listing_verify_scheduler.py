@@ -313,6 +313,7 @@ class ListingVerifyScheduler:
         include_failed: bool = False,
         codes: set[str] | None = None,
         max_codes: int | None = None,
+        quiet: bool = False,
     ) -> dict:
         """Verify codes via kimi-cli (the listing-date backstop).
 
@@ -323,8 +324,12 @@ class ListingVerifyScheduler:
                 source_none/orphan backstop set). If None, defaults to
                 snapshot codes lacking a listing_info row.
             max_codes: per-run cap (defaults to MAX_CODES_PER_RUN).
+            quiet: suppress the standalone per-run Feishu success summary (the
+                daily-maintenance pipeline folds kimi's result into its one
+                unified message). Tool/auth-failure aborts still alert regardless.
 
-        Returns dict: {checked, verified, failed, remaining, error?}.
+        Returns dict: {checked, verified, failed, remaining, findings, error?}.
+        ``findings`` = kimi's plain-Chinese "怎么回事" per code (for the caller's report).
         """
         storage = self._get_storage()
         if storage is None or not storage.is_ready:
@@ -333,6 +338,7 @@ class ListingVerifyScheduler:
                 "verified": 0,
                 "failed": 0,
                 "remaining": 0,
+                "findings": [],
                 "error": "GreptimeDB storage 不可用",
             }
 
@@ -349,7 +355,7 @@ class ListingVerifyScheduler:
         total = len(all_codes)
         if total == 0:
             await _log("无待验证代码，跳过")
-            return {"checked": 0, "verified": 0, "failed": 0, "remaining": 0}
+            return {"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}
 
         cap = max_codes if max_codes is not None else MAX_CODES_PER_RUN
         batch = all_codes[:cap]
@@ -385,6 +391,7 @@ class ListingVerifyScheduler:
                 "failed": len(not_found_codes),
                 "tool_errors": len(tool_errors),
                 "remaining": remaining,
+                "findings": findings,
                 "error": reason,
             }
 
@@ -510,7 +517,10 @@ class ListingVerifyScheduler:
                 summary += f"\n…另有 {extra} 只,完整清单见设置页 / 「逐只情况」接口"
         if tool_errors:
             summary += f"\n⚠ kimi 工具错误样本: {tool_errors[0][1]}"
-        await _notify_feishu(summary)
+        # quiet=True when called inside the daily-maintenance pipeline — it folds
+        # kimi's result into its one unified Feishu, so don't double-send here.
+        if not quiet:
+            await _notify_feishu(summary)
 
         self.last_verified = verified_n
         self.last_failed = len(not_found_codes)
@@ -521,4 +531,5 @@ class ListingVerifyScheduler:
             "failed": len(not_found_codes),
             "tool_errors": len(tool_errors),
             "remaining": remaining,
+            "findings": findings,
         }

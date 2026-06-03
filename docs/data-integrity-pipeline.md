@@ -60,6 +60,32 @@
 > 飞书噪音治理:补全过程中的逐日"停牌记录/数据异常/lifecycle"**不再发**(`download_prices(quiet=True)`
 > → reporter `silent_feishu()`,feishu=None)。每阶段只发一条由端点自己拼的总结。
 
+### 4.1 每日自动数据维护(统一流水线,凌晨 3 点)
+
+过去拆成「3 点缓存补全 + 4 点 kimi 核名单 + 手动刷名单 + 手动重建」四块各跑各的,还要互斥锁防抢。
+现在**捏成一条**:`CacheScheduler` 每天凌晨 3 点按顺序跑完整个收敛环,4 点那条独立调度**退休**
+(kimi 变成其中一步)。一句话定位:**先查漏(全量检测)、再补缺(精准,只补查出来的)。**
+
+```
+① 刷名单    run_load_listing         —— 新股/退市进 stock_listing_info(roster 跟上)
+② 核身份    kimi verify_unverified   —— 只核还没验证的新代码 + 回填 code_alias(接住换号);通常很少/跳过
+③ 查漏      build_calendar(全历史)   —— 阶段1:重建真值表 2023→T-1,哪只哪天缺一目了然
+④ 补缺      fill_daily_from_calendar —— 阶段2:只补 missing/wrong_suspended;source_none/ok 不碰(绝不全量重下)
+⑤ 确认      build_calendar(④补过的天) —— 重建被补过的那几天,确认缺口归零
+⑥ 一条飞书汇总(逐步结果 + 最终分类计数)
+```
+
+设计要点:
+- **查漏全量、补缺精准**:③ 覆盖全历史(任何历史倒退当晚发现),④ 只动 ③ 查出来的那几只那几天,
+  **不是 `mode=full` 的全量重下**。④ 通常每天 0 缺口 → 几乎瞬间;⑤ 只重建被补过的天,无缺口则跳过。
+- **顺序跑 → 不再需要互斥锁**(当初 `cache_fill_running` vs kimi 的锁,是两者分开跑才会抢内存/抢名单新鲜度)。
+- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续后面能跑的(如 kimi 挂了,照样用现有名单重建+补);
+  唯独 ③ 重建失败则跳过 ④⑤(不在过期索引上乱补,fail-safe)。
+- **只在 3 点跑,不在 startup 跑**:watchtower 频繁重启,startup 跑会每次重启都重来一遍全量重建(见 §8)。
+- **开关**:`get_cache_scheduler_enabled()` 管整条;`get_listing_verify_enabled()` 管 ② 是否跑 kimi。
+- **分钟线不在本流程**(阶段三,单独触发);但缺口**诊断报告**仍上报 → 分钟缺口看得见,只是不自动补。
+- 手动端点(`/calendar/rebuild`、`/backfill-daily`、`/listing-info/*`)全保留,排查/补历史用。
+
 ---
 
 ## 5. 真值表 schema 与状态定义
@@ -153,17 +179,17 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   还闷头重试 20 次、错误被吞 → "啥都没有"。修法:报告瘦身(逐日上限 + 每类代码上限)+ 硬截断
   (`_FEISHU_MAX_CHARS`)+ 完整明细落文件。
 - **Tushare `trade_cal` 返回的是 `YYYY-MM-DD`(带横杠)**:别用 `%Y%m%d` 解析(会崩在第一个日期)。
-- **缓存调度器 (`cache_scheduler.check_and_fill_gaps`) 只认"整天一行都没有"的缺口**,
-  看不见"有一半缺一半"的部分缺口 → 这类历史窟窿它永远不补。部分缺口的补全只发生在
-  `download_prices → audit_daily_gaps → _fill_partial_gaps` 里,或现在的索引驱动补全里。
+- **旧缓存调度器 (`check_and_fill_gaps`) 只认"整天一行都没有"的缺口**,看不见"有一半缺一半"的部分缺口
+  → 这类历史窟窿它永远不补。**已废弃**:每日自动流程(§4.1)改走真值表——重建(查漏)精确到每只每天,
+  索引驱动补全(`fill_daily_from_calendar`)按真值表只补 `missing`/`wrong_suspended`,部分缺口不再漏。
 - **watchtower(机器 2026-06 升级后能自动部署了)CI 一绿就重启容器**,会**打断正在跑的长补全/重建**。
   规则:跑长任务期间不推代码;先把代码 push 稳定,再触发长任务。见 MEMORY.md。
-- **调度器:不在 startup 补全,只在 3am 补,且只补最近窗口(`AUTO_FILL_LOOKBACK_DAYS=30` 天)**。
-  教训:`CACHE_START=2023` 后,启动补全里 `find_minute_gaps` 扒出 2023→今天一大片历史分钟缺口 →
-  每次重启就想下几小时分钟 → 把 kimi/路径B(`cache_fill_running` 互斥)死卡。watchtower 还频繁重启,
-  于是**每次重启都卡一次**。所以:**① 干脆不在 startup 跑补全(重启不再触发任何 fill,kimi 立刻可用);
-  ② 3am 那次也只顶最近 30 天**。历史补全(日线/分钟)是 deliberate 端点的事;手动 `/api/cache/trigger`
-  仍走全量(`start_date=None → CACHE_START`)。
+- **调度器只在 3am 跑、不在 startup 跑(watchtower 频繁重启的教训,仍然成立)**:`CACHE_START=2023` 后,
+  startup 跑全量会**每次重启都重来一遍**;旧坑里 startup 的 `find_minute_gaps` 还会扒出一大片历史分钟缺口、
+  下几小时、把 kimi 死卡。现在统一流水线(§4.1)**只在 3am 触发,无 startup 跑**,重启不再触发任何重活。
+  **为什么现在敢全量查漏**:查漏(重建)只是 reconcile + 有界 Tushare 调用(全历史 ~1640 次,几分钟);
+  补缺是索引驱动(只补查出来的几只,通常每天 0 缺口);分钟线已移出本流程(阶段三)→ 当初"只顶最近 30 天
+  避免拖垮 kimi"的约束随之消失(kimi 现在是流水线内的第②步,没有独立 loop 可被卡)。
 - **历史日线曾只存主板**:创业板(300/301)/科创板(688)/北交所(920)在早期一大段没下进来
   (2026-03-03 实测:Tushare 有 5472 只交易,库里只 3194)。根因 = 部分缺口没人补 + 名单不全无法定性。
   靠"干净 roster + 索引驱动补全"修掉。

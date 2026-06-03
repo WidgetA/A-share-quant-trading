@@ -1641,23 +1641,28 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/cache/trigger")
     async def trigger_cache_fill(request: Request) -> dict:
-        """Manually trigger the cache gap-fill process."""
+        """Manually run the daily data-maintenance pipeline now (查漏→补缺)."""
         from src.data.services.cache_scheduler import CacheScheduler
 
         storage = getattr(request.app.state, "storage", None)
         if not storage:
             raise HTTPException(503, "GreptimeDB 缓存未连接")
 
-        if getattr(request.app.state, "cache_fill_running", False):
-            raise HTTPException(409, "缓存补全正在运行中，请等待完成后再试")
+        # Defer if any data op (incl. a running pipeline) already holds a flag.
+        if any(getattr(request.app.state, f, False) for f in CacheScheduler._OWNED_FLAGS):
+            raise HTTPException(409, "数据任务正在运行中，请等待完成后再试")
 
-        request.app.state.cache_fill_running = True
-        try:
-            scheduler = CacheScheduler(request.app.state)
-            result = await scheduler.check_and_fill_gaps()
-            return {"success": True, **result}
-        finally:
-            request.app.state.cache_fill_running = False
+        # Reuse the app's scheduler instance (restored status); force past the toggle
+        # since the operator asked explicitly. _run_once owns the flags + status + Feishu.
+        scheduler = getattr(request.app.state, "cache_scheduler", None) or CacheScheduler(
+            request.app.state
+        )
+        await scheduler._run_once("manual", force_enabled=True)
+        return {
+            "success": scheduler.last_run_result != "failed",
+            "result": scheduler.last_run_result,
+            "message": scheduler.last_run_message,
+        }
 
     return router
 

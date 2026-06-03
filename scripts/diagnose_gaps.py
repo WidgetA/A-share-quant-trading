@@ -394,7 +394,8 @@ def _minute_non_b_summary(days: list[dict]) -> list[str]:
     p_days = sum(1 for d in days if d["class_counts"][PENDING] > 0)
     a_days = sum(1 for d in days if d["class_counts"][CLASS_A] > 0)
     return [
-        f"  口径/源头类汇总: C 类 {c_days} 天 / PENDING {p_days} 天 / A {a_days} 天。",
+        f"  口径/源头类汇总: 停牌占位类(C) {c_days} 天 / 待核对(尚未AI核身份) {p_days} 天 / "
+        f"半天交易或低成交(A) {a_days} 天。",
         "  这些不在飞书逐日展开,完整逐日问题、根因、正确数字、修法见文件。",
     ]
 

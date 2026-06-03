@@ -554,36 +554,11 @@ def create_audit_router() -> APIRouter:
         end = _qdate("end", today - timedelta(days=1))
 
         async def _run() -> None:
-            from src.common.config import get_tushare_token
-            from src.data.clients.tushare_realtime import (
-                TushareRealtimeClient,
-                get_tushare_trade_calendar,
-            )
-            from src.data.services.trading_calendar import build_calendar
+            from src.data.services.trading_calendar import rebuild_calendar
 
             request.app.state.calendar_rebuild_running = True
-            client = TushareRealtimeClient(token=get_tushare_token())
-            await client.start()
             try:
-                cal = await get_tushare_trade_calendar(
-                    start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), token=get_tushare_token()
-                )
-                # get_tushare_trade_calendar returns YYYY-MM-DD; tolerate YYYYMMDD too.
-                trading_days = [datetime.strptime(d.replace("-", ""), "%Y%m%d").date() for d in cal]
-
-                async def fetch_suspended(day: date) -> set[str]:
-                    return await client.fetch_suspended_stocks(day.strftime("%Y%m%d"))
-
-                async def fetch_traded(day: date) -> set[str]:
-                    recs = await client.fetch_daily(day.strftime("%Y%m%d"))
-                    return {r["ticker"] for r in recs if (r.get("volume") or 0) > 0}
-
-                result = await build_calendar(
-                    storage,
-                    trading_days=trading_days,
-                    fetch_suspended=fetch_suspended,
-                    fetch_traded=fetch_traded,
-                )
+                result = await rebuild_calendar(storage, start=start, end=end)
                 bd = result.get("by_state", {})
                 _labels = {
                     "ok": "正常",
@@ -608,7 +583,6 @@ def create_audit_router() -> APIRouter:
                 logger.error("calendar rebuild 失败: %s", e, exc_info=True)
                 msg = f"【阶段一·索引建设】❌ 重建失败 {start}~{end}\n{e}"
             finally:
-                await client.stop()
                 request.app.state.calendar_rebuild_running = False
             try:
                 from src.common.feishu_bot import FeishuBot

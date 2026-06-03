@@ -52,9 +52,13 @@ class _FakeClient:
 
 
 class _FakeStorage:
-    def __init__(self):
+    def __init__(self, existing: dict | None = None):
         self.written: list[dict] = []
         self.truncated = False
+        self.existing = existing or {}
+
+    async def get_listing_info_all(self):
+        return self.existing
 
     async def truncate_listing_info(self):
         self.truncated = True
@@ -69,8 +73,63 @@ class _FakeStorage:
 async def test_load_listing_writes_listed_and_delisted():
     storage = _FakeStorage()
     result = await load_listing(storage, _FakeClient())
-    assert result == {"listed": 1, "delisted": 1, "total_entries": 2, "written": 2}
+    assert result == {
+        "listed": 1,
+        "delisted": 1,
+        "total_entries": 2,
+        "written": 2,
+        "preserved_kimi": 0,
+    }
     codes = {e["code"] for e in storage.written}
     assert codes == {"600000", "000003"}
     # full rebuild must clear stale rows first (one clean row per code)
     assert storage.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_load_listing_preserves_kimi_rows_drops_migrated_tushare():
+    """kimi's path-B rows survive the reload; an old Tushare row for a code Tushare
+    no longer lists (migrated 北交所 老码) is dropped; Tushare stays authoritative."""
+    from datetime import date
+
+    existing = {
+        # kimi 查不到 placeholder for a dead code → must survive (no re-burn nightly)
+        "830964": {
+            "name": None,
+            "list_date": None,
+            "delist_date": None,
+            "verified": False,
+            "source": "kimi-not-found",
+        },
+        # kimi-confirmed code Tushare doesn't return here → must survive
+        "920964": {
+            "name": "国义招标",
+            "list_date": date(2020, 7, 27),
+            "delist_date": None,
+            "verified": True,
+            "source": "kimi",
+        },
+        # OLD tushare row for a migrated code, gone from fresh Tushare → must be dropped
+        "430198": {
+            "name": "旧码",
+            "list_date": date(2015, 1, 1),
+            "delist_date": None,
+            "verified": True,
+            "source": "tushare_stock_basic",
+        },
+        # old tushare row still in fresh Tushare → replaced by reload, not preserved
+        "600000": {
+            "name": "浦发",
+            "list_date": date(1999, 11, 10),
+            "delist_date": None,
+            "verified": True,
+            "source": "tushare_stock_basic",
+        },
+    }
+    storage = _FakeStorage(existing=existing)
+    result = await load_listing(storage, _FakeClient())
+    assert result["preserved_kimi"] == 2  # 830964 + 920964
+    codes = {e["code"] for e in storage.written}
+    # fresh Tushare (600000, 000003) + preserved kimi (830964, 920964); 430198 dropped
+    assert codes == {"600000", "000003", "830964", "920964"}
+    assert "430198" not in codes

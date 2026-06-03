@@ -45,7 +45,7 @@
                 <div class="toggle-info">
                     <h3>Kimi 上市日自动验证（路径 B）</h3>
                     <p class="settings-desc">
-                        每日凌晨 4 点（缓存补全之后）服务端 kimi-cli 自动验证 <code>stock_snapshot</code> 里未覆盖代码的真实上市日，写入 <code>stock_listing_info</code>。
+                        每日凌晨 3 点「数据维护流水线」的第 ② 步,服务端 kimi-cli 自动核验未覆盖代码的真实上市日(刷名单之后、查漏重建之前),写入 <code>stock_listing_info</code>。
                         Kimi 认证用静态 API key（部署环境的 <code>KIMI_API_KEY</code>），启动时自动生成配置，无需上传凭证。
                     </p>
                 </div>
@@ -611,7 +611,11 @@ async function loadListingInfoStatus() {
             if (s) {
                 let line = '验证任务: ' + (s.in_progress ? '运行中…' : '空闲');
                 if (s.last_run_time) {
-                    line += ' | 上次 ' + s.last_run_time + ' (' + (s.last_run_result || '') + ')';
+                    const resultZh = {
+                        success: '成功', failed: '失败', skipped: '跳过',
+                        no_codes: '无新代码', no_gaps: '无缺口', unknown: '未知'
+                    }[s.last_run_result] || s.last_run_result || '';
+                    line += ' | 上次 ' + s.last_run_time + (resultZh ? ' (' + resultZh + ')' : '');
                 }
                 if (s.last_run_result === 'success') {
                     line += ' | 本次验证 ' + s.last_verified + ' / 失败 ' + s.last_failed +

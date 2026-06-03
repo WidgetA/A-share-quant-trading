@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
-from datetime import date
+import logging
+from datetime import date, datetime
 from typing import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 # --- trade_status (this stock, this day — shared across data types) ---
 TRADING = "trading"  # 正常交易 (Tushare daily has a real bar)
@@ -115,14 +118,19 @@ def roster_for_day(listing_info: dict[str, dict], day: date) -> set[str]:
     """Codes on the exchange on `day` = list_date ≤ day < delist_date.
 
     `listing_info` is `get_listing_info_all()` output: code → {list_date, delist_date, ...}.
-    A code with no list_date is treated as listed (conservative — keep it visible).
+    A code with NO list_date is treated as NOT listed (excluded). The only rows
+    without a list_date are kimi "查不到" placeholders (verified=false) for dead/
+    migrated codes — keeping them in the roster is exactly what made those codes
+    linger as `source_none` forever (no list_date ⇒ never excluded, always rostered,
+    Tushare daily never returns them). No confirmed list_date ⇒ not on the roster.
+    Every authoritative row (Tushare stock_basic / kimi-confirmed) has a list_date.
     """
     out: set[str] = set()
     for code, meta in listing_info.items():
         ld = meta.get("list_date")
-        dd = meta.get("delist_date")
-        if ld is not None and day < ld:
+        if ld is None or day < ld:
             continue
+        dd = meta.get("delist_date")
         if dd is not None and day >= dd:
             continue
         out.add(code)
@@ -163,3 +171,61 @@ async def build_calendar(
         "problem_rows": problem_rows,
         "by_state": by_state,
     }
+
+
+async def rebuild_calendar(
+    storage,
+    *,
+    trading_days: list[date] | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    client=None,
+) -> dict:
+    """Rebuild ``trading_calendar`` — the shared runner used by both the
+    ``/api/audit/calendar/rebuild`` endpoint and the daily maintenance pipeline.
+
+    Wires the Tushare inputs build_calendar() needs (suspend_d + daily-traded)
+    and owns a ``TushareRealtimeClient`` unless one is passed in (so a caller can
+    reuse one client across several steps — e.g. load-tushare + rebuild + rebuild).
+
+    Pass EITHER ``trading_days`` (an explicit list, e.g. only the dates a fill
+    just touched — used by the pipeline's confirm step) OR ``start``+``end`` (a
+    range, resolved to trading days via Tushare ``trade_cal``). Returns the
+    build_calendar() summary dict (days / rows / problem_rows / by_state).
+    """
+    from src.common.config import get_tushare_token
+    from src.data.clients.tushare_realtime import (
+        TushareRealtimeClient,
+        get_tushare_trade_calendar,
+    )
+
+    own_client = client is None
+    if own_client:
+        client = TushareRealtimeClient(token=get_tushare_token())
+        await client.start()
+    try:
+        if trading_days is None:
+            if start is None or end is None:
+                raise ValueError("rebuild_calendar 需要 trading_days 或 (start, end)")
+            cal = await get_tushare_trade_calendar(
+                start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), token=get_tushare_token()
+            )
+            # get_tushare_trade_calendar returns YYYY-MM-DD; tolerate YYYYMMDD too.
+            trading_days = [datetime.strptime(d.replace("-", ""), "%Y%m%d").date() for d in cal]
+
+        async def fetch_suspended(day: date) -> set[str]:
+            return await client.fetch_suspended_stocks(day.strftime("%Y%m%d"))
+
+        async def fetch_traded(day: date) -> set[str]:
+            recs = await client.fetch_daily(day.strftime("%Y%m%d"))
+            return {r["ticker"] for r in recs if (r.get("volume") or 0) > 0}
+
+        return await build_calendar(
+            storage,
+            trading_days=trading_days,
+            fetch_suspended=fetch_suspended,
+            fetch_traded=fetch_traded,
+        )
+    finally:
+        if own_client:
+            await client.stop()

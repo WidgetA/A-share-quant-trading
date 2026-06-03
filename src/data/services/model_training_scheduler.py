@@ -618,12 +618,24 @@ class ModelTrainingScheduler:
                     f"数据完整性问题: {n} 个 (第{attempt}/{MAX_DATA_FIX_ATTEMPTS}次尝试修复)"
                 )
 
-            # Try to fill gaps
+            # Try to fill gaps. Both this scheduler and the 3am data-maintenance
+            # pipeline fire at 3am and share app.state.pipeline's Tushare httpx
+            # clients — re-entering them concurrently corrupts the shared client.
+            # So: defer if any data op already holds an owned flag; otherwise own
+            # cache_fill_running while we fill (the pipeline then defers to us).
             try:
                 from src.data.services.cache_scheduler import CacheScheduler
 
-                temp_scheduler = CacheScheduler(self._app_state)
-                await temp_scheduler.check_and_fill_gaps()
+                if any(getattr(self._app_state, f, False) for f in CacheScheduler._OWNED_FLAGS):
+                    if progress_cb:
+                        await progress_cb("数据维护任务正在运行，跳过本次预补全，留待下次")
+                    return False
+                self._app_state.cache_fill_running = True
+                try:
+                    temp_scheduler = CacheScheduler(self._app_state)
+                    await temp_scheduler.check_and_fill_gaps()
+                finally:
+                    self._app_state.cache_fill_running = False
             except Exception as e:
                 if progress_cb:
                     await progress_cb(f"数据修复失败: {e}")

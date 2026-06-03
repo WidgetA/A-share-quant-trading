@@ -600,41 +600,39 @@ def create_app(
         app.state.pre_market_report_scheduler_task = asyncio.create_task(pre_market_scheduler.run())
         logger.info("Pre-market report scheduler started (8am daily)")
 
-        # Auto-start listing-info auto-verify scheduler (4am daily, path B)
-        # HARD GATE: only boot it if kimi-cli is actually present in the
-        # container. No kimi → don't start the scheduler at all (no startup
-        # run, no 4am run, no Feishu alert). The prod image ships without
-        # kimi-cli, so running it there is dead-on-arrival and just spams
-        # alerts — kimi presence is a precondition for the feature to exist.
+        # Listing-info auto-verify (path B) — NO standalone loop anymore. kimi is
+        # step ② of the 3am daily-maintenance pipeline (CacheScheduler). We still
+        # construct the instance here (the pipeline calls its verify_unverified, and
+        # the manual endpoint + status card use it), but start NO 4am/startup task.
+        # HARD GATE preserved: only construct it if kimi-cli is present + a key is
+        # configured; otherwise None → the pipeline's step ② sees it and skips.
         from src.data.services.kimi_config import ensure_kimi_config_from_env
         from src.data.services.kimi_listing_verifier import kimi_available
         from src.data.services.listing_verify_scheduler import ListingVerifyScheduler
 
         # Generate kimi-cli's config from the static API key (KIMI_API_KEY env).
-        # No key → no config → kimi can't authenticate → don't start path B.
+        # No key → no config → kimi can't authenticate → step ② will skip.
         kimi_key_ready = ensure_kimi_config_from_env()
+        app.state.listing_verify_scheduler_task = None  # retired: no standalone loop
 
         if kimi_available() and kimi_key_ready:
-            listing_verify_scheduler = ListingVerifyScheduler(app.state)
-            app.state.listing_verify_scheduler = listing_verify_scheduler
-            app.state.listing_verify_scheduler_task = asyncio.create_task(
-                listing_verify_scheduler.run()
-            )
-            logger.info("Listing-info auto-verify scheduler started (4am daily)")
+            app.state.listing_verify_scheduler = ListingVerifyScheduler(app.state)
+            logger.info("Listing-info verify ready (runs as step ② of the 3am pipeline)")
         else:
             app.state.listing_verify_scheduler = None
-            app.state.listing_verify_scheduler_task = None
-            # Don't run it (no per-run spam) — but DO alert ONCE at startup so
-            # the operator knows path B is silently off. Not-running is itself
-            # a state worth a single notification; only the per-run repeat was
-            # the spam we removed.
+            # Alert ONCE at startup so the operator knows kimi身份核验 is off (the 3am
+            # pipeline will skip step ②); the other steps still run.
             from src.data.services.listing_verify_scheduler import _notify_feishu
 
             if not kimi_available():
                 reason = "容器内没有 kimi-cli,要启用请先把 kimi-cli 装进镜像"
             else:
                 reason = "未配置 KIMI_API_KEY,kimi 无法认证,请在部署环境设置该密钥"
-            msg = "[上市日验证·路径B] 未启动 — " + reason + "。listing_info 不会被自动验证。"
+            msg = (
+                "[上市日验证·路径B] 未就绪 — "
+                + reason
+                + "。每日维护流水线第②步(kimi 核身份)会自动跳过,其余步骤照常。"
+            )
             logger.warning(msg)
             await _notify_feishu(msg)
 

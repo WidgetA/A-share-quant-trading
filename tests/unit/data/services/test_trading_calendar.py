@@ -157,6 +157,17 @@ def test_roster_for_day_respects_list_and_delist_dates():
     assert later == {"600000", "920001"}
 
 
+def test_roster_for_day_excludes_codes_without_list_date():
+    # kimi "查不到" placeholders carry list_date=None. They must NOT be rostered —
+    # otherwise dead/migrated codes (which Tushare daily never returns) linger as
+    # source_none forever. No confirmed list_date ⇒ not on the roster.
+    info = {
+        "600000": {"list_date": date(1999, 11, 10), "delist_date": None},
+        "830964": {"list_date": None, "delist_date": None},  # kimi 查不到 placeholder
+    }
+    assert roster_for_day(info, date(2024, 1, 2)) == {"600000"}
+
+
 class _FakeCalStorage:
     """Minimal storage for build_calendar: 600000 has real data, 300001 missing."""
 

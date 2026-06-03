@@ -1623,7 +1623,11 @@ class GreptimeBacktestStorage:
                 continue
             ld = meta.get("list_date")
             dd = meta.get("delist_date")
-            if ld is not None and day < ld:
+            # No confirmed list_date = a kimi "查不到" placeholder for a dead/migrated
+            # code → exclude it, mirroring roster_for_day. Otherwise the audit keeps
+            # counting it as expected and reports a permanent phantom gap. Codes with
+            # NO listing_info row at all still pass (tracked separately as unverified).
+            if ld is None or day < ld:
                 blocked.add(code)
             elif dd is not None and day >= dd:
                 blocked.add(code)
@@ -1702,7 +1706,9 @@ class GreptimeBacktestStorage:
                     continue
                 ld = meta.get("list_date")
                 dd = meta.get("delist_date")
-                if ld is not None and d < ld:
+                # list_date=None ⇒ kimi 查不到 placeholder → exclude (mirror
+                # roster_for_day), else phantom permanent gaps for dead codes.
+                if ld is None or d < ld:
                     blocked += 1
                 elif dd is not None and d >= dd:
                     blocked += 1

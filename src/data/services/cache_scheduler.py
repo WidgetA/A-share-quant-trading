@@ -1,8 +1,14 @@
 # === MODULE PURPOSE ===
-# Background scheduler that auto-fills missing dates in GreptimeDB storage.
-# Checks gaps on startup (so restarts don't lose a day), then daily at 3am.
-# All run status is persisted to GreptimeDB scheduler_log table so it
-# survives container restarts.
+# CacheScheduler runs the unified DAILY DATA-MAINTENANCE pipeline at 3am Beijing
+# (see docs/data-integrity-pipeline.md §4.1). One sequential pass:
+#   ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 → ③ 重建真值表(全历史·查漏)
+#   → ④ 索引驱动补缺 → ⑤ 重建补过的天(确认) → 一条飞书汇总.
+# "先全量查漏、再精准补缺." Steps are failure-isolated; only 3am (no startup run);
+# all run status persisted to GreptimeDB scheduler_log so it survives restarts.
+# (The 4am ListingVerifyScheduler loop is retired — kimi is step ② here.)
+# `check_and_fill_gaps` (the old coarse whole-day fill) is kept ONLY for the
+# model-training pre-fill + the manual /api/cache/trigger; the nightly path no
+# longer uses it.
 
 from __future__ import annotations
 
@@ -17,14 +23,19 @@ BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 # Daily coverage starts 2023-01-01 by default (backfill/rebuild endpoints reuse
 # this); pass ?start= to an endpoint to go earlier.
 CACHE_START_DATE = date(2023, 1, 1)
-# AUTO runs (startup + 3am) only keep this recent window current — they must NOT
-# re-audit/re-download all of history on every restart (esp. minute over 2023→now,
-# which blocks kimi/path-B for hours). Historical backfill is deliberate (the
-# index-driven endpoints), not the scheduler's job.
-AUTO_FILL_LOOKBACK_DAYS = 30
 SCHEDULE_HOUR = 3  # 3am Beijing time
-DOWNLOAD_TIMEOUT_SECONDS = 4 * 3600  # 4 hours max per range
+DOWNLOAD_TIMEOUT_SECONDS = 4 * 3600  # 4h max per range (coarse check_and_fill_gaps)
 _STARTUP_DELAY_SECONDS = 60  # wait for storage/pipeline to initialize
+
+# Per-step time bounds for the daily-maintenance pipeline. A step that exceeds its
+# bound is recorded as a timeout + the pipeline continues (failure isolation).
+_STEP_TIMEOUT_LOAD = 15 * 60  # ① load-tushare (2 Tushare calls + writes)
+_STEP_TIMEOUT_KIMI = 6 * 3600  # ② kimi serial, up to MAX_CODES_PER_RUN
+_STEP_TIMEOUT_REBUILD = 90 * 60  # ③ full-history rebuild (~1640 Tushare calls)
+_STEP_TIMEOUT_FILL = 3 * 3600  # ④ index-driven daily fill
+_STEP_TIMEOUT_CONFIRM = 30 * 60  # ⑤ rebuild only the touched dates
+# How many of kimi's per-code "怎么回事" lines to inline in the unified summary.
+_KIMI_FINDINGS_IN_SUMMARY = 15
 
 
 async def _notify_feishu(message: str) -> None:
@@ -85,10 +96,9 @@ async def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
 
 
 class CacheScheduler:
-    """Background task that auto-fills GreptimeDB backtest cache gaps.
+    """Runs the unified daily data-maintenance pipeline (see _run_pipeline / docs §4.1).
 
-    - On startup: check gaps after a short delay, fill immediately.
-    - Then: sleep until 3am daily, check gaps, fill.
+    - Daily at 3am ONLY — no startup run (watchtower restarts must not re-trigger it).
     - All run results are persisted to GreptimeDB ``scheduler_log`` table.
 
     Usage:
@@ -210,71 +220,322 @@ class CacheScheduler:
         except asyncio.CancelledError:
             logger.info("CacheScheduler cancelled")
 
-    async def _run_once(self, trigger: str) -> None:
-        """Execute one gap-check-and-fill cycle.
+    # Data-maintenance flags the pipeline OWNS while it runs, so a manually-
+    # triggered op (rebuild / backfill / load-listing / cache fill) defers.
+    _OWNED_FLAGS = (
+        "cache_fill_running",
+        "calendar_rebuild_running",
+        "backfill_daily_running",
+        "load_listing_running",
+    )
+
+    async def _run_once(self, trigger: str, force_enabled: bool = False) -> None:
+        """Run one daily-maintenance pass (see _run_pipeline). Wraps it with the
+        enable check, the busy-guard, the owned flags, and status persistence.
 
         Args:
-            trigger: 'startup' | 'scheduled' | 'manual'
+            trigger: 'scheduled' (3am) | 'manual' — this scheduler has no startup run.
+            force_enabled: bypass the on/off toggle (manual trigger asked explicitly).
         """
         run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
 
         from src.common.config import get_cache_scheduler_enabled
 
-        if not get_cache_scheduler_enabled():
+        if not force_enabled and not get_cache_scheduler_enabled():
             logger.info("CacheScheduler: disabled via settings, skipping (%s)", trigger)
             self.last_run_time = run_time
             self.last_run_result = "skipped"
             self.last_run_message = "已关闭，跳过本次执行"
             await self._persist_status(trigger)
-            await _notify_feishu("[缓存补全·定时任务] 调度器已关闭，跳过本次执行")
+            await _notify_feishu("【每日数据维护】调度器已关闭，跳过本次执行")
             return
 
-        # Skip if any download is already running. Also defer when a snapshot
-        # backfill is in flight — it shares pipeline.daily_source/metadata_source,
-        # and entering those httpx-client contexts twice concurrently corrupts them.
+        # Defer if ANY data op is already in flight (manual rebuild / backfill /
+        # load-listing / snapshot, or a running download) — the pipeline owns all
+        # of them below, so manual triggers correctly wait their turn.
         active = getattr(self._app_state, "active_download", None)
-        if (
-            getattr(self._app_state, "cache_fill_running", False)
-            or getattr(self._app_state, "snapshot_backfill_running", False)
-            or (active is not None and active.state.value == "running")
+        busy = (*self._OWNED_FLAGS, "snapshot_backfill_running")
+        if any(getattr(self._app_state, f, False) for f in busy) or (
+            active is not None and active.state.value == "running"
         ):
-            logger.info("CacheScheduler: download already in progress, skipping (%s)", trigger)
+            logger.info("CacheScheduler: a data op is already running, skipping (%s)", trigger)
             self.last_run_time = run_time
             self.last_run_result = "skipped"
-            self.last_run_message = "下载正在运行，跳过本次执行"
+            self.last_run_message = "已有数据任务在运行，跳过本次执行"
             await self._persist_status(trigger)
-            await _notify_feishu("[缓存补全·定时任务] 下载正在运行，跳过本次执行")
+            await _notify_feishu("【每日数据维护】已有数据任务在运行，跳过本次执行")
             return
 
-        self._app_state.cache_fill_running = True
+        for f in self._OWNED_FLAGS:
+            setattr(self._app_state, f, True)
         try:
-            # AUTO runs (startup/scheduled) only top up the recent window so a
-            # restart can't trigger a full-history (minute) re-audit that blocks
-            # kimi for hours. Historical backfill is deliberate (endpoints).
-            recent_start = datetime.now(BEIJING_TZ).date() - timedelta(days=AUTO_FILL_LOOKBACK_DAYS)
-            result = await self.check_and_fill_gaps(start_date=recent_start)
+            result, message = await self._run_pipeline(trigger)
             self.last_run_time = run_time
-            if result.get("error"):
-                self.last_run_result = "failed"
-                self.last_run_message = result["error"]
-            elif result["gaps_found"] == 0:
-                self.last_run_result = "no_gaps"
-                self.last_run_message = "无缺失数据"
-            else:
-                self.last_run_result = "success"
-                self.last_run_message = f"已补全 {result['dates_downloaded']} 段"
+            self.last_run_result = result
+            self.last_run_message = message
         except Exception as e:
-            logger.error(f"CacheScheduler gap-fill failed: {e}", exc_info=True)
+            logger.error("CacheScheduler daily maintenance failed: %s", e, exc_info=True)
             self.last_run_time = run_time
             self.last_run_result = "failed"
-            self.last_run_message = str(e)[:100]
+            self.last_run_message = str(e)[:120]
             next_retry = self._next_run_str()
             await _notify_feishu(
-                f"[缓存补全·定时任务] 执行异常 ({trigger})\n{e}\n\n下次重试: {next_retry}"
+                f"【每日数据维护】执行异常 ({trigger})\n{e}\n\n下次重试: {next_retry}"
             )
         finally:
-            self._app_state.cache_fill_running = False
+            for f in self._OWNED_FLAGS:
+                setattr(self._app_state, f, False)
             await self._persist_status(trigger)
+
+    # ------------------------------------------------------------------
+    # Daily data-maintenance pipeline (docs/data-integrity-pipeline.md §4.1)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _bounded(coro, timeout: int):
+        """Run one pipeline step time-bounded + failure-isolated → (ok, value|errmsg).
+
+        On timeout/exception the coro's effect is whatever completed before the
+        cancel; the caller records the step as failed and (for ③) skips downstream.
+        """
+        try:
+            return True, await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            return False, f"超时(>{timeout // 60}分钟未完成)"
+        except Exception as e:  # noqa: BLE001 — isolate per-step; pipeline continues
+            logger.error("maintenance step failed: %s", e, exc_info=True)
+            return False, str(e)[:120]
+
+    async def _run_pipeline(self, trigger: str) -> tuple[str, str]:
+        """The unified daily data-maintenance pass — 先全量查漏、再精准补缺:
+        ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 →
+        ③ 重建真值表(全历史·查漏) → ④ 索引驱动补缺 → ⑤ 重建补过的天(确认).
+
+        Failure-isolated: a failed step is logged + recorded + the pass continues —
+        EXCEPT ④/⑤ are skipped if ③ (rebuild) failed (never fill on a stale index).
+        Sends ONE Feishu summary + the per-day gap diagnosis. Returns (result, message).
+        """
+        from scripts.load_listing_from_tushare import run_load_listing
+        from src.common.config import get_listing_verify_enabled, get_tushare_token
+        from src.data.clients.tushare_realtime import TushareRealtimeClient
+        from src.data.services.kimi_listing_verifier import kimi_available
+        from src.data.services.trading_calendar import rebuild_calendar
+
+        storage = self._get_storage()
+        pipeline = self._get_pipeline()
+        if storage is None or pipeline is None or not storage.is_ready:
+            await _notify_feishu("【每日数据维护】GreptimeDB 未就绪，跳过本次执行")
+            return "failed", "GreptimeDB 未就绪"
+
+        task_start = datetime.now(BEIJING_TZ)
+        # daily interface only goes to T-1 — ending at today would falsely mark all
+        # of today's roster as missing (today's daily isn't published yet).
+        yesterday = task_start.date() - timedelta(days=1)
+        steps: list[tuple[str, str, str]] = []  # (label, status, detail)
+        kimi_findings: list[dict] = []
+
+        client = TushareRealtimeClient(token=get_tushare_token())
+        await client.start()
+        try:
+            # ① 刷名单 (Tushare stock_basic → 新股/退市进 roster;保留 kimi 占位)
+            ok, r = await self._bounded(
+                run_load_listing(storage, feishu=False, client=client), _STEP_TIMEOUT_LOAD
+            )
+            if ok:
+                steps.append(
+                    (
+                        "① 刷名单",
+                        "成功",
+                        f"在市 {r['listed']} + 退市 {r['delisted']} = {r['total_entries']} 只"
+                        + (
+                            f"(保留 kimi 占位 {r['preserved_kimi']})"
+                            if r.get("preserved_kimi")
+                            else ""
+                        ),
+                    )
+                )
+            else:
+                steps.append(("① 刷名单", "失败", r))
+
+            # ② kimi 核没核过的新代码 + 回填换号对应表 (gated by the verify toggle)
+            lv = getattr(self._app_state, "listing_verify_scheduler", None)
+            if not get_listing_verify_enabled():
+                steps.append(("② 核身份(kimi)", "跳过", "核身份开关关闭"))
+            elif lv is None or not kimi_available():
+                steps.append(("② 核身份(kimi)", "跳过", "kimi 不可用"))
+            else:
+                # Mark in_progress so the status card + manual endpoints reflect
+                # that kimi is running (verify_unverified itself doesn't set it).
+                lv.in_progress = True
+                try:
+                    ok, r = await self._bounded(
+                        lv.verify_unverified(quiet=True), _STEP_TIMEOUT_KIMI
+                    )
+                finally:
+                    lv.in_progress = False
+                if not ok:
+                    steps.append(("② 核身份(kimi)", "失败", r))
+                else:
+                    kimi_findings = r.get("findings", []) or []
+                    te = r.get("tool_errors", 0)
+                    if r.get("error"):
+                        steps.append(("② 核身份(kimi)", "失败", r["error"][:100]))
+                    elif r.get("checked", 0) == 0:
+                        steps.append(("② 核身份(kimi)", "成功", "无新代码需核"))
+                    else:
+                        detail = (
+                            f"核 {r['checked']} 只 / 写入上市日 {r['verified']} / "
+                            f"查不到 {r['failed']} / 还剩 {r['remaining']}"
+                        )
+                        # Surface sub-threshold kimi tool/auth errors — never report a
+                        # partially-broken kimi as plain 成功 (CLAUDE.md §12). They are
+                        # NOT 查不到; those codes stay unverified and retry next night.
+                        if te:
+                            steps.append(
+                                (
+                                    "② 核身份(kimi)",
+                                    "警告",
+                                    detail + f" / 出错(超时或认证·未写) {te} 只 — 请检查 kimi 凭证",
+                                )
+                            )
+                        else:
+                            steps.append(("② 核身份(kimi)", "成功", detail))
+
+            # ③ 查漏 — 重建真值表 全历史 2023→T-1
+            ok, r = await self._bounded(
+                rebuild_calendar(storage, start=CACHE_START_DATE, end=yesterday, client=client),
+                _STEP_TIMEOUT_REBUILD,
+            )
+            rebuild_ok = ok
+            if ok:
+                steps.append(
+                    (
+                        "③ 查漏·重建真值表",
+                        "成功",
+                        f"{r['days']} 个交易日 / {r['rows']:,} 行 / 待修 {r['problem_rows']:,}",
+                    )
+                )
+            else:
+                steps.append(("③ 查漏·重建真值表", "失败", r))
+
+            # ④ 补缺 — 索引驱动,只补 missing/wrong_suspended (skip if ③ failed)
+            processed_dates: list = []
+            if not rebuild_ok:
+                steps.append(("④ 补缺", "跳过", "重建失败，不在过期索引上补"))
+            else:
+                ok, r = await self._bounded(
+                    pipeline.fill_daily_from_calendar(quiet=True), _STEP_TIMEOUT_FILL
+                )
+                if not ok:
+                    steps.append(("④ 补缺", "失败", r))
+                else:
+                    processed_dates = r.get("processed_dates", []) or []
+                    if r["dates"] == 0:
+                        steps.append(("④ 补缺", "成功", "无缺口可补"))
+                    else:
+                        steps.append(
+                            (
+                                "④ 补缺",
+                                "成功",
+                                f"补回 {r['filled']:,} 行 / 跨 {r['dates']} 个缺口日",
+                            )
+                        )
+
+            # ⑤ 确认 — 只重建 ④ 动过的那几天 (skip if nothing was touched)
+            if processed_dates:
+                ok, r = await self._bounded(
+                    rebuild_calendar(storage, trading_days=processed_dates, client=client),
+                    _STEP_TIMEOUT_CONFIRM,
+                )
+                if ok:
+                    steps.append(
+                        (
+                            "⑤ 确认·重建补过的天",
+                            "成功",
+                            f"{r['days']} 天 / 仍待修 {r['problem_rows']:,}",
+                        )
+                    )
+                else:
+                    steps.append(("⑤ 确认·重建补过的天", "失败", r))
+            else:
+                steps.append(("⑤ 确认", "跳过", "无补缺，免重建"))
+        finally:
+            await client.stop()
+
+        # final library snapshot (read-only — the same view /calendar/status returns)
+        final_state: dict = {}
+        try:
+            summary = await storage.get_trading_calendar_summary()
+            final_state = summary.get("by_daily_state", {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("maintenance: final calendar summary failed: %s", e)
+
+        result, message = await self._send_pipeline_summary(
+            task_start, steps, kimi_findings, final_state
+        )
+        # the per-day gap diagnosis (incl. minute) is still surfaced for observability
+        await _send_gap_detail_report(storage)
+        return result, message
+
+    async def _send_pipeline_summary(
+        self,
+        task_start: datetime,
+        steps: list[tuple[str, str, str]],
+        kimi_findings: list[dict],
+        final_state: dict,
+    ) -> tuple[str, str]:
+        """Build + send the ONE unified Feishu summary. Returns (result, message)."""
+        now = datetime.now(BEIJING_TZ)
+        elapsed_min = max(1, int((now - task_start).total_seconds() / 60))
+        failed_steps = [s for s in steps if s[1] in ("失败", "超时")]
+        warn_steps = [s for s in steps if s[1] == "警告"]
+        if failed_steps:
+            header = "【每日数据维护】⚠️ 部分步骤异常"
+        elif warn_steps:
+            header = "【每日数据维护】⚠️ 完成(有告警)"
+        else:
+            header = "【每日数据维护】✅ 完成"
+
+        marks = {"成功": "✅", "失败": "❌", "超时": "⏱", "跳过": "⏭", "警告": "⚠️"}
+        lines = [
+            header,
+            f"时间: {task_start.strftime('%Y-%m-%d %H:%M')} ~ {now.strftime('%H:%M')} "
+            f"({elapsed_min}min) · 先全量查漏、再精准补缺",
+            "",
+        ]
+        lines += [f"{marks.get(st, '·')} {label}: {detail}" for label, st, detail in steps]
+
+        if final_state:
+            _labels = {
+                "ok": "正常",
+                "missing": "真缺待补",
+                "wrong_suspended": "标错停牌",
+                "wrong_traded": "标错交易",
+                "orphan": "有数据却不在册",
+                "source_none": "源头也无(接口不全·可接受)",
+            }
+            picture = " / ".join(
+                f"{_labels.get(k, k)} {v:,}" for k, v in sorted(final_state.items()) if v
+            )
+            lines += ["", f"最终真值表: {picture}"]
+
+        if kimi_findings:
+            lines += ["", "本轮 kimi 查证(逐只):"]
+            for f in kimi_findings[:_KIMI_FINDINGS_IN_SUMMARY]:
+                name = f.get("name") or "(名字未知)"
+                lines.append(f"· {f.get('code')} {name}｜{f.get('status')}｜{f.get('note')}")
+            extra = len(kimi_findings) - min(len(kimi_findings), _KIMI_FINDINGS_IN_SUMMARY)
+            if extra > 0:
+                lines.append(f"…另有 {extra} 只，完整见「逐只情况」接口")
+
+        lines += ["", f"下次执行: {self._next_run_str()}"]
+        await _notify_feishu("\n".join(lines))
+
+        if failed_steps:
+            return "failed", "异常步骤: " + "、".join(s[0] for s in failed_steps)
+        if warn_steps:
+            return "success", "完成(有告警: " + "、".join(s[0] for s in warn_steps) + ")"
+        return "success", "维护完成(查漏→补缺)"
 
     # ------------------------------------------------------------------
     # Gap detection + download
@@ -285,13 +546,13 @@ class CacheScheduler:
         progress_callback=None,
         start_date: date | None = None,
     ) -> dict:
-        """Find missing trading dates from ``start_date`` to yesterday, download them.
+        """Coarse whole-day gap fill (the OLD path). Find trading dates from
+        ``start_date`` to yesterday with NO rows in backtest_daily, download them.
 
-        ``start_date`` defaults to CACHE_START_DATE (full history) — used by the
-        manual trigger. The AUTO runs (startup + 3am) pass a RECENT window so a
-        restart doesn't re-audit/re-download all of history (esp. minute over
-        2023→now), which would run for hours and block kimi/path-B. Historical
-        backfill is deliberate (index-driven endpoints), not the scheduler's job.
+        RETIRED from the nightly path — the 3am pipeline now does the precise
+        truth-table 查漏→补缺 (rebuild + fill_daily_from_calendar). Kept only for its
+        SOLE remaining caller: the model-training pre-fill (model_training_scheduler),
+        which calls it with no args ⇒ ``start_date=None`` ⇒ CACHE_START_DATE full range.
 
         Sends ONE Feishu summary at the end. Returns {gaps_found, dates_downloaded, error?}.
         """

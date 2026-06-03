@@ -88,11 +88,11 @@ Rules:
 Rules:
 1. **Non-trading data** has its own sources: local JSON for boards and stock names
 2. **Single Tushare token** powers realtime quotes, daily OHLCV, suspend_d, bak_basic, stk_mins
-3. **Cache scheduler** auto-fills missing dates at 3am daily (from 2024-01-01)
+3. **每日数据维护流水线** runs at 3am daily (`CacheScheduler`): 刷名单 → kimi 核新代码 → 重建真值表(全历史查漏)→ 索引驱动补缺 → 确认。查漏全量、补缺精准。见 `docs/data-integrity-pipeline.md` §4.1
 4. **Live prev_close is always fetched live from Tushare `daily`** — never read from cache. Stale cache caused silent limit-up filter bypass on 2026-05-11 (002975 incident — see `MEMORY.md`)
 5. **⚠️ Live 37d history 当前是临时方案** —— cache (stock_snapshot + stock_listing_info + 自动验证) 没完全跑通前,live 扫描走实时 Tushare `daily` 拉 37 次以解耦 cache 风险。等以下条件满足后**回退到读 cache**:
    - `stock_snapshot` 三源并集稳定 (B∪D∪S 每天可靠入库) ✅
-   - `stock_listing_info` 服务端自动验证流程上线 (路径 B, kimi-cli 自动跑覆盖未验证代码) ✅ `ListingVerifyScheduler` (每日 4am, 见 §12)
+   - `stock_listing_info` 服务端自动验证流程上线 (路径 B, kimi-cli 自动跑覆盖未验证代码) ✅ 已并入每日 3 点统一数据维护流水线第 ② 步 (见 §12 + `docs/data-integrity-pipeline.md` §4.1)
    - 至少跑过一周连续无人工干预的 daily audit, gaps==0 ← **剩余唯一门槛**
    切回 cache 时:  `_fetch_history_live` 删除, run_ml_live 改回 `storage.get_multi_day_history`
 
@@ -100,7 +100,7 @@ Rules:
 
 **目的**: 把 `stock_snapshot` 里还没验证的代码自动喂给容器内 kimi-cli 查真实上市日,写回 `stock_listing_info`,让 `audit_daily_gaps` 能算出干净的 effective universe。
 
-- **Scheduler**: `ListingVerifyScheduler` (`src/data/services/listing_verify_scheduler.py`),每日 **4am** (3am 缓存补全之后,snapshot 已新鲜) + startup 各跑一次。
+- **Scheduler (已并入统一流水线, 2026-06)**: kimi 核验逻辑 `verify_unverified()` 现在是**每日凌晨 3 点「数据维护流水线」的第 ② 步**(`CacheScheduler` 顺序调用,见 `docs/data-integrity-pipeline.md` §4.1)——刷名单后、重建真值表前核新代码 + 回填 `code_alias`。原来独立的 4 点 `ListingVerifyScheduler.run()` loop **已退休**(不再有独立 4 点跑、不再有 startup 跑);`ListingVerifyScheduler` 类与 `verify_unverified()` 方法保留,供流水线调用 + 手动端点 + 状态卡片。
 - **kimi-cli 是镜像里的硬依赖 (CRITICAL)**: kimi-cli 要 Python ≥3.13,所以整个 service 迁到 **Python 3.13**(`Dockerfile` 用 `python:3.13-slim`,`requires-python>=3.13`)。kimi-cli 是 `pyproject` 声明依赖 → `uv sync` 装进镜像。**CI 强制**:`tests/unit/data/services/test_kimi_cli_installed.py` 断言 `kimi --version` 能跑,Dockerfile builder 也 `RUN kimi --version`——没装/装坏直接 CI 红、镜像 build 失败,**杜绝部署出 path B 跑不起来的镜像**。
 - **认证 = 静态 API key,不走 OAuth (CRITICAL, 2026-06 改)**: kimi 的认证用一个 **Kimi-Code API key**(`sk-kimi-…`,授权 `api.kimi.com/coding/v1`)。容器启动时 `ensure_kimi_config_from_env()`(`src/data/services/kimi_config.py`)读环境变量 `KIMI_API_KEY` **现生成** `~/.kimi/config.toml`:provider `type="kimi"` + `api_key=<key>` + **不写 `oauth` 字段**(无 oauth → kimi 直接用明文 key,源码 `llm.py:create_llm`),并把 `[services.moonshot_search]`/`[services.moonshot_fetch]` 也配上同一 key → **原生 SearchWeb/FetchURL 照常可用**(实测同一 key 同时授权聊天和搜索端点)。
   - **为什么换掉 OAuth**: 旧方案上传 OAuth 凭证,access_token 只活 **15 分钟**、refresh 设备绑定,无人值守跑着跑着 refresh_token 失效就废,只能人工重登。静态 key **永不过期、零交互登录**,这套故障路径整个消失。
@@ -110,7 +110,7 @@ Rules:
 - **验证逻辑**: 共享模块 `src/data/services/kimi_listing_verifier.py` 的 `run_kimi_for_code()` —— spawn `kimi --print --afk`(thinking 留开,关了它搜索失败就放弃不绕道),让 kimi 用全部工具(SearchWeb→FetchURL→Shell curl)实证查清**这代码是什么、现在什么情况(在交易/已退市/迁移/更名)+ 上市退市日**,解析失败**绝不猜**。脱机脚本 `scripts/verify_list_date_kimi.py` 复用同一模块。
 - **失败处理**: 查不到/超时/解析失败 → 写 `verified=false` 占位行 (离开"未验证集",不再每天重烧 kimi) + 飞书通知。**kimi 工具/认证错误**(key 失效等)单独识别,**绝不**当"查不到"写占位,而是报错中止。手动 `?include_failed=1` 可重验占位行。
 - **报告 = kimi 自己写的「怎么回事」**: 每只代码 kimi 回一句人话(名字/状态/说明/日期)→ 落盘 `data/audit/kimi_findings/<code>.json`,飞书报告逐条列出,完整清单 `GET /api/audit/listing-info/findings`。**不准我自己拿 Tushare/网页逐只核异常代码当结论**——放 kimi 上去就是让它查、它写。
-- **守卫**: `get_listing_verify_enabled()` 开关、`kimi_available()`+`KIMI_API_KEY` 探测、与 `cache_fill_running` 互斥、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、**并发 1**、`upsert_listing_info` 小批 ≤200 行。
+- **守卫**: `get_listing_verify_enabled()` 开关(管流水线第 ② 步是否跑 kimi)、`kimi_available()`+`KIMI_API_KEY` 探测、单次 `MAX_CODES_PER_RUN` 上限 (默认 500,截断必 log + 飞书,不静默)、**并发 1**、`upsert_listing_info` 小批 ≤200 行。(原 `cache_fill_running` 互斥锁已无意义——流水线顺序跑,kimi 与补全不再并发抢内存。)
 - **手动触发**: `POST /api/audit/listing-info/verify` (X-API-Key) 或 `POST /api/audit/listing-info/verify-problems?states=` (查真值表异常代码);状态见 `GET /api/audit/listing-info/status` + 设置页卡片;kimi 逐只结论见 `GET /api/audit/listing-info/findings`,原始 trace 见 `?code=` 的 `kimi-raw`。
 
 ## 9. Volume Unit Convention (CRITICAL)

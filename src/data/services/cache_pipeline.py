@@ -189,7 +189,7 @@ class CachePipeline:
         self,
         cancel_event: CancelChecker = None,
         quiet: bool = False,
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         """Fill daily gaps the trading_calendar marks as fixable by a re-download.
 
         Index-driven (see docs/data-integrity-pipeline.md §7.1): only the dates
@@ -205,7 +205,11 @@ class CachePipeline:
 
         The calendar must be freshly rebuilt first (阶段1) — this acts on its
         verdict. ``quiet=True`` silences per-event Feishu (the caller sends one
-        summary). Returns ``{dates, filled}``.
+        summary). Returns ``{dates, filled, processed_dates}`` where
+        ``processed_dates`` is the list of dates that had a gap and were acted on
+        — the daily-maintenance pipeline re-reconciles exactly those to confirm
+        the gaps closed (a ``wrong_suspended`` fix changes state without adding a
+        row, so we re-reconcile every touched date, not only ones whose count rose).
         """
         saved_reporter = self.reporter
         if quiet:
@@ -218,7 +222,7 @@ class CachePipeline:
             total = len(dates)
             filled = 0
             if total == 0:
-                return {"dates": 0, "filled": 0}
+                return {"dates": 0, "filled": 0, "processed_dates": []}
             # Roster (authoritative listing) gates suspended placeholders so we
             # don't re-create orphans for de-rostered codes suspend_d still lists.
             listing_info = await self.storage.get_listing_info_all()
@@ -258,7 +262,7 @@ class CachePipeline:
                     after = await self.storage.get_codes_for_daily_date(day)
                     filled += len(after - before)
             logger.info("Calendar-driven daily fill: %d dates, %d rows filled", total, filled)
-            return {"dates": total, "filled": filled}
+            return {"dates": total, "filled": filled, "processed_dates": dates}
         finally:
             self.reporter = saved_reporter
 
