@@ -26,6 +26,9 @@ class _FakeStorage:
     async def get_trading_calendar_summary(self):
         return {"by_daily_state": {"ok": 100, "source_none": 5}}
 
+    async def get_calendar_problem_codes(self, states):
+        return set()
+
     async def get_last_scheduler_run(self, name):
         return None
 
@@ -76,8 +79,12 @@ class _AppState:
         self.active_download = None
 
 
-def _patch(monkeypatch, *, rebuild_results, kimi_enabled=False, kimi_ok=True):
-    """Patch the external steps at their source modules; return the order list."""
+def _patch(monkeypatch, *, rebuild_results, kimi_ok=True):
+    """Patch the external steps at their source modules; return the order list.
+
+    kimi runs as step ② whenever a listing_verify_scheduler is present on app.state
+    AND kimi_available() (kimi_ok) — there is no on/off toggle anymore.
+    """
     calls: list[str] = []
 
     async def fake_load(storage, *, feishu, client=None, stop_storage=False):
@@ -99,17 +106,12 @@ def _patch(monkeypatch, *, rebuild_results, kimi_enabled=False, kimi_ok=True):
             raise r
         return r
 
-    async def fake_gap_report(storage):
-        calls.append("gap_report")
-
     async def fake_notify(msg):
         calls.append("notify")
 
     monkeypatch.setattr("scripts.load_listing_from_tushare.run_load_listing", fake_load)
     monkeypatch.setattr("src.data.services.trading_calendar.rebuild_calendar", fake_rebuild)
-    monkeypatch.setattr(mod, "_send_gap_detail_report", fake_gap_report)
     monkeypatch.setattr(mod, "_notify_feishu", fake_notify)
-    monkeypatch.setattr("src.common.config.get_listing_verify_enabled", lambda: kimi_enabled)
     monkeypatch.setattr("src.common.config.get_tushare_token", lambda: "tok")
     monkeypatch.setattr("src.data.clients.tushare_realtime.TushareRealtimeClient", _FakeClient)
     monkeypatch.setattr("src.data.services.kimi_listing_verifier.kimi_available", lambda: kimi_ok)
@@ -124,14 +126,14 @@ _NO_GAPS = {"dates": 0, "filled": 0, "processed_dates": []}
 async def test_pipeline_happy_path_no_gaps_runs_in_order(monkeypatch):
     calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
     storage = _FakeStorage()
-    sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls)))
+    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
+    sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls), lv=lv))
     result, message = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ② kimi skipped (toggle off) — no "kimi" call. ⑤ skipped (no gaps).
-    assert calls[:3] == ["load", "rebuild_full", "fill"]
-    assert "rebuild_days" not in calls  # ⑤ skipped when nothing was filled
-    assert "kimi" not in calls
-    assert "gap_report" in calls  # minute/daily diagnosis still surfaced
+    # order: ① load → ② kimi → ③ rebuild(full) → ④ fill; ⑤ skipped (no gaps to confirm)
+    assert calls[:4] == ["load", "kimi", "rebuild_full", "fill"]
+    assert "rebuild_days" not in calls
+    assert "gap_report" not in calls  # legacy per-day diagnosis no longer auto-sent
 
 
 @pytest.mark.asyncio
@@ -140,11 +142,12 @@ async def test_pipeline_fill_gaps_triggers_confirm_rebuild(monkeypatch):
     calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN, _RB_CLEAN])
     fill = {"dates": 2, "filled": 50, "processed_dates": [date(2024, 1, 2), date(2024, 1, 3)]}
     storage = _FakeStorage()
-    sched = CacheScheduler(_AppState(storage, _FakePipeline(fill, calls)))
+    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
+    sched = CacheScheduler(_AppState(storage, _FakePipeline(fill, calls), lv=lv))
     result, _ = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ⑤ runs because ④ touched dates → a second rebuild over those days.
-    assert calls == ["load", "rebuild_full", "fill", "rebuild_days", "notify", "gap_report"]
+    # ⑤ runs because ④ touched dates → a second rebuild over those days. No gap-report spam.
+    assert calls == ["load", "kimi", "rebuild_full", "fill", "rebuild_days", "notify"]
 
 
 @pytest.mark.asyncio
@@ -162,7 +165,7 @@ async def test_rebuild_failure_skips_fill_and_confirm(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_kimi_runs_when_enabled_and_available(monkeypatch):
-    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN], kimi_enabled=True)
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
     kimi_result = {
         "checked": 1,
         "verified": 1,
@@ -185,7 +188,7 @@ async def test_kimi_runs_when_enabled_and_available(monkeypatch):
 @pytest.mark.asyncio
 async def test_kimi_tool_errors_surface_as_warning(monkeypatch):
     # Sub-threshold kimi tool/auth errors must NOT be hidden as plain 成功.
-    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN], kimi_enabled=True)
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
     kimi_result = {
         "checked": 3,
         "verified": 1,

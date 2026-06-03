@@ -136,11 +136,10 @@ class ListingVerifyScheduler:
         return target.strftime("%m-%d %H:%M")
 
     def get_status(self) -> dict:
-        """Return scheduler status for the settings page."""
-        from src.common.config import get_listing_verify_enabled
-
+        """Return verify status for the settings page (no on/off toggle anymore —
+        kimi runs as step ② of the 3am pipeline; ``available`` reflects whether it CAN)."""
         return {
-            "enabled": get_listing_verify_enabled(),
+            "available": kimi_available(),
             "next_run_time": self.next_run_time,
             "last_run_time": self.last_run_time,
             "last_run_result": self.last_run_result,
@@ -217,16 +216,14 @@ class ListingVerifyScheduler:
         codes: set[str] | None = None,
         max_codes: int | None = None,
     ) -> None:
-        """Manual one-shot run (settings-page button / API). Bypasses the
-        enable toggle since the operator asked for it explicitly, but keeps
-        the kimi-availability, cache-fill and in-progress guards.
+        """Manual one-shot run (settings-page button / API). Keeps the
+        kimi-availability, cache-fill and in-progress guards.
 
         If ``codes`` is given, verify exactly those (e.g. the truth-table's
         source_none/orphan backstop set) instead of snapshot-unverified.
         """
         await self._run_once(
             "manual",
-            force_enabled=True,
             include_failed=include_failed,
             codes=codes,
             max_codes=max_codes,
@@ -235,23 +232,16 @@ class ListingVerifyScheduler:
     async def _run_once(
         self,
         trigger: str,
-        force_enabled: bool = False,
         include_failed: bool = False,
         codes: set[str] | None = None,
         max_codes: int | None = None,
     ) -> None:
-        """Execute one verify cycle, with guards. trigger: startup|scheduled|manual."""
-        from src.common.config import get_listing_verify_enabled
+        """Execute one verify cycle, with guards. trigger: scheduled|manual.
 
+        No on/off toggle: kimi runs whenever available — if it can't, that's an
+        alert, not a silent skip (see module docstring + the 3am pipeline step ②).
+        """
         run_time = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
-
-        if not force_enabled and not get_listing_verify_enabled():
-            logger.info("ListingVerifyScheduler: disabled via settings, skipping (%s)", trigger)
-            self.last_run_time = run_time
-            self.last_run_result = "skipped"
-            self.last_run_message = "已关闭，跳过本次执行"
-            await self._persist_status(trigger)
-            return
 
         if not kimi_available():
             self.last_run_time = run_time

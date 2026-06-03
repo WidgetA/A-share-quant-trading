@@ -46,13 +46,10 @@
                     <h3>Kimi 上市日自动验证（路径 B）</h3>
                     <p class="settings-desc">
                         每日凌晨 3 点「数据维护流水线」的第 ② 步,服务端 kimi-cli 自动核验未覆盖代码的真实上市日(刷名单之后、查漏重建之前),写入 <code>stock_listing_info</code>。
-                        Kimi 认证用静态 API key（部署环境的 <code>KIMI_API_KEY</code>），启动时自动生成配置，无需上传凭证。
+                        <strong>无开关</strong>——kimi 可用就跑;用不了(未安装 / 无 <code>KIMI_API_KEY</code> / 跑挂)会在飞书报警,不会被静默关掉。
+                        认证用静态 API key（部署环境的 <code>KIMI_API_KEY</code>），启动时自动生成配置。
                     </p>
                 </div>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="listingVerifyToggle" onchange="toggleListingVerify(this)">
-                    <span class="toggle-slider"></span>
-                </label>
             </div>
             <div class="settings-desc" id="listingInfoStatus" style="margin-top: 0.5rem;">
                 listing_info 状态: 加载中...
@@ -609,17 +606,15 @@ async function loadListingInfoStatus() {
         if (schedEl) {
             const s = data.scheduler;
             if (s) {
-                let line = '验证任务: ' + (s.in_progress ? '运行中…' : '空闲');
+                let line = 'kimi: ' + (s.available === false ? '不可用(未安装/无密钥)' : '可用');
+                line += ' | ' + (s.in_progress ? '核验运行中…' : '空闲');
                 if (s.last_run_time) {
                     const resultZh = {
                         success: '成功', failed: '失败', skipped: '跳过',
                         no_codes: '无新代码', no_gaps: '无缺口', unknown: '未知'
                     }[s.last_run_result] || s.last_run_result || '';
-                    line += ' | 上次 ' + s.last_run_time + (resultZh ? ' (' + resultZh + ')' : '');
-                }
-                if (s.last_run_result === 'success') {
-                    line += ' | 本次验证 ' + s.last_verified + ' / 失败 ' + s.last_failed +
-                        ' / 剩余 ' + s.last_remaining;
+                    line += ' | 上次手动核验 ' + s.last_run_time +
+                        (resultZh ? ' (' + resultZh + ')' : '');
                 }
                 schedEl.textContent = line;
             } else {
@@ -631,29 +626,8 @@ async function loadListingInfoStatus() {
     }
 }
 
-// Listing-verify scheduler toggle
-async function loadListingVerifyToggle() {
-    try {
-        const resp = await fetch('/api/settings/listing-verify');
-        const data = await resp.json();
-        document.getElementById('listingVerifyToggle').checked = data.enabled;
-    } catch (e) {
-        console.error('Failed to load listing-verify status', e);
-    }
-}
-async function toggleListingVerify(el) {
-    try {
-        const resp = await fetch('/api/settings/listing-verify', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({enabled: el.checked})
-        });
-        const data = await resp.json();
-        showMessage('listingVerifyMessage', data.message, data.success);
-    } catch (e) {
-        showMessage('listingVerifyMessage', '操作失败: ' + e.message, false);
-        el.checked = !el.checked;
-    }
-}
+// Listing-verify: no on/off toggle (kimi runs as step ② of the 3am pipeline);
+// only the manual "立即验证 / 重验失败项" buttons remain.
 async function triggerListingVerify(includeFailed) {
     const apiKey = (function () { try { return localStorage.getItem('tradingApiKey') || ''; } catch (e) { return ''; } })();
     const url = '/api/audit/listing-info/verify' + (includeFailed ? '?include_failed=1' : '');
@@ -671,7 +645,6 @@ async function triggerListingVerify(includeFailed) {
 loadCacheSchedulerStatus();
 loadTushareStatus();
 loadListingInfoStatus();
-loadListingVerifyToggle();
 loadMlKeyStatus();
 loadTradingKeyStatus();
 loadFcStatus();

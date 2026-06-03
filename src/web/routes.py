@@ -2325,26 +2325,8 @@ def create_settings_router() -> APIRouter:
             "message": f"缓存定时更新已{'开启' if enabled else '关闭'}",
         }
 
-    # === LISTING-INFO AUTO-VERIFY TOGGLE (路径 B) ===
-
-    @router.get("/api/settings/listing-verify")
-    async def get_listing_verify_status():
-        from src.common.config import get_listing_verify_enabled
-
-        return {"enabled": get_listing_verify_enabled()}
-
-    @router.post("/api/settings/listing-verify")
-    async def set_listing_verify_status(request: Request):
-        from src.common.config import set_listing_verify_enabled
-
-        body = await request.json()
-        enabled = bool(body.get("enabled", True))
-        set_listing_verify_enabled(enabled)
-        return {
-            "success": True,
-            "enabled": enabled,
-            "message": f"上市日自动验证已{'开启' if enabled else '关闭'}",
-        }
+    # Listing-info auto-verify has NO on/off toggle — kimi runs as step ② of the
+    # 3am pipeline whenever available; unavailable → Feishu alert (not a silent off).
 
     # === DAILY SCAN TOGGLE ===
 

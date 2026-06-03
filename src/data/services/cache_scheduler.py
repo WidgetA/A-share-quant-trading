@@ -36,6 +36,8 @@ _STEP_TIMEOUT_FILL = 3 * 3600  # ④ index-driven daily fill
 _STEP_TIMEOUT_CONFIRM = 30 * 60  # ⑤ rebuild only the touched dates
 # How many of kimi's per-code "怎么回事" lines to inline in the unified summary.
 _KIMI_FINDINGS_IN_SUMMARY = 15
+# How many 待修 codes (orphan/missing/wrong_suspended) to name in the summary.
+_PROBLEM_CODES_IN_SUMMARY = 30
 
 
 async def _notify_feishu(message: str) -> None:
@@ -48,31 +50,6 @@ async def _notify_feishu(message: str) -> None:
             await bot.send_message(message)
     except Exception:
         logger.warning("Failed to send Feishu cache scheduler notification", exc_info=True)
-
-
-async def _send_gap_detail_report(storage) -> None:
-    """Send the detailed per-day gap diagnosis after the cache job finishes.
-
-    Bounded for the 1.58G box: only the most-recent 30 daily-gap days and 30
-    minute-gap days are classified per run, and both Tushare calls — suspend_d
-    (one per daily-gap day) and stk_mins source-check (one per missing minute
-    stock) — are kept well under the 500/min limit. Beyond the caps, items show
-    "待核对" (honest), and the full per-day detail is always written to
-    data/audit/ regardless.
-    """
-    try:
-        from scripts.diagnose_gaps import run_diagnosis_report
-
-        await run_diagnosis_report(
-            storage,
-            feishu=True,
-            daily_detail_days=30,
-            minute_detail_days=30,
-            max_minute_source_checks=60,
-        )
-    except Exception as e:
-        logger.error("Failed to send detailed gap diagnosis report: %s", e, exc_info=True)
-        await _notify_feishu(f"[数据诊断报告] 自动生成失败\n{e}")
 
 
 async def _get_trading_calendar(start_date: date, end_date: date) -> list[date]:
@@ -182,12 +159,11 @@ class CacheScheduler:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Main loop: fill gaps daily at 3am (recent window only).
+        """Main loop: run the daily data-maintenance pipeline at 3am (see _run_pipeline).
 
-        Deliberately NO startup fill: with frequent watchtower redeploys a
-        startup fill would run on every restart, holding cache_fill_running and
-        blocking kimi/path-B. Recent freshness is the 3am run's job; historical
-        backfill is deliberate (index-driven endpoints).
+        Deliberately NO startup run: with frequent watchtower redeploys a startup
+        run would re-fire the whole pipeline on every restart. The 3am run is the
+        only auto-trigger; historical backfill is deliberate (index-driven endpoints).
         """
         logger.info("CacheScheduler started, will run daily at 3am Beijing time")
         try:
@@ -316,7 +292,7 @@ class CacheScheduler:
         Sends ONE Feishu summary + the per-day gap diagnosis. Returns (result, message).
         """
         from scripts.load_listing_from_tushare import run_load_listing
-        from src.common.config import get_listing_verify_enabled, get_tushare_token
+        from src.common.config import get_tushare_token
         from src.data.clients.tushare_realtime import TushareRealtimeClient
         from src.data.services.kimi_listing_verifier import kimi_available
         from src.data.services.trading_calendar import rebuild_calendar
@@ -357,12 +333,18 @@ class CacheScheduler:
             else:
                 steps.append(("① 刷名单", "失败", r))
 
-            # ② kimi 核没核过的新代码 + 回填换号对应表 (gated by the verify toggle)
+            # ② kimi 核没核过的新代码 + 回填换号对应表. No on/off toggle: kimi runs
+            # whenever available; if it can't, that's a WARNING (alert), not a silent
+            # skip — a missing capability should be visible, not switched off quietly.
             lv = getattr(self._app_state, "listing_verify_scheduler", None)
-            if not get_listing_verify_enabled():
-                steps.append(("② 核身份(kimi)", "跳过", "核身份开关关闭"))
-            elif lv is None or not kimi_available():
-                steps.append(("② 核身份(kimi)", "跳过", "kimi 不可用"))
+            if lv is None or not kimi_available():
+                steps.append(
+                    (
+                        "② 核身份(kimi)",
+                        "警告",
+                        "kimi 不可用(未安装或无密钥)——新代码/换号无法自动核,请检查",
+                    )
+                )
             else:
                 # Mark in_progress so the status card + manual endpoints reflect
                 # that kimi is running (verify_unverified itself doesn't set it).
@@ -462,20 +444,27 @@ class CacheScheduler:
         finally:
             await client.stop()
 
-        # final library snapshot (read-only — the same view /calendar/status returns)
+        # Final library snapshot (read-only, truth-table = single source). Pull the
+        # actual problem codes (orphan / missing / wrong_suspended) so the ONE summary
+        # names "怎么回事" concisely — instead of the old per-day snapshot-audit report,
+        # which spammed the same codes across dozens of near-identical day blocks and
+        # disagreed with the truth-table. (Deep per-day digging stays on the manual
+        # /api/audit/diagnose-gaps endpoint.)
         final_state: dict = {}
+        problem_codes: list[str] = []
         try:
             summary = await storage.get_trading_calendar_summary()
             final_state = summary.get("by_daily_state", {})
+            codes = await storage.get_calendar_problem_codes(
+                {"orphan", "missing", "wrong_suspended"}
+            )
+            problem_codes = sorted(codes)
         except Exception as e:  # noqa: BLE001
             logger.warning("maintenance: final calendar summary failed: %s", e)
 
-        result, message = await self._send_pipeline_summary(
-            task_start, steps, kimi_findings, final_state
+        return await self._send_pipeline_summary(
+            task_start, steps, kimi_findings, final_state, problem_codes
         )
-        # the per-day gap diagnosis (incl. minute) is still surfaced for observability
-        await _send_gap_detail_report(storage)
-        return result, message
 
     async def _send_pipeline_summary(
         self,
@@ -483,6 +472,7 @@ class CacheScheduler:
         steps: list[tuple[str, str, str]],
         kimi_findings: list[dict],
         final_state: dict,
+        problem_codes: list[str],
     ) -> tuple[str, str]:
         """Build + send the ONE unified Feishu summary. Returns (result, message)."""
         now = datetime.now(BEIJING_TZ)
@@ -518,6 +508,16 @@ class CacheScheduler:
                 f"{_labels.get(k, k)} {v:,}" for k, v in sorted(final_state.items()) if v
             )
             lines += ["", f"最终真值表: {picture}"]
+
+        # Name the actual待修 codes (真缺/标错停牌/有数据却不在册) so the operator sees
+        # 怎么回事 without the old per-day spam. source_none is intentionally NOT listed
+        # (接口不全·可接受, often 100+). 修法见 /api/audit/calendar/problems。
+        if problem_codes:
+            shown = problem_codes[:_PROBLEM_CODES_IN_SUMMARY]
+            line = "待修代码(真缺/标错停牌/不在册): " + "、".join(shown)
+            if len(problem_codes) > len(shown):
+                line += f" …共 {len(problem_codes)} 只(完整见 calendar/problems 接口)"
+            lines += ["", line]
 
         if kimi_findings:
             lines += ["", "本轮 kimi 查证(逐只):"]
@@ -791,7 +791,6 @@ class CacheScheduler:
         lines.append(f"下次执行: {self._next_run_str()}")
 
         await _notify_feishu("\n".join(lines))
-        await _send_gap_detail_report(storage)
 
 
 def _group_contiguous_dates(dates: list[date]) -> list[tuple[date, date]]:
