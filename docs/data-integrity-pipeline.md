@@ -175,6 +175,13 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   **source_none 暴涨 5.5 万**。**正解 = 认 Tushare 为准、统一到 920**:`load-tushare` 重载权威名单
   (老代码自动消失)+ `purge-orphan-rows` 删老代码冗余日线(数据已在 920 下)。**别去补老代码**(Tushare 没有)。
   同理 300114(中航电测)2025 重组更名迁 302132、个股退市后残留占位行,都靠"权威名单 + 删孤儿"收敛。
+- **代码对应表 `code_alias`(老号→新号)接住"重组改名换号"(2026-06)**:北交所那种数据商已把历史迁
+  新号(老号冗余)→ 删即可、不复发。但**个股重组改名换号**(如 300114→302132)数据商**历史仍挂老号**,
+  删了就丢真历史。正解 = 一张 `code_alias` 表:① 入库 `_process_daily_date` 用它把记录的老号**改写成新号
+  再存**(`code_alias` 参数;表空时 no-op)→ 历史落到在册新号下、永不成孤儿;② path-B 的 kimi 查到迁号/换号
+  会**自动回填新号**进表(prompt 多问一个 `new_code`,findings 带它,跑完 `upsert_code_alias`)→ 接住未来;
+  ③ 端点 `GET/POST /api/audit/calendar/code-alias` 看/手填。**这张表单独存,load-tushare 刷名单不碰它**
+  (必须活下来)。302132 在 Tushare 上市日被回填成原始 2010-08-27,所以老号历史重归新号后落在在册窗口内 = 正常。
 - **补全别盲信 Tushare `suspend_d`(2026-06)**:Tushare `daily` 与 `suspend_d` 会**自相矛盾**——
   实测 `688435 @2023-01-19` daily 有成交量(确实交易了),`suspend_d` 却也列它为停牌。补全若按
   `suspend_d` 写成停牌占位 → 把"交易过的票"存成停牌(`wrong_suspended`,且回测数据错)。修法:
@@ -215,6 +222,7 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 | `POST /backfill-daily?mode=full&start=&end=` | bootstrap | 旧的全量审计式重下(建底/扩新范围,默认 CACHE_START~今天) |
 | `POST /calendar/purge-orphan-rows[?execute=1]` | 清理 | 删真值表 `orphan` 对应的 backtest_daily 行(只删孤儿行,退市股保留退市前历史)。不带 execute = dry-run 出清单 |
 | `POST /calendar/purge-codes-data {codes:[...]}` | 清理 | 按显式代码清单删其全部日线(删整只死代码用;上限 500) |
+| `GET/POST /calendar/code-alias` | 对应表 | 看/手填老号→新号(重组改名换号);kimi 自动回填,入库时据此改号 → 老号历史归新号、不成孤儿 |
 | `POST /diagnose-gaps` | — | 逐日诊断报告(问题→根因→正确数字→修法)→ 飞书 |
 | `POST /listing-info/verify-problems?states=&max=` | kimi兜底 | 把真值表 source_none/orphan 代码喂 kimi 查清「这代码是什么、现在什么情况」 |
 | `GET  /listing-info/kimi-raw?code=` | **可观测** | 拉某代码上次 kimi 验证的**完整原始输出(工具调用全过程)**——"查不到"时调它看 kimi 到底做了什么,**别猜** |
