@@ -1,9 +1,10 @@
 # === MODULE PURPOSE ===
 # CacheScheduler runs the unified DAILY DATA-MAINTENANCE pipeline at 3am Beijing
 # (see docs/data-integrity-pipeline.md §4.1). One sequential, failure-isolated pass:
-#   ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表
-#   → ③ 增量重建真值表(只新交易日·日线+分钟) → ④ 索引驱动补日线 → ⑤ 索引驱动补分钟
-#   → ⑥ 重建补过的天(确认) → 一条飞书汇总.
+#   ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 → ③ 增量重建真值表(只新交易日)
+#   → ④ 索引驱动补日线 → ⑤ 重建补过的天(确认) → 一条飞书汇总.
+# 分钟补全(fill_minute)**暂不在此无人值守流水线**——大规模下会挂死占锁(2026-06 实测),
+# 撤出待加固;走手动端点 /backfill-minute。
 # 增量查漏(不每晚全表重扫历史)、精准补缺. Steps are failure-isolated; only 3am (no startup run);
 # all run status persisted to GreptimeDB scheduler_log so it survives restarts.
 # (The 4am ListingVerifyScheduler loop is retired — kimi is step ② here.)
@@ -410,16 +411,14 @@ class CacheScheduler:
                 steps.append(("③ 查漏·增量重建", "成功", "历史索引已最新,无新交易日"))
             else:
                 ok, r = await self._bounded(
-                    rebuild_calendar(
-                        storage, start=incr_start, end=yesterday, client=client, with_minute=True
-                    ),
+                    rebuild_calendar(storage, start=incr_start, end=yesterday, client=client),
                     _STEP_TIMEOUT_REBUILD,
                 )
                 rebuild_ok = ok
                 if ok:
                     steps.append(
                         (
-                            "③ 查漏·增量重建(日线+分钟)",
+                            "③ 查漏·增量重建",
                             "成功",
                             f"新增 {incr_start}~{yesterday}: {r['days']} 个交易日 / "
                             f"写入 {r['rows']:,} 行 / 待修 {r['problem_rows']:,}",
@@ -451,54 +450,29 @@ class CacheScheduler:
                             )
                         )
 
-            # ⑤ 补分钟 — 索引驱动,只补 minute_state=missing (skip if ③ failed)
-            minute_dates: list = []
-            minute_source_short: dict = {}
-            if not rebuild_ok:
-                steps.append(("⑤ 补分钟", "跳过", "重建失败,跳过"))
-            else:
-                ok, r = await self._bounded(
-                    pipeline.fill_minute_from_calendar(quiet=True), _STEP_TIMEOUT_MINUTE_FILL
-                )
-                if not ok:
-                    steps.append(("⑤ 补分钟", "失败", r))
-                else:
-                    minute_dates = r.get("processed_dates", []) or []
-                    minute_source_short = r.get("source_short", {}) or {}
-                    if r["dates"] == 0:
-                        steps.append(("⑤ 补分钟", "成功", "无缺口可补"))
-                    else:
-                        ss = sum(len(c) for c in minute_source_short.values())
-                        detail = f"补 {r['filled']:,} 只(天) / 跨 {r['dates']} 天"
-                        if ss:
-                            detail += f" / 源头不足241 {ss} 只(天·半天交易)"
-                        steps.append(("⑤ 补分钟", "成功", detail))
+            # 分钟补全(fill_minute)**暂不放进每晚无人值守流水线** —— 2026-06 实测:大规模下
+            # (多天 ×~5000 只 × 上千次 stk_mins/insert)会挂死、占锁(手动跑 45min 未完成)。
+            # 分钟走手动端点 /backfill-minute(后台 create_task),加固(超时/分批)+ 受控验证后再放回。
+            # 每晚只做日线;③ 因此也保持 with_minute=False。
 
-            # ⑥ 确认 — 重建 ④/⑤ 动过的天(日线+分钟),把补好的状态确认下来
-            touched = sorted(set(daily_dates) | set(minute_dates))
-            if touched:
+            # ⑤ 确认 — 只重建 ④ 动过的那几天 (skip if nothing touched)
+            if daily_dates:
                 ok, r = await self._bounded(
-                    rebuild_calendar(
-                        storage,
-                        trading_days=touched,
-                        client=client,
-                        with_minute=True,
-                        extra_minute_source_short=minute_source_short,
-                    ),
+                    rebuild_calendar(storage, trading_days=daily_dates, client=client),
                     _STEP_TIMEOUT_CONFIRM,
                 )
                 if ok:
                     steps.append(
                         (
-                            "⑥ 确认·重建补过的天",
+                            "⑤ 确认·重建补过的天",
                             "成功",
                             f"{r['days']} 天 / 仍待修 {r['problem_rows']:,}",
                         )
                     )
                 else:
-                    steps.append(("⑥ 确认·重建补过的天", "失败", r))
+                    steps.append(("⑤ 确认·重建补过的天", "失败", r))
             else:
-                steps.append(("⑥ 确认", "跳过", "无补缺，免重建"))
+                steps.append(("⑤ 确认", "跳过", "无补缺，免重建"))
         finally:
             await client.stop()
 

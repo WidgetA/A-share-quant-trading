@@ -153,10 +153,11 @@ async def test_pipeline_happy_path_no_gaps_runs_in_order(monkeypatch):
     sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls), lv=lv))
     result, message = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ① load → ② kimi → ③ rebuild(daily+minute) → ④ 补日线 → ⑤ 补分钟; ⑥ skipped (no gaps)
-    assert calls[:5] == ["load", "kimi", "rebuild_full", "fill", "fill_minute"]
-    assert "rebuild_days" not in calls  # ⑥ confirm skipped when nothing was filled
-    assert "gap_report" not in calls  # legacy per-day diagnosis no longer auto-sent
+    # ① load → ② kimi → ③ rebuild → ④ 补日线; ⑤ confirm skipped (no gaps).
+    # 分钟补全(fill_minute)已撤出每晚流水线(待加固)→ 不应被调用。
+    assert calls[:4] == ["load", "kimi", "rebuild_full", "fill"]
+    assert "fill_minute" not in calls
+    assert "rebuild_days" not in calls  # ⑤ confirm skipped when nothing was filled
 
 
 @pytest.mark.asyncio
@@ -169,44 +170,8 @@ async def test_pipeline_fill_gaps_triggers_confirm_rebuild(monkeypatch):
     sched = CacheScheduler(_AppState(storage, _FakePipeline(fill, calls), lv=lv))
     result, _ = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ⑥ confirm runs because ④ touched dates → rebuild over those days. No gap-report spam.
-    assert calls == [
-        "load",
-        "kimi",
-        "rebuild_full",
-        "fill",
-        "fill_minute",
-        "rebuild_days",
-        "notify",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_pipeline_minute_gaps_trigger_confirm(monkeypatch):
-    # daily has no gaps, but ⑤ 补分钟 fills minute → ⑥ confirm must still run (with the
-    # source_short feedback so the re-reconcile persists half-day codes).
-    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN, _RB_CLEAN])
-    minute = {
-        "dates": 1,
-        "filled": 3,
-        "processed_dates": [date(2024, 1, 2)],
-        "source_short": {date(2024, 1, 2): {"300001"}},
-    }
-    storage = _FakeStorage()
-    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
-    pipe = _FakePipeline(_NO_GAPS, calls, minute_result=minute)
-    sched = CacheScheduler(_AppState(storage, pipe, lv=lv))
-    result, _ = await sched._run_pipeline("scheduled")
-    assert result == "success"
-    assert calls == [
-        "load",
-        "kimi",
-        "rebuild_full",
-        "fill",
-        "fill_minute",
-        "rebuild_days",
-        "notify",
-    ]
+    # ⑤ confirm runs because ④ touched dates → rebuild over those days. fill_minute 撤出。
+    assert calls == ["load", "kimi", "rebuild_full", "fill", "rebuild_days", "notify"]
 
 
 @pytest.mark.asyncio
