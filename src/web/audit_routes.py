@@ -519,6 +519,64 @@ def create_audit_router() -> APIRouter:
         return JSONResponse({"success": True, "message": f"已触发日线补全({label}),结果发飞书"})
 
     # ------------------------------------------------------------------
+    # 补分钟 (POST /api/audit/backfill-minute) — DAT-006 阶段3
+    # 索引驱动:只补 trading_calendar minute_state=missing 的(天,股)。建底前先跑
+    # /calendar/rebuild?with_minute=1 把历史的 minute_state 算出来。每日新交易日由
+    # 3 点流水线自动补,这个端点是历史建底/修复。
+    # ------------------------------------------------------------------
+
+    @router.post("/backfill-minute")
+    async def trigger_backfill_minute(request: Request) -> JSONResponse:
+        """Index-driven minute backfill (阶段3). Fill ``minute_state=missing``, then a
+        confirm-rebuild of the touched days marks them ok / source_short. Per-stock
+        ``stk_mins``, resume by stock. ok / source_short never retried."""
+        storage = getattr(request.app.state, "storage", None)
+        pipeline = getattr(request.app.state, "pipeline", None)
+        if storage is None or pipeline is None or not getattr(storage, "is_ready", False):
+            raise HTTPException(status_code=503, detail="GreptimeDB storage/pipeline 未就绪")
+        if getattr(request.app.state, "backfill_minute_running", False):
+            return JSONResponse({"success": False, "message": "分钟补全正在进行中,请稍后"})
+
+        async def _run() -> None:
+            request.app.state.backfill_minute_running = True
+            try:
+                result = await pipeline.fill_minute_from_calendar(quiet=True)
+                touched = result.get("processed_dates") or []
+                ss = result.get("source_short") or {}
+                ss_n = sum(len(c) for c in ss.values())
+                if touched:
+                    from src.data.services.trading_calendar import rebuild_calendar
+
+                    await rebuild_calendar(
+                        storage,
+                        trading_days=touched,
+                        with_minute=True,
+                        extra_minute_source_short=ss,
+                    )
+                msg = (
+                    "【阶段三·补分钟】✅ 完成\n"
+                    "任务: 照索引补「该有分钟、库里不满 241 根」的(天·股)\n"
+                    f"结果: 补 {result['filled']:,} 只(天) / 跨 {result['dates']} 个有缺口的交易日"
+                    + (f" / 源头不足241 {ss_n} 只(天·半天交易,已标记不再补)" if ss_n else "")
+                )
+            except Exception as e:
+                logger.error("backfill-minute 失败: %s", e, exc_info=True)
+                msg = f"【阶段三·补分钟】❌ 失败\n{e}"
+            finally:
+                request.app.state.backfill_minute_running = False
+            try:
+                from src.common.feishu_bot import FeishuBot
+
+                bot = FeishuBot()
+                if bot.is_configured():
+                    await bot.send_message(msg)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("backfill-minute 飞书通知失败: %s", e)
+
+        asyncio.create_task(_run())
+        return JSONResponse({"success": True, "message": "已触发分钟补全(索引驱动),结果发飞书"})
+
+    # ------------------------------------------------------------------
     # 重建交易日历真值表 (POST /api/audit/calendar/rebuild) — DAT-006
     # 每(交易日 × 股票)复合一行真值:roster(Tushare 上市日) ∩ suspend_d ∩
     # Tushare daily ∩ backtest_daily → 状态。范围 ?start=&end=,默认 2024-01-01~昨天。
@@ -552,13 +610,18 @@ def create_audit_router() -> APIRouter:
         # daily interface only goes to T-1; ending at "today" would falsely mark
         # all of today's roster as missing (today's daily isn't published yet).
         end = _qdate("end", today - timedelta(days=1))
+        # ?with_minute=1 ALSO reconciles minute_state (阶段3 建底): per day a GROUP BY on
+        # the ~1.8B-row backtest_minute (~15-30s/day), so it's deliberate, not the default.
+        with_minute = request.query_params.get("with_minute") == "1"
 
         async def _run() -> None:
             from src.data.services.trading_calendar import rebuild_calendar
 
             request.app.state.calendar_rebuild_running = True
             try:
-                result = await rebuild_calendar(storage, start=start, end=end)
+                result = await rebuild_calendar(
+                    storage, start=start, end=end, with_minute=with_minute
+                )
                 bd = result.get("by_state", {})
                 _labels = {
                     "ok": "正常",

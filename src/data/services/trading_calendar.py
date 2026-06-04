@@ -203,12 +203,21 @@ async def build_calendar(
         minute_counts = None
         minute_source_short = None
         if with_minute:
-            minute_counts = await storage.get_minute_bar_counts(day)
-            minute_source_short = await storage.get_minute_source_short_codes(day)
-            if extra_minute_source_short:
-                minute_source_short = minute_source_short | extra_minute_source_short.get(
-                    day, set()
+            # A minute-table query hiccup must NOT break the daily reconcile — degrade
+            # to daily-only for that day (minute_state left NULL) and keep going.
+            try:
+                minute_counts = await storage.get_minute_bar_counts(day)
+                minute_source_short = await storage.get_minute_source_short_codes(day)
+                if extra_minute_source_short:
+                    minute_source_short = minute_source_short | extra_minute_source_short.get(
+                        day, set()
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "build_calendar: minute counts for %s failed, daily-only: %s", day, e
                 )
+                minute_counts = None
+                minute_source_short = None
         rows = reconcile_day(
             roster, suspended, traded, db_normal, db_suspended, minute_counts, minute_source_short
         )

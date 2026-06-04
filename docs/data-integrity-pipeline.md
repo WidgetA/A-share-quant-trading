@@ -71,12 +71,13 @@
 (kimi 变成其中一步)。一句话定位:**增量查漏(只把新交易日补进索引)、再精准补缺。**
 
 ```
-① 刷名单     run_load_listing              —— 新股/退市进 stock_listing_info(roster 跟上);保留 kimi 占位行
-② 核身份     kimi verify_unverified        —— 只核还没验证的新代码 + 回填 code_alias(接住换号);通常很少
-③ 查漏(增量) build_calendar(max_date+1→T-1) —— 只 reconcile 还没进真值表的新交易日,信任已物化的历史索引
-④ 补缺       fill_daily_from_calendar      —— 只补 missing/wrong_suspended;source_none/ok 不碰(绝不全量重下)
-⑤ 确认       build_calendar(④补过的天)     —— 重建被补过的那几天,确认缺口归零
-⑥ 一条飞书汇总(逐步结果 + 最终分类计数 + 点名待修代码)
+① 刷名单      run_load_listing                  —— 新股/退市进 stock_listing_info;保留 kimi 占位行
+② 核身份      kimi verify_unverified            —— 只核新代码 + 回填 code_alias(接住换号);通常很少
+③ 查漏(增量)  build_calendar(max_date+1→T-1, with_minute) —— 只 reconcile 新交易日的日线+分钟状态,信任历史索引
+④ 补日线      fill_daily_from_calendar          —— 只补 daily_state=missing/wrong_suspended(绝不全量重下)
+⑤ 补分钟      fill_minute_from_calendar         —— 只补 minute_state=missing;源头真给不满 241 → 标 source_short
+⑥ 确认        build_calendar(④⑤补过的天, with_minute) —— 重建被补过的天,确认缺口归零 + 持久化 source_short
+⑦ 一条飞书汇总(逐步结果 + 最终分类计数 + 点名待修代码)
 ```
 
 设计要点:
@@ -260,10 +261,11 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 | 端点 | 阶段 | 作用 |
 |------|------|------|
 | `POST /listing-info/load-tushare` | 前置 | 从 Tushare stock_basic 灌权威上市索引 |
-| `POST /calendar/rebuild?start=&end=` | 阶段1 | 重建真值表(默认 2023-01-01~今天) |
+| `POST /calendar/rebuild?start=&end=` | 阶段1 | 重建真值表(默认 2023-01-01~今天)。`?with_minute=1` 同时算 minute_state(阶段3 建底,每天一次分钟 GROUP BY、慢) |
 | `GET  /calendar/status` | — | 查真值表:分状态/分交易状态计数 + 日期范围 + 是否在重建 |
 | `GET  /calendar/problems?state=&limit=` | — | 列出某状态(missing/wrong_suspended/orphan/source_none…)的具体(日期×代码),供核查/修复 |
 | `POST /backfill-daily` | 阶段2 | **默认索引驱动**:补真值表 `missing`+`wrong_suspended`(先跑阶段1);`ok`+`source_none` 跳过 |
+| `POST /backfill-minute` | 阶段3 | **索引驱动**:补真值表 `minute_state=missing`(先跑 `rebuild?with_minute=1` 建底);stk_mins 按股重下,补完确认重建标 ok/source_short |
 | `POST /backfill-daily?mode=full&start=&end=` | bootstrap | 旧的全量审计式重下(建底/扩新范围,默认 CACHE_START~今天) |
 | `POST /calendar/purge-orphan-rows[?execute=1]` | 清理 | 删真值表 `orphan` 对应的 backtest_daily 行(只删孤儿行,退市股保留退市前历史)。不带 execute = dry-run 出清单 |
 | `POST /calendar/purge-codes-data {codes:[...]}` | 清理 | 按显式代码清单删其全部日线(删整只死代码用;上限 500) |

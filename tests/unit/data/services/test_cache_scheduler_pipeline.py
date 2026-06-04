@@ -40,9 +40,13 @@ class _FakeStorage:
         self.logged.append((trigger, result, message))
 
 
+_NO_MINUTE_GAPS = {"dates": 0, "filled": 0, "processed_dates": [], "source_short": {}}
+
+
 class _FakePipeline:
-    def __init__(self, fill_result, calls):
+    def __init__(self, fill_result, calls, minute_result=None):
         self._fill = fill_result
+        self._minute = minute_result if minute_result is not None else _NO_MINUTE_GAPS
         self._calls = calls
 
     async def fill_daily_from_calendar(self, quiet=False):
@@ -50,6 +54,12 @@ class _FakePipeline:
         if isinstance(self._fill, Exception):
             raise self._fill
         return self._fill
+
+    async def fill_minute_from_calendar(self, quiet=False):
+        self._calls.append("fill_minute")
+        if isinstance(self._minute, Exception):
+            raise self._minute
+        return self._minute
 
 
 class _FakeClient:
@@ -103,7 +113,16 @@ def _patch(monkeypatch, *, rebuild_results, kimi_ok=True):
 
     rb_iter = iter(rebuild_results)
 
-    async def fake_rebuild(storage, *, trading_days=None, start=None, end=None, client=None):
+    async def fake_rebuild(
+        storage,
+        *,
+        trading_days=None,
+        start=None,
+        end=None,
+        client=None,
+        with_minute=False,
+        extra_minute_source_short=None,
+    ):
         calls.append("rebuild_full" if trading_days is None else "rebuild_days")
         r = next(rb_iter)
         if isinstance(r, Exception):
@@ -134,9 +153,9 @@ async def test_pipeline_happy_path_no_gaps_runs_in_order(monkeypatch):
     sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls), lv=lv))
     result, message = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # order: ① load → ② kimi → ③ rebuild(full) → ④ fill; ⑤ skipped (no gaps to confirm)
-    assert calls[:4] == ["load", "kimi", "rebuild_full", "fill"]
-    assert "rebuild_days" not in calls
+    # ① load → ② kimi → ③ rebuild(daily+minute) → ④ 补日线 → ⑤ 补分钟; ⑥ skipped (no gaps)
+    assert calls[:5] == ["load", "kimi", "rebuild_full", "fill", "fill_minute"]
+    assert "rebuild_days" not in calls  # ⑥ confirm skipped when nothing was filled
     assert "gap_report" not in calls  # legacy per-day diagnosis no longer auto-sent
 
 
@@ -150,8 +169,44 @@ async def test_pipeline_fill_gaps_triggers_confirm_rebuild(monkeypatch):
     sched = CacheScheduler(_AppState(storage, _FakePipeline(fill, calls), lv=lv))
     result, _ = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ⑤ runs because ④ touched dates → a second rebuild over those days. No gap-report spam.
-    assert calls == ["load", "kimi", "rebuild_full", "fill", "rebuild_days", "notify"]
+    # ⑥ confirm runs because ④ touched dates → rebuild over those days. No gap-report spam.
+    assert calls == [
+        "load",
+        "kimi",
+        "rebuild_full",
+        "fill",
+        "fill_minute",
+        "rebuild_days",
+        "notify",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_minute_gaps_trigger_confirm(monkeypatch):
+    # daily has no gaps, but ⑤ 补分钟 fills minute → ⑥ confirm must still run (with the
+    # source_short feedback so the re-reconcile persists half-day codes).
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN, _RB_CLEAN])
+    minute = {
+        "dates": 1,
+        "filled": 3,
+        "processed_dates": [date(2024, 1, 2)],
+        "source_short": {date(2024, 1, 2): {"300001"}},
+    }
+    storage = _FakeStorage()
+    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
+    pipe = _FakePipeline(_NO_GAPS, calls, minute_result=minute)
+    sched = CacheScheduler(_AppState(storage, pipe, lv=lv))
+    result, _ = await sched._run_pipeline("scheduled")
+    assert result == "success"
+    assert calls == [
+        "load",
+        "kimi",
+        "rebuild_full",
+        "fill",
+        "fill_minute",
+        "rebuild_days",
+        "notify",
+    ]
 
 
 @pytest.mark.asyncio
@@ -162,8 +217,9 @@ async def test_rebuild_failure_skips_fill_and_confirm(monkeypatch):
     result, message = await sched._run_pipeline("scheduled")
     assert result == "failed"
     assert "③" in message  # the rebuild step is flagged
-    # ④ fill + ⑤ confirm must NOT run on a stale index.
+    # ④ 补日线 + ⑤ 补分钟 + ⑥ confirm must NOT run on a stale index.
     assert "fill" not in calls
+    assert "fill_minute" not in calls
     assert "rebuild_days" not in calls
 
 
@@ -220,7 +276,16 @@ async def test_incremental_rebuild_starts_after_max_date(monkeypatch):
     async def fake_load(storage, *, feishu, client=None, stop_storage=False):
         return {"listed": 1, "delisted": 0, "total_entries": 1, "written": 1, "preserved_kimi": 0}
 
-    async def fake_rebuild(storage, *, trading_days=None, start=None, end=None, client=None):
+    async def fake_rebuild(
+        storage,
+        *,
+        trading_days=None,
+        start=None,
+        end=None,
+        client=None,
+        with_minute=False,
+        extra_minute_source_short=None,
+    ):
         if trading_days is None:
             captured["start"] = start
         return _RB_CLEAN
