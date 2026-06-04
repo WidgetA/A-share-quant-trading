@@ -1114,15 +1114,23 @@ class GreptimeBacktestStorage:
         by_trade = await self.db.fetch(
             "SELECT trade_status, COUNT(*) as cnt FROM trading_calendar GROUP BY trade_status"
         )
+        # minute_state only set for days reconciled with_minute (else NULL) — count the
+        # non-NULL ones so 补分钟 progress (missing → ok) is observable via /calendar/status.
+        by_minute = await self.db.fetch(
+            "SELECT minute_state, COUNT(*) as cnt FROM trading_calendar "
+            "WHERE minute_state IS NOT NULL GROUP BY minute_state"
+        )
         rng = await self.db.fetchrow("SELECT MIN(ts) as mn, MAX(ts) as mx FROM trading_calendar")
         daily_state = {r["daily_state"]: int(r["cnt"]) for r in by_daily}
         trade_status = {r["trade_status"]: int(r["cnt"]) for r in by_trade}
+        minute_state = {r["minute_state"]: int(r["cnt"]) for r in by_minute}
         mn = rng["mn"] if rng else None
         mx = rng["mx"] if rng else None
         return {
             "total_rows": sum(daily_state.values()),
             "by_daily_state": daily_state,
             "by_trade_status": trade_status,
+            "by_minute_state": minute_state,
             "min_date": ts_to_date(mn).isoformat() if mn is not None else None,
             "max_date": ts_to_date(mx).isoformat() if mx is not None else None,
         }
