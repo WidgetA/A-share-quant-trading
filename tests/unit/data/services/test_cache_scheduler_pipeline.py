@@ -20,11 +20,15 @@ from src.data.services.cache_scheduler import CacheScheduler
 class _FakeStorage:
     is_ready = True
 
-    def __init__(self):
+    def __init__(self, max_date="2023-01-01"):
         self.logged: list = []
+        self._max_date = max_date
 
     async def get_trading_calendar_summary(self):
-        return {"by_daily_state": {"ok": 100, "source_none": 5}}
+        return {
+            "by_daily_state": {"ok": 100, "source_none": 5},
+            "max_date": self._max_date,
+        }
 
     async def get_calendar_problem_codes(self, states):
         return set()
@@ -205,6 +209,48 @@ async def test_kimi_tool_errors_surface_as_warning(monkeypatch):
     # so the operator sees a partially-broken kimi night (not reported as clean).
     assert result == "success"
     assert "告警" in message and "② 核身份" in message
+
+
+@pytest.mark.asyncio
+async def test_incremental_rebuild_starts_after_max_date(monkeypatch):
+    # ③ must rebuild ONLY new days (max_date+1 .. T-1), trusting the materialized
+    # historical index — never re-scan all history nightly.
+    captured: dict = {}
+
+    async def fake_load(storage, *, feishu, client=None, stop_storage=False):
+        return {"listed": 1, "delisted": 0, "total_entries": 1, "written": 1, "preserved_kimi": 0}
+
+    async def fake_rebuild(storage, *, trading_days=None, start=None, end=None, client=None):
+        if trading_days is None:
+            captured["start"] = start
+        return _RB_CLEAN
+
+    async def fake_notify(msg):
+        pass
+
+    monkeypatch.setattr("scripts.load_listing_from_tushare.run_load_listing", fake_load)
+    monkeypatch.setattr("src.data.services.trading_calendar.rebuild_calendar", fake_rebuild)
+    monkeypatch.setattr(mod, "_notify_feishu", fake_notify)
+    monkeypatch.setattr("src.common.config.get_tushare_token", lambda: "tok")
+    monkeypatch.setattr("src.data.clients.tushare_realtime.TushareRealtimeClient", _FakeClient)
+    monkeypatch.setattr("src.data.services.kimi_listing_verifier.kimi_available", lambda: False)
+
+    storage = _FakeStorage(max_date="2024-01-10")
+    sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, [])))
+    await sched._run_pipeline("scheduled")
+    assert captured["start"] == date(2024, 1, 11)  # max_date + 1, NOT CACHE_START_DATE
+
+
+@pytest.mark.asyncio
+async def test_empty_truth_table_skips_rebuild_and_fill(monkeypatch):
+    # No materialized index yet → do NOT auto-full-rebuild nightly (manual bootstrap).
+    calls = _patch(monkeypatch, rebuild_results=[])
+    storage = _FakeStorage(max_date=None)
+    sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls)))
+    result, _ = await sched._run_pipeline("scheduled")
+    assert "rebuild_full" not in calls  # no rebuild
+    assert "fill" not in calls  # ④ skipped (no fresh index to fill against)
+    assert result == "success"  # a warning, not a hard failure
 
 
 @pytest.mark.asyncio

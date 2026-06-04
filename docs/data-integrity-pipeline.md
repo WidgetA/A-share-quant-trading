@@ -64,27 +64,33 @@
 
 过去拆成「3 点缓存补全 + 4 点 kimi 核名单 + 手动刷名单 + 手动重建」四块各跑各的,还要互斥锁防抢。
 现在**捏成一条**:`CacheScheduler` 每天凌晨 3 点按顺序跑完整个收敛环,4 点那条独立调度**退休**
-(kimi 变成其中一步)。一句话定位:**先查漏(全量检测)、再补缺(精准,只补查出来的)。**
+(kimi 变成其中一步)。一句话定位:**增量查漏(只把新交易日补进索引)、再精准补缺。**
 
 ```
-① 刷名单    run_load_listing         —— 新股/退市进 stock_listing_info(roster 跟上)
-② 核身份    kimi verify_unverified   —— 只核还没验证的新代码 + 回填 code_alias(接住换号);通常很少/跳过
-③ 查漏      build_calendar(全历史)   —— 阶段1:重建真值表 2023→T-1,哪只哪天缺一目了然
-④ 补缺      fill_daily_from_calendar —— 阶段2:只补 missing/wrong_suspended;source_none/ok 不碰(绝不全量重下)
-⑤ 确认      build_calendar(④补过的天) —— 重建被补过的那几天,确认缺口归零
-⑥ 一条飞书汇总(逐步结果 + 最终分类计数)
+① 刷名单     run_load_listing              —— 新股/退市进 stock_listing_info(roster 跟上);保留 kimi 占位行
+② 核身份     kimi verify_unverified        —— 只核还没验证的新代码 + 回填 code_alias(接住换号);通常很少
+③ 查漏(增量) build_calendar(max_date+1→T-1) —— 只 reconcile 还没进真值表的新交易日,信任已物化的历史索引
+④ 补缺       fill_daily_from_calendar      —— 只补 missing/wrong_suspended;source_none/ok 不碰(绝不全量重下)
+⑤ 确认       build_calendar(④补过的天)     —— 重建被补过的那几天,确认缺口归零
+⑥ 一条飞书汇总(逐步结果 + 最终分类计数 + 点名待修代码)
 ```
 
 设计要点:
-- **查漏全量、补缺精准**:③ 覆盖全历史(任何历史倒退当晚发现),④ 只动 ③ 查出来的那几只那几天,
-  **不是 `mode=full` 的全量重下**。④ 通常每天 0 缺口 → 几乎瞬间;⑤ 只重建被补过的天,无缺口则跳过。
-- **顺序跑 → 不再需要互斥锁**(当初 `cache_fill_running` vs kimi 的锁,是两者分开跑才会抢内存/抢名单新鲜度)。
-- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续后面能跑的(如 kimi 挂了,照样用现有名单重建+补);
-  唯独 ③ 重建失败则跳过 ④⑤(不在过期索引上乱补,fail-safe)。
-- **只在 3 点跑,不在 startup 跑**:watchtower 频繁重启,startup 跑会每次重启都重来一遍全量重建(见 §8)。
-- **开关**:`get_cache_scheduler_enabled()` 管整条;`get_listing_verify_enabled()` 管 ② 是否跑 kimi。
-- **分钟线不在本流程**(阶段三,单独触发);但缺口**诊断报告**仍上报 → 分钟缺口看得见,只是不自动补。
-- 手动端点(`/calendar/rebuild`、`/backfill-daily`、`/listing-info/*`)全保留,排查/补历史用。
+- **③ 是增量,不是全量(关键)**:真值表是**物化**的——历史做对一次就存着、之后直接信。3 点只 reconcile
+  `max_date+1 → T-1`(基本就昨天)。**绝不每晚全表重扫 2023→今**:那既慢,又会把历史里 GreptimeDB
+  没落地删除 / 坏 tag 索引留下的「幽灵行」反复重造成 orphan(见 §8 的 300114 案)。**全量/历史重建是
+  手动端点**(`/calendar/rebuild`)的事——建底、重组换号、或发现索引有毛病时手动跑一次。真值表为空时
+  ③ 不自动全量建底(发警告、等手动),免得每次重启偷偷重扫全史。
+- **补缺精准**:④ 只动索引标了缺的那几只那几天,不是 `mode=full` 的全量重下;通常每天 0 缺口 → 几乎瞬间;
+  ⑤ 只重建被补过的天,无缺口则跳过。
+- **顺序跑 → 不再需要互斥锁**(当初 `cache_fill_running` vs kimi 的锁,是两者分开跑才会抢)。
+- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续;唯独 ③ 失败则跳过 ④⑤(不在过期索引上乱补)。
+- **kimi 无开关**:装了 + 有 `KIMI_API_KEY` 就跑;用不了 → 汇总里报「⚠️ 警告」(不被静默关掉)。
+- **只在 3 点跑,不在 startup 跑**(watchtower 频繁重启,见 §8)。
+- **分钟线不在本流程**(阶段三,单独触发)。逐日刷屏的老快照诊断报告已**不再每晚发**(它走旧的
+  `audit_daily_gaps`、跟真值表两套打架);每日就这一条真值表汇总、末尾点名待修代码,深挖走手动
+  `POST /api/audit/diagnose-gaps`。
+- 手动端点(`/calendar/rebuild`、`/backfill-daily`、`/listing-info/*`)全保留。
 
 ---
 
@@ -221,6 +227,15 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   **永远残留**,重建多少次 source_none 都降不下来(卡在 5.5 万)。修法:`upsert_trading_calendar` 写前先
   `DELETE FROM trading_calendar WHERE ts=当天`,再插 reconcile 结果,使每天真值表与 reconcile 完全一致
   (空 rows 也照清)。**教训:做"快照/重算"型写入时,要么先清范围再写、要么显式删差集,纯 upsert 会留残留。**
+- **GreptimeDB 等号查询会漏「坏 tag 索引」的行,全表扫描却读得到(2026-06,300114 案,折腾最久的一个)**:
+  300114 重组迁 302132 后,backtest_daily 残留一条 `300114 @ 2024-06-06` 的**真行**,但它的 tag 索引坏了:
+  `SELECT … WHERE stock_code='300114'`(走 tag 索引)**查不到**(于是被一路误判成"没数据的幽灵"),
+  可 reconcile 的 `WHERE ts=…`(**全表扫描**)**读得到** → 每次重建都把它判成 orphan;删了真值表标记,
+  下次全量重建又从这条真行盖回来。**教训**:① **按 tag 等号查不到 ≠ 数据不存在**;reconcile/DELETE 走的是
+  全表扫描,真相以全表扫描为准,别信等号 SELECT 的 "No Data"。② 删这种行用**带 ts 的等号 DELETE**
+  (`DELETE … WHERE ts=… AND stock_code='X'`)能删掉(DELETE 也走全表扫描、够得着),删完重建即净;实在
+  删不动再 `ADMIN flush_table` + `ADMIN compact_table` 落地。③ **根上的防线 = 每日只增量重建(§4.1)**:
+  历史索引建对一次就信、不每晚全表重扫,这类历史脏行就不会被反复重造成 orphan。
 
 ---
 

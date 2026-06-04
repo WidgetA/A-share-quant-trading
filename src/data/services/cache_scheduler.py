@@ -383,22 +383,45 @@ class CacheScheduler:
                         else:
                             steps.append(("② 核身份(kimi)", "成功", detail))
 
-            # ③ 查漏 — 重建真值表 全历史 2023→T-1
-            ok, r = await self._bounded(
-                rebuild_calendar(storage, start=CACHE_START_DATE, end=yesterday, client=client),
-                _STEP_TIMEOUT_REBUILD,
-            )
-            rebuild_ok = ok
-            if ok:
+            # ③ 查漏 — 增量重建:只 reconcile 还没进真值表的新交易日(基本就昨天),
+            # 信任已物化的历史索引,绝不每晚全表重扫历史。全表重扫又慢、又会把历史里
+            # GreptimeDB 没落地删除留下的"幽灵行"反复重造成 orphan(300114 那案)。
+            # 全量/历史重建是手动端点(建底 / 重组换号 / 修索引)的事。
+            incr_start: date | None = None
+            try:
+                pre = await storage.get_trading_calendar_summary()
+                md = pre.get("max_date")
+                if md:
+                    incr_start = date.fromisoformat(md) + timedelta(days=1)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("maintenance: 读真值表 max_date 失败: %s", e)
+
+            if incr_start is None:
+                # 真值表为空 → 不在 3 点偷偷做全量重建(那是手动建底的事)。
+                rebuild_ok = False
                 steps.append(
-                    (
-                        "③ 查漏·重建真值表",
-                        "成功",
-                        f"{r['days']} 个交易日 / {r['rows']:,} 行 / 待修 {r['problem_rows']:,}",
-                    )
+                    ("③ 查漏·增量重建", "警告", "真值表为空,请先手动全量重建建底;本次跳过")
                 )
+            elif incr_start > yesterday:
+                rebuild_ok = True
+                steps.append(("③ 查漏·增量重建", "成功", "历史索引已最新,无新交易日"))
             else:
-                steps.append(("③ 查漏·重建真值表", "失败", r))
+                ok, r = await self._bounded(
+                    rebuild_calendar(storage, start=incr_start, end=yesterday, client=client),
+                    _STEP_TIMEOUT_REBUILD,
+                )
+                rebuild_ok = ok
+                if ok:
+                    steps.append(
+                        (
+                            "③ 查漏·增量重建",
+                            "成功",
+                            f"新增 {incr_start}~{yesterday}: {r['days']} 个交易日 / "
+                            f"写入 {r['rows']:,} 行 / 待修 {r['problem_rows']:,}",
+                        )
+                    )
+                else:
+                    steps.append(("③ 查漏·增量重建", "失败", r))
 
             # ④ 补缺 — 索引驱动,只补 missing/wrong_suspended (skip if ③ failed)
             processed_dates: list = []

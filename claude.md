@@ -88,7 +88,7 @@ Rules:
 Rules:
 1. **Non-trading data** has its own sources: local JSON for boards and stock names
 2. **Single Tushare token** powers realtime quotes, daily OHLCV, suspend_d, bak_basic, stk_mins
-3. **每日数据维护流水线** runs at 3am daily (`CacheScheduler`): 刷名单 → kimi 核新代码 → 重建真值表(全历史查漏)→ 索引驱动补缺 → 确认。查漏全量、补缺精准。见 `docs/data-integrity-pipeline.md` §4.1
+3. **每日数据维护流水线** runs at 3am daily (`CacheScheduler`): 刷名单 → kimi 核新代码 → **增量**重建真值表(只 reconcile `max_date+1→T-1` 的新交易日,信任已物化的历史索引)→ 索引驱动补缺 → 确认。**增量查漏、精准补缺;绝不每晚全表重扫历史**(全量重建是手动端点的事——建底/换号/索引出错时)。见 `docs/data-integrity-pipeline.md` §4.1
 4. **Live prev_close is always fetched live from Tushare `daily`** — never read from cache. Stale cache caused silent limit-up filter bypass on 2026-05-11 (002975 incident — see `MEMORY.md`)
 5. **⚠️ Live 37d history 当前是临时方案** —— cache (stock_snapshot + stock_listing_info + 自动验证) 没完全跑通前,live 扫描走实时 Tushare `daily` 拉 37 次以解耦 cache 风险。等以下条件满足后**回退到读 cache**:
    - `stock_snapshot` 三源并集稳定 (B∪D∪S 每天可靠入库) ✅
