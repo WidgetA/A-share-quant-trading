@@ -7,7 +7,8 @@ A quantitative trading system for China A-share market with modular architecture
 > - [docs/trading-safety-patterns.md](docs/trading-safety-patterns.md) — Forbidden/correct code patterns with examples
 > - [docs/datetime-timezone-guide.md](docs/datetime-timezone-guide.md) — Date calculation examples, asyncpg timezone pitfalls
 > - [docs/features.md](docs/features.md) — Feature specifications (check before any development)
-> - [docs/data-integrity-pipeline.md](docs/data-integrity-pipeline.md) — 真值表 (trading_calendar) 为中心的数据完整性架构:三阶段流程、状态定义、复合规则、索引驱动补全、关键修复与坑(改数据管线前必读)
+> - [docs/backtest-data-engine.md](docs/backtest-data-engine.md) — **Backtest data engine architecture (English, start here for the data engine)**: mental model, module map, storage schema, write/reconcile path, truth table, nightly pipeline, read/adapter layer, safety invariants
+> - [docs/data-integrity-pipeline.md](docs/data-integrity-pipeline.md) — 真值表 (trading_calendar) 为中心的数据完整性架构:三阶段流程、状态定义、复合规则、索引驱动补全、关键修复与坑(改数据管线前必读;backtest-data-engine.md 的深入细节)
 
 ## 1. Development Workflow Rules
 

@@ -1,5 +1,8 @@
 # 数据完整性管线架构 (Data Integrity Pipeline)
 
+> **本文是 [`backtest-data-engine.md`](backtest-data-engine.md)(英文·回测数据引擎总架构)的深入细节篇**
+> ——专讲真值表 reconcile 规则与全部踩坑教训(§8)。先看那篇拿整体心智模型 + 模块地图,本文再深挖。
+>
 > 这套管线负责维护一个**正确的、可直接查询的每日数据源**。改动前先读本文——逻辑复杂,
 > 多处是踩坑后才定下来的设计,改错一处会静默丢数据。配套:`docs/features.md` DAT-006、
 > CLAUDE.md §8(数据源)/§9(成交量单位)。
