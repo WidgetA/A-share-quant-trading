@@ -214,6 +214,83 @@ async def test_build_calendar_aggregates_by_state():
     assert result["by_state"][MISSING] == 1
     assert result["problem_rows"] == 1
     assert len(storage.upserts) == 1
+    assert result["skipped_days"] == []  # normal day, nothing skipped
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_skips_day_when_traded_empty_but_db_has_real_rows():
+    # FAIL-SAFE: an empty fetch_traded for a day the DB already holds many real rows for is a
+    # transient Tushare daily failure, NOT a no-trade day → SKIP + surface, never mass-flip
+    # those rows to wrong_traded (the 2026-06-03 corruption that motivated this guard).
+    big = {str(600000 + i) for i in range(150)}  # 150 real DB rows ≥ guard threshold (100)
+
+    class _EmptyTradedStorage:
+        def __init__(self):
+            self.upserts: list = []
+
+        async def get_listing_info_all(self):
+            return {c: {"list_date": date(1999, 1, 1), "delist_date": None} for c in big}
+
+        async def get_daily_split_for_date(self, day):
+            return (set(big), set())  # 库里有 150 行真实日线
+
+        async def upsert_trading_calendar(self, day, rows):
+            self.upserts.append((day, rows))
+            return len(rows)
+
+    storage = _EmptyTradedStorage()
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return set()  # Tushare daily 空响应(取数失败)
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+    )
+    assert result["skipped_days"] == ["2024-01-02"]
+    assert result["rows"] == 0  # nothing upserted → existing good rows left intact
+    assert storage.upserts == []  # the day was NOT reconciled/overwritten
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_empty_traded_genuine_nontrading_day_not_skipped():
+    # A genuine empty day (0 traded AND ~0 DB rows) must NOT trip the guard — it reconciles
+    # normally (roster codes → source_none), so the guard can't cause false skips.
+    class _EmptyBothStorage:
+        def __init__(self):
+            self.upserts: list = []
+
+        async def get_listing_info_all(self):
+            return {"600000": {"list_date": date(1999, 1, 1), "delist_date": None}}
+
+        async def get_daily_split_for_date(self, day):
+            return (set(), set())  # 库里也没有 → 真正无数据
+
+        async def upsert_trading_calendar(self, day, rows):
+            self.upserts.append((day, rows))
+            return len(rows)
+
+    storage = _EmptyBothStorage()
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return set()
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+    )
+    assert result["skipped_days"] == []  # not skipped (no real rows to protect)
+    assert len(storage.upserts) == 1  # reconciled normally
 
 
 # --- minute_state reconcile (阶段3) ---

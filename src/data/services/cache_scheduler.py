@@ -429,14 +429,24 @@ class CacheScheduler:
                 )
                 rebuild_ok = ok
                 if ok:
-                    steps.append(
-                        (
-                            "③ 查漏·增量重建",
-                            "成功",
-                            f"新增 {incr_start}~{yesterday}: {r['days']} 个交易日 / "
-                            f"写入 {r['rows']:,} 行 / 待修 {r['problem_rows']:,}",
-                        )
+                    detail = (
+                        f"新增 {incr_start}~{yesterday}: {r['days']} 个交易日 / "
+                        f"写入 {r['rows']:,} 行 / 待修 {r['problem_rows']:,}"
                     )
+                    sk = r.get("skipped_days") or []
+                    if sk:
+                        # 源头(Tushare daily)空响应被守卫拦下、没覆盖好数据 → 必须可见(警告)
+                        steps.append(
+                            (
+                                "③ 查漏·增量重建",
+                                "警告",
+                                detail
+                                + f" / ⚠️跳过 {len(sk)} 天(疑似 Tushare 取数失败,未覆盖好数据,"
+                                f"待源头恢复重试): {'、'.join(sk)}",
+                            )
+                        )
+                    else:
+                        steps.append(("③ 查漏·增量重建", "成功", detail))
                 else:
                     steps.append(("③ 查漏·增量重建", "失败", r))
 
@@ -506,6 +516,7 @@ class CacheScheduler:
             daily_only_days = sorted(set(daily_dates) - minute_set)
             confirm_days_total = 0
             confirm_problem_total = 0
+            confirm_skipped: list[str] = []
             confirm_fail: str | None = None
             # ⑥a 分钟确认(带 source_short)— 仅 ⑤ 动过的天,被 ⑤ 上限 bound
             if minute_set:
@@ -522,6 +533,7 @@ class CacheScheduler:
                 if ok:
                     confirm_days_total += r["days"]
                     confirm_problem_total += r["problem_rows"]
+                    confirm_skipped += r.get("skipped_days") or []
                 else:
                     confirm_fail = f"分钟确认失败: {r}"
             # ⑥b 日线确认(便宜·with_minute=False)— ④ 动过但 ⑤ 没碰分钟的天
@@ -533,6 +545,7 @@ class CacheScheduler:
                 if ok:
                     confirm_days_total += r["days"]
                     confirm_problem_total += r["problem_rows"]
+                    confirm_skipped += r.get("skipped_days") or []
                 else:
                     confirm_fail = f"日线确认失败: {r}"
 
@@ -540,6 +553,17 @@ class CacheScheduler:
                 steps.append(("⑥ 确认", "跳过", "无补缺，免重建"))
             elif confirm_fail is not None:
                 steps.append(("⑥ 确认·重建补过的天", "失败", confirm_fail))
+            elif confirm_skipped:
+                # 守卫拦下了源头空响应的天(没覆盖)→ 可见告警,别让人以为全确认干净了
+                steps.append(
+                    (
+                        "⑥ 确认·重建补过的天",
+                        "警告",
+                        f"{confirm_days_total} 天 / 仍待修 {confirm_problem_total:,} / "
+                        f"⚠️跳过 {len(confirm_skipped)} 天(疑似 Tushare 取数失败): "
+                        f"{'、'.join(confirm_skipped)}",
+                    )
+                )
             else:
                 steps.append(
                     (

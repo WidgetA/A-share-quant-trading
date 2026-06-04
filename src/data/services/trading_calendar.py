@@ -40,6 +40,16 @@ MINUTE_MISSING = "missing"  # <241 且源头未确认短 → 可补 (阶段3)
 MINUTE_SOURCE_SHORT = "source_short"  # 重下后源头真给不满 241 (半天交易) → 不再补
 MINUTE_BARS_FULL = 241  # 9:30-11:30 + 13:00-15:00 = 240min + 收盘 = 241 根
 
+# Fail-safe guard: an EMPTY `traded` (Tushare daily) for a day the DB already holds many
+# real bars for is almost certainly a transient SOURCE failure (empty/garbled response),
+# NOT a real "nobody traded" day. Reconciling it anyway flips every such code to
+# wrong_traded (源头查无 → 该不该存在), corrupting good state from a one-off hiccup
+# (observed 2026-06-03: a momentary empty `daily` turned 5511 ok rows into wrong_traded).
+# Per CLAUDE.md trading-safety (incomplete data → skip; never silent-empty fallback) we
+# SKIP that day's reconcile (leave its rows intact) + surface it loudly. A genuine
+# non-trading day has 0 traded AND ~0 db rows, so it sails through.
+_EMPTY_TRADED_GUARD_MIN_DB_ROWS = 100
+
 
 def _minute_state(
     code: str,
@@ -195,11 +205,24 @@ async def build_calendar(
     total_rows = 0
     by_state: dict[str, int] = {}
     by_minute: dict[str, int] = {}
+    skipped_days: list[date] = []  # days skipped because fetch_traded looked like a源头失败
     for day in trading_days:
         roster = roster_for_day(listing_info, day)
         suspended = await fetch_suspended(day)
         traded = await fetch_traded(day)
         db_normal, db_suspended = await storage.get_daily_split_for_date(day)
+        # FAIL-SAFE: empty traded + many real DB rows ⇒ almost certainly a transient
+        # Tushare `daily` failure, not a real no-trade day. Reconciling would mass-flip
+        # those rows to wrong_traded (corrupting good state). Skip + surface, don't corrupt.
+        if not traded and len(db_normal) >= _EMPTY_TRADED_GUARD_MIN_DB_ROWS:
+            logger.error(
+                "build_calendar: %s — fetch_traded 空但库里有 %d 行真实日线,几乎可断定是 Tushare "
+                "daily 取数失败(空响应);跳过这天 reconcile,不把好状态刷成 wrong_traded",
+                day,
+                len(db_normal),
+            )
+            skipped_days.append(day)
+            continue
         minute_counts = None
         minute_source_short = None
         if with_minute:
@@ -235,6 +258,7 @@ async def build_calendar(
         "problem_rows": problem_rows,
         "by_state": by_state,
         "by_minute": by_minute,
+        "skipped_days": [d.isoformat() for d in skipped_days],
     }
 
 
