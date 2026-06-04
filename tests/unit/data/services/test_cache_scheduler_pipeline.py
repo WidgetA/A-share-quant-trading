@@ -1,10 +1,11 @@
 # === MODULE PURPOSE ===
 # Tests for the unified daily data-maintenance pipeline in CacheScheduler
 # (docs/data-integrity-pipeline.md §4.1): ① load-tushare → ② kimi → ③ rebuild
-# (全历史查漏) → ④ index-fill (补缺) → ⑤ rebuild touched dates (确认). Covers the
-# orchestration order, failure isolation (③ fail ⇒ skip ④⑤), the ⑤-only-if-touched
-# rule, the _bounded step wrapper, and the busy-guard. External steps are faked at
-# their source modules (the pipeline re-imports them at call time).
+# (增量查漏·含分钟状态) → ④ 补日线 → ⑤ 补分钟(带上限) → ⑥ rebuild touched dates (确认日线+分钟).
+# Covers the orchestration order, failure isolation (③ fail ⇒ skip ④⑤⑥), the
+# ⑥-only-if-touched rule, the truncated-minute warning, the _bounded step wrapper, and
+# the busy-guard. External steps are faked at their source modules (the pipeline
+# re-imports them at call time).
 
 from __future__ import annotations
 
@@ -40,7 +41,15 @@ class _FakeStorage:
         self.logged.append((trigger, result, message))
 
 
-_NO_MINUTE_GAPS = {"dates": 0, "filled": 0, "processed_dates": [], "source_short": {}}
+_NO_MINUTE_GAPS = {
+    "dates": 0,
+    "filled": 0,
+    "processed_dates": [],
+    "source_short": {},
+    "processed": 0,
+    "truncated": False,
+    "remaining": 0,
+}
 
 
 class _FakePipeline:
@@ -55,7 +64,7 @@ class _FakePipeline:
             raise self._fill
         return self._fill
 
-    async def fill_minute_from_calendar(self, quiet=False):
+    async def fill_minute_from_calendar(self, quiet=False, max_codes=None):
         self._calls.append("fill_minute")
         if isinstance(self._minute, Exception):
             raise self._minute
@@ -153,16 +162,14 @@ async def test_pipeline_happy_path_no_gaps_runs_in_order(monkeypatch):
     sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls), lv=lv))
     result, message = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ① load → ② kimi → ③ rebuild → ④ 补日线; ⑤ confirm skipped (no gaps).
-    # 分钟补全(fill_minute)已撤出每晚流水线(待加固)→ 不应被调用。
-    assert calls[:4] == ["load", "kimi", "rebuild_full", "fill"]
-    assert "fill_minute" not in calls
-    assert "rebuild_days" not in calls  # ⑤ confirm skipped when nothing was filled
+    # ① load → ② kimi → ③ rebuild → ④ 补日线 → ⑤ 补分钟; ⑥ confirm skipped (nothing touched).
+    assert calls[:5] == ["load", "kimi", "rebuild_full", "fill", "fill_minute"]
+    assert "rebuild_days" not in calls  # ⑥ confirm skipped when nothing was filled
 
 
 @pytest.mark.asyncio
 async def test_pipeline_fill_gaps_triggers_confirm_rebuild(monkeypatch):
-    # ③ then ⑤ both rebuild → supply two results.
+    # ③ then ⑥ both rebuild → supply two results.
     calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN, _RB_CLEAN])
     fill = {"dates": 2, "filled": 50, "processed_dates": [date(2024, 1, 2), date(2024, 1, 3)]}
     storage = _FakeStorage()
@@ -170,8 +177,114 @@ async def test_pipeline_fill_gaps_triggers_confirm_rebuild(monkeypatch):
     sched = CacheScheduler(_AppState(storage, _FakePipeline(fill, calls), lv=lv))
     result, _ = await sched._run_pipeline("scheduled")
     assert result == "success"
-    # ⑤ confirm runs because ④ touched dates → rebuild over those days. fill_minute 撤出。
-    assert calls == ["load", "kimi", "rebuild_full", "fill", "rebuild_days", "notify"]
+    # ④ touched dates (minute had none) → ⑥ confirm rebuilds over those days.
+    assert calls == [
+        "load",
+        "kimi",
+        "rebuild_full",
+        "fill",
+        "fill_minute",
+        "rebuild_days",
+        "notify",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_minute_fill_truncated_warns_and_confirms(monkeypatch):
+    # ⑤ minute fill hit the nightly cap → reported as 警告 (visible, NOT silently
+    # swallowed — CLAUDE.md §12) and ⑥ confirm still re-reconciles the touched days
+    # (here minute days only; daily had no gaps). ③ + ⑥ → two rebuild results.
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN, _RB_CLEAN])
+    minute = {
+        "dates": 2,
+        "filled": 9000,
+        "processed_dates": [date(2024, 1, 2), date(2024, 1, 3)],
+        "source_short": {date(2024, 1, 2): {"600000"}},
+        "processed": 12000,
+        "truncated": True,
+        "remaining": 3000,
+    }
+    storage = _FakeStorage()
+    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
+    sched = CacheScheduler(
+        _AppState(storage, _FakePipeline(_NO_GAPS, calls, minute_result=minute), lv=lv)
+    )
+    result, message = await sched._run_pipeline("scheduled")
+    assert calls == [
+        "load",
+        "kimi",
+        "rebuild_full",
+        "fill",
+        "fill_minute",
+        "rebuild_days",
+        "notify",
+    ]
+    # Truncated backlog surfaces as a warning; the pass still functionally succeeds.
+    assert result == "success"
+    assert "告警" in message and "⑤ 补分钟" in message
+
+
+@pytest.mark.asyncio
+async def test_confirm_runs_with_minute_only_over_minute_touched_days(monkeypatch):
+    # ⑥ must NOT feed the (uncapped) daily-gap set into a with_minute=True confirm — each
+    # such day costs a ~15-30s minute GROUP BY, so an unbounded daily backlog would blow
+    # _STEP_TIMEOUT_CONFIRM and wedge the nightly. Only ⑤'s minute-touched days (bounded by
+    # the cap) get with_minute=True; daily-only days confirm cheaply (with_minute=False).
+    rebuild_calls: list[dict] = []
+
+    async def fake_load(storage, *, feishu, client=None, stop_storage=False):
+        return {"listed": 1, "delisted": 0, "total_entries": 1, "written": 1, "preserved_kimi": 0}
+
+    rb_iter = iter([_RB_CLEAN, _RB_CLEAN, _RB_CLEAN])  # ③ + ⑥a(minute) + ⑥b(daily-only)
+
+    async def fake_rebuild(
+        storage,
+        *,
+        trading_days=None,
+        start=None,
+        end=None,
+        client=None,
+        with_minute=False,
+        extra_minute_source_short=None,
+    ):
+        rebuild_calls.append(
+            {
+                "kind": "full" if trading_days is None else "days",
+                "trading_days": trading_days,
+                "with_minute": with_minute,
+            }
+        )
+        return next(rb_iter)
+
+    async def fake_notify(msg):
+        pass
+
+    monkeypatch.setattr("scripts.load_listing_from_tushare.run_load_listing", fake_load)
+    monkeypatch.setattr("src.data.services.trading_calendar.rebuild_calendar", fake_rebuild)
+    monkeypatch.setattr(mod, "_notify_feishu", fake_notify)
+    monkeypatch.setattr("src.common.config.get_tushare_token", lambda: "tok")
+    monkeypatch.setattr("src.data.clients.tushare_realtime.TushareRealtimeClient", _FakeClient)
+    monkeypatch.setattr("src.data.services.kimi_listing_verifier.kimi_available", lambda: False)
+
+    day_a, day_b = date(2024, 2, 1), date(2024, 2, 2)  # daily touches A, minute touches B
+    fill = {"dates": 1, "filled": 10, "processed_dates": [day_a]}
+    minute = {
+        "dates": 1,
+        "filled": 20,
+        "processed_dates": [day_b],
+        "source_short": {},
+        "processed": 20,
+        "truncated": False,
+        "remaining": 0,
+    }
+    sched = CacheScheduler(_AppState(_FakeStorage(), _FakePipeline(fill, [], minute_result=minute)))
+    result, _ = await sched._run_pipeline("scheduled")
+    assert result == "success"
+    confirms = [c for c in rebuild_calls if c["kind"] == "days"]
+    assert len(confirms) == 2  # one minute-confirm + one daily-only-confirm (disjoint days)
+    by_minute = {c["with_minute"]: c["trading_days"] for c in confirms}
+    assert by_minute[True] == [day_b]  # minute-touched day → with_minute=True
+    assert by_minute[False] == [day_a]  # daily-only day → cheap, with_minute=False
 
 
 @pytest.mark.asyncio

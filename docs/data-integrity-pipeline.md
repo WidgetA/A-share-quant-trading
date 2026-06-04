@@ -75,7 +75,7 @@
 ② 核身份      kimi verify_unverified            —— 只核新代码 + 回填 code_alias(接住换号);通常很少
 ③ 查漏(增量)  build_calendar(max_date+1→T-1, with_minute) —— 只 reconcile 新交易日的日线+分钟状态,信任历史索引
 ④ 补日线      fill_daily_from_calendar          —— 只补 daily_state=missing/wrong_suspended(绝不全量重下)
-⑤ 补分钟      fill_minute_from_calendar         —— 只补 minute_state=missing;源头真给不满 241 → 标 source_short
+⑤ 补分钟      fill_minute_from_calendar(每晚上限) —— 只补 minute_state=missing;逐批心跳日志;超上限下次续补;源头不满 241 → 标 source_short
 ⑥ 确认        build_calendar(④⑤补过的天, with_minute) —— 重建被补过的天,确认缺口归零 + 持久化 source_short
 ⑦ 一条飞书汇总(逐步结果 + 最终分类计数 + 点名待修代码)
 ```
@@ -86,13 +86,18 @@
   没落地删除 / 坏 tag 索引留下的「幽灵行」反复重造成 orphan(见 §8 的 300114 案)。**全量/历史重建是
   手动端点**(`/calendar/rebuild`)的事——建底、重组换号、或发现索引有毛病时手动跑一次。真值表为空时
   ③ 不自动全量建底(发警告、等手动),免得每次重启偷偷重扫全史。
-- **补缺精准**:④ 只动索引标了缺的那几只那几天,不是 `mode=full` 的全量重下;通常每天 0 缺口 → 几乎瞬间;
-  ⑤ 只重建被补过的天,无缺口则跳过。
+- **补缺精准**:④/⑤ 只动索引标了缺的那几只那几天,不是 `mode=full` 的全量重下;日线通常每天 0 缺口 → 几乎瞬间;
+  ⑥ 只重建被补过的天(日线+分钟一起确认),无缺口则跳过。
 - **顺序跑 → 不再需要互斥锁**(当初 `cache_fill_running` vs kimi 的锁,是两者分开跑才会抢)。
-- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续;唯独 ③ 失败则跳过 ④⑤(不在过期索引上乱补)。
+- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续;唯独 ③ 失败则跳过 ④⑤⑥(不在过期索引上乱补)。
 - **kimi 无开关**:装了 + 有 `KIMI_API_KEY` 就跑;用不了 → 汇总里报「⚠️ 警告」(不被静默关掉)。
 - **只在 3 点跑,不在 startup 跑**(watchtower 频繁重启,见 §8)。
-- **分钟线不在本流程**(阶段三,单独触发)。逐日刷屏的老快照诊断报告已**不再每晚发**(它走旧的
+- **分钟线在本流程,但带每晚上限**:⑤ 跟着索引补当晚该补的分钟,设上限 `NIGHTLY_MINUTE_MAX_CODES`
+  (≈2.4 个交易日的量)。稳态每天就一天约 5000 只(天)、十几分钟补完;万一积压(分钟久没跑),当晚补到
+  上限就停、汇总报「还剩多少下次续补」,**绝不无人值守跑几小时**。`fill_minute` 内部**逐批心跳日志**
+  (docker logs 看得到在动 = 慢≠挂——2026-06「手动触发像卡死」其实是在真下整天 5000 只,这是当时的修法)。
+  **一次性历史建底**仍走手动 `POST /backfill-minute`(无上限·后台 create_task)。手动 `POST /api/cache/trigger`
+  也是后台跑(不再同步阻塞 HTTP,免再次卡住请求)。逐日刷屏的老快照诊断报告已**不再每晚发**(它走旧的
   `audit_daily_gaps`、跟真值表两套打架);每日就这一条真值表汇总、末尾点名待修代码,深挖走手动
   `POST /api/audit/diagnose-gaps`。
 - 手动端点(`/calendar/rebuild`、`/backfill-daily`、`/listing-info/*`)全保留。
@@ -262,7 +267,8 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
 |------|------|------|
 | `POST /listing-info/load-tushare` | 前置 | 从 Tushare stock_basic 灌权威上市索引 |
 | `POST /calendar/rebuild?start=&end=` | 阶段1 | 重建真值表(默认 2023-01-01~今天)。`?with_minute=1` 同时算 minute_state(阶段3 建底,每天一次分钟 GROUP BY、慢) |
-| `GET  /calendar/status` | — | 查真值表:分状态/分交易状态计数 + 日期范围 + 是否在重建 |
+| `GET  /calendar/status` | — | 查真值表:日线分状态(`by_daily_state`)+ 分钟分状态(`by_minute_state`)计数 + 日期范围 + 是否在重建 |
+| `GET  /calendar/minute-coverage?date=` | 可观测 | 某天 `backtest_minute` 行数(默认 max_date)。**看分钟补全是否在涨**(进度,非终态;`by_minute_state` 要补完确认才翻) |
 | `GET  /calendar/problems?state=&limit=` | — | 列出某状态(missing/wrong_suspended/orphan/source_none…)的具体(日期×代码),供核查/修复 |
 | `POST /backfill-daily` | 阶段2 | **默认索引驱动**:补真值表 `missing`+`wrong_suspended`(先跑阶段1);`ok`+`source_none` 跳过 |
 | `POST /backfill-minute` | 阶段3 | **索引驱动**:补真值表 `minute_state=missing`(先跑 `rebuild?with_minute=1` 建底);stk_mins 按股重下,补完确认重建标 ok/source_short |

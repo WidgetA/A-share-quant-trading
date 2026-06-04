@@ -270,6 +270,7 @@ class CachePipeline:
         self,
         cancel_event: CancelChecker = None,
         quiet: bool = False,
+        max_codes: int | None = None,
     ) -> dict[str, Any]:
         """Fill minute gaps the trading_calendar marks ``minute_state='missing'`` (阶段3).
 
@@ -281,12 +282,31 @@ class CachePipeline:
             so the caller's re-reconcile marks it source_short and never retries it;
           - 0 bars (empty/error) → stays ``missing`` → retried next run.
 
-        Returns ``{dates, filled, processed_dates, source_short}`` where ``source_short`` maps
-        day → codes the source confirmed short (the re-reconcile step persists those).
-        The calendar must be freshly minute-reconciled first. ``quiet=True`` silences Feishu.
+        ``max_codes`` caps how many (code,day) this run will ATTEMPT (None = unbounded —
+        the deliberate manual backlog clear). The 3am nightly passes a bound so an
+        unexpected backlog (e.g. minute never ran ⇒ thousands missing) can't make the
+        unattended pass run for hours: when the cap is hit the run stops at a batch
+        boundary and reports ``truncated``/``remaining`` (NEVER silent — see CLAUDE.md §12).
+        A progress heartbeat is logged as it advances so docker logs prove it's moving
+        (slow ≠ hung — the lesson from the 2026-06 manual-trigger "hang").
+
+        Returns ``{dates, filled, processed_dates, source_short, processed, truncated,
+        remaining}``. ``source_short`` maps day → codes the source confirmed short (the
+        re-reconcile step persists those). ``processed_dates`` = days actually touched
+        (a confirm-rebuild should re-reconcile exactly these). The calendar must be freshly
+        minute-reconciled first. ``quiet=True`` silences Feishu.
         """
         from src.data.services.trading_calendar import MINUTE_BARS_FULL
 
+        empty = {
+            "dates": 0,
+            "filled": 0,
+            "processed_dates": [],
+            "source_short": {},
+            "processed": 0,
+            "truncated": False,
+            "remaining": 0,
+        }
         saved_reporter = self.reporter
         if quiet:
             self.reporter = saved_reporter.silent_feishu()
@@ -294,17 +314,48 @@ class CachePipeline:
             fillable = await self.storage.get_calendar_minute_fillable_by_date()
             dates = sorted(fillable)
             if not dates:
-                return {"dates": 0, "filled": 0, "processed_dates": [], "source_short": {}}
+                return empty
+            total_target = sum(len(fillable[d]) for d in dates)
+            logger.info(
+                "Minute calendar fill: %d 个有缺口的交易日, %d (code,day) 待补%s",
+                len(dates),
+                total_target,
+                f" (本次上限 {max_codes})" if max_codes is not None else "",
+            )
             filled = 0
+            processed = 0  # codes attempted (ok+empty+err) — drives progress + the cap
+            last_logged = 0
+            truncated = False
+            processed_dates: list[date] = []
             source_short: dict[date, set[str]] = {}
             async with self.minute_source:
                 for day in dates:
+                    if max_codes is not None and processed >= max_codes:
+                        truncated = True
+                        break
                     self._raise_if_cancelled(cancel_event, "Minute calendar fill cancelled")
+                    processed_dates.append(day)
+                    # No code_alias remap needed (unlike fill_daily): minute_state='missing' is
+                    # only set for codes that traded that day per CURRENT Tushare daily
+                    # (reconcile_day), i.e. already canonical post-migration → stk_mins(code) hits
+                    # the right series. Daily fill aliases because it touches OLD historical rows.
                     codes = sorted(fillable[day])
                     async for batch in self.minute_source.fetch_batches(codes, day, day):
                         self._raise_if_cancelled(cancel_event, "Minute calendar fill cancelled")
                         for code, raw_bars in batch.ok.items():
-                            kept = [b for b in raw_bars if len(str(b.get("trade_time", ""))) >= 10]
+                            # Dedup by trade_time so the source_short test counts the SAME
+                            # quantity the confirm-rebuild reads back: backtest_minute upserts by
+                            # (code, ts), so dup trade_times collapse in the DB. Without this, dup
+                            # bars could pass len(kept)≥241 here yet read <241 from the DB →
+                            # rebuild marks 'missing' → re-downloaded every night forever (评审).
+                            # stk_mins is queried day 09:00–15:00 so kept bars are in-window.
+                            seen_ts: set[str] = set()
+                            kept: list[dict[str, Any]] = []
+                            for b in raw_bars:
+                                tt = str(b.get("trade_time", ""))
+                                if len(tt) >= 10 and tt not in seen_ts:
+                                    seen_ts.add(tt)
+                                    kept.append(b)
                             if not kept:
                                 continue
                             # Per-code auto-commit (resume granularity = stock; a crash
@@ -313,17 +364,44 @@ class CachePipeline:
                             filled += 1
                             if len(kept) < MINUTE_BARS_FULL:  # source genuinely短 (半天)
                                 source_short.setdefault(day, set()).add(code)
+                        processed += (
+                            len(batch.ok)
+                            + len(batch.empty)
+                            + len(batch.unknown_exchange)
+                            + len(batch.error_codes)
+                        )
+                        # Heartbeat ~ every 500 codes so docker logs show it advancing.
+                        if processed - last_logged >= 500:
+                            last_logged = processed
+                            logger.info(
+                                "Minute fill 进度: %s · 累计处理 %d/%d · 已补 %d 只(天)",
+                                day,
+                                processed,
+                                total_target,
+                                filled,
+                            )
+                        if max_codes is not None and processed >= max_codes:
+                            truncated = True
+                            break
+            remaining = max(0, total_target - processed)
             logger.info(
-                "Calendar-driven minute fill: %d dates, %d (code,day) filled, %d source_short",
-                len(dates),
+                "Calendar-driven minute fill done: 触达 %d 天, 补 %d 只(天), source_short %d, "
+                "处理 %d/%d%s",
+                len(processed_dates),
                 filled,
                 sum(len(c) for c in source_short.values()),
+                processed,
+                total_target,
+                f" (达上限·还剩 {remaining})" if truncated else "",
             )
             return {
-                "dates": len(dates),
+                "dates": len(processed_dates),
                 "filled": filled,
-                "processed_dates": dates,
+                "processed_dates": processed_dates,
                 "source_short": source_short,
+                "processed": processed,
+                "truncated": truncated,
+                "remaining": remaining,
             }
         finally:
             self.reporter = saved_reporter

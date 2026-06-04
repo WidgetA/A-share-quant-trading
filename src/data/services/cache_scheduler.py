@@ -1,16 +1,17 @@
 # === MODULE PURPOSE ===
 # CacheScheduler runs the unified DAILY DATA-MAINTENANCE pipeline at 3am Beijing
 # (see docs/data-integrity-pipeline.md §4.1). One sequential, failure-isolated pass:
-#   ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 → ③ 增量重建真值表(只新交易日)
-#   → ④ 索引驱动补日线 → ⑤ 重建补过的天(确认) → 一条飞书汇总.
-# 分钟补全(fill_minute)**暂不在此无人值守流水线**——大规模下会挂死占锁(2026-06 实测),
-# 撤出待加固;走手动端点 /backfill-minute。
+#   ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 → ③ 增量重建真值表(只新交易日·含分钟状态)
+#   → ④ 索引驱动补日线 → ⑤ 索引驱动补分钟(带上限+逐批心跳) → ⑥ 重建补过的天(确认日线+分钟)
+#   → 一条飞书汇总.
 # 增量查漏(不每晚全表重扫历史)、精准补缺. Steps are failure-isolated; only 3am (no startup run);
 # all run status persisted to GreptimeDB scheduler_log so it survives restarts.
+# 分钟补全 2026-06 曾因「大规模·无上限」下载占锁撤出;现以「每晚上限 NIGHTLY_MINUTE_MAX_CODES
+# + fill_minute 逐批心跳日志」放回——慢≠挂、且无人值守不会跑几小时(超额下次续补,飞书报)。
+# 一次性历史建底仍走手动 /backfill-minute(无上限·后台 create_task)。
 # (The 4am ListingVerifyScheduler loop is retired — kimi is step ② here.)
 # `check_and_fill_gaps` (the old coarse whole-day fill) is kept ONLY for the
-# model-training pre-fill + the manual /api/cache/trigger; the nightly path no
-# longer uses it.
+# model-training pre-fill; the nightly path no longer uses it.
 
 from __future__ import annotations
 
@@ -35,8 +36,13 @@ _STEP_TIMEOUT_LOAD = 15 * 60  # ① load-tushare (2 Tushare calls + writes)
 _STEP_TIMEOUT_KIMI = 6 * 3600  # ② kimi serial, up to MAX_CODES_PER_RUN
 _STEP_TIMEOUT_REBUILD = 90 * 60  # ③ full-history rebuild (~1640 Tushare calls)
 _STEP_TIMEOUT_FILL = 3 * 3600  # ④ index-driven daily fill
-_STEP_TIMEOUT_MINUTE_FILL = 4 * 3600  # ⑤ index-driven minute fill (per-stock stk_mins)
+_STEP_TIMEOUT_MINUTE_FILL = 4 * 3600  # ⑤ index-driven minute fill (capped, per-stock stk_mins)
 _STEP_TIMEOUT_CONFIRM = 60 * 60  # ⑥ rebuild only the touched dates (daily+minute)
+# Nightly minute-fill cap: bound the unattended pass so a surprise backlog (minute never
+# ran ⇒ thousands of missing code-days) can't run for hours. ~1 trading day ≈ ~5000
+# code-days; 12000 ≈ ~2.4 days of catch-up per night, the remainder reported + carried to
+# the next run. Manual /backfill-minute is UNCAPPED (deliberate full historical clear).
+NIGHTLY_MINUTE_MAX_CODES = 12_000
 # How many of kimi's per-code "怎么回事" lines to inline in the unified summary.
 _KIMI_FINDINGS_IN_SUMMARY = 15
 # How many 待修 codes (orphan/missing/wrong_suspended) to name in the summary.
@@ -287,13 +293,14 @@ class CacheScheduler:
             return False, str(e)[:120]
 
     async def _run_pipeline(self, trigger: str) -> tuple[str, str]:
-        """The unified daily data-maintenance pass — 先全量查漏、再精准补缺:
+        """The unified daily data-maintenance pass — 先查漏、再精准补缺:
         ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 →
-        ③ 重建真值表(全历史·查漏) → ④ 索引驱动补缺 → ⑤ 重建补过的天(确认).
+        ③ 增量重建真值表(新交易日·含分钟状态) → ④ 索引驱动补日线 →
+        ⑤ 索引驱动补分钟(带上限+逐批心跳) → ⑥ 重建补过的天(确认日线+分钟).
 
         Failure-isolated: a failed step is logged + recorded + the pass continues —
-        EXCEPT ④/⑤ are skipped if ③ (rebuild) failed (never fill on a stale index).
-        Sends ONE Feishu summary + the per-day gap diagnosis. Returns (result, message).
+        EXCEPT ④/⑤/⑥ are skipped if ③ (rebuild) failed (never fill on a stale index).
+        Sends ONE Feishu summary. Returns (result, message).
         """
         from scripts.load_listing_from_tushare import run_load_listing
         from src.common.config import get_tushare_token
@@ -411,7 +418,13 @@ class CacheScheduler:
                 steps.append(("③ 查漏·增量重建", "成功", "历史索引已最新,无新交易日"))
             else:
                 ok, r = await self._bounded(
-                    rebuild_calendar(storage, start=incr_start, end=yesterday, client=client),
+                    rebuild_calendar(
+                        storage,
+                        start=incr_start,
+                        end=yesterday,
+                        client=client,
+                        with_minute=True,  # 新交易日同时算 minute_state → ⑤ 才知道要补哪些
+                    ),
                     _STEP_TIMEOUT_REBUILD,
                 )
                 rebuild_ok = ok
@@ -450,29 +463,91 @@ class CacheScheduler:
                             )
                         )
 
-            # 分钟补全(fill_minute)**暂不放进每晚无人值守流水线** —— 2026-06 实测:大规模下
-            # (多天 ×~5000 只 × 上千次 stk_mins/insert)会挂死、占锁(手动跑 45min 未完成)。
-            # 分钟走手动端点 /backfill-minute(后台 create_task),加固(超时/分批)+ 受控验证后再放回。
-            # 每晚只做日线;③ 因此也保持 with_minute=False。
-
-            # ⑤ 确认 — 只重建 ④ 动过的那几天 (skip if nothing touched)
-            if daily_dates:
+            # ⑤ 补分钟 — 索引驱动,只补 minute_state=missing 的(天·股)。带每晚上限
+            # (NIGHTLY_MINUTE_MAX_CODES)防无人值守下载几小时;fill_minute 内部逐批心跳日志,
+            # 慢能看出在动(≠挂)。超额本次不补完、报告还剩多少,下次续补。skip if ③ failed。
+            minute_dates: list = []
+            minute_source_short: dict = {}
+            if not rebuild_ok:
+                steps.append(("⑤ 补分钟", "跳过", "重建失败，不在过期索引上补"))
+            else:
                 ok, r = await self._bounded(
-                    rebuild_calendar(storage, trading_days=daily_dates, client=client),
+                    pipeline.fill_minute_from_calendar(
+                        quiet=True, max_codes=NIGHTLY_MINUTE_MAX_CODES
+                    ),
+                    _STEP_TIMEOUT_MINUTE_FILL,
+                )
+                if not ok:
+                    steps.append(("⑤ 补分钟", "失败", r))
+                else:
+                    minute_dates = r.get("processed_dates", []) or []
+                    minute_source_short = r.get("source_short", {}) or {}
+                    if r["dates"] == 0:
+                        steps.append(("⑤ 补分钟", "成功", "无缺口可补"))
+                    else:
+                        detail = f"补回 {r['filled']:,} 只(天) / 跨 {r['dates']} 个缺口日"
+                        ss_n = sum(len(c) for c in minute_source_short.values())
+                        if ss_n:
+                            detail += f" / 源头半天 {ss_n} 只(已标记不再补)"
+                        if r.get("truncated"):
+                            # 还有 backlog 没补完 → 当告警(可见),不是纯成功静默吞掉
+                            detail += f" / 达本次上限,还剩 {r['remaining']:,} 只(天)下次续补"
+                            steps.append(("⑤ 补分钟", "警告", detail))
+                        else:
+                            steps.append(("⑤ 补分钟", "成功", detail))
+
+            # ⑥ 确认 — 重建 ④/⑤ 动过的那几天。**分钟 reconcile 很贵**(每天一次 GROUP BY 扫
+            # ~1.8B 行 backtest_minute,~15-30s/天),所以只对 ⑤ 真补过分钟的天 with_minute=True
+            # (那批天数已被 ⑤ 的 NIGHTLY_MINUTE_MAX_CODES 上限 bound 住);④ 补过日线但 ⑤ 没碰分钟
+            # 的天只确认日线(with_minute=False·便宜)。否则:无上限的历史**日线**缺口集喂进
+            # with_minute=True,会做几百次分钟扫描、超 _STEP_TIMEOUT_CONFIRM 把每晚拖垮——这正是
+            # 分钟上限保护不到的 wedge 点(评审高危项)。无补缺则整步跳过。
+            minute_set = set(minute_dates)
+            daily_only_days = sorted(set(daily_dates) - minute_set)
+            confirm_days_total = 0
+            confirm_problem_total = 0
+            confirm_fail: str | None = None
+            # ⑥a 分钟确认(带 source_short)— 仅 ⑤ 动过的天,被 ⑤ 上限 bound
+            if minute_set:
+                ok, r = await self._bounded(
+                    rebuild_calendar(
+                        storage,
+                        trading_days=sorted(minute_set),
+                        client=client,
+                        with_minute=True,
+                        extra_minute_source_short=minute_source_short,
+                    ),
                     _STEP_TIMEOUT_CONFIRM,
                 )
                 if ok:
-                    steps.append(
-                        (
-                            "⑤ 确认·重建补过的天",
-                            "成功",
-                            f"{r['days']} 天 / 仍待修 {r['problem_rows']:,}",
-                        )
-                    )
+                    confirm_days_total += r["days"]
+                    confirm_problem_total += r["problem_rows"]
                 else:
-                    steps.append(("⑤ 确认·重建补过的天", "失败", r))
+                    confirm_fail = f"分钟确认失败: {r}"
+            # ⑥b 日线确认(便宜·with_minute=False)— ④ 动过但 ⑤ 没碰分钟的天
+            if daily_only_days and confirm_fail is None:
+                ok, r = await self._bounded(
+                    rebuild_calendar(storage, trading_days=daily_only_days, client=client),
+                    _STEP_TIMEOUT_CONFIRM,
+                )
+                if ok:
+                    confirm_days_total += r["days"]
+                    confirm_problem_total += r["problem_rows"]
+                else:
+                    confirm_fail = f"日线确认失败: {r}"
+
+            if not minute_set and not daily_only_days:
+                steps.append(("⑥ 确认", "跳过", "无补缺，免重建"))
+            elif confirm_fail is not None:
+                steps.append(("⑥ 确认·重建补过的天", "失败", confirm_fail))
             else:
-                steps.append(("⑤ 确认", "跳过", "无补缺，免重建"))
+                steps.append(
+                    (
+                        "⑥ 确认·重建补过的天",
+                        "成功",
+                        f"{confirm_days_total} 天 / 仍待修 {confirm_problem_total:,}",
+                    )
+                )
         finally:
             await client.stop()
 
@@ -483,10 +558,12 @@ class CacheScheduler:
         # disagreed with the truth-table. (Deep per-day digging stays on the manual
         # /api/audit/diagnose-gaps endpoint.)
         final_state: dict = {}
+        minute_state: dict = {}
         problem_codes: list[str] = []
         try:
             summary = await storage.get_trading_calendar_summary()
             final_state = summary.get("by_daily_state", {})
+            minute_state = summary.get("by_minute_state", {})
             codes = await storage.get_calendar_problem_codes(
                 {"orphan", "missing", "wrong_suspended"}
             )
@@ -495,7 +572,7 @@ class CacheScheduler:
             logger.warning("maintenance: final calendar summary failed: %s", e)
 
         return await self._send_pipeline_summary(
-            task_start, steps, kimi_findings, final_state, problem_codes
+            task_start, steps, kimi_findings, final_state, minute_state, problem_codes
         )
 
     async def _send_pipeline_summary(
@@ -504,6 +581,7 @@ class CacheScheduler:
         steps: list[tuple[str, str, str]],
         kimi_findings: list[dict],
         final_state: dict,
+        minute_state: dict,
         problem_codes: list[str],
     ) -> tuple[str, str]:
         """Build + send the ONE unified Feishu summary. Returns (result, message)."""
@@ -539,7 +617,19 @@ class CacheScheduler:
             picture = " / ".join(
                 f"{_labels.get(k, k)} {v:,}" for k, v in sorted(final_state.items()) if v
             )
-            lines += ["", f"最终真值表: {picture}"]
+            lines += ["", f"最终真值表(日线): {picture}"]
+
+        if minute_state:
+            _mlabels = {
+                "ok": "完整(241根)",
+                "missing": "缺/不满待补",
+                "source_short": "源头半天(正常)",
+            }
+            mpic = " / ".join(
+                f"{_mlabels.get(k, k)} {v:,}" for k, v in sorted(minute_state.items()) if v
+            )
+            if mpic:
+                lines += [f"最终真值表(分钟): {mpic}"]
 
         # Name the actual待修 codes (真缺/标错停牌/有数据却不在册) so the operator sees
         # 怎么回事 without the old per-day spam. source_none is intentionally NOT listed

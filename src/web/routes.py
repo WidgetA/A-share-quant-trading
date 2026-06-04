@@ -1641,7 +1641,16 @@ def create_momentum_router() -> APIRouter:
 
     @router.post("/api/cache/trigger")
     async def trigger_cache_fill(request: Request) -> dict:
-        """Manually run the daily data-maintenance pipeline now (查漏→补缺)."""
+        """Manually run the daily data-maintenance pipeline now (查漏→补缺).
+
+        Fire-and-forget: the pipeline (①刷名单→②kimi→③重建→④补日线→⑤补分钟→⑥确认) can take
+        tens of minutes (分钟按只下载), so it runs as a background task — returning immediately
+        instead of blocking the HTTP request until completion (a synchronous await once wedged
+        a 40-min run, the incident behind 撤分钟; see cache_scheduler 注释). Progress: docker
+        logs (fill_minute 逐批心跳) + /api/audit/calendar/status; 结果发飞书。
+        """
+        import asyncio
+
         from src.data.services.cache_scheduler import CacheScheduler
 
         storage = getattr(request.app.state, "storage", None)
@@ -1657,11 +1666,22 @@ def create_momentum_router() -> APIRouter:
         scheduler = getattr(request.app.state, "cache_scheduler", None) or CacheScheduler(
             request.app.state
         )
-        await scheduler._run_once("manual", force_enabled=True)
+        # Root a STRONG ref on app.state: this multi-minute task owns _OWNED_FLAGS and is the
+        # only thing that clears them (in _run_once's finally). asyncio keeps only a weak ref to
+        # a bare create_task, so without this the loop could GC-cancel it mid-run → flags stuck
+        # True → every future run skips with 409 until restart (评审高危项). Done-callback surfaces
+        # any exception loudly instead of letting it vanish.
+        task = asyncio.create_task(scheduler._run_once("manual", force_enabled=True))
+        request.app.state.cache_manual_trigger_task = task
+
+        def _on_done(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("manual cache-maintenance task failed", exc_info=t.exception())
+
+        task.add_done_callback(_on_done)
         return {
-            "success": scheduler.last_run_result != "failed",
-            "result": scheduler.last_run_result,
-            "message": scheduler.last_run_message,
+            "success": True,
+            "message": "已触发每日数据维护(查漏→补缺),后台运行;进度见日志/真值表状态,结果发飞书",
         }
 
     return router

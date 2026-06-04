@@ -88,5 +88,29 @@ async def test_fill_minute_no_gaps_short_circuits():
     storage = _FakeStorage({})  # nothing marked missing
     src = _FakeMinuteSource({})
     result = await _pipe(storage, src).fill_minute_from_calendar()
-    assert result == {"dates": 0, "filled": 0, "processed_dates": [], "source_short": {}}
+    assert result == {
+        "dates": 0,
+        "filled": 0,
+        "processed_dates": [],
+        "source_short": {},
+        "processed": 0,
+        "truncated": False,
+        "remaining": 0,
+    }
     assert storage.inserted == {}
+
+
+@pytest.mark.asyncio
+async def test_fill_minute_max_codes_caps_and_reports_remaining():
+    # The nightly passes max_codes so an unattended pass can't run for hours on a
+    # surprise backlog. When the cap is hit it stops at a batch boundary, touches only
+    # the days it reached, and reports truncated + remaining (never silent).
+    day1, day2 = date(2024, 1, 2), date(2024, 1, 3)
+    src = _FakeMinuteSource({"600000": _bars(241), "600001": _bars(241)})
+    storage = _FakeStorage({day1: {"600000"}, day2: {"600001"}})
+    result = await _pipe(storage, src).fill_minute_from_calendar(max_codes=1)
+    assert result["truncated"] is True
+    assert result["filled"] == 1
+    assert result["processed_dates"] == [day1]  # day2 never reached (capped first)
+    assert result["remaining"] == 1  # total 2 − processed 1
+    assert set(storage.inserted) == {"600000"}  # 600001 (day2) NOT downloaded

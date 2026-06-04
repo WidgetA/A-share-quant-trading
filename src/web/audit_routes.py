@@ -573,7 +573,9 @@ def create_audit_router() -> APIRouter:
             except Exception as e:  # noqa: BLE001
                 logger.warning("backfill-minute 飞书通知失败: %s", e)
 
-        asyncio.create_task(_run())
+        # Strong ref on app.state: _run owns backfill_minute_running + clears it in finally;
+        # a bare create_task could be GC-cancelled mid-run → flag stuck True (评审高危项).
+        request.app.state.backfill_minute_task = asyncio.create_task(_run())
         return JSONResponse({"success": True, "message": "已触发分钟补全(索引驱动),结果发飞书"})
 
     # ------------------------------------------------------------------
@@ -805,6 +807,39 @@ def create_audit_router() -> APIRouter:
             getattr(request.app.state, "calendar_rebuild_running", False)
         )
         return JSONResponse(summary)
+
+    @router.get("/calendar/minute-coverage")
+    async def minute_coverage(request: Request) -> JSONResponse:
+        """backtest_minute 行数 for one day — 看分钟补全是否在涨(进度,非终态)。
+        ``?date=YYYY-MM-DD``(默认 = 真值表 max_date)。"""
+        from datetime import date as _date
+        from datetime import datetime as _dt
+
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None or not getattr(storage, "is_ready", False):
+            return JSONResponse({"ready": False})
+        v = request.query_params.get("date")
+        day: _date | None = None
+        if v:
+            try:
+                day = _dt.strptime(v, "%Y-%m-%d").date()
+            except ValueError:
+                day = None
+        if day is None:
+            summary = await storage.get_trading_calendar_summary()
+            md = summary.get("max_date")
+            day = _date.fromisoformat(md) if md else _dt.now().date()
+        # count_minute_rows_in_range is END-INCLUSIVE (adds +1 day internally), so (day, day)
+        # = exactly one day; (day, day+1) would double-count two days (评审 off-by-one).
+        rows = await storage.count_minute_rows_in_range(day, day)
+        return JSONResponse(
+            {
+                "ready": True,
+                "date": day.isoformat(),
+                "minute_rows": rows,
+                "approx_complete_stocks": rows // 241,  # 241 bars/股·天
+            }
+        )
 
     @router.get("/calendar/problems")
     async def calendar_problems(request: Request) -> JSONResponse:
