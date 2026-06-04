@@ -53,7 +53,11 @@
    `POST /api/audit/calendar/rebuild`。
 2. **阶段2 补日线** —— **读索引**,只补 `daily_state=missing`(真缺),跳过 `ok` 和 `source_none`。
    `POST /api/audit/backfill-daily`(只日线,不碰分钟)。
-3. **阶段3 补分钟** —— 同理,补分钟(依赖日线先齐;分钟"该补谁"是从日线推的)。**(待建)**
+3. **阶段3 补分钟** —— 同理,**跟着索引走**:reconcile 顺手填 `minute_state`(当天**日线交易了**的票
+   才该有分钟,分钟 bar ≥241=`ok`、否则 `missing`);索引驱动按 `minute_state=missing` 的(天,股)用
+   `stk_mins` **按股**重下覆盖(resume 按股、按股 auto-commit)。**不预判半天交易**——重下后源头真给不满
+   241(新股首日/复牌)才标 `source_short`、不再重试(跟日线 `missing→source_none` 一个道理)。
+   增量并进 3 点流水线(日线那套后追加),全量建底走手动端点。
 
 **手动触发 = 重新做一遍索引(阶段1),然后补全(阶段2/3)对照新索引。每日增量也从索引起步。**
 
@@ -105,7 +109,7 @@
 | `listed` | 当天是否在册(roster=true / orphan=false) |
 | `trade_status` | `trading` 正常交易 / `suspended` 停牌 / `unknown` 源头无法定性 —— 这只票这天**共享**的标记 |
 | `daily_state` | 见下表 |
-| `minute_state` | **预留**:`ok` / `missing` / `source_short`(源头不足241) / `pending` |
+| `minute_state` | **当天日线交易了的票才填**(没交易=`NULL`,不该有分钟):`ok`(分钟 bar ≥241) / `missing`(<241,可补) / `source_short`(重下后源头真给不满 241=半天交易,不再补) |
 | `reason` | 备注 |
 
 `daily_state` 取值(= "不全的原因"):

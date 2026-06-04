@@ -10,6 +10,9 @@ from datetime import date
 import pytest
 
 from src.data.services.trading_calendar import (
+    MINUTE_MISSING,
+    MINUTE_OK,
+    MINUTE_SOURCE_SHORT,
     MISSING,
     OK,
     ORPHAN,
@@ -211,3 +214,110 @@ async def test_build_calendar_aggregates_by_state():
     assert result["by_state"][MISSING] == 1
     assert result["problem_rows"] == 1
     assert len(storage.upserts) == 1
+
+
+# --- minute_state reconcile (阶段3) ---
+
+
+def test_minute_state_only_for_traded_stocks():
+    # minute_counts given → traded stocks get a minute_state (≥241 ok, else missing);
+    # a stock that didn't trade (suspended) gets minute_state=None (no minute expected).
+    rows = _by_code(
+        reconcile_day(
+            roster={"600000", "300001", "688001"},
+            suspended={"688001"},
+            traded={"600000", "300001"},
+            db_normal={"600000", "300001"},
+            db_suspended={"688001"},
+            minute_counts={"600000": 241, "300001": 120},  # 300001 partial
+        )
+    )
+    assert rows["600000"]["minute_state"] == MINUTE_OK  # full day
+    assert rows["300001"]["minute_state"] == MINUTE_MISSING  # <241 → fillable
+    assert rows["688001"]["minute_state"] is None  # suspended → no minute expected
+
+
+def test_minute_state_none_when_no_minute_counts():
+    # daily-only path (minute_counts None) → minute_state stays NULL for everyone.
+    rows = _by_code(
+        reconcile_day(
+            roster={"600000"},
+            suspended=set(),
+            traded={"600000"},
+            db_normal={"600000"},
+            db_suspended=set(),
+        )
+    )
+    assert rows["600000"]["minute_state"] is None
+
+
+def test_minute_source_short_preserved_over_missing():
+    # a traded stock with <241 bars the fill already confirmed source-short must stay
+    # source_short on re-reconcile (not flip back to missing → no re-burn loop).
+    rows = _by_code(
+        reconcile_day(
+            roster={"600000"},
+            suspended=set(),
+            traded={"600000"},
+            db_normal={"600000"},
+            db_suspended=set(),
+            minute_counts={"600000": 120},  # half day
+            minute_source_short={"600000"},
+        )
+    )
+    assert rows["600000"]["minute_state"] == MINUTE_SOURCE_SHORT
+
+
+class _FakeMinuteStorage(_FakeCalStorage):
+    async def get_minute_bar_counts(self, day):
+        return {"600000": 241, "300001": 0}  # 600000 full minute, 300001 none
+
+    async def get_minute_source_short_codes(self, day):
+        return set()
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_with_minute_populates_minute_states():
+    storage = _FakeMinuteStorage()
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return {"600000", "300001"}
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+        with_minute=True,
+    )
+    # 600000 traded + 241 bars → minute ok; 300001 traded + 0 bars → minute missing
+    assert result["by_minute"][MINUTE_OK] == 1
+    assert result["by_minute"][MINUTE_MISSING] == 1
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_extra_source_short_persists_over_missing():
+    # The minute fill found 300001 source-short → the confirm re-reconcile gets it via
+    # extra_minute_source_short and must mark it source_short (not missing → no re-burn).
+    storage = _FakeMinuteStorage()  # 300001 has 0 bars (would be missing without the flag)
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return {"600000", "300001"}
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+        with_minute=True,
+        extra_minute_source_short={date(2024, 1, 2): {"300001"}},
+    )
+    assert result["by_minute"][MINUTE_OK] == 1  # 600000
+    assert result["by_minute"][MINUTE_SOURCE_SHORT] == 1  # 300001 (was the half-day)
+    assert result["by_minute"].get(MINUTE_MISSING, 0) == 0

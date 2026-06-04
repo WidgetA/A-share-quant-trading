@@ -266,6 +266,68 @@ class CachePipeline:
         finally:
             self.reporter = saved_reporter
 
+    async def fill_minute_from_calendar(
+        self,
+        cancel_event: CancelChecker = None,
+        quiet: bool = False,
+    ) -> dict[str, Any]:
+        """Fill minute gaps the trading_calendar marks ``minute_state='missing'`` (阶段3).
+
+        Index-driven, mirrors fill_daily_from_calendar: only (day, code) the truth-table
+        marks missing get re-downloaded via ``stk_mins`` — per (code, day), resume by stock
+        (insert_minute_bars auto-commits each code). A code that comes back with:
+          - ≥241 bars → inserted → re-reconcile makes it ``ok``;
+          - 1-240 bars → inserted + reported as **source_short** (源头真给不满 241 = 半天交易),
+            so the caller's re-reconcile marks it source_short and never retries it;
+          - 0 bars (empty/error) → stays ``missing`` → retried next run.
+
+        Returns ``{dates, filled, processed_dates, source_short}`` where ``source_short`` maps
+        day → codes the source confirmed short (the re-reconcile step persists those).
+        The calendar must be freshly minute-reconciled first. ``quiet=True`` silences Feishu.
+        """
+        from src.data.services.trading_calendar import MINUTE_BARS_FULL
+
+        saved_reporter = self.reporter
+        if quiet:
+            self.reporter = saved_reporter.silent_feishu()
+        try:
+            fillable = await self.storage.get_calendar_minute_fillable_by_date()
+            dates = sorted(fillable)
+            if not dates:
+                return {"dates": 0, "filled": 0, "processed_dates": [], "source_short": {}}
+            filled = 0
+            source_short: dict[date, set[str]] = {}
+            async with self.minute_source:
+                for day in dates:
+                    self._raise_if_cancelled(cancel_event, "Minute calendar fill cancelled")
+                    codes = sorted(fillable[day])
+                    async for batch in self.minute_source.fetch_batches(codes, day, day):
+                        self._raise_if_cancelled(cancel_event, "Minute calendar fill cancelled")
+                        for code, raw_bars in batch.ok.items():
+                            kept = [b for b in raw_bars if len(str(b.get("trade_time", ""))) >= 10]
+                            if not kept:
+                                continue
+                            # Per-code auto-commit (resume granularity = stock; a crash
+                            # mid-run keeps every already-written stock — see MEMORY).
+                            await self.storage.insert_minute_bars(code, kept)
+                            filled += 1
+                            if len(kept) < MINUTE_BARS_FULL:  # source genuinely短 (半天)
+                                source_short.setdefault(day, set()).add(code)
+            logger.info(
+                "Calendar-driven minute fill: %d dates, %d (code,day) filled, %d source_short",
+                len(dates),
+                filled,
+                sum(len(c) for c in source_short.values()),
+            )
+            return {
+                "dates": len(dates),
+                "filled": filled,
+                "processed_dates": dates,
+                "source_short": source_short,
+            }
+        finally:
+            self.reporter = saved_reporter
+
     # ------------------------------------------------------------------
     # Phase 1: daily (unified — calendar + stock_snapshot + audit + download)
     # ------------------------------------------------------------------

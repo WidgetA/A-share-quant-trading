@@ -720,6 +720,21 @@ class GreptimeBacktestStorage:
         )
         return {r["stock_code"]: int(r["cnt"]) for r in rows}
 
+    async def get_minute_source_short_codes(self, d: date) -> set[str]:
+        """Codes whose trading_calendar `minute_state='source_short'` on day `d`.
+
+        The minute fill sets source_short once Tushare stk_mins genuinely returns
+        <241 bars (half-day trading). The minute reconcile reads this back so a
+        re-reconcile PRESERVES source_short instead of flipping it to missing and
+        re-burning the source forever (mirrors daily's source_none)."""
+        ts_ms = date_to_epoch_ms(d)
+        rows = await self.db.fetch(
+            "SELECT stock_code FROM trading_calendar "
+            f"WHERE ts >= {ts_ms} AND ts < {ts_ms + 86_400_000} "
+            "AND minute_state = 'source_short'"
+        )
+        return {r["stock_code"] for r in rows}
+
     async def get_minute_stock_count(self) -> int:
         """Count distinct stock codes with minute data on the most recent day.
 
@@ -1127,6 +1142,21 @@ class GreptimeBacktestStorage:
         rows = await self.db.fetch(
             "SELECT ts, stock_code FROM trading_calendar "
             "WHERE daily_state IN ('missing', 'wrong_suspended')"
+        )
+        out: dict[date, set[str]] = {}
+        for r in rows:
+            out.setdefault(ts_to_date(r["ts"]), set()).add(r["stock_code"])
+        return out
+
+    async def get_calendar_minute_fillable_by_date(self) -> dict[date, set[str]]:
+        """Codes a minute re-download can FIX, grouped by trade date = ``minute_state='missing'``.
+
+        Drives the index-driven minute fill (DAT-006 阶段3): only these (day, code) get
+        re-downloaded. ``ok`` (already ≥241) and ``source_short`` (源头真给不满 241) are
+        NOT returned → never re-burned. NULL (didn't trade) is irrelevant — no minute expected.
+        """
+        rows = await self.db.fetch(
+            "SELECT ts, stock_code FROM trading_calendar WHERE minute_state = 'missing'"
         )
         out: dict[date, set[str]] = {}
         for r in rows:
