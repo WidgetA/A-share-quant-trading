@@ -246,6 +246,20 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   (`DELETE … WHERE ts=… AND stock_code='X'`)能删掉(DELETE 也走全表扫描、够得着),删完重建即净;实在
   删不动再 `ADMIN flush_table` + `ADMIN compact_table` 落地。③ **根上的防线 = 每日只增量重建(§4.1)**:
   历史索引建对一次就信、不每晚全表重扫,这类历史脏行就不会被反复重造成 orphan。
+- **Tushare daily 一次空响应 → reconcile 把整天好状态刷成 wrong_traded(2026-06,守卫已加)**:
+  重建/确认某天时,`fetch_traded(day)` = 调 Tushare `daily`。Tushare 偶发返回 `code=0` 但空数据
+  (瞬时抖动,常在密集调用如分钟补全 barrage 后),`fetch_daily` 按约定返回 `[]` → reconcile 看到
+  "这天没人交易",把库里**本来在交易**的几千只全判成 `wrong_traded`(源头查无),好端端的真值表被一次
+  源头打嗝刷烂(实测 2026-06-03:5511 只 ok → wrong_traded;真实日线/分钟数据没丢,只状态表错)。
+  **守卫**:`build_calendar` 现加 fail-safe —— 某天 `traded` 为空、但库里已有 ≥100 行真实日线 → 判为
+  **取数失败**而非真·无交易日,**跳过该天 reconcile(不覆盖)** + 记 ERROR + 进 `skipped_days`,③/⑥
+  汇总里标「⚠️ 跳过 N 天」(绝不静默)。**教训**:① 外部源返回空 ≠ 真的没有;**写真值表前要分清"源头确实
+  没有"和"这次没取到",后者必须跳过而不是拿空覆盖**(CLAUDE.md 交易安全:数据不全就跳过,别拿空兜底)。
+  ② 真·非交易日是 0 traded **且**库里也几乎没行,守卫放行;只有"空 traded + 库里一堆真行"才拦。
+  ③ 这种 wrong_traded 是**状态腐蚀、非数据丢失**(`wrong_traded` 不进补全集、也不被 purge 自动删),
+  Tushare 恢复后**重建那天**即复原(`POST /calendar/rebuild?start=&end=&with_minute=1`)。
+  ④ 分钟补全 barrage(stk_mins 上百次)易触发 Tushare 限频/抖动 → 当晚可能只补一部分(其余 missing
+  下晚续补)+ 抬高紧接其后的 daily 取数抖动概率;每晚 ⑤ 带上限、⑥ 有守卫,所以慢/部分/抖动都不致命。
 
 ---
 
