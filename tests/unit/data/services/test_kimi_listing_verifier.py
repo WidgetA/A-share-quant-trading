@@ -59,6 +59,32 @@ def test_prefers_real_date_over_placeholder_echo():
     assert out["list_date"] == "1999-11-10"
 
 
+def test_prefers_informative_answer_over_prompt_not_found_echo():
+    # The prompt embeds a "查不到" example with the code filled in (so it shows up in the
+    # trace). kimi's REAL answer can legitimately have list_date=null — 未上市 (new IPO not
+    # trading yet) / 迁移 / 已退市. The parser must return kimi's real, informative answer,
+    # NOT the prompt's echoed "error: not found" example.
+    # Regression: 高特电子 301669 = 未上市 was mangled into "查不到 / 名字未知".
+    raw = (
+        # prompt's echoed fallback example — appears BEFORE kimi's answer
+        '{"code":"301669","name":null,"list_date":null,"delist_date":null,'
+        '"status":"查不到","new_code":null,"note":"多方查证仍无结果",'
+        '"source":null,"error":"not found"}\n'
+        "查证结果汇总:高特电子,创业板新股,尚未挂牌交易。\n"
+        "```json\n"
+        '{"code":"301669","name":"杭州高特电子设备股份有限公司","list_date":null,'
+        '"delist_date":null,"status":"未上市","new_code":null,'
+        '"note":"创业板新股,已申购缴款但截至今日尚未挂牌交易","source":"http://data.eastmoney.com/x"}\n'
+        "```"
+    )
+    out = parse_kimi_output(raw, "301669")
+    assert out is not None
+    assert out["name"] == "杭州高特电子设备股份有限公司"
+    assert out["status"] == "未上市"
+    assert out["list_date"] is None
+    assert out.get("error") != "not found"
+
+
 def test_no_matching_code_returns_none():
     raw = '{"code":"123456","list_date":"2020-01-01"}'
     assert parse_kimi_output(raw, "600519") is None

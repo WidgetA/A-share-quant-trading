@@ -138,9 +138,22 @@ def parse_kimi_output(text: str, code: str) -> dict | None:
         ld = obj.get("list_date")
         if isinstance(ld, str) and _REAL_DATE_RE.match(ld):
             return obj
-    # No real date — return the last explicit "not found" candidate, else last.
+    # No real date: kimi's ACTUAL answer is the LAST JSON it emits (in a ```json fence
+    # at the end). Any earlier "code" JSON is the prompt's echoed example
+    # (name=null / status=查不到 / error="not found"). A correct answer can legitimately
+    # have list_date=null — 未上市 (new IPO not trading yet) / 迁移新代码 / 已退市 — so we
+    # must NOT prefer the prompt's "error: not found" example over it. (That bug turned
+    # 高特电子=未上市 into a false "查不到/名字未知".) Prefer the last INFORMATIVE answer
+    # (real company name, or a concrete status other than 查不到); only if none is
+    # informative does kimi genuinely not know → fall back to its last word.
     for obj in reversed(candidates):
-        if obj.get("error") == "not found":
+        name = obj.get("name")
+        status = obj.get("status")
+        has_name = isinstance(name, str) and bool(name.strip())
+        real_status = (
+            isinstance(status, str) and bool(status.strip()) and status.strip() != "查不到"
+        )
+        if has_name or real_status:
             return obj
     return candidates[-1]
 
