@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from src.data.services.kimi_listing_verifier import (
+    _read_result_file,
     finding_from_result,
     parse_kimi_output,
 )
@@ -83,6 +84,29 @@ def test_prefers_informative_answer_over_prompt_not_found_echo():
     assert out["status"] == "未上市"
     assert out["list_date"] is None
     assert out.get("error") != "not found"
+
+
+def test_read_result_file_returns_clean_answer(tmp_path):
+    # The file channel: kimi writes ONLY its answer JSON to the file (no prompt-echo),
+    # so reading it back is unambiguous — even for a null-list_date 未上市 answer.
+    p = tmp_path / "301669.json"
+    p.write_text(
+        '{"code":"301669","name":"杭州高特电子设备股份有限公司","list_date":null,'
+        '"status":"未上市","note":"创业板新股,尚未挂牌","source":"http://x"}',
+        encoding="utf-8",
+    )
+    out = _read_result_file(str(p), "301669")
+    assert out is not None
+    assert out["name"] == "杭州高特电子设备股份有限公司"
+    assert out["status"] == "未上市"
+    assert out["list_date"] is None
+
+
+def test_read_result_file_missing_or_empty_returns_none(tmp_path):
+    assert _read_result_file(str(tmp_path / "nope.json"), "301669") is None
+    empty = tmp_path / "empty.json"
+    empty.write_text("", encoding="utf-8")
+    assert _read_result_file(str(empty), "301669") is None
 
 
 def test_no_matching_code_returns_none():

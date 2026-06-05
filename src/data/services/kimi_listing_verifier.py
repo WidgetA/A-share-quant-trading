@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 KIMI_PROMPT_TMPL = (
@@ -42,6 +43,36 @@ KIMI_PROMPT_TMPL = (
     '{{"code":"{code}","name":null,"list_date":null,"delist_date":null,"status":"查不到",'
     '"new_code":null,"note":"多方查证仍无结果","source":null,"error":"not found"}}'
 )
+
+# Result-file channel: kimi writes its FINAL answer JSON to a file via its Shell tool,
+# and we read THAT file instead of scraping JSON out of the noisy --print trace. The trace
+# also contains the prompt's own example JSON (with the code substituted in), which is what
+# made the stdout parser misread 高特电子=未上市 as "查不到". The file holds only kimi's real
+# answer → no echo to confuse. ``{path}`` is filled per-call (a unique temp path).
+_RESULT_FILE_INSTRUCTION = (
+    "\n\n**最后一步(必须做,不能省略)**:把你上面那一行最终答案 JSON,用 Shell **原样写入文件** "
+    "`{path}` —— 只写这一个 JSON 对象、UTF-8 编码,**不要 markdown 代码块包裹、不要任何多余文字**。"
+    "例如:\n"
+    "cat > {path} <<'KIMI_JSON_EOF'\n"
+    "{{你的最终答案 JSON}}\n"
+    "KIMI_JSON_EOF\n"
+    "写完用 `cat {path}` 确认文件里是一个合法 JSON 对象。"
+)
+
+
+def _read_result_file(path: str, code: str) -> dict | None:
+    """Read kimi's answer from the file it was told to write. Returns the parsed dict,
+    or None if the file is missing / empty / not parseable for ``code``. Reuses
+    ``parse_kimi_output`` (the file should hold only the answer, so there is no
+    prompt-echo to confuse it)."""
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not content.strip():
+        return None
+    return parse_kimi_output(content, code)
+
 
 _REAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -218,78 +249,90 @@ async def run_kimi_for_code(
     "not found" placeholder.
     """
     prompt = KIMI_PROMPT_TMPL.format(code=code)
+    # Result-file channel (primary): tell kimi to write its FINAL answer JSON to this temp
+    # file via its Shell tool; we read the FILE rather than scraping the --print trace
+    # (which also carries the prompt's own example JSON — the cause of the 高特电子 misparse).
+    fd, result_path = tempfile.mkstemp(prefix=f"kimi_{code}_", suffix=".json")
+    os.close(fd)
+    prompt += _RESULT_FILE_INSTRUCTION.format(path=result_path)
     # Force UTF-8 stdio so kimi can print Chinese / replacement chars on
     # Windows without hitting the GBK console codec (which silently kills
     # the process mid-print and truncates --print output).
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
-    proc = await asyncio.create_subprocess_exec(
-        "kimi",
-        "--print",
-        "--afk",
-        # NOTE: thinking left ON. With --no-thinking, when SearchWeb fails kimi
-        # gives up ("查不到") instead of reasoning its way to a FetchURL/Shell
-        # fallback (which works — verified manually for 920039). Slower but it
-        # actually finds answers.
-        "-p",
-        prompt,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
-    )
     try:
-        out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        raise KimiToolError(f"kimi 超时 (>{timeout_sec}s) — code={code}") from None
-
-    text = out_bytes.decode("utf-8", errors="replace")
-
-    if raw_dir is not None:
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        (raw_dir / f"{code}.txt").write_text(text, encoding="utf-8")
-
-    # "LLM not set": the headless --print run had no model configured (no
-    # ~/.kimi/config.toml in the container — only credentials were uploaded), so
-    # kimi never ran the model/tools and just echoed the prompt. The prompt
-    # itself contains an example {"...","error":"not found"} JSON, which the
-    # parser below would otherwise FALSELY return as a "查不到". This is a TOOL
-    # ERROR (kimi couldn't run), never a real "not found" — raise loudly so we
-    # never write a bogus placeholder.
-    low_all = text.lower()
-    if any(m in low_all for m in _NO_LLM_MARKERS):
-        raise KimiToolError(
-            f"kimi 未配置模型 (LLM not set) — code={code};"
-            " 容器缺 ~/.kimi/config.toml(只上传了凭证,没带模型/provider 配置)"
+        proc = await asyncio.create_subprocess_exec(
+            "kimi",
+            "--print",
+            "--afk",
+            # NOTE: thinking left ON. With --no-thinking, when SearchWeb fails kimi
+            # gives up ("查不到") instead of reasoning its way to a FetchURL/Shell
+            # fallback (which works — verified manually for 920039). Slower but it
+            # actually finds answers.
+            "-p",
+            prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
         )
-    # Auth/runtime failure: kimi started but the API rejected the token (expired
-    # 15-min OAuth, refresh failed — e.g. missing device_id) or the step was
-    # interrupted. Specific phrases (won't match a 6-digit code or a date).
-    # Catch BEFORE parsing — else parse_kimi_output matches the prompt-echo's
-    # example "not found" JSON and falsely reports 查不到.
-    if any(m in low_all for m in _AUTH_FAIL_PHRASES):
-        snippet = " ".join(text.split())[-200:]
-        raise KimiToolError(f"kimi 认证/运行失败(API 拒绝)— code={code}; 输出尾: {snippet!r}")
+        try:
+            out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise KimiToolError(f"kimi 超时 (>{timeout_sec}s) — code={code}") from None
 
-    parsed = parse_kimi_output(text, code)
-    if parsed is not None:
-        # kimi gave a usable answer (found date OR explicit "not found").
-        return parsed
+        text = out_bytes.decode("utf-8", errors="replace")
 
-    # No parseable answer → the tool itself failed. Distinguish auth/tool
-    # failure (the common case when credentials are missing) so the operator
-    # gets a real reason instead of a fake "查不到".
-    rc = proc.returncode
-    snippet = " ".join(text.split())[:200]
-    low = text.lower()
-    if any(mark in low for mark in _TOOL_ERROR_MARKERS):
-        reason = "kimi 未授权/登录或凭证问题"
-    elif not text.strip():
-        reason = "kimi 无任何输出"
-    elif rc not in (0, None):
-        reason = f"kimi 退出码 {rc}"
-    else:
-        reason = "kimi 输出无法解析(非有效答案)"
-    raise KimiToolError(f"{reason} — code={code}; 输出片段: {snippet!r}")
+        if raw_dir is not None:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / f"{code}.txt").write_text(text, encoding="utf-8")
+
+        # "LLM not set": the headless --print run had no model configured (no
+        # ~/.kimi/config.toml in the container — only credentials were uploaded), so
+        # kimi never ran the model/tools and just echoed the prompt. This is a TOOL
+        # ERROR (kimi couldn't run), never a real "not found" — raise loudly so we
+        # never write a bogus placeholder.
+        low_all = text.lower()
+        if any(m in low_all for m in _NO_LLM_MARKERS):
+            raise KimiToolError(
+                f"kimi 未配置模型 (LLM not set) — code={code};"
+                " 容器缺 ~/.kimi/config.toml(只上传了凭证,没带模型/provider 配置)"
+            )
+        # Auth/runtime failure: kimi started but the API rejected the token, or the step
+        # was interrupted. Specific phrases (won't match a 6-digit code or a date).
+        if any(m in low_all for m in _AUTH_FAIL_PHRASES):
+            snippet = " ".join(text.split())[-200:]
+            raise KimiToolError(f"kimi 认证/运行失败(API 拒绝)— code={code}; 输出尾: {snippet!r}")
+
+        # PRIMARY: read kimi's answer from the file it was told to write — unambiguous,
+        # no prompt-echo to misparse. Fall back to scraping stdout only if no file.
+        file_answer = _read_result_file(result_path, code)
+        if file_answer is not None:
+            return file_answer
+
+        parsed = parse_kimi_output(text, code)
+        if parsed is not None:
+            # kimi answered in stdout but didn't write the file — still usable.
+            return parsed
+
+        # No answer in the file OR stdout → the tool itself failed. Distinguish auth/tool
+        # failure so the operator gets a real reason instead of a fake "查不到".
+        rc = proc.returncode
+        snippet = " ".join(text.split())[:200]
+        low = text.lower()
+        if any(mark in low for mark in _TOOL_ERROR_MARKERS):
+            reason = "kimi 未授权/登录或凭证问题"
+        elif not text.strip():
+            reason = "kimi 无任何输出"
+        elif rc not in (0, None):
+            reason = f"kimi 退出码 {rc}"
+        else:
+            reason = "kimi 输出无法解析(非有效答案)"
+        raise KimiToolError(f"{reason} — code={code}; 输出片段: {snippet!r}")
+    finally:
+        try:
+            os.unlink(result_path)
+        except OSError:
+            pass
