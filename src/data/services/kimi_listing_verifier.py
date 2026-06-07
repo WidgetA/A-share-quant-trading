@@ -76,26 +76,12 @@ def _read_result_file(path: str, code: str) -> dict | None:
 
 _REAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# Markers that mean kimi-cli itself failed (not authenticated / not working),
-# as opposed to "kimi searched and found nothing". If these appear we must
-# raise loudly, never silently treat the stock as "查不到".
-_TOOL_ERROR_MARKERS = (
-    "login",
-    "log in",
-    "unauthorized",
-    "未登录",
-    "登录",
-    "凭证",
-    "credential",
-    "access token",
-    "refresh token",
-    "401",
-    "403",
-    "authenticat",
-    "api key",
-    "quota",
-    "rate limit",
-)
+# NOTE: there is deliberately NO loose "auth-words anywhere in the trace" check.
+# A successful kimi run is a 50–100K-char web-search trace that routinely *mentions*
+# 登录 / 凭证 / 401 / 403 (page content + URLs like cfi.cn/p2026...000403.html). Substring-
+# matching those over the whole trace cried "请检查 kimi 凭证" on runs where kimi actually
+# authenticated and answered correctly. Real API auth rejections are detected by the
+# precise response-format phrases in `_AUTH_FAIL_PHRASES` only. 报什么错就是什么错。
 
 # Output markers meaning kimi never ran the model in this (headless) invocation —
 # no default model/provider configured (~/.kimi/config.toml missing). Distinct
@@ -110,17 +96,52 @@ _NO_LLM_MARKERS = (
     "未配置模型",
 )
 
-# Auth/runtime failure phrases — SPECIFIC enough not to match a 6-digit code or
-# a YYYY-MM-DD date (so safe to check before parsing). "Invalid Authentication"
-# = the 401 seen when the 15-min OAuth token is expired and refresh failed.
+# kimi *API* auth-rejection phrases — RESPONSE-format strings specific enough not to match
+# a 6-digit code, a date, a URL, or financial page content (so they won't false-fire on a
+# successful search trace). Only THESE mean "the token was rejected → check KIMI_API_KEY".
+# Deliberately NOT here: bare "401"/"403" (appear in URLs/numbers), "unauthorized" (appears
+# in article text), "登录"/"凭证" (every Chinese finance site), "stepinterrupted" (a turn
+# interruption, NOT auth — it falls through to an honest "解析失败"/"退出码" instead).
 _AUTH_FAIL_PHRASES = (
     "invalid authentication",
     "invalid_authentication",
-    "unauthorized",
-    "error code: 401",
+    "authenticationerror",
+    "invalid_api_key",  # OpenAI-compatible error code (Moonshot/Kimi API is OpenAI-shaped)
+    "incorrect api key",  # OpenAI message "Incorrect API key provided"
+    "error code: 401",  # openai-python client format ("Error code: 401 - ...")
     "error code: 403",
-    "stepinterrupted",
 )
+
+# A successful kimi run is a tens-of-KB search trace. If kimi produced almost nothing, it
+# barely ran — most likely a startup/auth/config failure that printed an error and exited,
+# NOT a search-then-parse problem. We flag those for the operator to read the saved raw
+# trace, instead of guessing more auth substrings (build observability, don't guess).
+_SHORT_OUTPUT_CHARS = 2000
+
+
+def _looks_like_api_auth_failure(text: str) -> bool:
+    """True ONLY on a kimi API auth rejection (precise response-format phrases). A 100K
+    search trace that merely mentions 登录/凭证/401/403 is NOT auth — that loose match is
+    exactly what produced false "请检查 kimi 凭证" alarms on successful runs. Bare "401
+    Unauthorized"/"403 Forbidden" are deliberately NOT here: they also appear when a *fetched
+    page* returns 403, which is not a kimi-token problem — the short-output heuristic in
+    _classify_unparseable covers a real auth death without that false-positive."""
+    low = text.lower()
+    return any(p in low for p in _AUTH_FAIL_PHRASES)
+
+
+def _classify_unparseable(text: str, returncode: int | None) -> str:
+    """kimi ran (not an API auth rejection, not 'no LLM') but we got no usable answer.
+    Report what it ACTUALLY is — never guess 'credentials'. 是什么错就报什么错。"""
+    stripped = text.strip()
+    if not stripped:
+        return "kimi 无任何输出"
+    if returncode not in (0, None):
+        return f"kimi 退出码 {returncode}"
+    if len(stripped) < _SHORT_OUTPUT_CHARS:
+        # barely ran → likely startup/auth/config failure, not a search-then-parse miss
+        return "kimi 几乎没输出就结束(疑似启动/认证/配置类失败,请看原始 trace)"
+    return "kimi 跑完但没给出可识别的答案(输出解析失败)"
 
 
 class KimiToolError(RuntimeError):
@@ -231,9 +252,16 @@ def kimi_available() -> bool:
     return shutil.which("kimi") is not None
 
 
+# Deep web-search + thinking on a hard code (新股待挂牌 / IPO 叫停 / 北交所迁号) routinely
+# runs several minutes and a 50–100K-char trace. 180s cut kimi off MID-SEARCH → it timed out
+# right before writing its (already-correct) answer, which then surfaced as a tool-error. 600s
+# lets the answer land so the code leaves the queue instead of re-burning every night.
+KIMI_VERIFY_TIMEOUT_SEC = 600
+
+
 async def run_kimi_for_code(
     code: str,
-    timeout_sec: int = 180,
+    timeout_sec: int = KIMI_VERIFY_TIMEOUT_SEC,
     raw_dir: Path | None = None,
 ) -> dict:
     """Invoke kimi-cli print mode for one code, parse the JSON it returns.
@@ -300,11 +328,13 @@ async def run_kimi_for_code(
                 f"kimi 未配置模型 (LLM not set) — code={code};"
                 " 容器缺 ~/.kimi/config.toml(只上传了凭证,没带模型/provider 配置)"
             )
-        # Auth/runtime failure: kimi started but the API rejected the token, or the step
-        # was interrupted. Specific phrases (won't match a 6-digit code or a date).
-        if any(m in low_all for m in _AUTH_FAIL_PHRASES):
+        # API auth rejection: ONLY the precise response-format phrases (not bare 401/登录/凭证
+        # that appear in any search trace). This is the sole path that says "check the token".
+        if _looks_like_api_auth_failure(text):
             snippet = " ".join(text.split())[-200:]
-            raise KimiToolError(f"kimi 认证/运行失败(API 拒绝)— code={code}; 输出尾: {snippet!r}")
+            raise KimiToolError(
+                f"kimi API 认证被拒(token 无效/过期,查 KIMI_API_KEY)— code={code}; 尾: {snippet!r}"
+            )
 
         # PRIMARY: read kimi's answer from the file it was told to write — unambiguous,
         # no prompt-echo to misparse. Fall back to scraping stdout only if no file.
@@ -317,19 +347,11 @@ async def run_kimi_for_code(
             # kimi answered in stdout but didn't write the file — still usable.
             return parsed
 
-        # No answer in the file OR stdout → the tool itself failed. Distinguish auth/tool
-        # failure so the operator gets a real reason instead of a fake "查不到".
-        rc = proc.returncode
+        # kimi ran but produced no usable answer and it's NOT an API auth rejection.
+        # Report the REAL reason (timeout already raised above; here it's empty/exit/parse).
+        # NEVER guess "凭证" — that loose全文匹配 was the false-alarm bug. 是什么错就报什么错。
         snippet = " ".join(text.split())[:200]
-        low = text.lower()
-        if any(mark in low for mark in _TOOL_ERROR_MARKERS):
-            reason = "kimi 未授权/登录或凭证问题"
-        elif not text.strip():
-            reason = "kimi 无任何输出"
-        elif rc not in (0, None):
-            reason = f"kimi 退出码 {rc}"
-        else:
-            reason = "kimi 输出无法解析(非有效答案)"
+        reason = _classify_unparseable(text, proc.returncode)
         raise KimiToolError(f"{reason} — code={code}; 输出片段: {snippet!r}")
     finally:
         try:

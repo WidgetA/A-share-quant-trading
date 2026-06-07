@@ -7,10 +7,54 @@
 from __future__ import annotations
 
 from src.data.services.kimi_listing_verifier import (
+    _classify_unparseable,
+    _looks_like_api_auth_failure,
     _read_result_file,
     finding_from_result,
     parse_kimi_output,
 )
+
+
+def test_incidental_auth_words_in_trace_are_not_an_auth_failure():
+    # REGRESSION (301669 "请检查 kimi 凭证" false alarm): a successful 100K search trace
+    # routinely *mentions* 登录/凭证/401/403 (page content + URLs). That must NOT be flagged
+    # as an API auth failure — only precise response-format phrases count.
+    trace = (
+        "正在搜索东方财富… 需要登录查看完整数据… 来源 http://cfi.cn/p20260531000403.html …"
+        "存托凭证相关… 状态码 401/403 在文中出现… 已找到挂牌信息。" * 80
+    )
+    assert _looks_like_api_auth_failure(trace) is False
+
+
+def test_real_api_auth_rejection_is_flagged():
+    # precise LLM-API auth-rejection formats (Anthropic-style + OpenAI-compatible) ARE caught
+    assert _looks_like_api_auth_failure("... Error code: 401 - Invalid Authentication ...") is True
+    assert _looks_like_api_auth_failure("openai.AuthenticationError: bad key") is True
+    assert _looks_like_api_auth_failure("HTTP error code: 403 forbidden") is True
+    assert _looks_like_api_auth_failure("{'error': {'code': 'invalid_api_key'}}") is True
+    assert _looks_like_api_auth_failure("Incorrect API key provided: sk-xxx") is True
+
+
+def test_fetched_page_403_is_not_kimi_auth():
+    # a web page kimi FETCHED returning 403/unauthorized is NOT a kimi-token problem — must
+    # not be flagged as an API auth failure (the short-output heuristic covers a real death).
+    assert _looks_like_api_auth_failure("the fetched page returned 403 Forbidden") is False
+    assert _looks_like_api_auth_failure("unauthorized access to this paywalled article") is False
+
+
+def test_classify_unparseable_reports_what_it_actually_is():
+    assert _classify_unparseable("", None) == "kimi 无任何输出"
+    assert "退出码 1" in _classify_unparseable("partial output that is short", 1)
+    # a LONG search trace we couldn't parse → honest "解析失败" (it actually ran + searched)
+    long_trace = "搜索东方财富 抓取页面 分析结果 " * 1000
+    assert "解析失败" in _classify_unparseable(long_trace, 0)
+    # a long trace full of incidental auth words is STILL just "解析失败", NEVER "凭证"
+    noisy = "登录 凭证 401 403 credential login quota " * 300
+    assert "解析失败" in _classify_unparseable(noisy, 0)
+    assert "凭证" not in _classify_unparseable(noisy, 0)
+    # a SHORT output = kimi barely ran → flag as suspected startup/auth failure (read trace),
+    # rather than silently calling a real auth death "解析失败"
+    assert "疑似" in _classify_unparseable("AuthError occurred, exiting", 0)
 
 
 def test_parses_clean_success_json():

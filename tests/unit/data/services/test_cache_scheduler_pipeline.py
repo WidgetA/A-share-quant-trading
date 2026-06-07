@@ -89,7 +89,9 @@ class _FakeLV:
         self._result = result
         self._calls = calls
 
-    async def verify_unverified(self, quiet=False):
+    async def verify_unverified(self, quiet=False, max_codes=None):
+        # max_codes: the nightly caps the batch to fit the 6h step bound (600s/code serial)
+        self._captured_max_codes = max_codes
         self._calls.append("kimi")
         return self._result
 
@@ -321,6 +323,23 @@ async def test_kimi_runs_when_enabled_and_available(monkeypatch):
     # kimi (②) runs after load (①), before rebuild (③).
     assert calls.index("kimi") == 1
     assert calls.index("kimi") < calls.index("rebuild_full")
+
+
+@pytest.mark.asyncio
+async def test_kimi_batch_capped_to_fit_step_budget(monkeypatch):
+    # B1 regression: serial kimi at KIMI_VERIFY_TIMEOUT_SEC/code MUST fit the 6h ② step
+    # bound, so the nightly passes a max_codes cap. Without it a 500-code backlog × 600s =
+    # 83h ≫ 6h → ② times out + fails every night. A bigger backlog drains over nights.
+    from src.data.services import cache_scheduler as cs
+    from src.data.services.kimi_listing_verifier import KIMI_VERIFY_TIMEOUT_SEC
+
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
+    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
+    sched = CacheScheduler(_AppState(_FakeStorage(), _FakePipeline(_NO_GAPS, calls), lv=lv))
+    await sched._run_pipeline("scheduled")
+    cap = lv._captured_max_codes
+    assert cap is not None and cap >= 1
+    assert cap * KIMI_VERIFY_TIMEOUT_SEC <= cs._STEP_TIMEOUT_KIMI
 
 
 @pytest.mark.asyncio

@@ -17,14 +17,14 @@ import sys
 import time
 from pathlib import Path
 
-from src.data.services.kimi_listing_verifier import run_kimi_for_code
+from src.data.services.kimi_listing_verifier import KIMI_VERIFY_TIMEOUT_SEC, run_kimi_for_code
 
 OUT_DIR = Path("data/audit/list_dates")
 CODES_FILE = Path("data/audit/diff_codes.txt")
 RAW_DIR = OUT_DIR.parent / "list_dates_raw"
 
 
-async def _run_kimi_for_code(code: str, timeout_sec: int = 180) -> dict | None:
+async def _run_kimi_for_code(code: str, timeout_sec: int = KIMI_VERIFY_TIMEOUT_SEC) -> dict | None:
     """Thin wrapper: delegate to the shared verifier, saving raw stdout
     under data/audit/list_dates_raw/ for offline diagnosis."""
     return await run_kimi_for_code(code, timeout_sec=timeout_sec, raw_dir=RAW_DIR)

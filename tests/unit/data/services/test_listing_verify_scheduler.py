@@ -141,25 +141,28 @@ async def test_storage_not_ready_returns_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kimi_tool_error_aborts_without_placeholders(monkeypatch):
-    """When kimi itself fails (e.g. no credentials), DON'T mask it as '查不到':
-    abort, write NO placeholders, return an error, and alert."""
+async def test_kimi_tool_error_aborts_with_real_reason(monkeypatch):
+    """When kimi itself fails, DON'T mask it as '查不到': abort, write NO placeholders,
+    and surface the REAL reason (here a timeout) — never a hardcoded '凭证'."""
     codes = [f"{1 + i:06d}" for i in range(20)]
     storage = _FakeStorage(codes)
     sched = _scheduler(storage)
-    monkeypatch.setattr(mod, "run_kimi_for_code", _kimi_tool_error_stub())
+    monkeypatch.setattr(mod, "run_kimi_for_code", _kimi_tool_error_stub("kimi 超时 (>600s)"))
     with patch.object(mod, "_notify_feishu", new=AsyncMock()) as feishu:
         result = await sched.verify_unverified()
 
     assert result["verified"] == 0
     assert result["failed"] == 0  # NOT counted as 查不到
     assert result["tool_errors"] >= mod._TOOL_ERROR_ABORT
-    assert "kimi" in result["error"] and "凭证" in result["error"]
+    # the ACTUAL reason flows through honestly — timeout is reported as 超时, not 凭证
+    assert "超时" in result["error"]
+    assert "超时" in (result.get("tool_error_sample") or "")
+    assert "凭证" not in result["error"]
     assert storage.written == []  # no bogus placeholders written
     # checked stops early at the abort threshold, not the full batch
     assert result["checked"] <= mod._TOOL_ERROR_ABORT
     msg = feishu.await_args.args[0]
-    assert "已中止" in msg and "未写任何占位" in msg
+    assert "已中止" in msg and "未写任何占位" in msg and "超时" in msg
 
 
 @pytest.mark.asyncio

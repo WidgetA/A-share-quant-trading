@@ -386,6 +386,7 @@ class ListingVerifyScheduler:
                 "verified": verified_n,
                 "failed": len(not_found_codes),
                 "tool_errors": len(tool_errors),
+                "tool_error_sample": tool_errors[0][1] if tool_errors else None,
                 "remaining": remaining,
                 "findings": findings,
                 "error": reason,
@@ -404,13 +405,13 @@ class ListingVerifyScheduler:
                     reason = tool_errors[0][1]
                     await _log(f"kimi 连续 {len(tool_errors)} 次工具错误且零成功 → 中止: {reason}")
                     await _notify_feishu(
-                        "【阶段一·索引建设｜上市日核验】 已中止 — kimi 工具/凭证失败\n"
+                        "【阶段一·索引建设｜上市日核验】 已中止 — kimi 连续工具错误\n"
                         f"前 {len(tool_errors)} 只全部是 kimi 工具错误、0 成功,"
                         "未写任何占位(不是'查不到')。\n"
                         f"原因: {reason}\n"
-                        "请检查容器内 kimi 是否已登录 / 凭证是否有效。"
+                        "(原因写'超时'就调长超时;只有写'认证被拒'才去检查 KIMI_API_KEY。)"
                     )
-                    return _abort(f"kimi 工具/凭证失败: {reason}", idx)
+                    return _abort(f"kimi 连续工具错误: {reason}", idx)
                 continue
             except Exception as e:  # noqa: BLE001 — unexpected; treat as tool error
                 logger.warning("kimi verify %s unexpected error: %s", code, e)
@@ -545,6 +546,7 @@ class ListingVerifyScheduler:
             "migrated": migrated_n,
             "failed": len(not_found_codes),
             "tool_errors": len(tool_errors),
+            "tool_error_sample": tool_errors[0][1] if tool_errors else None,
             "remaining": remaining,
             "findings": findings,
         }

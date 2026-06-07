@@ -361,8 +361,14 @@ class CacheScheduler:
                 # that kimi is running (verify_unverified itself doesn't set it).
                 lv.in_progress = True
                 try:
+                    # Cap the batch so serial (CONCURRENCY=1) × per-code timeout fits the 6h
+                    # step bound. Without this, a big backlog × 600s/code would blow past
+                    # _STEP_TIMEOUT_KIMI and fail ②; a larger backlog now drains over nights.
+                    from src.data.services.kimi_listing_verifier import KIMI_VERIFY_TIMEOUT_SEC
+
+                    kimi_cap = max(1, int(_STEP_TIMEOUT_KIMI * 0.8 // KIMI_VERIFY_TIMEOUT_SEC))
                     ok, r = await self._bounded(
-                        lv.verify_unverified(quiet=True), _STEP_TIMEOUT_KIMI
+                        lv.verify_unverified(quiet=True, max_codes=kimi_cap), _STEP_TIMEOUT_KIMI
                     )
                 finally:
                     lv.in_progress = False
@@ -384,11 +390,14 @@ class CacheScheduler:
                         # partially-broken kimi as plain 成功 (CLAUDE.md §12). They are
                         # NOT 查不到; those codes stay unverified and retry next night.
                         if te:
+                            # Report the ACTUAL reason (超时 / 解析失败 / 认证被拒…), not a
+                            # hardcoded "请检查凭证" that cried wolf about the token.
+                            sample = r.get("tool_error_sample") or "原因未知"
                             steps.append(
                                 (
                                     "② 核身份(kimi)",
                                     "警告",
-                                    detail + f" / 出错(超时或认证·未写) {te} 只 — 请检查 kimi 凭证",
+                                    detail + f" / 出错 {te} 只(未写,原因:{sample})",
                                 )
                             )
                         else:
