@@ -39,6 +39,11 @@ MAX_CODES_PER_RUN = 500  # bound runtime/cost on the 1.58G machine
 CONCURRENCY = 1
 _UPSERT_BATCH = 200  # GreptimeDB drops rows silently above ~200 per INSERT
 _FAILED_SOURCE = "kimi-not-found"
+# A 迁号/换号 old code is dead: identity + history belong to the new code (which Tushare
+# stock_basic carries). We write the old code as a list_date=None "已迁移" marker so
+# roster_for_day excludes it (NOT a verified live listing row — that caused the source_none
+# loop), and record old→new in code_alias. load_listing drops it entirely on the next reload.
+_MIGRATED_SOURCE = "kimi-migrated"
 _FEISHU_FAILED_DISPLAY = 50  # cap failed-code list in the Feishu message
 # If kimi itself fails (auth/tool error) this many times in a row with zero
 # successes, abort the whole run and alert — don't grind through hundreds of
@@ -370,6 +375,7 @@ class ListingVerifyScheduler:
         tool_errors: list[tuple[str, str]] = []  # (code, reason) — kimi itself failed
         findings: list[dict] = []  # kimi's plain-Chinese "怎么回事" per code → report
         verified_n = 0
+        migrated_n = 0  # 迁号/换号 old codes — written as excluded markers + code_alias
 
         def _abort(reason: str, checked: int) -> dict:
             self.last_verified = verified_n
@@ -417,8 +423,25 @@ class ListingVerifyScheduler:
             findings.append(finding)
             self._save_finding(finding)
 
+            nc = result.get("new_code")
             ld = result.get("list_date")
-            if isinstance(ld, str) and len(ld) == 10 and ld[4] == "-":
+            is_migration = isinstance(nc, str) and len(nc) == 6 and nc.isdigit() and nc != code
+            if is_migration:
+                # 迁号/换号:老码作废,身份+历史归新码(新码由 stock_basic 在册)。绝不把老码当
+                # 正常上市码写"在册行"——那正是 source_none 死循环的根。写成 list_date=None 的
+                # 已迁移占位 → roster_for_day 直接不纳入在册;old→new 由下面的 code_alias 记。
+                migrated_n += 1
+                verified_entries.append(
+                    {
+                        "code": code,
+                        "name": result.get("name"),
+                        "list_date": None,
+                        "delist_date": None,
+                        "verified": False,
+                        "source": _MIGRATED_SOURCE,
+                    }
+                )
+            elif isinstance(ld, str) and len(ld) == 10 and ld[4] == "-":
                 verified_n += 1
                 verified_entries.append(
                     {
@@ -476,7 +499,7 @@ class ListingVerifyScheduler:
         alias_written = await storage.upsert_code_alias(aliases) if aliases else 0
 
         await _log(
-            f"完成: 验证 {verified_n} / 查不到 {len(not_found_codes)} / "
+            f"完成: 验证 {verified_n} / 迁号 {migrated_n} / 查不到 {len(not_found_codes)} / "
             f"kimi工具错误 {len(tool_errors)} / 写入 {written} / 换号映射 {alias_written} / "
             f"剩余 {remaining}"
         )
@@ -487,6 +510,7 @@ class ListingVerifyScheduler:
             "任务: 让大模型(kimi)逐只查清这些代码到底是什么、现在什么情况(在交易 / 已退市 / "
             "迁去新代码 / 更名),并写清上市日,以便把名单修准\n"
             f"结果: 查清 {len(findings)} 只 / 其中确认上市日并写入 {verified_n} 只 / "
+            f"迁号换码(老码出名单、记对应表) {migrated_n} 只 / "
             f"搜过仍查不清 {len(not_found_codes)} 只 / "
             f"出错(超时或认证,未写) {len(tool_errors)} 只 / 还剩 {remaining} 只待核\n"
         )
@@ -518,6 +542,7 @@ class ListingVerifyScheduler:
         return {
             "checked": len(batch),
             "verified": verified_n,
+            "migrated": migrated_n,
             "failed": len(not_found_codes),
             "tool_errors": len(tool_errors),
             "remaining": remaining,

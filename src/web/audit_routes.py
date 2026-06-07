@@ -85,12 +85,12 @@ def create_audit_router() -> APIRouter:
         """Run kimi on the truth-table's listing-date-ambiguous codes — the backstop
         for cases Tushare stock_basic can't resolve (DAT-006).
 
-        These are codes the calendar marks ``source_none`` (在册却源头无数据 → list_date
-        suspect, e.g. 920 迁移代码) or ``orphan`` (有数据却不在册 → 退市/迁移代码). kimi
-        web-searches the real listing/delisting and writes it back to stock_listing_info;
-        the next calendar rebuild then reclassifies them.
+        Default = ``orphan`` (有数据却不在册 → 退市/迁移代码;kimi 查清后写 delist/迁号 alias →
+        重建后归位)。**``source_none`` 默认不再喂 kimi**:它是"在册却源头无数据"=数据缺口,不是
+        身份问题——kimi 查得出身份也变不出日线,且历史上正是把迁移老码当上市码写回名单、造成
+        source_none 死循环的入口。要强行复核 source_none 仍可显式传 ``?states=source_none``。
 
-        ``?states=source_none,orphan`` (default), ``?max=`` per-run cap.
+        ``?states=orphan`` (default), ``?max=`` per-run cap.
         """
         scheduler = getattr(request.app.state, "listing_verify_scheduler", None)
         storage = getattr(request.app.state, "storage", None)
@@ -98,7 +98,7 @@ def create_audit_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="验证调度器/存储未就绪")
         if scheduler.in_progress:
             return JSONResponse({"success": False, "message": "验证正在进行中，请稍后"})
-        states_raw = request.query_params.get("states", "source_none,orphan")
+        states_raw = request.query_params.get("states", "orphan")
         states = {s.strip() for s in states_raw.split(",") if s.strip()}
         max_codes: int | None
         try:

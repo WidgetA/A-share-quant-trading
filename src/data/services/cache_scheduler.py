@@ -584,6 +584,7 @@ class CacheScheduler:
         final_state: dict = {}
         minute_state: dict = {}
         problem_codes: list[str] = []
+        align_suspects: list[str] = []
         try:
             summary = await storage.get_trading_calendar_summary()
             final_state = summary.get("by_daily_state", {})
@@ -592,11 +593,26 @@ class CacheScheduler:
                 {"orphan", "missing", "wrong_suspended"}
             )
             problem_codes = sorted(codes)
+            # Fix-4 guard: kimi-rostered codes that are source_none (kimi gave a list_date but
+            # Tushare serves no data) = likely alignment defect (wrong date / missed migration).
+            # After the alignment fix this is empty; anything here = a NEW divergence → surface.
+            from src.data.services.trading_calendar import alignment_suspects
+
+            sn = await storage.get_calendar_problem_codes({"source_none"})
+            if sn:
+                info = await storage.get_listing_info_all()
+                align_suspects = alignment_suspects(sn, info)
         except Exception as e:  # noqa: BLE001
             logger.warning("maintenance: final calendar summary failed: %s", e)
 
         return await self._send_pipeline_summary(
-            task_start, steps, kimi_findings, final_state, minute_state, problem_codes
+            task_start,
+            steps,
+            kimi_findings,
+            final_state,
+            minute_state,
+            problem_codes,
+            align_suspects,
         )
 
     async def _send_pipeline_summary(
@@ -607,15 +623,17 @@ class CacheScheduler:
         final_state: dict,
         minute_state: dict,
         problem_codes: list[str],
+        align_suspects: list[str] | None = None,
     ) -> tuple[str, str]:
         """Build + send the ONE unified Feishu summary. Returns (result, message)."""
         now = datetime.now(BEIJING_TZ)
         elapsed_min = max(1, int((now - task_start).total_seconds() / 60))
         failed_steps = [s for s in steps if s[1] in ("失败", "超时")]
         warn_steps = [s for s in steps if s[1] == "警告"]
+        suspects = align_suspects or []
         if failed_steps:
             header = "【每日数据维护】⚠️ 部分步骤异常"
-        elif warn_steps:
+        elif warn_steps or suspects:
             header = "【每日数据维护】⚠️ 完成(有告警)"
         else:
             header = "【每日数据维护】✅ 完成"
@@ -624,7 +642,7 @@ class CacheScheduler:
         lines = [
             header,
             f"时间: {task_start.strftime('%Y-%m-%d %H:%M')} ~ {now.strftime('%H:%M')} "
-            f"({elapsed_min}min) · 先全量查漏、再精准补缺",
+            f"({elapsed_min}min) · 增量查漏、再精准补缺",
             "",
         ]
         lines += [f"{marks.get(st, '·')} {label}: {detail}" for label, st, detail in steps]
@@ -665,6 +683,18 @@ class CacheScheduler:
                 line += f" …共 {len(problem_codes)} 只(完整见 calendar/problems 接口)"
             lines += ["", line]
 
+        # Fix-4 guard: kimi rostered these (gave a list_date) but Tushare serves no data →
+        # 上市日错 / 该走迁号对应表而非当成上市码。正常情况下应为空,出现即"下次有别的"的新偏差。
+        if suspects:
+            shown = suspects[:_PROBLEM_CODES_IN_SUMMARY]
+            line = (
+                "⚠️ 疑似对齐缺陷(kimi 给了上市日·Tushare 却无数据 → 上市日错/该走迁号表): "
+                + "、".join(shown)
+            )
+            if len(suspects) > len(shown):
+                line += f" …共 {len(suspects)} 只"
+            lines += ["", line]
+
         if kimi_findings:
             lines += ["", "本轮 kimi 查证(逐只):"]
             for f in kimi_findings[:_KIMI_FINDINGS_IN_SUMMARY]:
@@ -679,8 +709,11 @@ class CacheScheduler:
 
         if failed_steps:
             return "failed", "异常步骤: " + "、".join(s[0] for s in failed_steps)
-        if warn_steps:
-            return "success", "完成(有告警: " + "、".join(s[0] for s in warn_steps) + ")"
+        if warn_steps or suspects:
+            parts = [s[0] for s in warn_steps]
+            if suspects:
+                parts.append(f"疑似对齐缺陷 {len(suspects)} 只")
+            return "success", "完成(有告警: " + "、".join(parts) + ")"
         return "success", "维护完成(查漏→补缺)"
 
     # ------------------------------------------------------------------

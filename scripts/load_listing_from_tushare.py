@@ -68,15 +68,26 @@ async def load_listing(storage, client) -> dict:
     entries = build_entries(listed, delisted)
     tushare_codes = {e["code"] for e in entries}
 
+    # code_alias old_codes = 迁号/换号后作废的老代码 (老→新). Tushare 已把它们的历史重挂到
+    # 新码、daily 不再返回老码 → 老码若留在名单里会按 list_date 永远"在册却源头查无" = source_none
+    # (还被反复喂 kimi 死循环)。这里把对应表接到名单构建上:**凡是 code_alias 的 old_code,
+    # 一律不保留进 listing_info** —— 老码彻底出名单,roster_for_day / get_effective_universe /
+    # audit_daily_gaps(都读 stock_listing_info)随之自动排除它。这是"让建好的对应表真正生效"的一处。
+    alias_old_codes = set(await storage.get_code_alias_map())
+
     # Snapshot kimi-written rows to re-apply after the truncate. The fetch above
     # already happened, so a fetch failure aborts before we touch the table.
     existing = await storage.get_listing_info_all()
     preserved: list[dict] = []
+    dropped_aliased = 0
     for code, meta in existing.items():
         if (meta.get("source") or "") == _SOURCE:
             continue  # a prior Tushare row — let the fresh reload replace/drop it
         if code in tushare_codes:
             continue  # Tushare now covers it — authoritative wins
+        if code in alias_old_codes:
+            dropped_aliased += 1
+            continue  # migrated/renamed dead code — its identity+history is the new code now
         ld = meta.get("list_date")
         dd = meta.get("delist_date")
         preserved.append(
@@ -104,6 +115,7 @@ async def load_listing(storage, client) -> dict:
         "total_entries": len(entries),
         "written": written,
         "preserved_kimi": len(preserved),
+        "dropped_aliased": dropped_aliased,
     }
 
 

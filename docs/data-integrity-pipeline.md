@@ -263,6 +263,18 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   Tushare 恢复后**重建那天**即复原(`POST /calendar/rebuild?start=&end=&with_minute=1`)。
   ④ 分钟补全 barrage(stk_mins 上百次)易触发 Tushare 限频/抖动 → 当晚可能只补一部分(其余 missing
   下晚续补)+ 抬高紧接其后的 daily 取数抖动概率;每晚 ⑤ 带上限、⑥ 有守卫,所以慢/部分/抖动都不致命。
+- **`code_alias` 必须接到"排除"链路,否则迁移老码永久 source_none + 被 kimi 反复重烧(2026-06,通用修)**:
+  北交所迁号后,`code_alias`(老→新)虽由 kimi 填好,但**只接到"下载 re-key"一处**;`load_listing`/
+  `roster_for_day`/`effective_universe`/`audit` 都不读它 → 迁移老码仍按 list_date 在册、daily 查无 →
+  永久 `source_none`,且每晚被当"未验证/source_none"喂回 kimi。更坑的是 kimi 把"迁移新代码"判定**当成
+  正常上市码、以 verified=True+list_date 写回名单**,亲手把老码顶成在册(死循环)。**通用修(四处)**:
+  ① `load_listing` 读 code_alias,**凡 old_code 一律不进 listing_info**(一处生效、roster/effective/audit 全排除);
+  ② 验证器遇到带 `new_code` 的迁号 finding **只写 code_alias、把老码写成 list_date=None 的"已迁移"占位**(绝不写在册行);
+  ③ `get_unverified_codes_in_snapshot` 排除 code_alias old_code(不再喂 kimi),`verify-problems` 默认 states
+  去掉 `source_none`(数据缺口不是身份问题、kimi 填不了);④ 每晚 `alignment_suspects` 守卫:**kimi 给了上市日
+  但 Tushare 无数据**的 source_none 码 = 疑似对齐缺陷 → 飞书告警(正常应为空,出现即新偏差)。**教训**:对应关系
+  建好了**没接到决定"在不在册"的链路上 = 等于没用**;`source_none` 是数据缺口、别拿身份工具(kimi)去追。
+  B 类(新码挂原始上市日、但 Tushare 该新码无迁移前历史,如 920039)是**真·源头也无**,接受为 source_none、不追。
 
 ---
 

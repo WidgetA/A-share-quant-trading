@@ -1672,16 +1672,20 @@ class GreptimeBacktestStorage:
         return snapshot - blocked
 
     async def get_unverified_codes_in_snapshot(self) -> set[str]:
-        """Codes appearing in stock_snapshot that have no listing_info row yet.
+        """Codes in stock_snapshot with no listing_info row yet AND not a resolved
+        code_alias old_code.
 
-        Used by the audit "coverage check": when the daily missing set
-        intersects this group we know the data isn't conclusively wrong —
-        it's just not yet verified — and we hold the alert instead of
-        firing immediately.
+        Used by the audit "coverage check" + as the nightly kimi-verify feed. We exclude
+        ``code_alias`` old_codes: those are migrated/renamed dead codes (identity + history
+        now belong to the new code) — already resolved, so they must NOT be treated as
+        "unverified" and re-fed to kimi every night. Without this, load_listing dropping a
+        migrated old code from listing_info would make it resurface here forever (the
+        source_none / kimi re-burn loop).
         """
         rows = await self.db.fetch(
             "SELECT DISTINCT stock_code FROM stock_snapshot "
-            "WHERE stock_code NOT IN (SELECT stock_code FROM stock_listing_info)"
+            "WHERE stock_code NOT IN (SELECT stock_code FROM stock_listing_info) "
+            "AND stock_code NOT IN (SELECT old_code FROM code_alias)"
         )
         return {r["stock_code"] for r in rows}
 

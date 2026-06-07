@@ -22,6 +22,7 @@ class _FakeStorage:
         self._unverified = set(unverified)
         self._failed = set(failed or [])
         self.written: list[dict] = []
+        self.aliases: list[dict] = []
 
     async def get_unverified_codes_in_snapshot(self):
         return set(self._unverified)
@@ -31,6 +32,10 @@ class _FakeStorage:
 
     async def upsert_listing_info(self, entries):
         self.written.extend(entries)
+        return len(entries)
+
+    async def upsert_code_alias(self, entries):
+        self.aliases.extend(entries)
         return len(entries)
 
 
@@ -155,6 +160,47 @@ async def test_kimi_tool_error_aborts_without_placeholders(monkeypatch):
     assert result["checked"] <= mod._TOOL_ERROR_ABORT
     msg = feishu.await_args.args[0]
     assert "已中止" in msg and "未写任何占位" in msg
+
+
+@pytest.mark.asyncio
+async def test_migration_writes_alias_and_excluded_marker_not_listing(monkeypatch):
+    """A 迁号/换号 finding (new_code present) must NOT write the old code as a verified live
+    listing row (that caused the source_none loop). It writes a list_date=None excluded
+    marker (roster_for_day drops it) + a code_alias old→new, counted as 'migrated'."""
+    storage = _FakeStorage(["830779"])
+    sched = _scheduler(storage)
+
+    async def _mig(code, timeout_sec=180, raw_dir=None):
+        return {
+            "code": code,
+            "name": "武汉蓝电",
+            "list_date": "2023-06-01",
+            "delist_date": "2025-10-09",
+            "status": "迁移新代码",
+            "new_code": "920779",
+            "note": "迁到 920779",
+            "source": "http://x",
+        }
+
+    monkeypatch.setattr(mod, "run_kimi_for_code", _mig)
+    with patch.object(mod, "_notify_feishu", new=AsyncMock()):
+        result = await sched.verify_unverified()
+
+    # old code written as an EXCLUDED marker (list_date=None), NOT a verified live listing
+    assert len(storage.written) == 1
+    row = storage.written[0]
+    assert row["code"] == "830779"
+    assert row["verified"] is False
+    assert row["list_date"] is None  # roster_for_day excludes list_date=None
+    assert row["source"] == mod._MIGRATED_SOURCE
+    # code_alias old→new recorded so load_listing drops 830779 entirely next reload
+    assert len(storage.aliases) == 1
+    assert storage.aliases[0]["old_code"] == "830779"
+    assert storage.aliases[0]["new_code"] == "920779"
+    # categorized as migrated, NOT verified / not-found
+    assert result["migrated"] == 1
+    assert result["verified"] == 0
+    assert result["failed"] == 0
 
 
 @pytest.mark.asyncio

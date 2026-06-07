@@ -22,6 +22,7 @@ from src.data.services.trading_calendar import (
     UNKNOWN,
     WRONG_SUSPENDED,
     WRONG_TRADED,
+    alignment_suspects,
     build_calendar,
     reconcile_day,
     roster_for_day,
@@ -291,6 +292,23 @@ async def test_build_calendar_empty_traded_genuine_nontrading_day_not_skipped():
     )
     assert result["skipped_days"] == []  # not skipped (no real rows to protect)
     assert len(storage.upserts) == 1  # reconciled normally
+
+
+def test_alignment_suspects_flags_only_kimi_rostered_source_none():
+    # Fix-4 guard: a source_none code rostered by a KIMI row WITH a list_date = likely
+    # alignment defect (kimi gave a date but Tushare has no data). A Tushare-listed
+    # source_none = genuine 源头也无 (not flagged). No list_date / no row = not rostered.
+    listing = {
+        "888888": {"list_date": date(2020, 1, 1), "source": "kimi"},  # suspect
+        "920039": {"list_date": date(2021, 8, 18), "source": "tushare_stock_basic"},  # genuine gap
+        "999999": {"list_date": None, "source": "kimi-not-found"},  # not rostered
+    }
+    sn = {"888888", "920039", "999999"}
+    assert alignment_suspects(sn, listing) == ["888888"]
+    # a source_none code with no listing row at all → not a suspect
+    assert alignment_suspects({"777777"}, listing) == []
+    # nothing source_none → empty
+    assert alignment_suspects(set(), listing) == []
 
 
 # --- minute_state reconcile (阶段3) ---

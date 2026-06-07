@@ -181,6 +181,33 @@ def roster_for_day(listing_info: dict[str, dict], day: date) -> set[str]:
     return out
 
 
+# A listing_info row's source = this string when it came from the authoritative exchange
+# registry (Tushare stock_basic, via load_listing); anything else is a kimi-added row.
+# Keep in sync with scripts/load_listing_from_tushare._SOURCE.
+LISTING_SOURCE_TUSHARE = "tushare_stock_basic"
+
+
+def alignment_suspects(source_none_codes: set[str], listing_info: dict[str, dict]) -> list[str]:
+    """Codes that are ``source_none`` AND were rostered by a kimi-sourced listing row with a
+    real list_date — i.e. kimi gave a list_date but Tushare serves NO data for them.
+
+    That signature = a likely **alignment defect**: a wrong list_date, or a migration that
+    should have been a `code_alias` (old→new) rather than a live listing. It is distinct from
+    a genuine 源头也无 gap on a *Tushare-listed* code (which is acceptable). After the alignment
+    fix this set should be empty; anything in it = a NEW divergence to investigate, so the
+    nightly surfaces it as a ⚠️ warning instead of letting it silently pile into source_none.
+    Pure function (unit-tested).
+    """
+    out: list[str] = []
+    for code in source_none_codes:
+        meta = listing_info.get(code)
+        if not meta or not meta.get("list_date"):
+            continue  # no list_date ⇒ not rostered ⇒ not the defect we're hunting
+        if (meta.get("source") or "") != LISTING_SOURCE_TUSHARE:
+            out.append(code)  # kimi-rostered + source_none = suspect
+    return sorted(out)
+
+
 async def build_calendar(
     storage,
     *,

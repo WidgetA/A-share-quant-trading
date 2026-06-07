@@ -52,13 +52,17 @@ class _FakeClient:
 
 
 class _FakeStorage:
-    def __init__(self, existing: dict | None = None):
+    def __init__(self, existing: dict | None = None, alias: dict | None = None):
         self.written: list[dict] = []
         self.truncated = False
         self.existing = existing or {}
+        self.alias = alias or {}
 
     async def get_listing_info_all(self):
         return self.existing
+
+    async def get_code_alias_map(self):
+        return dict(self.alias)
 
     async def truncate_listing_info(self):
         self.truncated = True
@@ -79,6 +83,7 @@ async def test_load_listing_writes_listed_and_delisted():
         "total_entries": 2,
         "written": 2,
         "preserved_kimi": 0,
+        "dropped_aliased": 0,
     }
     codes = {e["code"] for e in storage.written}
     assert codes == {"600000", "000003"}
@@ -133,3 +138,37 @@ async def test_load_listing_preserves_kimi_rows_drops_migrated_tushare():
     # fresh Tushare (600000, 000003) + preserved kimi (830964, 920964); 430198 dropped
     assert codes == {"600000", "000003", "830964", "920964"}
     assert "430198" not in codes
+
+
+@pytest.mark.asyncio
+async def test_load_listing_drops_code_alias_old_codes():
+    """A code that appears as old_code in code_alias (迁号/换号 dead code) must NOT survive
+    into listing_info — even a kimi-written verified row — so it's never re-rostered (no
+    source_none, no kimi loop). This wires the old→new mapping into roster exclusion."""
+    from datetime import date
+
+    existing = {
+        # kimi wrongly wrote 830779 as a verified live listing row when it found the migration
+        "830779": {
+            "name": "武汉蓝电",
+            "list_date": date(2023, 6, 1),
+            "delist_date": None,
+            "verified": True,
+            "source": "kimi",
+        },
+        # a genuine kimi placeholder NOT in the alias map → still preserved
+        "999999": {
+            "name": None,
+            "list_date": None,
+            "delist_date": None,
+            "verified": False,
+            "source": "kimi-not-found",
+        },
+    }
+    storage = _FakeStorage(existing=existing, alias={"830779": "920779"})
+    result = await load_listing(storage, _FakeClient())
+    codes = {e["code"] for e in storage.written}
+    assert "830779" not in codes  # migrated old code dropped (it's a code_alias old_code)
+    assert "999999" in codes  # non-aliased kimi row still preserved
+    assert result["dropped_aliased"] == 1
+    assert result["preserved_kimi"] == 1  # only 999999
