@@ -1381,17 +1381,13 @@ def create_momentum_router() -> APIRouter:
                                 sell_trade_date = t1_date
                                 sell_reason = "T+1 低开止损"
                                 sell_price_val = (
-                                    float(t1_data.close)
-                                    if t1_data and t1_data.close
-                                    else 0.0
+                                    float(t1_data.close) if t1_data and t1_data.close else 0.0
                                 )
                             else:
                                 sell_trade_date = t2_date
                                 sell_reason = "T+2 收盘"
                                 sell_price_val = (
-                                    float(t2_data.close)
-                                    if t2_data and t2_data.close
-                                    else 0.0
+                                    float(t2_data.close) if t2_data and t2_data.close else 0.0
                                 )
 
                             if buy_price > 0 and sell_price_val > 0:
