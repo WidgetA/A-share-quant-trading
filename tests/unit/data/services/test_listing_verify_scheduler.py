@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -105,6 +106,28 @@ async def test_no_codes_short_circuits(monkeypatch):
         result = await sched.verify_unverified()
     assert result == {"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}
     assert storage.written == []
+
+
+@pytest.mark.asyncio
+async def test_time_budget_stops_gracefully_leaves_rest_queued(monkeypatch):
+    # The nightly TIME-budgets ②: verify as many as fit the window, then stop CLEANLY with
+    # the rest queued — not an arbitrary tiny count, not a failure. Here the 0.05s budget
+    # fits only the first (0.1s) code; the other 4 stay queued, no error.
+    codes = [f"{600000 + i:06d}" for i in range(5)]
+    storage = _FakeStorage(codes)
+    sched = _scheduler(storage)
+
+    async def _slow(code, timeout_sec=180, raw_dir=None):
+        await asyncio.sleep(0.1)
+        return {"code": code, "name": f"N{code}", "list_date": "2020-01-01", "source": "http://x"}
+
+    monkeypatch.setattr(mod, "run_kimi_for_code", _slow)
+    with patch.object(mod, "_notify_feishu", new=AsyncMock()):
+        result = await sched.verify_unverified(time_budget_sec=0.05)
+
+    assert result["checked"] == 1  # only the first code fit the budget
+    assert result["remaining"] == 4  # the rest stay queued for next run
+    assert result.get("error") is None  # graceful stop, NOT a failure
 
 
 @pytest.mark.asyncio

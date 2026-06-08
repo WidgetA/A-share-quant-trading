@@ -308,6 +308,7 @@ class ListingVerifyScheduler:
         include_failed: bool = False,
         codes: set[str] | None = None,
         max_codes: int | None = None,
+        time_budget_sec: float | None = None,
         quiet: bool = False,
     ) -> dict:
         """Verify codes via kimi-cli (the listing-date backstop).
@@ -318,7 +319,12 @@ class ListingVerifyScheduler:
             codes: explicit code set to verify (e.g. the truth-table's
                 source_none/orphan backstop set). If None, defaults to
                 snapshot codes lacking a listing_info row.
-            max_codes: per-run cap (defaults to MAX_CODES_PER_RUN).
+            max_codes: per-run COUNT ceiling (sanity bound, defaults to MAX_CODES_PER_RUN).
+            time_budget_sec: per-run TIME budget — keep verifying codes until this many
+                seconds have elapsed, then stop gracefully (the rest stay queued for next
+                run). This is the real nightly limiter: it clears as MANY codes as fit the
+                time window instead of an arbitrary tiny count, and a slow night just does
+                fewer + stops cleanly (never blows the outer step bound → never a false fail).
             quiet: suppress the standalone per-run Feishu success summary (the
                 daily-maintenance pipeline folds kimi's result into its one
                 unified message). Tool/auth-failure aborts still alert regardless.
@@ -353,15 +359,17 @@ class ListingVerifyScheduler:
             return {"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}
 
         cap = max_codes if max_codes is not None else MAX_CODES_PER_RUN
-        batch = all_codes[:cap]
-        truncated = total - len(batch)
-        remaining = truncated
-        if truncated > 0:
-            msg = (
-                f"本次只验证 {len(batch)}/{total},剩余 {truncated} 下次继续 "
+        batch = all_codes[:cap]  # COUNT ceiling; time_budget_sec (below) is the real limiter
+        if time_budget_sec is not None:
+            await _log(
+                f"待验证 {total} 只,本次按时间预算 ~{time_budget_sec / 60:.0f}min 能核多少核多少 "
+                f"(并发 {CONCURRENCY})"
+            )
+        elif len(batch) < total:
+            await _log(
+                f"本次只验证 {len(batch)}/{total},剩余 {total - len(batch)} 下次继续 "
                 f"(MAX_CODES_PER_RUN={MAX_CODES_PER_RUN})"
             )
-            await _log(msg)
         else:
             await _log(f"待验证 {len(batch)} 只代码 (并发 {CONCURRENCY})")
 
@@ -380,19 +388,33 @@ class ListingVerifyScheduler:
         def _abort(reason: str, checked: int) -> dict:
             self.last_verified = verified_n
             self.last_failed = len(not_found_codes)
-            self.last_remaining = remaining
+            self.last_remaining = total - checked
             return {
                 "checked": checked,
                 "verified": verified_n,
                 "failed": len(not_found_codes),
                 "tool_errors": len(tool_errors),
                 "tool_error_sample": tool_errors[0][1] if tool_errors else None,
-                "remaining": remaining,
+                "remaining": total - checked,
                 "findings": findings,
                 "error": reason,
             }
 
-        for idx, code in enumerate(batch, 1):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + time_budget_sec if time_budget_sec is not None else None
+        processed = 0
+        for code in batch:
+            # Time budget is the real limiter: stop gracefully when the window is used up
+            # (the rest stay queued for the next run) — never an arbitrary tiny count cap,
+            # and never run past the outer step bound into a false "failed" verdict.
+            if deadline is not None and loop.time() >= deadline:
+                assert time_budget_sec is not None  # deadline set ⇒ budget set
+                await _log(
+                    f"已用满时间预算 ~{time_budget_sec / 60:.0f}min,本次核了 {processed} 只,"
+                    f"剩 {total - processed} 只下次继续"
+                )
+                break
+            processed += 1
             try:
                 # raw_dir → keep the full tool trace per code for observability
                 result = await run_kimi_for_code(code, raw_dir=KIMI_RAW_DIR)
@@ -411,7 +433,7 @@ class ListingVerifyScheduler:
                         f"原因: {reason}\n"
                         "(原因写'超时'就调长超时;只有写'认证被拒'才去检查 KIMI_API_KEY。)"
                     )
-                    return _abort(f"kimi 连续工具错误: {reason}", idx)
+                    return _abort(f"kimi 连续工具错误: {reason}", processed)
                 continue
             except Exception as e:  # noqa: BLE001 — unexpected; treat as tool error
                 logger.warning("kimi verify %s unexpected error: %s", code, e)
@@ -466,8 +488,10 @@ class ListingVerifyScheduler:
                         "source": _FAILED_SOURCE,
                     }
                 )
-            if idx % 50 == 0:
-                await _log(f"进度 {idx}/{len(batch)}")
+            if processed % 50 == 0:
+                await _log(f"进度 {processed} 只(队列 {total})")
+
+        remaining = total - processed  # codes not reached this run (time budget / count ceiling)
 
         # Write back in small batches (GreptimeDB silently drops big INSERTs).
         written = 0
@@ -541,7 +565,7 @@ class ListingVerifyScheduler:
         self.last_failed = len(not_found_codes)
         self.last_remaining = remaining
         return {
-            "checked": len(batch),
+            "checked": processed,
             "verified": verified_n,
             "migrated": migrated_n,
             "failed": len(not_found_codes),

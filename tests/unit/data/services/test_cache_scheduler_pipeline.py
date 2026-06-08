@@ -89,9 +89,9 @@ class _FakeLV:
         self._result = result
         self._calls = calls
 
-    async def verify_unverified(self, quiet=False, max_codes=None):
-        # max_codes: the nightly caps the batch to fit the 6h step bound (600s/code serial)
-        self._captured_max_codes = max_codes
+    async def verify_unverified(self, quiet=False, max_codes=None, time_budget_sec=None):
+        # the nightly TIME-budgets the batch (clears as many as fit the step window)
+        self._captured_time_budget = time_budget_sec
         self._calls.append("kimi")
         return self._result
 
@@ -326,20 +326,19 @@ async def test_kimi_runs_when_enabled_and_available(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kimi_batch_capped_to_fit_step_budget(monkeypatch):
-    # B1 regression: serial kimi at KIMI_VERIFY_TIMEOUT_SEC/code MUST fit the 6h ② step
-    # bound, so the nightly passes a max_codes cap. Without it a 500-code backlog × 600s =
-    # 83h ≫ 6h → ② times out + fails every night. A bigger backlog drains over nights.
+async def test_kimi_time_budgeted_under_step_bound(monkeypatch):
+    # The nightly TIME-budgets ② (not an arbitrary count): it must pass a time_budget_sec
+    # that stays UNDER the hard 6h step bound, so ② stops gracefully before the _bounded()
+    # cut — clearing as many codes as fit, never a false "step timed out" failure.
     from src.data.services import cache_scheduler as cs
-    from src.data.services.kimi_listing_verifier import KIMI_VERIFY_TIMEOUT_SEC
 
     calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
     lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
     sched = CacheScheduler(_AppState(_FakeStorage(), _FakePipeline(_NO_GAPS, calls), lv=lv))
     await sched._run_pipeline("scheduled")
-    cap = lv._captured_max_codes
-    assert cap is not None and cap >= 1
-    assert cap * KIMI_VERIFY_TIMEOUT_SEC <= cs._STEP_TIMEOUT_KIMI
+    budget = lv._captured_time_budget
+    assert budget is not None and budget > 0
+    assert budget < cs._STEP_TIMEOUT_KIMI
 
 
 @pytest.mark.asyncio

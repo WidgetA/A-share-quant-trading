@@ -361,14 +361,14 @@ class CacheScheduler:
                 # that kimi is running (verify_unverified itself doesn't set it).
                 lv.in_progress = True
                 try:
-                    # Cap the batch so serial (CONCURRENCY=1) × per-code timeout fits the 6h
-                    # step bound. Without this, a big backlog × 600s/code would blow past
-                    # _STEP_TIMEOUT_KIMI and fail ②; a larger backlog now drains over nights.
-                    from src.data.services.kimi_listing_verifier import KIMI_VERIFY_TIMEOUT_SEC
-
-                    kimi_cap = max(1, int(_STEP_TIMEOUT_KIMI * 0.8 // KIMI_VERIFY_TIMEOUT_SEC))
+                    # TIME-budget the batch, not an arbitrary count: ② verifies as MANY codes
+                    # as fit ~85% of the step bound, then stops gracefully (the rest queue for
+                    # next run). Clears a big backlog in ~one long night instead of dribbling a
+                    # tiny count/night, and stays inside the hard _bounded() cut (no false fail).
+                    kimi_budget = _STEP_TIMEOUT_KIMI * 0.85
                     ok, r = await self._bounded(
-                        lv.verify_unverified(quiet=True, max_codes=kimi_cap), _STEP_TIMEOUT_KIMI
+                        lv.verify_unverified(quiet=True, time_budget_sec=kimi_budget),
+                        _STEP_TIMEOUT_KIMI,
                     )
                 finally:
                     lv.in_progress = False
