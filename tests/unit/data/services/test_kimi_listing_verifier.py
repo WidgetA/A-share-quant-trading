@@ -6,12 +6,19 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
+from src.data.services import kimi_listing_verifier as kv
 from src.data.services.kimi_listing_verifier import (
+    KimiToolError,
     _classify_unparseable,
     _looks_like_api_auth_failure,
     _read_result_file,
     finding_from_result,
     parse_kimi_output,
+    run_kimi_for_code,
 )
 
 
@@ -55,6 +62,45 @@ def test_classify_unparseable_reports_what_it_actually_is():
     # a SHORT output = kimi barely ran → flag as suspected startup/auth failure (read trace),
     # rather than silently calling a real auth death "解析失败"
     assert "疑似" in _classify_unparseable("AuthError occurred, exiting", 0)
+
+
+@pytest.mark.asyncio
+async def test_hang_backstop_keeps_partial_output_not_discarded(monkeypatch, tmp_path):
+    # 用户要求:别用时间判失败 + 别把 kimi 输出扔了。这里验证 hang-backstop 触发时,我们
+    # KEEP 已产出的部分(写进 raw)并报"未退出/卡死"(区别于 kimi 明确失败),而不是丢弃。
+    class _FakeStdout:
+        def __init__(self):
+            self._sent = False
+
+        async def read(self, _n):
+            if not self._sent:
+                self._sent = True
+                return "kimi 正在搜索 836419 …第3步 FetchURL 东方财富".encode()
+            await asyncio.sleep(3600)  # never produces EOF → simulates a hung process
+            return b""
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _FakeStdout()
+            self.returncode = None
+
+        def kill(self):
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    async def _fake_exec(*_a, **_k):
+        return _FakeProc()
+
+    monkeypatch.setattr(kv.asyncio, "create_subprocess_exec", _fake_exec)
+    with pytest.raises(KimiToolError) as ei:
+        await run_kimi_for_code("836419", timeout_sec=1, raw_dir=tmp_path)
+
+    msg = str(ei.value)
+    assert "未退出" in msg and "836419" in msg  # explicit hang verdict, not a guessed failure
+    raw = (tmp_path / "836419.txt").read_text(encoding="utf-8")
+    assert "正在搜索" in raw  # partial output KEPT for inspection, not thrown away
 
 
 def test_parses_clean_success_json():

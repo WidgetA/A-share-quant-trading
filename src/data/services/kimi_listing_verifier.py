@@ -252,13 +252,14 @@ def kimi_available() -> bool:
     return shutil.which("kimi") is not None
 
 
-# Deep web-search + thinking on a hard code (新股待挂牌 / IPO 叫停 / 北交所迁号) routinely
-# runs many minutes and a 50–100K-char trace. Measured live: successful 北交所-migration verifies
-# took ~6min; the slowest still exceeded 600s and got cut off MID-SEARCH (timed out right before
-# writing its already-correct answer → false tool-error). 1200s gives the slow ones headroom so
-# the answer lands and the code leaves the queue instead of re-burning every night. The nightly
-# ② caps its batch to _STEP_TIMEOUT_KIMI*0.8//this (≈14 codes), so a backlog drains over nights.
-KIMI_VERIFY_TIMEOUT_SEC = 1200
+# HANG-BACKSTOP only — NOT a "work limit" / failure criterion. kimi-cli exits on its own with an
+# explicit verdict (answer / auth error / 查不到); we wait for that exit and judge from it. This
+# bound exists solely to kill a process that never exits, and even then we keep the partial output.
+# It is set well beyond any legitimate run (deep 北交所-migration searches measured ~3–6min local,
+# ~2× on prod, 50–100K-char traces) so it never cuts a real verdict short. The nightly ② caps its
+# batch to _STEP_TIMEOUT_KIMI*0.8//this (≈9 codes worst-case), so the 6h step bound holds even if
+# every code hit the backstop; in practice codes finish far faster, so a night clears more.
+KIMI_VERIFY_TIMEOUT_SEC = 1800
 
 
 async def run_kimi_for_code(
@@ -306,18 +307,43 @@ async def run_kimi_for_code(
             stderr=asyncio.subprocess.STDOUT,
             env=env,
         )
+        # Let kimi run to its OWN exit and judge from what it EXPLICITLY says (answer /
+        # auth error / 查不到). We do NOT time-kill it as a "failure": kimi-cli always exits
+        # with a verdict, so killing it mid-search just discards that verdict (the old false
+        # "超时" tool-errors). `timeout_sec` is ONLY a generous hang-backstop for a process
+        # that never exits — and even then we KEEP + report the partial output we captured,
+        # so a stuck run is observable instead of thrown away.
+        assert proc.stdout is not None
+        chunks: list[bytes] = []
+
+        async def _drain() -> None:
+            while True:
+                chunk = await proc.stdout.read(65536)  # type: ignore[union-attr]
+                if not chunk:
+                    break
+                chunks.append(chunk)
+
+        def _persist(data: bytes) -> str:
+            decoded = data.decode("utf-8", errors="replace")
+            if raw_dir is not None and decoded.strip():
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                (raw_dir / f"{code}.txt").write_text(decoded, encoding="utf-8")
+            return decoded
+
         try:
-            out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+            await asyncio.wait_for(_drain(), timeout=timeout_sec)
+            await proc.wait()
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
-            raise KimiToolError(f"kimi 超时 (>{timeout_sec}s) — code={code}") from None
+            await proc.wait()
+            text = _persist(b"".join(chunks))  # keep partial so we can SEE where it hung
+            tail = " ".join(text.split())[-300:]
+            raise KimiToolError(
+                f"kimi 超过 {timeout_sec}s 仍未退出(疑似卡死,非 kimi 明确失败)— code={code};"
+                f" 已产出 {len(text)} 字,尾部: {tail!r}"
+            ) from None
 
-        text = out_bytes.decode("utf-8", errors="replace")
-
-        if raw_dir is not None:
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            (raw_dir / f"{code}.txt").write_text(text, encoding="utf-8")
+        text = _persist(b"".join(chunks))
 
         # "LLM not set": the headless --print run had no model configured (no
         # ~/.kimi/config.toml in the container — only credentials were uploaded), so
