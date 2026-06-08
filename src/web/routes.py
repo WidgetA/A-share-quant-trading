@@ -1237,7 +1237,8 @@ def create_momentum_router() -> APIRouter:
             try:
                 from datetime import timedelta
 
-                cal_end = end_date + timedelta(days=10)
+                # +20 日历日:为区间末尾买入日留足 T+2 跨长假(国庆/春节)的余量
+                cal_end = end_date + timedelta(days=20)
                 trading_days_all = await _get_trading_calendar(start_date, cal_end)
                 if not trading_days_all:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
@@ -1248,23 +1249,18 @@ def create_momentum_router() -> APIRouter:
                     yield sse({"type": "error", "message": "所选日期范围内无交易日"})
                     return
 
-                # Build T+1 map
-                next_day_map = {}
+                # 买入日 T → (T+1, T+2):对齐 STR-005 实盘的 T+2 adaptive sell。
+                # 买入仍是 T 日 9:40;T+1 用于早盘低开止损判定,T+2 是默认卖出日。
+                hold_map = {}
                 for i, d in enumerate(trading_days_all):
                     if d > end_date:
                         break
-                    if d >= start_date and i + 1 < len(trading_days_all):
-                        next_day_map[d] = trading_days_all[i + 1]
+                    if d >= start_date and i + 2 < len(trading_days_all):
+                        hold_map[d] = (trading_days_all[i + 1], trading_days_all[i + 2])
 
-                if len(days_in_range) > 250:
-                    days_in_range = days_in_range[:250]
-                    yield sse(
-                        {
-                            "type": "warning",
-                            "message": f"已截断至前 250 个交易日"
-                            f" ({days_in_range[0]} ~ {days_in_range[-1]})",
-                        }
-                    )
+                # 不截断交易日:数据全在本地 GreptimeDB,无外部 API 配额;逐日 SSE
+                # 流式输出不会空闲超时,任意长度区间都能跑完。total_days 在下方 init
+                # 事件里如实报给前端。
 
                 yield sse(
                     {
@@ -1280,9 +1276,10 @@ def create_momentum_router() -> APIRouter:
                 day_results: list[dict] = []
 
                 for day_idx, trade_date in enumerate(days_in_range):
-                    next_trade_date = next_day_map.get(trade_date)
-                    if not next_trade_date:
+                    hold_days = hold_map.get(trade_date)
+                    if not hold_days:
                         continue
+                    t1_date, t2_date = hold_days
 
                     yield sse(
                         {
@@ -1364,17 +1361,38 @@ def create_momentum_router() -> APIRouter:
                             if buy_price <= 0:
                                 buy_price = rec.open_price
 
-                            # Get T+1 open from cache
-                            next_date_key = next_trade_date.strftime("%Y-%m-%d")
-                            next_day_data = await storage.get_daily(
-                                rec.stock_code,
-                                next_date_key,
+                            # T+2 adaptive sell(对齐 STR-005 实盘):
+                            #   T+1 早盘若比买入价低开 > 3% → 当天(T+1)收盘提前止损;
+                            #   否则持到 T+2 收盘卖。两天都取日线收盘价模拟尾盘成交。
+                            t1_data = await storage.get_daily(
+                                rec.stock_code, t1_date.strftime("%Y-%m-%d")
                             )
-                            sell_price_val = (
-                                float(next_day_data.open)
-                                if next_day_data and next_day_data.open
-                                else 0.0
+                            t2_data = await storage.get_daily(
+                                rec.stock_code, t2_date.strftime("%Y-%m-%d")
                             )
+
+                            early_exit = (
+                                buy_price > 0
+                                and t1_data is not None
+                                and bool(t1_data.open)
+                                and (float(t1_data.open) - buy_price) / buy_price < -0.03
+                            )
+                            if early_exit:
+                                sell_trade_date = t1_date
+                                sell_reason = "T+1 低开止损"
+                                sell_price_val = (
+                                    float(t1_data.close)
+                                    if t1_data and t1_data.close
+                                    else 0.0
+                                )
+                            else:
+                                sell_trade_date = t2_date
+                                sell_reason = "T+2 收盘"
+                                sell_price_val = (
+                                    float(t2_data.close)
+                                    if t2_data and t2_data.close
+                                    else 0.0
+                                )
 
                             if buy_price > 0 and sell_price_val > 0:
                                 lots = math.floor(capital / (buy_price * 100))
@@ -1417,7 +1435,9 @@ def create_momentum_router() -> APIRouter:
                                         "board_name": rec.board_name,
                                         "buy_price": round(buy_price, 2),
                                         "sell_price": round(sell_price_val, 2),
-                                        "sell_date": str(next_trade_date),
+                                        "sell_date": str(sell_trade_date),
+                                        "sell_reason": sell_reason,
+                                        "early_exit": early_exit,
                                         "lots": lots,
                                         "profit": round(trade_profit, 2),
                                         "return_pct": round(trade_return_pct, 2),
@@ -1440,7 +1460,7 @@ def create_momentum_router() -> APIRouter:
                                 if buy_price <= 0:
                                     reason_parts.append("无买入价")
                                 if sell_price_val <= 0:
-                                    reason_parts.append("无次日开盘卖出价")
+                                    reason_parts.append("无卖出价(T+2/止损日收盘缺失)")
                                 day_backtest["skip_reason"] = "、".join(reason_parts)
                                 day_backtest["stock_code"] = rec.stock_code
                                 day_backtest["stock_name"] = rec.stock_name
@@ -1504,6 +1524,7 @@ def create_momentum_router() -> APIRouter:
                     ),
                     "max_win": round(max((d["profit"] for d in trade_results), default=0), 2),
                     "max_loss": round(min((d["profit"] for d in trade_results), default=0), 2),
+                    "early_exit_days": sum(1 for d in trade_results if d.get("early_exit")),
                 }
 
                 yield sse(

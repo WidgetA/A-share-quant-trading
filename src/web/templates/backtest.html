@@ -618,7 +618,8 @@ async function runRangeBacktest() {
                             cls = bt.profit >= 0 ? 'log-profit' : 'log-loss';
                             detail = ` → ${bt.stock_name}(${bt.stock_code}) ` +
                                      `买@${(bt.buy_price||0).toFixed(2)} ` +
-                                     `T+1开@${(bt.sell_price||0).toFixed(2)} ` +
+                                     `${(bt.sell_reason||'T+2收')}@${(bt.sell_price||0).toFixed(2)}` +
+                                     `(${(bt.sell_date||'').slice(5)}) ` +
                                      `收益: ${(bt.return_pct||0).toFixed(2)}% ` +
                                      `资金: ¥${(bt.capital||0).toFixed(0)}`;
                         } else {
@@ -656,6 +657,7 @@ function renderRangeStats(s) {
         ['最大单日盈利', '¥' + (s.max_win||0).toFixed(0)],
         ['最大单日亏损', '¥' + (s.max_loss||0).toFixed(0)],
         ['胜/负/平', `${s.win_days||0}/${s.lose_days||0}/${s.even_days||0}`],
+        ['T+1止损天数', `${s.early_exit_days||0}`],
     ];
     items.forEach(([label, val]) => {
         html += `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${val}</div></div>`;

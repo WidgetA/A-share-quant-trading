@@ -7,6 +7,8 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.18.2 | 2026-06-08 | - | STR-004/006: 删除区间回测的「最多 250 个交易日」截断上限——数据全在本地 GreptimeDB,没有外部 API 配额限制,逐日 SSE 流式输出不会空闲超时,任意长度区间(几年)都能跑完。原上限只是怕一次跑太久的人为软保护,并非数据限制。(注:逐日全市场扫描的单日耗时未变,长区间仍是线性时间,后续若要提速另议) |
+| 0.18.1 | 2026-06-08 | - | STR-004/006: 区间回测卖出口径从「T+1 开盘」改为 **T+2 adaptive sell**,完整对齐 STR-005 实盘(买入仍 T 日 9:40):①T+1 早盘开盘比买入价低开 >3% → 当天 T+1 收盘提前止损;②否则持到 T+2 收盘卖。回测此前卖在 T+1 开盘,恰是实盘文档明令「不是」的那套。summary 增 `early_exit_days`(止损触发天数);日历缓冲 +10→+20 天,防区间末尾买入日的 T+2 跨长假被静默跳过;前端逐日日志显示真实卖出原因(T+2 收 / T+1 低开止损)+ 卖出日期。 |
 | 0.18.0 | 2026-06-02 | - | DAT-006: 交易日历真值表 `trading_calendar` —— 每「交易日 × 股票」一行的物化权威真值(在册/停牌/日线状态/预留分钟状态),由 roster(Tushare 上市日) ∩ suspend_d ∩ Tushare daily ∩ backtest_daily 复合而来;存全+读时筛(视图);检查/补全改为对照它,手动触发=重建。配套: `_to_ts_code` 北交所→`.BJ`(原 `.SZ` 致分钟空);日线-only 历史回填 `POST /api/audit/backfill-daily`;诊断报告飞书消息体积上限(超限静默丢弃修复);`stock_listing_info` 固定 ts + 重建前 truncate(同码双行/读闪修复)。 |
 | 0.17.0 | 2026-05-31 | - | DAT-002: 缓存补全/完整性检查结束后自动发送“按天详报”到飞书; `/api/audit/diagnose-gaps` 手动触发同一报告; 日线问题逐日展开,分钟 B 类库漏存逐日摘要,C/PENDING 类归类汇总,完整逐天明细写入 `data/audit/gap_diagnosis_report.{json,md}`。 |
 | 0.16.9 | 2026-05-07 | - | NOTE-001: 买入/卖出 事件正文拆 对内 / 对外 两栏（schema 加 `content_external` 列，幂等 ALTER 兼容老部署）；新增/编辑表单都给两个 textarea，单事件查看 + 篇 view trade card 都展示双栏（两栏都填时显示「对内/对外」分节标签）。 |
@@ -463,11 +465,14 @@ scored stock list → dashboard / Feishu report           (returned to caller; n
 | Mode | Description |
 |------|-------------|
 | **Single-day** | Run strategy for one date, show selected stocks + recommendation |
-| **Range** | Run strategy for a date range (max 90 trading days), simulate daily buy/sell with real costs |
+| **Range** | Run strategy for a date range (任意长度,无交易日上限——数据全在本地 GreptimeDB,逐日 SSE 流式跑完), simulate daily buy/sell with real costs |
 
 **Range Backtest Details**:
 - Input: start date, end date, initial capital (yuan)
-- Each trading day: run strategy → buy recommended stock at 9:40 price, sell at next day's open
+- Each trading day: run strategy → buy recommended stock at 9:40 price, **sell via T+2 adaptive rule**(对齐 STR-005 实盘):
+  - **T+1 早盘低开止损**:若 T+1 开盘价比买入价低开 > 3% → 当天 T+1 收盘卖出止损
+  - **T+2 默认**:否则持到 T+2 收盘卖出(持仓 2 个交易日)
+  - 两条分支都取日线收盘价模拟尾盘成交;summary 里 `early_exit_days` 记录止损触发了几天
 - Trading costs:
   - **Commission**: 0.3% of trade amount, minimum 5 yuan (both buy and sell)
   - **Transfer fee**: 0.001% (1/100,000) of trade amount (both buy and sell)
