@@ -241,8 +241,13 @@ days. Minute reconcile (`with_minute=True`) additionally reads `get_minute_bar_c
 `run_load_listing()` rebuilds `stock_listing_info` authoritatively from Tushare
 `stock_basic` (list_status `L` + `D`), with `list_date` / `delist_date`. It **fails fast on
 an empty listed list** (API hiccup must not wipe the roster), **truncates then re‑inserts**,
-and **preserves non‑Tushare rows** (kimi "查不到" placeholders + `code_alias`‑backed entries)
-across the truncate. This is the roster `reconcile_day` reads.
+and **preserves kimi‑written rows** (查不到 placeholders, plus the new‑IPO/active codes kimi
+resolved that `stock_basic` doesn't yet carry) across the truncate — **EXCEPT it DROPS any
+`code_alias` old_code**. A migrated/renamed code's identity + history belong to the new code,
+so the old code must leave the roster entirely; this is what makes `code_alias` authoritative
+for roster exclusion (wired in at the one build point → `roster_for_day` /
+`get_effective_universe_for_date` / `audit_daily_gaps` all exclude it for free), so migrated
+老北交所 codes stop lingering as perpetual `source_none`. This is the roster `reconcile_day` reads.
 
 ### 7.3 `CachePipeline._process_daily_date()` — real‑vs‑suspended decision
 
