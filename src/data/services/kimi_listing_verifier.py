@@ -253,10 +253,12 @@ def kimi_available() -> bool:
 
 
 # Deep web-search + thinking on a hard code (新股待挂牌 / IPO 叫停 / 北交所迁号) routinely
-# runs several minutes and a 50–100K-char trace. 180s cut kimi off MID-SEARCH → it timed out
-# right before writing its (already-correct) answer, which then surfaced as a tool-error. 600s
-# lets the answer land so the code leaves the queue instead of re-burning every night.
-KIMI_VERIFY_TIMEOUT_SEC = 600
+# runs many minutes and a 50–100K-char trace. Measured live: successful 北交所-migration verifies
+# took ~6min; the slowest still exceeded 600s and got cut off MID-SEARCH (timed out right before
+# writing its already-correct answer → false tool-error). 1200s gives the slow ones headroom so
+# the answer lands and the code leaves the queue instead of re-burning every night. The nightly
+# ② caps its batch to _STEP_TIMEOUT_KIMI*0.8//this (≈14 codes), so a backlog drains over nights.
+KIMI_VERIFY_TIMEOUT_SEC = 1200
 
 
 async def run_kimi_for_code(
