@@ -1272,7 +1272,12 @@ def create_momentum_router() -> APIRouter:
                     }
                 )
 
-                capital = body.initial_capital
+                # 资金分 3 份轮动:持仓 T+2 = 2 个交易日,任一时刻最多 3 笔重叠持仓
+                # (买入日 + 后 2 个交易日),故把资金均分到 3 个独立子仓,按交易日
+                # 序号 %3 轮流用。第 N 天用第 N%3 份的钱买,该份上一笔(第 N-3 天买)
+                # 在第 N-2 天就已卖出 → 资金不冲突。各子仓自负盈亏独立复利。
+                NUM_SLEEVES = 3
+                sleeve_capital = [body.initial_capital / NUM_SLEEVES] * NUM_SLEEVES
                 day_results: list[dict] = []
 
                 for day_idx, trade_date in enumerate(days_in_range):
@@ -1280,6 +1285,10 @@ def create_momentum_router() -> APIRouter:
                     if not hold_days:
                         continue
                     t1_date, t2_date = hold_days
+
+                    # 本日动用第 day_idx%3 份子仓的钱(轮动)
+                    sleeve = day_idx % NUM_SLEEVES
+                    capital = sleeve_capital[sleeve]
 
                     yield sse(
                         {
@@ -1303,7 +1312,7 @@ def create_momentum_router() -> APIRouter:
                                     "trade_date": str(trade_date),
                                     "has_trade": False,
                                     "skip_reason": str(e),
-                                    "capital": round(capital, 2),
+                                    "capital": round(sum(sleeve_capital), 2),
                                 }
                             )
                             yield sse(
@@ -1330,7 +1339,7 @@ def create_momentum_router() -> APIRouter:
                                     "trade_date": str(trade_date),
                                     "has_trade": False,
                                     "skip_reason": skip_msg,
-                                    "capital": round(capital, 2),
+                                    "capital": round(sum(sleeve_capital), 2),
                                 }
                             )
                             yield sse(
@@ -1349,7 +1358,7 @@ def create_momentum_router() -> APIRouter:
                         day_backtest: dict = {
                             "trade_date": str(trade_date),
                             "has_trade": False,
-                            "capital": round(capital, 2),
+                            "capital": round(sum(sleeve_capital), 2),
                             "funnel": [
                                 {"key": s.key, "label": s.label, "count": s.count}
                                 for s in scan_result.funnel
@@ -1414,8 +1423,10 @@ def create_momentum_router() -> APIRouter:
                                         sell_amount - sell_commission - sell_transfer - sell_stamp
                                     )
 
-                                    capital_before = capital
-                                    capital = capital - total_buy_cost + net_sell
+                                    # 结算回这一份子仓;capital_before/capital 报总资金
+                                    capital_before = sum(sleeve_capital)
+                                    sleeve_capital[sleeve] = capital - total_buy_cost + net_sell
+                                    capital = sum(sleeve_capital)
                                     trade_profit = net_sell - total_buy_cost
                                     trade_return_pct = (
                                         trade_profit / total_buy_cost * 100
@@ -1463,7 +1474,7 @@ def create_momentum_router() -> APIRouter:
                         else:
                             day_backtest["skip_reason"] = "无推荐"
 
-                        day_backtest["capital"] = round(capital, 2)
+                        day_backtest["capital"] = round(sum(sleeve_capital), 2)
                         day_results.append(day_backtest)
 
                         yield sse(
@@ -1485,7 +1496,7 @@ def create_momentum_router() -> APIRouter:
                                 "trade_date": str(trade_date),
                                 "has_trade": False,
                                 "skip_reason": f"出错: {str(e)[:60]}",
-                                "capital": round(capital, 2),
+                                "capital": round(sum(sleeve_capital), 2),
                             }
                         )
                         yield sse(
@@ -1502,11 +1513,15 @@ def create_momentum_router() -> APIRouter:
                 trade_results = [d for d in day_results if d.get("has_trade")]
                 wins = [d for d in trade_results if d["profit"] > 0]
                 losses = [d for d in trade_results if d["profit"] < 0]
-                total_return_pct = (capital - body.initial_capital) / body.initial_capital * 100
+                final_capital = sum(sleeve_capital)
+                total_return_pct = (
+                    (final_capital - body.initial_capital) / body.initial_capital * 100
+                )
 
                 backtest_summary = {
                     "initial_capital": body.initial_capital,
-                    "final_capital": round(capital, 2),
+                    "final_capital": round(final_capital, 2),
+                    "num_sleeves": NUM_SLEEVES,
                     "total_return_pct": round(total_return_pct, 2),
                     "total_days": len(days_in_range),
                     "trade_days": len(trade_results),

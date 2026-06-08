@@ -658,6 +658,7 @@ function renderRangeStats(s) {
         ['最大单日亏损', '¥' + (s.max_loss||0).toFixed(0)],
         ['胜/负/平', `${s.win_days||0}/${s.lose_days||0}/${s.even_days||0}`],
         ['T+1止损天数', `${s.early_exit_days||0}`],
+        ['资金分仓', `${s.num_sleeves||3} 份轮动 (每日投 1/${s.num_sleeves||3})`],
     ];
     items.forEach(([label, val]) => {
         html += `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${val}</div></div>`;
