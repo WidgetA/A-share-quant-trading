@@ -325,10 +325,12 @@ class CacheScheduler:
         await client.start()
         try:
             # ① 刷名单 (Tushare stock_basic → 新股/退市进 roster;保留 kimi 占位)
-            ok, r = await self._bounded(
+            # load_ok 被 ③ 依赖:刷名单是 truncate→重灌,失败/超时可能把名单留成残缺半截;
+            # 在残名单上 reconcile 会把全市场判成 orphan(而 orphan 是 purge 可删的)。
+            load_ok, r = await self._bounded(
                 run_load_listing(storage, feishu=False, client=client), _STEP_TIMEOUT_LOAD
             )
-            if ok:
+            if load_ok:
                 steps.append(
                     (
                         "① 刷名单",
@@ -416,7 +418,14 @@ class CacheScheduler:
             except Exception as e:  # noqa: BLE001
                 logger.warning("maintenance: 读真值表 max_date 失败: %s", e)
 
-            if incr_start is None:
+            if not load_ok:
+                # ① 失败 → 名单可能残缺(truncate 后没灌完),绝不在残名单上 reconcile:
+                # 全市场会被判成 orphan(purge 可删)。④⑤⑥ 随 rebuild_ok=False 一并跳过。
+                rebuild_ok = False
+                steps.append(
+                    ("③ 查漏·增量重建", "跳过", "① 刷名单失败,名单可能残缺,不在残名单上重建")
+                )
+            elif incr_start is None:
                 # 真值表为空 → 不在 3 点偷偷做全量重建(那是手动建底的事)。
                 rebuild_ok = False
                 steps.append(
@@ -462,7 +471,7 @@ class CacheScheduler:
             # ④ 补日线 — 索引驱动,只补 missing/wrong_suspended (skip if ③ failed)
             daily_dates: list = []
             if not rebuild_ok:
-                steps.append(("④ 补日线", "跳过", "重建失败，不在过期索引上补"))
+                steps.append(("④ 补日线", "跳过", "③ 未成功，不在过期/残缺索引上补"))
             else:
                 ok, r = await self._bounded(
                     pipeline.fill_daily_from_calendar(quiet=True), _STEP_TIMEOUT_FILL
@@ -488,7 +497,7 @@ class CacheScheduler:
             minute_dates: list = []
             minute_source_short: dict = {}
             if not rebuild_ok:
-                steps.append(("⑤ 补分钟", "跳过", "重建失败，不在过期索引上补"))
+                steps.append(("⑤ 补分钟", "跳过", "③ 未成功，不在过期/残缺索引上补"))
             else:
                 ok, r = await self._bounded(
                     pipeline.fill_minute_from_calendar(

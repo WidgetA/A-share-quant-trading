@@ -149,6 +149,76 @@ def test_data_present_but_not_in_roster_is_orphan():
     assert rows["688001"]["trade_status"] == TRADING
 
 
+# --- vol=0 真实 bar(一字板无成交等):写入端存真实行,reconcile 必须同口径 ---
+
+
+def test_zero_vol_real_bar_not_suspended_counts_as_traded_ok():
+    # Tushare daily has a real-price bar with vol=0, not in suspend_d → the write path
+    # stores a REAL row → reconcile must judge it trading/ok, NOT wrong_traded forever.
+    rows = _by_code(
+        reconcile_day(
+            roster={"600001"},
+            suspended=set(),
+            traded=set(),  # vol>0 set: empty
+            db_normal={"600001"},
+            db_suspended=set(),
+            traded_zero_vol={"600001"},
+        )
+    )
+    assert rows["600001"]["trade_status"] == TRADING
+    assert rows["600001"]["daily_state"] == OK
+
+
+def test_zero_vol_real_bar_not_suspended_missing_from_db_is_missing():
+    rows = _by_code(
+        reconcile_day(
+            roster={"600001"},
+            suspended=set(),
+            traded=set(),
+            db_normal=set(),
+            db_suspended=set(),
+            traded_zero_vol={"600001"},
+        )
+    )
+    assert rows["600001"]["trade_status"] == TRADING
+    assert rows["600001"]["daily_state"] == MISSING
+
+
+def test_zero_vol_bar_while_suspended_is_judged_suspended():
+    # vol=0 bar + listed in suspend_d → the write path writes a PLACEHOLDER → reconcile
+    # must expect db_suspended (mirror of _process_daily_date's volume>0-wins rule).
+    rows = _by_code(
+        reconcile_day(
+            roster={"600001"},
+            suspended={"600001"},
+            traded=set(),
+            db_normal=set(),
+            db_suspended={"600001"},
+            traded_zero_vol={"600001"},
+        )
+    )
+    assert rows["600001"]["trade_status"] == SUSPENDED
+    assert rows["600001"]["daily_state"] == OK
+
+
+def test_zero_vol_traded_stock_has_no_minute_expectation():
+    # vol=0 → no minute activity to demand: minute_state stays None even when the
+    # minute reconcile is on (otherwise it would re-download these forever).
+    rows = _by_code(
+        reconcile_day(
+            roster={"600001", "600002"},
+            suspended=set(),
+            traded={"600002"},  # 600002 has volume → minute expected
+            db_normal={"600001", "600002"},
+            db_suspended=set(),
+            minute_counts={"600002": 241},
+            traded_zero_vol={"600001"},
+        )
+    )
+    assert rows["600001"]["minute_state"] is None
+    assert rows["600002"]["minute_state"] == MINUTE_OK
+
+
 def test_roster_for_day_respects_list_and_delist_dates():
     info = {
         "600000": {"list_date": date(1999, 11, 10), "delist_date": None},
@@ -200,6 +270,7 @@ async def test_build_calendar_aggregates_by_state():
         return set()
 
     async def fetch_traded(day):
+        # legacy plain-set shape (no zero-vol info) — must keep working
         return {"600000", "300001"}  # both traded per Tushare
 
     result = await build_calendar(
@@ -207,6 +278,7 @@ async def test_build_calendar_aggregates_by_state():
         trading_days=[date(2024, 1, 2)],
         fetch_suspended=fetch_suspended,
         fetch_traded=fetch_traded,
+        min_listing=0,  # tiny fake roster — disable the truncated-roster guard
     )
     assert result["days"] == 1
     assert result["rows"] == 2
@@ -219,11 +291,34 @@ async def test_build_calendar_aggregates_by_state():
 
 
 @pytest.mark.asyncio
+async def test_build_calendar_zero_vol_bar_flows_through_tuple_fetch_traded():
+    # fetch_traded's tuple shape: (vol>0, real-price vol=0). The zero-vol code with a
+    # real DB row must come out trading/ok (not wrong_traded).
+    storage = _FakeCalStorage()  # 600000 real in DB; 300001 absent
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return {"300001"}, {"600000"}  # 600000 = 一字板 vol=0 real bar
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+        min_listing=0,
+    )
+    assert result["by_state"][OK] == 1  # 600000: zero-vol bar + db real → ok
+    assert result["by_state"][MISSING] == 1  # 300001: traded + db absent → missing
+
+
+@pytest.mark.asyncio
 async def test_build_calendar_skips_day_when_traded_empty_but_db_has_real_rows():
-    # FAIL-SAFE: an empty fetch_traded for a day the DB already holds many real rows for is a
-    # transient Tushare daily failure, NOT a no-trade day → SKIP + surface, never mass-flip
-    # those rows to wrong_traded (the 2026-06-03 corruption that motivated this guard).
-    big = {str(600000 + i) for i in range(150)}  # 150 real DB rows ≥ guard threshold (100)
+    # FAIL-SAFE: an empty fetch_traded on a trade_cal day is a transient Tushare daily
+    # failure, NOT a no-trade day → SKIP + surface, never mass-flip good rows to
+    # wrong_traded (the 2026-06-03 corruption that motivated this guard).
+    big = {str(600000 + i) for i in range(150)}
 
     class _EmptyTradedStorage:
         def __init__(self):
@@ -252,6 +347,7 @@ async def test_build_calendar_skips_day_when_traded_empty_but_db_has_real_rows()
         trading_days=[date(2024, 1, 2)],
         fetch_suspended=fetch_suspended,
         fetch_traded=fetch_traded,
+        min_listing=0,
     )
     assert result["skipped_days"] == ["2024-01-02"]
     assert result["rows"] == 0  # nothing upserted → existing good rows left intact
@@ -259,10 +355,12 @@ async def test_build_calendar_skips_day_when_traded_empty_but_db_has_real_rows()
 
 
 @pytest.mark.asyncio
-async def test_build_calendar_empty_traded_genuine_nontrading_day_not_skipped():
-    # A genuine empty day (0 traded AND ~0 DB rows) must NOT trip the guard — it reconciles
-    # normally (roster codes → source_none), so the guard can't cause false skips.
-    class _EmptyBothStorage:
+async def test_build_calendar_skips_empty_traded_even_on_brand_new_day():
+    # THE key fix (2026-06 二次收紧): on a brand-new day (nightly ③, fill not run yet,
+    # DB EMPTY) an empty Tushare daily must STILL be skipped. The old ≥100-DB-rows guard
+    # let it through → whole roster written source_none ("可接受") → the incremental
+    # nightly never revisits the day → silently never filled.
+    class _NewDayStorage:
         def __init__(self):
             self.upserts: list = []
 
@@ -270,13 +368,50 @@ async def test_build_calendar_empty_traded_genuine_nontrading_day_not_skipped():
             return {"600000": {"list_date": date(1999, 1, 1), "delist_date": None}}
 
         async def get_daily_split_for_date(self, day):
-            return (set(), set())  # 库里也没有 → 真正无数据
+            return (set(), set())  # 新交易日,补全还没跑,库里 0 行
 
         async def upsert_trading_calendar(self, day, rows):
             self.upserts.append((day, rows))
             return len(rows)
 
-    storage = _EmptyBothStorage()
+    storage = _NewDayStorage()
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return set()  # 源头空响应
+
+    result = await build_calendar(
+        storage,
+        trading_days=[date(2024, 1, 2)],
+        fetch_suspended=fetch_suspended,
+        fetch_traded=fetch_traded,
+        min_listing=0,
+    )
+    assert result["skipped_days"] == ["2024-01-02"]  # protected even with an empty DB
+    assert storage.upserts == []  # nothing written → next nightly retries this day
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_empty_roster_day_reconciles_orphans_without_guard():
+    # Empty roster (e.g. all codes listed after this day) + empty traded must NOT trip the
+    # empty-traded guard — orphan-only reconcile still proceeds.
+    class _OrphanOnlyStorage:
+        def __init__(self):
+            self.upserts: list = []
+
+        async def get_listing_info_all(self):
+            return {"600000": {"list_date": date(2025, 1, 1), "delist_date": None}}
+
+        async def get_daily_split_for_date(self, day):
+            return ({"688001"}, set())  # a stray DB row, not rostered that day
+
+        async def upsert_trading_calendar(self, day, rows):
+            self.upserts.append((day, rows))
+            return len(rows)
+
+    storage = _OrphanOnlyStorage()
 
     async def fetch_suspended(day):
         return set()
@@ -286,12 +421,36 @@ async def test_build_calendar_empty_traded_genuine_nontrading_day_not_skipped():
 
     result = await build_calendar(
         storage,
-        trading_days=[date(2024, 1, 2)],
+        trading_days=[date(2024, 1, 2)],  # before 600000's list_date → roster empty
         fetch_suspended=fetch_suspended,
         fetch_traded=fetch_traded,
+        min_listing=0,
     )
-    assert result["skipped_days"] == []  # not skipped (no real rows to protect)
-    assert len(storage.upserts) == 1  # reconciled normally
+    assert result["skipped_days"] == []
+    assert result["by_state"][ORPHAN] == 1
+
+
+@pytest.mark.asyncio
+async def test_build_calendar_raises_on_truncated_roster():
+    # ROSTER GUARD: a near-empty stock_listing_info (truncate→re-insert interrupted)
+    # must abort the whole build — reconciling against it would mark the whole market
+    # orphan (purge-eligible). Default min_listing applies.
+    storage = _FakeCalStorage()  # only 2 listing rows ≪ MIN_LISTING_GUARD
+
+    async def fetch_suspended(day):
+        return set()
+
+    async def fetch_traded(day):
+        return {"600000"}, set()
+
+    with pytest.raises(RuntimeError, match="残名单|stock_listing_info"):
+        await build_calendar(
+            storage,
+            trading_days=[date(2024, 1, 2)],
+            fetch_suspended=fetch_suspended,
+            fetch_traded=fetch_traded,
+        )
+    assert storage.upserts == []  # nothing was written
 
 
 def test_alignment_suspects_flags_only_kimi_rostered_source_none():
@@ -387,6 +546,7 @@ async def test_build_calendar_with_minute_populates_minute_states():
         fetch_suspended=fetch_suspended,
         fetch_traded=fetch_traded,
         with_minute=True,
+        min_listing=0,
     )
     # 600000 traded + 241 bars → minute ok; 300001 traded + 0 bars → minute missing
     assert result["by_minute"][MINUTE_OK] == 1
@@ -412,6 +572,7 @@ async def test_build_calendar_extra_source_short_persists_over_missing():
         fetch_traded=fetch_traded,
         with_minute=True,
         extra_minute_source_short={date(2024, 1, 2): {"300001"}},
+        min_listing=0,
     )
     assert result["by_minute"][MINUTE_OK] == 1  # 600000
     assert result["by_minute"][MINUTE_SOURCE_SHORT] == 1  # 300001 (was the half-day)

@@ -1510,50 +1510,60 @@ class GreptimeBacktestStorage:
         """
         await self.db.execute("TRUNCATE TABLE stock_listing_info")
 
+    # Stay under GreptimeDB's silent >~200-row INSERT drop cliff.
+    _LISTING_INSERT_BATCH = 200
+
     async def upsert_listing_info(self, entries: list[dict[str, Any]]) -> int:
         """Bulk upsert per-code listing metadata.
 
         Each entry: ``{code, name, list_date, delist_date, verified, source}``.
         `list_date` / `delist_date` are "YYYY-MM-DD" or None.
-        Returns the number of rows written (= len(entries)).
+        Returns the number of rows written.
 
+        Multi-row VALUES in batches of ≤200 (GreptimeDB silently drops larger
+        batches). Batching matters here beyond speed: load_listing rebuilds the
+        roster as truncate → re-insert, and every second of that window is a
+        chance for a crash/timeout to leave a truncated roster (the all-orphan
+        hazard) — ~7000 single-row INSERTs took minutes; 200/batch takes seconds.
         Uses PRIMARY KEY upsert (GreptimeDB merge_mode=last_row).
         """
         if not entries:
             return 0
+
+        def _ts_or_null(s: str | None) -> str:
+            if not s:
+                return "NULL"
+            try:
+                return str(date_to_epoch_ms(parse_date_str(s)))
+            except Exception:
+                return "NULL"
+
+        def _str_or_null(s: str | None) -> str:
+            if s is None:
+                return "NULL"
+            return "'" + s.replace("'", "''") + "'"
+
         written = 0
-        for e in entries:
-            code = e.get("code")
-            if not code or len(code) != 6:
+        for i in range(0, len(entries), self._LISTING_INSERT_BATCH):
+            values: list[str] = []
+            for e in entries[i : i + self._LISTING_INSERT_BATCH]:
+                code = e.get("code")
+                if not code or len(code) != 6:
+                    continue
+                verified = bool(e.get("verified", e.get("list_date") is not None))
+                values.append(
+                    f"('{code}', {_LISTING_INFO_TS}, {_str_or_null(e.get('name'))}, "
+                    f"{_ts_or_null(e.get('list_date'))}, {_ts_or_null(e.get('delist_date'))}, "
+                    f"{'true' if verified else 'false'}, {_str_or_null(e.get('source'))})"
+                )
+            if not values:
                 continue
-            name = e.get("name")
-            ld = e.get("list_date")
-            dd = e.get("delist_date")
-            verified = bool(e.get("verified", e.get("list_date") is not None))
-            source = e.get("source")
-
-            def _ts_or_null(s: str | None) -> str:
-                if not s:
-                    return "NULL"
-                try:
-                    ms = date_to_epoch_ms(parse_date_str(s))
-                    return str(ms)
-                except Exception:
-                    return "NULL"
-
-            def _str_or_null(s: str | None) -> str:
-                if s is None:
-                    return "NULL"
-                return "'" + s.replace("'", "''") + "'"
-
             await self.db.execute(
                 "INSERT INTO stock_listing_info"
                 '(stock_code, ts, "name", list_date, delist_date, verified, "source") '
-                f"VALUES ('{code}', {_LISTING_INFO_TS}, {_str_or_null(name)}, "
-                f"{_ts_or_null(ld)}, {_ts_or_null(dd)}, "
-                f"{'true' if verified else 'false'}, {_str_or_null(source)})"
+                "VALUES " + ", ".join(values)
             )
-            written += 1
+            written += len(values)
         return written
 
     async def get_listing_info_all(self) -> dict[str, dict[str, Any]]:

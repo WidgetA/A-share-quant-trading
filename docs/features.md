@@ -867,10 +867,10 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 **复合 (reconcile) —— 全用权威源,不推断**。每个交易日 D:
 1. **在册名单 (roster)** = `stock_listing_info` 中 `list_date ≤ D < delist_date` 的代码(Tushare stock_basic 官方上市/退市日)。
 2. **停牌** = Tushare `suspend_d`(D)。
-3. **真有成交** = Tushare `daily`(D)(整批,含所有板块,成交量>0)。
+3. **真有成交** = Tushare `daily`(D)(整批,含所有板块)。成交量>0 是主集;**成交量=0 但有真实价格 bar**(一字板无成交等)且**不在停牌名单**的,也按"交易了"算——与写入端 `_process_daily_date` 的"有真实 bar 就存真实行"**同一口径**,否则这类票会被永久误判成 `wrong_traded`(库有真实行、reconcile 却认为源头查无)。成交量=0 且在停牌名单 → 按停牌算(写入端写的也是占位)。分钟完整性(`minute_state`)只对成交量>0 的票要求(vol=0 的票不强求 241 根,避免空转重试)。
 4. **库里有什么** = `backtest_daily`(D)(区分 `is_suspended`)。
 三者一碰定状态:
-- daily 有真实成交 → `trade_status=trading`;库有真实行=`ok` / 库标成停牌=`wrong_suspended` / 库无=`missing`(真缺待补)。
+- daily 有真实成交(含上述 vol=0 真实 bar 且未停牌)→ `trade_status=trading`;库有真实行=`ok` / 库标成停牌=`wrong_suspended` / 库无=`missing`(真缺待补)。
 - suspend_d 停牌、daily 无成交 → `trade_status=suspended`;库有占位=`ok` / 库无=`missing`(停牌没占位待补)。
 - 在册、不停牌、daily 也查无 → `source_none`(源头也无,长期挂,不假装解决)。
 - 有库数据但**不在当天 roster** → `orphan`(有数据却不在册,`listed=false`)。
@@ -891,6 +891,11 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 - 「当天该有日线的名单」= `listed=true AND daily_state≠source_none`;
 - 「当天能交易的名单」= `trade_status=trading`;
 - 「当天数据问题」= `daily_state IN (missing, wrong_suspended, orphan)`。
+
+**写入守卫(输入可疑就不写,宁可跳过)**:
+- **空 traded 守卫**:某天(出自 `trade_cal` 的真交易日)Tushare `daily` 返回空、而在册名单非空 → 几乎可断定是源头取数失败(真交易日不可能零成交)→ **跳过该天 reconcile、不覆盖**,记 ERROR + 进 `skipped_days`(汇总可见)。不依赖"库里已有多少行"——新交易日首次 reconcile 时库里还没数据,同样受保护(否则一次空响应把整天写成 source_none,增量重建永不回头,整天数据静默永失)。
+- **名单守卫**:`stock_listing_info` 行数异常少(< 3000,正常 L+D 约 7000+)→ 名单疑似被截断(如刷名单中途被打断)→ **整个 build 直接报错中止**,绝不在残缺名单上 reconcile(否则正常代码全成 orphan,而 orphan 是 purge 可删的)。
+- **流水线依赖**:3 点流水线里 **① 刷名单失败 → ③④⑤⑥ 全跳过**(同 ③ 失败跳 ④⑤⑥ 的逻辑——绝不在可能残缺的名单/过期的索引上重建或补数)。
 
 **用法**: 检查/补全对照"该有日线"视图比 `backtest_daily`,只补/只纠差异;**手动触发 = 重建索引**(重新复合);每天新补全从它起步。历史某天复合好即不变真值,只最近/新增日需重做。
 

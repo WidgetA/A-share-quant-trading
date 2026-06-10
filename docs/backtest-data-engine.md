@@ -150,8 +150,10 @@ pool silently wedges (each cost a full day of debugging — see CLAUDE.md §7 / 
   `StreamHandler` at startup).
 
 **Write batching (GreptimeDB silently drops INSERTs > ~200 rows):** daily = 1 row/insert;
-minute = **100**/batch; `trading_calendar` / `code_alias` = **200**/batch; listing = 1/insert.
-Stay under the cliff — exceeding it loses rows with no error.
+minute = **100**/batch; `trading_calendar` / `code_alias` / listing = **200**/batch.
+Stay under the cliff — exceeding it loses rows with no error. (Listing was 1/insert until
+2026-06; batching it also shrank the roster-reload truncate→reinsert window from minutes
+to seconds — see §9.)
 
 ---
 
@@ -185,11 +187,18 @@ For trading day `D`, given five authoritative inputs:
 roster       = stock_listing_info where list_date ≤ D < delist_date
 suspended    = Tushare suspend_d(D)
 traded       = Tushare daily(D) with volume > 0
+traded_zero  = Tushare daily(D) with a real-price bar but volume = 0 (一字板 no-trade etc.)
 db_normal    = backtest_daily(D) where is_suspended = false
 db_suspended = backtest_daily(D) where is_suspended = true
 
+is_traded(code) = code in traded
+                  OR (code in traded_zero AND code not in suspended)
+  # mirrors the write path exactly: _process_daily_date keeps a real-price vol=0 bar
+  # as a REAL row when not suspended, and writes a placeholder when suspended.
+  # Without traded_zero, those real rows were judged wrong_traded forever.
+
 for each code in roster:
-    if code in traded:        trade_status = trading
+    if is_traded(code):       trade_status = trading
                               daily_state = ok | wrong_suspended | missing
     elif code in suspended:   trade_status = suspended
                               daily_state = ok | wrong_traded | missing
@@ -197,6 +206,9 @@ for each code in roster:
                               trade_status = suspended(if db placeholder) else unknown
                               daily_state  = wrong_traded(if db real) else source_none
 for codes in DB but NOT in roster:  listed = false, daily_state = orphan
+
+minute_state is only expected for codes in traded (volume > 0) — a vol=0 bar has no
+minute activity to demand, so requiring 241 bars there would just busy-retry forever.
 ```
 
 **Truth of "did it trade" is Tushare `daily`.** The DB is judged *against* that, never the
@@ -308,8 +320,11 @@ Non‑negotiable invariants:
   indexes) as orphans every night (the 300114 case, §9). **Full rebuild is a manual endpoint**
   (bootstrap / migration / index repair). If the table is empty, ③ warns and waits for a
   manual bootstrap — it does not silently full‑rebuild on every restart.
-- **Failure‑isolated.** A failed step is logged + recorded + the pass continues — *except*
-  ④⑤⑥ are skipped if ③ failed (never fill against a stale index).
+- **Failure‑isolated.** A failed step is logged + recorded + the pass continues — *except*:
+  ③④⑤⑥ are skipped if **①** failed (a failed/timed-out roster reload can leave
+  `stock_listing_info` truncated mid-rewrite; reconciling against it would mark the whole
+  market `orphan` — and orphans are purge-eligible), and ④⑤⑥ are skipped if **③** failed
+  (never fill against a stale index).
 - **⑤ minute is capped** (`NIGHTLY_MINUTE_MAX_CODES ≈ 2.4 trading days`). Steady state ≈ one
   day (~5000 code‑days, ~15 min). A surprise backlog fills up to the cap, reports
   "N remaining, will continue next run", and **never runs unattended for hours**.
@@ -334,12 +349,23 @@ data → skip; never substitute an empty/failed fetch as truth.**
 
 - **Empty `fetch_traded` guard (`build_calendar`).** Tushare `daily` occasionally returns
   `code=0` with empty data (a transient hiccup, often after a dense `stk_mins` barrage).
-  Reconciling that day naively would mark every truly‑trading code `wrong_traded` (source
-  shows no trade) — corrupting good state from one blip. The guard: if `traded` is empty
-  **but the DB already holds ≥ 100 real rows** for that day, treat it as a **fetch failure**,
-  **skip the day (don't overwrite)**, log ERROR, and surface it as `skipped_days` → a ⚠️
-  warning in the ③/⑥ summary (never silent). A genuine non‑trading day (0 traded **and** ~0
-  DB rows) sails through.
+  Reconciling that day naively would corrupt good state from one blip: on a day with data
+  it mass‑flips `ok` → `wrong_traded`; on a **brand‑new day** (nightly ③, fill hasn't run
+  yet, DB empty) it writes the whole roster as `source_none` — which the incremental
+  nightly never revisits, so the day silently never gets filled. The guard: every day fed
+  to `build_calendar` comes from `trade_cal` (a real trading day), so **`traded` empty +
+  roster non‑empty ⇒ fetch failure** — **skip the day (don't overwrite)**, log ERROR, and
+  surface it as `skipped_days` → a ⚠️ warning in the ③/⑥ summary (never silent). The day is
+  retried by the next rebuild that covers it (for a skipped new day, ③'s `max_date+1` start
+  means the next nightly picks it up automatically). Deliberately does NOT depend on
+  existing DB rows (the pre‑2026‑06 version did, leaving new days unprotected).
+- **Roster guard (`build_calendar`).** If `stock_listing_info` has suspiciously few rows
+  (< `MIN_LISTING_GUARD = 3000`; healthy L+D ≈ 7000+), the roster was likely truncated
+  mid‑rewrite (the reload is truncate → re‑insert; a crash/timeout in between leaves a
+  partial table). Reconciling against it would mark virtually the whole market `orphan`
+  (purge‑eligible!), so `build_calendar` **raises** instead — the step fails loudly and the
+  pipeline's failure isolation skips the fills. Additionally the nightly skips ③④⑤⑥
+  whenever step ① itself reported failure (§8).
 - **`source_none` self‑heals.** It's skipped by backfill (no pointless retry), but every
   rebuild re‑checks the source; the day the source has data, the state flips `source_none →
   missing` and the next fill picks it up. "Don't busy‑retry when the source is empty; pick it

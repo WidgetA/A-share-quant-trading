@@ -104,16 +104,19 @@ class _AppState:
         self.active_download = None
 
 
-def _patch(monkeypatch, *, rebuild_results, kimi_ok=True):
+def _patch(monkeypatch, *, rebuild_results, kimi_ok=True, load_fails=False):
     """Patch the external steps at their source modules; return the order list.
 
     kimi runs as step ② whenever a listing_verify_scheduler is present on app.state
     AND kimi_available() (kimi_ok) — there is no on/off toggle anymore.
+    ``load_fails=True`` makes step ① (run_load_listing) raise.
     """
     calls: list[str] = []
 
     async def fake_load(storage, *, feishu, client=None, stop_storage=False):
         calls.append("load")
+        if load_fails:
+            raise RuntimeError("Tushare stock_basic 在市列表为空")
         return {
             "listed": 10,
             "delisted": 2,
@@ -287,6 +290,23 @@ async def test_confirm_runs_with_minute_only_over_minute_touched_days(monkeypatc
     by_minute = {c["with_minute"]: c["trading_days"] for c in confirms}
     assert by_minute[True] == [day_b]  # minute-touched day → with_minute=True
     assert by_minute[False] == [day_a]  # daily-only day → cheap, with_minute=False
+
+
+@pytest.mark.asyncio
+async def test_load_listing_failure_skips_rebuild_and_fill(monkeypatch):
+    # ① 刷名单 is truncate→re-insert; a failure/timeout can leave the roster truncated.
+    # Reconciling against a broken roster marks the whole market orphan (purge-eligible),
+    # so ① failed ⇒ ③④⑤⑥ must ALL be skipped (③ never runs on a possibly-broken roster).
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN], load_fails=True)
+    storage = _FakeStorage()
+    sched = CacheScheduler(_AppState(storage, _FakePipeline(_NO_GAPS, calls)))
+    result, message = await sched._run_pipeline("scheduled")
+    assert result == "failed"
+    assert "①" in message  # the load step is flagged as the failure
+    assert "rebuild_full" not in calls  # ③ skipped
+    assert "fill" not in calls  # ④ skipped
+    assert "fill_minute" not in calls  # ⑤ skipped
+    assert "rebuild_days" not in calls  # ⑥ skipped
 
 
 @pytest.mark.asyncio

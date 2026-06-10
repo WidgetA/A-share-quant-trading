@@ -92,7 +92,10 @@
 - **补缺精准**:④/⑤ 只动索引标了缺的那几只那几天,不是 `mode=full` 的全量重下;日线通常每天 0 缺口 → 几乎瞬间;
   ⑥ 只重建被补过的天(日线+分钟一起确认),无缺口则跳过。
 - **顺序跑 → 不再需要互斥锁**(当初 `cache_fill_running` vs kimi 的锁,是两者分开跑才会抢)。
-- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续;唯独 ③ 失败则跳过 ④⑤⑥(不在过期索引上乱补)。
+- **步骤失败隔离**:某步失败 → 记日志 + 进汇总 + 继续;两个例外:**① 刷名单失败 → ③④⑤⑥ 全跳过**
+  (刷名单是 truncate→重灌,失败/超时可能把 `stock_listing_info` 留成残缺半截;在残名单上 reconcile
+  会把全市场判成 orphan——而 orphan 是 purge 可删的,绝不能发生);**③ 失败 → 跳过 ④⑤⑥**(不在过期
+  索引上乱补)。另有兜底:`build_calendar` 自带**名单守卫**(listing 行数 < 3000 直接报错,见 §8)。
 - **kimi 无开关**:装了 + 有 `KIMI_API_KEY` 就跑;用不了 → 汇总里报「⚠️ 警告」(不被静默关掉)。
 - **只在 3 点跑,不在 startup 跑**(watchtower 频繁重启,见 §8)。
 - **分钟线在本流程,但带每晚上限**:⑤ 跟着索引补当晚该补的分钟,设上限 `NIGHTLY_MINUTE_MAX_CODES`
@@ -142,11 +145,16 @@
 roster      = stock_listing_info 中 list_date ≤ D < delist_date 的代码
 suspended   = Tushare suspend_d(D)
 traded      = Tushare daily(D) 中成交量>0 的代码
+traded_zero = Tushare daily(D) 中有真实价格 bar 但成交量=0 的代码(一字板无成交等)
 db_normal   = backtest_daily(D) 中 is_suspended=false
 db_suspended= backtest_daily(D) 中 is_suspended=true
 
+算"交易了" = code in traded,或 (code in traded_zero 且 不在 suspended)
+  —— 与写入端 _process_daily_date 完全同口径:vol=0 真实 bar 且未停牌 → 存真实行;
+     vol=0 且停牌 → 存占位。口径不一致时,这类真实行会被永久误判 wrong_traded。
+
 对 roster 里每只:
-  若 traded:    trade_status=trading
+  若 算"交易了": trade_status=trading
                 daily_state = ok(库有真实) / wrong_suspended(库标停牌) / missing(库无)
   elif suspended: trade_status=suspended
                 daily_state = ok(库有占位) / wrong_traded(库有真实) / missing(库无)
@@ -155,6 +163,8 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
                 daily_state  = wrong_traded(库有真实) 否则 source_none
 
 对"库有数据但不在 roster"的: listed=false, daily_state=orphan
+
+minute_state 只对成交量>0 的票要求(vol=0 没有分钟成交可言,强求 241 根只会空转重试)。
 ```
 
 要点:**"它到底交易没交易"以 Tushare daily 为准**;库里有没有、标得对不对,是拿库去比这个权威结果。
@@ -254,16 +264,28 @@ db_suspended= backtest_daily(D) 中 is_suspended=true
   (瞬时抖动,常在密集调用如分钟补全 barrage 后),`fetch_daily` 按约定返回 `[]` → reconcile 看到
   "这天没人交易",把库里**本来在交易**的几千只全判成 `wrong_traded`(源头查无),好端端的真值表被一次
   源头打嗝刷烂(实测 2026-06-03:5511 只 ok → wrong_traded;真实日线/分钟数据没丢,只状态表错)。
-  **守卫**:`build_calendar` 现加 fail-safe —— 某天 `traded` 为空、但库里已有 ≥100 行真实日线 → 判为
-  **取数失败**而非真·无交易日,**跳过该天 reconcile(不覆盖)** + 记 ERROR + 进 `skipped_days`,③/⑥
-  汇总里标「⚠️ 跳过 N 天」(绝不静默)。**教训**:① 外部源返回空 ≠ 真的没有;**写真值表前要分清"源头确实
-  没有"和"这次没取到",后者必须跳过而不是拿空覆盖**(CLAUDE.md 交易安全:数据不全就跳过,别拿空兜底)。
-  ② 真·非交易日是 0 traded **且**库里也几乎没行,守卫放行;只有"空 traded + 库里一堆真行"才拦。
+  **守卫(2026-06 二次收紧)**:`build_calendar` 的 fail-safe —— 某天 `traded` 为空、而 roster 非空 →
+  判为**取数失败**而非真·无交易日,**跳过该天 reconcile(不覆盖)** + 记 ERROR + 进 `skipped_days`,③/⑥
+  汇总里标「⚠️ 跳过 N 天」(绝不静默)。喂进 build_calendar 的天本来就出自 `trade_cal`(真交易日),
+  真交易日不可能零成交,所以这个条件没有误拦。**初版守卫曾要求"库里已有 ≥100 行真实日线"才拦——那对
+  「全新交易日」不生效**(3 点 ③ reconcile 昨天时补全还没跑、库里 0 行):一次空响应会把整个 roster 写成
+  source_none,而 source_none 不算 problem、汇总标"可接受"、增量重建永不回访这天 → **整天数据静默永久
+  缺失**。去掉库行数条件后,新天也受保护;被跳过的新天因 max_date 没推进,下晚 ③ 自动重试。
+  **教训**:① 外部源返回空 ≠ 真的没有;**写真值表前要分清"源头确实没有"和"这次没取到",后者必须跳过
+  而不是拿空覆盖**(CLAUDE.md 交易安全:数据不全就跳过,别拿空兜底)。
+  ② 守卫条件要对"表还是空的第一次"也成立——只保护"已有数据"的守卫,保不住最关键的增量新天。
   ③ 这种 wrong_traded 是**状态腐蚀、非数据丢失**(`wrong_traded` 不进补全集、也不被 purge 自动删),
   Tushare 恢复后**重建那天**即复原(`POST /calendar/rebuild?start=&end=&with_minute=1`)。
   ④ 分钟补全 barrage(stk_mins 上百次)易触发 Tushare 限频/抖动 → 当晚可能只补一部分(其余 missing
   下晚续补)+ 抬高紧接其后的 daily 取数抖动概率;每晚 ⑤ 带上限、⑥ 有守卫,所以慢/部分/抖动都不致命。
-- **`code_alias` 必须接到"排除"链路,否则迁移老码永久 source_none + 被 kimi 反复重烧(2026-06,通用修)**:
+- **刷名单是 truncate→重灌,中途被打断 = 残名单;在残名单上 reconcile 会把全市场判成 orphan(2026-06,预防性修)**:
+  `load_listing` 先 `TRUNCATE stock_listing_info` 再重灌 ~7000 行。重灌途中崩溃/被 ① 的步骤超时 cancel →
+  名单只剩半截甚至全空;若 ③ 照常增量重建,roster 里没有的正常代码全部写成 `orphan`——而 orphan 正是
+  `purge-orphan-rows` 的删除对象,操作员照汇总清理就会**删掉一整天好数据**。三层防:**(a)** 流水线 ① 失败
+  → ③④⑤⑥ 全跳过(见 §4.1);**(b)** `build_calendar` 名单守卫:listing 总行数 < `MIN_LISTING_GUARD=3000`
+  (正常 L+D ≈ 7000+)直接 RuntimeError,手动重建端点同样被保护;**(c)** `upsert_listing_info` 改成
+  ≤200 行/条的多行 INSERT(原先逐行),truncate→重灌窗口从分钟级缩到秒级。**教训**:对"先清后写"的权威表,
+  下游读它做判定前要先问一句"这表现在完整吗"。
   北交所迁号后,`code_alias`(老→新)虽由 kimi 填好,但**只接到"下载 re-key"一处**;`load_listing`/
   `roster_for_day`/`effective_universe`/`audit` 都不读它 → 迁移老码仍按 list_date 在册、daily 查无 →
   永久 `source_none`,且每晚被当"未验证/source_none"喂回 kimi。更坑的是 kimi 把"迁移新代码"判定**当成

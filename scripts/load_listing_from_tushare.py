@@ -19,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data.clients.greptime_storage import create_storage_from_config  # noqa: E402
 
 _SOURCE = "tushare_stock_basic"
-_UPSERT_BATCH = 200  # GreptimeDB drops rows silently above ~200 per INSERT
 
 
 def build_entries(rows_listed: list[dict], rows_delisted: list[dict]) -> list[dict]:
@@ -103,11 +102,10 @@ async def load_listing(storage, client) -> dict:
 
     await storage.truncate_listing_info()
 
-    written = 0
-    for i in range(0, len(entries), _UPSERT_BATCH):
-        written += await storage.upsert_listing_info(entries[i : i + _UPSERT_BATCH])
-    for i in range(0, len(preserved), _UPSERT_BATCH):
-        await storage.upsert_listing_info(preserved[i : i + _UPSERT_BATCH])
+    # upsert_listing_info batches internally (≤200-row multi-row INSERTs), keeping the
+    # truncate→re-insert window down to seconds — see build_calendar's roster guard.
+    written = await storage.upsert_listing_info(entries)
+    await storage.upsert_listing_info(preserved)
 
     return {
         "listed": len(listed),

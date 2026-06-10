@@ -40,15 +40,24 @@ MINUTE_MISSING = "missing"  # <241 且源头未确认短 → 可补 (阶段3)
 MINUTE_SOURCE_SHORT = "source_short"  # 重下后源头真给不满 241 (半天交易) → 不再补
 MINUTE_BARS_FULL = 241  # 9:30-11:30 + 13:00-15:00 = 240min + 收盘 = 241 根
 
-# Fail-safe guard: an EMPTY `traded` (Tushare daily) for a day the DB already holds many
-# real bars for is almost certainly a transient SOURCE failure (empty/garbled response),
-# NOT a real "nobody traded" day. Reconciling it anyway flips every such code to
-# wrong_traded (源头查无 → 该不该存在), corrupting good state from a one-off hiccup
-# (observed 2026-06-03: a momentary empty `daily` turned 5511 ok rows into wrong_traded).
-# Per CLAUDE.md trading-safety (incomplete data → skip; never silent-empty fallback) we
-# SKIP that day's reconcile (leave its rows intact) + surface it loudly. A genuine
-# non-trading day has 0 traded AND ~0 db rows, so it sails through.
-_EMPTY_TRADED_GUARD_MIN_DB_ROWS = 100
+# Fail-safe guard: an EMPTY `traded` (Tushare daily) on a day that came from trade_cal
+# (i.e. a REAL trading day — every build_calendar caller resolves days via trade_cal) is
+# almost certainly a transient SOURCE failure (empty/garbled response), NOT a real
+# "nobody traded" day. Reconciling it anyway corrupts good state from a one-off hiccup:
+# on a day with data it mass-flips ok → wrong_traded (observed 2026-06-03: 5511 rows);
+# on a BRAND-NEW day (nightly ③, fill not run yet, DB empty) it writes the whole roster
+# as source_none — which the incremental nightly never revisits → the day silently never
+# gets filled. Per CLAUDE.md trading-safety (incomplete data → skip; never silent-empty
+# fallback) we SKIP that day's reconcile (leave it untouched) + surface it loudly. The
+# guard deliberately does NOT depend on existing DB rows (the old ≥100-rows version left
+# new days unprotected). Condition: traded empty AND roster non-empty ⇒ skip.
+
+# Roster guard: stock_listing_info is rebuilt via truncate → re-insert (load_listing); a
+# crash/timeout mid-rewrite leaves it truncated or empty. Reconciling against a broken
+# roster marks virtually the whole market `orphan` — and orphan rows are purge-eligible,
+# so this MUST fail loudly instead. Healthy L+D listing is ~7000+ rows; anything under
+# this floor means the table is broken, not that the market shrank.
+MIN_LISTING_GUARD = 3000
 
 
 def _minute_state(
@@ -78,6 +87,7 @@ def reconcile_day(
     db_suspended: set[str],
     minute_counts: dict[str, int] | None = None,
     minute_source_short: set[str] | None = None,
+    traded_zero_vol: set[str] | None = None,
 ) -> list[dict]:
     """Reconcile one trading day into per-stock truth rows. Pure function.
 
@@ -90,6 +100,12 @@ def reconcile_day(
         minute_counts: backtest_minute bar count per code that day (None ⇒ skip minute
             reconcile, minute_state left NULL — the daily-only path).
         minute_source_short: codes already confirmed source-short that day (preserve).
+        traded_zero_vol: codes in Tushare daily with a REAL-PRICE bar but volume = 0
+            (一字板无成交 etc.). Judged "traded" when NOT suspended — the exact mirror of
+            the write path (_process_daily_date keeps such a bar as a real row; suspended
+            + vol=0 becomes a placeholder). Without this, those real rows were flagged
+            wrong_traded forever. Minute completeness is NOT expected for them (no
+            minute activity to demand — requiring 241 bars would busy-retry forever).
 
     Returns one dict per (code) with: code, listed, trade_status, daily_state,
     minute_state, reason. `roster` codes are `listed=True`; codes only present in the
@@ -97,10 +113,12 @@ def reconcile_day(
     """
     rows: list[dict] = []
     mss = minute_source_short or set()
+    tzv = traded_zero_vol or set()
 
     for code in sorted(roster):
-        is_traded = code in traded
+        has_vol = code in traded
         is_susp = code in suspended
+        is_traded = has_vol or (code in tzv and not is_susp)
         has_real = code in db_normal
         has_susp = code in db_suspended
 
@@ -131,14 +149,16 @@ def reconcile_day(
                 "listed": True,
                 "trade_status": trade_status,
                 "daily_state": daily_state,
-                "minute_state": _minute_state(code, is_traded, minute_counts, mss),
+                # minute only expected for vol>0 codes (zero-vol bars have no minute
+                # activity; demanding 241 bars would re-download them forever).
+                "minute_state": _minute_state(code, has_vol, minute_counts, mss),
                 "reason": None,
             }
         )
 
     # Orphans: present in the DB but NOT in the day's roster (not-listed/delisted).
     for code in sorted((db_normal | db_suspended) - roster):
-        if code in traded:
+        if code in traded or (code in tzv and code not in suspended):
             trade_status = TRADING
         elif code in suspended:
             trade_status = SUSPENDED
@@ -213,14 +233,22 @@ async def build_calendar(
     *,
     trading_days: list[date],
     fetch_suspended: Callable[[date], Awaitable[set[str]]],
-    fetch_traded: Callable[[date], Awaitable[set[str]]],
+    fetch_traded: Callable[[date], Awaitable[set[str] | tuple[set[str], set[str]]]],
     with_minute: bool = False,
     extra_minute_source_short: dict[date, set[str]] | None = None,
+    min_listing: int = MIN_LISTING_GUARD,
 ) -> dict:
     """Reconcile each day in `trading_days` and upsert into trading_calendar.
 
-    `fetch_suspended(day)` → Tushare suspend_d codes; `fetch_traded(day)` → Tushare
-    daily codes that actually traded. backtest_daily + listing_info come from storage.
+    `fetch_suspended(day)` → Tushare suspend_d codes; `fetch_traded(day)` → either a
+    plain set (codes with volume > 0 — legacy shape) or a `(traded, traded_zero_vol)`
+    tuple where the second set holds real-price bars with volume = 0 (one Tushare call
+    yields both; see reconcile_day's traded_zero_vol). backtest_daily + listing_info
+    come from storage.
+
+    Raises RuntimeError if stock_listing_info holds fewer than ``min_listing`` rows —
+    a truncated/empty roster (e.g. load_listing crashed mid-rewrite) would mark the
+    whole market `orphan` (purge-eligible), so reconciling against it is forbidden.
 
     `with_minute=True` ALSO reconciles `minute_state` (per traded stock: ≥241 bars=ok,
     else missing; preserving any existing source_short). It reads backtest_minute bar
@@ -229,6 +257,16 @@ async def build_calendar(
     full rebuild. Returns counts for the run summary.
     """
     listing_info = await storage.get_listing_info_all()
+    # ROSTER GUARD: a healthy L+D listing is ~7000+ rows. Far fewer ⇒ the table is
+    # broken (truncate→re-insert interrupted), NOT a smaller market. Fail loudly —
+    # never reconcile against it (every roster code missing ⇒ orphan ⇒ purge-eligible).
+    if len(listing_info) < min_listing:
+        raise RuntimeError(
+            f"build_calendar: stock_listing_info 只有 {len(listing_info)} 行 "
+            f"(健康名单应 ≥{min_listing}),疑似刷名单中途被打断留下残表;"
+            f"拒绝在残名单上重建(否则全市场会被判成可删除的 orphan)。"
+            f"请先重跑 POST /api/audit/listing-info/load-tushare 再重建"
+        )
     total_rows = 0
     by_state: dict[str, int] = {}
     by_minute: dict[str, int] = {}
@@ -236,20 +274,28 @@ async def build_calendar(
     for day in trading_days:
         roster = roster_for_day(listing_info, day)
         suspended = await fetch_suspended(day)
-        traded = await fetch_traded(day)
-        db_normal, db_suspended = await storage.get_daily_split_for_date(day)
-        # FAIL-SAFE: empty traded + many real DB rows ⇒ almost certainly a transient
-        # Tushare `daily` failure, not a real no-trade day. Reconciling would mass-flip
-        # those rows to wrong_traded (corrupting good state). Skip + surface, don't corrupt.
-        if not traded and len(db_normal) >= _EMPTY_TRADED_GUARD_MIN_DB_ROWS:
+        fetched = await fetch_traded(day)
+        if isinstance(fetched, tuple):
+            traded, traded_zero = fetched
+        else:  # legacy shape: a plain vol>0 set
+            traded, traded_zero = fetched, set()
+        # FAIL-SAFE: `trading_days` always come from trade_cal (real trading days), and
+        # a real trading day cannot have ZERO traded codes — so empty traded + non-empty
+        # roster ⇒ a transient Tushare `daily` failure (empty response). Reconciling it
+        # anyway corrupts good state: mass wrong_traded on a filled day, or a whole-roster
+        # source_none on a brand-new day (which the incremental nightly never revisits).
+        # Skip + surface, don't corrupt. Deliberately independent of existing DB rows.
+        if not traded and roster:
             logger.error(
-                "build_calendar: %s — fetch_traded 空但库里有 %d 行真实日线,几乎可断定是 Tushare "
-                "daily 取数失败(空响应);跳过这天 reconcile,不把好状态刷成 wrong_traded",
+                "build_calendar: %s — fetch_traded 空但在册名单有 %d 只(交易日不可能零成交),"
+                "几乎可断定是 Tushare daily 取数失败(空响应);跳过这天 reconcile,"
+                "不拿空响应覆盖/初始化真值表",
                 day,
-                len(db_normal),
+                len(roster),
             )
             skipped_days.append(day)
             continue
+        db_normal, db_suspended = await storage.get_daily_split_for_date(day)
         minute_counts = None
         minute_source_short = None
         if with_minute:
@@ -269,7 +315,14 @@ async def build_calendar(
                 minute_counts = None
                 minute_source_short = None
         rows = reconcile_day(
-            roster, suspended, traded, db_normal, db_suspended, minute_counts, minute_source_short
+            roster,
+            suspended,
+            traded,
+            db_normal,
+            db_suspended,
+            minute_counts,
+            minute_source_short,
+            traded_zero_vol=traded_zero,
         )
         total_rows += await storage.upsert_trading_calendar(day, rows)
         for r in rows:
@@ -334,9 +387,23 @@ async def rebuild_calendar(
         async def fetch_suspended(day: date) -> set[str]:
             return await client.fetch_suspended_stocks(day.strftime("%Y%m%d"))
 
-        async def fetch_traded(day: date) -> set[str]:
+        async def fetch_traded(day: date) -> tuple[set[str], set[str]]:
+            """One Tushare daily call → (vol>0 codes, real-price vol=0 codes).
+
+            The zero-vol set mirrors the write path's "real bar" test (open/close
+            non-None): such bars are stored as REAL rows when not suspended, so the
+            reconcile must count them as traded too (see reconcile_day)."""
             recs = await client.fetch_daily(day.strftime("%Y%m%d"))
-            return {r["ticker"] for r in recs if (r.get("volume") or 0) > 0}
+            traded: set[str] = set()
+            traded_zero: set[str] = set()
+            for r in recs:
+                if r.get("open") is None or r.get("close") is None:
+                    continue  # halted placeholder row — not a real bar
+                if (r.get("volume") or 0) > 0:
+                    traded.add(r["ticker"])
+                else:
+                    traded_zero.add(r["ticker"])
+            return traded, traded_zero
 
         return await build_calendar(
             storage,
