@@ -20,6 +20,12 @@ def test_zhuanjingtexin_is_junk():
     assert "专精特新" not in BROAD_CONCEPT_BOARDS
 
 
+def test_guojia_dajijin_is_junk():
+    """国家大基金持股 is a fund-holding label, not a tradable theme."""
+    assert is_junk_board("国家大基金持股") is True
+    assert "国家大基金持股" in JUNK_BOARDS
+
+
 def test_real_themes_not_junk():
     """Narrow, tradable themes must survive filtering."""
     for board in ("减速器", "无人驾驶", "汽车热管理"):
