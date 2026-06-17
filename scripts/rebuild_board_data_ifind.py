@@ -179,7 +179,7 @@ async def async_main(args: argparse.Namespace) -> None:
         json.dump(sectors, f, ensure_ascii=False, indent=1)
     logger.info("写出 %s", NEW_SECTORS)
 
-    print(f"\n完成。新文件 (未覆盖旧数据):")
+    print("\n完成。新文件 (未覆盖旧数据):")
     print(f"  {NEW_CONSTITUENTS}   ({len(board2stocks)} 板块)")
     print(f"  {NEW_SECTORS}        (concept {len(sectors['concept'])} 个)")
 
