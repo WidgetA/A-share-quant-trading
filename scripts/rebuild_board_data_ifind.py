@@ -125,8 +125,7 @@ def rebuild_sectors(board_names: list[str]) -> dict:
     old_code_by_name = {c["name"]: c.get("code", "") for c in old.get("concept", [])}
 
     concept = [
-        {"code": old_code_by_name.get(name, ""), "name": name}
-        for name in sorted(board_names)
+        {"code": old_code_by_name.get(name, ""), "name": name} for name in sorted(board_names)
     ]
     return {
         "industry": old.get("industry", []),
