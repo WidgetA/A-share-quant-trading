@@ -87,6 +87,16 @@ src/web/audit_routes.py              # all /api/audit/* manual endpoints (rebuil
 GreptimeDB tables are `PRIMARY KEY (tag)` + `TIME INDEX (ts)`. **`(tag, ts)` deduplicates —
 last write wins.** All `ts` are **epoch milliseconds, naive‑UTC** (see §4).
 
+> Because `(tag, ts)` is structurally unique, the training‑time `check_data_integrity` audit
+> does **not** scan for duplicate `(stock_code, ts)` rows — they cannot exist (the engine merges
+> them on write, and `ts` is computed deterministically from the bar's trade time, so the old
+> `stock_listing_info` "varying‑ts" duplicate hazard does not apply here). A full‑table
+> `GROUP BY stock_code, ts HAVING COUNT(*) > 1` was removed in 2026‑06 after it OOM‑killed the
+> GreptimeDB process every night: materializing ~1e9 groups over the ~1‑billion‑row
+> `backtest_minute` table spiked RSS to ~6.6 GB → host global‑OOM → `connection closed in the
+> middle of operation` during the nightly pre‑train integrity check. Streaming `COUNT(*) WHERE`
+> checks (bad OHLC / NULL / negatives) stay — they are memory‑bounded.
+
 | Table | Key | `ts` means | Columns / purpose |
 |-------|-----|-----------|-------------------|
 | `backtest_daily` | `stock_code` | **trade date** (day) | `open/high/low/close/pre_close FLOAT64`, `vol`, `amount`, `turnover_ratio`, `is_suspended BOOL`. The daily data. `vol` in **手 (lots)**. |

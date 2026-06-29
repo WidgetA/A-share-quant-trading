@@ -2150,23 +2150,13 @@ class GreptimeBacktestStorage:
                 }
             )
 
-        daily_duplicate_rows = await self.db.fetch(
-            "SELECT stock_code, ts, COUNT(*) as cnt FROM backtest_daily "
-            "GROUP BY stock_code, ts HAVING COUNT(*) > 1 LIMIT 100"
-        )
-        if daily_duplicate_rows:
-            details = [
-                f"  {r['stock_code']}@{ts_to_date(r['ts'])}: {int(r['cnt'])} 条"
-                for r in daily_duplicate_rows
-            ]
-            issues.append(
-                {
-                    "level": "error",
-                    "check": "duplicate_daily_rows",
-                    "message": "日线: 存在重复 (stock_code, ts) 记录:\n" + "\n".join(details),
-                    "count": len(daily_duplicate_rows),
-                }
-            )
+        # No duplicate-(stock_code, ts) scan: GreptimeDB's PRIMARY KEY(stock_code) +
+        # TIME INDEX(ts) makes a second row with the same (code, ts) physically
+        # impossible (merge-on-write/read, last-write-wins), and ts is computed
+        # deterministically from the trade date — so the check could only ever
+        # return empty. The old full-table `GROUP BY stock_code, ts HAVING COUNT(*) > 1`
+        # was the heaviest variant of this and OOM-killed the GreptimeDB process every
+        # night (see docs/backtest-data-engine.md §3).
 
         if await self.has_minute_data():
             await _count_and_sample(
@@ -2214,24 +2204,11 @@ class GreptimeBacktestStorage:
                 "分钟线: {cnt} 条记录 amount 为负数",
             )
 
-            duplicate_rows = await self.db.fetch(
-                "SELECT stock_code, ts, COUNT(*) as cnt FROM backtest_minute "
-                "GROUP BY stock_code, ts HAVING COUNT(*) > 1 LIMIT 100"
-            )
-            if duplicate_rows:
-                details = [
-                    f"  {r['stock_code']}@{epoch_ms_to_minute_str(ts_to_epoch_ms(r['ts']))}: "
-                    f"{int(r['cnt'])} 条"
-                    for r in duplicate_rows
-                ]
-                issues.append(
-                    {
-                        "level": "error",
-                        "check": "duplicate_minute_rows",
-                        "message": "分钟线: 存在重复 (stock_code, ts) 记录:\n" + "\n".join(details),
-                        "count": len(duplicate_rows),
-                    }
-                )
+            # No duplicate-(stock_code, ts) scan here either — same reason as the
+            # daily table above. This was the exact query that OOM-killed GreptimeDB:
+            # a full-table GROUP BY over ~1e9 minute rows materializes ~1e9 groups,
+            # spikes RSS to ~6.6 GB, and trips the host OOM-killer mid-query →
+            # "connection closed in the middle of operation". (docs/backtest-data-engine.md §3)
 
         return issues
 
