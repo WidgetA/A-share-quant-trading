@@ -74,6 +74,32 @@ async def _notify_feishu_error(title: str, detail: str) -> None:
         logger.warning("Failed to send Feishu error notification", exc_info=True)
 
 
+async def _refresh_top10_names(fdb: Any, recommended: list) -> None:
+    """Override the ≤10 final picks' display names with live Tushare names.
+
+    The board/concept JSON is refreshed offline in bulk, so its stock names can
+    lag reality — e.g. 600360 摘帽 (de-ST) on 2026-05-20 yet still carried as
+    "*ST华微", which then showed up on the 06-29 report even though the stock is
+    no longer ST. This affects **display only**: ST *filtering* already queries
+    live Tushare (``batch_filter_st``), so trading correctness never depended on
+    these names. Only the final picks are looked up, so the extra Tushare call
+    is negligible. Best-effort — on any failure the cached names are kept.
+    """
+    if not fdb or not recommended:
+        return
+    try:
+        cur_names = await fdb.batch_current_names([s.code for s in recommended])
+    except Exception:
+        logger.warning(
+            "Top-10 name refresh from Tushare failed; keeping cached names", exc_info=True
+        )
+        return
+    for s in recommended:
+        fresh = cur_names.get(s.code)
+        if fresh:
+            s.name = fresh
+
+
 async def _notify_feishu_v16_top10(scan_result: Any) -> None:
     """Send V16 top-10 scored report to Feishu. Best-effort, never raises."""
     try:
@@ -636,6 +662,11 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
 
     # Run V16 scan
     scan_result = await scanner.scan(stock_data, clean_boards)
+
+    # Refresh the final picks' display names from live Tushare — the offline
+    # board JSON name can lag reality (a de-ST'd stock still labelled "*ST").
+    # Display only; ST filtering already uses live Tushare names upstream.
+    await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
 
     # Push top-10 report to Feishu (always, non-critical)
     await _notify_feishu_v16_top10(scan_result)

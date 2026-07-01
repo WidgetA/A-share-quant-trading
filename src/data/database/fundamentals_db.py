@@ -346,6 +346,17 @@ class FundamentalsDB:
         names = await _fetch_tushare_names(stock_codes)
         return [c for c in stock_codes if c in names and not names[c].startswith(_ST_PREFIXES)]
 
+    async def batch_current_names(self, stock_codes: list[str]) -> dict[str, str]:
+        """Fetch current company names from live Tushare ``stock_basic``.
+
+        Returns a ``{6-digit code: current name}`` map; codes Tushare doesn't
+        return are absent. Use this to override stale *display* names — the
+        offline board JSON lags reality (e.g. 600360 摘帽/de-ST on 2026-05-20
+        yet still carried as "*ST华微"). Display only; ST *filtering* uses the
+        same live source via :meth:`batch_filter_st`.
+        """
+        return await _fetch_tushare_names(stock_codes)
+
     def _row_to_model(self, row: asyncpg.Record) -> StockFundamentals:
         """Convert database row to StockFundamentals."""
 
