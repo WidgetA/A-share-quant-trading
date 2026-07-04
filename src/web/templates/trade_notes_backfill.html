@@ -85,7 +85,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
 <div class="tnb-root">
     <div class="tnb-header">
         <h2>补作业 · 批量补录历史交易</h2>
-        <span class="hint">对着券商 App 的历史成交记录，一条一条把买卖流水和佣金/过户费/印花税补进来。时间按北京时间。</span>
+        <span class="hint">对着券商 App 的历史成交记录，一条一条把买卖流水和费用补进来。时间按北京时间。键盘方向键可在单元格间移动。</span>
         <a class="tnb-back-link" href="/trade-notes">← 返回交易笔记</a>
     </div>
 
@@ -592,6 +592,71 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         }
         render();
     }
+
+    // ---- 方向键在单元格间移动（类 Excel）----
+    // 上/下：任何格子直接跳行（顺带屏蔽 number 输入的加减值、select 的换选项）。
+    // 左/右：number 直接跳格；text 光标到头/尾才跳（中间是正常移光标，全选状态
+    // 视为在边上）；date/time 不劫持（原生用左右键切年月日段）。行首/行尾绕到
+    // 上/下一行。禁用格（买入行的印花税等）自动跳过。
+    const NAV_COLS = ['.f-date', '.f-time', '.f-code', '.f-type', '.f-price', '.f-qty',
+                      '.f-comm', '.f-transfer', '.f-stamp', '.f-dividend', '.f-pnl', '.f-remark'];
+
+    function focusCell(rowIdx, colIdx, dRow, dCol) {
+        while (rowIdx >= 0 && rowIdx < rows.length) {
+            while (colIdx >= 0 && colIdx < NAV_COLS.length) {
+                const el = q(rows[rowIdx], NAV_COLS[colIdx]);
+                if (el && !el.disabled) {
+                    el.focus();
+                    if (el.tagName === 'INPUT' && el.select) el.select();
+                    return;
+                }
+                if (!dCol) break;
+                colIdx += dCol;
+            }
+            if (dCol) { // horizontal: wrap to the prev/next row's far cell
+                rowIdx += dCol > 0 ? 1 : -1;
+                colIdx = dCol > 0 ? 0 : NAV_COLS.length - 1;
+            } else if (dRow) {
+                rowIdx += dRow;
+            } else {
+                return;
+            }
+        }
+    }
+
+    function handleArrowNav(e) {
+        if (!e.key.startsWith('Arrow')) return;
+        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        const el = e.target;
+        if (!el.matches) return;
+        const colIdx = NAV_COLS.findIndex(sel => el.matches(sel));
+        if (colIdx === -1) return;
+        const tr = el.closest('tr');
+        const rowIdx = rows.findIndex(r => r.tr === tr);
+        if (rowIdx === -1) return;
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+            e.preventDefault();
+            const dRow = e.key === 'ArrowDown' ? 1 : -1;
+            focusCell(rowIdx + dRow, colIdx, dRow, 0);
+            return;
+        }
+        const type = el.tagName === 'SELECT' ? 'select' : (el.type || 'text');
+        if (type === 'date' || type === 'time') return; // native segment nav
+        if (type === 'text') {
+            const len = el.value.length;
+            const allSelected = len > 0 && el.selectionStart === 0 && el.selectionEnd === len;
+            if (!allSelected) {
+                const atStart = el.selectionStart === 0 && el.selectionEnd === 0;
+                const atEnd = el.selectionStart === len && el.selectionEnd === len;
+                if (e.key === 'ArrowLeft' && !atStart) return;
+                if (e.key === 'ArrowRight' && !atEnd) return;
+            }
+        }
+        e.preventDefault();
+        const dCol = e.key === 'ArrowRight' ? 1 : -1;
+        focusCell(rowIdx, colIdx + dCol, 0, dCol);
+    }
+    dom.body.addEventListener('keydown', handleArrowNav);
 
     dom.reload.addEventListener('click', () => {
         if (confirmDiscardUnsaved()) loadAll();
