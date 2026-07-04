@@ -897,13 +897,12 @@
                 </div>
             </div>
         `;
-        // 逆回购：只留 价格(利率)/数量/收益，费项和股息隐藏，计算按钮不适用。
+        // 逆回购：留 价格(利率)/数量/佣金/收益，过户费/印花税/股息隐藏，计算按钮不适用。
         function applyEditTypeVis(t) {
             const trade = (t === '买入' || t === '卖出' || t === '逆回购');
             const repo = (t === '逆回购');
             document.getElementById('tnEditTradeFields').hidden = !trade;
             document.getElementById('tnEditSellFields').hidden = !(t === '卖出' || repo);
-            document.getElementById('tnEditCommissionLabel').hidden = repo;
             document.getElementById('tnEditTransferFeeLabel').hidden = repo;
             document.getElementById('tnEditStampTaxLabel').hidden = repo;
             document.getElementById('tnEditDividendLabel').hidden = repo;
@@ -983,11 +982,11 @@
                     body[key] = v;
                 }
             }
-            // 逆回购只登记收益，费项/股息不适用——隐藏 input 里残留的旧值一律清空。
-            // 收益输入框里的数落到物理隔离的 repo_income 列，平仓收益列清空；
-            // 反过来非逆回购行把 repo_income 清空——两列绝不互串。
+            // 逆回购登记 佣金+收益，过户费/印花税/股息不适用——隐藏 input 里
+            // 残留的旧值一律清空。收益输入框里的数落到物理隔离的 repo_income
+            // 列，平仓收益列清空；反过来非逆回购行把 repo_income 清空——两列
+            // 绝不互串。
             if (eventType === '逆回购') {
-                body.commission = null;
                 body.transfer_fee = null;
                 body.stamp_tax = null;
                 body.dividend = null;
@@ -1175,9 +1174,8 @@
         const isTrade = (t === '买入' || t === '卖出' || t === '逆回购');
         const repo = (t === '逆回购');
         dom.newTradeFields.hidden = !isTrade;
-        // 印花税/股息/平仓收益 仅卖出显示；逆回购只显示 收益(计算按钮不适用)。
+        // 印花税/股息/平仓收益 仅卖出显示；逆回购显示 佣金+收益(计算按钮不适用)。
         dom.newSellFields.hidden = !(t === '卖出' || repo);
-        document.getElementById('tnNewCommissionLabel').hidden = repo;
         document.getElementById('tnNewTransferFeeLabel').hidden = repo;
         document.getElementById('tnNewStampTaxLabel').hidden = repo;
         document.getElementById('tnNewDividendLabel').hidden = repo;
@@ -1266,14 +1264,11 @@
                 body.qty = q;
             }
             // 5 个数值费用/股息/收益字段：留空不发，非空校验后发。买入只用前 2 个；
-            // 逆回购一个费项都不发，只发收益。
+            // 逆回购发 佣金+收益，过户费不适用。
             // [key, el, label, allowNeg]. 股息/股息税 可负（派息−已扣税）。
-            const feeMap = [];
+            const feeMap = [['commission', dom.newCommission, '佣金', false]];
             if (event_type !== '逆回购') {
-                feeMap.push(
-                    ['commission', dom.newCommission, '佣金', false],
-                    ['transfer_fee', dom.newTransferFee, '过户费', false],
-                );
+                feeMap.push(['transfer_fee', dom.newTransferFee, '过户费', false]);
             }
             if (event_type === '卖出') {
                 feeMap.push(

@@ -162,7 +162,7 @@ def test_create_sell_event_rejects_repo_income():
 
 def test_convert_sell_with_pnl_to_repo_does_not_carry_pnl_over():
     # 卖出行已有平仓收益 -8000，转成逆回购：数值绝不搬进 repo_income，
-    # realized_pnl/费项全部清空。
+    # realized_pnl/过户费/印花税/股息清空；佣金(手续费)两类通用，保留。
     row = dict(_SELL_ROW, realized_pnl=-8000.0, commission=8.11, stamp_tax=47.49)
     st = _store(row=row)
     ok = asyncio.run(st.update_event("204001", row["event_id"], event_type="逆回购"))
@@ -170,8 +170,43 @@ def test_convert_sell_with_pnl_to_repo_does_not_carry_pnl_over():
     (insert_sql,) = [s for s in st._db.executed if s.startswith("INSERT INTO trade_notes")]
     assert "'逆回购'" in insert_sql
     assert "-8000" not in insert_sql  # 平仓收益没有跟过来
-    assert "8.11" not in insert_sql  # 费项也清了
-    assert "47.49" not in insert_sql
+    assert "8.11" in insert_sql  # 佣金通用，保留
+    assert "47.49" not in insert_sql  # 印花税清了
+
+
+def test_repo_event_accepts_commission():
+    st = _store(row=None)
+    asyncio.run(
+        st.create_event(
+            code="204001",
+            event_type="逆回购",
+            title="",
+            content="",
+            price=1.46,
+            qty=10020,
+            commission=1.0,  # 逆回购手续费——合法
+            repo_income=4.1,
+        )
+    )
+    (insert_sql,) = [s for s in st._db.executed if s.startswith("INSERT INTO trade_notes")]
+    assert "'逆回购'" in insert_sql
+    assert "1.0" in insert_sql
+    assert "4.1" in insert_sql
+
+
+def test_repo_event_rejects_transfer_fee():
+    st = _store(row=None)
+    with pytest.raises(ValueError, match="transfer_fee"):
+        asyncio.run(
+            st.create_event(
+                code="204001",
+                event_type="逆回购",
+                title="",
+                content="",
+                transfer_fee=0.09,  # 过户费不属于逆回购 → 拒收
+            )
+        )
+    assert st._db.executed == []
 
 
 def test_convert_repo_with_income_to_sell_does_not_carry_income_over():

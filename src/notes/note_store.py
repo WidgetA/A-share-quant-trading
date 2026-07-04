@@ -112,15 +112,15 @@ class NoteEvent:
     deleted: bool
     # Fee/dividend/P&L fields. All optional — NULL for legacy rows and for
     # broker-imported events (broker fill data doesn't include these).
-    commission: float | None  # 佣金 (买/卖)
+    commission: float | None  # 佣金/手续费 (买/卖/逆回购通用)
     transfer_fee: float | None  # 过户费 (买/卖)
     stamp_tax: float | None  # 印花税 (仅卖出)
     dividend: float | None  # 股息/股息税 净到手 (派息额 − 已扣税)，可负，仅卖出登记
     realized_pnl: float | None  # 平仓收益 (仅卖出)
     # 逆回购利息收益 — 与 realized_pnl 物理隔离的独立列 (仅 event_type='逆回购')。
-    # 硬性约束：逆回购行 realized_pnl/费项 恒为 NULL；非逆回购行 repo_income 恒为
-    # NULL。类型切换时不属于新类型的数值自动清空、绝不搬家——两种收益在任何
-    # 情况下都分得清 (见 update_event / create_event 守卫)。
+    # 硬性约束：逆回购行 realized_pnl/过户费/印花税/股息 恒为 NULL (佣金通用可填)；
+    # 非逆回购行 repo_income 恒为 NULL。类型切换时不属于新类型的数值自动清空、
+    # 绝不搬家——两种收益在任何情况下都分得清 (见 update_event / create_event 守卫)。
     repo_income: float | None
 
 
@@ -635,17 +635,17 @@ class TradeNoteStore:
         # 收益隔离硬守卫：平仓收益(realized_pnl)只属于卖出，逆回购利息
         # (repo_income)只属于逆回购。往错误字段塞数直接报错拒收——绝不静默
         # 挪到另一个字段，两种收益在任何情况下都不允许混。
+        # 逆回购有手续费(佣金)——commission 两边通用；过户费/印花税/股息不适用。
         if event_type == "逆回购":
             wrong = {
                 "realized_pnl": realized_pnl,
-                "commission": commission,
                 "transfer_fee": transfer_fee,
                 "stamp_tax": stamp_tax,
                 "dividend": dividend,
             }
             filled = [k for k, v in wrong.items() if v is not None]
             if filled:
-                raise ValueError(f"逆回购只登记 repo_income(利息收益)，不接受: {filled}")
+                raise ValueError(f"逆回购只登记 repo_income(利息收益)+佣金，不接受: {filled}")
         elif repo_income is not None:
             raise ValueError(f"repo_income 只属于逆回购事件，{event_type} 不接受")
         # For 买入/卖出 events, keep side in sync with event_type and auto-fill
@@ -741,24 +741,23 @@ class TradeNoteStore:
         new_realized_pnl = realized_pnl if realized_pnl is not _UNSET else existing.realized_pnl
         new_repo_income = repo_income if repo_income is not _UNSET else existing.repo_income
         # 收益隔离硬守卫（与 create_event 同一不变量）：
-        #   逆回购行: realized_pnl/费项/股息 恒 NULL；非逆回购行: repo_income 恒 NULL。
+        #   逆回购行: realized_pnl/过户费/印花税/股息 恒 NULL；非逆回购行:
+        #   repo_income 恒 NULL。佣金(手续费)两边通用，不参与互斥。
         # 类型切换时不属于新类型的数值自动清空、绝不搬家；调用方往错误字段塞
         # 非空值直接报错拒收——两种收益在任何情况下都不允许混。
         if new_event_type == "逆回购":
             wrong = {
                 "realized_pnl": realized_pnl,
-                "commission": commission,
                 "transfer_fee": transfer_fee,
                 "stamp_tax": stamp_tax,
                 "dividend": dividend,
             }
             filled = [k for k, v in wrong.items() if v is not _UNSET and v is not None]
             if filled:
-                raise ValueError(f"逆回购只登记 repo_income(利息收益)，不接受: {filled}")
+                raise ValueError(f"逆回购只登记 repo_income(利息收益)+佣金，不接受: {filled}")
             if existing.event_type != "逆回购" and repo_income is _UNSET:
                 new_repo_income = None  # 从买卖切成逆回购：不继承任何旧数
             new_realized_pnl = None
-            new_commission = None
             new_transfer_fee = None
             new_stamp_tax = None
             new_dividend = None

@@ -204,7 +204,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
     // 股息是偶发的——都不是费项，不算缺。
     function needsBackfill(e) {
         const missing = v => v === null || v === undefined;
-        if (e.event_type === '逆回购') return missing(e.repo_income);
+        if (e.event_type === '逆回购') return missing(e.repo_income) || missing(e.commission);
         if (missing(e.commission)) return true;
         if (e.event_type === '卖出' && missing(e.stamp_tax)) return true;
         return false;
@@ -214,8 +214,8 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         const t = val(row, '.f-type');
         const isSell = t === '卖出';
         const isRepo = t === '逆回购';
-        // 逆回购只填收益：费项/股息/算 全禁，佣金过户费也禁。
-        q(row, '.f-comm').disabled = isRepo;
+        // 逆回购填 佣金+收益：过户费/印花税/股息/算 禁用。
+        q(row, '.f-comm').disabled = false;
         q(row, '.f-transfer').disabled = isRepo;
         q(row, '.f-stamp').disabled = !isSell;
         q(row, '.f-dividend').disabled = !isSell;
@@ -433,7 +433,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             ts_ms: ts_ms,
             price: price,
             qty: qty,
-            commission: isRepo ? null : numField('.f-comm', '佣金', false),
+            commission: numField('.f-comm', '佣金', false),
             transfer_fee: isRepo ? null : numField('.f-transfer', '过户费', false),
             stamp_tax: isSell ? numField('.f-stamp', '印花税', false) : null,
             dividend: isSell ? numField('.f-dividend', '股息', true) : null,
