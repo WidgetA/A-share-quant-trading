@@ -181,13 +181,14 @@ table.tnb-table { border-collapse: collapse; font-size: 0.85em; }
             + `表格 ${rows.length} 行` + (unsaved ? `，${unsaved} 行待保存` : '');
     }
 
-    // 作业 = 费项没填全的买卖行。买入和卖出的费项不同：
-    //   买入 = 佣金 + 过户费
-    //   卖出 = 佣金 + 过户费 + 印花税
-    // 平仓收益是算出来的、股息是偶发的——都不是费项，不算缺。
+    // 作业 = 必填费项没填的买卖行。按用户实际交割单口径（2026-07-04 线上数据核实）：
+    //   买入必填 = 佣金
+    //   卖出必填 = 佣金 + 印花税
+    // 过户费该券商不单列（用户不填，永远别拿它判缺）；平仓收益是算出来的、
+    // 股息是偶发的——都不是费项，不算缺。
     function needsBackfill(e) {
         const missing = v => v === null || v === undefined;
-        if (missing(e.commission) || missing(e.transfer_fee)) return true;
+        if (missing(e.commission)) return true;
         if (e.event_type === '卖出' && missing(e.stamp_tax)) return true;
         return false;
     }
