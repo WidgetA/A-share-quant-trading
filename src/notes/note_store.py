@@ -79,7 +79,18 @@ CREATE TABLE IF NOT EXISTS note_cards (
 DEFAULT_EVENT_TYPES = [
     "买入",
     "卖出",
+    "逆回购",
 ]
+
+
+def is_reverse_repo_code(code: str) -> bool:
+    """国债逆回购代码：沪市 204xxx（GC001…GC182）、深市 1318xx（R-001…R-182）。
+
+    QMT 把逆回购按普通「卖出成交」送进来；写笔记这一步按代码识别，记成
+    event_type='逆回购'、side=NULL——逆回购不算买卖，只登记收益。
+    """
+    bare = code.split(".")[0]
+    return len(bare) == 6 and (bare.startswith("204") or bare.startswith("1318"))
 
 
 @dataclass
@@ -390,8 +401,14 @@ class TradeNoteStore:
             f"ORDER BY ts DESC LIMIT 1"
         )
         existing = await self._db.fetchrow(existing_sql)
-        side_lower = side.lower()
-        event_type = "买入" if side_lower == "buy" else "卖出"
+        side_lower: str | None = side.lower()
+        # 逆回购：QMT 按「卖出成交」送数，写笔记时按代码识别成独立类型,
+        # side 置空——它不是买卖，收益后续在补作业里登记到 realized_pnl。
+        if is_reverse_repo_code(code):
+            event_type = "逆回购"
+            side_lower = None
+        else:
+            event_type = "买入" if side_lower == "buy" else "卖出"
         if price is not None:
             title = f"{event_type} @{price:.2f} x {qty}"
         else:
@@ -605,8 +622,11 @@ class TradeNoteStore:
         # For 买入/卖出 events, keep side in sync with event_type and auto-fill
         # the title in the same format the broker-import path uses, so manual
         # entries and broker-imported entries render identically in the篇 view.
-        if event_type in ("买入", "卖出"):
-            if side is None:
+        # 逆回购 gets the same auto-title but never a side (它不算买卖).
+        if event_type in ("买入", "卖出", "逆回购"):
+            if event_type == "逆回购":
+                side = None
+            elif side is None:
                 side = "buy" if event_type == "买入" else "sell"
             if not title and qty is not None:
                 if price is not None:
@@ -658,7 +678,7 @@ class TradeNoteStore:
 
         When event_type toggles between 买入/卖出, `side` flips with it so the
         two stay consistent (the events-list filter and dashboard meta both
-        read `side`).
+        read `side`); switching to 逆回购 clears side to NULL (逆回购不算买卖).
 
         Numeric fields use the _UNSET sentinel so the caller can clear them
         to None (market price / unknown qty / no fee) explicitly, distinct
@@ -676,6 +696,9 @@ class TradeNoteStore:
         new_side: str | None
         if event_type is not None and event_type in ("买入", "卖出"):
             new_side = "buy" if event_type == "买入" else "sell"
+        elif event_type == "逆回购":
+            # 逆回购不是买卖——改成该类型时把误挂的 side 一并清掉。
+            new_side = None
         else:
             new_side = existing.side
         new_price = price if price is not _UNSET else existing.price

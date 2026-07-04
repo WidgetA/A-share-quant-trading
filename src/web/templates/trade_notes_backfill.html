@@ -66,6 +66,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
 .tnb-row-dirty { background: #fffbe6; }
 .tnb-row-sell { border-left: 3px solid #d69e2e; }
 .tnb-row-buy { border-left: 3px solid #38a169; }
+.tnb-row-repo { border-left: 3px solid #3182ce; }
 .tnb-status { font-size: 0.85em; }
 .tnb-status.saved { color: #38a169; }
 .tnb-status.dirty { color: #d69e2e; }
@@ -136,7 +137,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
     // Field values live in the row's inputs — the DOM is the single source of
     // truth; we read inputs at save time.
     const rows = [];
-    const AUTO_TITLE_RE = /^(买入|卖出) (@|市价)/;
+    const AUTO_TITLE_RE = /^(买入|卖出|逆回购) (@|市价)/;
 
     const dom = {
         onlyEmpty: document.getElementById('tnbOnlyEmpty'),
@@ -195,26 +196,34 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             + `表格 ${rows.length} 行` + (unsaved ? `，${unsaved} 行待保存` : '');
     }
 
-    // 作业 = 必填费项没填的买卖行。按用户实际交割单口径（2026-07-04 线上数据核实）：
+    // 作业 = 必填项没填的行。按用户实际交割单口径（2026-07-04 线上数据核实）：
     //   买入必填 = 佣金
     //   卖出必填 = 佣金 + 印花税
+    //   逆回购必填 = 收益（费项对逆回购不适用，一律不判）
     // 过户费该券商不单列（用户不填，永远别拿它判缺）；平仓收益是算出来的、
     // 股息是偶发的——都不是费项，不算缺。
     function needsBackfill(e) {
         const missing = v => v === null || v === undefined;
+        if (e.event_type === '逆回购') return missing(e.realized_pnl);
         if (missing(e.commission)) return true;
         if (e.event_type === '卖出' && missing(e.stamp_tax)) return true;
         return false;
     }
 
     function updateSellFieldsEnabled(row) {
-        const isSell = val(row, '.f-type') === '卖出';
-        for (const sel of ['.f-stamp', '.f-dividend', '.f-pnl']) {
-            q(row, sel).disabled = !isSell;
-        }
+        const t = val(row, '.f-type');
+        const isSell = t === '卖出';
+        const isRepo = t === '逆回购';
+        // 逆回购只填收益：费项/股息/算 全禁，佣金过户费也禁。
+        q(row, '.f-comm').disabled = isRepo;
+        q(row, '.f-transfer').disabled = isRepo;
+        q(row, '.f-stamp').disabled = !isSell;
+        q(row, '.f-dividend').disabled = !isSell;
+        q(row, '.f-pnl').disabled = !(isSell || isRepo);
         q(row, '.f-calc').disabled = !isSell;
         row.tr.classList.toggle('tnb-row-sell', isSell);
-        row.tr.classList.toggle('tnb-row-buy', !isSell);
+        row.tr.classList.toggle('tnb-row-repo', isRepo);
+        row.tr.classList.toggle('tnb-row-buy', !isSell && !isRepo);
     }
 
     async function lookupName(row) {
@@ -341,6 +350,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             <td><select class="f-type">
                 <option value="买入">买入</option>
                 <option value="卖出">卖出</option>
+                <option value="逆回购">逆回购</option>
             </select></td>
             <td class="tnb-num"><input class="f-price" type="number" step="0.001" min="0" placeholder="留空=市价" value="${numVal(data && data.price)}"></td>
             <td class="tnb-num"><input class="f-qty" type="number" step="100" min="0" value="${numVal(data && data.qty)}"></td>
@@ -358,7 +368,10 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
                 <button class="f-save" type="button">保存</button>
                 <button class="f-del tnb-danger" type="button">删</button>
             </td>`;
-        q(row, '.f-type').value = data ? (data.event_type === '卖出' ? '卖出' : '买入') : '买入';
+        q(row, '.f-type').value = data
+            ? (data.event_type === '卖出' ? '卖出'
+                : (data.event_type === '逆回购' ? '逆回购' : '买入'))
+            : '买入';
 
         row.tr.addEventListener('input', () => markDirty(row));
         q(row, '.f-type').addEventListener('change', () => updateSellFieldsEnabled(row));
@@ -399,6 +412,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         if (Number.isNaN(ts_ms)) throw new Error('日期/时间格式错误');
         const event_type = val(row, '.f-type');
         const isSell = event_type === '卖出';
+        const isRepo = event_type === '逆回购';
 
         const numField = (sel, label, allowNeg) => {
             const raw = val(row, sel);
@@ -419,11 +433,11 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             ts_ms: ts_ms,
             price: price,
             qty: qty,
-            commission: numField('.f-comm', '佣金', false),
-            transfer_fee: numField('.f-transfer', '过户费', false),
+            commission: isRepo ? null : numField('.f-comm', '佣金', false),
+            transfer_fee: isRepo ? null : numField('.f-transfer', '过户费', false),
             stamp_tax: isSell ? numField('.f-stamp', '印花税', false) : null,
             dividend: isSell ? numField('.f-dividend', '股息', true) : null,
-            realized_pnl: isSell ? numField('.f-pnl', '平仓收益', true) : null,
+            realized_pnl: (isSell || isRepo) ? numField('.f-pnl', '收益', true) : null,
             content: val(row, '.f-remark'),
         };
         return { code, body, isNew: row.eventId === null };
@@ -448,7 +462,8 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         row.origTime = time;
         ev.code = code;
         ev.event_type = snapshot.event_type;
-        ev.side = snapshot.event_type === '买入' ? 'buy' : 'sell';
+        ev.side = snapshot.event_type === '逆回购' ? null
+            : (snapshot.event_type === '买入' ? 'buy' : 'sell');
         ev.title = row.title;
         ev.price = snapshot.price;
         ev.qty = snapshot.qty;
@@ -474,7 +489,10 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         const snapshot = Object.assign({}, body); // body loses null keys on POST
         try {
             if (isNew) {
-                body.side = body.event_type === '买入' ? 'buy' : 'sell';
+                // 逆回购不发 side——它不算买卖，后端建行时 side 留 NULL。
+                if (body.event_type !== '逆回购') {
+                    body.side = body.event_type === '买入' ? 'buy' : 'sell';
+                }
                 body.title = '';        // server auto-generates '买入 @x x y'
                 body.content_external = '';
                 body.author = 'user';
@@ -562,7 +580,11 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
     function render() {
         rows.length = 0;
         const pending = allTrades.filter(needsBackfill);
-        rangeInfo = `共 ${allTrades.length} 笔买卖，待补 ${pending.length} 笔`;
+        const repoCount = allTrades.filter(e => e.event_type === '逆回购').length;
+        const tradeCount = allTrades.length - repoCount;
+        rangeInfo = `共 ${tradeCount} 笔买卖`
+            + (repoCount ? ` + ${repoCount} 笔逆回购` : '')
+            + `，待补 ${pending.length} 笔`;
         // Sort by ts — rows synced into the cache after a save sit at the end.
         const show = (dom.onlyEmpty.checked ? pending : allTrades)
             .slice().sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
@@ -585,7 +607,8 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             const data = await fetchJSON('/api/notes/events-range');
             // Only trade rows belong in this table — thoughts/comments live in
             // the three-pane page.
-            allTrades = data.events.filter(e => e.event_type === '买入' || e.event_type === '卖出');
+            allTrades = data.events.filter(e => e.event_type === '买入'
+                || e.event_type === '卖出' || e.event_type === '逆回购');
         } catch (e) {
             dom.body.innerHTML = `<tr><td colspan="15" class="tnb-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
             return;

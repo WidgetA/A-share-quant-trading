@@ -103,21 +103,21 @@
                     <label>数量
                         <input id="tnNewQty" type="number" step="100" min="0" placeholder="股数" />
                     </label>
-                    <label>佣金
+                    <label id="tnNewCommissionLabel">佣金
                         <input id="tnNewCommission" type="number" step="0.01" min="0" placeholder="元" />
                     </label>
-                    <label>过户费
+                    <label id="tnNewTransferFeeLabel">过户费
                         <input id="tnNewTransferFee" type="number" step="0.01" min="0" placeholder="元" />
                     </label>
                 </div>
                 <div id="tnNewSellFields" class="tn-modal-row" hidden>
-                    <label>印花税
+                    <label id="tnNewStampTaxLabel">印花税
                         <input id="tnNewStampTax" type="number" step="0.01" min="0" placeholder="元 (仅卖)" />
                     </label>
-                    <label>股息/股息税
+                    <label id="tnNewDividendLabel">股息/股息税
                         <input id="tnNewDividend" type="number" step="0.01" placeholder="净到手，可负" />
                     </label>
-                    <label class="tn-pnl-label">平仓收益
+                    <label class="tn-pnl-label"><span id="tnNewPnlLabelText">平仓收益</span>
                         <span class="tn-pnl-input-group">
                             <input id="tnNewRealizedPnl" type="number" step="0.01" placeholder="元" />
                             <button id="tnNewCalcPnlBtn" type="button" class="tn-calc-btn" title="按上一次买入按比例分摊成本计算">计算</button>
@@ -244,7 +244,12 @@
 
     function isTradeEvent(ev) {
         return ev.event_type === '\u4e70\u5165' || ev.event_type === '\u5356\u51fa' ||
+            ev.event_type === '\u9006\u56de\u8d2d' ||
             ev.side === 'buy' || ev.side === 'sell';
+    }
+
+    function isRepoEvent(ev) {
+        return ev.event_type === '\u9006\u56de\u8d2d';
     }
 
     function isCommentEvent(ev) {
@@ -252,6 +257,7 @@
     }
 
     function tradeTypeLabel(ev) {
+        if (isRepoEvent(ev)) return '\u9006\u56de\u8d2d';
         if (ev.event_type === '\u4e70\u5165' || ev.side === 'buy') return '\u4e70\u5165';
         if (ev.event_type === '\u5356\u51fa' || ev.side === 'sell') return '\u5356\u51fa';
         return ev.event_type || '\u4ea4\u6613';
@@ -266,8 +272,10 @@
     }
 
     // 费用/股息/平仓收益小一行，只在至少有一项非空时渲染。
+    // 逆回购只显示收益（realized_pnl），费项对它不适用。
     function feeRowHtml(ev) {
         const isSell = ev.side === 'sell' || ev.event_type === '卖出';
+        const isRepo = isRepoEvent(ev);
         const parts = [];
         const fmt = (v) => Number(v).toFixed(2);
         if (ev.commission !== null && ev.commission !== undefined) {
@@ -285,9 +293,10 @@
             }
         }
         let pnlHtml = '';
-        if (isSell && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
+        if ((isSell || isRepo) && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
             const cls = ev.realized_pnl >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
-            pnlHtml = `<span class="${cls}">平仓收益 ${fmt(ev.realized_pnl)}</span>`;
+            const pnlLabel = isRepo ? '收益' : '平仓收益';
+            pnlHtml = `<span class="${cls}">${pnlLabel} ${fmt(ev.realized_pnl)}</span>`;
         }
         if (!parts.length && !pnlHtml) return '';
         const sep = parts.length && pnlHtml ? ' · ' : '';
@@ -444,12 +453,13 @@
             }
             dom.events.innerHTML = trades.map(ev => {
                 const sideCls = ev.event_type === '买入' ? 'buy'
-                    : (ev.event_type === '卖出' ? 'sell' : 'other');
+                    : (ev.event_type === '卖出' ? 'sell'
+                        : (ev.event_type === '逆回购' ? 'repo' : 'other'));
                 const titleText = ev.title || ev.event_type;
                 const dot = ev.has_content ? '●' : '○';
                 const isSell = ev.side === 'sell' || ev.event_type === '卖出';
                 let pnlHtml = '';
-                if (isSell && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
+                if ((isSell || isRepoEvent(ev)) && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
                     const pnlCls = ev.realized_pnl >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
                     const sign = ev.realized_pnl >= 0 ? '+' : '';
                     pnlHtml = `<span class="tn-event-pnl ${pnlCls}">${sign}${Number(ev.realized_pnl).toFixed(2)}</span>`;
@@ -526,7 +536,8 @@
         const appendTrade = (trade) => {
             const card = document.createElement('div');
             const isSell = trade.side === 'sell' || trade.event_type === '卖出';
-            card.className = `tn-doc-trade-card tn-doc-node ${isSell ? 'sell' : 'buy'}`;
+            const cardCls = isRepoEvent(trade) ? 'repo' : (isSell ? 'sell' : 'buy');
+            card.className = `tn-doc-trade-card tn-doc-node ${cardCls}`;
             card.contentEditable = 'false';
             card.dataset.kind = 'trade';
             card.dataset.eventId = trade.event_id;
@@ -813,9 +824,9 @@
         // dropped by the prefill (broker_<order_id> events have a sub-minute
         // submit_time), producing a soft-deleted shadow at the old ts.
         state.editTsOriginal = isoToLocalDatetimeValue(ev.ts);
-        // Type options: always 买入/卖出, plus current type if it's something else
-        // (preserves rare cases like 评论 if someone opens its editor directly).
-        const typeChoices = ['买入', '卖出'];
+        // Type options: always 买入/卖出/逆回购, plus current type if it's something
+        // else (preserves rare cases like 评论 if someone opens its editor directly).
+        const typeChoices = ['买入', '卖出', '逆回购'];
         if (ev.event_type && !typeChoices.includes(ev.event_type)) {
             typeChoices.unshift(ev.event_type);
         }
@@ -825,8 +836,10 @@
         }).join('');
         const priceVal = ev.price !== null && ev.price !== undefined ? ev.price : '';
         const qtyVal = ev.qty !== null && ev.qty !== undefined ? ev.qty : '';
-        const isTrade = ev.event_type === '买入' || ev.event_type === '卖出';
+        const isTrade = ev.event_type === '买入' || ev.event_type === '卖出'
+            || ev.event_type === '逆回购';
         const isSell = ev.event_type === '卖出';
+        const isRepo = ev.event_type === '逆回购';
         const numOrBlank = (v) => (v !== null && v !== undefined ? v : '');
         dom.content.innerHTML = `
             <div class="tn-edit-form">
@@ -844,21 +857,21 @@
                         <label>数量
                             <input type="number" id="tnEditQty" step="100" min="0" placeholder="股数" value="${qtyVal}" />
                         </label>
-                        <label>佣金
+                        <label id="tnEditCommissionLabel">佣金
                             <input type="number" id="tnEditCommission" step="0.01" min="0" placeholder="元" value="${numOrBlank(ev.commission)}" />
                         </label>
-                        <label>过户费
+                        <label id="tnEditTransferFeeLabel">过户费
                             <input type="number" id="tnEditTransferFee" step="0.01" min="0" placeholder="元" value="${numOrBlank(ev.transfer_fee)}" />
                         </label>
                     </div>
-                    <div id="tnEditSellFields" class="tn-modal-row"${isSell ? '' : ' hidden'}>
-                        <label>印花税
+                    <div id="tnEditSellFields" class="tn-modal-row"${(isSell || isRepo) ? '' : ' hidden'}>
+                        <label id="tnEditStampTaxLabel">印花税
                             <input type="number" id="tnEditStampTax" step="0.01" min="0" placeholder="元 (仅卖)" value="${numOrBlank(ev.stamp_tax)}" />
                         </label>
-                        <label>股息/股息税
+                        <label id="tnEditDividendLabel">股息/股息税
                             <input type="number" id="tnEditDividend" step="0.01" placeholder="净到手，可负" value="${numOrBlank(ev.dividend)}" />
                         </label>
-                        <label class="tn-pnl-label">平仓收益
+                        <label class="tn-pnl-label"><span id="tnEditPnlLabelText">平仓收益</span>
                             <span class="tn-pnl-input-group">
                                 <input type="number" id="tnEditRealizedPnl" step="0.01" placeholder="元" value="${numOrBlank(ev.realized_pnl)}" />
                                 <button id="tnEditCalcPnlBtn" type="button" class="tn-calc-btn" title="按上一次买入按比例分摊成本计算">计算</button>
@@ -881,12 +894,21 @@
                 </div>
             </div>
         `;
-        document.getElementById('tnEditType').addEventListener('change', e => {
-            const t = e.target.value;
-            const trade = (t === '买入' || t === '卖出');
+        // 逆回购：只留 价格(利率)/数量/收益，费项和股息隐藏，计算按钮不适用。
+        function applyEditTypeVis(t) {
+            const trade = (t === '买入' || t === '卖出' || t === '逆回购');
+            const repo = (t === '逆回购');
             document.getElementById('tnEditTradeFields').hidden = !trade;
-            document.getElementById('tnEditSellFields').hidden = (t !== '卖出');
-        });
+            document.getElementById('tnEditSellFields').hidden = !(t === '卖出' || repo);
+            document.getElementById('tnEditCommissionLabel').hidden = repo;
+            document.getElementById('tnEditTransferFeeLabel').hidden = repo;
+            document.getElementById('tnEditStampTaxLabel').hidden = repo;
+            document.getElementById('tnEditDividendLabel').hidden = repo;
+            document.getElementById('tnEditCalcPnlBtn').hidden = repo;
+            document.getElementById('tnEditPnlLabelText').textContent = repo ? '收益' : '平仓收益';
+        }
+        applyEditTypeVis(ev.event_type);
+        document.getElementById('tnEditType').addEventListener('change', e => applyEditTypeVis(e.target.value));
         document.getElementById('tnEditCancel').addEventListener('click', () => selectEvent(state.currentEventId));
         document.getElementById('tnEditSave').addEventListener('click', saveEdit);
         document.getElementById('tnEditCalcPnlBtn').addEventListener('click', () => calcPnlInEditMode(ev));
@@ -909,8 +931,11 @@
         // the minute-precision round-trip drops the original sub-minute part
         // and the backend treats it as a ts change.
         if (tsMs !== null && tsRaw !== state.editTsOriginal) body.ts_ms = tsMs;
-        if (eventType === '买入' || eventType === '卖出') {
-            body.side = eventType === '买入' ? 'buy' : 'sell';
+        if (eventType === '买入' || eventType === '卖出' || eventType === '逆回购') {
+            // 逆回购不发 side —— 后端在类型改为 逆回购 时自动把 side 清成 NULL。
+            if (eventType !== '逆回购') {
+                body.side = eventType === '买入' ? 'buy' : 'sell';
+            }
             const priceEl = document.getElementById('tnEditPrice');
             const qtyEl = document.getElementById('tnEditQty');
             const priceRaw = priceEl ? priceEl.value.trim() : '';
@@ -954,6 +979,13 @@
                     }
                     body[key] = v;
                 }
+            }
+            // 逆回购只登记收益，费项/股息不适用——隐藏 input 里残留的旧值一律清空。
+            if (eventType === '逆回购') {
+                body.commission = null;
+                body.transfer_fee = null;
+                body.stamp_tax = null;
+                body.dividend = null;
             }
         }
         try {
@@ -1131,10 +1163,17 @@
 
     function updateNewTradeFieldsVisibility() {
         const t = dom.newType.value;
-        const isTrade = (t === '买入' || t === '卖出');
+        const isTrade = (t === '买入' || t === '卖出' || t === '逆回购');
+        const repo = (t === '逆回购');
         dom.newTradeFields.hidden = !isTrade;
-        // 印花税/股息/平仓收益 仅卖出显示
-        dom.newSellFields.hidden = (t !== '卖出');
+        // 印花税/股息/平仓收益 仅卖出显示；逆回购只显示 收益(计算按钮不适用)。
+        dom.newSellFields.hidden = !(t === '卖出' || repo);
+        document.getElementById('tnNewCommissionLabel').hidden = repo;
+        document.getElementById('tnNewTransferFeeLabel').hidden = repo;
+        document.getElementById('tnNewStampTaxLabel').hidden = repo;
+        document.getElementById('tnNewDividendLabel').hidden = repo;
+        document.getElementById('tnNewCalcPnlBtn').hidden = repo;
+        document.getElementById('tnNewPnlLabelText').textContent = repo ? '收益' : '平仓收益';
     }
 
     async function openEditStockCodeFlow() {
@@ -1200,8 +1239,11 @@
         }
         const body = { event_type, title, content, content_external, author: 'user', source: 'user' };
         if (ts_ms !== null) body.ts_ms = ts_ms;
-        if (event_type === '买入' || event_type === '卖出') {
-            body.side = event_type === '买入' ? 'buy' : 'sell';
+        if (event_type === '买入' || event_type === '卖出' || event_type === '逆回购') {
+            // 逆回购不发 side——它不算买卖，后端建行时 side 留 NULL。
+            if (event_type !== '逆回购') {
+                body.side = event_type === '买入' ? 'buy' : 'sell';
+            }
             const priceRaw = dom.newPrice.value.trim();
             const qtyRaw = dom.newQty.value.trim();
             if (priceRaw) {
@@ -1214,12 +1256,16 @@
                 if (Number.isNaN(q) || q < 0) { alert('数量格式错误'); return; }
                 body.qty = q;
             }
-            // 5 个数值费用/股息/收益字段：留空不发，非空校验后发。买入只用前 2 个。
+            // 5 个数值费用/股息/收益字段：留空不发，非空校验后发。买入只用前 2 个；
+            // 逆回购一个费项都不发，只发收益。
             // [key, el, label, allowNeg]. 股息/股息税 可负（派息−已扣税）。
-            const feeMap = [
-                ['commission', dom.newCommission, '佣金', false],
-                ['transfer_fee', dom.newTransferFee, '过户费', false],
-            ];
+            const feeMap = [];
+            if (event_type !== '逆回购') {
+                feeMap.push(
+                    ['commission', dom.newCommission, '佣金', false],
+                    ['transfer_fee', dom.newTransferFee, '过户费', false],
+                );
+            }
             if (event_type === '卖出') {
                 feeMap.push(
                     ['stamp_tax', dom.newStampTax, '印花税', false],
@@ -1235,12 +1281,12 @@
                 }
                 body[key] = v;
             }
-            // realized_pnl 可正可负，单独处理
-            if (event_type === '卖出') {
+            // realized_pnl 可正可负，单独处理（卖出=平仓收益，逆回购=收益）
+            if (event_type === '卖出' || event_type === '逆回购') {
                 const pnlRaw = dom.newRealizedPnl.value.trim();
                 if (pnlRaw !== '') {
                     const pnl = Number(pnlRaw);
-                    if (Number.isNaN(pnl)) { alert('平仓收益格式错误'); return; }
+                    if (Number.isNaN(pnl)) { alert('收益格式错误'); return; }
                     body.realized_pnl = pnl;
                 }
             }

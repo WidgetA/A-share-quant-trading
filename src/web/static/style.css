@@ -2877,6 +2877,12 @@ footer {
     color: #555;
 }
 
+/* 逆回购 — 蓝：不是买卖，是闲钱出借收利息 */
+.tn-tag-repo {
+    background: #e3effc;
+    color: #1d5a9e;
+}
+
 .tn-event-line1-right {
     display: inline-flex;
     align-items: center;
@@ -3059,6 +3065,12 @@ footer {
     border-color: #ead7d4;
     background: #fff7f5;
     color: #74352c;
+}
+
+.tn-doc-trade-card.repo {
+    border-color: #d3e2f2;
+    background: #f4f9ff;
+    color: #234f7e;
 }
 
 .tn-doc-trade-card:hover,
