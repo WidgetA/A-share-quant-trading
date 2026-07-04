@@ -1,0 +1,541 @@
+{% extends "base.html" %}
+
+{% block title %}交易笔记 · 补作业{% endblock %}
+
+{% block head %}
+<style>
+/* Self-contained styles: this page is a spreadsheet-like table, unrelated to
+   the three-pane .trade-notes-* layout in style.css. */
+.tnb-root { padding: 12px 16px; }
+.tnb-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.tnb-header h2 { margin: 0; font-size: 1.2em; }
+.tnb-header .hint { color: #888; font-size: 0.85em; }
+.tnb-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.tnb-toolbar input[type="date"] { padding: 3px 6px; }
+.tnb-toolbar button, .tnb-back-link {
+    padding: 4px 12px; border: 1px solid #ccc; border-radius: 4px;
+    background: #f7f7f7; cursor: pointer; font-size: 0.9em;
+    text-decoration: none; color: inherit;
+}
+.tnb-toolbar button:hover, .tnb-back-link:hover { background: #ececec; }
+.tnb-toolbar button.primary { background: #2b6cb0; border-color: #2b6cb0; color: #fff; }
+.tnb-toolbar button.primary:hover { background: #245a94; }
+.tnb-summary { color: #666; font-size: 0.85em; margin-left: auto; }
+.tnb-table-wrap { overflow-x: auto; }
+table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+.tnb-table th, .tnb-table td { border: 1px solid #ddd; padding: 2px 4px; white-space: nowrap; }
+.tnb-table th { background: #f0f0f0; position: sticky; top: 0; }
+.tnb-table input, .tnb-table select {
+    border: 1px solid transparent; background: transparent; width: 100%;
+    font: inherit; padding: 2px 3px; box-sizing: border-box;
+}
+.tnb-table input:focus, .tnb-table select:focus { border-color: #2b6cb0; background: #fff; outline: none; }
+.tnb-table input:disabled { background: #f5f5f5; color: #bbb; }
+.tnb-table td.tnb-name { color: #555; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.tnb-table td.tnb-num input { text-align: right; }
+.tnb-col-date input { min-width: 110px; }
+.tnb-col-time input { min-width: 60px; }
+.tnb-col-code input { min-width: 62px; }
+.tnb-col-remark input { min-width: 160px; }
+.tnb-row-dirty { background: #fffbe6; }
+.tnb-row-sell { border-left: 3px solid #d69e2e; }
+.tnb-row-buy { border-left: 3px solid #38a169; }
+.tnb-status { font-size: 0.85em; }
+.tnb-status.saved { color: #38a169; }
+.tnb-status.dirty { color: #d69e2e; }
+.tnb-status.error { color: #e53e3e; }
+.tnb-row-actions button {
+    border: 1px solid #ccc; border-radius: 3px; background: #fafafa;
+    cursor: pointer; padding: 1px 6px; font-size: 0.85em;
+}
+.tnb-row-actions button:hover { background: #eee; }
+.tnb-row-actions .tnb-danger { color: #e53e3e; }
+.tnb-pnl-cell { display: flex; gap: 2px; align-items: center; }
+.tnb-empty { color: #999; padding: 24px; text-align: center; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="tnb-root">
+    <div class="tnb-header">
+        <h2>补作业 · 批量补录历史交易</h2>
+        <span class="hint">对着券商 App 的历史成交记录，一条一条把买卖流水和佣金/过户费/印花税补进来。时间按北京时间。</span>
+        <a class="tnb-back-link" href="/trade-notes">← 返回交易笔记</a>
+    </div>
+
+    <div class="tnb-toolbar">
+        <label>从 <input id="tnbStart" type="date" /></label>
+        <label>到 <input id="tnbEnd" type="date" /></label>
+        <button id="tnbLoad">加载区间已有记录</button>
+        <label title="费用没填全的才是作业;取消勾选可看区间内全部买卖"><input id="tnbOnlyEmpty" type="checkbox" checked /> 只看待补的</label>
+        <button id="tnbAddRow">＋ 加一行</button>
+        <button id="tnbSaveAll" class="primary">全部保存</button>
+        <span class="tnb-summary" id="tnbSummary"></span>
+    </div>
+
+    <div class="tnb-table-wrap">
+        <table class="tnb-table">
+            <thead>
+                <tr>
+                    <th class="tnb-col-date">日期</th>
+                    <th class="tnb-col-time">时间</th>
+                    <th class="tnb-col-code">代码</th>
+                    <th>名称</th>
+                    <th>类型</th>
+                    <th>价格</th>
+                    <th>数量(股)</th>
+                    <th>佣金</th>
+                    <th>过户费</th>
+                    <th>印花税(卖)</th>
+                    <th>股息(卖,可负)</th>
+                    <th>平仓收益(卖)</th>
+                    <th class="tnb-col-remark">备注(对内)</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="tnbBody">
+                <tr><td colspan="15" class="tnb-empty">选好日期区间点「加载」，或直接「＋ 加一行」开始补。</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    'use strict';
+
+    // Each row: { eventId: string|null, source, title, contentExternal, author,
+    //             dirty: bool, tr: <tr> }. eventId null = new unsaved row.
+    // Field values live in the row's inputs — the DOM is the single source of
+    // truth; we read inputs at save time.
+    const rows = [];
+    const AUTO_TITLE_RE = /^(买入|卖出) (@|市价)/;
+
+    const dom = {
+        start: document.getElementById('tnbStart'),
+        end: document.getElementById('tnbEnd'),
+        load: document.getElementById('tnbLoad'),
+        onlyEmpty: document.getElementById('tnbOnlyEmpty'),
+        addRow: document.getElementById('tnbAddRow'),
+        saveAll: document.getElementById('tnbSaveAll'),
+        summary: document.getElementById('tnbSummary'),
+        body: document.getElementById('tnbBody'),
+    };
+
+    async function fetchJSON(url, opts) {
+        const resp = await fetch(url, Object.assign({ cache: 'no-store' }, opts));
+        if (!resp.ok) {
+            let detail = `HTTP ${resp.status}`;
+            try { detail = (await resp.json()).detail || detail; } catch (e) { /* keep */ }
+            throw new Error(detail);
+        }
+        return resp.json();
+    }
+
+    function pad(n) { return String(n).padStart(2, '0'); }
+
+    function defaultRange() {
+        // Default: first day of the previous month → today (the whole point
+        // of this page is catching up on last month's missing entries).
+        const now = new Date();
+        const prevFirst = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        dom.start.value = `${prevFirst.getFullYear()}-${pad(prevFirst.getMonth() + 1)}-${pad(prevFirst.getDate())}`;
+        dom.end.value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    }
+
+    function q(row, sel) { return row.tr.querySelector(sel); }
+    function val(row, sel) { return q(row, sel).value.trim(); }
+
+    function setStatus(row, cls, text) {
+        const el = q(row, '.tnb-status');
+        el.className = 'tnb-status ' + cls;
+        el.textContent = text;
+    }
+
+    function markDirty(row) {
+        row.dirty = true;
+        row.tr.classList.add('tnb-row-dirty');
+        setStatus(row, 'dirty', row.eventId ? '有改动' : '未保存');
+        updateSummary();
+    }
+
+    function markSaved(row) {
+        row.dirty = false;
+        row.tr.classList.remove('tnb-row-dirty');
+        setStatus(row, 'saved', '已保存 ✓');
+        updateSummary();
+    }
+
+    let rangeInfo = ''; // set by loadRange, e.g. '区间共 12 笔买卖，其中 9 笔费用待补'
+
+    function updateSummary() {
+        const unsaved = rows.filter(r => r.dirty).length;
+        dom.summary.textContent = (rangeInfo ? rangeInfo + ' · ' : '')
+            + `表格 ${rows.length} 行` + (unsaved ? `，${unsaved} 行待保存` : '');
+    }
+
+    // 作业 = 费用没填全的买卖行。佣金/过户费每笔都有；卖出还应有印花税和平仓
+    // 收益。股息不是每笔都有，不算缺。
+    function needsBackfill(e) {
+        const missing = v => v === null || v === undefined;
+        if (missing(e.commission) || missing(e.transfer_fee)) return true;
+        if (e.event_type === '卖出' && (missing(e.stamp_tax) || missing(e.realized_pnl))) return true;
+        return false;
+    }
+
+    function updateSellFieldsEnabled(row) {
+        const isSell = val(row, '.f-type') === '卖出';
+        for (const sel of ['.f-stamp', '.f-dividend', '.f-pnl']) {
+            q(row, sel).disabled = !isSell;
+        }
+        q(row, '.f-calc').disabled = !isSell;
+        row.tr.classList.toggle('tnb-row-sell', isSell);
+        row.tr.classList.toggle('tnb-row-buy', !isSell);
+    }
+
+    async function lookupName(row) {
+        const code = val(row, '.f-code');
+        const nameCell = q(row, '.tnb-name');
+        if (!/^\d{6}$/.test(code)) { nameCell.textContent = ''; return; }
+        try {
+            const data = await fetchJSON(`/api/notes/stock-name/${code}`);
+            nameCell.textContent = data.name || '(名称未知)';
+        } catch (e) {
+            nameCell.textContent = '';
+        }
+    }
+
+    // ---- 平仓收益：同表格内找同代码上一次买入，口径与三栏页一致 ----
+    function rowTsMs(row) {
+        const d = val(row, '.f-date');
+        const t = val(row, '.f-time') || '00:00';
+        if (!d) return NaN;
+        return Date.parse(`${d}T${t}:00+08:00`);
+    }
+
+    async function calcPnlForRow(row) {
+        const sellTs = rowTsMs(row);
+        const code = val(row, '.f-code');
+        const price = Number(val(row, '.f-price'));
+        const qty = Number(val(row, '.f-qty'));
+        if (!code || Number.isNaN(sellTs)) { alert('请先填好本行的日期和代码'); return; }
+        if (!(price > 0) || !(qty > 0)) { alert('请先填写本次卖出的价格和数量'); return; }
+
+        // 先在表格里找同代码更早的买入行（未保存的也算）……
+        let buy = null, buyTs = -Infinity;
+        for (const r of rows) {
+            if (r === row) continue;
+            if (val(r, '.f-code') !== code) continue;
+            if (val(r, '.f-type') !== '买入') continue;
+            const t = rowTsMs(r);
+            if (Number.isNaN(t) || t >= sellTs) continue;
+            if (t > buyTs) {
+                buyTs = t;
+                buy = {
+                    price: Number(val(r, '.f-price')),
+                    qty: Number(val(r, '.f-qty')),
+                    commission: Number(val(r, '.f-comm')) || 0,
+                    transfer_fee: Number(val(r, '.f-transfer')) || 0,
+                };
+            }
+        }
+        // ……表格里没有（被「只看待补的」滤掉，或买入在区间之外）就查数据库。
+        if (!buy) {
+            try {
+                const data = await fetchJSON(`/api/notes/${code}/events`);
+                let best = null, bestTs = -Infinity;
+                for (const ev of data.events) {
+                    if (row.eventId && ev.event_id === row.eventId) continue;
+                    const isBuy = ev.side === 'buy' || ev.event_type === '买入';
+                    if (!isBuy) continue;
+                    const t = new Date(ev.ts).getTime();
+                    if (Number.isNaN(t) || t >= sellTs) continue;
+                    if (t > bestTs) { bestTs = t; best = ev; }
+                }
+                if (best) {
+                    buy = {
+                        price: Number(best.price),
+                        qty: Number(best.qty),
+                        commission: Number(best.commission) || 0,
+                        transfer_fee: Number(best.transfer_fee) || 0,
+                    };
+                }
+            } catch (e) { /* fall through to the not-found alert */ }
+        }
+        if (!buy) { alert('表格和数据库里都没找到该代码更早的买入——先把对应买入补进来再算'); return; }
+        if (!(buy.price > 0) || !(buy.qty > 0)) { alert('对应买入缺价格或数量，无法计算'); return; }
+        if (qty > buy.qty) { alert(`本次卖出 ${qty} 股，超过上一次买入 ${buy.qty} 股，请检查`); return; }
+        const ratio = qty / buy.qty;
+        const sellFees = (Number(val(row, '.f-comm')) || 0)
+            + (Number(val(row, '.f-transfer')) || 0)
+            + (Number(val(row, '.f-stamp')) || 0);
+        const buyFees = ratio * (buy.commission + buy.transfer_fee);
+        const dividend = Number(val(row, '.f-dividend')) || 0;
+        const pnl = price * qty - sellFees - (buy.price * qty + buyFees) + dividend;
+        q(row, '.f-pnl').value = pnl.toFixed(2);
+        markDirty(row);
+    }
+
+    // ---- row construction ----
+    function addRow(data) {
+        // data: null (blank new row) or an event object from /events-range.
+        if (rows.length === 0) dom.body.innerHTML = '';
+        const row = {
+            eventId: data ? data.event_id : null,
+            source: data ? data.source : 'user',
+            title: data ? (data.title || '') : '',
+            contentExternal: data ? (data.content_external || '') : '',
+            author: data ? (data.author || 'user') : 'user',
+            dirty: !data,
+            tr: document.createElement('tr'),
+        };
+
+        let date = '', time = '09:31';
+        if (data) {
+            // ts arrives as Beijing-local ISO: '2026-06-03T09:41:37+08:00'.
+            // The time input is minute-precision; remember the original ts so
+            // an untouched date/time keeps the exact stored timestamp (seconds
+            // included) instead of shifting it on every save.
+            date = data.ts.slice(0, 10);
+            time = data.ts.slice(11, 16);
+            row.origTsMs = Date.parse(data.ts);
+            row.origDate = date;
+            row.origTime = time;
+        } else if (rows.length > 0) {
+            date = val(rows[rows.length - 1], '.f-date'); // carry last row's date
+        } else {
+            date = dom.start.value;
+        }
+
+        const numVal = v => (v === null || v === undefined) ? '' : String(v);
+        row.tr.innerHTML = `
+            <td class="tnb-col-date"><input class="f-date" type="date" value="${date}"></td>
+            <td class="tnb-col-time"><input class="f-time" type="time" value="${time}"></td>
+            <td class="tnb-col-code"><input class="f-code" maxlength="6" placeholder="6位" value="${data ? data.code : ''}"></td>
+            <td class="tnb-name">${data && data.name ? escapeHtml(data.name) : ''}</td>
+            <td><select class="f-type">
+                <option value="买入">买入</option>
+                <option value="卖出">卖出</option>
+            </select></td>
+            <td class="tnb-num"><input class="f-price" type="number" step="0.001" min="0" placeholder="留空=市价" value="${numVal(data && data.price)}"></td>
+            <td class="tnb-num"><input class="f-qty" type="number" step="100" min="0" value="${numVal(data && data.qty)}"></td>
+            <td class="tnb-num"><input class="f-comm" type="number" step="0.01" min="0" value="${numVal(data && data.commission)}"></td>
+            <td class="tnb-num"><input class="f-transfer" type="number" step="0.01" min="0" value="${numVal(data && data.transfer_fee)}"></td>
+            <td class="tnb-num"><input class="f-stamp" type="number" step="0.01" min="0" value="${numVal(data && data.stamp_tax)}"></td>
+            <td class="tnb-num"><input class="f-dividend" type="number" step="0.01" value="${numVal(data && data.dividend)}"></td>
+            <td class="tnb-num"><span class="tnb-pnl-cell">
+                <input class="f-pnl" type="number" step="0.01" value="${numVal(data && data.realized_pnl)}">
+                <button class="f-calc" type="button" title="按同表格内该代码上一次买入分摊成本计算">算</button>
+            </span></td>
+            <td class="tnb-col-remark"><input class="f-remark" value="${data ? escapeAttr(data.content || '') : ''}"></td>
+            <td><span class="tnb-status"></span></td>
+            <td class="tnb-row-actions">
+                <button class="f-save" type="button">保存</button>
+                <button class="f-del tnb-danger" type="button">删</button>
+            </td>`;
+        q(row, '.f-type').value = data ? (data.event_type === '卖出' ? '卖出' : '买入') : '买入';
+
+        row.tr.addEventListener('input', () => markDirty(row));
+        q(row, '.f-type').addEventListener('change', () => updateSellFieldsEnabled(row));
+        q(row, '.f-code').addEventListener('blur', () => lookupName(row));
+        q(row, '.f-calc').addEventListener('click', () => calcPnlForRow(row));
+        q(row, '.f-save').addEventListener('click', () => saveRow(row));
+        q(row, '.f-del').addEventListener('click', () => deleteRow(row));
+
+        rows.push(row);
+        dom.body.appendChild(row.tr);
+        updateSellFieldsEnabled(row);
+        if (data) { markSaved(row); } else { setStatus(row, 'dirty', '未保存'); }
+        updateSummary();
+        return row;
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function escapeAttr(s) {
+        return escapeHtml(s).replace(/"/g, '&quot;');
+    }
+
+    // ---- save / delete ----
+    function readRowPayload(row) {
+        // Returns {code, body, isNew} or throws Error with a user-facing reason.
+        const code = val(row, '.f-code');
+        if (!/^\d{6}$/.test(code)) throw new Error('代码需为 6 位数字');
+        const date = val(row, '.f-date');
+        if (!date) throw new Error('日期不能为空');
+        const time = val(row, '.f-time') || '15:00';
+        let ts_ms;
+        if (row.origTsMs !== undefined && date === row.origDate && time === row.origTime) {
+            ts_ms = row.origTsMs; // untouched → keep exact stored ts (with seconds)
+        } else {
+            ts_ms = Date.parse(`${date}T${time}:00+08:00`);
+        }
+        if (Number.isNaN(ts_ms)) throw new Error('日期/时间格式错误');
+        const event_type = val(row, '.f-type');
+        const isSell = event_type === '卖出';
+
+        const numField = (sel, label, allowNeg) => {
+            const raw = val(row, sel);
+            if (raw === '') return null;
+            const v = Number(raw);
+            if (Number.isNaN(v) || (!allowNeg && v < 0)) throw new Error(`${label}格式错误`);
+            return v;
+        };
+        const price = numField('.f-price', '价格', false);
+        const qtyRaw = val(row, '.f-qty');
+        let qty = null;
+        if (qtyRaw !== '') {
+            qty = parseInt(qtyRaw, 10);
+            if (Number.isNaN(qty) || qty < 0) throw new Error('数量格式错误');
+        }
+        const body = {
+            event_type: event_type,
+            ts_ms: ts_ms,
+            price: price,
+            qty: qty,
+            commission: numField('.f-comm', '佣金', false),
+            transfer_fee: numField('.f-transfer', '过户费', false),
+            stamp_tax: isSell ? numField('.f-stamp', '印花税', false) : null,
+            dividend: isSell ? numField('.f-dividend', '股息', true) : null,
+            realized_pnl: isSell ? numField('.f-pnl', '平仓收益', true) : null,
+            content: val(row, '.f-remark'),
+        };
+        return { code, body, isNew: row.eventId === null };
+    }
+
+    async function saveRow(row) {
+        if (!row.dirty && row.eventId) return; // nothing to do
+        let payload;
+        try {
+            payload = readRowPayload(row);
+        } catch (e) {
+            setStatus(row, 'error', e.message);
+            return;
+        }
+        const { code, body, isNew } = payload;
+        try {
+            if (isNew) {
+                body.side = body.event_type === '买入' ? 'buy' : 'sell';
+                body.title = '';        // server auto-generates '买入 @x x y'
+                body.content_external = '';
+                body.author = 'user';
+                body.source = 'user';
+                for (const k of Object.keys(body)) {
+                    if (body[k] === null) delete body[k];
+                }
+                const data = await fetchJSON(`/api/notes/${code}/events`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                row.eventId = data.event_id;
+            } else {
+                // PATCH: the row's cells are the source of truth — send every
+                // numeric field explicitly (null clears to NULL in DB).
+                // Regenerate the title only if it was the auto-generated kind;
+                // keep hand-written titles untouched.
+                if (!row.title || AUTO_TITLE_RE.test(row.title)) {
+                    const t = body.event_type;
+                    body.title = (body.price !== null && body.qty !== null)
+                        ? `${t} @${body.price.toFixed(2)} x ${body.qty}`
+                        : (body.qty !== null ? `${t} 市价 x ${body.qty}` : t);
+                    row.title = body.title;
+                }
+                await fetchJSON(`/api/notes/${code}/events/${encodeURIComponent(row.eventId)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+            }
+            markSaved(row);
+            lookupName(row);
+        } catch (e) {
+            setStatus(row, 'error', '失败: ' + e.message);
+        }
+    }
+
+    async function deleteRow(row) {
+        if (row.eventId) {
+            if (!confirm('确认删除这条已保存的记录？（软删除，可数据库恢复）')) return;
+            try {
+                const code = val(row, '.f-code');
+                await fetchJSON(`/api/notes/${code}/events/${encodeURIComponent(row.eventId)}`, {
+                    method: 'DELETE',
+                });
+            } catch (e) {
+                setStatus(row, 'error', '删除失败: ' + e.message);
+                return;
+            }
+        }
+        row.tr.remove();
+        rows.splice(rows.indexOf(row), 1);
+        if (rows.length === 0) {
+            dom.body.innerHTML = '<tr><td colspan="15" class="tnb-empty">没有记录了。「＋ 加一行」继续补。</td></tr>';
+        }
+        updateSummary();
+    }
+
+    async function saveAll() {
+        // Sequential on purpose: single-row INSERTs, no batch (GreptimeDB
+        // batch-insert silently drops rows — see MEMORY).
+        for (const row of rows.slice()) {
+            if (row.dirty) await saveRow(row);
+        }
+        const failed = rows.filter(r => r.dirty).length;
+        if (failed) {
+            alert(`还有 ${failed} 行没保存成功，看每行状态列的原因`);
+        }
+    }
+
+    // ---- load existing events in range ----
+    async function loadRange() {
+        const start = dom.start.value, end = dom.end.value;
+        if (!start || !end) { alert('请先选好日期区间'); return; }
+        const unsaved = rows.filter(r => r.dirty).length;
+        if (unsaved && !confirm(`表格里有 ${unsaved} 行未保存，重新加载会丢掉它们，继续？`)) return;
+        dom.body.innerHTML = '<tr><td colspan="15" class="tnb-empty">加载中…</td></tr>';
+        rows.length = 0;
+        try {
+            const data = await fetchJSON(`/api/notes/events-range?start=${start}&end=${end}`);
+            // Only trade rows belong in this table — thoughts/comments live in
+            // the three-pane page.
+            const trades = data.events.filter(e => e.event_type === '买入' || e.event_type === '卖出');
+            const pending = trades.filter(needsBackfill);
+            rangeInfo = `区间共 ${trades.length} 笔买卖，待补 ${pending.length} 笔`;
+            const show = dom.onlyEmpty.checked ? pending : trades;
+            if (show.length === 0) {
+                dom.body.innerHTML = trades.length === 0
+                    ? '<tr><td colspan="15" class="tnb-empty">区间内没有已记录的买卖。「＋ 加一行」开始补。</td></tr>'
+                    : '<tr><td colspan="15" class="tnb-empty">🎉 区间内的买卖费用都填全了。漏记的交易用「＋ 加一行」补。</td></tr>';
+                updateSummary();
+                return;
+            }
+            dom.body.innerHTML = '';
+            for (const ev of show) addRow(ev);   // already ts ASC from server
+        } catch (e) {
+            dom.body.innerHTML = `<tr><td colspan="15" class="tnb-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+        }
+        updateSummary();
+    }
+
+    dom.load.addEventListener('click', loadRange);
+    dom.onlyEmpty.addEventListener('change', () => {
+        if (rangeInfo) loadRange(); // re-filter only after a first load
+    });
+    dom.addRow.addEventListener('click', () => {
+        const row = addRow(null);
+        q(row, '.f-code').focus();
+    });
+    dom.saveAll.addEventListener('click', saveAll);
+    window.addEventListener('beforeunload', (e) => {
+        if (rows.some(r => r.dirty)) { e.preventDefault(); e.returnValue = ''; }
+    });
+
+    defaultRange();
+})();
+</script>
+{% endblock %}

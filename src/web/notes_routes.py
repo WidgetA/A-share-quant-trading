@@ -3,6 +3,9 @@
 #
 # Three-pane master-detail UI backed by GreptimeDB `trade_notes` + `note_cards`:
 #   GET  /trade-notes                              → HTML page (vanilla JS)
+#   GET  /trade-notes/backfill                     → 补作业 page: date-ordered bulk backfill table
+#   GET  /api/notes/events-range                   → all events in a Beijing date range (JSON)
+#   GET  /api/notes/stock-name/{code}              → code → company name lookup
 #   GET  /api/notes/stocks                         → left pane (stocks)
 #   PATCH /api/notes/stocks/{code}                 → rename a stock's code
 #   GET  /api/notes/{code}/events                  → middle pane (events list)
@@ -113,6 +116,76 @@ def create_notes_router() -> APIRouter:
                 "event_types": DEFAULT_EVENT_TYPES,
             },
         )
+
+    @router.get("/trade-notes/backfill", response_class=HTMLResponse)
+    async def trade_notes_backfill_page(request: Request):
+        """补作业页面 — 按日期排列的表格式批量补录历史买卖/费用."""
+        templates = request.app.state.templates
+        return templates.TemplateResponse(
+            "trade_notes_backfill.html",
+            {
+                "request": request,
+                "event_types": DEFAULT_EVENT_TYPES,
+            },
+        )
+
+    @router.get("/api/notes/events-range")
+    async def events_in_range(request: Request, start: str, end: str) -> dict:
+        """All live events in Beijing date [start, end], JSON (for the backfill table).
+
+        Same query as /api/notes/export but returned as a plain JSON body
+        (no attachment) and including the internal `content` field so rows
+        can be edited in place. Timestamps are Beijing-local ISO strings.
+        """
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+
+        if not _DATE_RE.match(start) or not _DATE_RE.match(end):
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+        if start > end:
+            raise HTTPException(status_code=400, detail="start must be <= end")
+        store = _get_store(request)
+        try:
+            events = await store.list_events_in_range(start, end)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        mapper = LocalConceptMapper()
+        return {
+            "range": {"start": start, "end": end},
+            "count": len(events),
+            "events": [
+                {
+                    "ts": e.ts.astimezone(_BEIJING_TZ).isoformat(),
+                    "code": e.code,
+                    "name": mapper.get_stock_name(e.code),
+                    "event_id": e.event_id,
+                    "event_type": e.event_type,
+                    "source": e.source,
+                    "title": e.title,
+                    "price": e.price,
+                    "qty": e.qty,
+                    "side": e.side,
+                    "content": e.content,
+                    "content_external": e.content_external,
+                    "author": e.author,
+                    "commission": e.commission,
+                    "transfer_fee": e.transfer_fee,
+                    "stamp_tax": e.stamp_tax,
+                    "dividend": e.dividend,
+                    "realized_pnl": e.realized_pnl,
+                }
+                for e in events
+            ],
+        }
+
+    @router.get("/api/notes/stock-name/{code}")
+    async def stock_name(code: str) -> dict:
+        """Code → company name (backfill table confirms the typed code)."""
+        from src.data.sources.local_concept_mapper import LocalConceptMapper
+
+        if not re.match(r"^\d{6}$", code):
+            raise HTTPException(status_code=400, detail="code must be 6 digits")
+        mapper = LocalConceptMapper()
+        return {"code": code, "name": mapper.get_stock_name(code)}
 
     @router.get("/api/notes/stocks")
     async def list_stocks(request: Request, date: str | None = None) -> dict:

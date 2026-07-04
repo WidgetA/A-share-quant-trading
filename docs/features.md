@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.18.4 | 2026-07-04 | - | NOTE-001: 新增「补作业」页面 `/trade-notes/backfill`——按日期排列的表格式批量补录界面,用于事后手工补上历史买卖流水和佣金/过户费/印花税等费用(对着券商 App 成交记录一条条抄)。加载区间内已有 买入/卖出 事件为可编辑行(PATCH 更新,默认「只看待补的」——费用没填全的才铺出来),可批量加新行(POST 创建,ts 按北京时间回填);卖出行支持「算」按钮按上一次买入分摊成本算平仓收益(先找表格行,再查数据库)。配套 2 个新 API:`GET /api/notes/events-range?start&end`(区间内全部事件 JSON,北京时区)、`GET /api/notes/stock-name/{code}`。**为什么不从 QMT 自动拉**:xtquant 成交接口只返回当日成交、无历史查询,且成交回报字段本身不含佣金/手续费——历史费用只能人工补。 |
 | 0.18.3 | 2026-06-08 | - | STR-004/006 修复: 区间回测资金模型适配 T+2 持仓。改 T+2 卖后,旧模型每天仍用「全部资金」买,但 T 日的票要到 T+2 才卖、T+1 根本没钱再买(等于自己骗自己)。改为**资金分 3 份轮动**:持仓 2 个交易日→任一时刻最多 3 笔重叠持仓,故初始资金均分 3 个独立子仓,按交易日序号 %3 轮流用、每日只投 1/3;第 N 天用第 N%3 份买的票在 N+2 卖,该子仓 N+3 天才轮到下一笔,资金不冲突。各子仓自负盈亏复利,`final_capital`=3 份之和;summary 增 `num_sleeves`。 |
 | 0.18.2 | 2026-06-08 | - | STR-004/006: 删除区间回测的「最多 250 个交易日」截断上限——数据全在本地 GreptimeDB,没有外部 API 配额限制,逐日 SSE 流式输出不会空闲超时,任意长度区间(几年)都能跑完。原上限只是怕一次跑太久的人为软保护,并非数据限制。(注:逐日全市场扫描的单日耗时未变,长区间仍是线性时间,后续若要提速另议) |
 | 0.18.1 | 2026-06-08 | - | STR-004/006: 区间回测卖出口径从「T+1 开盘」改为 **T+2 adaptive sell**,完整对齐 STR-005 实盘(买入仍 T 日 9:40):①T+1 早盘开盘比买入价低开 >3% → 当天 T+1 收盘提前止损;②否则持到 T+2 收盘卖。回测此前卖在 T+1 开盘,恰是实盘文档明令「不是」的那套。summary 增 `early_exit_days`(止损触发天数);日历缓冲 +10→+20 天,防区间末尾买入日的 T+2 跨长假被静默跳过;前端逐日日志显示真实卖出原因(T+2 收 / T+1 低开止损)+ 卖出日期。 |
@@ -1184,6 +1185,9 @@ CREATE TABLE note_cards (
 
 ```
 GET    /trade-notes                           # 三栏页面（HTML）
+GET    /trade-notes/backfill                  # 补作业页面（HTML）：按日期排列的表格式批量补录
+GET    /api/notes/events-range?start&end      # 区间内全部 live 事件（JSON，北京时区 ts + 股票名）
+GET    /api/notes/stock-name/{code}           # 代码 → 股票名（补作业表格输码后确认用）
 GET    /api/notes/stocks                      # 左栏：所有有事件的股票，按 last_ts DESC
 PATCH  /api/notes/stocks/{code}               # 改股票代码：所有 live 事件迁到 {new_code}
 GET    /api/notes/{code}/events               # 中栏：股票全部事件，按 ts DESC
@@ -1211,14 +1215,34 @@ DELETE /api/notes/{code}/cards/{card_id}      # 软删除卡片
 混排按时间倒序，单表 + `source` 列查询最简单；结构化字段（price/qty/side）对 manual
 事件设为 NULL 即可，GreptimeDB 原生支持。
 
-**未持久化历史交易**: broker 接口（`get_trades`）只返回今日成交，无历史 API。
-**从部署日开始累积**——过去交易需要的话，前端 "+ 新事件" 手动补一条 `event_type='买入'`
-即可。
+**未持久化历史交易**: broker 接口（`get_trades`）只返回今日成交，无历史 API；且
+xtquant 成交回报字段（成交价/量/金额/订单号）**不含佣金/手续费/印花税**——连当日
+费用都拿不到，历史费用更无从自动补。**从部署日开始累积**——过去交易用
+**补作业页面 `/trade-notes/backfill`** 批量手工补录（见下），单条也可用 "+ 新事件"。
+
+**补作业页面（`/trade-notes/backfill`，2026-07-04）**: 按日期排列的表格式批量补录界面，
+对着券商 App 的历史成交记录一条条抄。行为：
+
+- 选日期区间 → 「加载」把区间内已有 买入/卖出 事件铺成可编辑行（改完 PATCH 保存，
+  日期/时间改动即 ts 迁移；title 若是自动生成格式会随价格/数量同步重生成，自定义
+  title 保留不动）。给已有 broker 自动事件补费用就是在这里改。
+- **默认「只看待补的」**：加载时把费用已填全的行滤掉，只铺作业（待补 = 佣金或过户费
+  为空；卖出行还要求印花税、平仓收益非空；股息不是每笔都有、不算缺）。取消勾选
+  可看区间内全部买卖；汇总栏显示「区间共 N 笔买卖，待补 M 笔」。
+- 「+ 加一行」追加空行（日期沿用上一行），填 日期/时间/代码/类型/价格/数量/佣金/
+  过户费/印花税/股息/平仓收益/备注 → 保存即 POST 创建（`ts_ms` 按北京时间
+  `+08:00` 显式换算，与浏览器时区无关）。代码输完自动查股票名确认没输错。
+- 卖出行有「算」按钮：先在**当前表格的行里**（含未保存行）找同代码上一次买入，
+  找不到（被「只看待补的」滤掉，或买入在区间之外）再查数据库该股全部事件；按
+  `sell_qty/buy_qty` 比例分摊成本算平仓收益——口径与三栏页的「计算」按钮一致。
+- 「全部保存」逐行顺序提交（单行 INSERT，避开 GreptimeDB 批量丢数据坑）；每行有
+  状态列（未保存/已保存/失败原因）。删除：已存行走 DELETE（软删），未存行直接移除。
 
 **Files**:
 - `src/notes/note_store.py` — GreptimeDB CRUD（复用 `app.state.storage` 连接池）
 - `src/web/notes_routes.py` — 7 个 endpoint（HTML + 6 个 API）
 - `src/web/templates/trade_notes.html` — 三栏布局 + vanilla JS
+- `src/web/templates/trade_notes_backfill.html` — 补作业表格页 + vanilla JS（样式内嵌，独立于三栏页）
 - `src/web/static/style.css` — `.trade-notes-*` 三栏样式（响应式：手机下变 drill-down）
 - `src/web/routes.py` — buy/sell endpoint 内嵌 hook 调用（best-effort，失败只 log
   不影响下单返回）
