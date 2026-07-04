@@ -74,6 +74,14 @@ def test_backfill_page_renders(client):
     assert resp.status_code == 200
     assert "补作业" in resp.text
     assert "tnbBody" in resp.text
+    # 内嵌 JS 的页面不许被浏览器启发式缓存——部署后拿旧脚本会看不到新行为。
+    assert resp.headers["cache-control"] == "no-cache"
+
+
+def test_trade_notes_page_no_cache(client):
+    resp = client.get("/trade-notes")
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-cache"
 
 
 def test_events_range_returns_beijing_iso_and_name(client):

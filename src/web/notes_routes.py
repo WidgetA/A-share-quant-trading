@@ -106,6 +106,10 @@ def _get_store(request: Request) -> TradeNoteStore:
 def create_notes_router() -> APIRouter:
     router = APIRouter(tags=["notes"])
 
+    # 页面 JS 全部内嵌在 HTML 里,浏览器启发式缓存会让用户在部署后拿到旧脚本
+    # (0.19.0 上线后补作业页看不到逆回购行就是这么来的)——强制每次重新验证。
+    _NO_CACHE = {"Cache-Control": "no-cache"}
+
     @router.get("/trade-notes", response_class=HTMLResponse)
     async def trade_notes_page(request: Request):
         templates = request.app.state.templates
@@ -115,6 +119,7 @@ def create_notes_router() -> APIRouter:
                 "request": request,
                 "event_types": DEFAULT_EVENT_TYPES,
             },
+            headers=_NO_CACHE,
         )
 
     @router.get("/trade-notes/backfill", response_class=HTMLResponse)
@@ -127,6 +132,7 @@ def create_notes_router() -> APIRouter:
                 "request": request,
                 "event_types": DEFAULT_EVENT_TYPES,
             },
+            headers=_NO_CACHE,
         )
 
     @router.get("/api/notes/events-range")
