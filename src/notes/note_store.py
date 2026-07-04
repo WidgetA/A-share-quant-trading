@@ -506,7 +506,7 @@ class TradeNoteStore:
                 continue
             # Non-FILLED single-order (REJECTED / CANCELLED / etc.): if an
             # earlier place_order hook wrote a note for this order_id (back
-            # when we wrote notes on submit rather than on fill), soft-delete
+            # when we wrote notes on submit rather than on fill), delete
             # the orphan so it stops showing up. Today these statuses produce
             # no notes; this branch only cleans up historical pollution.
             if status_raw.upper() != "FILLED":
@@ -514,7 +514,7 @@ class TradeNoteStore:
                     deleted = await self.delete_event(bare_code, f"broker_{order_id}")
                     if deleted:
                         logger.info(
-                            "trade-notes: soft-deleted orphan broker_%s on %s (status=%s)",
+                            "trade-notes: deleted orphan broker_%s on %s (status=%s)",
                             order_id,
                             bare_code,
                             status_raw,
@@ -797,30 +797,40 @@ class TradeNoteStore:
         return moved
 
     async def delete_event(self, code: str, event_id: str) -> bool:
-        """Soft delete: re-INSERT same row with deleted=true."""
+        """Hard delete: physically remove ALL rows for (code, event_id).
+
+        Deletes by primary key only (no ts filter), so soft-deleted shadow
+        rows left behind by earlier ts-moving edits go too — wrong records
+        (e.g. duplicated QMT fills) must not keep rotting in the table.
+        The full row is logged first as the audit trail; there is no
+        restore path after this.
+        """
         existing = await self.get_event(code, event_id)
         if existing is None:
             return False
-        ts_ms = int(existing.ts.timestamp() * 1000)
-        await self._raw_insert(
-            ts_ms=ts_ms,
-            code=existing.code,
-            event_id=existing.event_id,
-            event_type=existing.event_type,
-            source=existing.source,
-            title=existing.title,
-            price=existing.price,
-            qty=existing.qty,
-            side=existing.side,
-            content=existing.content,
-            content_external=existing.content_external,
-            author=existing.author,
-            deleted=True,
-            commission=existing.commission,
-            transfer_fee=existing.transfer_fee,
-            stamp_tax=existing.stamp_tax,
-            dividend=existing.dividend,
-            realized_pnl=existing.realized_pnl,
+        logger.info(
+            "trade-notes: hard-delete event %s/%s ts=%s type=%s title=%r price=%s qty=%s "
+            "side=%s author=%s content=%r content_external=%r commission=%s "
+            "transfer_fee=%s stamp_tax=%s dividend=%s realized_pnl=%s",
+            existing.code,
+            existing.event_id,
+            existing.ts.isoformat(),
+            existing.event_type,
+            existing.title,
+            existing.price,
+            existing.qty,
+            existing.side,
+            existing.author,
+            existing.content,
+            existing.content_external,
+            existing.commission,
+            existing.transfer_fee,
+            existing.stamp_tax,
+            existing.dividend,
+            existing.realized_pnl,
+        )
+        await self._db.execute(
+            f"DELETE FROM trade_notes WHERE code = {_q(code)} AND event_id = {_q(event_id)}"
         )
         return True
 
@@ -889,16 +899,21 @@ class TradeNoteStore:
         return True
 
     async def delete_card(self, code: str, card_id: str) -> bool:
+        """Hard delete: physically remove ALL rows for (code, card_id),
+        including soft-deleted shadow rows from earlier ts-moving edits.
+        Content is logged first as the audit trail; no restore path."""
         existing = await self.get_card(code, card_id)
         if existing is None:
             return False
-        ts_ms = int(existing.ts.timestamp() * 1000)
-        await self._raw_card_insert(
-            ts_ms=ts_ms,
-            code=existing.code,
-            card_id=existing.card_id,
-            content=existing.content,
-            deleted=True,
+        logger.info(
+            "trade-notes: hard-delete card %s/%s ts=%s content=%r",
+            existing.code,
+            existing.card_id,
+            existing.ts.isoformat(),
+            existing.content,
+        )
+        await self._db.execute(
+            f"DELETE FROM note_cards WHERE code = {_q(code)} AND card_id = {_q(card_id)}"
         )
         return True
 

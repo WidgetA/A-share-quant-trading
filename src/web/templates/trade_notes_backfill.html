@@ -516,7 +516,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
 
     async function deleteRow(row) {
         if (row.eventId) {
-            if (!confirm('确认删除这条已保存的记录？（软删除，可数据库恢复）')) return;
+            if (!confirm('确认删除这条已保存的记录？（彻底删除，不可恢复）')) return;
             try {
                 const code = val(row, '.f-code');
                 await fetchJSON(`/api/notes/${code}/events/${encodeURIComponent(row.eventId)}`, {

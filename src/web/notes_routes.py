@@ -12,11 +12,11 @@
 #   GET  /api/notes/{code}/events/{event_id}       → right pane (single event)
 #   POST /api/notes/{code}/events                  → create manual event
 #   PATCH /api/notes/{code}/events/{event_id}      → edit title/content/type/ts
-#   DELETE /api/notes/{code}/events/{event_id}     → soft delete
+#   DELETE /api/notes/{code}/events/{event_id}     → hard delete (physical, shadows too)
 #   GET  /api/notes/{code}/cards                   → 篇 view: manual timestamped cards
 #   POST /api/notes/{code}/cards                   → create card
 #   PATCH /api/notes/{code}/cards/{card_id}        → edit card content/ts
-#   DELETE /api/notes/{code}/cards/{card_id}       → soft-delete card
+#   DELETE /api/notes/{code}/cards/{card_id}       → hard-delete card (physical DELETE)
 #
 # Auto-write of broker events happens in routes.py at the place_order success
 # point — not here.

@@ -973,7 +973,7 @@
 
     async function deleteCurrentEvent() {
         if (!state.currentCode || !state.currentEventId) return;
-        if (!confirm('确认删除该事件？（软删除，可数据库恢复）')) return;
+        if (!confirm('确认删除该事件？（彻底删除，不可恢复）')) return;
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(state.currentCode)}/events/${encodeURIComponent(state.currentEventId)}`, {
                 method: 'DELETE',
@@ -1327,7 +1327,7 @@
     async function deleteCard() {
         const editingId = state.editingCardId;
         if (!editingId) return;
-        if (!confirm('确认删除该卡片？（软删除，可数据库恢复）')) return;
+        if (!confirm('确认删除该卡片？（彻底删除，不可恢复）')) return;
         const code = state.currentCode;
         try {
             await fetchJSON(`/api/notes/${encodeURIComponent(code)}/cards/${encodeURIComponent(editingId)}`, {
