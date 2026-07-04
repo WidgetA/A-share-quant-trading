@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     stamp_tax    FLOAT64,
     dividend     FLOAT64,
     realized_pnl FLOAT64,
+    repo_income  FLOAT64,
     PRIMARY KEY (code, event_id)
 )
 """
@@ -57,6 +58,7 @@ _ALTER_ADD_TRANSFER_FEE_SQL = "ALTER TABLE trade_notes ADD COLUMN transfer_fee F
 _ALTER_ADD_STAMP_TAX_SQL = "ALTER TABLE trade_notes ADD COLUMN stamp_tax FLOAT64"
 _ALTER_ADD_DIVIDEND_SQL = "ALTER TABLE trade_notes ADD COLUMN dividend FLOAT64"
 _ALTER_ADD_REALIZED_PNL_SQL = "ALTER TABLE trade_notes ADD COLUMN realized_pnl FLOAT64"
+_ALTER_ADD_REPO_INCOME_SQL = "ALTER TABLE trade_notes ADD COLUMN repo_income FLOAT64"
 
 
 # Manually-inserted cards in 篇 view live in their own table — they aren't
@@ -115,6 +117,11 @@ class NoteEvent:
     stamp_tax: float | None  # 印花税 (仅卖出)
     dividend: float | None  # 股息/股息税 净到手 (派息额 − 已扣税)，可负，仅卖出登记
     realized_pnl: float | None  # 平仓收益 (仅卖出)
+    # 逆回购利息收益 — 与 realized_pnl 物理隔离的独立列 (仅 event_type='逆回购')。
+    # 硬性约束：逆回购行 realized_pnl/费项 恒为 NULL；非逆回购行 repo_income 恒为
+    # NULL。类型切换时不属于新类型的数值自动清空、绝不搬家——两种收益在任何
+    # 情况下都分得清 (见 update_event / create_event 守卫)。
+    repo_income: float | None
 
 
 @dataclass
@@ -187,6 +194,7 @@ def _row_to_event(row) -> NoteEvent:
         stamp_tax=_opt("stamp_tax"),
         dividend=_opt("dividend"),
         realized_pnl=_opt("realized_pnl"),
+        repo_income=_opt("repo_income"),
     )
 
 
@@ -220,6 +228,7 @@ class TradeNoteStore:
             ("stamp_tax", _ALTER_ADD_STAMP_TAX_SQL),
             ("dividend", _ALTER_ADD_DIVIDEND_SQL),
             ("realized_pnl", _ALTER_ADD_REALIZED_PNL_SQL),
+            ("repo_income", _ALTER_ADD_REPO_INCOME_SQL),
         ):
             try:
                 await self._db.execute(sql)
@@ -278,7 +287,7 @@ class TradeNoteStore:
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, content_external, author, deleted, "
-            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl, repo_income "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND {_NOT_DELETED} "
             f"ORDER BY ts ASC"
@@ -305,7 +314,7 @@ class TradeNoteStore:
             sql = (
                 f"SELECT ts, code, event_id, event_type, event_source, title, "
                 f"       price, qty, side, content, content_external, author, deleted, "
-                f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
+                f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl, repo_income "
                 f"FROM trade_notes "
                 f"WHERE {_NOT_DELETED} "
                 f"ORDER BY ts ASC"
@@ -337,7 +346,7 @@ class TradeNoteStore:
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, content_external, author, deleted, "
-            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl, repo_income "
             f"FROM trade_notes "
             f"WHERE {_NOT_DELETED} AND ts >= {start_ms} AND ts < {end_ms} "
             f"ORDER BY ts ASC"
@@ -355,7 +364,7 @@ class TradeNoteStore:
         sql = (
             f"SELECT ts, code, event_id, event_type, event_source, title, "
             f"       price, qty, side, content, content_external, author, deleted, "
-            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl, repo_income "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
             f"AND {_NOT_DELETED} "
@@ -394,7 +403,7 @@ class TradeNoteStore:
         existing_sql = (
             f"SELECT ts, event_type, event_source AS source, "
             f"       content, content_external, author, "
-            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
+            f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl, repo_income "
             f"FROM trade_notes "
             f"WHERE code = {_q(code)} AND event_id = {_q(event_id)} "
             f"AND {_NOT_DELETED} "
@@ -440,6 +449,7 @@ class TradeNoteStore:
             row_stamp_tax = _existing_opt("stamp_tax")
             row_dividend = _existing_opt("dividend")
             row_realized_pnl = _existing_opt("realized_pnl")
+            row_repo_income = _existing_opt("repo_income")
         else:
             row_ts_ms = ts_ms if ts_ms is not None else _now_ms()
             row_event_type = event_type
@@ -452,6 +462,7 @@ class TradeNoteStore:
             row_stamp_tax = None
             row_dividend = None
             row_realized_pnl = None
+            row_repo_income = None
 
         await self._raw_insert(
             ts_ms=row_ts_ms,
@@ -472,6 +483,7 @@ class TradeNoteStore:
             stamp_tax=row_stamp_tax,
             dividend=row_dividend,
             realized_pnl=row_realized_pnl,
+            repo_income=row_repo_income,
         )
         return True
 
@@ -618,7 +630,24 @@ class TradeNoteStore:
         stamp_tax: float | None = None,
         dividend: float | None = None,
         realized_pnl: float | None = None,
+        repo_income: float | None = None,
     ) -> str:
+        # 收益隔离硬守卫：平仓收益(realized_pnl)只属于卖出，逆回购利息
+        # (repo_income)只属于逆回购。往错误字段塞数直接报错拒收——绝不静默
+        # 挪到另一个字段，两种收益在任何情况下都不允许混。
+        if event_type == "逆回购":
+            wrong = {
+                "realized_pnl": realized_pnl,
+                "commission": commission,
+                "transfer_fee": transfer_fee,
+                "stamp_tax": stamp_tax,
+                "dividend": dividend,
+            }
+            filled = [k for k, v in wrong.items() if v is not None]
+            if filled:
+                raise ValueError(f"逆回购只登记 repo_income(利息收益)，不接受: {filled}")
+        elif repo_income is not None:
+            raise ValueError(f"repo_income 只属于逆回购事件，{event_type} 不接受")
         # For 买入/卖出 events, keep side in sync with event_type and auto-fill
         # the title in the same format the broker-import path uses, so manual
         # entries and broker-imported entries render identically in the篇 view.
@@ -650,6 +679,7 @@ class TradeNoteStore:
             stamp_tax=stamp_tax,
             dividend=dividend,
             realized_pnl=realized_pnl,
+            repo_income=repo_income,
         )
 
     async def update_event(
@@ -668,6 +698,7 @@ class TradeNoteStore:
         stamp_tax: Any = _UNSET,
         dividend: Any = _UNSET,
         realized_pnl: Any = _UNSET,
+        repo_income: Any = _UNSET,
     ) -> bool:
         """Update title, content (对内/对外), ts, event_type, price/qty, and fees.
 
@@ -708,6 +739,33 @@ class TradeNoteStore:
         new_stamp_tax = stamp_tax if stamp_tax is not _UNSET else existing.stamp_tax
         new_dividend = dividend if dividend is not _UNSET else existing.dividend
         new_realized_pnl = realized_pnl if realized_pnl is not _UNSET else existing.realized_pnl
+        new_repo_income = repo_income if repo_income is not _UNSET else existing.repo_income
+        # 收益隔离硬守卫（与 create_event 同一不变量）：
+        #   逆回购行: realized_pnl/费项/股息 恒 NULL；非逆回购行: repo_income 恒 NULL。
+        # 类型切换时不属于新类型的数值自动清空、绝不搬家；调用方往错误字段塞
+        # 非空值直接报错拒收——两种收益在任何情况下都不允许混。
+        if new_event_type == "逆回购":
+            wrong = {
+                "realized_pnl": realized_pnl,
+                "commission": commission,
+                "transfer_fee": transfer_fee,
+                "stamp_tax": stamp_tax,
+                "dividend": dividend,
+            }
+            filled = [k for k, v in wrong.items() if v is not _UNSET and v is not None]
+            if filled:
+                raise ValueError(f"逆回购只登记 repo_income(利息收益)，不接受: {filled}")
+            if existing.event_type != "逆回购" and repo_income is _UNSET:
+                new_repo_income = None  # 从买卖切成逆回购：不继承任何旧数
+            new_realized_pnl = None
+            new_commission = None
+            new_transfer_fee = None
+            new_stamp_tax = None
+            new_dividend = None
+        else:
+            if repo_income is not _UNSET and repo_income is not None:
+                raise ValueError(f"repo_income 只属于逆回购事件，{new_event_type} 不接受")
+            new_repo_income = None
         old_ts_ms = int(existing.ts.timestamp() * 1000)
         new_ts_ms = ts_ms if ts_ms is not None else old_ts_ms
         if new_ts_ms != old_ts_ms:
@@ -731,6 +789,7 @@ class TradeNoteStore:
                 stamp_tax=existing.stamp_tax,
                 dividend=existing.dividend,
                 realized_pnl=existing.realized_pnl,
+                repo_income=existing.repo_income,
             )
         await self._raw_insert(
             ts_ms=new_ts_ms,
@@ -751,6 +810,7 @@ class TradeNoteStore:
             stamp_tax=new_stamp_tax,
             dividend=new_dividend,
             realized_pnl=new_realized_pnl,
+            repo_income=new_repo_income,
         )
         return True
 
@@ -795,6 +855,7 @@ class TradeNoteStore:
                 stamp_tax=ev.stamp_tax,
                 dividend=ev.dividend,
                 realized_pnl=ev.realized_pnl,
+                repo_income=ev.repo_income,
             )
             await self._raw_insert(
                 ts_ms=old_ts_ms,
@@ -815,6 +876,7 @@ class TradeNoteStore:
                 stamp_tax=ev.stamp_tax,
                 dividend=ev.dividend,
                 realized_pnl=ev.realized_pnl,
+                repo_income=ev.repo_income,
             )
             moved += 1
         return moved
@@ -834,7 +896,7 @@ class TradeNoteStore:
         logger.info(
             "trade-notes: hard-delete event %s/%s ts=%s type=%s title=%r price=%s qty=%s "
             "side=%s author=%s content=%r content_external=%r commission=%s "
-            "transfer_fee=%s stamp_tax=%s dividend=%s realized_pnl=%s",
+            "transfer_fee=%s stamp_tax=%s dividend=%s realized_pnl=%s repo_income=%s",
             existing.code,
             existing.event_id,
             existing.ts.isoformat(),
@@ -851,6 +913,7 @@ class TradeNoteStore:
             existing.stamp_tax,
             existing.dividend,
             existing.realized_pnl,
+            existing.repo_income,
         )
         await self._db.execute(
             f"DELETE FROM trade_notes WHERE code = {_q(code)} AND event_id = {_q(event_id)}"
@@ -978,6 +1041,7 @@ class TradeNoteStore:
         stamp_tax: float | None = None,
         dividend: float | None = None,
         realized_pnl: float | None = None,
+        repo_income: float | None = None,
     ) -> str:
         event_id = uuid.uuid4().hex
         await self._raw_insert(
@@ -999,6 +1063,7 @@ class TradeNoteStore:
             stamp_tax=stamp_tax,
             dividend=dividend,
             realized_pnl=realized_pnl,
+            repo_income=repo_income,
         )
         return event_id
 
@@ -1023,6 +1088,7 @@ class TradeNoteStore:
         stamp_tax: float | None = None,
         dividend: float | None = None,
         realized_pnl: float | None = None,
+        repo_income: float | None = None,
     ) -> None:
         price_lit = "NULL" if price is None else f"{price}"
         qty_lit = "NULL" if qty is None else f"{int(qty)}"
@@ -1035,12 +1101,12 @@ class TradeNoteStore:
             "INSERT INTO trade_notes "
             "(ts, code, event_id, event_type, event_source, title, "
             " price, qty, side, content, content_external, author, deleted, "
-            " commission, transfer_fee, stamp_tax, dividend, realized_pnl) "
+            " commission, transfer_fee, stamp_tax, dividend, realized_pnl, repo_income) "
             f"VALUES ({ts_ms}, {_q(code)}, {_q(event_id)}, {_q(event_type)}, "
             f"{_q(source)}, {_q(title)}, {price_lit}, {qty_lit}, {side_lit}, "
             f"{_q(content)}, {_q(content_external)}, {_q(author)}, "
             f"{'true' if deleted else 'false'}, "
             f"{_flit(commission)}, {_flit(transfer_fee)}, {_flit(stamp_tax)}, "
-            f"{_flit(dividend)}, {_flit(realized_pnl)})"
+            f"{_flit(dividend)}, {_flit(realized_pnl)}, {_flit(repo_income)})"
         )
         await self._db.execute(sql)

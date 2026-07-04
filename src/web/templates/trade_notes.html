@@ -292,11 +292,13 @@
                 parts.push(`股息/税 ${fmt(ev.dividend)}`);
             }
         }
+        // 两种收益物理隔离：卖出读 realized_pnl，逆回购读 repo_income。
         let pnlHtml = '';
-        if ((isSell || isRepo) && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
-            const cls = ev.realized_pnl >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
+        const pnlVal = isRepo ? ev.repo_income : (isSell ? ev.realized_pnl : null);
+        if (pnlVal !== null && pnlVal !== undefined) {
+            const cls = pnlVal >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
             const pnlLabel = isRepo ? '收益' : '平仓收益';
-            pnlHtml = `<span class="${cls}">${pnlLabel} ${fmt(ev.realized_pnl)}</span>`;
+            pnlHtml = `<span class="${cls}">${pnlLabel} ${fmt(pnlVal)}</span>`;
         }
         if (!parts.length && !pnlHtml) return '';
         const sep = parts.length && pnlHtml ? ' · ' : '';
@@ -459,10 +461,11 @@
                 const dot = ev.has_content ? '●' : '○';
                 const isSell = ev.side === 'sell' || ev.event_type === '卖出';
                 let pnlHtml = '';
-                if ((isSell || isRepoEvent(ev)) && ev.realized_pnl !== null && ev.realized_pnl !== undefined) {
-                    const pnlCls = ev.realized_pnl >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
-                    const sign = ev.realized_pnl >= 0 ? '+' : '';
-                    pnlHtml = `<span class="tn-event-pnl ${pnlCls}">${sign}${Number(ev.realized_pnl).toFixed(2)}</span>`;
+                const pnlVal = isRepoEvent(ev) ? ev.repo_income : (isSell ? ev.realized_pnl : null);
+                if (pnlVal !== null && pnlVal !== undefined) {
+                    const pnlCls = pnlVal >= 0 ? 'tn-pnl-positive' : 'tn-pnl-negative';
+                    const sign = pnlVal >= 0 ? '+' : '';
+                    pnlHtml = `<span class="tn-event-pnl ${pnlCls}">${sign}${Number(pnlVal).toFixed(2)}</span>`;
                 }
                 return `
                     <div class="tn-event-row" data-id="${escapeHtml(ev.event_id)}">
@@ -873,7 +876,7 @@
                         </label>
                         <label class="tn-pnl-label"><span id="tnEditPnlLabelText">平仓收益</span>
                             <span class="tn-pnl-input-group">
-                                <input type="number" id="tnEditRealizedPnl" step="0.01" placeholder="元" value="${numOrBlank(ev.realized_pnl)}" />
+                                <input type="number" id="tnEditRealizedPnl" step="0.01" placeholder="元" value="${numOrBlank(isRepo ? ev.repo_income : ev.realized_pnl)}" />
                                 <button id="tnEditCalcPnlBtn" type="button" class="tn-calc-btn" title="按上一次买入按比例分摊成本计算">计算</button>
                             </span>
                         </label>
@@ -981,11 +984,17 @@
                 }
             }
             // 逆回购只登记收益，费项/股息不适用——隐藏 input 里残留的旧值一律清空。
+            // 收益输入框里的数落到物理隔离的 repo_income 列，平仓收益列清空；
+            // 反过来非逆回购行把 repo_income 清空——两列绝不互串。
             if (eventType === '逆回购') {
                 body.commission = null;
                 body.transfer_fee = null;
                 body.stamp_tax = null;
                 body.dividend = null;
+                body.repo_income = body.realized_pnl;
+                body.realized_pnl = null;
+            } else {
+                body.repo_income = null;
             }
         }
         try {
@@ -1281,13 +1290,18 @@
                 }
                 body[key] = v;
             }
-            // realized_pnl 可正可负，单独处理（卖出=平仓收益，逆回购=收益）
+            // 收益可正可负，单独处理。卖出=平仓收益(realized_pnl)，
+            // 逆回购=利息收益(repo_income)——两列物理隔离，绝不互串。
             if (event_type === '卖出' || event_type === '逆回购') {
                 const pnlRaw = dom.newRealizedPnl.value.trim();
                 if (pnlRaw !== '') {
                     const pnl = Number(pnlRaw);
                     if (Number.isNaN(pnl)) { alert('收益格式错误'); return; }
-                    body.realized_pnl = pnl;
+                    if (event_type === '逆回购') {
+                        body.repo_income = pnl;
+                    } else {
+                        body.realized_pnl = pnl;
+                    }
                 }
             }
         }

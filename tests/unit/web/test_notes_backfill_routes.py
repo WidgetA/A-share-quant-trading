@@ -45,6 +45,7 @@ def _sample_event() -> NoteEvent:
         stamp_tax=None,
         dividend=None,
         realized_pnl=None,
+        repo_income=None,
     )
 
 

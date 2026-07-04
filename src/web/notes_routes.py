@@ -63,6 +63,9 @@ class CreateEventRequest(BaseModel):
     dividend: float | None = Field(None)
     # realized_pnl can legitimately be negative (loss), so no ge=0.
     realized_pnl: float | None = Field(None)
+    # 逆回购利息收益 — 与 realized_pnl 物理隔离的独立列，仅 event_type='逆回购'
+    # 接受（存储层守卫强制，塞错字段 → 400）。
+    repo_income: float | None = Field(None)
 
 
 class UpdateEventRequest(BaseModel):
@@ -80,6 +83,7 @@ class UpdateEventRequest(BaseModel):
     stamp_tax: float | None = Field(None, ge=0)
     dividend: float | None = Field(None)  # 净到手，可负（见 CreateEventRequest）
     realized_pnl: float | None = Field(None)
+    repo_income: float | None = Field(None)  # 仅逆回购（见 CreateEventRequest）
 
 
 class RenameStockRequest(BaseModel):
@@ -186,6 +190,7 @@ def create_notes_router() -> APIRouter:
                     "stamp_tax": e.stamp_tax,
                     "dividend": e.dividend,
                     "realized_pnl": e.realized_pnl,
+                    "repo_income": e.repo_income,
                 }
                 for e in events
             ],
@@ -240,6 +245,7 @@ def create_notes_router() -> APIRouter:
                     "stamp_tax": e.stamp_tax,
                     "dividend": e.dividend,
                     "realized_pnl": e.realized_pnl,
+                    "repo_income": e.repo_income,
                 }
                 for e in events
             ],
@@ -269,29 +275,35 @@ def create_notes_router() -> APIRouter:
             "stamp_tax": ev.stamp_tax,
             "dividend": ev.dividend,
             "realized_pnl": ev.realized_pnl,
+            "repo_income": ev.repo_income,
         }
 
     @router.post("/api/notes/{code}/events")
     async def create_event(code: str, body: CreateEventRequest, request: Request) -> dict:
         store = _get_store(request)
-        event_id = await store.create_event(
-            code=code,
-            event_type=body.event_type,
-            title=body.title,
-            content=body.content,
-            content_external=body.content_external,
-            author=body.author,
-            source=body.source,
-            ts_ms=body.ts_ms,
-            price=body.price,
-            qty=body.qty,
-            side=body.side,
-            commission=body.commission,
-            transfer_fee=body.transfer_fee,
-            stamp_tax=body.stamp_tax,
-            dividend=body.dividend,
-            realized_pnl=body.realized_pnl,
-        )
+        try:
+            event_id = await store.create_event(
+                code=code,
+                event_type=body.event_type,
+                title=body.title,
+                content=body.content,
+                content_external=body.content_external,
+                author=body.author,
+                source=body.source,
+                ts_ms=body.ts_ms,
+                price=body.price,
+                qty=body.qty,
+                side=body.side,
+                commission=body.commission,
+                transfer_fee=body.transfer_fee,
+                stamp_tax=body.stamp_tax,
+                dividend=body.dividend,
+                realized_pnl=body.realized_pnl,
+                repo_income=body.repo_income,
+            )
+        except ValueError as e:
+            # 收益隔离守卫拒收（如给逆回购塞平仓收益/费项）——如实告知调用方。
+            raise HTTPException(status_code=400, detail=str(e)) from e
         logger.info(f"trade-notes: created {body.source} event for {code} ({body.event_type})")
         return {"event_id": event_id}
 
@@ -312,19 +324,24 @@ def create_notes_router() -> APIRouter:
             "stamp_tax",
             "dividend",
             "realized_pnl",
+            "repo_income",
         ):
             if name in fields:
                 extra[name] = getattr(body, name)
-        ok = await store.update_event(
-            code=code,
-            event_id=event_id,
-            title=body.title,
-            content=body.content,
-            content_external=body.content_external,
-            ts_ms=body.ts_ms,
-            event_type=body.event_type,
-            **extra,
-        )
+        try:
+            ok = await store.update_event(
+                code=code,
+                event_id=event_id,
+                title=body.title,
+                content=body.content,
+                content_external=body.content_external,
+                ts_ms=body.ts_ms,
+                event_type=body.event_type,
+                **extra,
+            )
+        except ValueError as e:
+            # 收益隔离守卫拒收（如给逆回购塞平仓收益/费项）——如实告知调用方。
+            raise HTTPException(status_code=400, detail=str(e)) from e
         if not ok:
             raise HTTPException(status_code=404, detail="event not found")
         return {"updated": True}
@@ -455,6 +472,7 @@ def create_notes_router() -> APIRouter:
                     "stamp_tax": e.stamp_tax,
                     "dividend": e.dividend,
                     "realized_pnl": e.realized_pnl,
+                    "repo_income": e.repo_income,
                 }
                 for e in events
             ],

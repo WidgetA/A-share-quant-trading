@@ -204,7 +204,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
     // 股息是偶发的——都不是费项，不算缺。
     function needsBackfill(e) {
         const missing = v => v === null || v === undefined;
-        if (e.event_type === '逆回购') return missing(e.realized_pnl);
+        if (e.event_type === '逆回购') return missing(e.repo_income);
         if (missing(e.commission)) return true;
         if (e.event_type === '卖出' && missing(e.stamp_tax)) return true;
         return false;
@@ -359,7 +359,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             <td class="tnb-num"><input class="f-stamp" type="number" step="0.01" min="0" value="${numVal(data && data.stamp_tax)}"></td>
             <td class="tnb-num"><input class="f-dividend" type="number" step="0.01" value="${numVal(data && data.dividend)}"></td>
             <td class="tnb-num"><span class="tnb-pnl-cell">
-                <input class="f-pnl" type="number" step="0.01" value="${numVal(data && data.realized_pnl)}">
+                <input class="f-pnl" type="number" step="0.01" value="${numVal(data && (data.event_type === '逆回购' ? data.repo_income : data.realized_pnl))}">
                 <button class="f-calc" type="button" title="按同表格内该代码上一次买入分摊成本计算">算</button>
             </span></td>
             <td class="tnb-col-remark"><input class="f-remark" value="${data ? escapeAttr(data.content || '') : ''}"></td>
@@ -437,7 +437,9 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             transfer_fee: isRepo ? null : numField('.f-transfer', '过户费', false),
             stamp_tax: isSell ? numField('.f-stamp', '印花税', false) : null,
             dividend: isSell ? numField('.f-dividend', '股息', true) : null,
-            realized_pnl: (isSell || isRepo) ? numField('.f-pnl', '收益', true) : null,
+            // 同一个收益输入格,按行类型落到物理隔离的两列——绝不互串。
+            realized_pnl: isSell ? numField('.f-pnl', '平仓收益', true) : null,
+            repo_income: isRepo ? numField('.f-pnl', '收益', true) : null,
             content: val(row, '.f-remark'),
         };
         return { code, body, isNew: row.eventId === null };
@@ -472,6 +474,7 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         ev.stamp_tax = snapshot.stamp_tax;
         ev.dividend = snapshot.dividend;
         ev.realized_pnl = snapshot.realized_pnl;
+        ev.repo_income = snapshot.repo_income;
         ev.content = snapshot.content;
         if (!ev.name) ev.name = q(row, '.tnb-name').textContent || null;
     }

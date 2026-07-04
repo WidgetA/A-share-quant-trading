@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from src.notes.note_store import TradeNoteStore, is_reverse_repo_code
 
 
@@ -112,7 +114,7 @@ def test_create_manual_repo_event_no_side_auto_title():
             content="",
             price=1.26,
             qty=5510,
-            realized_pnl=3.9,
+            repo_income=3.9,
             ts_ms=1780624772000,
         )
     )
@@ -120,4 +122,84 @@ def test_create_manual_repo_event_no_side_auto_title():
     assert "'逆回购'" in insert_sql
     assert "逆回购 @1.26 x 5510" in insert_sql
     assert "'sell'" not in insert_sql
-    assert "3.9" in insert_sql  # 收益进 realized_pnl
+    # 收益进独立列 repo_income（INSERT 末位），realized_pnl 保持 NULL。
+    assert insert_sql.rstrip(")").endswith("3.9")
+
+
+# ---- 收益隔离硬守卫：平仓收益(realized_pnl)与逆回购利息(repo_income)物理隔离，
+# ---- 任何情况都不允许混——塞错字段拒收，类型切换自动清空、绝不搬家。
+
+
+def test_create_repo_event_rejects_realized_pnl():
+    st = _store(row=None)
+    with pytest.raises(ValueError, match="repo_income"):
+        asyncio.run(
+            st.create_event(
+                code="204001",
+                event_type="逆回购",
+                title="",
+                content="",
+                realized_pnl=3.9,  # 平仓收益字段不属于逆回购 → 拒收
+            )
+        )
+    assert st._db.executed == []
+
+
+def test_create_sell_event_rejects_repo_income():
+    st = _store(row=None)
+    with pytest.raises(ValueError, match="逆回购"):
+        asyncio.run(
+            st.create_event(
+                code="002407",
+                event_type="卖出",
+                title="",
+                content="",
+                repo_income=3.9,  # 利息字段不属于卖出 → 拒收
+            )
+        )
+    assert st._db.executed == []
+
+
+def test_convert_sell_with_pnl_to_repo_does_not_carry_pnl_over():
+    # 卖出行已有平仓收益 -8000，转成逆回购：数值绝不搬进 repo_income，
+    # realized_pnl/费项全部清空。
+    row = dict(_SELL_ROW, realized_pnl=-8000.0, commission=8.11, stamp_tax=47.49)
+    st = _store(row=row)
+    ok = asyncio.run(st.update_event("204001", row["event_id"], event_type="逆回购"))
+    assert ok is True
+    (insert_sql,) = [s for s in st._db.executed if s.startswith("INSERT INTO trade_notes")]
+    assert "'逆回购'" in insert_sql
+    assert "-8000" not in insert_sql  # 平仓收益没有跟过来
+    assert "8.11" not in insert_sql  # 费项也清了
+    assert "47.49" not in insert_sql
+
+
+def test_convert_repo_with_income_to_sell_does_not_carry_income_over():
+    row = dict(
+        _SELL_ROW,
+        event_type="逆回购",
+        side=None,
+        title="逆回购 @100.00 x 3900",
+        repo_income=5.2,
+    )
+    st = _store(row=row)
+    ok = asyncio.run(st.update_event("204001", row["event_id"], event_type="卖出"))
+    assert ok is True
+    (insert_sql,) = [s for s in st._db.executed if s.startswith("INSERT INTO trade_notes")]
+    assert "'卖出'" in insert_sql
+    assert "5.2" not in insert_sql  # 利息没有跟过来变成平仓收益
+
+
+def test_update_repo_event_rejects_realized_pnl():
+    row = dict(_SELL_ROW, event_type="逆回购", side=None)
+    st = _store(row=row)
+    with pytest.raises(ValueError, match="repo_income"):
+        asyncio.run(st.update_event("204001", row["event_id"], realized_pnl=9.9))
+    assert st._db.executed == []
+
+
+def test_update_sell_event_rejects_repo_income():
+    st = _store(row=dict(_SELL_ROW, code="002407", event_id="broker_1"))
+    with pytest.raises(ValueError, match="逆回购"):
+        asyncio.run(st.update_event("002407", "broker_1", repo_income=9.9))
+    assert st._db.executed == []
