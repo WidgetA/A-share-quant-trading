@@ -130,8 +130,13 @@ def create_notes_router() -> APIRouter:
         )
 
     @router.get("/api/notes/events-range")
-    async def events_in_range(request: Request, start: str, end: str) -> dict:
+    async def events_in_range(
+        request: Request, start: str | None = None, end: str | None = None
+    ) -> dict:
         """All live events in Beijing date [start, end], JSON (for the backfill table).
+
+        Omit both params to get every live event ever recorded — the backfill
+        page loads everything and filters "待补" client-side.
 
         Same query as /api/notes/export but returned as a plain JSON body
         (no attachment) and including the internal `content` field so rows
@@ -139,10 +144,13 @@ def create_notes_router() -> APIRouter:
         """
         from src.data.sources.local_concept_mapper import LocalConceptMapper
 
-        if not _DATE_RE.match(start) or not _DATE_RE.match(end):
-            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-        if start > end:
-            raise HTTPException(status_code=400, detail="start must be <= end")
+        if (start is None) != (end is None):
+            raise HTTPException(status_code=400, detail="start and end must be provided together")
+        if start is not None and end is not None:
+            if not _DATE_RE.match(start) or not _DATE_RE.match(end):
+                raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+            if start > end:
+                raise HTTPException(status_code=400, detail="start must be <= end")
         store = _get_store(request)
         try:
             events = await store.list_events_in_range(start, end)

@@ -54,7 +54,7 @@ def client(monkeypatch):
 
     captured = {}
 
-    async def fake_list_events_in_range(self, start, end):
+    async def fake_list_events_in_range(self, start=None, end=None):
         captured["range"] = (start, end)
         return [_sample_event()]
 
@@ -91,11 +91,20 @@ def test_events_range_returns_beijing_iso_and_name(client):
     assert ev["content"] == "补录"  # internal content included (export omits it)
 
 
+def test_events_range_without_params_returns_all(client):
+    resp = client.get("/api/notes/events-range")
+    assert resp.status_code == 200
+    assert client.captured["range"] == (None, None)
+    assert resp.json()["count"] == 1
+
+
 @pytest.mark.parametrize(
     "qs",
     [
         "start=2026-6-1&end=2026-06-30",  # bad format
         "start=2026-06-30&end=2026-06-01",  # start > end
+        "start=2026-06-01",  # only one bound
+        "end=2026-06-30",  # only one bound
     ],
 )
 def test_events_range_rejects_bad_dates(client, qs):

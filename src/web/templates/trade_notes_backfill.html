@@ -22,7 +22,9 @@
 .tnb-toolbar button.primary:hover { background: #245a94; }
 .tnb-summary { color: #666; font-size: 0.85em; margin-left: auto; }
 .tnb-table-wrap { overflow-x: auto; }
-table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+/* No width:100% — the table takes the width its columns need and the wrapper
+   scrolls horizontally. Squeezing to viewport width crushed every input. */
+table.tnb-table { border-collapse: collapse; font-size: 0.85em; }
 .tnb-table th, .tnb-table td { border: 1px solid #ddd; padding: 2px 4px; white-space: nowrap; }
 .tnb-table th { background: #f0f0f0; position: sticky; top: 0; }
 .tnb-table input, .tnb-table select {
@@ -31,12 +33,22 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
 }
 .tnb-table input:focus, .tnb-table select:focus { border-color: #2b6cb0; background: #fff; outline: none; }
 .tnb-table input:disabled { background: #f5f5f5; color: #bbb; }
-.tnb-table td.tnb-name { color: #555; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+/* Spinner arrows eat half of a narrow number input — hide them. */
+.tnb-table input[type=number]::-webkit-inner-spin-button,
+.tnb-table input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.tnb-table input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+.tnb-table td.tnb-name { color: #555; min-width: 64px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .tnb-table td.tnb-num input { text-align: right; }
-.tnb-col-date input { min-width: 110px; }
-.tnb-col-time input { min-width: 60px; }
-.tnb-col-code input { min-width: 62px; }
-.tnb-col-remark input { min-width: 160px; }
+.tnb-col-date input { min-width: 118px; }
+.tnb-col-time input { min-width: 78px; }
+.tnb-col-code input { min-width: 64px; }
+.tnb-col-remark input { min-width: 200px; }
+.tnb-table select.f-type { min-width: 62px; }
+.tnb-table input.f-price { min-width: 84px; }
+.tnb-table input.f-qty { min-width: 80px; }
+.tnb-table input.f-comm, .tnb-table input.f-transfer, .tnb-table input.f-stamp { min-width: 72px; }
+.tnb-table input.f-dividend { min-width: 80px; }
+.tnb-table input.f-pnl { min-width: 88px; }
 .tnb-row-dirty { background: #fffbe6; }
 .tnb-row-sell { border-left: 3px solid #d69e2e; }
 .tnb-row-buy { border-left: 3px solid #38a169; }
@@ -64,10 +76,8 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
     </div>
 
     <div class="tnb-toolbar">
-        <label>从 <input id="tnbStart" type="date" /></label>
-        <label>到 <input id="tnbEnd" type="date" /></label>
-        <button id="tnbLoad">加载区间已有记录</button>
-        <label title="费用没填全的才是作业;取消勾选可看区间内全部买卖"><input id="tnbOnlyEmpty" type="checkbox" checked /> 只看待补的</label>
+        <label title="费用没填全的才是作业;取消勾选可看全部买卖"><input id="tnbOnlyEmpty" type="checkbox" checked /> 只看待补的</label>
+        <button id="tnbReload" title="重新从数据库加载">↻ 重新加载</button>
         <button id="tnbAddRow">＋ 加一行</button>
         <button id="tnbSaveAll" class="primary">全部保存</button>
         <span class="tnb-summary" id="tnbSummary"></span>
@@ -95,7 +105,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
                 </tr>
             </thead>
             <tbody id="tnbBody">
-                <tr><td colspan="15" class="tnb-empty">选好日期区间点「加载」，或直接「＋ 加一行」开始补。</td></tr>
+                <tr><td colspan="15" class="tnb-empty">加载中…</td></tr>
             </tbody>
         </table>
     </div>
@@ -115,10 +125,8 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
     const AUTO_TITLE_RE = /^(买入|卖出) (@|市价)/;
 
     const dom = {
-        start: document.getElementById('tnbStart'),
-        end: document.getElementById('tnbEnd'),
-        load: document.getElementById('tnbLoad'),
         onlyEmpty: document.getElementById('tnbOnlyEmpty'),
+        reload: document.getElementById('tnbReload'),
         addRow: document.getElementById('tnbAddRow'),
         saveAll: document.getElementById('tnbSaveAll'),
         summary: document.getElementById('tnbSummary'),
@@ -137,13 +145,9 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
 
     function pad(n) { return String(n).padStart(2, '0'); }
 
-    function defaultRange() {
-        // Default: first day of the previous month → today (the whole point
-        // of this page is catching up on last month's missing entries).
-        const now = new Date();
-        const prevFirst = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        dom.start.value = `${prevFirst.getFullYear()}-${pad(prevFirst.getMonth() + 1)}-${pad(prevFirst.getDate())}`;
-        dom.end.value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    function todayStr() {
+        const d = new Date();
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     }
 
     function q(row, sel) { return row.tr.querySelector(sel); }
@@ -169,7 +173,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
         updateSummary();
     }
 
-    let rangeInfo = ''; // set by loadRange, e.g. '区间共 12 笔买卖，其中 9 笔费用待补'
+    let rangeInfo = ''; // set by render(), e.g. '共 12 笔买卖，待补 9 笔'
 
     function updateSummary() {
         const unsaved = rows.filter(r => r.dirty).length;
@@ -242,7 +246,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
                 };
             }
         }
-        // ……表格里没有（被「只看待补的」滤掉，或买入在区间之外）就查数据库。
+        // ……表格里没有（被「只看待补的」滤掉）就查数据库该股全部事件。
         if (!buy) {
             try {
                 const data = await fetchJSON(`/api/notes/${code}/events`);
@@ -291,6 +295,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
             author: data ? (data.author || 'user') : 'user',
             dirty: !data,
             tr: document.createElement('tr'),
+            cacheRef: data || null, // the allTrades entry this row mirrors
         };
 
         let date = '', time = '09:31';
@@ -307,7 +312,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
         } else if (rows.length > 0) {
             date = val(rows[rows.length - 1], '.f-date'); // carry last row's date
         } else {
-            date = dom.start.value;
+            date = todayStr();
         }
 
         const numVal = v => (v === null || v === undefined) ? '' : String(v);
@@ -407,6 +412,38 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
         return { code, body, isNew: row.eventId === null };
     }
 
+    // Mirror a successful save back into allTrades so a re-render (只看待补的
+    // toggle) shows the saved values instead of the stale fetched ones.
+    function syncCache(row, code, snapshot) {
+        let ev = row.cacheRef;
+        if (!ev) {
+            ev = { event_id: row.eventId, source: 'user', author: 'user', content_external: '' };
+            allTrades.push(ev);
+            row.cacheRef = ev;
+        }
+        const date = val(row, '.f-date');
+        const time = val(row, '.f-time') || '15:00';
+        if (!(row.origTsMs !== undefined && snapshot.ts_ms === row.origTsMs)) {
+            ev.ts = `${date}T${time}:00+08:00`;
+        }
+        row.origTsMs = snapshot.ts_ms;
+        row.origDate = date;
+        row.origTime = time;
+        ev.code = code;
+        ev.event_type = snapshot.event_type;
+        ev.side = snapshot.event_type === '买入' ? 'buy' : 'sell';
+        ev.title = row.title;
+        ev.price = snapshot.price;
+        ev.qty = snapshot.qty;
+        ev.commission = snapshot.commission;
+        ev.transfer_fee = snapshot.transfer_fee;
+        ev.stamp_tax = snapshot.stamp_tax;
+        ev.dividend = snapshot.dividend;
+        ev.realized_pnl = snapshot.realized_pnl;
+        ev.content = snapshot.content;
+        if (!ev.name) ev.name = q(row, '.tnb-name').textContent || null;
+    }
+
     async function saveRow(row) {
         if (!row.dirty && row.eventId) return; // nothing to do
         let payload;
@@ -417,6 +454,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
             return;
         }
         const { code, body, isNew } = payload;
+        const snapshot = Object.assign({}, body); // body loses null keys on POST
         try {
             if (isNew) {
                 body.side = body.event_type === '买入' ? 'buy' : 'sell';
@@ -451,6 +489,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
                     body: JSON.stringify(body),
                 });
             }
+            syncCache(row, code, snapshot);
             markSaved(row);
             lookupName(row);
         } catch (e) {
@@ -470,6 +509,10 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
                 setStatus(row, 'error', '删除失败: ' + e.message);
                 return;
             }
+        }
+        if (row.cacheRef) {
+            const i = allTrades.indexOf(row.cacheRef);
+            if (i !== -1) allTrades.splice(i, 1);
         }
         row.tr.remove();
         rows.splice(rows.indexOf(row), 1);
@@ -491,40 +534,59 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
         }
     }
 
-    // ---- load existing events in range ----
-    async function loadRange() {
-        const start = dom.start.value, end = dom.end.value;
-        if (!start || !end) { alert('请先选好日期区间'); return; }
+    // ---- load & render ----
+    let allTrades = []; // every 买入/卖出 event in the DB, fetched once
+
+    function confirmDiscardUnsaved() {
         const unsaved = rows.filter(r => r.dirty).length;
-        if (unsaved && !confirm(`表格里有 ${unsaved} 行未保存，重新加载会丢掉它们，继续？`)) return;
-        dom.body.innerHTML = '<tr><td colspan="15" class="tnb-empty">加载中…</td></tr>';
+        return !unsaved || confirm(`表格里有 ${unsaved} 行未保存，重新加载会丢掉它们，继续？`);
+    }
+
+    function render() {
         rows.length = 0;
-        try {
-            const data = await fetchJSON(`/api/notes/events-range?start=${start}&end=${end}`);
-            // Only trade rows belong in this table — thoughts/comments live in
-            // the three-pane page.
-            const trades = data.events.filter(e => e.event_type === '买入' || e.event_type === '卖出');
-            const pending = trades.filter(needsBackfill);
-            rangeInfo = `区间共 ${trades.length} 笔买卖，待补 ${pending.length} 笔`;
-            const show = dom.onlyEmpty.checked ? pending : trades;
-            if (show.length === 0) {
-                dom.body.innerHTML = trades.length === 0
-                    ? '<tr><td colspan="15" class="tnb-empty">区间内没有已记录的买卖。「＋ 加一行」开始补。</td></tr>'
-                    : '<tr><td colspan="15" class="tnb-empty">🎉 区间内的买卖费用都填全了。漏记的交易用「＋ 加一行」补。</td></tr>';
-                updateSummary();
-                return;
-            }
-            dom.body.innerHTML = '';
-            for (const ev of show) addRow(ev);   // already ts ASC from server
-        } catch (e) {
-            dom.body.innerHTML = `<tr><td colspan="15" class="tnb-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+        const pending = allTrades.filter(needsBackfill);
+        rangeInfo = `共 ${allTrades.length} 笔买卖，待补 ${pending.length} 笔`;
+        // Sort by ts — rows synced into the cache after a save sit at the end.
+        const show = (dom.onlyEmpty.checked ? pending : allTrades)
+            .slice().sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+        if (show.length === 0) {
+            dom.body.innerHTML = allTrades.length === 0
+                ? '<tr><td colspan="15" class="tnb-empty">还没有任何买卖记录。「＋ 加一行」开始补。</td></tr>'
+                : '<tr><td colspan="15" class="tnb-empty">🎉 作业写完了——所有买卖的费用都填全了。漏记的交易用「＋ 加一行」补。</td></tr>';
+            updateSummary();
+            return;
         }
+        dom.body.innerHTML = '';
+        for (const ev of show) addRow(ev);   // already ts ASC from server
         updateSummary();
     }
 
-    dom.load.addEventListener('click', loadRange);
+    async function loadAll() {
+        dom.body.innerHTML = '<tr><td colspan="15" class="tnb-empty">加载中…</td></tr>';
+        rows.length = 0;
+        try {
+            const data = await fetchJSON('/api/notes/events-range');
+            // Only trade rows belong in this table — thoughts/comments live in
+            // the three-pane page.
+            allTrades = data.events.filter(e => e.event_type === '买入' || e.event_type === '卖出');
+        } catch (e) {
+            dom.body.innerHTML = `<tr><td colspan="15" class="tnb-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+            return;
+        }
+        render();
+    }
+
+    dom.reload.addEventListener('click', () => {
+        if (confirmDiscardUnsaved()) loadAll();
+    });
     dom.onlyEmpty.addEventListener('change', () => {
-        if (rangeInfo) loadRange(); // re-filter only after a first load
+        // Toggling re-renders from the cached list — no refetch, but it does
+        // rebuild the table, so guard unsaved rows the same way as reload.
+        if (confirmDiscardUnsaved()) {
+            render();
+        } else {
+            dom.onlyEmpty.checked = !dom.onlyEmpty.checked;
+        }
     });
     dom.addRow.addEventListener('click', () => {
         const row = addRow(null);
@@ -535,7 +597,7 @@ table.tnb-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
         if (rows.some(r => r.dirty)) { e.preventDefault(); e.returnValue = ''; }
     });
 
-    defaultRange();
+    loadAll();
 })();
 </script>
 {% endblock %}

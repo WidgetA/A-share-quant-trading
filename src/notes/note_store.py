@@ -278,7 +278,7 @@ class TradeNoteStore:
     # ---------- export: all live events across all stocks in a date range ----------
 
     async def list_events_in_range(
-        self, start_beijing_date: str, end_beijing_date: str
+        self, start_beijing_date: str | None = None, end_beijing_date: str | None = None
     ) -> list[NoteEvent]:
         """All live events with ts falling in Beijing date [start, end] inclusive.
 
@@ -286,7 +286,23 @@ class TradeNoteStore:
         start side and the end day is included by extending to end+1 day 00:00
         Beijing time. UTC epoch ms conversion follows the same calendar.timegm()
         pattern as list_stocks() — see CLAUDE.md §7.
+
+        Both None → no time filter: every live event ever recorded (the
+        backfill page loads everything and filters client-side).
         """
+        if start_beijing_date is None and end_beijing_date is None:
+            sql = (
+                f"SELECT ts, code, event_id, event_type, event_source, title, "
+                f"       price, qty, side, content, content_external, author, deleted, "
+                f"       commission, transfer_fee, stamp_tax, dividend, realized_pnl "
+                f"FROM trade_notes "
+                f"WHERE {_NOT_DELETED} "
+                f"ORDER BY ts ASC"
+            )
+            rows = await self._db.fetch(sql)
+            return [_row_to_event(r) for r in rows]
+        if start_beijing_date is None or end_beijing_date is None:
+            raise ValueError("start and end must be provided together (or both omitted)")
 
         def _parse(d: str) -> tuple[int, int, int]:
             try:
