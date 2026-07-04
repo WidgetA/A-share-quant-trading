@@ -21,14 +21,28 @@
 .tnb-toolbar button.primary { background: #2b6cb0; border-color: #2b6cb0; color: #fff; }
 .tnb-toolbar button.primary:hover { background: #245a94; }
 .tnb-summary { color: #666; font-size: 0.85em; margin-left: auto; }
-.tnb-table-wrap { overflow-x: auto; }
-/* No width:100% — the table takes the width its columns need and the wrapper
-   scrolls horizontally. Squeezing to viewport width crushed every input. */
-table.tnb-table { border-collapse: collapse; font-size: 0.85em; }
-.tnb-table th, .tnb-table td { border: 1px solid #ddd; padding: 2px 4px; white-space: nowrap; }
-.tnb-table th { background: #f0f0f0; position: sticky; top: 0; }
+/* Scroll-card: the table lives inside a fixed-height card with its OWN
+   scrollbars (both axes always at the card's edge, not the document's bottom
+   — with 100+ rows the page-level horizontal scrollbar was unreachable). */
+.tnb-table-wrap {
+    overflow: auto;
+    max-height: calc(100vh - 250px);
+    min-height: 320px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85em; }
+.tnb-table th, .tnb-table td {
+    border-bottom: 1px solid #ddd; border-right: 1px solid #eee;
+    padding: 2px 4px; white-space: nowrap;
+}
+.tnb-table th { background: #f0f0f0; position: sticky; top: 0; z-index: 2; }
+/* Inputs get explicit compact widths (below) — width drives the cell width;
+   browser-default date/number control widths made columns twice as fat. */
 .tnb-table input, .tnb-table select {
-    border: 1px solid transparent; background: transparent; width: 100%;
+    border: 1px solid transparent; background: transparent;
     font: inherit; padding: 2px 3px; box-sizing: border-box;
 }
 .tnb-table input:focus, .tnb-table select:focus { border-color: #2b6cb0; background: #fff; outline: none; }
@@ -37,18 +51,18 @@ table.tnb-table { border-collapse: collapse; font-size: 0.85em; }
 .tnb-table input[type=number]::-webkit-inner-spin-button,
 .tnb-table input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .tnb-table input[type=number] { -moz-appearance: textfield; appearance: textfield; }
-.tnb-table td.tnb-name { color: #555; min-width: 64px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.tnb-table td.tnb-name { color: #555; max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
 .tnb-table td.tnb-num input { text-align: right; }
-.tnb-col-date input { min-width: 118px; }
-.tnb-col-time input { min-width: 78px; }
-.tnb-col-code input { min-width: 64px; }
-.tnb-col-remark input { min-width: 200px; }
-.tnb-table select.f-type { min-width: 62px; }
-.tnb-table input.f-price { min-width: 84px; }
-.tnb-table input.f-qty { min-width: 80px; }
-.tnb-table input.f-comm, .tnb-table input.f-transfer, .tnb-table input.f-stamp { min-width: 72px; }
-.tnb-table input.f-dividend { min-width: 80px; }
-.tnb-table input.f-pnl { min-width: 88px; }
+.tnb-col-date input { width: 118px; }
+.tnb-col-time input { width: 72px; }
+.tnb-col-code input { width: 60px; }
+.tnb-col-remark input { width: 180px; }
+.tnb-table select.f-type { width: 62px; }
+.tnb-table input.f-price { width: 74px; }
+.tnb-table input.f-qty { width: 74px; }
+.tnb-table input.f-comm, .tnb-table input.f-transfer, .tnb-table input.f-stamp { width: 62px; }
+.tnb-table input.f-dividend { width: 70px; }
+.tnb-table input.f-pnl { width: 78px; }
 .tnb-row-dirty { background: #fffbe6; }
 .tnb-row-sell { border-left: 3px solid #d69e2e; }
 .tnb-row-buy { border-left: 3px solid #38a169; }
