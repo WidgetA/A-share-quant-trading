@@ -215,6 +215,17 @@ class TestNormalizeScanRows:
             )
 
 
+class TestTsToTradeDate:
+    def test_accepts_datetime_and_epoch_ms(self):
+        from src.notes.ai_journal import _ts_to_trade_date
+
+        # asyncpg 对 TIMESTAMP 列回 naive datetime(UTC 约定,日线在交易日 00:00)
+        assert _ts_to_trade_date(datetime(2026, 6, 3, 0, 0)) == "20260603"
+        # epoch ms 整数路径
+        ms = int(datetime(2026, 6, 3, tzinfo=timezone.utc).timestamp() * 1000)
+        assert _ts_to_trade_date(ms) == "20260603"
+
+
 class TestBuildExemplars:
     def test_picks_handwritten_and_skips_ai(self):
         hand_buy = _ev("b1", "买入", content_external="手写买入范文")

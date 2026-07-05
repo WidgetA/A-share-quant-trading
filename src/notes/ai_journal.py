@@ -247,6 +247,14 @@ def _cci14(daily_rows: list[dict]) -> float | None:
     return round((tps[-1] - sma) / (0.015 * mean_dev), 1)
 
 
+def _ts_to_trade_date(ts_val: Any) -> str:
+    """日线行 ts → YYYYMMDD。asyncpg 对 TIMESTAMP 列回 datetime(naive UTC 约定,
+    日线 bar 落在交易日 00:00 UTC),部分路径回 epoch ms 整数——两种都接。"""
+    if isinstance(ts_val, datetime):
+        return ts_val.strftime("%Y%m%d")
+    return datetime.fromtimestamp(ts_val / 1000, tz=ZoneInfo("UTC")).strftime("%Y%m%d")
+
+
 async def _get_daily_rows(storage: Any, code: str, start: str, end: str) -> list[dict]:
     """backtest_daily 日线 → [{trade_date, o/h/l/c, pre_close, pct_chg, vol_shares}]。
 
@@ -255,8 +263,8 @@ async def _get_daily_rows(storage: Any, code: str, start: str, end: str) -> list
     """
     records = await storage.get_daily_for_code(code, start, end)
     rows: list[dict] = []
-    for r in sorted(records, key=lambda x: x["ts"]):
-        d = datetime.fromtimestamp(r["ts"] / 1000, tz=ZoneInfo("UTC")).strftime("%Y%m%d")
+    for r in sorted(records, key=lambda x: _ts_to_trade_date(x["ts"])):
+        d = _ts_to_trade_date(r["ts"])
         close = float(r["close_price"])
         pre_close = float(r["pre_close"]) if r["pre_close"] is not None else None
         pct = round((close - pre_close) / pre_close * 100, 2) if pre_close else None
