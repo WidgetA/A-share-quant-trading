@@ -65,6 +65,11 @@ config/greptimedb.toml
 
 # === Dev Tools (local scripts, model files, caches for offline analysis) ===
 dev-tools/
+# main-only module, local copy so dev-tools/replicate_v16.py runs on this branch
+src/strategy/lgbrank_scorer.py
+
+# === Strategy Research (local prototype scripts + data, never pushed) ===
+strategy-research/
 
 # === OS ===
 .DS_Store

@@ -100,6 +100,14 @@ class UpdateCardRequest(BaseModel):
     ts_ms: int | None = Field(None, description="Epoch ms; omit to keep current ts")
 
 
+class AiJournalRunRequest(BaseModel):
+    """POST /api/notes/ai-journal/run — 参数全部可省(默认写全部待补)."""
+
+    event_ids: list[str] | None = Field(None, description="只处理这些事件;省略=全部待补")
+    max_events: int = Field(50, ge=1, le=200)
+    time_budget_sec: int = Field(1800, ge=60, le=21600)
+
+
 def _get_store(request: Request) -> TradeNoteStore:
     storage = getattr(request.app.state, "storage", None)
     if storage is None:
@@ -195,6 +203,50 @@ def create_notes_router() -> APIRouter:
                 for e in events
             ],
         }
+
+    # ── AI 写日志 (NOTE-002) ─────────────────────────────────────
+
+    @router.post("/api/notes/ai-journal/run")
+    async def ai_journal_run(request: Request, body: AiJournalRunRequest) -> dict:
+        """触发 AI 批量代写待补日志。后台跑,进度看 /api/notes/ai-journal/status。
+
+        守卫: kimi 可用 + KIMI_API_KEY 就绪才启动;单飞(已在跑 → 409)。
+        只写正文为空的 买入/卖出 事件;不在推票榜单的交易不代写,归入手动清单。
+        """
+        import os as _os
+
+        from src.data.services.kimi_listing_verifier import kimi_available
+        from src.notes import ai_journal
+
+        if ai_journal.get_state()["running"]:
+            raise HTTPException(status_code=409, detail="AI 写日志已在跑,等它结束")
+        if not kimi_available():
+            raise HTTPException(status_code=503, detail="容器里没有 kimi,无法代写")
+        if not _os.environ.get("KIMI_API_KEY"):
+            raise HTTPException(status_code=503, detail="KIMI_API_KEY 未配置,无法代写")
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            raise HTTPException(status_code=503, detail="GreptimeDB unavailable")
+
+        import asyncio as _asyncio
+
+        # 引用挂到 app.state 防止 task 被 GC 掐掉
+        request.app.state.ai_journal_task = _asyncio.create_task(
+            ai_journal.run_ai_journal_batch(
+                storage,
+                event_ids=body.event_ids,
+                time_budget_sec=body.time_budget_sec,
+                max_events=body.max_events,
+            )
+        )
+        return {"started": True}
+
+    @router.get("/api/notes/ai-journal/status")
+    async def ai_journal_status() -> dict:
+        """AI 写日志进度/结果/手动清单。"""
+        from src.notes import ai_journal
+
+        return ai_journal.get_state()
 
     @router.get("/api/notes/stock-name/{code}")
     async def stock_name(code: str) -> dict:

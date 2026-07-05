@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.21.0 | 2026-07-05 | - | NOTE-002 **AI 交易日志代写**上线:补作业页「AI 写日志」按钮 → `POST /api/notes/ai-journal/run` 后台批量代写正文为空的买卖事件(对内+对外两栏,仿用户手写范文)。策略票判定查 159 选股接口(`/api/v16/scan-history?date=`,买入日在 V16 Top-10 才代写);**不在榜单的绝不冒认策略信号**,归 manual_list 留用户手动写。事实包=榜单+本机日线/分钟线+FIFO 配对推算收益;kimi 串行+时间预算+单飞;只写仍为空的正文(写回前二次确认);收益只进文本不回填 realized_pnl 字段。 |
 | 0.20.1 | 2026-07-05 | - | NOTE-001 逆回购**佣金(手续费)可填**(用户核实逆回购有手续费):commission 列买卖/逆回购通用、不参与收益互斥;过户费/印花税/股息对逆回购仍拒收;类型互转时佣金保留、其余照旧清空。补作业逆回购待补判定改 = **佣金+收益**都要填;三栏页/补作业逆回购行佣金格开放。 |
 | 0.20.0 | 2026-07-05 | - | NOTE-001 逆回购收益改存**独立列 `repo_income`**,与平仓收益 realized_pnl **物理隔离**(用户要求 100% 任何情况分得清)。硬性不变量(存储层守卫强制):逆回购行 realized_pnl/费项/股息 恒 NULL;非逆回购行 repo_income 恒 NULL;**类型切换时不属于新类型的数值自动清空、绝不搬家**;客户端往错误字段塞非空值 → 400 拒收。UI 仍共用一个「收益」输入格,按行类型落到对应列。幂等 ALTER 兼容老库。 |
 | 0.19.2 | 2026-07-05 | - | NOTE-001 补作业表头「平仓收益(卖)」改**「收益」**(tooltip: 卖出=平仓收益;逆回购=利息收益)——括号里的"卖"让用户以为逆回购不能填这列,实际逆回购的利息收益就登记在这一列。 |
@@ -1285,6 +1286,60 @@ xtquant 成交回报字段（成交价/量/金额/订单号）**不含佣金/手
 - T+n 复盘提醒（cron 扫所有股票最近一次买入，T+1/T+3/T+5 飞书推链接）
 - 全文搜索（GreptimeDB 暂无 FTS，先靠浏览器 ctrl+F；未来可加 like 模糊匹配）
 - 跨股票分析（"按 signal 类型回归胜率"——需要 event_type 标签更结构化）
+
+---
+
+### [NOTE-002] AI 交易日志代写 (AI Journal Writer)
+
+**Status**: Implemented — 线上功能 + 离线补作业工具 (2026-07-05)
+
+**Description**: 给 trade_notes 里正文为空的 买入/卖出 事件批量代写「交易原因」日志
+（对内 `content` + 对外 `content_external` 两栏），风格仿照用户已手写的范文（范文从
+库里动态抽最近手写正文，风格随用户更新）。买入原因基于当日 V16 推票（排名/板块/评分）
++ 早盘分钟走势 + CCI14；卖出原因基于 T+2 持仓原则 + 实际持仓天数/个股与大盘走势/
+FIFO 推算收益，弹性叙事（提前止损/到期出货/多拿）。
+
+**策略票判定（用户定的铁律）**: 只有「买入当日在 V16 Top-10 榜单」的买入（及买入腿
+在榜单的卖出）才代写；**不在榜单的交易绝不冒认策略信号**，归入 manual_list 返回给
+用户手动写。榜单按日期查 159（main 分支）的选股接口
+`GET /api/v16/scan-history?date=`（main 侧 `src/web/v16_scan_history.py`，扫描后落盘
+`data/v16_scan_history/*.json`，另有 X-API-Key 回填端点上传离线复刻的历史日期）。
+**选股接口不可达 ≠ 无数据**——不可达时中止整批（否则会把策略票误判成手动票）。
+
+**线上触发（补作业页按钮「AI 写日志」）**:
+
+```
+POST /api/notes/ai-journal/run     {event_ids?, max_events<=200, time_budget_sec<=6h}
+GET  /api/notes/ai-journal/status  进度/结果/manual_list
+```
+
+- 守卫：kimi_available() + KIMI_API_KEY 就绪才启动；单飞（已在跑 → 409）；
+  kimi 串行 + 时间预算（预算耗尽优雅停，剩的下次再点）。
+- 事实包（服务端组装）：159 榜单 + 本机 GreptimeDB backtest_daily（CCI14/持仓表现，
+  vol×100 手→股）/backtest_minute（早盘与卖出时段分时）+ Tushare index_daily 大盘
+  （best-effort）+ trade_notes 全量 FIFO 配对。数据缺口显式写进 `data_gaps`
+  告诉 kimi 不许写对应内容。
+- kimi 调用复用路径 B 模式：`kimi --print --afk` + 结果临时文件（不从 trace 刮）+
+  错误如实分类；kimi 工具/认证故障（KimiToolError）→ 中止整批不连环烧。
+- **只写正文仍为空的事件**：写回前二次读库确认，跑批期间用户手写了就放弃该笔。
+- 跑完飞书大白话总结（成功/失败/手动清单）。
+
+**硬性规则**（`src/notes/ai_journal_instructions.md` 对 kimi 的约束）:
+- 只准引用事实包里的数字，一个数都不许编；缺数据的信息不写。
+- 卖出理由必须与数据自洽：T+2 到期 / <2 提前（止损/落袋）/ >2 多拿（技术面强），
+  分批腿体现分批。
+- 清仓收益/收益率用 FIFO 推算值（含买卖费用分摊，口径对齐用户手写范文），
+  **不回填** `realized_pnl` 字段（那是系统既有计算逻辑的领地）。
+
+**Files**: `src/notes/ai_journal.py`（服务）+ `ai_journal_instructions.md`（任务书）+
+`src/web/notes_routes.py`（run/status 端点）+ `trade_notes_backfill.html`（按钮+进度）；
+测试 `tests/unit/notes/test_ai_journal.py`、`tests/unit/web/test_ai_journal_routes.py`。
+
+**离线补作业工具（历史积压用，与线上共用任务书思路）**:
+`dev-tools/ai_journal/{fetch_materials,run_kimi_writer,apply_drafts}.py` —— 素材从
+V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一致）+ Tushare 拉，
+本机 kimi 并发 2（启动错峰防 `~/.kimi` 写锁竞态）。复刻结果可经 main 的回填端点
+上传成 159 的正式榜单数据。
 
 ---
 

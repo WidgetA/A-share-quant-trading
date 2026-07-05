@@ -95,6 +95,8 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
         <button id="tnbReload" title="重新从数据库加载">↻ 重新加载</button>
         <button id="tnbAddRow">＋ 加一行</button>
         <button id="tnbSaveAll" class="primary">全部保存</button>
+        <button id="tnbAiJournal" title="给所有还没写正文的买卖事件让 AI 代写交易日志(不在推票榜单的会留给你手动写)">AI 写日志</button>
+        <span class="tnb-summary" id="tnbAiStatus"></span>
         <span class="tnb-summary" id="tnbSummary"></span>
     </div>
 
@@ -704,6 +706,62 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
     window.addEventListener('beforeunload', (e) => {
         if (rows.some(r => r.dirty)) { e.preventDefault(); e.returnValue = ''; }
     });
+
+    // ── AI 写日志 (NOTE-002) ──────────────────────────────────────
+    const aiBtn = document.getElementById('tnbAiJournal');
+    const aiStatus = document.getElementById('tnbAiStatus');
+    let aiPollTimer = null;
+
+    function renderAiState(st) {
+        if (st.running) {
+            aiBtn.disabled = true;
+            aiStatus.textContent = `AI 写日志中… ${st.done}/${st.total}` +
+                (st.current ? `（${st.current}）` : '');
+        } else {
+            aiBtn.disabled = false;
+            if (st.error) {
+                aiStatus.textContent = `AI 写日志中止: ${st.error}`;
+            } else if (st.finished_at) {
+                const manualN = (st.manual_list || []).length;
+                aiStatus.textContent = `AI 写完:成功 ${st.ok} 笔,失败 ${st.failed} 笔` +
+                    (manualN ? `,${manualN} 笔不在榜单要手动写` : '');
+            } else {
+                aiStatus.textContent = '';
+            }
+        }
+    }
+
+    async function pollAiStatus() {
+        try {
+            const st = await fetchJSON('/api/notes/ai-journal/status');
+            renderAiState(st);
+            if (st.running) {
+                aiPollTimer = setTimeout(pollAiStatus, 5000);
+            } else if (aiPollTimer) {
+                aiPollTimer = null;
+                loadAll(); // 跑完刷新表格,新写的正文会出现在备注列
+            }
+        } catch (e) {
+            aiStatus.textContent = 'AI 状态查询失败: ' + e.message;
+        }
+    }
+
+    aiBtn.addEventListener('click', async () => {
+        if (!confirm('让 AI 给所有还没写正文的买卖事件代写日志?\n不在推票榜单的会跳过留给你手动写。')) return;
+        try {
+            aiBtn.disabled = true;
+            await fetchJSON('/api/notes/ai-journal/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
+            pollAiStatus();
+        } catch (e) {
+            aiBtn.disabled = false;
+            aiStatus.textContent = 'AI 启动失败: ' + e.message;
+        }
+    });
+    pollAiStatus(); // 页面打开时同步一次(可能有正在跑的批)
 
     loadAll();
 })();
