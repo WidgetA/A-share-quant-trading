@@ -42,8 +42,22 @@ def test_ai_written_sibling_does_not_block():
     assert has_handwritten_sibling(empty, [empty, ai]) is False
 
 
-def test_other_direction_or_code_does_not_block():
+def test_other_code_does_not_block():
     empty_sell = _ev("s2", "卖出")
-    hand_buy = _ev("b1", "买入", content="进场理由", author="user")
     hand_other_code = _ev("s9", "卖出", code="600000", content="别的票", author="user")
-    assert has_handwritten_sibling(empty_sell, [empty_sell, hand_buy, hand_other_code]) is False
+    assert has_handwritten_sibling(empty_sell, [empty_sell, hand_other_code]) is False
+
+
+def test_handwritten_buy_blocks_its_sells():
+    # 「买入我写了的你不要多嘴」——买入是用户手写的,这条链的卖出也不代写
+    from datetime import datetime, timezone
+
+    hand_buy = _ev("b1", "买入", content="进场理由", author="user")
+    hand_buy.ts = datetime(2026, 5, 15, 1, 39, tzinfo=timezone.utc)
+    empty_sell = _ev("s2", "卖出")
+    leg = {"buy_dates": ["2026-05-15"]}
+    assert has_handwritten_sibling(empty_sell, [hand_buy, empty_sell], leg) is True
+    # 买入是 AI 写的则不拦
+    ai_buy = _ev("b1", "买入", content="AI 写的进场", author="ai")
+    ai_buy.ts = datetime(2026, 5, 15, 1, 39, tzinfo=timezone.utc)
+    assert has_handwritten_sibling(empty_sell, [ai_buy, empty_sell], leg) is False

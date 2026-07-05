@@ -127,12 +127,24 @@ def build_fifo_ledger(events: list[NoteEvent]) -> dict[str, dict]:
     return result
 
 
-def has_handwritten_sibling(event: NoteEvent, all_trades: list[NoteEvent]) -> bool:
-    """同一票、同一天(北京日)、同方向的分批成交里,是否已有用户手写过正文的记录。
+def _is_handwritten(x: NoteEvent) -> bool:
+    return bool(
+        ((x.content or "").strip() or (x.content_external or "").strip())
+        and x.author not in ("ai", "ai_journal")
+    )
 
-    有 → 这次进/出货用户已经记录过故事了,整组剩余空腿都不代写
-    (教训: 润建 5/18 用户在首腿写「先出一半」尾腿写「全出」,中间三笔百股小腿
-    被 AI 各写一篇废话)。AI 自己写的(author='ai')不算手写。
+
+def has_handwritten_sibling(
+    event: NoteEvent, all_trades: list[NoteEvent], fifo_leg: dict | None = None
+) -> bool:
+    """用户已经亲手记录过这条交易链 → AI 整条闭嘴,一个字不代写。
+
+    两种情况都算(2026-07-05 用户明确要求):
+    1. 同一票、同一天(北京日)、同方向的分批成交里有他手写的腿
+       (润建 5/18: 首腿「先出一半」尾腿「全出」,中间小腿不需要 AI 各写一篇);
+    2. 卖出事件对应的**买入是他手写的**(「买入我写了的你不要多嘴」)——
+       他写了进场理由的仓位,出场也是他自己的故事。
+    AI 自己写的(author='ai')不算手写。
     """
     d10 = event.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d")
     for x in all_trades:
@@ -141,10 +153,19 @@ def has_handwritten_sibling(event: NoteEvent, all_trades: list[NoteEvent]) -> bo
             and x.code == event.code
             and x.event_type == event.event_type
             and x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d") == d10
-            and ((x.content or "").strip() or (x.content_external or "").strip())
-            and x.author not in ("ai", "ai_journal")
+            and _is_handwritten(x)
         ):
             return True
+    if event.event_type == "卖出":
+        buy_dates = set((fifo_leg or {}).get("buy_dates") or [])
+        for x in all_trades:
+            if (
+                x.code == event.code
+                and x.event_type == "买入"
+                and x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d") in buy_dates
+                and _is_handwritten(x)
+            ):
+                return True
     return False
 
 
@@ -681,9 +702,9 @@ async def run_ai_journal_batch(
                 "reason": "",
             }
             try:
-                if has_handwritten_sibling(e, trades):
+                if has_handwritten_sibling(e, trades, fifo.get(e.event_id)):
                     entry["status"] = "skipped"
-                    entry["reason"] = "同天同票的分批成交里你已手写过记录,整组不代写"
+                    entry["reason"] = "这条交易链你已手写过记录(同组分批腿或买入),AI 不代写"
                     _state["results"].append(entry)
                     _state["done"] += 1
                     continue
