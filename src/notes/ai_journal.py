@@ -127,6 +127,27 @@ def build_fifo_ledger(events: list[NoteEvent]) -> dict[str, dict]:
     return result
 
 
+def has_handwritten_sibling(event: NoteEvent, all_trades: list[NoteEvent]) -> bool:
+    """同一票、同一天(北京日)、同方向的分批成交里,是否已有用户手写过正文的记录。
+
+    有 → 这次进/出货用户已经记录过故事了,整组剩余空腿都不代写
+    (教训: 润建 5/18 用户在首腿写「先出一半」尾腿写「全出」,中间三笔百股小腿
+    被 AI 各写一篇废话)。AI 自己写的(author='ai')不算手写。
+    """
+    d10 = event.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d")
+    for x in all_trades:
+        if (
+            x.event_id != event.event_id
+            and x.code == event.code
+            and x.event_type == event.event_type
+            and x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d") == d10
+            and ((x.content or "").strip() or (x.content_external or "").strip())
+            and x.author not in ("ai", "ai_journal")
+        ):
+            return True
+    return False
+
+
 # ── 策略票判定(纯函数,可单测) ────────────────────────────────────
 
 
@@ -467,7 +488,11 @@ async def assemble_fact(
 
 def build_exemplars(all_trades: list[NoteEvent], n_each: int = 4) -> str:
     """从用户手写过正文的买/卖事件里抽最近 N 篇当范文(排除 AI 写的)。"""
-    hand = [e for e in all_trades if (e.content or e.content_external) and e.author != "ai_journal"]
+    hand = [
+        e
+        for e in all_trades
+        if (e.content or e.content_external) and e.author not in ("ai", "ai_journal")
+    ]
     hand.sort(key=lambda e: e.ts, reverse=True)
     buys = [e for e in hand if e.event_type == "买入"][:n_each]
     sells = [e for e in hand if e.event_type == "卖出"][:n_each]
@@ -656,6 +681,13 @@ async def run_ai_journal_batch(
                 "reason": "",
             }
             try:
+                if has_handwritten_sibling(e, trades):
+                    entry["status"] = "skipped"
+                    entry["reason"] = "同天同票的分批成交里你已手写过记录,整组不代写"
+                    _state["results"].append(entry)
+                    _state["done"] += 1
+                    continue
+
                 check_date = (
                     d10
                     if e.event_type == "买入"
@@ -702,6 +734,7 @@ async def run_ai_journal_batch(
                         e.event_id,
                         content=draft["content"],
                         content_external=draft["content_external"],
+                        author="ai",  # 页面可见标记 + 范文抽取排除 AI 文
                     )
                     entry["status"] = "ok"
                     _state["ok"] += 1
