@@ -134,39 +134,32 @@ def _is_handwritten(x: NoteEvent) -> bool:
     )
 
 
-def has_handwritten_sibling(
-    event: NoteEvent, all_trades: list[NoteEvent], fifo_leg: dict | None = None
-) -> bool:
-    """用户已经亲手记录过这条交易链 → AI 整条闭嘴,一个字不代写。
+def collect_user_buy_notes(
+    event: NoteEvent, all_trades: list[NoteEvent], fifo_leg: dict | None
+) -> list[dict]:
+    """卖出事件对应买入腿里用户手写的记录(2026-07-05 用户定的规则:
+    「买的我写了卖的没写你也补,可以看我买的写了啥」)。
 
-    两种情况都算(2026-07-05 用户明确要求):
-    1. 同一票、同一天(北京日)、同方向的分批成交里有他手写的腿
-       (润建 5/18: 首腿「先出一半」尾腿「全出」,中间小腿不需要 AI 各写一篇);
-    2. 卖出事件对应的**买入是他手写的**(「买入我写了的你不要多嘴」)——
-       他写了进场理由的仓位,出场也是他自己的故事。
-    AI 自己写的(author='ai')不算手写。
+    返回给事实包,让 kimi 衔接用户买入时的口径写卖出;但卖出理由独立判断
+    ——卖早了可以与买入理由完全无关。用户写的内容只读,绝不修改。
     """
-    d10 = event.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d")
+    buy_dates = set((fifo_leg or {}).get("buy_dates") or [])
+    notes = []
     for x in all_trades:
         if (
-            x.event_id != event.event_id
-            and x.code == event.code
-            and x.event_type == event.event_type
-            and x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d") == d10
+            x.code == event.code
+            and x.event_type == "买入"
+            and x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d") in buy_dates
             and _is_handwritten(x)
         ):
-            return True
-    if event.event_type == "卖出":
-        buy_dates = set((fifo_leg or {}).get("buy_dates") or [])
-        for x in all_trades:
-            if (
-                x.code == event.code
-                and x.event_type == "买入"
-                and x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d") in buy_dates
-                and _is_handwritten(x)
-            ):
-                return True
-    return False
+            notes.append(
+                {
+                    "date": x.ts.astimezone(_BEIJING_TZ).strftime("%Y-%m-%d"),
+                    "content": x.content,
+                    "content_external": x.content_external,
+                }
+            )
+    return notes
 
 
 # ── 策略票判定(纯函数,可单测) ────────────────────────────────────
@@ -504,6 +497,20 @@ async def assemble_fact(
             {"time": x.ts.astimezone(_BEIJING_TZ).strftime("%H:%M"), "price": x.price, "qty": x.qty}
             for x in sorted(siblings, key=lambda x: x.ts)
         ]
+        buy_notes = collect_user_buy_notes(event, all_trades, leg)
+        if buy_notes:
+            fact["your_buy_note"] = buy_notes
+        # 同日已有用户手写的其他卖出腿 → 原文给 kimi 衔接口吻(只读)
+        hand_sells = [x for x in siblings if _is_handwritten(x)]
+        if hand_sells:
+            fact["your_same_day_sell_notes"] = [
+                {
+                    "time": x.ts.astimezone(_BEIJING_TZ).strftime("%H:%M"),
+                    "content": x.content,
+                    "content_external": x.content_external,
+                }
+                for x in sorted(hand_sells, key=lambda x: x.ts)
+            ]
     return fact
 
 
@@ -702,13 +709,6 @@ async def run_ai_journal_batch(
                 "reason": "",
             }
             try:
-                if has_handwritten_sibling(e, trades, fifo.get(e.event_id)):
-                    entry["status"] = "skipped"
-                    entry["reason"] = "这条交易链你已手写过记录(同组分批腿或买入),AI 不代写"
-                    _state["results"].append(entry)
-                    _state["done"] += 1
-                    continue
-
                 check_date = (
                     d10
                     if e.event_type == "买入"
