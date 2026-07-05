@@ -3,10 +3,11 @@
 # 批量代写「交易原因」(对内 content + 对外 content_external),风格仿用户手写范文。
 #
 # 数据流(每笔一个「事实包」):
-#   - 推票事实: 159 的**现成**选股接口 GET /api/trading/recommendations?date= (X-API-Key,
-#     只读调用;159 是生产选股机,绝不改动它——见 MEMORY feedback_never_touch_159_prod)。
+#   - 推票事实: **本服务自己的**选股接口 GET /api/trading/recommendations?date=
+#     (localhost 自调用,X-API-Key 用本机交易 key;今天读内存、历史日服务端现算)。
 #     只有「在当日 Top-10 榜单」的买入(以及买入腿在榜单的卖出)才代写;
 #     不在榜单的交易**绝不冒认策略信号**,归入 manual_list 由用户手动处理。
+#     (159 生产选股机与本功能无任何交互——见 MEMORY feedback_never_touch_159_prod)
 #   - 行情事实: 本机 GreptimeDB backtest_daily/backtest_minute (日线 CCI14/持仓表现,
 #     分钟线早盘/卖出时段走势) + Tushare index_daily 大盘背景(best-effort)。
 #   - 持仓事实: trade_notes 全量买卖 FIFO 配对 → 成本价/T+n/推算清仓收益(只进文本,
@@ -35,13 +36,18 @@ logger = logging.getLogger(__name__)
 _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 _INSTRUCTIONS_PATH = Path(__file__).resolve().parent / "ai_journal_instructions.md"
 
-# 159 的现成选股接口(只读)。地址与 key 都可用环境变量覆盖;
-# key 缺省复用本服务自己的 TRADING_API_KEY(两台若不同,配 SCAN_API_KEY)。
-V16_SCAN_BASE = os.environ.get("V16_SCAN_BASE", "http://8.159.150.224:8000")
+# 选股接口 = 本服务自己的 /api/trading/recommendations(同进程,localhost 自调用,只读)。
+# 地址可用环境变量覆盖;key 用本服务自己的交易 API Key(config 统一读取逻辑)。
+V16_SCAN_BASE = os.environ.get("V16_SCAN_BASE", "http://localhost:8000")
 
 
 def _scan_api_key() -> str:
-    return os.environ.get("SCAN_API_KEY") or os.environ.get("TRADING_API_KEY") or ""
+    override = os.environ.get("SCAN_API_KEY")
+    if override:
+        return override
+    from src.common.config import get_trading_api_key
+
+    return get_trading_api_key() or ""
 
 
 KIMI_JOURNAL_TIMEOUT_SEC = int(os.environ.get("KIMI_JOURNAL_TIMEOUT_SEC", "1200"))
@@ -191,19 +197,20 @@ def _normalize_scan_rows(payload: dict) -> list[dict] | None:
 
 
 async def fetch_scan_rows(day: str) -> list[dict] | None:
-    """只读调用 159 现成选股接口拉某日推票。日期 YYYY-MM-DD。当日无推荐返回 None。
+    """只读调用本服务选股接口拉某日推票。日期 YYYY-MM-DD。当日无推荐返回 None。
 
+    历史日是服务端现算(全市场扫描),可能要几分钟——超时给足。
     「无数据」与「接口不可达/鉴权失败」必须分清——后者中止整批,否则会把
-    策略票误判成手动票。这里绝不向 159 发任何修改类请求。
+    策略票误判成手动票。
     """
     import httpx
 
     key = _scan_api_key()
     if not key:
-        raise RuntimeError("选股接口需要 X-API-Key,但 SCAN_API_KEY/TRADING_API_KEY 都没配")
+        raise RuntimeError("选股接口需要 X-API-Key,但本机交易 API Key 没配置")
     url = f"{V16_SCAN_BASE}/api/trading/recommendations"
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.get(url, params={"date": day}, headers={"X-API-Key": key})
         if resp.status_code in (401, 403):
             raise RuntimeError(f"选股接口拒绝了 API Key(HTTP {resp.status_code}),请核对 key")
