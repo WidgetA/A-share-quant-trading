@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from src.notes.ai_journal import (
     TOP_LIST_SIZE,
+    _normalize_scan_rows,
     build_exemplars,
     build_fifo_ledger,
     classify_event,
@@ -151,6 +152,37 @@ class TestClassifyEvent:
         ok, why, _ = classify_event("卖出", "002407", "2026-06-05", {"buy_dates": []}, self.SCAN)
         assert not ok
         assert "买入腿" in why
+
+
+class TestNormalizeScanRows:
+    def test_maps_recommendations_payload(self):
+        payload = {
+            "date": "2026-06-03",
+            "recommendations": [
+                {
+                    "rank": 1,
+                    "stock_code": "002384",
+                    "stock_name": "东山精密",
+                    "board_name": "CPO",
+                    "ml_score": 0.21,
+                    "final_candidates": 164,
+                },
+                {
+                    "stock_code": "600246",
+                    "stock_name": "万通发展",
+                    "board_name": "存储芯片",
+                    "lgb_score": 0.20,
+                },
+            ],
+        }
+        rows = _normalize_scan_rows(payload)
+        assert rows[0]["rank"] == 1 and rows[0]["score"] == 0.21
+        # 无 rank 字段时按顺序补位;评分字段名兼容 lgb_score
+        assert rows[1]["rank"] == 2 and rows[1]["score"] == 0.20
+
+    def test_empty_recommendations_means_no_data(self):
+        assert _normalize_scan_rows({"date": "2026-06-01", "recommendations": []}) is None
+        assert _normalize_scan_rows({"error": "..."}) is None
 
 
 class TestBuildExemplars:

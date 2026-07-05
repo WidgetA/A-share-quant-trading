@@ -3,7 +3,8 @@
 # 批量代写「交易原因」(对内 content + 对外 content_external),风格仿用户手写范文。
 #
 # 数据流(每笔一个「事实包」):
-#   - 推票事实: 159(main 分支)的选股接口 GET /api/v16/scan-history?date= —— 排名/评分/板块。
+#   - 推票事实: 159 的**现成**选股接口 GET /api/trading/recommendations?date= (X-API-Key,
+#     只读调用;159 是生产选股机,绝不改动它——见 MEMORY feedback_never_touch_159_prod)。
 #     只有「在当日 Top-10 榜单」的买入(以及买入腿在榜单的卖出)才代写;
 #     不在榜单的交易**绝不冒认策略信号**,归入 manual_list 由用户手动处理。
 #   - 行情事实: 本机 GreptimeDB backtest_daily/backtest_minute (日线 CCI14/持仓表现,
@@ -34,8 +35,14 @@ logger = logging.getLogger(__name__)
 _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 _INSTRUCTIONS_PATH = Path(__file__).resolve().parent / "ai_journal_instructions.md"
 
-# 159 (main 分支) 的选股接口。按分支部署在不同 IP,可用环境变量覆盖。
+# 159 的现成选股接口(只读)。地址与 key 都可用环境变量覆盖;
+# key 缺省复用本服务自己的 TRADING_API_KEY(两台若不同,配 SCAN_API_KEY)。
 V16_SCAN_BASE = os.environ.get("V16_SCAN_BASE", "http://8.159.150.224:8000")
+
+
+def _scan_api_key() -> str:
+    return os.environ.get("SCAN_API_KEY") or os.environ.get("TRADING_API_KEY") or ""
+
 
 KIMI_JOURNAL_TIMEOUT_SEC = int(os.environ.get("KIMI_JOURNAL_TIMEOUT_SEC", "1200"))
 DEFAULT_TIME_BUDGET_SEC = 1800
@@ -158,36 +165,53 @@ def classify_event(
 # ── 行情/推票数据获取 ────────────────────────────────────────────
 
 
-async def fetch_scan_rows(day: str) -> list[dict] | None:
-    """从 159 选股接口拉某日推票榜单。日期格式 YYYY-MM-DD。查不到返回 None。
+def _normalize_scan_rows(payload: dict) -> list[dict] | None:
+    """把 /api/trading/recommendations 的应答规整成 classify/facts 用的行。
 
-    「无数据 404」与「接口不可达/端点不存在」必须分清——后者中止整批,否则
-    对面跑旧镜像(路由整体 404)时会把所有策略票误判成手动票。只有 404 且
-    detail 是我们自己的「无推票榜单数据」措辞才算真·无数据。
+    纯函数,可单测。行字段对齐: rank / stock_code / stock_name / board_name /
+    score / final_candidates(评分字段名各版本可能是 ml_score/lgb_score/v3_score)。
+    明确「当日无推荐」→ None。
+    """
+    recs = payload.get("recommendations")
+    if not recs:
+        return None
+    rows: list[dict] = []
+    for i, r in enumerate(recs, 1):
+        rows.append(
+            {
+                "rank": r.get("rank") or i,
+                "stock_code": r.get("stock_code"),
+                "stock_name": r.get("stock_name"),
+                "board_name": r.get("board_name"),
+                "score": r.get("ml_score", r.get("lgb_score", r.get("v3_score"))),
+                "final_candidates": r.get("final_candidates"),
+            }
+        )
+    return rows
+
+
+async def fetch_scan_rows(day: str) -> list[dict] | None:
+    """只读调用 159 现成选股接口拉某日推票。日期 YYYY-MM-DD。当日无推荐返回 None。
+
+    「无数据」与「接口不可达/鉴权失败」必须分清——后者中止整批,否则会把
+    策略票误判成手动票。这里绝不向 159 发任何修改类请求。
     """
     import httpx
 
-    url = f"{V16_SCAN_BASE}/api/v16/scan-history"
+    key = _scan_api_key()
+    if not key:
+        raise RuntimeError("选股接口需要 X-API-Key,但 SCAN_API_KEY/TRADING_API_KEY 都没配")
+    url = f"{V16_SCAN_BASE}/api/trading/recommendations"
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, params={"date": day})
-        if resp.status_code == 404:
-            try:
-                detail = resp.json().get("detail") or ""
-            except Exception:
-                detail = ""
-            if "无推票榜单数据" in detail:
-                return None
-            raise RuntimeError(
-                f"选股接口 404 但不是「无数据」应答(detail={detail!r}),疑似旧版本/路径错误"
-            )
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.get(url, params={"date": day}, headers={"X-API-Key": key})
+        if resp.status_code in (401, 403):
+            raise RuntimeError(f"选股接口拒绝了 API Key(HTTP {resp.status_code}),请核对 key")
         resp.raise_for_status()
-        rows = resp.json().get("rows") or []
-        return rows or None
+        return _normalize_scan_rows(resp.json())
     except RuntimeError:
         raise
     except Exception as exc:
-        # 接口不可达与「无数据」必须分清: 前者中止整批(否则会把策略票误判成手动票)。
         raise RuntimeError(f"选股接口不可达: {exc}") from exc
 
 
