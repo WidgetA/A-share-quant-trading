@@ -6,6 +6,8 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from src.notes.ai_journal import (
     TOP_LIST_SIZE,
     _normalize_scan_rows,
@@ -182,7 +184,11 @@ class TestNormalizeScanRows:
 
     def test_empty_recommendations_means_no_data(self):
         assert _normalize_scan_rows({"date": "2026-06-01", "recommendations": []}) is None
-        assert _normalize_scan_rows({"error": "..."}) is None
+
+    def test_error_payload_raises_instead_of_no_data(self):
+        # 带 error 的空应答 = 接口故障/开关关闭,必须报错中止,不许当「无数据」
+        with pytest.raises(RuntimeError, match="推荐功能已关闭"):
+            _normalize_scan_rows({"recommendations": [], "error": "推荐功能已关闭"})
 
 
 class TestBuildExemplars:

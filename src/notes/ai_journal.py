@@ -176,10 +176,15 @@ def _normalize_scan_rows(payload: dict) -> list[dict] | None:
 
     纯函数,可单测。行字段对齐: rank / stock_code / stock_name / board_name /
     score / final_candidates(评分字段名各版本可能是 ml_score/lgb_score/v3_score)。
-    明确「当日无推荐」→ None。
+    明确「当日无推荐」→ None。**带 error 的应答绝不当「无数据」**——那是接口在
+    报故障/开关关闭,吞掉会把整批策略票误判成手动票(2026-07-05 踩过:推荐功能
+    开关关闭时全部日期回 error,被当成"无数据"→ 3 笔策略票全进了手动清单)。
     """
     recs = payload.get("recommendations")
     if not recs:
+        err = payload.get("error")
+        if err:
+            raise RuntimeError(f"选股接口报错: {err}")
         return None
     rows: list[dict] = []
     for i, r in enumerate(recs, 1):
