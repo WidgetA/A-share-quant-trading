@@ -35,7 +35,6 @@
 | 0.10.3 | 2026-03-05 | - | STR-004: Add Step 5.7 LLM board relevance filter + flip scoring to +Z(gfo)+Z(amp) + board leader bonus |
 | 0.10.4 | 2026-06-01 | - | STR-004: Blacklist 专精特新 board — move into JUNK_BOARDS so is_junk_board() actually excludes it (was leaking via un-filtered BROAD_CONCEPT_BOARDS, dominating universe + best-board labels) |
 | 0.10.5 | 2026-06-01 | - | STR-004: V16 Feishu top-10 report marks picks whose best-board is a BROAD_CONCEPT_BOARD with ⭐ + adds a legend, so vague wide-theme picks are visible at a glance (still un-filtered, just flagged) |
-| 0.10.6 | 2026-07-05 | - | STR-004: V16 每日推票榜单落盘 data/v16_scan_history/ + 选股接口 GET /api/v16/scan-history?date= + 回填端点(X-API-Key)——笔记服务 AI 写日志(NOTE-002)按日回查当日 Top-10 |
 
 ---
 
@@ -701,15 +700,6 @@ strategy:
 - [x] Range backtest with trading cost simulation (SSE streaming)
 - [x] Tab-based UI for single-day vs range backtest
 - [ ] Unit tests
-
-**扫描榜单持久化与选股接口 (2026-07-05)**: 每日 9:39 扫描完成后 Top-10 写
-`data/v16_scan_history/YYYY-MM-DD.json`（本地 JSON，零 DB 依赖；v15_scan_db 需要的
-PostgreSQL 线上不存在，save_top_n 从未接线）。行字段：rank/stock_code/stock_name/
-board_name/score/buy_price/open_price/prev_close/gain_from_open_pct/cci14/final_candidates。
-接口：`GET /api/v16/scan-history?date=YYYY-MM-DD`（无鉴权，无数据 404）；
-`POST /api/v16/scan-history/backfill`（X-API-Key=iquant key，离线复刻结果上传历史日期，
-live 数据默认拒绝覆盖需 force）。消费方：笔记服务（另一分支部署）的 AI 写日志
-功能（NOTE-002）按买入日期回查榜单判定策略票。模块：`src/web/v16_scan_history.py`。
 
 ---
 

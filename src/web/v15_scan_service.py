@@ -671,19 +671,6 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     # Push top-10 report to Feishu (always, non-critical)
     await _notify_feishu_v16_top10(scan_result)
 
-    # Persist top-10 to data/v16_scan_history/ — the notes service's AI journal
-    # feature queries this by date. Non-critical: never break the scan.
-    try:
-        from src.web.v16_scan_history import build_history_rows_from_scan, persist_scan_history
-
-        persist_scan_history(
-            today.strftime("%Y-%m-%d"),
-            build_history_rows_from_scan(scan_result, stock_data),
-            source="live",
-        )
-    except Exception:
-        logger.exception("V16 scan history persist failed (scan continues)")
-
     recommended = scan_result.recommended
     if not recommended:
         return None

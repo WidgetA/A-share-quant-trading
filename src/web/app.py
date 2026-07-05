@@ -109,11 +109,6 @@ def create_app(
     v15_bt_router = create_v15_backtest_router()
     app.include_router(v15_bt_router)
 
-    # V16 scan-history query/backfill (NOTE-002 AI journal reads this by date)
-    from src.web.v16_scan_history import create_v16_scan_history_router
-
-    app.include_router(create_v16_scan_history_router())
-
     # Add iQuant API router (trading only, scan is separate)
     iquant_router = create_iquant_router()
     app.include_router(iquant_router)
