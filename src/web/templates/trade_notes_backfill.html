@@ -724,7 +724,8 @@ table.tnb-table { border-collapse: separate; border-spacing: 0; font-size: 0.85e
             } else if (st.finished_at) {
                 const manualN = (st.manual_list || []).length;
                 aiStatus.textContent = `AI 写完:成功 ${st.ok} 笔,失败 ${st.failed} 笔` +
-                    (manualN ? `,${manualN} 笔不在榜单要手动写` : '');
+                    (manualN ? `,${manualN} 笔不在榜单要手动写` : '') +
+                    (st.deferred ? `,${st.deferred} 笔等 159 补数据后重跑` : '');
             } else {
                 aiStatus.textContent = '';
             }

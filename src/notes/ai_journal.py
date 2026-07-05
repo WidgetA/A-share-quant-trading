@@ -57,9 +57,11 @@ _state: dict[str, Any] = {
     "ok": 0,
     "failed": 0,
     "manual": 0,
+    "deferred": 0,  # 159 缺榜单数据、挂起待补数重跑的事件数
     "current": None,
     "results": [],  # [{event_id, code, name, type, date, status, reason}]
     "manual_list": [],  # 不在榜单、需用户手动处理的交易
+    "gap_dates": [],  # 159 缺数据的日期(YYYY-MM-DD)
 }
 
 
@@ -588,9 +590,11 @@ async def run_ai_journal_batch(
         ok=0,
         failed=0,
         manual=0,
+        deferred=0,
         current=None,
         results=[],
         manual_list=[],
+        gap_dates=[],
         error=None,
     )
     loop = asyncio.get_running_loop()
@@ -618,9 +622,21 @@ async def run_ai_journal_batch(
             else:
                 for bd in (fifo.get(e.event_id) or {}).get("buy_dates", []):
                     scan_dates.add(bd)
+        # 159 缓存缺某些日期时: 该日期涉及的事件整体挂起(deferred),其余日期照跑。
+        # 绝不把「159 缺数据」当「不在榜单」归手动;其他错误(不可达等)仍中止整批。
         scan_rows_by_date: dict[str, list[dict] | None] = {}
+        gap_dates: dict[str, str] = {}
         for d in sorted(scan_dates):
-            scan_rows_by_date[d] = await fetch_scan_rows(d)
+            try:
+                scan_rows_by_date[d] = await fetch_scan_rows(d)
+            except RuntimeError as exc:
+                if "算不了这天的榜单" in str(exc):
+                    gap_dates[d] = str(exc)
+                    logger.warning("ai_journal: %s 榜单数据缺口,该日事件挂起: %s", d, exc)
+                else:
+                    raise
+        if gap_dates:
+            _state["gap_dates"] = sorted(gap_dates)
 
         for e in targets:
             if loop.time() > deadline:
@@ -640,6 +656,19 @@ async def run_ai_journal_batch(
                 "reason": "",
             }
             try:
+                check_date = (
+                    d10
+                    if e.event_type == "买入"
+                    else ((fifo.get(e.event_id) or {}).get("buy_dates") or [d10])[0]
+                )
+                if check_date in gap_dates:
+                    entry["status"] = "deferred"
+                    entry["reason"] = f"159 缺 {check_date} 的榜单数据,补数后重跑即可"
+                    _state["deferred"] += 1
+                    _state["results"].append(entry)
+                    _state["done"] += 1
+                    continue
+
                 is_strategy, why_not, scan_row = classify_event(
                     e.event_type, e.code, d10, fifo.get(e.event_id), scan_rows_by_date
                 )
@@ -722,6 +751,11 @@ async def _notify_feishu_summary() -> None:
         ]
         if _state.get("error"):
             lines.append(f"整批中止原因: {_state['error']}")
+        if _state.get("deferred"):
+            lines.append(
+                f"另有 {_state['deferred']} 笔因 159 缺榜单数据挂起"
+                f"(缺数据日期: {', '.join(_state.get('gap_dates', []))}),补数后再点一次即可"
+            )
         for m in manual[:10]:
             lines.append(f"  手动: {m['date']} {m['type']} {m['code']} ({m['reason']})")
         if len(manual) > 10:
