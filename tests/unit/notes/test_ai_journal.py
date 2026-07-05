@@ -157,38 +157,62 @@ class TestClassifyEvent:
 
 
 class TestNormalizeScanRows:
-    def test_maps_recommendations_payload(self):
+    def test_maps_v16_backtest_payload(self):
         payload = {
-            "date": "2026-06-03",
-            "recommendations": [
+            "success": True,
+            "trade_date": "2026-06-03",
+            "final_candidates": 164,
+            "recommended": [{"code": "002384", "rank": 1}],
+            "all_scored": [
                 {
+                    "code": "002384",
+                    "name": "东山精密",
+                    "score": 0.2145,
                     "rank": 1,
-                    "stock_code": "002384",
-                    "stock_name": "东山精密",
-                    "board_name": "CPO",
-                    "ml_score": 0.21,
-                    "final_candidates": 164,
+                    "buy_price": 223.86,
+                    "board": "共封装光学(CPO)",
                 },
                 {
-                    "stock_code": "600246",
-                    "stock_name": "万通发展",
-                    "board_name": "存储芯片",
-                    "lgb_score": 0.20,
+                    "code": "600246",
+                    "name": "万通发展",
+                    "score": 0.2145,
+                    "rank": 2,
+                    "buy_price": 16.64,
+                    "board": "存储芯片",
                 },
             ],
         }
         rows = _normalize_scan_rows(payload)
-        assert rows[0]["rank"] == 1 and rows[0]["score"] == 0.21
-        # 无 rank 字段时按顺序补位;评分字段名兼容 lgb_score
-        assert rows[1]["rank"] == 2 and rows[1]["score"] == 0.20
+        # 优先 all_scored(全量),字段名 code/name/board → stock_code/stock_name/board_name
+        assert len(rows) == 2
+        assert rows[0] == {
+            "rank": 1,
+            "stock_code": "002384",
+            "stock_name": "东山精密",
+            "board_name": "共封装光学(CPO)",
+            "score": 0.2145,
+            "final_candidates": 164,
+        }
 
-    def test_empty_recommendations_means_no_data(self):
-        assert _normalize_scan_rows({"date": "2026-06-01", "recommendations": []}) is None
+    def test_scanned_but_empty_means_no_list_that_day(self):
+        assert (
+            _normalize_scan_rows(
+                {"success": True, "trade_date": "2026-06-01", "recommended": [], "all_scored": []}
+            )
+            is None
+        )
 
-    def test_error_payload_raises_instead_of_no_data(self):
-        # 带 error 的空应答 = 接口故障/开关关闭,必须报错中止,不许当「无数据」
-        with pytest.raises(RuntimeError, match="推荐功能已关闭"):
-            _normalize_scan_rows({"recommendations": [], "error": "推荐功能已关闭"})
+    def test_data_gap_message_raises_instead_of_no_data(self):
+        # 159 缓存缺该日期 ≠ 当日无榜单,必须报错中止,不许静默归手动
+        with pytest.raises(RuntimeError, match="算不了"):
+            _normalize_scan_rows(
+                {
+                    "success": True,
+                    "recommended": [],
+                    "all_scored": [],
+                    "message": "2026-04-28 无可用日线数据（非交易日或数据未下载）",
+                }
+            )
 
 
 class TestBuildExemplars:

@@ -3,11 +3,10 @@
 # 批量代写「交易原因」(对内 content + 对外 content_external),风格仿用户手写范文。
 #
 # 数据流(每笔一个「事实包」):
-#   - 推票事实: **本服务自己的**选股接口 GET /api/trading/recommendations?date=
-#     (localhost 自调用,X-API-Key 用本机交易 key;今天读内存、历史日服务端现算)。
+#   - 推票事实: 159 的 V16 回测端点 POST /api/v16/backtest {trade_date}(用户口径:
+#     每日推票以 159 的 V16 为准;纯查询、无副作用、无鉴权,对 159 只做这一种只读调用)。
 #     只有「在当日 Top-10 榜单」的买入(以及买入腿在榜单的卖出)才代写;
 #     不在榜单的交易**绝不冒认策略信号**,归入 manual_list 由用户手动处理。
-#     (159 生产选股机与本功能无任何交互——见 MEMORY feedback_never_touch_159_prod)
 #   - 行情事实: 本机 GreptimeDB backtest_daily/backtest_minute (日线 CCI14/持仓表现,
 #     分钟线早盘/卖出时段走势) + Tushare index_daily 大盘背景(best-effort)。
 #   - 持仓事实: trade_notes 全量买卖 FIFO 配对 → 成本价/T+n/推算清仓收益(只进文本,
@@ -36,18 +35,10 @@ logger = logging.getLogger(__name__)
 _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 _INSTRUCTIONS_PATH = Path(__file__).resolve().parent / "ai_journal_instructions.md"
 
-# 选股接口 = 本服务自己的 /api/trading/recommendations(同进程,localhost 自调用,只读)。
-# 地址可用环境变量覆盖;key 用本服务自己的交易 API Key(config 统一读取逻辑)。
-V16_SCAN_BASE = os.environ.get("V16_SCAN_BASE", "http://localhost:8000")
-
-
-def _scan_api_key() -> str:
-    override = os.environ.get("SCAN_API_KEY")
-    if override:
-        return override
-    from src.common.config import get_trading_api_key
-
-    return get_trading_api_key() or ""
+# 选股来源 = 159 的 V16 回测端点 POST /api/v16/backtest {trade_date}(用户指定口径:
+# 每日推票以 159 的 V16 为准)。纯查询、无副作用、无需鉴权;对 159 只做这一种只读调用,
+# 绝不发任何修改类请求(见 MEMORY feedback_never_touch_159_prod)。
+V16_SCAN_BASE = os.environ.get("V16_SCAN_BASE", "http://8.159.150.224:8000")
 
 
 KIMI_JOURNAL_TIMEOUT_SEC = int(os.environ.get("KIMI_JOURNAL_TIMEOUT_SEC", "1200"))
@@ -171,60 +162,76 @@ def classify_event(
 # ── 行情/推票数据获取 ────────────────────────────────────────────
 
 
-def _normalize_scan_rows(payload: dict) -> list[dict] | None:
-    """把 /api/trading/recommendations 的应答规整成 classify/facts 用的行。
+# 159 回不出榜单但属于「它算不了」而非「当日真没榜单」的 message 关键词——
+# 这些必须报错中止,不许当「无数据」归手动(否则数据缺口会把策略票误判成手动票)
+_SCAN_DATA_GAP_MARKERS = (
+    "无可用日线数据",
+    "数据未下载",
+    "无法构建股票数据",
+    "股票池为空",
+    "预下载",
+)
 
-    纯函数,可单测。行字段对齐: rank / stock_code / stock_name / board_name /
-    score / final_candidates(评分字段名各版本可能是 ml_score/lgb_score/v3_score)。
-    明确「当日无推荐」→ None。**带 error 的应答绝不当「无数据」**——那是接口在
-    报故障/开关关闭,吞掉会把整批策略票误判成手动票(2026-07-05 踩过:推荐功能
-    开关关闭时全部日期回 error,被当成"无数据"→ 3 笔策略票全进了手动清单)。
+
+def _normalize_scan_rows(payload: dict) -> list[dict] | None:
+    """把 159 /api/v16/backtest 的应答规整成 classify/facts 用的行。
+
+    纯函数,可单测。优先 all_scored(全量榜单,手动清单能写清"排第 15"还是
+    "不在漏斗"),回退 recommended(Top-10)。字段: code→stock_code, name→stock_name,
+    board→board_name, score, rank。
+    真·当日无推荐(扫描跑了但空)→ None;**带数据缺口 message 的空应答绝不当
+    「无数据」**——那是 159 缓存缺该日期,吞掉会把策略票误判成手动票
+    (2026-07-05 两次踩坑:推荐开关误用 + error 被吞)。
     """
-    recs = payload.get("recommendations")
-    if not recs:
-        err = payload.get("error")
-        if err:
-            raise RuntimeError(f"选股接口报错: {err}")
+    rows_raw = payload.get("all_scored") or payload.get("recommended")
+    if not rows_raw:
+        msg = str(payload.get("message") or payload.get("error") or "")
+        if any(marker in msg for marker in _SCAN_DATA_GAP_MARKERS):
+            raise RuntimeError(f"159 算不了这天的榜单: {msg}")
+        if payload.get("success") is False:
+            raise RuntimeError(f"159 回测接口报错: {msg or payload}")
         return None
+    final_candidates = payload.get("final_candidates")
     rows: list[dict] = []
-    for i, r in enumerate(recs, 1):
+    for i, r in enumerate(rows_raw, 1):
         rows.append(
             {
                 "rank": r.get("rank") or i,
-                "stock_code": r.get("stock_code"),
-                "stock_name": r.get("stock_name"),
-                "board_name": r.get("board_name"),
-                "score": r.get("ml_score", r.get("lgb_score", r.get("v3_score"))),
-                "final_candidates": r.get("final_candidates"),
+                "stock_code": r.get("code") or r.get("stock_code"),
+                "stock_name": r.get("name") or r.get("stock_name"),
+                "board_name": r.get("board") or r.get("board_name"),
+                "score": r.get("score"),
+                "final_candidates": final_candidates,
             }
         )
     return rows
 
 
 async def fetch_scan_rows(day: str) -> list[dict] | None:
-    """只读调用本服务选股接口拉某日推票。日期 YYYY-MM-DD。当日无推荐返回 None。
+    """只读调用 159 的 V16 回测端点拿某日推票榜单。日期 YYYY-MM-DD。
 
-    历史日是服务端现算(全市场扫描),可能要几分钟——超时给足。
-    「无数据」与「接口不可达/鉴权失败」必须分清——后者中止整批,否则会把
-    策略票误判成手动票。
+    真·当日无榜单返回 None。「159 缓存缺数据 / 接口不可达 / 报错」一律中止整批
+    (绝不静默当「无数据」)。对 159 只有这一个 POST 查询,无任何副作用。
     """
     import httpx
 
-    key = _scan_api_key()
-    if not key:
-        raise RuntimeError("选股接口需要 X-API-Key,但本机交易 API Key 没配置")
-    url = f"{V16_SCAN_BASE}/api/trading/recommendations"
+    url = f"{V16_SCAN_BASE}/api/v16/backtest"
     try:
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.get(url, params={"date": day}, headers={"X-API-Key": key})
-        if resp.status_code in (401, 403):
-            raise RuntimeError(f"选股接口拒绝了 API Key(HTTP {resp.status_code}),请核对 key")
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(url, json={"trade_date": day})
+        if resp.status_code == 400:
+            detail = ""
+            try:
+                detail = resp.json().get("detail") or ""
+            except Exception:
+                pass
+            raise RuntimeError(f"159 回测接口拒绝请求: {detail or 'HTTP 400'}")
         resp.raise_for_status()
         return _normalize_scan_rows(resp.json())
     except RuntimeError:
         raise
     except Exception as exc:
-        raise RuntimeError(f"选股接口不可达: {exc}") from exc
+        raise RuntimeError(f"选股接口(159)不可达: {exc}") from exc
 
 
 def _cci14(daily_rows: list[dict]) -> float | None:
