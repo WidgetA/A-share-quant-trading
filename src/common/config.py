@@ -934,6 +934,72 @@ def get_web_config() -> dict[str, Any]:
 
 
 # --- Feishu AI Assistant (AST-001) ---
+#
+# Configured via the Settings page (persisted to data/assistant_config.json —
+# a volume mount, survives redeploys); env vars are only a bootstrap fallback.
+# Field priority: persisted file > env var. Whitelist and read-only key are
+# read at USE time by the dispatcher, so saving them applies immediately;
+# app credentials are bound when the ws thread starts (restart to change).
+
+ASSISTANT_CONFIG_FILE = PROJECT_ROOT / "data" / "assistant_config.json"
+
+_ASSISTANT_ENV_BY_FIELD = {
+    "app_id": "FEISHU_ASSISTANT_APP_ID",
+    "app_secret": "FEISHU_ASSISTANT_APP_SECRET",
+    "allowed_users": "FEISHU_ASSISTANT_ALLOWED_USERS",
+    "readonly_key": "ASSISTANT_READONLY_KEY",
+}
+
+
+def _load_assistant_config() -> dict[str, str]:
+    """Effective assistant config: per-field, persisted file > env fallback."""
+    import json
+    import os
+
+    stored: dict[str, str] = {}
+    if ASSISTANT_CONFIG_FILE.exists():
+        try:
+            raw = json.loads(ASSISTANT_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                stored = {k: str(v) for k, v in raw.items() if isinstance(v, str)}
+        except (OSError, ValueError):
+            logger.warning("assistant_config.json unreadable — falling back to env vars")
+
+    effective: dict[str, str] = {}
+    for field, env_name in _ASSISTANT_ENV_BY_FIELD.items():
+        value = (stored.get(field) or "").strip()
+        if not value:
+            value = os.environ.get(env_name, "").strip()
+        effective[field] = value
+    return effective
+
+
+def set_assistant_config(**fields: str) -> None:
+    """Persist assistant config fields (partial update: only given, non-empty
+    values overwrite; unknown field names are rejected loudly)."""
+    import json
+
+    unknown = set(fields) - set(_ASSISTANT_ENV_BY_FIELD)
+    if unknown:
+        raise ValueError(f"unknown assistant config fields: {sorted(unknown)}")
+
+    stored: dict[str, str] = {}
+    if ASSISTANT_CONFIG_FILE.exists():
+        try:
+            raw = json.loads(ASSISTANT_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                stored = {k: str(v) for k, v in raw.items() if isinstance(v, str)}
+        except (OSError, ValueError):
+            pass
+    for field, value in fields.items():
+        if value and value.strip():
+            stored[field] = value.strip()
+
+    ASSISTANT_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ASSISTANT_CONFIG_FILE.write_text(
+        json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.info("Assistant config updated via web UI (fields: %s)", sorted(fields))
 
 
 def get_assistant_feishu_config() -> dict[str, str]:
@@ -943,23 +1009,18 @@ def get_assistant_feishu_config() -> dict[str, str]:
     needs a self-built app with event subscription; the relay app may or may
     not be the same one. Empty strings mean "not configured".
     """
-    import os
-
-    return {
-        "app_id": os.environ.get("FEISHU_ASSISTANT_APP_ID", "").strip(),
-        "app_secret": os.environ.get("FEISHU_ASSISTANT_APP_SECRET", "").strip(),
-    }
+    cfg = _load_assistant_config()
+    return {"app_id": cfg["app_id"], "app_secret": cfg["app_secret"]}
 
 
 def get_assistant_allowed_users() -> frozenset[str]:
-    """open_id whitelist for the Feishu assistant (comma-separated env var).
+    """open_id whitelist for the Feishu assistant (comma-separated).
 
-    Empty set = assistant must NOT start. Holdings are sensitive data; there
-    is deliberately no "allow everyone" mode.
+    Empty set = assistant must NOT start / must ignore everyone. Holdings are
+    sensitive data; there is deliberately no "allow everyone" mode. Read at
+    use time by the dispatcher, so web-UI changes apply immediately.
     """
-    import os
-
-    raw = os.environ.get("FEISHU_ASSISTANT_ALLOWED_USERS", "")
+    raw = _load_assistant_config()["allowed_users"]
     return frozenset(u.strip() for u in raw.split(",") if u.strip())
 
 
@@ -969,7 +1030,4 @@ def get_assistant_readonly_key() -> str | None:
     Never the trading key: order endpoints do not accept this key, so a
     prompt-injected kimi physically cannot place orders with it.
     """
-    import os
-
-    key = os.environ.get("ASSISTANT_READONLY_KEY", "").strip()
-    return key or None
+    return _load_assistant_config()["readonly_key"] or None

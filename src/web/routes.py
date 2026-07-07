@@ -2376,6 +2376,60 @@ def create_settings_router() -> APIRouter:
             "message": "Trading API Key 已保存，下次请求起 /api/trading/* 需要带 X-API-Key",
         }
 
+    # === FEISHU AI ASSISTANT (AST-001) ===
+
+    @router.get("/api/settings/assistant")
+    async def get_assistant_settings(request: Request):
+        """Assistant status for the Settings card (secrets masked)."""
+        from src.assistant.dispatcher import assistant_missing_requirements
+        from src.common.config import (
+            get_assistant_allowed_users,
+            get_assistant_feishu_config,
+            get_assistant_readonly_key,
+        )
+
+        cfg = get_assistant_feishu_config()
+        ro = get_assistant_readonly_key() or ""
+        dispatcher = getattr(request.app.state, "assistant_dispatcher", None)
+        return {
+            "running": bool(dispatcher and dispatcher.is_running()),
+            "app_id": cfg["app_id"],
+            "app_secret_configured": bool(cfg["app_secret"]),
+            "allowed_users": sorted(get_assistant_allowed_users()),
+            "readonly_key_masked": (
+                (ro[:4] + "..." + ro[-4:]) if len(ro) > 12 else ("***" if ro else "")
+            ),
+            "missing": assistant_missing_requirements(),
+        }
+
+    @router.post("/api/settings/assistant")
+    async def update_assistant_settings(request: Request):
+        """Save assistant config (partial update: empty fields keep current
+        values) and hot-start the assistant when everything is in place."""
+        from src.assistant.dispatcher import start_assistant_if_ready
+        from src.common.config import set_assistant_config
+
+        body = await request.json()
+        fields = {
+            k: (body.get(k) or "").strip()
+            for k in ("app_id", "app_secret", "allowed_users", "readonly_key")
+        }
+        provided = {k: v for k, v in fields.items() if v}
+        if not provided:
+            raise HTTPException(status_code=400, detail="至少填一项再保存")
+        set_assistant_config(**provided)
+
+        dispatcher = getattr(request.app.state, "assistant_dispatcher", None)
+        was_running = bool(dispatcher and dispatcher.is_running())
+        missing = start_assistant_if_ready(request.app.state)
+        if was_running:
+            message = "已保存。白名单/只读钥匙立即生效;App ID/Secret 的改动要重启服务才生效。"
+        elif not missing:
+            message = "已保存,助手已启动。去群里 @机器人 发 /持仓 试试。"
+        else:
+            message = "已保存,还缺:" + "、".join(missing) + "。配齐后保存会自动启动。"
+        return {"success": True, "message": message, "missing": missing}
+
     # === CACHE SCHEDULER TOGGLE ===
 
     @router.get("/api/settings/cache-scheduler")

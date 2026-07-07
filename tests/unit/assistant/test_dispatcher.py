@@ -40,12 +40,18 @@ def _msg(
     )
 
 
-def _dispatcher(queue_size: int = 4) -> tuple[AssistantDispatcher, list[str]]:
+def _dispatcher(
+    monkeypatch: pytest.MonkeyPatch,
+    queue_size: int = 4,
+    allowed: frozenset[str] = frozenset({OWNER}),
+) -> tuple[AssistantDispatcher, list[str]]:
+    # Whitelist + read-only key are read from config at use time (hot-apply
+    # from the Settings page) — stub the getters the dispatcher module uses.
+    monkeypatch.setattr(disp, "get_assistant_allowed_users", lambda: allowed)
+    monkeypatch.setattr(disp, "get_assistant_readonly_key", lambda: "ro-key")
     d = AssistantDispatcher(
         app_id="cli_x",
         app_secret="secret",
-        allowed_users=frozenset({OWNER}),
-        readonly_key="ro-key",
         api_base="http://127.0.0.1:8000",
         queue_size=queue_size,
     )
@@ -88,31 +94,41 @@ def test_build_task_prompt_pins_skill_and_rules():
 # ── _handle behaviour ────────────────────────────────────────────────────
 
 
-async def test_slash_command_acks_and_enqueues():
-    d, replies = _dispatcher()
+async def test_slash_command_acks_and_enqueues(monkeypatch: pytest.MonkeyPatch):
+    d, replies = _dispatcher(monkeypatch)
     await d._handle(_msg("@_user_1 /持仓"))
     assert d._queue.qsize() == 1
     assert len(replies) == 1
     assert "查询" in replies[0]
 
 
-async def test_non_whitelisted_user_is_silently_ignored():
-    d, replies = _dispatcher()
+async def test_non_whitelisted_user_is_silently_ignored(monkeypatch: pytest.MonkeyPatch):
+    d, replies = _dispatcher(monkeypatch)
     await d._handle(_msg("/持仓", open_id="ou_stranger"))
     assert d._queue.qsize() == 0
     assert replies == []
 
 
-async def test_duplicate_event_id_processed_once():
-    d, replies = _dispatcher()
+async def test_whitelist_is_read_at_use_time(monkeypatch: pytest.MonkeyPatch):
+    """Settings-page whitelist changes apply without restart."""
+    d, replies = _dispatcher(monkeypatch, allowed=frozenset())
+    await d._handle(_msg("/持仓", event_id="e1"))
+    assert replies == []  # not whitelisted yet
+    monkeypatch.setattr(disp, "get_assistant_allowed_users", lambda: frozenset({OWNER}))
+    await d._handle(_msg("/持仓", event_id="e2"))
+    assert len(replies) == 1  # same dispatcher, new whitelist, no restart
+
+
+async def test_duplicate_event_id_processed_once(monkeypatch: pytest.MonkeyPatch):
+    d, replies = _dispatcher(monkeypatch)
     await d._handle(_msg("/持仓", event_id="evt_dup"))
     await d._handle(_msg("/持仓", event_id="evt_dup"))
     assert d._queue.qsize() == 1
     assert len(replies) == 1
 
 
-async def test_queue_full_gets_honest_reply_not_silent_drop():
-    d, replies = _dispatcher(queue_size=1)
+async def test_queue_full_gets_honest_reply_not_silent_drop(monkeypatch: pytest.MonkeyPatch):
+    d, replies = _dispatcher(monkeypatch, queue_size=1)
     await d._handle(_msg("/持仓", event_id="e1"))
     await d._handle(_msg("/持仓", event_id="e2"))
     assert d._queue.qsize() == 1
@@ -120,8 +136,8 @@ async def test_queue_full_gets_honest_reply_not_silent_drop():
     assert "排队满了" in replies[1]
 
 
-async def test_free_text_and_unknown_slash_get_help():
-    d, replies = _dispatcher()
+async def test_free_text_and_unknown_slash_get_help(monkeypatch: pytest.MonkeyPatch):
+    d, replies = _dispatcher(monkeypatch)
     await d._handle(_msg("大盘怎么样", event_id="e1"))
     await d._handle(_msg("/涨停", event_id="e2"))
     await d._handle(_msg("图片消息", event_id="e3", message_type="image"))
@@ -134,7 +150,7 @@ async def test_free_text_and_unknown_slash_get_help():
 
 
 async def test_worker_replies_with_kimi_result(monkeypatch: pytest.MonkeyPatch):
-    d, replies = _dispatcher()
+    d, replies = _dispatcher(monkeypatch)
 
     async def fake_run(task_prompt: str, readonly_key: str | None, api_base: str) -> str:
         assert "check-holdings" in task_prompt
@@ -155,7 +171,7 @@ async def test_worker_replies_with_kimi_result(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_worker_reports_failure_honestly(monkeypatch: pytest.MonkeyPatch):
-    d, replies = _dispatcher()
+    d, replies = _dispatcher(monkeypatch)
 
     async def fake_run(task_prompt: str, readonly_key: str | None, api_base: str) -> str:
         raise RuntimeError("kimi 跑完但没写回复文件(无任何输出)")

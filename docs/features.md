@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.23.2 | 2026-07-07 | - | AST-001 助手配置**改走 Settings 页**(用户要求,不放 docker-compose):设置页新增「飞书 AI 助手」卡片(App ID/Secret/白名单/只读 Key,新端点 `GET/POST /api/settings/assistant`),落盘 `data/assistant_config.json`(挂载卷),环境变量降为首次引导兜底(每字段:文件 > env)。**配齐保存即热启动**(不用重启);白名单/只读 Key 派单器按次读取、保存立即生效;App ID/Secret 绑在长连接线程上、改动需重启(卡片有说明)。空字段保存=保持原值;秘钥状态只回打码。 |
 | 0.23.1 | 2026-07-07 | - | AST-001 **M1 实现**(待真实凭证联调):`src/assistant/` 派单器(飞书长连接关进守护线程——lark SDK 在 import 时绑事件循环,必须线程内自建 loop 再首次 import;白名单/event_id 去重/队列上限 4/秒回)+ `kimi-skills/check-holdings`(/持仓 技能,CI 用 kimi 自带解析器校验 + Dockerfile COPY 进镜像)+ 助手只读 key(仅 `GET /api/trading/holdings` 认,7 个鉴权单测锁死)+ **全局 kimi 串行锁**(`src/common/kimi_lock.py`,流水线②/AI 写日志/助手三方共锁,按单个任务持锁、长批间可插队)。启动守卫细化:助手环境变量一个没配=没打算开,只记日志;配了一部分缺一部分才发飞书告警(防 watchtower 每次重启骚扰)。新依赖 lark-oapi。 |
 | 0.23.0 | 2026-07-07 | - | AST-001 **飞书 AI 助手**方案立项(设计文档,未实现):容器内 kimi-cli 当"大脑",飞书机器人长连接对话;已知需求走技能(kimi-cli 原生 skills,与 Claude Code 格式兼容),未知需求 kimi 现场实现。技能在仓库 `kimi-skills/` 编写、随镜像 CD(push→CI 绿→watchtower 自动部署=技能上线,CI 校验坏技能不出镜像)。硬性定位:只读助手(查数/分析/报告),白名单用户,禁交易/部署/写库;kimi 全局串行锁(与流水线②、NOTE-002 共用)。首个里程碑 M1:群里 @机器人 发 `/持仓` 查当前持仓——**用户拍板斜杠命令也走完整 kimi 技能链路**(不走原生捷径,从第一天验证全链);持仓查询给助手专用只读 key(`ASSISTANT_READONLY_KEY`,只认查询端点),交易 key 绝不交给 kimi。分期:M1 技能库基建+机器人骨架+/持仓 技能 → ②自由文本通道 → ③自学技能层。 |
 | 0.22.0 | 2026-07-07 | - | TRD-001 **主页账户概览模块**:dashboard 新增账户概览卡片——①持仓明细表(股数/成本/现价/市值/浮动盈亏,数据来自 broker 30s 轮询缓存,持仓缓存补 `last_price`);②净值曲线(inline SVG,无第三方库);③每周收益率(近 12 周,ISO 周,周末快照环比)。数据底座:新表 `account_equity_snapshot`(每账户每北京日一行,ts 固定为北京日 00:00 的 UTC epoch ms,broker 轮询成功后节流 ≥5 分钟 upsert 覆写,当日最后一笔即收盘值);历史无法回填,曲线从上线当天开始积累。新端点 `GET /api/trading/equity-curve`(X-API-Key),holdings 端点补成本/市值/盈亏字段。快照写失败只告警不打断持仓轮询(轮询是交易路径)。 |
@@ -1463,14 +1464,21 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
 - 任务书(dispatcher prompt)写明:先翻技能库,有匹配的照做;没有就现场实现;
   (Phase 3 后)跑通的做法存回自学技能目录
 
-**Configuration** (环境变量,走 docker-compose 注入,不进仓库):
+**Configuration** (0.23.2 改:**Settings 页配置为主**,用户拍板不放 docker-compose):
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `FEISHU_ASSISTANT_APP_ID` / `FEISHU_ASSISTANT_APP_SECRET` | M1 | 自建应用凭证(收消息+回消息;与现有推送用的 relay 应用是否同一个,接入时确认) |
-| `FEISHU_ASSISTANT_ALLOWED_USERS` | M1 | open_id 白名单,逗号分隔;为空 = 机器人不启动 |
-| `ASSISTANT_READONLY_KEY` | M1 | 助手专用只读 key,仅圈定的只读 GET 端点接受;缺省 = kimi 查不了持仓,技能如实报错 |
-| `KIMI_API_KEY` | 已有 | kimi 认证,复用现有机制 |
+- **入口**: 设置页「飞书 AI 助手」卡片 → `GET/POST /api/settings/assistant`;落盘
+  `data/assistant_config.json`(挂载卷,重部署不丢)。空字段保存 = 保持原值;状态查询
+  秘钥只回打码。
+- **生效时机**: 配齐保存**即热启动**(不用重启);白名单/只读 Key 派单器按次读取,保存立即
+  生效;App ID/Secret 绑在长连接线程上,改动需重启服务。
+- **优先级**: 每字段独立取值,`assistant_config.json` > 环境变量(env 只作首次引导兜底)。
+
+| 字段 | 兜底环境变量 | Description |
+|------|--------------|-------------|
+| App ID / App Secret | `FEISHU_ASSISTANT_APP_ID` / `FEISHU_ASSISTANT_APP_SECRET` | 自建应用凭证(收消息+回消息;与现有推送用的 relay 应用是否同一个,接入时确认) |
+| 使用者白名单 | `FEISHU_ASSISTANT_ALLOWED_USERS` | open_id 逗号分隔;为空 = 机器人不启动/不理任何人 |
+| 只读查询 Key | `ASSISTANT_READONLY_KEY` | 助手专用只读 key,仅圈定的只读 GET 端点接受;缺省 = kimi 查不了持仓,技能如实报错 |
+| (kimi 认证) | `KIMI_API_KEY` | 复用现有机制,仍走部署环境变量(kimi 配置在容器启动时生成) |
 
 **分期实施**:
 - **M1 机器人骨架 + `/持仓` 技能**(先做,含技能库基建全套——`/持仓` 走 kimi 链路,技能
@@ -1478,7 +1486,8 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
   CI 校验单测 + kimi spawn 封装支持 `--skills-dir`;② 机器人:lark-oapi 长连接(新增
   pyproject 依赖)+ @机器人解析 + 白名单/event_id 去重;③ kimi 通道最小闭环:队列 +
   全局串行锁 + 卡死兜底超时 + 秒回「处理中」;④ 助手只读 key(holdings 端点)。
-  启动守卫:飞书凭证/白名单/kimi 可用性任一缺 → 不启动机器人 + 飞书告警一条
+  启动守卫:飞书凭证/白名单/kimi 可用性任一缺 → 不启动机器人;此外在设置页配齐保存
+  可随时热启动,不依赖重启
 - **Phase 2 自由文本通道**: 任务书完善(技能匹配/现场实现约定/大白话输出规则)+
   时间预算 + 安全护栏加固(工作目录圈死、禁清单)
 - **Phase 3 自学技能层**(可选,做前另行确认): 挂载卷目录存 kimi 现场实现后自存的技能,
@@ -1517,8 +1526,9 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
 - `src/assistant/kimi_runner.py` — kimi spawn(--skills-dir/--work-dir/全局锁/结果文件)
 - `src/assistant/assistant_instructions.md` — kimi 任务书(只读禁令/不编数/大白话)
 - `src/common/kimi_lock.py` — 全局 kimi 串行锁(三消费方共用)
-- `src/common/config.py` — 助手凭证/白名单/只读 key 配置封装
-- `tests/unit/assistant/` — 技能校验 + 派单器行为单测
+- `src/common/config.py` — 助手配置封装(`data/assistant_config.json` > env,分字段)
+- `src/web/templates/settings.html` — 设置页「飞书 AI 助手」卡片
+- `tests/unit/assistant/` — 技能校验 + 派单器行为 + 配置优先级/Settings 端点单测
 - `tests/unit/web/test_assistant_readonly_key.py` — 只读 key 鉴权矩阵
 - `Dockerfile` — COPY kimi-skills
 - `src/web/routes.py` — `verify_trading_api_key` 增只读 key 通道(GET 路径白名单)

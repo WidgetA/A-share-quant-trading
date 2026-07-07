@@ -167,6 +167,51 @@
         </div>
     </section>
 
+    <!-- Feishu AI Assistant Section (AST-001) -->
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>飞书 AI 助手（群里 @机器人 /持仓）</h3>
+            <p class="settings-desc">
+                飞书自建应用的凭证和使用者白名单。全部落盘 <code>data/</code>（重部署不丢）。
+                空着的字段保存时保持原值。<b>白名单和只读 Key 保存立即生效；App ID/Secret
+                改动需要重启服务</b>。只读 Key 只够查持仓，碰不到下单接口。
+            </p>
+
+            <div class="token-status" id="assistantStatus">
+                <span class="token-status-label">当前状态：</span>
+                <span class="token-status-value" id="assistantStatusValue">加载中...</span>
+            </div>
+
+            <div class="form-group">
+                <label for="assistantAppIdInput">App ID</label>
+                <input type="text" id="assistantAppIdInput" class="token-input"
+                    placeholder="cli_ 开头,飞书开发者后台「凭证与基础信息」页..." style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="assistantAppSecretInput">App Secret</label>
+                <input type="password" id="assistantAppSecretInput" class="token-input"
+                    placeholder="同上页面的 App Secret..." style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="assistantUsersInput">使用者白名单（open_id，逗号分隔）</label>
+                <input type="text" id="assistantUsersInput" class="token-input"
+                    placeholder="ou_xxx,ou_yyy（不知道自己的 open_id?群里 @机器人 发一句话,从服务日志里抄）" style="font-family: monospace;">
+            </div>
+            <div class="form-group">
+                <label for="assistantRoKeyInput">只读查询 Key（助手查持仓专用）</label>
+                <input type="text" id="assistantRoKeyInput" class="token-input"
+                    placeholder="随机字符串（点随机生成）..." style="font-family: monospace;">
+            </div>
+
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="generateAssistantKey()" id="assistantGenBtn">随机生成只读 Key</button>
+                <button class="btn btn-primary" onclick="saveAssistantConfig()" id="assistantSaveBtn">保存</button>
+            </div>
+
+            <div class="token-message hidden" id="assistantMessage"></div>
+        </div>
+    </section>
+
     <!-- xtquant Broker Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -418,6 +463,67 @@ async function saveTradingKey() {
     } finally { btn.disabled = false; btn.textContent = '保存'; }
 }
 
+// 飞书 AI 助手 (AST-001)
+async function loadAssistantStatus() {
+    try {
+        const resp = await fetch('/api/settings/assistant', {cache: 'no-store'});
+        const data = await resp.json();
+        let text;
+        if (data.running) {
+            text = '✅ 运行中';
+        } else if (data.missing && data.missing.length) {
+            text = '未启动，还缺：' + data.missing.join('、');
+        } else {
+            text = '未启动（配置已齐，点一次保存即可启动）';
+        }
+        const parts = [];
+        if (data.app_id) parts.push('App ID: ' + data.app_id);
+        if (data.app_secret_configured) parts.push('Secret 已配置');
+        if (data.readonly_key_masked) parts.push('只读 Key: ' + data.readonly_key_masked);
+        if (data.allowed_users && data.allowed_users.length) parts.push('白名单 ' + data.allowed_users.length + ' 人: ' + data.allowed_users.join(', '));
+        document.getElementById('assistantStatusValue').textContent =
+            text + (parts.length ? ' ｜ ' + parts.join(' ｜ ') : '');
+    } catch (e) {
+        document.getElementById('assistantStatusValue').textContent = '状态加载失败';
+    }
+}
+function generateAssistantKey() {
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    document.getElementById('assistantRoKeyInput').value = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+    showMessage('assistantMessage', '已生成只读查询 Key，点保存生效', true);
+}
+async function saveAssistantConfig() {
+    const body = {
+        app_id: document.getElementById('assistantAppIdInput').value.trim(),
+        app_secret: document.getElementById('assistantAppSecretInput').value.trim(),
+        allowed_users: document.getElementById('assistantUsersInput').value.trim(),
+        readonly_key: document.getElementById('assistantRoKeyInput').value.trim(),
+    };
+    if (!body.app_id && !body.app_secret && !body.allowed_users && !body.readonly_key) {
+        showMessage('assistantMessage', '至少填一项再保存（空的字段保持原值）', false); return;
+    }
+    const btn = document.getElementById('assistantSaveBtn');
+    btn.disabled = true; btn.textContent = '保存中...';
+    try {
+        const resp = await fetch('/api/settings/assistant', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+            showMessage('assistantMessage', data.message || '保存成功', true);
+            ['assistantAppIdInput', 'assistantAppSecretInput', 'assistantUsersInput', 'assistantRoKeyInput']
+                .forEach(id => document.getElementById(id).value = '');
+            loadAssistantStatus();
+        } else {
+            showMessage('assistantMessage', data.detail || data.message || '保存失败', false);
+        }
+    } catch (e) {
+        showMessage('assistantMessage', '请求失败: ' + e.message, false);
+    } finally { btn.disabled = false; btn.textContent = '保存'; }
+}
+
 // FC Training Endpoint
 function loadFcStatus() { loadKeyStatus('/api/settings/fc-url', 'fcStatusValue'); }
 function testFcUrl() { testKey('/api/settings/fc-url/test', 'fcInput', 'fcMessage', 'fcTestBtn', '测试连接'); }
@@ -653,5 +759,6 @@ loadS3Status();
 loadLambdaKlineUrlStatus();
 loadLambdaKlineTokenStatus();
 loadBltcyKeyStatus();
+loadAssistantStatus();
 </script>
 {% endblock %}

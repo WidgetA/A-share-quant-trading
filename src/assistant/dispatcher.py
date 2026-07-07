@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.assistant.kimi_runner import SKILLS_DIR, run_kimi_assistant_task
+from src.common.config import get_assistant_allowed_users, get_assistant_readonly_key
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +114,15 @@ class AssistantDispatcher:
         self,
         app_id: str,
         app_secret: str,
-        allowed_users: frozenset[str],
-        readonly_key: str | None,
         api_base: str,
         queue_size: int = 4,
     ) -> None:
+        # Whitelist + read-only key are NOT bound here — they are read from
+        # config at use time, so Settings-page changes apply without restart.
+        # App credentials ARE bound (the ws thread holds them); changing them
+        # requires a service restart.
         self._app_id = app_id
         self._app_secret = app_secret
-        self._allowed_users = allowed_users
-        self._readonly_key = readonly_key
         self._api_base = api_base
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[IncomingMessage] = asyncio.Queue(maxsize=queue_size)
@@ -150,6 +151,15 @@ class AssistantDispatcher:
         # The ws thread is a daemon blocked in the SDK's run_until_complete —
         # the SDK offers no stop API; it dies with the process. Acceptable for
         # a container whose lifecycle IS the process lifecycle.
+
+    def is_running(self) -> bool:
+        """True while the long-connection thread and the worker are alive."""
+        return bool(
+            self._ws_thread
+            and self._ws_thread.is_alive()
+            and self._worker_task
+            and not self._worker_task.done()
+        )
 
     # ── ws thread side ───────────────────────────────────────────────────
 
@@ -218,7 +228,7 @@ class AssistantDispatcher:
     async def _handle(self, msg: IncomingMessage) -> None:
         if self._is_duplicate(msg.event_id):
             return
-        if msg.open_id not in self._allowed_users:
+        if msg.open_id not in get_assistant_allowed_users():
             # Holdings are sensitive — silently ignore, but leave an audit line
             # (also how the operator harvests open_ids to whitelist).
             logger.warning(
@@ -257,7 +267,7 @@ class AssistantDispatcher:
             try:
                 reply = await run_kimi_assistant_task(
                     build_task_prompt(command),
-                    readonly_key=self._readonly_key,
+                    readonly_key=get_assistant_readonly_key(),
                     api_base=self._api_base,
                 )
                 if len(reply) > _MAX_REPLY_CHARS:
@@ -321,3 +331,59 @@ async def _alert_feishu(message: str) -> None:
             await bot.send_alert("飞书助手", message)
     except Exception:
         logger.exception("Assistant ops alert failed")
+
+
+# ── startup helpers (used by app startup AND the Settings save endpoint) ──
+
+
+def assistant_missing_requirements() -> list[str]:
+    """What still blocks the assistant from starting — plain-Chinese list,
+    empty = ready. Config comes from the Settings page (data/assistant_config
+    .json) with env vars as bootstrap fallback."""
+    import os
+
+    from src.common.config import get_assistant_feishu_config
+    from src.data.services.kimi_listing_verifier import kimi_available
+
+    missing: list[str] = []
+    cfg = get_assistant_feishu_config()
+    if not (cfg["app_id"] and cfg["app_secret"]):
+        missing.append("飞书应用凭证(App ID / App Secret)")
+    if not get_assistant_allowed_users():
+        missing.append("使用者白名单(open_id)")
+    if not get_assistant_readonly_key():
+        missing.append("只读查询钥匙")
+    if not kimi_available():
+        missing.append("容器内 kimi-cli")
+    elif not os.environ.get("KIMI_API_KEY", "").strip():
+        missing.append("KIMI_API_KEY(部署环境变量)")
+    return missing
+
+
+def start_assistant_if_ready(app_state) -> list[str]:
+    """Start the dispatcher when everything is configured. Returns the missing
+    list (empty = running, either already or just started). Must be called
+    from inside the running uvicorn loop (startup event or a request handler)."""
+    import os
+
+    from src.common.config import get_assistant_feishu_config
+
+    existing = getattr(app_state, "assistant_dispatcher", None)
+    if existing is not None and existing.is_running():
+        return []
+
+    missing = assistant_missing_requirements()
+    if missing:
+        return missing
+
+    cfg = get_assistant_feishu_config()
+    web_port = int(os.environ.get("WEB_PORT", "8000"))
+    dispatcher = AssistantDispatcher(
+        app_id=cfg["app_id"],
+        app_secret=cfg["app_secret"],
+        api_base=f"http://127.0.0.1:{web_port}",
+    )
+    dispatcher.start()
+    app_state.assistant_dispatcher = dispatcher
+    logger.info("Feishu assistant started (long connection, commands: %s)", list(SLASH_COMMANDS))
+    return []

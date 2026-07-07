@@ -637,58 +637,32 @@ def create_app(
             await _notify_feishu(msg)
 
         # AST-001: Feishu AI assistant — group @bot slash commands → kimi skills.
-        # Hard gates mirror path B: every runtime dependency must be present or
-        # the assistant does NOT start (rest of the app unaffected). Alert policy:
-        # nothing configured at all = operator hasn't opted in yet → log only;
+        # Config lives on the Settings page (data/assistant_config.json, volume
+        # mount; env vars only as bootstrap fallback), so the operator can also
+        # start it later by completing the Settings card — no restart needed.
+        # Alert policy: nothing configured at all = not opted in yet → log only;
         # partially configured = they meant to enable it → alert what's missing.
-        import os as _os
-
+        from src.assistant.dispatcher import start_assistant_if_ready
         from src.common.config import (
             get_assistant_allowed_users,
             get_assistant_feishu_config,
             get_assistant_readonly_key,
         )
 
-        assistant_cfg = get_assistant_feishu_config()
-        assistant_users = get_assistant_allowed_users()
-        assistant_ro_key = get_assistant_readonly_key()
-        assistant_missing: list[str] = []
-        if not (assistant_cfg["app_id"] and assistant_cfg["app_secret"]):
-            assistant_missing.append("飞书应用凭证(FEISHU_ASSISTANT_APP_ID/SECRET)")
-        if not assistant_users:
-            assistant_missing.append("使用者白名单(FEISHU_ASSISTANT_ALLOWED_USERS)")
-        if not assistant_ro_key:
-            assistant_missing.append("只读查询钥匙(ASSISTANT_READONLY_KEY)")
-        if not kimi_available():
-            assistant_missing.append("容器内 kimi-cli")
-        if not kimi_key_ready:
-            assistant_missing.append("KIMI_API_KEY")
-
-        if not assistant_missing:
-            from src.assistant.dispatcher import AssistantDispatcher
-
-            web_port = int(_os.environ.get("WEB_PORT", "8000"))
-            app.state.assistant_dispatcher = AssistantDispatcher(
-                app_id=assistant_cfg["app_id"],
-                app_secret=assistant_cfg["app_secret"],
-                allowed_users=assistant_users,
-                readonly_key=assistant_ro_key,
-                api_base=f"http://127.0.0.1:{web_port}",
-            )
-            app.state.assistant_dispatcher.start()
-            logger.info("Feishu assistant started (long connection, commands: /持仓)")
-        else:
-            app.state.assistant_dispatcher = None
+        app.state.assistant_dispatcher = None
+        assistant_missing = start_assistant_if_ready(app.state)
+        if assistant_missing:
+            assistant_cfg = get_assistant_feishu_config()
             anything_configured = bool(
                 assistant_cfg["app_id"]
                 or assistant_cfg["app_secret"]
-                or assistant_users
-                or assistant_ro_key
+                or get_assistant_allowed_users()
+                or get_assistant_readonly_key()
             )
             msg = (
                 "[飞书助手] 未启动 — 还缺:"
                 + "、".join(assistant_missing)
-                + "。配齐后重启服务即可上线,其余功能不受影响。"
+                + "。到设置页「飞书 AI 助手」卡片配齐即可上线(不用重启),其余功能不受影响。"
             )
             if anything_configured:
                 from src.data.services.listing_verify_scheduler import (
