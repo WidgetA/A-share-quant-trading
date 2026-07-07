@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.23.3 | 2026-07-07 | - | AST-001 **白名单功能屏蔽**(用户拍板:目前不需要)——群本身即信任边界,能 @到机器人的人都能用;白名单不再是启动必要条件,设置页卡片撤下该字段。**休眠≠删除**:显式配了(env/接口)仍然生效,以后要启用直接填回;每次请求照旧记 open_id 审计日志。 |
 | 0.23.2 | 2026-07-07 | - | AST-001 助手配置**改走 Settings 页**(用户要求,不放 docker-compose):设置页新增「飞书 AI 助手」卡片(App ID/Secret/白名单/只读 Key,新端点 `GET/POST /api/settings/assistant`),落盘 `data/assistant_config.json`(挂载卷),环境变量降为首次引导兜底(每字段:文件 > env)。**配齐保存即热启动**(不用重启);白名单/只读 Key 派单器按次读取、保存立即生效;App ID/Secret 绑在长连接线程上、改动需重启(卡片有说明)。空字段保存=保持原值;秘钥状态只回打码。 |
 | 0.23.1 | 2026-07-07 | - | AST-001 **M1 实现**(待真实凭证联调):`src/assistant/` 派单器(飞书长连接关进守护线程——lark SDK 在 import 时绑事件循环,必须线程内自建 loop 再首次 import;白名单/event_id 去重/队列上限 4/秒回)+ `kimi-skills/check-holdings`(/持仓 技能,CI 用 kimi 自带解析器校验 + Dockerfile COPY 进镜像)+ 助手只读 key(仅 `GET /api/trading/holdings` 认,7 个鉴权单测锁死)+ **全局 kimi 串行锁**(`src/common/kimi_lock.py`,流水线②/AI 写日志/助手三方共锁,按单个任务持锁、长批间可插队)。启动守卫细化:助手环境变量一个没配=没打算开,只记日志;配了一部分缺一部分才发飞书告警(防 watchtower 每次重启骚扰)。新依赖 lark-oapi。 |
 | 0.23.0 | 2026-07-07 | - | AST-001 **飞书 AI 助手**方案立项(设计文档,未实现):容器内 kimi-cli 当"大脑",飞书机器人长连接对话;已知需求走技能(kimi-cli 原生 skills,与 Claude Code 格式兼容),未知需求 kimi 现场实现。技能在仓库 `kimi-skills/` 编写、随镜像 CD(push→CI 绿→watchtower 自动部署=技能上线,CI 校验坏技能不出镜像)。硬性定位:只读助手(查数/分析/报告),白名单用户,禁交易/部署/写库;kimi 全局串行锁(与流水线②、NOTE-002 共用)。首个里程碑 M1:群里 @机器人 发 `/持仓` 查当前持仓——**用户拍板斜杠命令也走完整 kimi 技能链路**(不走原生捷径,从第一天验证全链);持仓查询给助手专用只读 key(`ASSISTANT_READONLY_KEY`,只认查询端点),交易 key 绝不交给 kimi。分期:M1 技能库基建+机器人骨架+/持仓 技能 → ②自由文本通道 → ③自学技能层。 |
@@ -1406,9 +1407,9 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
 `/持仓` 技能指导 kimi 用 curl 调本机只读端点 `GET /api/trading/holdings`(数据与 TRD-001
 主页账户概览同源,30s 轮询缓存),把持仓明细(股票名/代码/股数/成本/现价/市值/浮动盈亏)+
 可用现金整理成大白话回群;broker 离线/数据拿不到 → 如实说,**一个数都不许编**(同 NOTE-002
-铁律)。鉴权用**助手专用只读 key**(见安全边界),TRADING_API_KEY 绝不交给 kimi。`/持仓` 同样
-只认白名单用户——持仓是敏感数据,不是群里谁 @ 都能看。kimi 链路是分钟级,收到命令先秒回
-「收到,查询中」。
+铁律)。鉴权用**助手专用只读 key**(见安全边界),TRADING_API_KEY 绝不交给 kimi。kimi 链路是
+分钟级,收到命令先秒回「收到,查询中」。(白名单已按用户决定屏蔽,见 0.23.3——群本身即
+信任边界。)
 
 **定位与安全边界 (CRITICAL,硬性护栏)**: 查数、分析、写报告的**只读助手**,不是运维机器人。
 任意飞书消息驱动一个能跑 Shell 的模型,存在提示注入风险,以下限制不可协商:
@@ -1417,7 +1418,9 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
   (首批:`/api/trading/holdings`);下单/撤单等修改类端点**绝不**认这把 key——kimi 拿到它
   也发不出任何交易指令。TRADING_API_KEY 永远不进 kimi 的环境/prompt/技能文本
 - 数据库只读;kimi 工作目录圈死在专用临时目录
-- 只响应白名单用户(open_id 校验);群聊只响应 @机器人;非白名单消息静默忽略+记日志
+- 群聊只响应 @机器人;每次请求记发送者 open_id 审计日志。**使用者白名单已屏蔽**
+  (用户拍板 2026-07-07:群本身即信任边界);休眠不删除——显式配置(env/接口)仍生效,
+  以后要启用直接填回
 
 **架构**:
 
@@ -1426,7 +1429,7 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
                       │ 长连接(lark-oapi SDK WebSocket;无需公网回调地址/验签)
                       ▼
               AssistantDispatcher (常驻协程, src/assistant/)
-                      │ ① 白名单校验 + event_id 去重(飞书事件会重推)
+                      │ ① event_id 去重(飞书事件会重推)+ open_id 审计日志(白名单休眠)
                       │ ② 秒回「收到,处理中」 ③ 入队(kimi 单次要几分钟,不能同步等)
                       ▼
               kimi --print --afk --skills-dir /app/kimi-skills
@@ -1476,7 +1479,7 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
 | 字段 | 兜底环境变量 | Description |
 |------|--------------|-------------|
 | App ID / App Secret | `FEISHU_ASSISTANT_APP_ID` / `FEISHU_ASSISTANT_APP_SECRET` | 自建应用凭证(收消息+回消息;与现有推送用的 relay 应用是否同一个,接入时确认) |
-| 使用者白名单 | `FEISHU_ASSISTANT_ALLOWED_USERS` | open_id 逗号分隔;为空 = 机器人不启动/不理任何人 |
+| 使用者白名单(**屏蔽中**) | `FEISHU_ASSISTANT_ALLOWED_USERS` | 0.23.3 起休眠:为空 = 不限制(群里都能用),设置页无此字段;显式配了(env/接口)仍生效 |
 | 只读查询 Key | `ASSISTANT_READONLY_KEY` | 助手专用只读 key,仅圈定的只读 GET 端点接受;缺省 = kimi 查不了持仓,技能如实报错 |
 | (kimi 认证) | `KIMI_API_KEY` | 复用现有机制,仍走部署环境变量(kimi 配置在容器启动时生成) |
 

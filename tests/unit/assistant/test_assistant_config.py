@@ -90,7 +90,8 @@ def test_status_endpoint_shape(isolated_config):
     assert data["app_secret_configured"] is False
     assert data["readonly_key_masked"] == ""
     assert any("凭证" in item for item in data["missing"])
-    assert any("白名单" in item for item in data["missing"])
+    # 白名单已屏蔽(用户拍板),绝不能出现在启动必要条件里
+    assert not any("白名单" in item for item in data["missing"])
 
 
 def test_save_persists_and_reports_missing(isolated_config, monkeypatch):

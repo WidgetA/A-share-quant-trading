@@ -172,9 +172,10 @@
         <div class="settings-card">
             <h3>飞书 AI 助手（群里 @机器人 /持仓）</h3>
             <p class="settings-desc">
-                飞书自建应用的凭证和使用者白名单。全部落盘 <code>data/</code>（重部署不丢）。
-                空着的字段保存时保持原值。<b>白名单和只读 Key 保存立即生效；App ID/Secret
+                飞书自建应用的凭证。全部落盘 <code>data/</code>（重部署不丢），
+                空着的字段保存时保持原值。<b>只读 Key 保存立即生效；App ID/Secret
                 改动需要重启服务</b>。只读 Key 只够查持仓，碰不到下单接口。
+                使用者白名单功能暂未启用——群里能 @到机器人的人都能用。
             </p>
 
             <div class="token-status" id="assistantStatus">
@@ -191,11 +192,6 @@
                 <label for="assistantAppSecretInput">App Secret</label>
                 <input type="password" id="assistantAppSecretInput" class="token-input"
                     placeholder="同上页面的 App Secret..." style="font-family: monospace;">
-            </div>
-            <div class="form-group">
-                <label for="assistantUsersInput">使用者白名单（open_id，逗号分隔）</label>
-                <input type="text" id="assistantUsersInput" class="token-input"
-                    placeholder="ou_xxx,ou_yyy（不知道自己的 open_id?群里 @机器人 发一句话,从服务日志里抄）" style="font-family: monospace;">
             </div>
             <div class="form-group">
                 <label for="assistantRoKeyInput">只读查询 Key（助手查持仓专用）</label>
@@ -480,7 +476,8 @@ async function loadAssistantStatus() {
         if (data.app_id) parts.push('App ID: ' + data.app_id);
         if (data.app_secret_configured) parts.push('Secret 已配置');
         if (data.readonly_key_masked) parts.push('只读 Key: ' + data.readonly_key_masked);
-        if (data.allowed_users && data.allowed_users.length) parts.push('白名单 ' + data.allowed_users.length + ' 人: ' + data.allowed_users.join(', '));
+        // 白名单功能暂未启用;只有通过环境变量/接口配了才显示,提示它在生效
+        if (data.allowed_users && data.allowed_users.length) parts.push('白名单已配置(' + data.allowed_users.length + ' 人,生效中)');
         document.getElementById('assistantStatusValue').textContent =
             text + (parts.length ? ' ｜ ' + parts.join(' ｜ ') : '');
     } catch (e) {
@@ -497,10 +494,9 @@ async function saveAssistantConfig() {
     const body = {
         app_id: document.getElementById('assistantAppIdInput').value.trim(),
         app_secret: document.getElementById('assistantAppSecretInput').value.trim(),
-        allowed_users: document.getElementById('assistantUsersInput').value.trim(),
         readonly_key: document.getElementById('assistantRoKeyInput').value.trim(),
     };
-    if (!body.app_id && !body.app_secret && !body.allowed_users && !body.readonly_key) {
+    if (!body.app_id && !body.app_secret && !body.readonly_key) {
         showMessage('assistantMessage', '至少填一项再保存（空的字段保持原值）', false); return;
     }
     const btn = document.getElementById('assistantSaveBtn');
@@ -513,7 +509,7 @@ async function saveAssistantConfig() {
         const data = await resp.json();
         if (resp.ok && data.success) {
             showMessage('assistantMessage', data.message || '保存成功', true);
-            ['assistantAppIdInput', 'assistantAppSecretInput', 'assistantUsersInput', 'assistantRoKeyInput']
+            ['assistantAppIdInput', 'assistantAppSecretInput', 'assistantRoKeyInput']
                 .forEach(id => document.getElementById(id).value = '');
             loadAssistantStatus();
         } else {

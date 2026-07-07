@@ -85,12 +85,13 @@ AWS resource bootstrap (S3 / ECR / IAM / Lambda function):
 目前支持 `/持仓`(查当前证券账户持仓)。
 
 - 接入方式:飞书官方长连接(WebSocket),不需要公网回调地址
-- 只响应 open_id 白名单用户;助手只持有专用只读 key,交易接口物理上不可达
-- **配置走 Settings 页「飞书 AI 助手」卡片**(App ID/Secret、白名单、只读 Key),落盘
-  `data/assistant_config.json`(挂载卷,重部署不丢);配齐保存即自动启动,白名单和只读 Key
+- 群里能 @到机器人的人都能用(白名单功能暂屏蔽);助手只持有专用只读 key,
+  交易接口物理上不可达
+- **配置走 Settings 页「飞书 AI 助手」卡片**(App ID/Secret、只读 Key),落盘
+  `data/assistant_config.json`(挂载卷,重部署不丢);配齐保存即自动启动,只读 Key
   改动即时生效,App ID/Secret 改动需重启。环境变量
-  (`FEISHU_ASSISTANT_APP_ID/APP_SECRET/ALLOWED_USERS`、`ASSISTANT_READONLY_KEY`)
-  仅作首次引导兜底。缺配置时助手不启动,其余功能不受影响
+  (`FEISHU_ASSISTANT_APP_ID/APP_SECRET`、`ASSISTANT_READONLY_KEY`)仅作首次引导兜底。
+  缺配置时助手不启动,其余功能不受影响
 - 详细设计:[docs/features.md AST-001](docs/features.md)
 
 ## Development

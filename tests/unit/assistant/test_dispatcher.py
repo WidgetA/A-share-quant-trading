@@ -102,21 +102,22 @@ async def test_slash_command_acks_and_enqueues(monkeypatch: pytest.MonkeyPatch):
     assert "查询" in replies[0]
 
 
-async def test_non_whitelisted_user_is_silently_ignored(monkeypatch: pytest.MonkeyPatch):
-    d, replies = _dispatcher(monkeypatch)
-    await d._handle(_msg("/持仓", open_id="ou_stranger"))
+async def test_empty_whitelist_allows_everyone(monkeypatch: pytest.MonkeyPatch):
+    """白名单功能屏蔽中(用户拍板 2026-07-07):没配白名单 = 群里都能用。"""
+    d, replies = _dispatcher(monkeypatch, allowed=frozenset())
+    await d._handle(_msg("/持仓", open_id="ou_anyone"))
+    assert d._queue.qsize() == 1
+    assert len(replies) == 1
+
+
+async def test_configured_whitelist_still_enforces(monkeypatch: pytest.MonkeyPatch):
+    """休眠≠删除:显式配了白名单(env/接口)仍然生效,以后要启用直接填。"""
+    d, replies = _dispatcher(monkeypatch)  # allowed={OWNER}
+    await d._handle(_msg("/持仓", event_id="e1", open_id="ou_stranger"))
     assert d._queue.qsize() == 0
     assert replies == []
-
-
-async def test_whitelist_is_read_at_use_time(monkeypatch: pytest.MonkeyPatch):
-    """Settings-page whitelist changes apply without restart."""
-    d, replies = _dispatcher(monkeypatch, allowed=frozenset())
-    await d._handle(_msg("/持仓", event_id="e1"))
-    assert replies == []  # not whitelisted yet
-    monkeypatch.setattr(disp, "get_assistant_allowed_users", lambda: frozenset({OWNER}))
     await d._handle(_msg("/持仓", event_id="e2"))
-    assert len(replies) == 1  # same dispatcher, new whitelist, no restart
+    assert len(replies) == 1
 
 
 async def test_duplicate_event_id_processed_once(monkeypatch: pytest.MonkeyPatch):

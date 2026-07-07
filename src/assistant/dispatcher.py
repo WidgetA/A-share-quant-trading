@@ -17,7 +17,9 @@
 #       the main-loop side once the ws thread did the first import.
 #
 # Safety posture:
-#   - open_id whitelist; non-whitelisted messages are logged and ignored
+#   - whitelist DORMANT (user decision 2026-07-07): the group is the trust
+#     boundary; a configured whitelist (env/API) still enforces; every request
+#     logs the sender open_id for audit
 #   - event_id dedup (Feishu re-pushes events not acked within 3s)
 #   - bounded queue; when full the user is told honestly instead of silent drop
 #   - kimi runs serialized process-wide (KIMI_GLOBAL_LOCK, in kimi_runner)
@@ -228,14 +230,19 @@ class AssistantDispatcher:
     async def _handle(self, msg: IncomingMessage) -> None:
         if self._is_duplicate(msg.event_id):
             return
-        if msg.open_id not in get_assistant_allowed_users():
-            # Holdings are sensitive — silently ignore, but leave an audit line
-            # (also how the operator harvests open_ids to whitelist).
+        # Whitelist is DORMANT for now (user decision 2026-07-07): the group
+        # itself is the trust boundary — anyone who can @ the bot may use it.
+        # An explicitly configured whitelist (env / API) still enforces, so
+        # re-enabling later = just fill the list. Every request keeps an audit
+        # line with the sender's open_id.
+        allowed = get_assistant_allowed_users()
+        if allowed and msg.open_id not in allowed:
             logger.warning(
                 "Feishu assistant: message from non-whitelisted open_id=%s ignored",
                 msg.open_id,
             )
             return
+        logger.info("Feishu assistant: message from open_id=%s", msg.open_id)
 
         text = extract_text(msg.message_type, msg.content)
         if text is None:
@@ -349,8 +356,7 @@ def assistant_missing_requirements() -> list[str]:
     cfg = get_assistant_feishu_config()
     if not (cfg["app_id"] and cfg["app_secret"]):
         missing.append("飞书应用凭证(App ID / App Secret)")
-    if not get_assistant_allowed_users():
-        missing.append("使用者白名单(open_id)")
+    # Whitelist deliberately NOT required — dormant feature, see _handle().
     if not get_assistant_readonly_key():
         missing.append("只读查询钥匙")
     if not kimi_available():
