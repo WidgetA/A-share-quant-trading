@@ -83,9 +83,7 @@ class EquitySnapshotStore:
         )
         await self._db.execute(sql)
 
-    async def list_snapshots(
-        self, account_id: str | None = None, days: int = 365
-    ) -> list[dict]:
+    async def list_snapshots(self, account_id: str | None = None, days: int = 365) -> list[dict]:
         """近 `days` 天快照,按日期升序。每行一天,直接读 trade_date 字符串列。"""
         days = max(1, min(int(days), 3650))
         where = f"WHERE account_id = {_q(account_id)} " if account_id else ""
