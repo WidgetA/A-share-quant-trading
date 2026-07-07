@@ -56,11 +56,14 @@ async def test_broker_position_fetch_records_cache_timestamp():
                     can_use_volume=100,
                     avg_price=12.3,
                     market_value=1230,
+                    last_price=12.3,
                 )
             ]
 
         async def get_account(self):
-            return SimpleNamespace(cash=1000, total_asset=2230, account_id="acct")
+            return SimpleNamespace(
+                cash=1000, total_asset=2230, market_value=1230, account_id="acct"
+            )
 
     app = SimpleNamespace(state=SimpleNamespace(broker=Broker()))
 

@@ -105,6 +105,15 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     except Exception as e:
         logger.exception(f"trade_notes schema ensure failed: {e}")
 
+    # Ensure account_equity_snapshot table exists (TRD-001). Same non-fatal
+    # policy as trade_notes: the equity-curve endpoint 503s until it appears.
+    try:
+        from src.trading.equity_snapshot import EquitySnapshotStore
+
+        await EquitySnapshotStore(storage).ensure_schema()
+    except Exception as e:
+        logger.exception(f"account_equity_snapshot schema ensure failed: {e}")
+
     app.state.pipeline = CachePipeline(
         storage=storage,
         daily_source=TushareDailySource(),
@@ -134,6 +143,7 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
             app.state.broker_positions = []
             app.state.available_cash = 0.0
             app.state.broker_total_asset = 0.0
+            app.state.broker_market_value = 0.0
             app.state.broker_account_id = None
             app.state.broker_positions_updated_at = None
             return f"broker not ready: {ready_err}"
@@ -145,6 +155,7 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
         app.state.broker_positions = []
         app.state.available_cash = 0.0
         app.state.broker_total_asset = 0.0
+        app.state.broker_market_value = 0.0
         app.state.broker_account_id = None
         app.state.broker_positions_updated_at = None
         return f"{type(e).__name__}: {e}"
@@ -155,15 +166,61 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
             "can_use_volume": p.can_use_volume,
             "avg_price": p.avg_price,
             "market_value": p.market_value,
+            "last_price": p.last_price,
         }
         for p in positions
         if p.volume > 0
     ]
     app.state.available_cash = account.cash
     app.state.broker_total_asset = account.total_asset
+    app.state.broker_market_value = account.market_value
     app.state.broker_account_id = account.account_id
     app.state.broker_positions_updated_at = time.time()
+    await _maybe_write_equity_snapshot(app, account)
     return None
+
+
+# 快照节流:同一天的值反复 upsert,5 分钟一笔足够(当日最后一笔即收盘值)。
+_EQUITY_SNAPSHOT_MIN_INTERVAL_SEC = 300
+
+
+async def _maybe_write_equity_snapshot(app: FastAPI, account) -> None:
+    """每日账户资产快照旁路写入 (TRD-001 净值曲线数据源)。
+
+    持仓轮询是交易路径 — 快照只是旁路观测,写失败只 log + 记
+    app.state.equity_snapshot_last_error,绝不向上抛、绝不打断轮询。
+    """
+    storage = getattr(app.state, "storage", None)
+    if storage is None:
+        return
+    if account.total_asset <= 0:
+        return  # broker 未登录/回了空账户时不落假快照
+    now = time.time()
+    if now - getattr(app.state, "_equity_snapshot_last_write", 0.0) < (
+        _EQUITY_SNAPSHOT_MIN_INTERVAL_SEC
+    ):
+        return
+    # 尝试即计时(不是成功才计时):DB 持续故障时最多 5 分钟重试一次,
+    # 避免 30s 轮询每轮都打异常日志(还会经 feishu_log_handler 外发)。
+    app.state._equity_snapshot_last_write = now
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from src.trading.equity_snapshot import EquitySnapshotStore
+
+        trade_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        await EquitySnapshotStore(storage).upsert_snapshot(
+            account_id=account.account_id,
+            trade_date=trade_date,
+            total_asset=account.total_asset,
+            cash=account.cash,
+            market_value=account.market_value,
+        )
+        app.state.equity_snapshot_last_error = None
+    except Exception as e:
+        app.state.equity_snapshot_last_error = f"{type(e).__name__}: {e}"
+        logger.exception(f"account equity snapshot write failed: {e}")
 
 
 def _filled_order_fingerprint(orders: list[dict]) -> tuple[tuple[str, ...], ...]:

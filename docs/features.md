@@ -7,6 +7,8 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.23.0 | 2026-07-07 | - | AST-001 **飞书 AI 助手**方案立项(设计文档,未实现):容器内 kimi-cli 当"大脑",飞书机器人长连接对话;已知需求走技能(kimi-cli 原生 skills,与 Claude Code 格式兼容),未知需求 kimi 现场实现。技能在仓库 `kimi-skills/` 编写、随镜像 CD(push→CI 绿→watchtower 自动部署=技能上线,CI 校验坏技能不出镜像)。硬性定位:只读助手(查数/分析/报告),白名单用户,禁交易/部署/写库;kimi 全局串行锁(与流水线②、NOTE-002 共用)。首个里程碑 M1:群里 @机器人 发 `/持仓` 查当前持仓——**用户拍板斜杠命令也走完整 kimi 技能链路**(不走原生捷径,从第一天验证全链);持仓查询给助手专用只读 key(`ASSISTANT_READONLY_KEY`,只认查询端点),交易 key 绝不交给 kimi。分期:M1 技能库基建+机器人骨架+/持仓 技能 → ②自由文本通道 → ③自学技能层。 |
+| 0.22.0 | 2026-07-07 | - | TRD-001 **主页账户概览模块**:dashboard 新增账户概览卡片——①持仓明细表(股数/成本/现价/市值/浮动盈亏,数据来自 broker 30s 轮询缓存,持仓缓存补 `last_price`);②净值曲线(inline SVG,无第三方库);③每周收益率(近 12 周,ISO 周,周末快照环比)。数据底座:新表 `account_equity_snapshot`(每账户每北京日一行,ts 固定为北京日 00:00 的 UTC epoch ms,broker 轮询成功后节流 ≥5 分钟 upsert 覆写,当日最后一笔即收盘值);历史无法回填,曲线从上线当天开始积累。新端点 `GET /api/trading/equity-curve`(X-API-Key),holdings 端点补成本/市值/盈亏字段。快照写失败只告警不打断持仓轮询(轮询是交易路径)。 |
 | 0.21.0 | 2026-07-05 | - | NOTE-002 **AI 交易日志代写**上线:补作业页「AI 写日志」按钮 → `POST /api/notes/ai-journal/run` 后台批量代写正文为空的买卖事件(对内+对外两栏,仿用户手写范文)。策略票判定查 159 选股接口(`/api/v16/scan-history?date=`,买入日在 V16 Top-10 才代写);**不在榜单的绝不冒认策略信号**,归 manual_list 留用户手动写。事实包=榜单+本机日线/分钟线+FIFO 配对推算收益;kimi 串行+时间预算+单飞;只写仍为空的正文(写回前二次确认);收益只进文本不回填 realized_pnl 字段。 |
 | 0.20.1 | 2026-07-05 | - | NOTE-001 逆回购**佣金(手续费)可填**(用户核实逆回购有手续费):commission 列买卖/逆回购通用、不参与收益互斥;过户费/印花税/股息对逆回购仍拒收;类型互转时佣金保留、其余照旧清空。补作业逆回购待补判定改 = **佣金+收益**都要填;三栏页/补作业逆回购行佣金格开放。 |
 | 0.20.0 | 2026-07-05 | - | NOTE-001 逆回购收益改存**独立列 `repo_income`**,与平仓收益 realized_pnl **物理隔离**(用户要求 100% 任何情况分得清)。硬性不变量(存储层守卫强制):逆回购行 realized_pnl/费项/股息 恒 NULL;非逆回购行 repo_income 恒 NULL;**类型切换时不属于新类型的数值自动清空、绝不搬家**;客户端往错误字段塞非空值 → 400 拒收。UI 仍共用一个「收益」输入格,按行类型落到对应列。幂等 ALTER 兼容老库。 |
@@ -713,6 +715,45 @@ FC training (`serverless/app.py`) MUST replicate `lgbrank_scorer.py`'s feature c
 
 Trading is handled through the broker interface (STR-005). Order placement lives in `src/web/routes.py` (`/api/trading/*`) backed by `src/trading/broker_client.py`, which talks to an `xtquant-trade-server` on a Windows QMT box. Positions, cash, and orders are polled from the broker every 30s into `app.state` (no local holdings file).
 
+### [TRD-001] 主页账户概览 (Account Overview: 持仓明细 / 每周收益率 / 净值曲线)
+
+**Status**: Completed (2026-07-07)
+
+**Description**: Dashboard 首屏新增「账户概览」模块,三块内容:
+
+1. **持仓明细** — 代码/名称/股数/成本价/现价/市值/浮动盈亏(额+%)。数据来自 broker 30s 轮询缓存(`app.state.broker_positions`,本功能给缓存补了 `last_price` 字段);浮动盈亏 = `market_value − avg_price × volume`(QMT 的 `avg_price` 即成本价)。
+2. **净值曲线** — 总资产按日曲线,inline SVG 绘制(无第三方图表库)。数据来自 `account_equity_snapshot` 表。
+3. **每周收益率** — 近 12 个 ISO 周(周一为一周开始,北京日期),周收益 = 本周最后一笔快照 ÷ 上周最后一笔快照 − 1;最早一周以该周第一笔快照为基数。红涨绿跌(A 股惯例,沿用页面已有 `gain-pos`/`gain-neg`)。
+
+**数据底座 — `account_equity_snapshot` 表** (GreptimeDB):
+
+| Column | Type | 说明 |
+|--------|------|------|
+| ts | TIMESTAMP TIME INDEX | 北京日 00:00 对应的 UTC epoch ms(每日固定,upsert 覆写键的一部分) |
+| account_id | STRING (PK) | 资金账号 |
+| trade_date | STRING (PK) | 北京日期 `YYYY-MM-DD`(读取端直接用,避免 ts 转换) |
+| total_asset | FLOAT64 | 总资产(净值曲线数据源) |
+| cash | FLOAT64 | 可用资金 |
+| market_value | FLOAT64 | 持仓市值 |
+| updated_at | FLOAT64 | 最后写入时刻 UTC epoch ms(观测用) |
+
+**写入路径**: broker 持仓轮询 (`_broker_fetch_once`) 成功后调用,节流 ≥5 分钟一次,同一天反复 upsert(PK+ts 相同 → mito 原地覆写),当日最后一笔即当日收盘值。快照写失败**只 log + 记 `app.state.equity_snapshot_last_error`,绝不打断轮询**(持仓缓存是交易路径,快照是旁路观测)。GreptimeDB 未连接时跳过。
+
+**已知口径限制**(如实展示,不做修正):
+- 历史无法回填(broker 无历史资产接口),曲线从部署当天开始积累;
+- 银证转账(入金/出金)会直接体现在总资产里,周收益率会被出入金失真——后续如需净值口径需登记现金流,暂不做;
+- 非交易日若 broker 在线也会落快照(值与上一交易日持平),曲线出现平段,属实。
+
+**API**:
+- `GET /api/trading/equity-curve` (X-API-Key) → `{snapshots: [{date, total_asset, cash, market_value}], weekly: [{year, week, start_date, end_date, return_pct, end_asset}], current: {total_asset, cash, market_value, prev_close_asset, today_pnl, today_pnl_pct}}`
+- `GET /api/trading/holdings` 增补字段: `avg_price` / `last_price` / `market_value` / `pnl` / `pnl_pct`(旧字段不变,向后兼容)
+
+**Files**:
+- `src/trading/equity_snapshot.py` — `EquitySnapshotStore`(建表/upsert/查询)+ `compute_weekly_returns()` 纯函数
+- `src/web/app.py` — startup 建表、轮询挂快照写入
+- `src/web/routes.py` — equity-curve 端点、holdings 增补
+- `src/web/templates/index.html` — 账户概览模块(SVG 曲线 + 周收益 + 持仓表)
+
 ---
 
 ## Module: Data
@@ -1343,6 +1384,126 @@ GET  /api/notes/ai-journal/status  进度/结果/manual_list
 V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一致）+ Tushare 拉，
 本机 kimi 并发 2（启动错峰防 `~/.kimi` 写锁竞态）。复刻结果可经 main 的回填端点
 上传成 159 的正式榜单数据。
+
+---
+
+## Module: Assistant
+
+### [AST-001] 飞书 AI 助手 (kimi 大脑 + 技能库)
+
+**Status**: Planned — 方案已立项,未实现 (2026-07-07)
+
+**Description**: 把容器里已有的 kimi-cli 当"大脑",通过飞书机器人对话使用:用户在飞书发需求
+→ 派单器 spawn kimi 处理 → 结果发回飞书。已知需求沉淀为**技能**(kimi-cli 原生 skills 机制,
+已源码确认,格式与 Claude Code 兼容);没有技能覆盖的需求 kimi 现场实现。技能在本仓库
+`kimi-skills/` 编写、随镜像发布——**push → CI 绿 → watchtower 自动部署 = 线上技能即最新**,
+零线上手工操作,回滚镜像即回滚技能。
+
+**首个里程碑 M1 (2026-07-07 定)**: 群里 @机器人 后发斜杠命令 `/持仓` → **走完整 kimi 技能
+链路**(用户拍板:斜杠命令不走原生捷径,从第一天验证「@机器人→派单→kimi→技能→回复」全链)。
+`/持仓` 技能指导 kimi 用 curl 调本机只读端点 `GET /api/trading/holdings`(数据与 TRD-001
+主页账户概览同源,30s 轮询缓存),把持仓明细(股票名/代码/股数/成本/现价/市值/浮动盈亏)+
+可用现金整理成大白话回群;broker 离线/数据拿不到 → 如实说,**一个数都不许编**(同 NOTE-002
+铁律)。鉴权用**助手专用只读 key**(见安全边界),TRADING_API_KEY 绝不交给 kimi。`/持仓` 同样
+只认白名单用户——持仓是敏感数据,不是群里谁 @ 都能看。kimi 链路是分钟级,收到命令先秒回
+「收到,查询中」。
+
+**定位与安全边界 (CRITICAL,硬性护栏)**: 查数、分析、写报告的**只读助手**,不是运维机器人。
+任意飞书消息驱动一个能跑 Shell 的模型,存在提示注入风险,以下限制不可协商:
+- **绝不给**:下单/撤单、任何交易路径、docker/部署/重启操作、写业务库
+- **助手专用只读 key** (`ASSISTANT_READONLY_KEY`):只被明确圈定的只读 GET 端点接受
+  (首批:`/api/trading/holdings`);下单/撤单等修改类端点**绝不**认这把 key——kimi 拿到它
+  也发不出任何交易指令。TRADING_API_KEY 永远不进 kimi 的环境/prompt/技能文本
+- 数据库只读;kimi 工作目录圈死在专用临时目录
+- 只响应白名单用户(open_id 校验);群聊只响应 @机器人;非白名单消息静默忽略+记日志
+
+**架构**:
+
+```
+飞书用户 ──消息──▶ 飞书开放平台
+                      │ 长连接(lark-oapi SDK WebSocket;无需公网回调地址/验签)
+                      ▼
+              AssistantDispatcher (常驻协程, src/assistant/)
+                      │ ① 白名单校验 + event_id 去重(飞书事件会重推)
+                      │ ② 秒回「收到,处理中」 ③ 入队(kimi 单次要几分钟,不能同步等)
+                      ▼
+              kimi --print --afk --skills-dir /app/kimi-skills
+                      │ 复用路径 B 模式:结果写临时文件(不刮 trace)、错误如实分类
+                      ▼
+              结果(大白话中文) ──▶ 飞书回复
+```
+
+**技能库机制** (kimi-cli 原生,源码 `kimi_cli/skill/__init__.py` 已确认):
+- 一个技能 = `kimi-skills/<技能名>/SKILL.md`(YAML frontmatter `name`/`description` + 正文
+  步骤说明),可带配套脚本;也支持平铺 `<名字>.md` 单文件
+- kimi 启动时扫描技能目录,把「名字+路径+描述」注入 system prompt,模型匹配后自行读正文照做
+- `--skills-dir` 可重复传;同名技能,先传的目录赢(为 Phase 3 双层技能留的口子)
+
+**技能 CD 闭环** (核心诉求:本地写技能 → push → CD 完即生效):
+1. 仓库根新建 `kimi-skills/` 目录,技能进版本控制
+2. Dockerfile 加 `COPY kimi-skills/ ./kimi-skills/`(放挂载卷 `/app/data` 外面,同
+   `bundled_data` 先例)
+3. **CI 校验技能**:单测用 kimi_cli 自带解析器(`kimi_cli.skill.parse_skill_text`)过一遍
+   每个 SKILL.md——frontmatter 齐全、名字唯一;坏技能 CI 直接红,不出镜像(同
+   `test_kimi_cli_installed.py` 防 DOA 思路)
+4. (可选加固)Dockerfile build 门:构建时跑一次技能发现,同 `RUN kimi --version` 先例
+
+**派单器要求**:
+- **统一走 kimi 技能链路**(用户拍板 2026-07-07,否决斜杠命令原生捷径):**斜杠命令** =
+  确定性派单——`/持仓` 直接在任务 prompt 里指定执行对应技能;**自由文本** = kimi 自己
+  匹配技能或现场实现。两者都经队列,都是分钟级,收到一律先秒回「收到,处理中」
+- **kimi 全局串行**:与流水线 ② kimi 核验、NOTE-002 AI 写日志共用一把全局锁——kimi 消费方
+  已有 3 个,不能再各管各的
+- 时间预算 + 卡死兜底超时,沿用路径 B 铁律:**不拿超时判失败**,等 kimi 自己退出读明确反馈,
+  超时只当卡死保险且保留已产出内容
+- 队列长度上限,满了直接回复"排队满了,稍后再试",不静默丢
+- **回复硬性规则**:大白话中文,禁英文状态码/内部代号/黑话(用户既定要求);错误如实报告
+  是什么错就报什么错,绝不猜
+- 任务书(dispatcher prompt)写明:先翻技能库,有匹配的照做;没有就现场实现;
+  (Phase 3 后)跑通的做法存回自学技能目录
+
+**Configuration** (环境变量,走 docker-compose 注入,不进仓库):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `FEISHU_ASSISTANT_APP_ID` / `FEISHU_ASSISTANT_APP_SECRET` | M1 | 自建应用凭证(收消息+回消息;与现有推送用的 relay 应用是否同一个,接入时确认) |
+| `FEISHU_ASSISTANT_ALLOWED_USERS` | M1 | open_id 白名单,逗号分隔;为空 = 机器人不启动 |
+| `ASSISTANT_READONLY_KEY` | M1 | 助手专用只读 key,仅圈定的只读 GET 端点接受;缺省 = kimi 查不了持仓,技能如实报错 |
+| `KIMI_API_KEY` | 已有 | kimi 认证,复用现有机制 |
+
+**分期实施**:
+- **M1 机器人骨架 + `/持仓` 技能**(先做,含技能库基建全套——`/持仓` 走 kimi 链路,技能
+  基建是前置): ① 技能库基建:`kimi-skills/` 目录 + `/持仓` 技能 + Dockerfile COPY +
+  CI 校验单测 + kimi spawn 封装支持 `--skills-dir`;② 机器人:lark-oapi 长连接(新增
+  pyproject 依赖)+ @机器人解析 + 白名单/event_id 去重;③ kimi 通道最小闭环:队列 +
+  全局串行锁 + 卡死兜底超时 + 秒回「处理中」;④ 助手只读 key(holdings 端点)。
+  启动守卫:飞书凭证/白名单/kimi 可用性任一缺 → 不启动机器人 + 飞书告警一条
+- **Phase 2 自由文本通道**: 任务书完善(技能匹配/现场实现约定/大白话输出规则)+
+  时间预算 + 安全护栏加固(工作目录圈死、禁清单)
+- **Phase 3 自学技能层**(可选,做前另行确认): 挂载卷目录存 kimi 现场实现后自存的技能,
+  `--skills-dir` 传两层(仓库技能优先);人工定期 review,值得的转正进仓库
+
+**Checklist**:
+- [ ] M1: `kimi-skills/` 目录 + `/持仓` 技能(check-holdings)
+- [ ] M1: Dockerfile COPY (+ 可选 build 门)
+- [ ] M1: CI 技能校验单测
+- [ ] M1: kimi spawn 封装支持 `--skills-dir`
+- [ ] M1: 助手只读 key(`ASSISTANT_READONLY_KEY`,仅 holdings 等只读 GET 端点)
+- [ ] M1: lark-oapi 长连接接入(@解析/白名单/event_id 去重)
+- [ ] M1: kimi 通道最小闭环(队列/全局串行锁/卡死兜底/秒回)
+- [ ] M1: 启动守卫 + 飞书告警
+- [ ] Phase 2: kimi 任务书(技能匹配/现场实现/大白话输出规则)+ 时间预算
+- [ ] Phase 2: 安全护栏加固(工作目录圈死、禁清单)
+- [ ] Phase 3: 自学技能挂载卷 + 双层 skills-dir
+
+**Files (planned)**:
+- `kimi-skills/check-holdings/SKILL.md` — `/持仓` 技能(目录/文件名英文,frontmatter name 中文)(新)
+- `src/assistant/dispatcher.py` — 飞书长连接 + 路由(斜杠命令→技能映射)+ 队列(新)
+- `src/assistant/assistant_instructions.md` — kimi 任务书(新)
+- `tests/unit/assistant/` — 单测(路由/白名单/去重/技能校验)(新)
+- `Dockerfile` — COPY kimi-skills
+- `src/web/routes.py` — holdings 等只读端点接受 `ASSISTANT_READONLY_KEY`
+- `src/web/app.py` — 启动派单器(带守卫)
 
 ---
 
