@@ -121,8 +121,14 @@ async def _import_batch_orders_into_notes(request: Request, codes: set[str]) -> 
 
 _trading_api_key_warned = False
 
+# AST-001: read-only GET endpoints the assistant's dedicated key may access.
+# This is a hard allowlist — the assistant key opens NOTHING else, so a
+# prompt-injected kimi holding it physically cannot reach order endpoints.
+ASSISTANT_READONLY_GET_PATHS = frozenset({"/api/trading/holdings"})
+
 
 async def verify_trading_api_key(
+    request: Request,
     x_api_key: str | None = Header(None, alias="X-API-Key"),
 ) -> None:
     """Gate `/api/trading/*` routes behind a simple shared-secret header.
@@ -132,8 +138,11 @@ async def verify_trading_api_key(
         Keeps existing deploys working until the operator sets a key via the
         Settings page or TRADING_API_KEY env var.
       - Configured: require `X-API-Key` to match exactly; otherwise 401.
+
+    Additionally (AST-001): the dedicated ASSISTANT_READONLY_KEY is accepted
+    ONLY for GET requests whose path is in ASSISTANT_READONLY_GET_PATHS.
     """
-    from src.common.config import get_trading_api_key
+    from src.common.config import get_assistant_readonly_key, get_trading_api_key
 
     configured = get_trading_api_key()
     if not configured:
@@ -147,8 +156,19 @@ async def verify_trading_api_key(
             _trading_api_key_warned = True
         return
 
-    if not x_api_key or x_api_key != configured:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+    if x_api_key and x_api_key == configured:
+        return
+
+    assistant_key = get_assistant_readonly_key()
+    if (
+        assistant_key
+        and x_api_key == assistant_key
+        and request.method == "GET"
+        and request.url.path in ASSISTANT_READONLY_GET_PATHS
+    ):
+        return
+
+    raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
 class SubmitRequest(BaseModel):

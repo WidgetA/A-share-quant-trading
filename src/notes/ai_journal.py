@@ -551,6 +551,17 @@ def build_prompt(fact: dict, exemplars: str, result_path: str) -> str:
 
 
 async def run_kimi_journal(prompt: str, timeout_sec: int = KIMI_JOURNAL_TIMEOUT_SEC) -> dict:
+    """串行入口——全进程同一时刻只跑一个 kimi(与流水线②、飞书助手共锁,
+    见 src/common/kimi_lock.py);锁按篇持有,长批之间其他消费方可插队。"""
+    from src.common.kimi_lock import KIMI_GLOBAL_LOCK
+
+    async with KIMI_GLOBAL_LOCK:
+        return await _run_kimi_journal_unlocked(prompt, timeout_sec)
+
+
+async def _run_kimi_journal_unlocked(
+    prompt: str, timeout_sec: int = KIMI_JOURNAL_TIMEOUT_SEC
+) -> dict:
     """spawn kimi 写一篇日志。成功返回 {content, content_external};失败抛 RuntimeError。
 
     结果走临时文件(不从 trace 刮 JSON);超时只是卡死兜底。错误如实分类,

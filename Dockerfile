@@ -57,6 +57,10 @@ COPY scripts/ ./scripts/
 COPY config/ ./config/
 # Static data files — placed outside /app/data which is a volume mount
 COPY data/sectors.json data/board_constituents.json data/board_relevance_cache.json ./bundled_data/
+# AST-001: repo-managed kimi skill library (outside the /app/data volume so it
+# ships with the image — push → CI green → watchtower deploy = skills updated).
+# Validity is CI-enforced (tests/unit/assistant/test_skills_valid.py).
+COPY kimi-skills/ ./kimi-skills/
 
 # kimi-cli config is generated at RUNTIME, not baked here: app startup calls
 # kimi_config.ensure_kimi_config_from_env(), which writes ~/.kimi/config.toml

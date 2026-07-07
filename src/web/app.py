@@ -636,6 +636,70 @@ def create_app(
             logger.warning(msg)
             await _notify_feishu(msg)
 
+        # AST-001: Feishu AI assistant — group @bot slash commands → kimi skills.
+        # Hard gates mirror path B: every runtime dependency must be present or
+        # the assistant does NOT start (rest of the app unaffected). Alert policy:
+        # nothing configured at all = operator hasn't opted in yet → log only;
+        # partially configured = they meant to enable it → alert what's missing.
+        import os as _os
+
+        from src.common.config import (
+            get_assistant_allowed_users,
+            get_assistant_feishu_config,
+            get_assistant_readonly_key,
+        )
+
+        assistant_cfg = get_assistant_feishu_config()
+        assistant_users = get_assistant_allowed_users()
+        assistant_ro_key = get_assistant_readonly_key()
+        assistant_missing: list[str] = []
+        if not (assistant_cfg["app_id"] and assistant_cfg["app_secret"]):
+            assistant_missing.append("飞书应用凭证(FEISHU_ASSISTANT_APP_ID/SECRET)")
+        if not assistant_users:
+            assistant_missing.append("使用者白名单(FEISHU_ASSISTANT_ALLOWED_USERS)")
+        if not assistant_ro_key:
+            assistant_missing.append("只读查询钥匙(ASSISTANT_READONLY_KEY)")
+        if not kimi_available():
+            assistant_missing.append("容器内 kimi-cli")
+        if not kimi_key_ready:
+            assistant_missing.append("KIMI_API_KEY")
+
+        if not assistant_missing:
+            from src.assistant.dispatcher import AssistantDispatcher
+
+            web_port = int(_os.environ.get("WEB_PORT", "8000"))
+            app.state.assistant_dispatcher = AssistantDispatcher(
+                app_id=assistant_cfg["app_id"],
+                app_secret=assistant_cfg["app_secret"],
+                allowed_users=assistant_users,
+                readonly_key=assistant_ro_key,
+                api_base=f"http://127.0.0.1:{web_port}",
+            )
+            app.state.assistant_dispatcher.start()
+            logger.info("Feishu assistant started (long connection, commands: /持仓)")
+        else:
+            app.state.assistant_dispatcher = None
+            anything_configured = bool(
+                assistant_cfg["app_id"]
+                or assistant_cfg["app_secret"]
+                or assistant_users
+                or assistant_ro_key
+            )
+            msg = (
+                "[飞书助手] 未启动 — 还缺:"
+                + "、".join(assistant_missing)
+                + "。配齐后重启服务即可上线,其余功能不受影响。"
+            )
+            if anything_configured:
+                from src.data.services.listing_verify_scheduler import (
+                    _notify_feishu as _assistant_notify,
+                )
+
+                logger.warning(msg)
+                await _assistant_notify(msg)
+            else:
+                logger.info("Feishu assistant not configured; skipping (%s)", msg)
+
         # Auto-start intraday momentum monitor as background task
         app.state.momentum_monitor_state = {
             "running": False,
@@ -689,6 +753,12 @@ def create_app(
         if listing_verify_task and not listing_verify_task.done():
             listing_verify_task.cancel()
             logger.info("Listing-info auto-verify scheduler stopped")
+
+        # Stop Feishu assistant (worker task; ws daemon thread dies with process)
+        assistant = getattr(app.state, "assistant_dispatcher", None)
+        if assistant is not None:
+            assistant.stop()
+            logger.info("Feishu assistant stopped")
 
         # Stop momentum monitor
         monitor_state = getattr(app.state, "momentum_monitor_state", None)

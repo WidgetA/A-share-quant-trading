@@ -931,3 +931,45 @@ def get_web_config() -> dict[str, Any]:
         "base_url": os.getenv("WEB_BASE_URL", ""),
         "interaction_mode": os.getenv("INTERACTION_MODE", "cli"),
     }
+
+
+# --- Feishu AI Assistant (AST-001) ---
+
+
+def get_assistant_feishu_config() -> dict[str, str]:
+    """Credentials for the Feishu assistant bot (long-connection app).
+
+    Separate from the FeishuBot relay credentials on purpose: the assistant
+    needs a self-built app with event subscription; the relay app may or may
+    not be the same one. Empty strings mean "not configured".
+    """
+    import os
+
+    return {
+        "app_id": os.environ.get("FEISHU_ASSISTANT_APP_ID", "").strip(),
+        "app_secret": os.environ.get("FEISHU_ASSISTANT_APP_SECRET", "").strip(),
+    }
+
+
+def get_assistant_allowed_users() -> frozenset[str]:
+    """open_id whitelist for the Feishu assistant (comma-separated env var).
+
+    Empty set = assistant must NOT start. Holdings are sensitive data; there
+    is deliberately no "allow everyone" mode.
+    """
+    import os
+
+    raw = os.environ.get("FEISHU_ASSISTANT_ALLOWED_USERS", "")
+    return frozenset(u.strip() for u in raw.split(",") if u.strip())
+
+
+def get_assistant_readonly_key() -> str | None:
+    """Dedicated READ-ONLY key handed to kimi for whitelisted GET endpoints.
+
+    Never the trading key: order endpoints do not accept this key, so a
+    prompt-injected kimi physically cannot place orders with it.
+    """
+    import os
+
+    key = os.environ.get("ASSISTANT_READONLY_KEY", "").strip()
+    return key or None

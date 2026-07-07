@@ -78,6 +78,19 @@ card. Full architecture: [docs/features.md ANA-001](docs/features.md). Initial
 AWS resource bootstrap (S3 / ECR / IAM / Lambda function):
 [lambda-kline/README.md](lambda-kline/README.md).
 
+## Feishu AI Assistant (飞书 AI 助手)
+
+在飞书群里 @机器人 发斜杠命令,容器内的 kimi-cli 作为"大脑"执行仓库里的技能
+(`kimi-skills/`,随镜像发布,push → CI 绿 → watchtower 部署即生效)并把结果回到群里。
+目前支持 `/持仓`(查当前证券账户持仓)。
+
+- 接入方式:飞书官方长连接(WebSocket),不需要公网回调地址
+- 只响应 open_id 白名单用户;助手只持有专用只读 key,交易接口物理上不可达
+- 环境变量(docker-compose):`FEISHU_ASSISTANT_APP_ID` / `FEISHU_ASSISTANT_APP_SECRET` /
+  `FEISHU_ASSISTANT_ALLOWED_USERS`(逗号分隔 open_id) / `ASSISTANT_READONLY_KEY`;
+  任一缺失则助手不启动,其余功能不受影响
+- 详细设计:[docs/features.md AST-001](docs/features.md)
+
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for development guidelines.

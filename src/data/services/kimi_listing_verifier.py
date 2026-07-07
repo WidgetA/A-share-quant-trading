@@ -267,6 +267,21 @@ async def run_kimi_for_code(
     timeout_sec: int = KIMI_VERIFY_TIMEOUT_SEC,
     raw_dir: Path | None = None,
 ) -> dict:
+    """Serialized entry — ONE kimi spawn process-wide (shared with the AI
+    journal + the Feishu assistant, see src/common/kimi_lock.py). The lock is
+    held per code, so other consumers can interleave between codes of a long
+    nightly batch instead of starving for hours."""
+    from src.common.kimi_lock import KIMI_GLOBAL_LOCK
+
+    async with KIMI_GLOBAL_LOCK:
+        return await _run_kimi_for_code_unlocked(code, timeout_sec, raw_dir)
+
+
+async def _run_kimi_for_code_unlocked(
+    code: str,
+    timeout_sec: int = KIMI_VERIFY_TIMEOUT_SEC,
+    raw_dir: Path | None = None,
+) -> dict:
     """Invoke kimi-cli print mode for one code, parse the JSON it returns.
 
     Returns the parsed dict on a VALID answer — either a found date
