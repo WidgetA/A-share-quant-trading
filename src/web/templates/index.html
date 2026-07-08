@@ -75,6 +75,43 @@
 .error-hint { color: #d32f2f; font-size: 0.75rem; display: none; margin-top: 2px; }
 .error-hint.visible { display: block; }
 
+/* Account overview (TRD-001) */
+.overview-stats {
+    display: flex; flex-wrap: wrap; gap: 1.5rem 2.5rem; margin-bottom: 1rem;
+}
+.overview-stat .ov-label { font-size: 0.78rem; color: #888; margin-bottom: 2px; }
+.overview-stat .ov-value { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.overview-stat.primary .ov-value { font-size: 1.7rem; }
+.overview-stat .ov-sub { font-size: 0.75rem; color: #999; margin-top: 1px; }
+.overview-body { display: grid; grid-template-columns: 2fr 1fr; gap: 1.25rem; }
+.equity-chart-wrap { position: relative; min-width: 0; }
+.equity-chart-wrap svg { width: 100%; height: auto; display: block; }
+.equity-tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(255,255,255,0.97); border: 1px solid #ddd; border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12); padding: 0.45rem 0.6rem;
+    font-size: 0.78rem; z-index: 20; white-space: nowrap;
+}
+.equity-tooltip .tt-date { color: #888; font-size: 0.72rem; margin-bottom: 2px; }
+.equity-tooltip .tt-main { font-weight: 600; font-size: 0.9rem; }
+.equity-tooltip .tt-row { color: #666; }
+.weekly-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.weekly-table td { padding: 0.3rem 0.35rem; border-bottom: 1px solid #f0f0f0; white-space: nowrap; }
+.weekly-table .wk-range { color: #666; }
+.weekly-bar-track { width: 64px; height: 10px; position: relative; }
+.weekly-bar {
+    position: absolute; top: 0; height: 10px;
+    border-radius: 0 4px 4px 0; min-width: 2px;
+}
+.weekly-bar.neg { border-radius: 4px 0 0 4px; }
+.weekly-pct { text-align: right; font-variant-numeric: tabular-nums; }
+#overviewHoldings { overflow-x: auto; }
+.section-subtitle { font-size: 0.85rem; font-weight: 600; color: #555; margin: 0 0 0.5rem 0; }
+@media (max-width: 700px) {
+    .overview-body { grid-template-columns: 1fr; }
+    .overview-stats { gap: 1rem 1.5rem; }
+}
+
 /* Toast */
 .toast {
     position: fixed; top: 20px; right: 20px; padding: 0.7rem 1.2rem;
@@ -96,6 +133,50 @@
 
 {% block content %}
 <div class="dashboard">
+    <!-- Account Overview (TRD-001): 持仓明细 / 每周收益率 / 净值曲线 -->
+    <div class="status-card" style="margin-bottom: 1rem;">
+        <div class="status-card-header">
+            <h3>账户概览</h3>
+            <span style="font-size:0.75rem;color:#999;" id="overviewUpdatedAt"></span>
+        </div>
+        <div class="overview-stats">
+            <div class="overview-stat primary">
+                <div class="ov-label">总资产</div>
+                <div class="ov-value" id="ovTotalAsset">--</div>
+                <div class="ov-sub" id="ovTodayPnl"></div>
+            </div>
+            <div class="overview-stat">
+                <div class="ov-label">持仓市值</div>
+                <div class="ov-value" id="ovMarketValue">--</div>
+            </div>
+            <div class="overview-stat">
+                <div class="ov-label">可用资金</div>
+                <div class="ov-value" id="ovCash">--</div>
+            </div>
+            <div class="overview-stat">
+                <div class="ov-label">本周收益率</div>
+                <div class="ov-value" id="ovThisWeek">--</div>
+            </div>
+        </div>
+        <div class="overview-body">
+            <div>
+                <p class="section-subtitle">净值曲线(总资产,每日快照)</p>
+                <div class="equity-chart-wrap" id="equityChartWrap">
+                    <div id="equityChart"><div class="empty-state small"><p>加载中...</p></div></div>
+                    <div class="equity-tooltip" id="equityTooltip"></div>
+                </div>
+            </div>
+            <div>
+                <p class="section-subtitle">每周收益率(近 12 周)</p>
+                <div id="weeklyReturns"><div class="empty-state small"><p>加载中...</p></div></div>
+            </div>
+        </div>
+        <div style="margin-top: 1rem;">
+            <p class="section-subtitle">持仓明细 <span class="badge" id="ovHoldingsCount" style="font-weight:400;">0</span></p>
+            <div id="overviewHoldings"><div class="empty-state small"><p>加载中...</p></div></div>
+        </div>
+    </div>
+
     <!-- Status Cards Grid -->
     <div class="status-grid">
         <!-- Broker Connection Status -->
@@ -633,6 +714,7 @@ async function loadHoldings() {
         ]);
         const hData = await hResp.json();
         const oData = oResp.ok ? await oResp.json() : {orders: []};
+        renderOverviewHoldings(hData.holdings || []);
         // Build map: stock_code → pending SELL order (most recent wins)
         const pendingSells = {};
         for (const o of (oData.orders || [])) {
@@ -1340,6 +1422,330 @@ async function clearDataEngineError() {
     loadDataEngineStatus();
 }
 
+// --- Account Overview (TRD-001) ---
+
+function fmtMoney(v) {
+    if (v == null || isNaN(v)) return '--';
+    return Number(v).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function fmtWan(v) {
+    // Y 轴刻度用:>=1万 显示 "12.3万",否则千分位整数
+    if (Math.abs(v) >= 10000) {
+        const w = v / 10000;
+        return (Math.abs(w) >= 100 ? w.toFixed(0) : w.toFixed(1)) + '万';
+    }
+    return Math.round(v).toLocaleString('zh-CN');
+}
+
+function fmtSignedPct(v) {
+    if (v == null || isNaN(v)) return '--';
+    return (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+}
+
+function gainClass(v) { return v >= 0 ? 'gain-pos' : 'gain-neg'; }
+
+function niceTicks(lo, hi, count) {
+    const span = hi - lo;
+    if (span <= 0) return [lo];
+    const rawStep = span / count;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    let step = mag;
+    for (const m of [1, 2, 5, 10]) {
+        if (rawStep <= m * mag) { step = m * mag; break; }
+    }
+    const ticks = [];
+    for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) ticks.push(t);
+    return ticks;
+}
+
+function svgEl(tag, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+}
+
+const EQUITY_LINE_COLOR = '#1976d2';
+
+function renderEquityChart(snapshots) {
+    const container = document.getElementById('equityChart');
+    container.textContent = '';
+    const tooltip = document.getElementById('equityTooltip');
+    tooltip.style.display = 'none';
+
+    if (!snapshots || snapshots.length < 2) {
+        const d = document.createElement('div');
+        d.className = 'empty-state small';
+        const p = document.createElement('p');
+        p.textContent = snapshots && snapshots.length === 1
+            ? '快照已开始记录(' + snapshots[0].date + '),积累两天后显示曲线'
+            : '暂无净值快照 — broker 在线后每个交易日自动记录';
+        d.appendChild(p);
+        container.appendChild(d);
+        return;
+    }
+
+    const W = 720, H = 240, PL = 58, PR = 16, PT = 14, PB = 26;
+    const vals = snapshots.map(s => s.total_asset);
+    let lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    if (hi === lo) { hi += Math.max(1, hi * 0.005); lo -= Math.max(1, lo * 0.005); }
+    const padY = (hi - lo) * 0.08;
+    lo -= padY; hi += padY;
+    const xAt = i => PL + (W - PL - PR) * (i / (snapshots.length - 1));
+    const yAt = v => PT + (H - PT - PB) * (1 - (v - lo) / (hi - lo));
+
+    const svg = svgEl('svg', {viewBox: '0 0 ' + W + ' ' + H, role: 'img',
+        'aria-label': '总资产净值曲线,' + snapshots[0].date + ' 至 ' + snapshots[snapshots.length - 1].date});
+
+    // 网格线 + Y 轴刻度:1px 实线浅灰,recessive
+    for (const t of niceTicks(lo, hi, 4)) {
+        const gy = yAt(t);
+        svg.appendChild(svgEl('line', {x1: PL, y1: gy, x2: W - PR, y2: gy,
+            stroke: '#eeeeee', 'stroke-width': 1}));
+        const txt = svgEl('text', {x: PL - 8, y: gy + 3.5, 'text-anchor': 'end',
+            'font-size': 11, fill: '#999'});
+        txt.textContent = fmtWan(t);
+        svg.appendChild(txt);
+    }
+
+    // X 轴日期:首/中/尾
+    const xIdx = snapshots.length > 2
+        ? [0, Math.floor((snapshots.length - 1) / 2), snapshots.length - 1]
+        : [0, snapshots.length - 1];
+    for (const i of xIdx) {
+        const anchor = i === 0 ? 'start' : (i === snapshots.length - 1 ? 'end' : 'middle');
+        const txt = svgEl('text', {x: xAt(i), y: H - 8, 'text-anchor': anchor,
+            'font-size': 11, fill: '#999'});
+        txt.textContent = snapshots[i].date.slice(5);
+        svg.appendChild(txt);
+    }
+
+    // 面积填充(~10% 透明度) + 2px 折线
+    let lineD = '', areaD = '';
+    for (let i = 0; i < snapshots.length; i++) {
+        const px = xAt(i).toFixed(1), py = yAt(vals[i]).toFixed(1);
+        lineD += (i === 0 ? 'M' : 'L') + px + ',' + py;
+        areaD += (i === 0 ? 'M' : 'L') + px + ',' + py;
+    }
+    areaD += 'L' + xAt(snapshots.length - 1).toFixed(1) + ',' + (H - PB) +
+             'L' + xAt(0).toFixed(1) + ',' + (H - PB) + 'Z';
+    svg.appendChild(svgEl('path', {d: areaD, fill: EQUITY_LINE_COLOR, 'fill-opacity': 0.08}));
+    svg.appendChild(svgEl('path', {d: lineD, fill: 'none', stroke: EQUITY_LINE_COLOR,
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}));
+
+    // 端点:8px 圆点 + 2px 白描边(surface ring),端点值直接标注
+    const lastX = xAt(snapshots.length - 1), lastY = yAt(vals[vals.length - 1]);
+    svg.appendChild(svgEl('circle', {cx: lastX, cy: lastY, r: 4,
+        fill: EQUITY_LINE_COLOR, stroke: '#ffffff', 'stroke-width': 2}));
+    const endLabel = svgEl('text', {x: lastX - 8, y: lastY - 10, 'text-anchor': 'end',
+        'font-size': 11.5, 'font-weight': 600, fill: '#333'});
+    endLabel.textContent = fmtMoney(vals[vals.length - 1]);
+    svg.appendChild(endLabel);
+
+    // Crosshair:竖直 hairline,pointermove 吸附到最近日期
+    const cross = svgEl('line', {x1: 0, y1: PT, x2: 0, y2: H - PB,
+        stroke: '#bbbbbb', 'stroke-width': 1, visibility: 'hidden'});
+    svg.appendChild(cross);
+    const hoverDot = svgEl('circle', {r: 4, fill: EQUITY_LINE_COLOR,
+        stroke: '#ffffff', 'stroke-width': 2, visibility: 'hidden'});
+    svg.appendChild(hoverDot);
+
+    const wrap = document.getElementById('equityChartWrap');
+    function onMove(evt) {
+        const rect = svg.getBoundingClientRect();
+        const mx = (evt.clientX - rect.left) / rect.width * W;
+        let idx = Math.round((mx - PL) / ((W - PL - PR) / (snapshots.length - 1)));
+        idx = Math.max(0, Math.min(snapshots.length - 1, idx));
+        const s = snapshots[idx];
+        const cx = xAt(idx);
+        cross.setAttribute('x1', cx); cross.setAttribute('x2', cx);
+        cross.setAttribute('visibility', 'visible');
+        hoverDot.setAttribute('cx', cx); hoverDot.setAttribute('cy', yAt(s.total_asset));
+        hoverDot.setAttribute('visibility', 'visible');
+
+        tooltip.textContent = '';
+        const dt = document.createElement('div');
+        dt.className = 'tt-date'; dt.textContent = s.date;
+        const main = document.createElement('div');
+        main.className = 'tt-main'; main.textContent = fmtMoney(s.total_asset);
+        tooltip.appendChild(dt); tooltip.appendChild(main);
+        if (s.market_value != null) {
+            const r1 = document.createElement('div');
+            r1.className = 'tt-row'; r1.textContent = '市值 ' + fmtMoney(s.market_value);
+            tooltip.appendChild(r1);
+        }
+        if (s.cash != null) {
+            const r2 = document.createElement('div');
+            r2.className = 'tt-row'; r2.textContent = '现金 ' + fmtMoney(s.cash);
+            tooltip.appendChild(r2);
+        }
+        tooltip.style.display = 'block';
+        const wrapRect = wrap.getBoundingClientRect();
+        let left = cx / W * rect.width + 12;
+        if (left + tooltip.offsetWidth > wrapRect.width - 4) {
+            left = cx / W * rect.width - tooltip.offsetWidth - 12;
+        }
+        tooltip.style.left = Math.max(0, left) + 'px';
+        tooltip.style.top = '10px';
+    }
+    function onLeave() {
+        cross.setAttribute('visibility', 'hidden');
+        hoverDot.setAttribute('visibility', 'hidden');
+        tooltip.style.display = 'none';
+    }
+    svg.addEventListener('pointermove', onMove);
+    svg.addEventListener('pointerleave', onLeave);
+
+    container.appendChild(svg);
+}
+
+function renderWeeklyReturns(weekly) {
+    const el = document.getElementById('weeklyReturns');
+    el.textContent = '';
+    if (!weekly || !weekly.length) {
+        const d = document.createElement('div');
+        d.className = 'empty-state small';
+        const p = document.createElement('p');
+        p.textContent = '暂无周收益数据(需至少一周快照)';
+        d.appendChild(p);
+        el.appendChild(d);
+        return;
+    }
+    const rows = weekly.slice().reverse();  // 最近的周排最上
+    let maxAbs = 0;
+    for (const w of rows) {
+        if (w.return_pct != null) maxAbs = Math.max(maxAbs, Math.abs(w.return_pct));
+    }
+    const table = document.createElement('table');
+    table.className = 'weekly-table';
+    const tbody = document.createElement('tbody');
+    for (const w of rows) {
+        const tr = document.createElement('tr');
+        const tdRange = document.createElement('td');
+        tdRange.className = 'wk-range';
+        tdRange.textContent = w.start_date.slice(5) + '~' + w.end_date.slice(5);
+        const tdBar = document.createElement('td');
+        const track = document.createElement('div');
+        track.className = 'weekly-bar-track';
+        if (w.return_pct != null && maxAbs > 0) {
+            const bar = document.createElement('div');
+            bar.className = 'weekly-bar' + (w.return_pct < 0 ? ' neg' : '');
+            const half = 32;  // track 一半宽度,零点居中
+            const len = Math.max(2, Math.abs(w.return_pct) / maxAbs * half);
+            bar.style.width = len + 'px';
+            bar.style.left = (w.return_pct >= 0 ? half : half - len) + 'px';
+            bar.style.background = w.return_pct >= 0 ? '#d32f2f' : '#2e7d32';
+            track.appendChild(bar);
+        }
+        tdBar.appendChild(track);
+        const tdPct = document.createElement('td');
+        tdPct.className = 'weekly-pct ' + (w.return_pct != null ? gainClass(w.return_pct) : '');
+        tdPct.textContent = fmtSignedPct(w.return_pct);
+        tr.appendChild(tdRange); tr.appendChild(tdBar); tr.appendChild(tdPct);
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    el.appendChild(table);
+}
+
+function renderOverviewHoldings(holdings) {
+    const el = document.getElementById('overviewHoldings');
+    document.getElementById('ovHoldingsCount').textContent = holdings.length;
+    el.textContent = '';
+    if (!holdings.length) {
+        const d = document.createElement('div');
+        d.className = 'empty-state small';
+        const p = document.createElement('p');
+        p.textContent = '无持仓';
+        d.appendChild(p);
+        el.appendChild(d);
+        return;
+    }
+    const table = document.createElement('table');
+    table.className = 'trading-table';
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    for (const h of ['代码', '名称', '股数', '成本', '现价', '市值', '盈亏', '盈亏%']) {
+        const th = document.createElement('th');
+        th.textContent = h;
+        hr.appendChild(th);
+    }
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (const h of holdings) {
+        const tr = document.createElement('tr');
+        function td(text, cls) {
+            const c = document.createElement('td');
+            c.textContent = text;
+            if (cls) c.className = cls;
+            tr.appendChild(c);
+        }
+        td(String(h.code).split('.')[0], 'code');
+        td(h.name || '');
+        td(String(h.quantity));
+        td(h.avg_price != null ? Number(h.avg_price).toFixed(3) : '--', 'price');
+        td(h.last_price != null ? Number(h.last_price).toFixed(2) : '--', 'price');
+        td(fmtMoney(h.market_value), 'price');
+        td(h.pnl != null ? (h.pnl >= 0 ? '+' : '') + fmtMoney(h.pnl) : '--',
+           h.pnl != null ? gainClass(h.pnl) : '');
+        td(fmtSignedPct(h.pnl_pct), h.pnl_pct != null ? gainClass(h.pnl_pct) : '');
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    el.appendChild(table);
+}
+
+async function loadEquityCurve() {
+    try {
+        const resp = await tradingFetch('/api/trading/equity-curve');
+        if (!resp.ok) {
+            let detail = 'HTTP ' + resp.status;
+            try { detail = (await resp.json()).detail || detail; } catch (e) {}
+            throw new Error(detail);
+        }
+        const data = await resp.json();
+        const cur = data.current || {};
+
+        document.getElementById('ovTotalAsset').textContent = fmtMoney(cur.total_asset);
+        document.getElementById('ovMarketValue').textContent = fmtMoney(cur.market_value);
+        document.getElementById('ovCash').textContent = fmtMoney(cur.cash);
+
+        const pnlEl = document.getElementById('ovTodayPnl');
+        if (cur.today_pnl != null) {
+            pnlEl.textContent = '今日 ' + (cur.today_pnl >= 0 ? '+' : '') + fmtMoney(cur.today_pnl) +
+                ' (' + fmtSignedPct(cur.today_pnl_pct) + ')';
+            pnlEl.style.color = cur.today_pnl >= 0 ? '#d32f2f' : '#2e7d32';
+        } else {
+            pnlEl.textContent = '今日盈亏待昨日快照落库后显示';
+            pnlEl.style.color = '#999';
+        }
+
+        const weekly = data.weekly || [];
+        const thisWeek = weekly.length ? weekly[weekly.length - 1] : null;
+        const twEl = document.getElementById('ovThisWeek');
+        twEl.textContent = fmtSignedPct(thisWeek ? thisWeek.return_pct : null);
+        if (thisWeek && thisWeek.return_pct != null) {
+            twEl.style.color = thisWeek.return_pct >= 0 ? '#d32f2f' : '#2e7d32';
+        }
+
+        renderEquityChart(data.snapshots || []);
+        renderWeeklyReturns(weekly);
+        const upd = document.getElementById('overviewUpdatedAt');
+        upd.textContent = '更新于 ' + new Date().toTimeString().slice(0, 5);
+    } catch (e) {
+        const container = document.getElementById('equityChart');
+        container.textContent = '';
+        const d = document.createElement('div');
+        d.className = 'empty-state small';
+        const p = document.createElement('p');
+        p.textContent = '净值数据加载失败:' + e.message;
+        p.style.color = '#d32f2f';
+        d.appendChild(p);
+        container.appendChild(d);
+    }
+}
+
 // --- Init ---
 document.getElementById('tradeDatePicker').addEventListener('change', loadRecommendations);
 loadHoldings();
@@ -1349,6 +1755,8 @@ loadTodayOrders();
 loadModelStatus();
 loadDataEngineStatus();
 loadPreMarketHoldingButtons();
+loadEquityCurve();
+setInterval(loadEquityCurve, 300000);
 setInterval(loadPreMarketHoldingButtons, 30000);
 setInterval(loadHoldings, 10000);
 setInterval(loadBrokerStatus, 5000);

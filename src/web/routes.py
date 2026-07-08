@@ -3283,22 +3283,134 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/holdings")
     async def get_holdings(request: Request) -> dict:
-        """Get current broker positions (cached from xtquant-trade-server poll)."""
+        """Get current broker positions (cached from xtquant-trade-server poll).
+
+        TRD-001 增补成本/现价/市值/浮动盈亏字段(旧字段不变,向后兼容)。
+        浮动盈亏 = market_value − 成本价 × volume。
+
+        成本价来源(按优先级):
+        1. broker 的 avg_price(>0 才算有效——QMT 不少券商通道回 0);
+        2. 交易日志 trade_notes 里自己的买入记录,从最近的买入往回加权摊到
+           当前持仓股数(每笔买卖本来就都记着,这就是自己的数据);
+        3. 都没有 → null,前端显示 --。绝不拿 0 当成本编造"+整个市值"的假盈利。
+        """
         broker_pos = getattr(request.app.state, "broker_positions", [])
+        storage = getattr(request.app.state, "storage", None)
 
         from src.data.sources.local_concept_mapper import LocalConceptMapper
+        from src.notes.note_store import TradeNoteStore
+
+        async def _cost_from_notes(bare_code: str, volume: int) -> float | None:
+            """用交易日志的买入记录算加权成本价.
+
+            list_events 按时间升序;倒着走=最近的买入优先,摊够当前持仓股数
+            就停。日志不全时用已找到的部分算;一笔买入都没有 → None。
+            """
+            if storage is None:
+                return None
+            events = await TradeNoteStore(storage).list_events(bare_code)
+            amount = 0.0
+            covered = 0
+            for ev in reversed(events):
+                if covered >= volume:
+                    break
+                if ev.side != "buy" or not ev.price or not ev.qty:
+                    continue
+                take = min(ev.qty, volume - covered)
+                amount += float(ev.price) * take
+                covered += take
+            if covered <= 0:
+                return None
+            return round(amount / covered, 3)
 
         mapper = LocalConceptMapper()
-        holdings = [
-            {
-                "code": pos["code"],
-                "name": mapper.get_stock_name(pos["code"]),
-                "quantity": pos.get("volume", 0),
-            }
-            for pos in broker_pos
-            if pos.get("volume", 0) > 0
-        ]
+        holdings = []
+        for pos in broker_pos:
+            volume = pos.get("volume", 0)
+            if volume <= 0:
+                continue
+            avg_price = pos.get("avg_price")
+            if avg_price is not None and float(avg_price) <= 0:
+                avg_price = None
+            if avg_price is None:
+                avg_price = await _cost_from_notes(pos["code"].split(".")[0], volume)
+            market_value = pos.get("market_value")
+            last_price = pos.get("last_price")
+            if last_price is None and market_value and volume > 0:
+                # QMT 的 market_value 本就是 最新价×股数——这是换算,不是编造。
+                last_price = round(float(market_value) / volume, 3)
+            pnl = None
+            pnl_pct = None
+            if avg_price is not None and market_value is not None:
+                cost = float(avg_price) * volume
+                pnl = round(float(market_value) - cost, 2)
+                pnl_pct = round(pnl / cost * 100, 2)
+            holdings.append(
+                {
+                    "code": pos["code"],
+                    "name": mapper.get_stock_name(pos["code"]),
+                    "quantity": volume,
+                    "avg_price": avg_price,
+                    "last_price": last_price,
+                    "market_value": market_value,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                }
+            )
         return {"holdings": holdings}
+
+    @router.get("/api/trading/equity-curve")
+    async def get_equity_curve(request: Request, days: int = 365) -> dict:
+        """TRD-001 账户概览:每日资产快照曲线 + 每周收益率 + 当前实时状态。
+
+        快照由 broker 轮询旁路写入 account_equity_snapshot(每北京日一行),
+        历史从部署当天开始积累。current 部分取内存里的实时轮询值。
+        """
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            raise HTTPException(status_code=503, detail="数据库未连接,净值历史暂不可用")
+
+        from src.trading.equity_snapshot import EquitySnapshotStore, compute_weekly_returns
+
+        account_id = getattr(request.app.state, "broker_account_id", None)
+        try:
+            snapshots = await EquitySnapshotStore(storage).list_snapshots(
+                account_id=account_id, days=days
+            )
+        except Exception as e:
+            # 建表在 GreptimeDB 连接成功后执行;表还没建出来时如实报 503,不装作没数据
+            raise HTTPException(status_code=503, detail=f"净值快照查询失败: {e}") from e
+
+        weekly = compute_weekly_returns(snapshots)
+
+        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+        total_asset = float(getattr(request.app.state, "broker_total_asset", 0.0) or 0.0)
+        # 昨收资产 = 最近一笔早于今天的快照;今日盈亏以它为基数
+        prev_close_asset = None
+        for snap in reversed(snapshots):
+            if snap["date"] < today:
+                prev_close_asset = snap["total_asset"]
+                break
+        today_pnl = None
+        today_pnl_pct = None
+        if prev_close_asset and prev_close_asset > 0 and total_asset > 0:
+            today_pnl = round(total_asset - prev_close_asset, 2)
+            today_pnl_pct = round(today_pnl / prev_close_asset * 100, 2)
+
+        return {
+            "snapshots": snapshots,
+            "weekly": weekly,
+            "current": {
+                "total_asset": total_asset if total_asset > 0 else None,
+                "cash": float(getattr(request.app.state, "available_cash", 0.0) or 0.0),
+                "market_value": float(
+                    getattr(request.app.state, "broker_market_value", 0.0) or 0.0
+                ),
+                "prev_close_asset": prev_close_asset,
+                "today_pnl": today_pnl,
+                "today_pnl_pct": today_pnl_pct,
+            },
+        }
 
     @router.get("/api/trading/recommendations")
     async def get_recommendations(request: Request, date: str | None = None) -> dict:

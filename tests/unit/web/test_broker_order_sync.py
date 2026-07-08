@@ -14,6 +14,7 @@ class _Broker:
                 can_use_volume=100,
                 avg_price=12.3,
                 market_value=1230.0,
+                last_price=12.3,
             )
         ]
         self.position_fetches = 0
@@ -26,7 +27,9 @@ class _Broker:
         return self.positions
 
     async def get_account(self):
-        return SimpleNamespace(cash=1000.0, total_asset=2230.0, account_id="acct")
+        return SimpleNamespace(
+            cash=1000.0, total_asset=2230.0, market_value=1230.0, account_id="acct"
+        )
 
 
 class _Storage:
@@ -92,6 +95,7 @@ async def test_broker_order_sync_refreshes_positions_when_fills_change():
             "can_use_volume": 100,
             "avg_price": 12.3,
             "market_value": 1230.0,
+            "last_price": 12.3,
         }
     ]
 
