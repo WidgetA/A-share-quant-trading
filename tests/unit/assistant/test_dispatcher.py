@@ -157,7 +157,7 @@ async def test_help_command_lists_capabilities(monkeypatch: pytest.MonkeyPatch):
     assert d._queue.qsize() == 0
     assert len(replies) == 2
     for r in replies:
-        assert "/持仓" in r and "浮动盈亏" in r  # 列表带命令和大白话说明
+        assert "/持仓" in r and "总资产" in r  # 列表带命令和大白话说明
         assert "/帮助" in r
 
 
