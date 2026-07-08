@@ -1815,6 +1815,13 @@ function _baselineMsg(text, ok) {
     el.style.color = ok ? '#2e7d32' : '#d32f2f';
 }
 
+// 服务器 500 时响应可能不是 JSON(如 "Internal Server Error" 纯文本)——
+// 按文本兜底解析,把真实原因显示出来,不要 "Unexpected token" 天书。
+async function _parseRespSafe(resp) {
+    const text = await resp.text();
+    try { return JSON.parse(text); } catch (e) { return {detail: text || ('HTTP ' + resp.status)}; }
+}
+
 async function saveBaseline() {
     const date = document.getElementById('baselineDate').value;
     const asset = parseFloat(document.getElementById('baselineAsset').value);
@@ -1827,7 +1834,7 @@ async function saveBaseline() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({date: date, total_asset: asset})
         });
-        const data = await resp.json();
+        const data = await _parseRespSafe(resp);
         if (resp.ok && data.success) {
             _baselineMsg('已保存:' + date + ' = ' + fmtMoney(asset), true);
             loadEquityCurve();
@@ -1845,7 +1852,7 @@ async function deleteBaseline() {
     if (!confirm('确认删除 ' + date + ' 的手动校准点?')) return;
     try {
         const resp = await tradingFetch('/api/trading/equity-baseline/' + date, {method: 'DELETE'});
-        const data = await resp.json();
+        const data = await _parseRespSafe(resp);
         if (resp.ok && data.success) {
             _baselineMsg('已删除 ' + date + ' 的校准点', true);
             loadEquityCurve();

@@ -212,6 +212,26 @@ def test_set_baseline_writes_manual_snapshot(monkeypatch):
     assert "1002872.83" in insert_sqls[0]
 
 
+def test_set_baseline_surfaces_db_error_as_detail(monkeypatch):
+    """数据库炸了 → 500 且 detail 带真实异常原文,绝不裸 'Internal Server Error'。"""
+
+    class _BoomDB:
+        async def fetchrow(self, sql: str):
+            raise RuntimeError("column source not found")
+
+    client = _client(
+        {"storage": SimpleNamespace(db=_BoomDB()), "broker_account_id": "acct"},
+        monkeypatch,
+    )
+    resp = client.post(
+        "/api/trading/equity-baseline",
+        headers=_KEY,
+        json={"date": _bj(6), "total_asset": 100.0},
+    )
+    assert resp.status_code == 500
+    assert "column source not found" in resp.json()["detail"]
+
+
 def test_set_baseline_rejects_today_and_future_and_nonpositive(monkeypatch):
     client, db = _baseline_client(monkeypatch)
     assert (

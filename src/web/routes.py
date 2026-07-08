@@ -3552,20 +3552,33 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="总资产必须大于 0")
 
         store = EquitySnapshotStore(storage)
-        existing = await store.get_snapshot(account_id, body.date)
+        # 数据库异常透传真实原因(是什么错就报什么错),不让 FastAPI 裸 500
+        try:
+            existing = await store.get_snapshot(account_id, body.date)
+        except Exception as e:
+            logger.exception(f"equity-baseline get_snapshot failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"查询快照失败: {type(e).__name__}: {e}"
+            ) from e
         if existing is not None and existing["source"] == "broker":
             raise HTTPException(
                 status_code=409,
                 detail=f"{body.date} 已有券商快照真值({existing['total_asset']:,.2f}),不需要校准",
             )
-        await store.upsert_snapshot(
-            account_id=account_id,
-            trade_date=body.date,
-            total_asset=body.total_asset,
-            cash=0.0,
-            market_value=0.0,
-            source="manual",
-        )
+        try:
+            await store.upsert_snapshot(
+                account_id=account_id,
+                trade_date=body.date,
+                total_asset=body.total_asset,
+                cash=0.0,
+                market_value=0.0,
+                source="manual",
+            )
+        except Exception as e:
+            logger.exception(f"equity-baseline upsert failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"保存校准点失败: {type(e).__name__}: {e}"
+            ) from e
         logger.info("equity-baseline set: %s %s = %.2f", account_id, body.date, body.total_asset)
         return {"success": True, "date": body.date, "total_asset": body.total_asset}
 
@@ -3587,6 +3600,11 @@ def create_trading_router() -> APIRouter:
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            logger.exception(f"equity-baseline delete failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"删除校准点失败: {type(e).__name__}: {e}"
+            ) from e
         if not deleted:
             raise HTTPException(status_code=404, detail=f"{trade_date} 没有手动校准点")
         return {"success": True, "date": trade_date}

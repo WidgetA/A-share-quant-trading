@@ -25,14 +25,15 @@ CREATE TABLE IF NOT EXISTS account_equity_snapshot (
     cash         FLOAT64,
     market_value FLOAT64,
     updated_at   INT64,
-    source       STRING,
+    "source"     STRING,
     PRIMARY KEY (account_id, trade_date)
 )
 """
 
 # 0.22.2 手动校准基准点:source 区分 broker(轮询写入)/manual(用户校准)。
 # 老部署幂等 ALTER;旧行 source=NULL 视同 broker(note_store 同款处理)。
-_ALTER_ADD_SOURCE_SQL = "ALTER TABLE account_equity_snapshot ADD COLUMN source STRING"
+# ⚠ source 疑为 GreptimeDB SQL 关键字,所有 SQL 一律双引号引用(0.22.3 线上 500 教训)。
+_ALTER_ADD_SOURCE_SQL = 'ALTER TABLE account_equity_snapshot ADD COLUMN "source" STRING'
 
 
 def _q(s: str) -> str:
@@ -93,7 +94,7 @@ class EquitySnapshotStore:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         sql = (
             "INSERT INTO account_equity_snapshot "
-            "(ts, account_id, trade_date, total_asset, cash, market_value, updated_at, source) "
+            '(ts, account_id, trade_date, total_asset, cash, market_value, updated_at, "source") '
             f"VALUES ({ts_ms}, {_q(account_id)}, {_q(trade_date)}, "
             f"{float(total_asset)}, {float(cash)}, {float(market_value)}, {now_ms}, {_q(source)})"
         )
@@ -103,7 +104,7 @@ class EquitySnapshotStore:
         """单日快照;不存在 → None。source 旧行 NULL 视同 broker。"""
         date.fromisoformat(trade_date)
         row = await self._db.fetchrow(
-            "SELECT trade_date, total_asset, cash, market_value, source "
+            'SELECT trade_date, total_asset, cash, market_value, "source" '
             "FROM account_equity_snapshot "
             f"WHERE account_id = {_q(account_id)} AND trade_date = {_q(trade_date)} "
             "LIMIT 1"
@@ -147,7 +148,7 @@ class EquitySnapshotStore:
         days = max(1, min(int(days), 3650))
         where = f"WHERE account_id = {_q(account_id)} " if account_id else ""
         sql = (
-            "SELECT trade_date, total_asset, cash, market_value, source "
+            'SELECT trade_date, total_asset, cash, market_value, "source" '
             f"FROM account_equity_snapshot {where}"
             f"ORDER BY trade_date DESC LIMIT {days}"
         )
