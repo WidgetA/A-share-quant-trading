@@ -118,12 +118,14 @@ def compute_weekly_returns(snapshots: list[dict], max_weeks: int = 12) -> list[d
     (list_snapshots 的返回即此格式)。
 
     口径:
-    - 周收益 = 本周最后一笔 total_asset ÷ 上周最后一笔 − 1
-    - 最早一周没有上周基数 → 用该周第一笔做基数;该周只有一笔 → return_pct=None
-    - 基数 ≤ 0 → return_pct=None(绝不产生除零/荒谬值)
+    - 周收益 = 本周最后一笔 total_asset ÷ 上周最后一笔 − 1;盈亏金额 = 两者之差
+    - 没有上周基数的起始周不报数(return_pct/pnl_amount = None)——序列从周中开始时,
+      拿周内的点当基数会吞掉周初的盈亏,宁可不显示也不显示错的(0.22.1 实测教训)
+    - 基数 ≤ 0 → 同样 None(绝不产生除零/荒谬值)
 
     返回最近 max_weeks 周,升序,每项:
-    {year, week, start_date, end_date, end_asset, return_pct(百分数,2位小数)|None}
+    {year, week, start_date, end_date, end_asset,
+     return_pct(百分数,2位小数)|None, pnl_amount(元,2位小数)|None}
     """
     weeks: list[dict] = []
     for snap in snapshots:
@@ -149,13 +151,11 @@ def compute_weekly_returns(snapshots: list[dict], max_weeks: int = 12) -> list[d
     out: list[dict] = []
     prev_end: float | None = None
     for w in weeks:
-        ret: float | None
-        if prev_end is not None:
-            ret = (w["end_asset"] / prev_end - 1.0) if prev_end > 0 else None
-        elif w["end_date"] != w["start_date"] and w["_first_asset"] > 0:
-            ret = w["end_asset"] / w["_first_asset"] - 1.0
-        else:
-            ret = None
+        ret: float | None = None
+        amount: float | None = None
+        if prev_end is not None and prev_end > 0:
+            ret = w["end_asset"] / prev_end - 1.0
+            amount = w["end_asset"] - prev_end
         out.append(
             {
                 "year": w["year"],
@@ -164,6 +164,7 @@ def compute_weekly_returns(snapshots: list[dict], max_weeks: int = 12) -> list[d
                 "end_date": w["end_date"],
                 "end_asset": w["end_asset"],
                 "return_pct": None if ret is None else round(ret * 100, 2),
+                "pnl_amount": None if amount is None else round(amount, 2),
             }
         )
         prev_end = w["end_asset"]

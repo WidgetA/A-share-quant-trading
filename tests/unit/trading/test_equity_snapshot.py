@@ -37,12 +37,14 @@ class TestComputeWeeklyReturns:
         ]
         out = compute_weekly_returns(snaps)
         assert len(out) == 2
-        # 第一周: 没有上周基数,用本周第一笔 10万 → +10%
-        assert out[0]["return_pct"] == 10.0
+        # 第一周: 没有上周基数 → 不报数(0.22.1:拿周内点当基数会吞掉周初盈亏)
+        assert out[0]["return_pct"] is None
+        assert out[0]["pnl_amount"] is None
         assert out[0]["start_date"] == "2026-06-29"
         assert out[0]["end_date"] == "2026-07-03"
-        # 第二周: 10.45/11 - 1 = -5%
+        # 第二周: 10.45/11 - 1 = -5%,金额 -5500
         assert out[1]["return_pct"] == -5.0
+        assert out[1]["pnl_amount"] == -5500.0
         assert out[1]["end_asset"] == 104500.0
 
     def test_first_week_single_snapshot_has_no_return(self):
@@ -54,6 +56,7 @@ class TestComputeWeeklyReturns:
         snaps = [_snap("2026-07-03", 100000.0), _snap("2026-07-06", 101000.0)]
         out = compute_weekly_returns(snaps)
         assert out[1]["return_pct"] == 1.0
+        assert out[1]["pnl_amount"] == 1000.0
 
     def test_zero_base_yields_none_not_crash(self):
         snaps = [_snap("2026-07-03", 0.0), _snap("2026-07-06", 101000.0)]

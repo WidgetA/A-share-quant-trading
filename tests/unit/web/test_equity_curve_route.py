@@ -27,10 +27,14 @@ def _client(state: dict, monkeypatch) -> TestClient:
 
 
 class _FakeDB:
+    """快照查询回 rows;重建路径的 trade_notes 查询回空(无本地流水)。"""
+
     def __init__(self, rows):
         self._rows = rows
 
     async def fetch(self, sql: str):
+        if "trade_notes" in sql:
+            return []
         return self._rows
 
 
@@ -60,8 +64,10 @@ def test_equity_curve_returns_snapshots_weekly_and_today_pnl(monkeypatch):
     data = resp.json()
     assert [s["date"] for s in data["snapshots"]] == [prev, today]  # 升序
     assert isinstance(data["weekly"], list) and data["weekly"]
+    assert "reconstruction" in data
     cur = data["current"]
     assert cur["total_asset"] == 105000.0
+    assert cur["frozen_cash"] == 0.0
     assert cur["prev_close_asset"] == 100000.0
     assert cur["today_pnl"] == 5000.0
     assert cur["today_pnl_pct"] == 5.0

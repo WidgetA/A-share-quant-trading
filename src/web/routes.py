@@ -3323,16 +3323,22 @@ def create_trading_router() -> APIRouter:
                 return None
             return round(amount / covered, 3)
 
+        from src.trading.equity_ledger import is_non_stock_position_code
+
         mapper = LocalConceptMapper()
         holdings = []
         for pos in broker_pos:
             volume = pos.get("volume", 0)
             if volume <= 0:
                 continue
+            # 逆回购聚合持仓(QMT 码 888880,市值/成本恒报 0):命名兜底,
+            # 不算成本/盈亏(算了也是编造)。
+            is_repo = is_non_stock_position_code(pos["code"])
+            name = mapper.get_stock_name(pos["code"]) or ("国债逆回购" if is_repo else "")
             avg_price = pos.get("avg_price")
             if avg_price is not None and float(avg_price) <= 0:
                 avg_price = None
-            if avg_price is None:
+            if avg_price is None and not is_repo:
                 avg_price = await _cost_from_notes(pos["code"].split(".")[0], volume)
             market_value = pos.get("market_value")
             last_price = pos.get("last_price")
@@ -3341,14 +3347,14 @@ def create_trading_router() -> APIRouter:
                 last_price = round(float(market_value) / volume, 3)
             pnl = None
             pnl_pct = None
-            if avg_price is not None and market_value is not None:
+            if not is_repo and avg_price is not None and market_value is not None:
                 cost = float(avg_price) * volume
                 pnl = round(float(market_value) - cost, 2)
                 pnl_pct = round(pnl / cost * 100, 2)
             holdings.append(
                 {
                     "code": pos["code"],
-                    "name": mapper.get_stock_name(pos["code"]),
+                    "name": name,
                     "quantity": volume,
                     "avg_price": avg_price,
                     "last_price": last_price,
@@ -3361,15 +3367,24 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/equity-curve")
     async def get_equity_curve(request: Request, days: int = 365) -> dict:
-        """TRD-001 账户概览:每日资产快照曲线 + 每周收益率 + 当前实时状态。
+        """TRD-001 账户概览:净值曲线 + 每周收益率(额+%) + 当前实时状态。
 
-        快照由 broker 轮询旁路写入 account_equity_snapshot(每北京日一行),
-        历史从部署当天开始积累。current 部分取内存里的实时轮询值。
+        曲线三段拼接(features.md 0.22.1):
+        1. 本地账本重建段 — 部署前历史,trade_notes 流水 + backtest_daily 收盘价
+           从最早快照锚点倒推(equity_ledger.build_reconstructed_history);
+        2. 快照段 — account_equity_snapshot,broker 轮询写入的每日真值;
+        3. 当日实时点 — 内存里的实时总资产(比 5 分钟节流的快照新)。
+        重建对不上会截断并把 warnings 原样交给前端展示,绝不显示错的历史。
         """
         storage = getattr(request.app.state, "storage", None)
         if storage is None:
             raise HTTPException(status_code=503, detail="数据库未连接,净值历史暂不可用")
 
+        from src.trading.equity_ledger import (
+            LEDGER_COMPLETE_SINCE,
+            build_reconstructed_history,
+            is_non_stock_position_code,
+        )
         from src.trading.equity_snapshot import EquitySnapshotStore, compute_weekly_returns
 
         account_id = getattr(request.app.state, "broker_account_id", None)
@@ -3381,13 +3396,59 @@ def create_trading_router() -> APIRouter:
             # 建表在 GreptimeDB 连接成功后执行;表还没建出来时如实报 503,不装作没数据
             raise HTTPException(status_code=503, detail=f"净值快照查询失败: {e}") from e
 
-        weekly = compute_weekly_returns(snapshots)
-
         today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         total_asset = float(getattr(request.app.state, "broker_total_asset", 0.0) or 0.0)
-        # 昨收资产 = 最近一笔早于今天的快照;今日盈亏以它为基数
+
+        # ---- 历史重建段(锚点 = 最早一笔快照;无快照则用当前实时值当今日锚)----
+        recon_points: list[dict] = []
+        recon_meta: dict = {
+            "window_start": LEDGER_COMPLETE_SINCE,
+            "anchor_date": None,
+            "truncated_at": None,
+            "warnings": [],
+        }
+        if snapshots:
+            anchor_date, anchor_equity = snapshots[0]["date"], snapshots[0]["total_asset"]
+        elif total_asset > 0:
+            anchor_date, anchor_equity = today, total_asset
+        else:
+            anchor_date, anchor_equity = None, None
+        if anchor_date is not None:
+            positions_now = {
+                pos["code"].split(".")[0]: int(pos.get("volume", 0))
+                for pos in getattr(request.app.state, "broker_positions", [])
+                if pos.get("volume", 0) > 0 and not is_non_stock_position_code(pos["code"])
+            }
+            try:
+                recon = await build_reconstructed_history(
+                    storage,
+                    positions_now=positions_now,
+                    anchor_date=anchor_date,
+                    anchor_equity=anchor_equity,
+                    today_bj=today,
+                )
+                recon_points = recon.points
+                recon_meta["anchor_date"] = anchor_date
+                recon_meta["truncated_at"] = recon.truncated_at
+                recon_meta["warnings"] = recon.warnings
+            except Exception as e:
+                # display 路径:重建失败退回纯快照,但必须让用户看见失败原因
+                logger.exception(f"equity history reconstruction failed: {e}")
+                recon_meta["warnings"] = [f"历史重建失败,仅显示快照段: {type(e).__name__}: {e}"]
+
+        # ---- 三段合并:重建段(< 首快照日) + 快照段 + 今日实时点 ----
+        series = list(recon_points) + list(snapshots)
+        if total_asset > 0:
+            if series and series[-1]["date"] == today:
+                series[-1] = {**series[-1], "total_asset": total_asset}
+            elif not series or series[-1]["date"] < today:
+                series.append({"date": today, "total_asset": total_asset})
+
+        weekly = compute_weekly_returns(series)
+
+        # 昨收资产 = 最近一笔早于今天的点;今日盈亏以它为基数
         prev_close_asset = None
-        for snap in reversed(snapshots):
+        for snap in reversed(series):
             if snap["date"] < today:
                 prev_close_asset = snap["total_asset"]
                 break
@@ -3398,14 +3459,16 @@ def create_trading_router() -> APIRouter:
             today_pnl_pct = round(today_pnl / prev_close_asset * 100, 2)
 
         return {
-            "snapshots": snapshots,
+            "snapshots": series,
             "weekly": weekly,
+            "reconstruction": recon_meta,
             "current": {
                 "total_asset": total_asset if total_asset > 0 else None,
                 "cash": float(getattr(request.app.state, "available_cash", 0.0) or 0.0),
                 "market_value": float(
                     getattr(request.app.state, "broker_market_value", 0.0) or 0.0
                 ),
+                "frozen_cash": float(getattr(request.app.state, "broker_frozen_cash", 0.0) or 0.0),
                 "prev_close_asset": prev_close_asset,
                 "today_pnl": today_pnl,
                 "today_pnl_pct": today_pnl_pct,

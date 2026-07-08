@@ -152,22 +152,26 @@
             <div class="overview-stat">
                 <div class="ov-label">可用资金</div>
                 <div class="ov-value" id="ovCash">--</div>
+                <div class="ov-sub" id="ovFrozen"></div>
             </div>
             <div class="overview-stat">
-                <div class="ov-label">本周收益率</div>
+                <div class="ov-label">本周</div>
                 <div class="ov-value" id="ovThisWeek">--</div>
+                <div class="ov-sub" id="ovThisWeekPct"></div>
             </div>
         </div>
         <div class="overview-body">
             <div>
-                <p class="section-subtitle">净值曲线(总资产,每日快照)</p>
+                <p class="section-subtitle">净值曲线(总资产)</p>
                 <div class="equity-chart-wrap" id="equityChartWrap">
                     <div id="equityChart"><div class="empty-state small"><p>加载中...</p></div></div>
                     <div class="equity-tooltip" id="equityTooltip"></div>
                 </div>
+                <div id="reconNote" style="font-size:0.72rem;color:#999;margin-top:4px;"></div>
+                <div id="reconWarnings" style="font-size:0.75rem;color:#b26a00;margin-top:2px;"></div>
             </div>
             <div>
-                <p class="section-subtitle">每周收益率(近 12 周)</p>
+                <p class="section-subtitle">每周收益(近 12 周)</p>
                 <div id="weeklyReturns"><div class="empty-state small"><p>加载中...</p></div></div>
             </div>
         </div>
@@ -1638,10 +1642,14 @@ function renderWeeklyReturns(weekly) {
             track.appendChild(bar);
         }
         tdBar.appendChild(track);
+        const tdAmt = document.createElement('td');
+        tdAmt.className = 'weekly-pct ' + (w.pnl_amount != null ? gainClass(w.pnl_amount) : '');
+        tdAmt.textContent = w.pnl_amount != null
+            ? (w.pnl_amount >= 0 ? '+' : '') + fmtMoney(w.pnl_amount) : '--';
         const tdPct = document.createElement('td');
         tdPct.className = 'weekly-pct ' + (w.return_pct != null ? gainClass(w.return_pct) : '');
         tdPct.textContent = fmtSignedPct(w.return_pct);
-        tr.appendChild(tdRange); tr.appendChild(tdBar); tr.appendChild(tdPct);
+        tr.appendChild(tdRange); tr.appendChild(tdBar); tr.appendChild(tdAmt); tr.appendChild(tdPct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -1710,6 +1718,9 @@ async function loadEquityCurve() {
         document.getElementById('ovTotalAsset').textContent = fmtMoney(cur.total_asset);
         document.getElementById('ovMarketValue').textContent = fmtMoney(cur.market_value);
         document.getElementById('ovCash').textContent = fmtMoney(cur.cash);
+        const frozenEl = document.getElementById('ovFrozen');
+        frozenEl.textContent = (cur.frozen_cash && cur.frozen_cash > 0)
+            ? '另冻结(逆回购/在途) ' + fmtMoney(cur.frozen_cash) : '';
 
         const pnlEl = document.getElementById('ovTodayPnl');
         if (cur.today_pnl != null) {
@@ -1717,20 +1728,41 @@ async function loadEquityCurve() {
                 ' (' + fmtSignedPct(cur.today_pnl_pct) + ')';
             pnlEl.style.color = cur.today_pnl >= 0 ? '#d32f2f' : '#2e7d32';
         } else {
-            pnlEl.textContent = '今日盈亏待昨日快照落库后显示';
+            pnlEl.textContent = '今日盈亏待昨日数据就绪后显示';
             pnlEl.style.color = '#999';
         }
 
         const weekly = data.weekly || [];
         const thisWeek = weekly.length ? weekly[weekly.length - 1] : null;
         const twEl = document.getElementById('ovThisWeek');
-        twEl.textContent = fmtSignedPct(thisWeek ? thisWeek.return_pct : null);
-        if (thisWeek && thisWeek.return_pct != null) {
-            twEl.style.color = thisWeek.return_pct >= 0 ? '#d32f2f' : '#2e7d32';
+        const twPctEl = document.getElementById('ovThisWeekPct');
+        if (thisWeek && thisWeek.pnl_amount != null) {
+            twEl.textContent = (thisWeek.pnl_amount >= 0 ? '+' : '') + fmtMoney(thisWeek.pnl_amount);
+            twEl.style.color = thisWeek.pnl_amount >= 0 ? '#d32f2f' : '#2e7d32';
+            twPctEl.textContent = fmtSignedPct(thisWeek.return_pct);
+            twPctEl.style.color = twEl.style.color;
+        } else {
+            twEl.textContent = '--';
+            twEl.style.color = '';
+            twPctEl.textContent = '';
         }
 
         renderEquityChart(data.snapshots || []);
         renderWeeklyReturns(weekly);
+
+        // 历史重建说明 + 数据警示(截断/近似口径,如实展示)
+        const recon = data.reconstruction || {};
+        const noteEl = document.getElementById('reconNote');
+        const warnEl = document.getElementById('reconWarnings');
+        noteEl.textContent = recon.anchor_date
+            ? recon.anchor_date + ' 之前由本地交易记录+日线收盘价重建,之后为券商每日快照'
+            : '';
+        warnEl.textContent = '';
+        for (const w of (recon.warnings || [])) {
+            const d = document.createElement('div');
+            d.textContent = '⚠ ' + w;
+            warnEl.appendChild(d);
+        }
         const upd = document.getElementById('overviewUpdatedAt');
         upd.textContent = '更新于 ' + new Date().toTimeString().slice(0, 5);
     } catch (e) {
