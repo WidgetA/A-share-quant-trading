@@ -124,7 +124,12 @@ _trading_api_key_warned = False
 # AST-001: read-only GET endpoints the assistant's dedicated key may access.
 # This is a hard allowlist — the assistant key opens NOTHING else, so a
 # prompt-injected kimi holding it physically cannot reach order endpoints.
-ASSISTANT_READONLY_GET_PATHS = frozenset({"/api/trading/holdings"})
+ASSISTANT_READONLY_GET_PATHS = frozenset(
+    {
+        "/api/trading/holdings",
+        "/api/trading/equity-curve",  # 账户概览:总资产/今日/本周/可用资金(只读)
+    }
+)
 
 
 async def verify_trading_api_key(

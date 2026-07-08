@@ -38,12 +38,22 @@ def _client(monkeypatch, assistant_key: str | None = ASSISTANT_KEY) -> TestClien
     async def orders():  # GET but NOT in the allowlist
         return {"orders": []}
 
+    @app.get("/api/trading/equity-curve", dependencies=dep)
+    async def equity_curve():  # 账户概览数据源,0.23.6 起进只读白名单
+        return {"current": {}}
+
     return TestClient(app)
 
 
 def test_assistant_key_opens_holdings_get(monkeypatch):
     client = _client(monkeypatch)
     r = client.get("/api/trading/holdings", headers={"X-API-Key": ASSISTANT_KEY})
+    assert r.status_code == 200
+
+
+def test_assistant_key_opens_equity_curve_get(monkeypatch):
+    client = _client(monkeypatch)
+    r = client.get("/api/trading/equity-curve", headers={"X-API-Key": ASSISTANT_KEY})
     assert r.status_code == 200
 
 

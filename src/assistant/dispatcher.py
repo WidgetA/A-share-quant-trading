@@ -48,8 +48,8 @@ _INSTRUCTIONS_PATH = Path(__file__).parent / "assistant_instructions.md"
 SLASH_COMMANDS: dict[str, dict[str, str]] = {
     "/持仓": {
         "skill": "check-holdings",
-        "desc": "查当前证券账户持仓(名称、股数、成本、现价、市值、浮动盈亏)",
-        "ack": "收到,正在查询当前持仓,大约要一两分钟,查到就回在这里。",
+        "desc": "查账户概览+持仓:总资产/今日变动/本周收益/可用资金 + 每只持仓的成本、现价、市值、盈亏",
+        "ack": "收到,正在查询账户概览和持仓,大约一分钟,查到就回在这里。",
     },
 }
 
