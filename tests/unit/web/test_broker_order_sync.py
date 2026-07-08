@@ -28,7 +28,11 @@ class _Broker:
 
     async def get_account(self):
         return SimpleNamespace(
-            cash=1000.0, total_asset=2230.0, market_value=1230.0, account_id="acct"
+            cash=1000.0,
+            total_asset=2230.0,
+            market_value=1230.0,
+            frozen_cash=0.0,
+            account_id="acct",
         )
 
 

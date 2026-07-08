@@ -37,12 +37,14 @@ class TestComputeWeeklyReturns:
         ]
         out = compute_weekly_returns(snaps)
         assert len(out) == 2
-        # 第一周: 没有上周基数,用本周第一笔 10万 → +10%
-        assert out[0]["return_pct"] == 10.0
+        # 第一周: 没有上周基数 → 不报数(0.22.1:拿周内点当基数会吞掉周初盈亏)
+        assert out[0]["return_pct"] is None
+        assert out[0]["pnl_amount"] is None
         assert out[0]["start_date"] == "2026-06-29"
         assert out[0]["end_date"] == "2026-07-03"
-        # 第二周: 10.45/11 - 1 = -5%
+        # 第二周: 10.45/11 - 1 = -5%,金额 -5500
         assert out[1]["return_pct"] == -5.0
+        assert out[1]["pnl_amount"] == -5500.0
         assert out[1]["end_asset"] == 104500.0
 
     def test_first_week_single_snapshot_has_no_return(self):
@@ -54,6 +56,7 @@ class TestComputeWeeklyReturns:
         snaps = [_snap("2026-07-03", 100000.0), _snap("2026-07-06", 101000.0)]
         out = compute_weekly_returns(snaps)
         assert out[1]["return_pct"] == 1.0
+        assert out[1]["pnl_amount"] == 1000.0
 
     def test_zero_base_yields_none_not_crash(self):
         snaps = [_snap("2026-07-03", 0.0), _snap("2026-07-06", 101000.0)]
@@ -97,8 +100,9 @@ class TestBeijingDateToUtcMs:
 
 
 class _FakeDB:
-    def __init__(self, rows: list[dict] | None = None):
+    def __init__(self, rows: list[dict] | None = None, row: dict | None = None):
         self._rows = rows or []
+        self._row = row
         self.executed: list[str] = []
 
     async def execute(self, sql: str) -> None:
@@ -107,6 +111,10 @@ class _FakeDB:
     async def fetch(self, sql: str):
         self.executed.append(sql)
         return self._rows
+
+    async def fetchrow(self, sql: str):
+        self.executed.append(sql)
+        return self._row
 
 
 def _store(db: _FakeDB) -> EquitySnapshotStore:
@@ -130,6 +138,62 @@ class TestEquitySnapshotStore:
         expected_ts = _beijing_date_to_utc_ms("2026-07-07")
         assert f"VALUES ({expected_ts}, '123456', '2026-07-07'" in sql
         assert "250000.5" in sql and "50000.0" in sql and "200000.5" in sql
+        assert "'broker'" in sql  # 默认 source
+
+    def test_upsert_manual_source_and_rejects_bad_source(self):
+        db = _FakeDB()
+        asyncio.run(
+            _store(db).upsert_snapshot(
+                account_id="1",
+                trade_date="2026-07-02",
+                total_asset=1002872.83,
+                cash=0.0,
+                market_value=0.0,
+                source="manual",
+            )
+        )
+        assert "'manual'" in db.executed[0]
+        with pytest.raises(ValueError):
+            asyncio.run(
+                _store(db).upsert_snapshot(
+                    account_id="1",
+                    trade_date="2026-07-02",
+                    total_asset=1.0,
+                    cash=0.0,
+                    market_value=0.0,
+                    source="hacker",
+                )
+            )
+
+    def test_delete_manual_snapshot_only_deletes_manual(self):
+        # broker 行:拒删
+        db = _FakeDB(
+            row={
+                "trade_date": "2026-07-07",
+                "total_asset": 100.0,
+                "cash": 1.0,
+                "market_value": 99.0,
+                "source": "broker",
+            }
+        )
+        with pytest.raises(ValueError):
+            asyncio.run(_store(db).delete_manual_snapshot("1", "2026-07-07"))
+        assert not any("DELETE" in s for s in db.executed)
+        # manual 行:删除
+        db2 = _FakeDB(
+            row={
+                "trade_date": "2026-07-02",
+                "total_asset": 100.0,
+                "cash": None,
+                "market_value": None,
+                "source": "manual",
+            }
+        )
+        assert asyncio.run(_store(db2).delete_manual_snapshot("1", "2026-07-02")) is True
+        assert any("DELETE FROM account_equity_snapshot" in s for s in db2.executed)
+        # 不存在:False
+        db3 = _FakeDB(row=None)
+        assert asyncio.run(_store(db3).delete_manual_snapshot("1", "2026-07-02")) is False
 
     def test_upsert_rejects_bad_date_and_empty_account(self):
         db = _FakeDB()
@@ -170,20 +234,28 @@ class TestEquitySnapshotStore:
 
     def test_list_snapshots_ascending_and_skips_null_asset(self):
         # 查询 ORDER BY trade_date DESC — fake 按 DESC 给行
-        def _row(d: str, asset, cash, mv) -> dict:
-            return {"trade_date": d, "total_asset": asset, "cash": cash, "market_value": mv}
+        def _row(d: str, asset, cash, mv, source=None) -> dict:
+            return {
+                "trade_date": d,
+                "total_asset": asset,
+                "cash": cash,
+                "market_value": mv,
+                "source": source,
+            }
 
         db = _FakeDB(
             rows=[
                 _row("2026-07-07", 102.0, 2.0, 100.0),
                 _row("2026-07-06", None, 1.0, 1.0),
-                _row("2026-07-03", 100.0, None, None),
+                _row("2026-07-03", 100.0, None, None, source="manual"),
             ]
         )
         out = asyncio.run(_store(db).list_snapshots(account_id="123456", days=30))
         assert [s["date"] for s in out] == ["2026-07-03", "2026-07-07"]
         assert out[0]["cash"] is None
+        assert out[0]["source"] == "manual"
         assert out[1]["total_asset"] == 102.0
+        assert out[1]["source"] == "broker"  # 旧行 NULL 视同 broker
         assert "WHERE account_id = '123456'" in db.executed[0]
         assert "LIMIT 30" in db.executed[0]
 

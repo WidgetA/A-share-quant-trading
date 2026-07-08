@@ -574,6 +574,17 @@ class XtquantConfigRequest(BaseModel):
     api_key: str
 
 
+class EquityBaselineRequest(BaseModel):
+    """TRD-001 0.22.2 手动校准基准点:某日收盘总资产(净值曲线从最早基准起算)。
+
+    Module-level on purpose — 函数内定义的 Pydantic body 模型在
+    `from __future__ import annotations` 下会 422(见 MEMORY)。
+    """
+
+    date: str  # YYYY-MM-DD(北京日,必须早于今天)
+    total_asset: float  # 该日收盘总资产(元)
+
+
 # ==================== Momentum Backtest Router ====================
 
 
@@ -3328,16 +3339,22 @@ def create_trading_router() -> APIRouter:
                 return None
             return round(amount / covered, 3)
 
+        from src.trading.equity_ledger import is_non_stock_position_code
+
         mapper = LocalConceptMapper()
         holdings = []
         for pos in broker_pos:
             volume = pos.get("volume", 0)
             if volume <= 0:
                 continue
+            # 逆回购聚合持仓(QMT 码 888880,市值/成本恒报 0):命名兜底,
+            # 不算成本/盈亏(算了也是编造)。
+            is_repo = is_non_stock_position_code(pos["code"])
+            name = mapper.get_stock_name(pos["code"]) or ("国债逆回购" if is_repo else "")
             avg_price = pos.get("avg_price")
             if avg_price is not None and float(avg_price) <= 0:
                 avg_price = None
-            if avg_price is None:
+            if avg_price is None and not is_repo:
                 avg_price = await _cost_from_notes(pos["code"].split(".")[0], volume)
             market_value = pos.get("market_value")
             last_price = pos.get("last_price")
@@ -3346,14 +3363,14 @@ def create_trading_router() -> APIRouter:
                 last_price = round(float(market_value) / volume, 3)
             pnl = None
             pnl_pct = None
-            if avg_price is not None and market_value is not None:
+            if not is_repo and avg_price is not None and market_value is not None:
                 cost = float(avg_price) * volume
                 pnl = round(float(market_value) - cost, 2)
                 pnl_pct = round(pnl / cost * 100, 2)
             holdings.append(
                 {
                     "code": pos["code"],
-                    "name": mapper.get_stock_name(pos["code"]),
+                    "name": name,
                     "quantity": volume,
                     "avg_price": avg_price,
                     "last_price": last_price,
@@ -3366,15 +3383,24 @@ def create_trading_router() -> APIRouter:
 
     @router.get("/api/trading/equity-curve")
     async def get_equity_curve(request: Request, days: int = 365) -> dict:
-        """TRD-001 账户概览:每日资产快照曲线 + 每周收益率 + 当前实时状态。
+        """TRD-001 账户概览:净值曲线 + 每周收益率(额+%) + 当前实时状态。
 
-        快照由 broker 轮询旁路写入 account_equity_snapshot(每北京日一行),
-        历史从部署当天开始积累。current 部分取内存里的实时轮询值。
+        曲线三段拼接(features.md 0.22.1):
+        1. 本地账本重建段 — 部署前历史,trade_notes 流水 + backtest_daily 收盘价
+           从最早快照锚点倒推(equity_ledger.build_reconstructed_history);
+        2. 快照段 — account_equity_snapshot,broker 轮询写入的每日真值;
+        3. 当日实时点 — 内存里的实时总资产(比 5 分钟节流的快照新)。
+        重建对不上会截断并把 warnings 原样交给前端展示,绝不显示错的历史。
         """
         storage = getattr(request.app.state, "storage", None)
         if storage is None:
             raise HTTPException(status_code=503, detail="数据库未连接,净值历史暂不可用")
 
+        from src.trading.equity_ledger import (
+            LEDGER_COMPLETE_SINCE,
+            build_reconstructed_history,
+            is_non_stock_position_code,
+        )
         from src.trading.equity_snapshot import EquitySnapshotStore, compute_weekly_returns
 
         account_id = getattr(request.app.state, "broker_account_id", None)
@@ -3386,13 +3412,89 @@ def create_trading_router() -> APIRouter:
             # 建表在 GreptimeDB 连接成功后执行;表还没建出来时如实报 503,不装作没数据
             raise HTTPException(status_code=503, detail=f"净值快照查询失败: {e}") from e
 
-        weekly = compute_weekly_returns(snapshots)
-
         today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         total_asset = float(getattr(request.app.state, "broker_total_asset", 0.0) or 0.0)
-        # 昨收资产 = 最近一笔早于今天的快照;今日盈亏以它为基数
+
+        # ---- 历史重建段(0.22.2:窗口起点=最早快照日,重建只填快照之间的空档)----
+        # 锚点 = 最早一笔 broker 快照(轮询写入的券商真值);手动校准点只定窗口
+        # 起点、不当锚(锚必须是"从当前持仓倒推可达"的真值)。无 broker 快照时
+        # 用当前实时值当今日锚。
+        recon_points: list[dict] = []
+        recon_meta: dict = {
+            "window_start": None,
+            "anchor_date": None,
+            "truncated_at": None,
+            "warnings": [],
+        }
+        broker_snaps = [s for s in snapshots if s.get("source", "broker") == "broker"]
+        if broker_snaps:
+            anchor_date, anchor_equity = (
+                broker_snaps[0]["date"],
+                broker_snaps[0]["total_asset"],
+            )
+        elif total_asset > 0:
+            anchor_date, anchor_equity = today, total_asset
+        else:
+            anchor_date, anchor_equity = None, None
+        # 窗口起点:最早快照日(手动基准点即起点);没设过基准就不往锚点前重建
+        window_start = max(
+            snapshots[0]["date"] if snapshots else (anchor_date or today),
+            LEDGER_COMPLETE_SINCE,
+        )
+        if anchor_date is not None and anchor_date > window_start:
+            positions_now = {
+                pos["code"].split(".")[0]: int(pos.get("volume", 0))
+                for pos in getattr(request.app.state, "broker_positions", [])
+                if pos.get("volume", 0) > 0 and not is_non_stock_position_code(pos["code"])
+            }
+            try:
+                recon = await build_reconstructed_history(
+                    storage,
+                    positions_now=positions_now,
+                    anchor_date=anchor_date,
+                    anchor_equity=anchor_equity,
+                    today_bj=today,
+                    window_start=window_start,
+                )
+                recon_meta["anchor_date"] = anchor_date
+                recon_meta["truncated_at"] = recon.truncated_at
+                recon_meta["warnings"] = recon.warnings
+                # 校准差核对:账本推算出的手动基准日净值 vs 用户校准值,
+                # 差 >1 元说明期间有费用没补或出入金 → 如实警示,数值以校准值为准
+                snap_by_date = {s["date"]: s for s in snapshots}
+                for p in recon.points:
+                    s = snap_by_date.get(p["date"])
+                    if s and s.get("source") == "manual":
+                        diff = round(p["total_asset"] - s["total_asset"], 2)
+                        if abs(diff) > 1.0:
+                            recon_meta["warnings"].append(
+                                f"账本推算 {p['date']} 净值 {p['total_asset']:,.2f},"
+                                f"与手动校准值差 {diff:+,.2f} 元"
+                                f"(期间可能有费用未补或出入金);曲线以校准值为准"
+                            )
+                # 快照(broker 真值 + 手动校准)优先,重建只填没有快照的日子
+                recon_points = [p for p in recon.points if p["date"] not in snap_by_date]
+                for p in recon_points:
+                    p["source"] = "recon"
+            except Exception as e:
+                # display 路径:重建失败退回纯快照,但必须让用户看见失败原因
+                logger.exception(f"equity history reconstruction failed: {e}")
+                recon_meta["warnings"] = [f"历史重建失败,仅显示快照段: {type(e).__name__}: {e}"]
+        recon_meta["window_start"] = window_start
+
+        # ---- 合并:快照(含手动基准) + 重建空档 + 今日实时点,按日期排序 ----
+        series = sorted(list(recon_points) + list(snapshots), key=lambda p: p["date"])
+        if total_asset > 0:
+            if series and series[-1]["date"] == today:
+                series[-1] = {**series[-1], "total_asset": total_asset, "source": "live"}
+            elif not series or series[-1]["date"] < today:
+                series.append({"date": today, "total_asset": total_asset, "source": "live"})
+
+        weekly = compute_weekly_returns(series)
+
+        # 昨收资产 = 最近一笔早于今天的点;今日盈亏以它为基数
         prev_close_asset = None
-        for snap in reversed(snapshots):
+        for snap in reversed(series):
             if snap["date"] < today:
                 prev_close_asset = snap["total_asset"]
                 break
@@ -3403,19 +3505,114 @@ def create_trading_router() -> APIRouter:
             today_pnl_pct = round(today_pnl / prev_close_asset * 100, 2)
 
         return {
-            "snapshots": snapshots,
+            "snapshots": series,
             "weekly": weekly,
+            "reconstruction": recon_meta,
             "current": {
                 "total_asset": total_asset if total_asset > 0 else None,
                 "cash": float(getattr(request.app.state, "available_cash", 0.0) or 0.0),
                 "market_value": float(
                     getattr(request.app.state, "broker_market_value", 0.0) or 0.0
                 ),
+                "frozen_cash": float(getattr(request.app.state, "broker_frozen_cash", 0.0) or 0.0),
                 "prev_close_asset": prev_close_asset,
                 "today_pnl": today_pnl,
                 "today_pnl_pct": today_pnl_pct,
             },
         }
+
+    @router.post("/api/trading/equity-baseline")
+    async def set_equity_baseline(request: Request, body: EquityBaselineRequest) -> dict:
+        """手动校准基准点(0.22.2):把某日收盘总资产存为 manual 快照。
+
+        净值曲线从最早快照日起算——设了基准点,更早的失真历史(计提利润等)
+        就不再展示。当日不可校准(以实时轮询为准);已有 broker 真值的日子
+        不需要校准。
+        """
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            raise HTTPException(status_code=503, detail="数据库未连接,暂时无法保存校准点")
+        account_id = getattr(request.app.state, "broker_account_id", None)
+        if not account_id:
+            raise HTTPException(
+                status_code=503, detail="券商未连接,拿不到资金账号——等 Broker 在线后再校准"
+            )
+
+        from datetime import date as _date
+
+        from src.trading.equity_snapshot import EquitySnapshotStore
+
+        try:
+            _date.fromisoformat(body.date)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400, detail=f"日期格式应为 YYYY-MM-DD: {body.date}"
+            ) from e
+        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+        if body.date >= today:
+            raise HTTPException(
+                status_code=400, detail="只能校准过去的日期——今天的值以券商实时数据为准"
+            )
+        if body.total_asset <= 0:
+            raise HTTPException(status_code=400, detail="总资产必须大于 0")
+
+        store = EquitySnapshotStore(storage)
+        # 数据库异常透传真实原因(是什么错就报什么错),不让 FastAPI 裸 500
+        try:
+            existing = await store.get_snapshot(account_id, body.date)
+        except Exception as e:
+            logger.exception(f"equity-baseline get_snapshot failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"查询快照失败: {type(e).__name__}: {e}"
+            ) from e
+        if existing is not None and existing["source"] == "broker":
+            raise HTTPException(
+                status_code=409,
+                detail=f"{body.date} 已有券商快照真值({existing['total_asset']:,.2f}),不需要校准",
+            )
+        try:
+            await store.upsert_snapshot(
+                account_id=account_id,
+                trade_date=body.date,
+                total_asset=body.total_asset,
+                cash=0.0,
+                market_value=0.0,
+                source="manual",
+            )
+        except Exception as e:
+            logger.exception(f"equity-baseline upsert failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"保存校准点失败: {type(e).__name__}: {e}"
+            ) from e
+        logger.info("equity-baseline set: %s %s = %.2f", account_id, body.date, body.total_asset)
+        return {"success": True, "date": body.date, "total_asset": body.total_asset}
+
+    @router.delete("/api/trading/equity-baseline/{trade_date}")
+    async def delete_equity_baseline(request: Request, trade_date: str) -> dict:
+        """删除手动校准点。只能删 manual 行,券商真值不可删。"""
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        account_id = getattr(request.app.state, "broker_account_id", None)
+        if not account_id:
+            raise HTTPException(status_code=503, detail="券商未连接,拿不到资金账号")
+
+        from src.trading.equity_snapshot import EquitySnapshotStore
+
+        try:
+            deleted = await EquitySnapshotStore(storage).delete_manual_snapshot(
+                account_id, trade_date
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            logger.exception(f"equity-baseline delete failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"删除校准点失败: {type(e).__name__}: {e}"
+            ) from e
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"{trade_date} 没有手动校准点")
+        return {"success": True, "date": trade_date}
 
     @router.get("/api/trading/recommendations")
     async def get_recommendations(request: Request, date: str | None = None) -> dict:

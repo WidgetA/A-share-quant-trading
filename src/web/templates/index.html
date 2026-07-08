@@ -152,22 +152,48 @@
             <div class="overview-stat">
                 <div class="ov-label">可用资金</div>
                 <div class="ov-value" id="ovCash">--</div>
+                <div class="ov-sub" id="ovFrozen"></div>
             </div>
             <div class="overview-stat">
-                <div class="ov-label">本周收益率</div>
+                <div class="ov-label">本周</div>
                 <div class="ov-value" id="ovThisWeek">--</div>
+                <div class="ov-sub" id="ovThisWeekPct"></div>
             </div>
         </div>
         <div class="overview-body">
             <div>
-                <p class="section-subtitle">净值曲线(总资产,每日快照)</p>
+                <p class="section-subtitle">净值曲线(总资产)</p>
                 <div class="equity-chart-wrap" id="equityChartWrap">
                     <div id="equityChart"><div class="empty-state small"><p>加载中...</p></div></div>
                     <div class="equity-tooltip" id="equityTooltip"></div>
                 </div>
+                <div id="reconNote" style="font-size:0.72rem;color:#999;margin-top:4px;"></div>
+                <div id="reconWarnings" style="font-size:0.75rem;color:#b26a00;margin-top:2px;"></div>
+                <div style="margin-top:6px;">
+                    <a href="javascript:void(0)" onclick="toggleBaselineForm()"
+                       style="font-size:0.75rem;color:#1976d2;text-decoration:none;">⚙ 手动校准基准点</a>
+                    <div id="baselineForm" style="display:none;margin-top:6px;padding:8px;
+                        background:#f9f9f9;border:1px solid #e0e0e0;border-radius:6px;">
+                        <div style="font-size:0.72rem;color:#888;margin-bottom:6px;">
+                            输入某日<b>收盘总资产</b>存为基准点;净值曲线从最早基准日起算,更早历史不再显示。
+                            计提利润(出金)后,在计提当日设一个新基准即可。只能填过去的日期。
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+                            <input type="date" id="baselineDate"
+                                style="padding:3px 6px;border:1px solid #ccc;border-radius:4px;font-size:0.8rem;">
+                            <input type="number" id="baselineAsset" min="0" step="0.01" placeholder="收盘总资产(元)"
+                                style="width:150px;padding:3px 6px;border:1px solid #ccc;border-radius:4px;
+                                       font-size:0.8rem;text-align:right;">
+                            <button class="btn-sm btn-buy" onclick="saveBaseline()">保存基准</button>
+                            <button class="btn-sm" onclick="deleteBaseline()"
+                                style="background:#eee;border:1px solid #ccc;">删除该日基准</button>
+                        </div>
+                        <div id="baselineMsg" style="font-size:0.75rem;margin-top:5px;color:#666;"></div>
+                    </div>
+                </div>
             </div>
             <div>
-                <p class="section-subtitle">每周收益率(近 12 周)</p>
+                <p class="section-subtitle">每周收益(近 12 周)</p>
                 <div id="weeklyReturns"><div class="empty-state small"><p>加载中...</p></div></div>
             </div>
         </div>
@@ -1565,7 +1591,9 @@ function renderEquityChart(snapshots) {
 
         tooltip.textContent = '';
         const dt = document.createElement('div');
-        dt.className = 'tt-date'; dt.textContent = s.date;
+        dt.className = 'tt-date';
+        const srcLabel = {broker: '券商快照', manual: '手动校准', recon: '账本重建', live: '实时'}[s.source];
+        dt.textContent = s.date + (srcLabel ? ' · ' + srcLabel : '');
         const main = document.createElement('div');
         main.className = 'tt-main'; main.textContent = fmtMoney(s.total_asset);
         tooltip.appendChild(dt); tooltip.appendChild(main);
@@ -1638,10 +1666,14 @@ function renderWeeklyReturns(weekly) {
             track.appendChild(bar);
         }
         tdBar.appendChild(track);
+        const tdAmt = document.createElement('td');
+        tdAmt.className = 'weekly-pct ' + (w.pnl_amount != null ? gainClass(w.pnl_amount) : '');
+        tdAmt.textContent = w.pnl_amount != null
+            ? (w.pnl_amount >= 0 ? '+' : '') + fmtMoney(w.pnl_amount) : '--';
         const tdPct = document.createElement('td');
         tdPct.className = 'weekly-pct ' + (w.return_pct != null ? gainClass(w.return_pct) : '');
         tdPct.textContent = fmtSignedPct(w.return_pct);
-        tr.appendChild(tdRange); tr.appendChild(tdBar); tr.appendChild(tdPct);
+        tr.appendChild(tdRange); tr.appendChild(tdBar); tr.appendChild(tdAmt); tr.appendChild(tdPct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -1710,6 +1742,9 @@ async function loadEquityCurve() {
         document.getElementById('ovTotalAsset').textContent = fmtMoney(cur.total_asset);
         document.getElementById('ovMarketValue').textContent = fmtMoney(cur.market_value);
         document.getElementById('ovCash').textContent = fmtMoney(cur.cash);
+        const frozenEl = document.getElementById('ovFrozen');
+        frozenEl.textContent = (cur.frozen_cash && cur.frozen_cash > 0)
+            ? '另冻结(逆回购/在途) ' + fmtMoney(cur.frozen_cash) : '';
 
         const pnlEl = document.getElementById('ovTodayPnl');
         if (cur.today_pnl != null) {
@@ -1717,20 +1752,41 @@ async function loadEquityCurve() {
                 ' (' + fmtSignedPct(cur.today_pnl_pct) + ')';
             pnlEl.style.color = cur.today_pnl >= 0 ? '#d32f2f' : '#2e7d32';
         } else {
-            pnlEl.textContent = '今日盈亏待昨日快照落库后显示';
+            pnlEl.textContent = '今日盈亏待昨日数据就绪后显示';
             pnlEl.style.color = '#999';
         }
 
         const weekly = data.weekly || [];
         const thisWeek = weekly.length ? weekly[weekly.length - 1] : null;
         const twEl = document.getElementById('ovThisWeek');
-        twEl.textContent = fmtSignedPct(thisWeek ? thisWeek.return_pct : null);
-        if (thisWeek && thisWeek.return_pct != null) {
-            twEl.style.color = thisWeek.return_pct >= 0 ? '#d32f2f' : '#2e7d32';
+        const twPctEl = document.getElementById('ovThisWeekPct');
+        if (thisWeek && thisWeek.pnl_amount != null) {
+            twEl.textContent = (thisWeek.pnl_amount >= 0 ? '+' : '') + fmtMoney(thisWeek.pnl_amount);
+            twEl.style.color = thisWeek.pnl_amount >= 0 ? '#d32f2f' : '#2e7d32';
+            twPctEl.textContent = fmtSignedPct(thisWeek.return_pct);
+            twPctEl.style.color = twEl.style.color;
+        } else {
+            twEl.textContent = '--';
+            twEl.style.color = '';
+            twPctEl.textContent = '';
         }
 
         renderEquityChart(data.snapshots || []);
         renderWeeklyReturns(weekly);
+
+        // 历史重建说明 + 数据警示(截断/近似口径,如实展示)
+        const recon = data.reconstruction || {};
+        const noteEl = document.getElementById('reconNote');
+        const warnEl = document.getElementById('reconWarnings');
+        noteEl.textContent = recon.anchor_date
+            ? recon.anchor_date + ' 之前由本地交易记录+日线收盘价重建,之后为券商每日快照'
+            : '';
+        warnEl.textContent = '';
+        for (const w of (recon.warnings || [])) {
+            const d = document.createElement('div');
+            d.textContent = '⚠ ' + w;
+            warnEl.appendChild(d);
+        }
         const upd = document.getElementById('overviewUpdatedAt');
         upd.textContent = '更新于 ' + new Date().toTimeString().slice(0, 5);
     } catch (e) {
@@ -1743,6 +1799,68 @@ async function loadEquityCurve() {
         p.style.color = '#d32f2f';
         d.appendChild(p);
         container.appendChild(d);
+    }
+}
+
+// --- Manual equity baseline (0.22.2) ---
+
+function toggleBaselineForm() {
+    const el = document.getElementById('baselineForm');
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function _baselineMsg(text, ok) {
+    const el = document.getElementById('baselineMsg');
+    el.textContent = text;
+    el.style.color = ok ? '#2e7d32' : '#d32f2f';
+}
+
+// 服务器 500 时响应可能不是 JSON(如 "Internal Server Error" 纯文本)——
+// 按文本兜底解析,把真实原因显示出来,不要 "Unexpected token" 天书。
+async function _parseRespSafe(resp) {
+    const text = await resp.text();
+    try { return JSON.parse(text); } catch (e) { return {detail: text || ('HTTP ' + resp.status)}; }
+}
+
+async function saveBaseline() {
+    const date = document.getElementById('baselineDate').value;
+    const asset = parseFloat(document.getElementById('baselineAsset').value);
+    if (!date) { _baselineMsg('请选择日期', false); return; }
+    if (!asset || asset <= 0) { _baselineMsg('请填写该日收盘总资产', false); return; }
+    if (!confirm('确认把 ' + date + ' 收盘总资产校准为 ' + fmtMoney(asset) + ' 元?\n净值曲线将从最早基准日起算。')) return;
+    try {
+        const resp = await tradingFetch('/api/trading/equity-baseline', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({date: date, total_asset: asset})
+        });
+        const data = await _parseRespSafe(resp);
+        if (resp.ok && data.success) {
+            _baselineMsg('已保存:' + date + ' = ' + fmtMoney(asset), true);
+            loadEquityCurve();
+        } else {
+            _baselineMsg('保存失败:' + (data.detail || resp.status), false);
+        }
+    } catch (e) {
+        _baselineMsg('请求异常:' + e.message, false);
+    }
+}
+
+async function deleteBaseline() {
+    const date = document.getElementById('baselineDate').value;
+    if (!date) { _baselineMsg('请选择要删除基准的日期', false); return; }
+    if (!confirm('确认删除 ' + date + ' 的手动校准点?')) return;
+    try {
+        const resp = await tradingFetch('/api/trading/equity-baseline/' + date, {method: 'DELETE'});
+        const data = await _parseRespSafe(resp);
+        if (resp.ok && data.success) {
+            _baselineMsg('已删除 ' + date + ' 的校准点', true);
+            loadEquityCurve();
+        } else {
+            _baselineMsg('删除失败:' + (data.detail || resp.status), false);
+        }
+    } catch (e) {
+        _baselineMsg('请求异常:' + e.message, false);
     }
 }
 

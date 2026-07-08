@@ -144,6 +144,7 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
             app.state.available_cash = 0.0
             app.state.broker_total_asset = 0.0
             app.state.broker_market_value = 0.0
+            app.state.broker_frozen_cash = 0.0
             app.state.broker_account_id = None
             app.state.broker_positions_updated_at = None
             return f"broker not ready: {ready_err}"
@@ -156,6 +157,7 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
         app.state.available_cash = 0.0
         app.state.broker_total_asset = 0.0
         app.state.broker_market_value = 0.0
+        app.state.broker_frozen_cash = 0.0
         app.state.broker_account_id = None
         app.state.broker_positions_updated_at = None
         return f"{type(e).__name__}: {e}"
@@ -174,6 +176,7 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
     app.state.available_cash = account.cash
     app.state.broker_total_asset = account.total_asset
     app.state.broker_market_value = account.market_value
+    app.state.broker_frozen_cash = account.frozen_cash
     app.state.broker_account_id = account.account_id
     app.state.broker_positions_updated_at = time.time()
     await _maybe_write_equity_snapshot(app, account)
