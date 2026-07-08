@@ -58,3 +58,4 @@ def test_dispatcher_commands_map_to_existing_skills():
     for command, spec in SLASH_COMMANDS.items():
         assert spec["skill"] in existing, f"{command} 指向不存在的技能 {spec['skill']!r}"
         assert spec["ack"].strip(), f"{command} 缺秒回文案"
+        assert spec["desc"].strip(), f"{command} 缺能力说明(/帮助 列表用)"

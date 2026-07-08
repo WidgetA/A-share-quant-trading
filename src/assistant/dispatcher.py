@@ -40,17 +40,32 @@ logger = logging.getLogger(__name__)
 
 _INSTRUCTIONS_PATH = Path(__file__).parent / "assistant_instructions.md"
 
-# Slash command → (skill name, one-line ack). The skill must exist under
-# kimi-skills/ (CI-validated); the dispatcher pins it explicitly in the task
-# prompt so routing never depends on the model guessing.
+# Slash command → (skill name, plain description, one-line ack). The skill must
+# exist under kimi-skills/ (CI-validated); the dispatcher pins it explicitly in
+# the task prompt so routing never depends on the model guessing. `desc` feeds
+# the auto-generated capability list — add a command here and /帮助 updates
+# itself, no separate help text to maintain.
 SLASH_COMMANDS: dict[str, dict[str, str]] = {
     "/持仓": {
         "skill": "check-holdings",
+        "desc": "查当前证券账户持仓(名称、股数、成本、现价、市值、浮动盈亏)",
         "ack": "收到,正在查询当前持仓,大约要一两分钟,查到就回在这里。",
     },
 }
 
-_HELP_TEXT = "目前支持的命令:" + "、".join(SLASH_COMMANDS) + "。在群里 @我 后发命令即可。"
+# Help is meta-information — answered instantly by the dispatcher, no kimi run.
+HELP_COMMANDS = ("/帮助", "/help", "/能力")
+
+
+def build_help_text() -> str:
+    """Capability list, generated from SLASH_COMMANDS so it never goes stale."""
+    lines = ["我目前会的:"]
+    for cmd, spec in SLASH_COMMANDS.items():
+        lines.append(f"{cmd} — {spec['desc']}")
+    lines.append("/帮助 — 显示这份能力列表")
+    lines.append("用法:在群里 @我,后面跟上面的命令。自由问答还没开通。")
+    return "\n".join(lines)
+
 
 # Mention placeholders in text content look like "@_user_1" (the SDK keeps the
 # display name in message.mentions, the body carries the placeholder).
@@ -84,11 +99,13 @@ def extract_text(message_type: str, content: str) -> str | None:
 
 
 def route(text: str) -> tuple[str, str]:
-    """Classify a message text → ("slash", command) | ("unknown_slash", word) |
-    ("free", text) | ("empty", "")."""
+    """Classify a message text → ("slash", command) | ("help", word) |
+    ("unknown_slash", word) | ("free", text) | ("empty", "")."""
     if not text:
         return ("empty", "")
     first = text.split()[0]
+    if first in HELP_COMMANDS:
+        return ("help", first)
     if first in SLASH_COMMANDS:
         return ("slash", first)
     if first.startswith("/"):
@@ -246,18 +263,16 @@ class AssistantDispatcher:
 
         text = extract_text(msg.message_type, msg.content)
         if text is None:
-            await self._reply(msg.message_id, "目前只认识文字消息。" + _HELP_TEXT)
+            await self._reply(msg.message_id, "目前只认识文字消息。\n" + build_help_text())
             return
 
         kind, value = route(text)
-        if kind == "empty":
-            await self._reply(msg.message_id, _HELP_TEXT)
+        if kind in ("empty", "help"):
+            await self._reply(msg.message_id, build_help_text())
         elif kind == "unknown_slash":
-            await self._reply(msg.message_id, f"不认识 {value} 这个命令。{_HELP_TEXT}")
+            await self._reply(msg.message_id, f"不认识 {value} 这个命令。\n" + build_help_text())
         elif kind == "free":
-            await self._reply(
-                msg.message_id, "自由问答还没开通,现在只会执行固定命令。" + _HELP_TEXT
-            )
+            await self._reply(msg.message_id, build_help_text())
         else:  # slash
             try:
                 self._queue.put_nowait(msg)

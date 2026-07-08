@@ -80,6 +80,8 @@ def test_extract_text_rejects_non_text_and_bad_json():
 def test_route_classification():
     assert route("/持仓") == ("slash", "/持仓")
     assert route("/持仓 请查一下") == ("slash", "/持仓")
+    assert route("/帮助") == ("help", "/帮助")
+    assert route("/help") == ("help", "/help")
     assert route("/不存在") == ("unknown_slash", "/不存在")
     assert route("帮我看看大盘") == ("free", "帮我看看大盘")
     assert route("") == ("empty", "")
@@ -145,6 +147,18 @@ async def test_free_text_and_unknown_slash_get_help(monkeypatch: pytest.MonkeyPa
     assert d._queue.qsize() == 0
     assert len(replies) == 3
     assert all("/持仓" in r for r in replies)
+
+
+async def test_help_command_lists_capabilities(monkeypatch: pytest.MonkeyPatch):
+    """@机器人 /帮助(或空 @)秒回能力列表——派单器直接回,不进 kimi 队列。"""
+    d, replies = _dispatcher(monkeypatch)
+    await d._handle(_msg("@_user_1 /帮助", event_id="e1"))
+    await d._handle(_msg("@_user_1", event_id="e2"))  # 只 @ 不带命令
+    assert d._queue.qsize() == 0
+    assert len(replies) == 2
+    for r in replies:
+        assert "/持仓" in r and "浮动盈亏" in r  # 列表带命令和大白话说明
+        assert "/帮助" in r
 
 
 # ── worker behaviour ─────────────────────────────────────────────────────
