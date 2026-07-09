@@ -3189,6 +3189,10 @@
   {
    "code": "885849.TI",
    "name": "黑龙江自贸区"
+  },
+  {
+   "code": "",
+   "name": "长鑫存储"
   }
  ],
  "region": [
@@ -3327,8 +3331,8 @@
  ],
  "summary": {
   "industry_count": 410,
-  "concept_count": 387,
+  "concept_count": 388,
   "region_count": 33,
-  "note": "concept rebuilt from iFinD 所属概念 inversion; industry/region carried over from old file"
+  "note": "concept rebuilt from iFinD 所属概念 inversion; industry/region carried over from old file; manually added 长鑫存储 (CXMT supply-chain board, maintained by hand from 长鑫存储指数(8841935) constituents)"
  }
 }
