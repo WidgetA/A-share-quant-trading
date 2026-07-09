@@ -26,3 +26,9 @@ def test_env_flag_restores_thinking(monkeypatch: pytest.MonkeyPatch):
 def test_garbage_env_value_keeps_no_thinking(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("KIMI_ASSISTANT_THINKING", "0")
     assert thinking_args() == ["--no-thinking"]
+
+
+def test_free_form_tasks_enable_thinking(monkeypatch: pytest.MonkeyPatch):
+    """自由提问显式开 thinking(现场选表/选工具/失败绕道要推理)。"""
+    monkeypatch.delenv("KIMI_ASSISTANT_THINKING", raising=False)
+    assert thinking_args(enable_thinking=True) == []

@@ -40,13 +40,16 @@ _RESULT_FILE_INSTRUCTION = (
 )
 
 
-def thinking_args() -> list[str]:
-    """Assistant tasks run --no-thinking by default (latency): skills are
-    scripted — read the skill, one curl, format — no open-ended research where
-    thinking earns its cost. Path B / AI journal keep thinking ON (with it off,
-    kimi gives up instead of reasoning to a tool fallback — 920039 lesson in
-    kimi_listing_verifier). KIMI_ASSISTANT_THINKING=1 flips it back on if
-    assistant reply quality degrades. Read at call time, not import."""
+def thinking_args(enable_thinking: bool = False) -> list[str]:
+    """Slash-command tasks run --no-thinking (latency): skills are scripted —
+    read the skill, one curl, format — no open-ended research where thinking
+    earns its cost. Free-form questions pass enable_thinking=True: improvising
+    (which table, which tool, fallback on failure) is exactly where thinking
+    pays — same lesson as path B (with it off, kimi gives up instead of
+    reasoning to a tool fallback, 920039). KIMI_ASSISTANT_THINKING=1 forces
+    thinking on for everything. Read at call time, not import."""
+    if enable_thinking:
+        return []
     if os.environ.get("KIMI_ASSISTANT_THINKING", "").strip().lower() in ("1", "true", "yes", "on"):
         return []
     return ["--no-thinking"]
@@ -57,6 +60,7 @@ async def run_kimi_assistant_task(
     readonly_key: str | None,
     api_base: str,
     timeout_sec: int = KIMI_ASSISTANT_TIMEOUT_SEC,
+    enable_thinking: bool = False,
 ) -> str:
     """Run one assistant task through kimi + skills; return the reply text.
 
@@ -94,7 +98,7 @@ async def run_kimi_assistant_task(
                 "kimi",
                 "--print",
                 "--afk",
-                *thinking_args(),
+                *thinking_args(enable_thinking),
                 "--skills-dir",
                 str(SKILLS_DIR),
                 "--work-dir",

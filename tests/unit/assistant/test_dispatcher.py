@@ -139,14 +139,22 @@ async def test_queue_full_gets_honest_reply_not_silent_drop(monkeypatch: pytest.
     assert "排队满了" in replies[1]
 
 
-async def test_free_text_and_unknown_slash_get_help(monkeypatch: pytest.MonkeyPatch):
+async def test_unknown_slash_and_non_text_get_help(monkeypatch: pytest.MonkeyPatch):
     d, replies = _dispatcher(monkeypatch)
-    await d._handle(_msg("大盘怎么样", event_id="e1"))
-    await d._handle(_msg("/涨停", event_id="e2"))
-    await d._handle(_msg("图片消息", event_id="e3", message_type="image"))
+    await d._handle(_msg("/涨停", event_id="e1"))
+    await d._handle(_msg("图片消息", event_id="e2", message_type="image"))
     assert d._queue.qsize() == 0
-    assert len(replies) == 3
+    assert len(replies) == 2
     assert all("/持仓" in r for r in replies)
+
+
+async def test_free_text_acks_and_enqueues(monkeypatch: pytest.MonkeyPatch):
+    """Phase 2:自由提问进 kimi 队列,秒回「想想怎么查」。"""
+    d, replies = _dispatcher(monkeypatch)
+    await d._handle(_msg("600519 最近五天走势怎么样", event_id="e1"))
+    assert d._queue.qsize() == 1
+    assert len(replies) == 1
+    assert "想想怎么查" in replies[0]
 
 
 async def test_help_command_lists_capabilities(monkeypatch: pytest.MonkeyPatch):
@@ -167,9 +175,12 @@ async def test_help_command_lists_capabilities(monkeypatch: pytest.MonkeyPatch):
 async def test_worker_replies_with_kimi_result(monkeypatch: pytest.MonkeyPatch):
     d, replies = _dispatcher(monkeypatch)
 
-    async def fake_run(task_prompt: str, readonly_key: str | None, api_base: str) -> str:
+    async def fake_run(
+        task_prompt: str, readonly_key: str | None, api_base: str, enable_thinking: bool
+    ) -> str:
         assert "check-holdings" in task_prompt
         assert readonly_key == "ro-key"
+        assert enable_thinking is False  # 斜杠命令关 thinking
         return "当前持仓:工商银行 1000 股。"
 
     monkeypatch.setattr(disp, "run_kimi_assistant_task", fake_run)
@@ -185,10 +196,39 @@ async def test_worker_replies_with_kimi_result(monkeypatch: pytest.MonkeyPatch):
     assert any("工商银行" in r for r in replies)
 
 
+async def test_worker_free_question_uses_free_prompt_with_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    d, replies = _dispatcher(monkeypatch)
+
+    async def fake_run(
+        task_prompt: str, readonly_key: str | None, api_base: str, enable_thinking: bool
+    ) -> str:
+        assert "自由提问" in task_prompt
+        assert "600519 最近五天走势" in task_prompt  # 用户原话进任务书
+        assert "assistant-sql" in task_prompt  # 资源指南真的带上了
+        assert enable_thinking is True  # 自由发挥开 thinking
+        return "查完了:最近五天累计涨 2.3%。"
+
+    monkeypatch.setattr(disp, "run_kimi_assistant_task", fake_run)
+    await d._handle(_msg("600519 最近五天走势怎么样"))
+    worker = asyncio.get_running_loop().create_task(d._worker())
+    try:
+        for _ in range(100):
+            if len(replies) >= 2:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        worker.cancel()
+    assert any("2.3%" in r for r in replies)
+
+
 async def test_worker_reports_failure_honestly(monkeypatch: pytest.MonkeyPatch):
     d, replies = _dispatcher(monkeypatch)
 
-    async def fake_run(task_prompt: str, readonly_key: str | None, api_base: str) -> str:
+    async def fake_run(
+        task_prompt: str, readonly_key: str | None, api_base: str, enable_thinking: bool
+    ) -> str:
         raise RuntimeError("kimi 跑完但没写回复文件(无任何输出)")
 
     monkeypatch.setattr(disp, "run_kimi_assistant_task", fake_run)

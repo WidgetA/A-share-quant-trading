@@ -42,6 +42,10 @@ def _client(monkeypatch, assistant_key: str | None = ASSISTANT_KEY) -> TestClien
     async def equity_curve():  # 账户概览数据源,0.23.6 起进只读白名单
         return {"current": {}}
 
+    @app.get("/api/trading/assistant-sql", dependencies=dep)
+    async def assistant_sql():  # SQL 只读代理,0.24.0 起进只读白名单
+        return {"rows": []}
+
     return TestClient(app)
 
 
@@ -54,6 +58,12 @@ def test_assistant_key_opens_holdings_get(monkeypatch):
 def test_assistant_key_opens_equity_curve_get(monkeypatch):
     client = _client(monkeypatch)
     r = client.get("/api/trading/equity-curve", headers={"X-API-Key": ASSISTANT_KEY})
+    assert r.status_code == 200
+
+
+def test_assistant_key_opens_assistant_sql_get(monkeypatch):
+    client = _client(monkeypatch)
+    r = client.get("/api/trading/assistant-sql", headers={"X-API-Key": ASSISTANT_KEY})
     assert r.status_code == 200
 
 

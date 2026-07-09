@@ -128,6 +128,7 @@ ASSISTANT_READONLY_GET_PATHS = frozenset(
     {
         "/api/trading/holdings",
         "/api/trading/equity-curve",  # 账户概览:总资产/今日/本周/可用资金(只读)
+        "/api/trading/assistant-sql",  # SQL 只读代理(服务端强制 SELECT 族+LIMIT+审计)
     }
 )
 
@@ -3613,6 +3614,33 @@ def create_trading_router() -> APIRouter:
         if not deleted:
             raise HTTPException(status_code=404, detail=f"{trade_date} 没有手动校准点")
         return {"success": True, "date": trade_date}
+
+    @router.get("/api/trading/assistant-sql")
+    async def assistant_readonly_sql(request: Request, sql: str) -> dict:
+        """AST-001 Phase 2: 助手自由问答的数据库只读查询代理。
+
+        服务端强制只读(SELECT/SHOW/DESCRIBE/WITH、拒多语句、强制 LIMIT)——
+        校验在 src/web/assistant_sql.py,纯函数有单测。每条查询记审计日志。
+        写操作物理走不通:校验拒绝 + 这条路只认只读 key。
+        """
+        from src.web.assistant_sql import rows_to_jsonable, validate_readonly_sql
+
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            raise HTTPException(status_code=503, detail="数据库未连接,稍后再试")
+        try:
+            safe_sql = validate_readonly_sql(sql)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        logger.info("assistant-sql audit: %s", safe_sql)
+        try:
+            records = await storage.db.fetch(safe_sql)
+        except Exception as e:
+            # 语法错/表不存在等,原因如实返回给 kimi 让它自己改写
+            raise HTTPException(status_code=400, detail=f"查询执行失败: {e}") from e
+        rows = rows_to_jsonable(records)
+        return {"row_count": len(rows), "rows": rows}
 
     @router.get("/api/trading/recommendations")
     async def get_recommendations(request: Request, date: str | None = None) -> dict:

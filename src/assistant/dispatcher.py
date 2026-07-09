@@ -63,8 +63,14 @@ def build_help_text() -> str:
     for cmd, spec in SLASH_COMMANDS.items():
         lines.append(f"{cmd} — {spec['desc']}")
     lines.append("/帮助 — 显示这份能力列表")
-    lines.append("用法:在群里 @我,后面跟上面的命令。自由问答还没开通。")
+    lines.append(
+        "也可以直接用大白话问我(比如「600519 最近五天走势」「系统的选股逻辑是什么」),"
+        "我会现场查数据/翻代码/搜网页,要几分钟。"
+    )
     return "\n".join(lines)
+
+
+_FREE_ACK = "收到,我想想怎么查,几分钟内回在这里。"
 
 
 # Mention placeholders in text content look like "@_user_1" (the SDK keeps the
@@ -123,6 +129,20 @@ def build_task_prompt(command: str) -> str:
         f"用户命令:{command}\n"
         f"指定执行的技能:{skill}(已在你的技能列表里,技能文件在 "
         f"{SKILLS_DIR / skill / 'SKILL.md'},先读它,严格照做)。\n"
+    )
+
+
+def build_free_task_prompt(question: str) -> str:
+    """Task prompt for a free-form question (Phase 2): task book (with the
+    resource guide) + the user's words verbatim."""
+    instructions = _INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    return (
+        f"{instructions}\n\n"
+        f"## 本次任务(自由提问)\n\n"
+        f"用户在飞书群里问:{question}\n\n"
+        "先看你的技能列表里有没有能直接套用的技能,有就照做;没有就按任务书里的"
+        "「自由问答资源指南」现场解决:想清楚需要什么信息、用哪个资源拿、查完把结论"
+        "整理成大白话中文回复。答不出来就如实说明查了什么、卡在哪,不许编。\n"
     )
 
 
@@ -271,26 +291,32 @@ class AssistantDispatcher:
             await self._reply(msg.message_id, build_help_text())
         elif kind == "unknown_slash":
             await self._reply(msg.message_id, f"不认识 {value} 这个命令。\n" + build_help_text())
-        elif kind == "free":
-            await self._reply(msg.message_id, build_help_text())
-        else:  # slash
+        else:  # slash 或 free(Phase 2):都排队进 kimi 通道
             try:
                 self._queue.put_nowait(msg)
             except asyncio.QueueFull:
                 await self._reply(msg.message_id, "排队满了(前面还有任务在跑),请过几分钟再试。")
                 return
-            await self._reply(msg.message_id, SLASH_COMMANDS[value]["ack"])
+            ack = SLASH_COMMANDS[value]["ack"] if kind == "slash" else _FREE_ACK
+            await self._reply(msg.message_id, ack)
 
     async def _worker(self) -> None:
         while True:
             msg = await self._queue.get()
             text = extract_text(msg.message_type, msg.content) or ""
-            command = route(text)[1]
+            kind, value = route(text)
             try:
+                if kind == "slash":
+                    # 照本宣科的技能:关 thinking 换速度
+                    prompt, thinking = build_task_prompt(value), False
+                else:
+                    # 自由发挥:开 thinking——选表/选工具/失败绕道全靠推理
+                    prompt, thinking = build_free_task_prompt(text), True
                 reply = await run_kimi_assistant_task(
-                    build_task_prompt(command),
+                    prompt,
                     readonly_key=get_assistant_readonly_key(),
                     api_base=self._api_base,
+                    enable_thinking=thinking,
                 )
                 if len(reply) > _MAX_REPLY_CHARS:
                     logger.info("Assistant reply truncated (%d chars); full: %s", len(reply), reply)
@@ -300,7 +326,7 @@ class AssistantDispatcher:
                 raise
             except Exception as exc:
                 # Honest failure report, plain Chinese — never a made-up answer.
-                logger.exception("Assistant task failed for %s", command)
+                logger.exception("Assistant task failed for %s (%s)", kind, value[:80])
                 await self._reply(msg.message_id, f"这次没查成:{exc}")
 
     # ── outbound replies ─────────────────────────────────────────────────
