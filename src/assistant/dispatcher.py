@@ -134,11 +134,21 @@ def build_task_prompt(command: str) -> str:
 
 def build_free_task_prompt(question: str) -> str:
     """Task prompt for a free-form question (Phase 2): task book (with the
-    resource guide) + the user's words verbatim."""
+    resource guide) + the user's words verbatim + the REAL current time.
+
+    时间由代码算好注入(北京时区)——绝不让模型猜"现在"是什么时候,否则
+    「为什么涨」这类问题它会拿几天前的行情当"最近"来解释(实测踩过)。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_bj = datetime.now(ZoneInfo("Asia/Shanghai"))
+    weekday = "一二三四五六日"[now_bj.weekday()]
     instructions = _INSTRUCTIONS_PATH.read_text(encoding="utf-8")
     return (
         f"{instructions}\n\n"
         f"## 本次任务(自由提问)\n\n"
+        f"当前北京时间:{now_bj.strftime('%Y-%m-%d %H:%M')}(周{weekday})。"
+        f"用户说的「现在」「最近」「今天」都以这个时间为准。\n\n"
         f"用户在飞书群里问:{question}\n\n"
         "先看你的技能列表里有没有能直接套用的技能,有就照做;没有就按任务书里的"
         "「自由问答资源指南」现场解决:想清楚需要什么信息、用哪个资源拿、查完把结论"

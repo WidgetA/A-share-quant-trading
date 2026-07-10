@@ -207,6 +207,8 @@ async def test_worker_free_question_uses_free_prompt_with_thinking(
         assert "自由提问" in task_prompt
         assert "600519 最近五天走势" in task_prompt  # 用户原话进任务书
         assert "assistant-sql" in task_prompt  # 资源指南真的带上了
+        assert "当前北京时间" in task_prompt  # 时间由代码注入,不让 kimi 猜"现在"
+        assert "先核实现状" in task_prompt  # 行情类问题铁律在任务书里
         assert enable_thinking is True  # 自由发挥开 thinking
         return "查完了:最近五天累计涨 2.3%。"
 
