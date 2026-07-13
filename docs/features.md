@@ -7,6 +7,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.24.1 | 2026-07-13 | - | SYS-006 新增**早盘选股健康巡检**:08:00 检测 `_run_intraday_monitor` 协程是否存活 + 每日选股开关是否开启,任一异常飞书告警,给 09:39 扫描窗口留出约 90 分钟修复时间。起因:该协程 07-10 之后静默崩溃退出,无监督者重启、无告警,整个周末未被发现,导致 07-13 周一早盘选股完全没触发(事后手动 `POST /api/momentum/monitor/start` 救活)。 |
 | 0.24.0 | 2026-07-08 | - | AST-001 **Phase 2 自由问答通道上线**(用户拍板:代码仓库、数据都开放):@机器人 说大白话 → 排队 → kimi 现场解决(自由任务**开 thinking**,斜杠命令继续关)。资源指南进任务书:①只读接口(holdings/equity-curve);②**SQL 只读代理** `GET /api/trading/assistant-sql?sql=`——服务端强制只准 SELECT/SHOW/DESCRIBE/WITH、拒多语句、无 LIMIT 自动加 200、上限 2000 行、每条记审计日志,进只读 key 白名单;③代码仓库 `/app`(src/docs/scripts 只读);④Tushare HTTP(token 在容器内,任务书要求省配额);⑤kimi 原生网络搜索。禁令:SQL 只走代理、不改文件、不装包、不碰交易。帮助文案同步更新。 |
 | 0.23.6 | 2026-07-08 | - | AST-001 **`/持仓` 对齐主页账户概览**(用户要求):回复改为 总资产(今日变动额/%)+ 持仓市值 + 可用资金 + 本周收益(额/%)+ 持仓明细(成本/现价/市值/盈亏,null 显示 --)。只读白名单新增 `GET /api/trading/equity-curve`(与 holdings 同为 TRD-001 数据源);技能改两条 curl(`equity-curve?days=30` + `holdings`),任一接口失败如实报哪个没通、绝不编数。 |
 | 0.23.5 | 2026-07-08 | - | AST-001 助手技能执行**默认关 thinking**(`--no-thinking`,提速):技能是照本宣科(读技能→一条 curl→整理),没有需要深度推理的环节。**只影响助手**——路径 B/AI 写日志保持 thinking 开(关了 kimi 搜索失败就放弃不绕道,920039 实测教训)。质量下降可设 `KIMI_ASSISTANT_THINKING=1` 切回。 |
@@ -396,6 +397,41 @@ services:
 - [x] SSE streaming for downloads, training, backtests
 - [x] Feishu notifications with clickable links
 - [x] Docker deployment with environment variable config
+
+---
+
+### [SYS-006] Intraday Monitor Health Watchdog (早盘选股健康巡检)
+
+**Status**: Completed (2026-07-13)
+
+**Description**: `_run_intraday_monitor`(`src/web/routes.py`,09:39 自动触发早盘 ML
+选股扫描的后台协程)没有任何监督者——循环体内一旦出现未被内层 try/except 兜住的
+异常,整个协程会永久退出,且不发任何告警,唯一症状是"次日没有扫描记录"。2026-07-13
+实测:该协程在 07-10(周五)之后的某个时刻悄然退出,经过整个周末都无人发现,导致
+07-13(周一)早盘选股完全没有触发,事后靠手动调 `POST /api/momentum/monitor/start`
+救活。加一道 08:00 的独立健康巡检,在 09:39-09:50 扫描窗口关闭前留出约 90 分钟的
+修复时间。
+
+**触发机制**: 复用已经在跑的 `_monitoring_scheduler`(`src/web/ml_routes.py`,app 启动
+即常驻的 30 秒心跳循环),仿照其"09:30 就绪报告"的每日一次时间窗口写法
+(`watchdog_done_date` 守卫 + `08:00 <= ex_time <= 08:05`)新增一次巡检,复用已有的
+`_notify_feishu_error` 告警封装。选它而不新建独立 scheduler 类的原因:它是独立于
+被检查对象(`_run_intraday_monitor`)之外的协程——后者挂了不影响它自己巡检;一次
+条件判断 + 一次告警不需要新的锁/持久化状态机。
+
+**巡检内容**（仅交易日检查,复用 `_get_trade_calendar()` 判断，周末/节假日跳过）:
+
+| 检查项 | 异常条件 | 说明 |
+|--------|---------|------|
+| 协程存活 | `app.state.momentum_monitor_state["running"]` 为 `False` | 协程已崩溃退出或被手动停止,09:39 不会触发 |
+| 手动开关 | `get_daily_scan_enabled()` 为 `False` | 开关处于关闭状态(可能是忘记开回),09:39 不会扫描 |
+
+任一异常 → 飞书告警(列出具体原因 + 恢复方式:`POST /api/momentum/monitor/start`
+重启协程无需重启容器,或去设置页开关);全部正常只记 info 日志,不发消息（避免
+每天骚扰）。
+
+**Files**:
+- `src/web/ml_routes.py` — `_check_monitor_watchdog()` 新函数 + `_monitoring_scheduler()` 内新增 08:00 时间窗口
 
 ---
 

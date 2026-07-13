@@ -264,6 +264,45 @@ def create_ml_router() -> APIRouter:
 
     TRADING_HOURS = (time(9, 30), time(15, 0))
 
+    async def _check_monitor_watchdog(now_bj: datetime, app_state: Any) -> None:
+        """08:00 daily check: will the 09:39 auto-scan actually fire today?
+
+        `_run_intraday_monitor` (routes.py) has no supervisor — any uncaught
+        exception in its main loop kills it forever with zero alert until the
+        process restarts (2026-07-13 incident: died sometime after 07-10,
+        silently, through the whole weekend into Monday). This check runs
+        ~90 minutes before the 09:39-09:50 scan window closes so there's time
+        to fix it.
+        """
+        from src.common.config import get_daily_scan_enabled
+
+        try:
+            calendar = await _get_trade_calendar()
+        except Exception as e:
+            logger.warning(f"Watchdog: trade calendar unavailable, skipping check: {e}")
+            return
+        if now_bj.date() not in calendar:
+            return  # weekend/holiday — monitor is expected to be idle, not a problem
+
+        monitor_state = getattr(app_state, "momentum_monitor_state", None) or {}
+        problems = []
+        if not monitor_state.get("running"):
+            problems.append("盘中选股监控协程未运行(可能已崩溃退出),09:39 不会自动触发扫描")
+        if not get_daily_scan_enabled():
+            problems.append("每日选股开关当前是关闭状态,09:39 不会自动扫描")
+
+        if not problems:
+            logger.info("Watchdog: intraday monitor healthy, 09:39 scan should fire normally")
+            return
+
+        await _notify_feishu_error(
+            "早盘选股健康检查异常",
+            "\n".join(f"- {p}" for p in problems)
+            + "\n现在是 08:00,距 09:39 扫描窗口关闭还有约 90 分钟。"
+            + "\n恢复方式: POST /api/momentum/monitor/start 重启协程(无需重启容器),"
+            + "或去设置页打开开关。",
+        )
+
     async def _send_readiness_report(now_bj: datetime, app_state: Any) -> None:
         """Send daily readiness report at 09:30."""
         broker = getattr(app_state, "broker", None)
@@ -296,8 +335,9 @@ def create_ml_router() -> APIRouter:
             logger.warning("Failed to send readiness report", exc_info=True)
 
     async def _monitoring_scheduler(app_state: Any) -> None:
-        """Lightweight monitoring: daily readiness report + broker health check."""
+        """Lightweight monitoring: readiness report + broker health check + monitor watchdog."""
         readiness_done_date = ""
+        watchdog_done_date = ""
         broker_alert_ts: float = 0
         ALERT_COOLDOWN = 30 * 60
 
@@ -309,6 +349,13 @@ def create_ml_router() -> APIRouter:
                     now_bj = datetime.now(BEIJING_TZ)
                     ex_date = now_bj.strftime("%Y-%m-%d")
                     ex_time = now_bj.time().replace(second=0, microsecond=0)
+
+                    # --- MONITOR WATCHDOG: 08:00 ---
+                    if watchdog_done_date != ex_date and time(8, 0) <= ex_time <= time(8, 5):
+                        watchdog_done_date = ex_date
+                        await _check_monitor_watchdog(now_bj, app_state)
+                    if watchdog_done_date != ex_date and ex_time > time(8, 5):
+                        watchdog_done_date = ex_date
 
                     # --- READINESS REPORT: 09:30 ---
                     if readiness_done_date != ex_date and time(9, 30) <= ex_time <= time(9, 35):
