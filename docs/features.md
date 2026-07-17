@@ -1567,7 +1567,7 @@ V16 离线复刻（`dev-tools/replicate_v16.py`，静态模型与线上排名一
 - [x] M1: kimi spawn 封装支持 `--skills-dir`(`src/assistant/kimi_runner.py`)
 - [x] M1: 助手只读 key(`ASSISTANT_READONLY_KEY`,仅 holdings GET;7 个单测锁死各种组合)
 - [x] M1: lark-oapi 长连接接入(@解析/白名单/event_id 去重)——代码完成,待真实凭证联调
-- [x] M1: kimi 通道最小闭环(队列上限 4/全局串行锁/卡死兜底 900s/秒回)
+- [x] M1: kimi 通道最小闭环(队列上限 4/全局串行锁/卡死兜底 1800s/秒回)
 - [x] M1: 启动守卫 + 飞书告警(细化:全没配=没打算开只记日志;配了一部分才告警,防 watchtower 重启骚扰)
 - [ ] M1: 真实飞书应用端到端联调(建应用/切长连接/进群实测 /持仓)
 - [ ] Phase 2: kimi 任务书(技能匹配/现场实现/大白话输出规则)+ 时间预算

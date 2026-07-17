@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Hang-backstop, same philosophy as KIMI_VERIFY_TIMEOUT_SEC (see path B notes):
 # generous, and hitting it reports "kimi never exited", keeping partial output.
-KIMI_ASSISTANT_TIMEOUT_SEC = int(os.environ.get("KIMI_ASSISTANT_TIMEOUT_SEC", "900"))
+KIMI_ASSISTANT_TIMEOUT_SEC = int(os.environ.get("KIMI_ASSISTANT_TIMEOUT_SEC", "1800"))
 
 SKILLS_DIR = (
     Path(os.environ.get("ASSISTANT_SKILLS_DIR", ""))
