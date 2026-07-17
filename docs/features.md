@@ -35,6 +35,7 @@
 | 0.10.3 | 2026-03-05 | - | STR-004: Add Step 5.7 LLM board relevance filter + flip scoring to +Z(gfo)+Z(amp) + board leader bonus |
 | 0.10.4 | 2026-06-01 | - | STR-004: Blacklist 专精特新 board — move into JUNK_BOARDS so is_junk_board() actually excludes it (was leaking via un-filtered BROAD_CONCEPT_BOARDS, dominating universe + best-board labels) |
 | 0.10.5 | 2026-06-01 | - | STR-004: V16 Feishu top-10 report marks picks whose best-board is a BROAD_CONCEPT_BOARD with ⭐ + adds a legend, so vague wide-theme picks are visible at a glance (still un-filtered, just flagged) |
+| 0.10.6 | 2026-07-14 | - | STR-005: V16 daily report (Feishu + `/api/v16/backtest`) lists ALL hot boards a stock belongs to (not just one "best" board) + tags each pick [带动]/[扩增] — whether its own gain alone cleared the hot-board bar, or it only entered via board-level expansion |
 
 ---
 
@@ -782,6 +783,24 @@ strategy:
 - This is stable regardless of when scan is triggered (auto 09:38 or manual 13:00)
 - `entry_price` in holdings = signal's `latest_price` = 09:40 price at scan time
 - Feishu notifications label this as "买入参考价(09:40)"
+
+**Board Attribution in the Daily Report (added 2026-07-14)**:
+- V16's hot-board step (Step 2) computes each board's avg gain from ALL constituents with
+  trading data (gainers and non-gainers alike), and once a board clears the 0.80% bar,
+  **every** constituent is admitted into the funnel — not just the stocks that individually
+  drove the average up. A stock can also belong to several hot boards simultaneously.
+- `V16ScanResult.stock_all_boards: dict[code, list[board]]` now retains every hot board a
+  stock belongs to (previously only `stock_best_board`, a single board picked by board size,
+  survived onto the result). Both the Feishu top-10 report (`feishu_bot.send_v16_top10_report`)
+  and the manual backtest page (`/api/v16/backtest`, `v15_backtest.html`) list ALL of them,
+  each with its own avg gain — not just the "best" one.
+- `V16ScanResult.stock_is_driver: dict[code, bool]` marks whether a stock's own
+  `gain_from_open` alone met the hot-board bar (`MIN_BOARD_AVG_GAIN`, 0.80%): `True` →
+  tagged **[带动]** (it could have made a board hot on its own); `False` → tagged **[扩增]**
+  (it only entered because other board members' gains pulled the board average over
+  threshold — Step 3's individual gain filter, 0.26%, is a much lower bar that it still
+  clears). `V16ScanResult.stock_gain_from_open` carries the raw per-stock gain % backing
+  this attribution.
 
 **Data Sources**:
 - Real-time quotes: Tushare via `TushareRealtimeClient` (`rt_min` / `rt_min_daily`)

@@ -72,3 +72,50 @@ async def test_no_legend_when_no_broad_board():
     msg = bot.send_message.call_args.args[0]
     assert "⭐" not in msg
     assert "宽泛板块" not in msg
+
+
+@pytest.mark.asyncio
+async def test_multi_board_stock_lists_all_hot_boards():
+    """A stock in >1 hot board must show every board, not just stock_best_board's pick."""
+    result = _make_result()
+    # "减速器" is a narrow real-theme board (unstarred), unlike broad "锂电池概念"
+    result.stock_all_boards = {"603119": ["锂电池概念", "减速器"], "002297": ["碳纤维"]}
+    result.step2_board_avg_gains = {"锂电池概念": 0.88, "减速器": 1.20, "碳纤维": 0.92}
+
+    bot = _bot()
+    bot.send_message = AsyncMock(return_value=True)
+    await bot.send_v16_top10_report(result, scan_time=datetime(2026, 6, 1, 9, 40))
+
+    msg = bot.send_message.call_args.args[0]
+    assert "⭐锂电池概念(+0.88%)、减速器(+1.20%)" in msg
+    assert "碳纤维(+0.92%)" in msg
+
+
+@pytest.mark.asyncio
+async def test_driver_vs_expanded_tag_and_legend():
+    result = _make_result()
+    result.stock_all_boards = {"603119": ["锂电池概念"], "002297": ["碳纤维"]}
+    # 603119 own gain cleared the hot-board bar -> driver; 002297 only rode the board -> expanded
+    result.stock_is_driver = {"603119": True, "002297": False}
+
+    bot = _bot()
+    bot.send_message = AsyncMock(return_value=True)
+    await bot.send_v16_top10_report(result, scan_time=datetime(2026, 6, 1, 9, 40))
+
+    msg = bot.send_message.call_args.args[0]
+    assert "[带动]⭐锂电池概念" in msg
+    assert "[扩增]碳纤维" in msg
+    assert "[带动]=个股自身涨幅已达热门板块门槛" in msg
+
+
+@pytest.mark.asyncio
+async def test_no_driver_legend_when_field_unset():
+    """Older/unset stock_is_driver (all None) must not print the driver/expanded legend."""
+    bot = _bot()
+    bot.send_message = AsyncMock(return_value=True)
+    await bot.send_v16_top10_report(_make_result(), scan_time=datetime(2026, 6, 1, 9, 40))
+
+    msg = bot.send_message.call_args.args[0]
+    assert "[带动]" not in msg
+    assert "[扩增]" not in msg
+    assert "个股自身涨幅已达热门板块门槛" not in msg

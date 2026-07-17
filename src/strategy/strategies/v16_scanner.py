@@ -109,8 +109,16 @@ class V16ScanResult:
 
     # Hot boards mapping: code → best board name
     stock_best_board: dict[str, str] = field(default_factory=dict)
+    # Hot boards mapping: code → ALL hot boards it belongs to (best board is one of these)
+    stock_all_boards: dict[str, list[str]] = field(default_factory=dict)
     # Board avg gain (%) for hot boards
     step2_board_avg_gains: dict[str, float] = field(default_factory=dict)
+    # Per-stock own gain_from_open (%), for driver-vs-expanded attribution
+    stock_gain_from_open: dict[str, float] = field(default_factory=dict)
+    # True if stock's own gain_from_open ≥ MIN_BOARD_AVG_GAIN — it could have made a board
+    # hot on its own. False means it only entered via board-level expansion: Step 2 admits
+    # ALL constituents of a hot board (not just the gainers whose gains drove the avg up).
+    stock_is_driver: dict[str, bool] = field(default_factory=dict)
     # CCI(14) for recommended stocks: code → CCI value
     stock_cci: dict[str, float] = field(default_factory=dict)
     # Early volume (call auction + first 7min) for recommended stocks: code → volume in 股
@@ -300,6 +308,20 @@ class V16Scanner:
         for code, boards in stock_all_boards.items():
             stock_best_board[code] = max(boards, key=lambda b: hot_board_sizes.get(b, 0))
         result.stock_best_board = stock_best_board
+        result.stock_all_boards = dict(stock_all_boards)
+
+        # Per-stock gain_from_open + driver/expanded attribution (see V16ScanResult docstring)
+        stock_gain_from_open: dict[str, float] = {}
+        stock_is_driver: dict[str, bool] = {}
+        for code in hot_board_codes:
+            sd = stock_data.get(code)
+            if sd is None or sd.open_price <= 0:
+                continue
+            gain = (sd.price_940 - sd.open_price) / sd.open_price * 100
+            stock_gain_from_open[code] = gain
+            stock_is_driver[code] = gain >= self.MIN_BOARD_AVG_GAIN
+        result.stock_gain_from_open = stock_gain_from_open
+        result.stock_is_driver = stock_is_driver
 
         # Build funnel candidates from hot board stocks
         candidates = [

@@ -179,6 +179,19 @@ document.getElementById('v16-form').addEventListener('submit', async (e) => {
     }
 });
 
+// Render ALL hot boards a stock belongs to (not just the "best" one), plus a
+// driver/expanded tag: [带动]=own gain alone cleared the hot-board bar (0.8%);
+// [扩增]=only entered because other board members' gains pulled the avg up.
+function formatBoards(s) {
+    const boards = (s.boards && s.boards.length > 0) ? s.boards : [{name: s.board, avg_gain: 0}];
+    const boardsHtml = boards.map(b =>
+        `${b.name}(${b.avg_gain >= 0 ? '+' : ''}${b.avg_gain.toFixed(2)}%)`
+    ).join('、');
+    const tag = s.is_driver === true ? '<span style="color:#16a34a">[带动]</span>'
+        : s.is_driver === false ? '<span style="color:#94a3b8">[扩增]</span>' : '';
+    return `${tag}${boardsHtml}`;
+}
+
 function renderV16Results(data) {
     _v16LastData = data;
     document.getElementById('v16-results').classList.remove('hidden');
@@ -239,7 +252,7 @@ function renderV16Results(data) {
                 <td>${s.name}${s.rank === 1 ? ' <span class="rec-tag">Top-1</span>' : ''}</td>
                 <td>${s.score.toFixed(4)}</td>
                 <td>${s.buy_price.toFixed(2)}</td>
-                <td>${s.board}</td>
+                <td>${formatBoards(s)}</td>
             </tr>`
         ).join('');
     } else {
@@ -283,7 +296,7 @@ function renderV16Results(data) {
                 <td>${s.name}${s.rank === 1 ? ' <span class="rec-tag">Top-1</span>' : ''}</td>
                 <td>${s.score.toFixed(4)}</td>
                 <td>${s.buy_price.toFixed(2)}</td>
-                <td>${s.board}</td>
+                <td>${formatBoards(s)}</td>
             </tr>
         `;
     });

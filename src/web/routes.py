@@ -5954,31 +5954,32 @@ def create_v15_backtest_router() -> APIRouter:
             {"label": "Step 7: LGBRank → Top-10", "count": result.final_candidates},
         ]
 
-        # Serialize recommended (top-10)
-        rec_list = [
-            {
+        def _serialize_scored(s):
+            # ALL hot boards this stock belongs to (not just the "best" one)
+            boards = result.stock_all_boards.get(s.code) or (
+                [result.stock_best_board[s.code]] if result.stock_best_board.get(s.code) else []
+            )
+            return {
                 "code": s.code,
                 "name": s.name,
                 "score": round(s.score, 4),
                 "rank": s.rank,
                 "buy_price": round(s.buy_price, 2),
                 "board": result.stock_best_board.get(s.code, "-"),
+                "boards": [
+                    {"name": b, "avg_gain": round(result.step2_board_avg_gains.get(b, 0), 4)}
+                    for b in boards
+                ],
+                # True: own gain_from_open alone cleared the hot-board bar (0.8%) — a driver.
+                # False: only entered via board-level expansion (other members drove the avg up).
+                "is_driver": result.stock_is_driver.get(s.code),
             }
-            for s in result.recommended
-        ]
+
+        # Serialize recommended (top-10)
+        rec_list = [_serialize_scored(s) for s in result.recommended]
 
         # Serialize all scored
-        all_scored_list = [
-            {
-                "code": s.code,
-                "name": s.name,
-                "score": round(s.score, 4),
-                "rank": s.rank,
-                "buy_price": round(s.buy_price, 2),
-                "board": result.stock_best_board.get(s.code, "-"),
-            }
-            for s in result.all_scored
-        ]
+        all_scored_list = [_serialize_scored(s) for s in result.all_scored]
 
         # Diagnostic: top 5 boards by avg gain (even if below threshold)
         all_gains = result.step2_all_board_avg_gains

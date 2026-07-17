@@ -413,6 +413,31 @@ Limit-up (skipped):
         from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS
 
         broad_shown = False
+        driver_tag_shown = False
+
+        def _format_boards(code: str) -> tuple[str, bool]:
+            """List ALL hot boards a stock belongs to (not just the 'best' one)."""
+            best = scan_result.stock_best_board.get(code)
+            boards = scan_result.stock_all_boards.get(code) or ([best] if best else [])
+            if not boards:
+                return "-", False
+            parts = []
+            any_broad = False
+            for b in boards:
+                star = "⭐" if b in BROAD_CONCEPT_BOARDS else ""
+                any_broad = any_broad or bool(star)
+                parts.append(f"{star}{b}({board_gains.get(b, 0):+.2f}%)")
+            return "、".join(parts), any_broad
+
+        def _driver_tag(code: str) -> str:
+            """[带动]=own gain alone would clear the hot-board bar; [扩增]=only got in
+            because other board members' gains pulled the board average over threshold."""
+            nonlocal driver_tag_shown
+            is_driver = scan_result.stock_is_driver.get(code)
+            if is_driver is None:
+                return ""
+            driver_tag_shown = True
+            return "[带动]" if is_driver else "[扩增]"
 
         lines = [
             f"[V16] 每日扫描报告 ({time_str})",
@@ -426,10 +451,8 @@ Limit-up (skipped):
         recommended = scan_result.recommended
         if recommended:
             top1 = recommended[0]
-            board = scan_result.stock_best_board.get(top1.code, "-")
-            bg = board_gains.get(board, 0)
-            top1_star = "⭐" if board in BROAD_CONCEPT_BOARDS else ""
-            broad_shown = broad_shown or bool(top1_star)
+            board_str, top1_broad = _format_boards(top1.code)
+            broad_shown = broad_shown or top1_broad
             cci_map = getattr(scan_result, "stock_cci", {})
             evol_map = getattr(scan_result, "stock_early_vol", {})
             top1_cci = cci_map.get(top1.code)
@@ -439,7 +462,7 @@ Limit-up (skipped):
             cci_str = f" | CCI: {top1_cci:.0f}" if top1_cci is not None else ""
             evol_str = f" | 7min量: {top1_evol / 10000:.0f}万股" if top1_evol else ""
             lines.append(
-                f"  板块: {top1_star}{board}(均涨{bg:+.2f}%) | "
+                f"  板块: {_driver_tag(top1.code)}{board_str} | "
                 f"LGB: {top1.score:.4f} | "
                 f"买入价: {top1.buy_price:.2f} (9:40)"
                 f"{cci_str}{evol_str}"
@@ -448,10 +471,8 @@ Limit-up (skipped):
             lines.append("")
             lines.append("评分前10:")
             for s in recommended:
-                board = scan_result.stock_best_board.get(s.code, "-")
-                bg = board_gains.get(board, 0)
-                star = "⭐" if board in BROAD_CONCEPT_BOARDS else ""
-                broad_shown = broad_shown or bool(star)
+                board_str, s_broad = _format_boards(s.code)
+                broad_shown = broad_shown or s_broad
                 s_cci = cci_map.get(s.code)
                 s_evol = evol_map.get(s.code)
                 cci_part = f"  CCI={s_cci:.0f}" if s_cci is not None else ""
@@ -460,7 +481,7 @@ Limit-up (skipped):
                     f"{s.rank}. {s.code} {s.name}  "
                     f"LGB={s.score:.4f}  "
                     f"买入:{s.buy_price:.2f}  "
-                    f"{star}{board}({bg:+.2f}%)"
+                    f"{_driver_tag(s.code)}{board_str}"
                     f"{cci_part}{evol_part}"
                 )
         else:
@@ -470,6 +491,11 @@ Limit-up (skipped):
         if broad_shown:
             lines.append("")
             lines.append("⭐=宽泛板块(成分≥400,题材偏泛,仅供参考)")
+        if driver_tag_shown:
+            lines.append(
+                "[带动]=个股自身涨幅已达热门板块门槛(0.8%),自己就能带火板块 | "
+                "[扩增]=仅个股涨幅未到0.8%,靠板块内其他股票拉高均值才被纳入"
+            )
 
         return await self.send_message("\n".join(lines))
 
