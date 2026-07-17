@@ -1,5 +1,5 @@
 # === MODULE PURPOSE ===
-# Offline backfill driver: use kimi-cli (Kimi K2.6) as an independent
+# Offline backfill driver: use kimi-cli (model per kimi_config, Kimi 3) as an independent
 # oracle to fetch the real list_date of every A-share code listed in
 # data/audit/diff_codes.txt. The result is written one JSON per code
 # under data/audit/list_dates/. Resume-safe: existing files are skipped.

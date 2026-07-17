@@ -29,10 +29,35 @@ def test_generated_config_is_valid_toml_with_key_and_no_oauth():
     # The whole point: NO oauth block → kimi uses the plaintext api_key.
     assert "oauth" not in provider
 
-    model = cfg["models"]["kimi-code/kimi-for-coding"]
+    # Default model is Kimi 3 (k3, 1M context); the older kimi-for-coding
+    # block is still emitted so KIMI_MODEL can roll back without a rebuild.
+    model = cfg["models"]["kimi-code/k3"]
     assert model["provider"] == "managed:kimi-code"
-    assert model["model"] == "kimi-for-coding"
+    assert model["model"] == "k3"
+    assert model["max_context_size"] == 1048576
+    assert cfg["default_model"] == "kimi-code/k3"
+    assert cfg["models"]["kimi-code/kimi-for-coding"]["model"] == "kimi-for-coding"
+
+
+def test_model_override_and_unknown_model_rejected():
+    cfg = tomllib.loads(build_kimi_config_toml("sk-kimi-X", model="kimi-for-coding"))
     assert cfg["default_model"] == "kimi-code/kimi-for-coding"
+    with pytest.raises(ValueError):
+        build_kimi_config_toml("sk-kimi-X", model="k9-nonexistent")
+
+
+def test_ensure_respects_kimi_model_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-FROMENV")
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    monkeypatch.setenv("KIMI_MODEL", "kimi-for-coding")
+    assert ensure_kimi_config_from_env() is True
+    cfg = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert cfg["default_model"] == "kimi-code/kimi-for-coding"
+    # An unknown model must refuse to write a config (path B then alerts).
+    monkeypatch.setenv("KIMI_MODEL", "bogus-model")
+    (tmp_path / "config.toml").unlink()
+    assert ensure_kimi_config_from_env() is False
+    assert not (tmp_path / "config.toml").exists()
 
 
 def test_search_and_fetch_services_share_the_key():
