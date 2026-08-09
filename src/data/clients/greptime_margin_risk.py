@@ -7,7 +7,7 @@ and repair semantics.  All writes are idempotent on (primary key, trade date).
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from src.data.clients.greptime_storage import date_to_epoch_ms, ts_to_date
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS margin_risk_metric_daily (
 _SERIES = "MEWS"
 _VERSION = "mews_v2"
 _WRITE_BATCH = 100
+_READ_WINDOW_DAYS = 60
 
 
 def _q(value: str) -> str:
@@ -128,6 +129,18 @@ def _timestamp(value: date | None) -> str:
 
 def _chunks[T](values: Sequence[T], size: int = _WRITE_BATCH) -> list[Sequence[T]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _date_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Split wide Greptime reads so one query cannot fan out over too many files."""
+
+    windows: list[tuple[date, date]] = []
+    current = start
+    while current <= end:
+        window_end = min(end, current + timedelta(days=_READ_WINDOW_DAYS - 1))
+        windows.append((current, window_end))
+        current = window_end + timedelta(days=1)
+    return windows
 
 
 class GreptimeMarginRiskStore:
@@ -239,12 +252,15 @@ class GreptimeMarginRiskStore:
         return output
 
     async def get_security_codes(self, start: date, end: date) -> list[str]:
-        rows = await self._db.fetch(
-            "SELECT DISTINCT stock_code FROM margin_risk_security_daily "
-            f"WHERE ts >= {date_to_epoch_ms(start)} AND ts <= {date_to_epoch_ms(end)} "
-            "ORDER BY stock_code"
-        )
-        return [str(row["stock_code"]) for row in rows]
+        codes: set[str] = set()
+        for window_start, window_end in _date_windows(start, end):
+            rows = await self._db.fetch(
+                "SELECT DISTINCT stock_code FROM margin_risk_security_daily "
+                f"WHERE ts >= {date_to_epoch_ms(window_start)} "
+                f"AND ts <= {date_to_epoch_ms(window_end)} ORDER BY stock_code"
+            )
+            codes.update(str(row["stock_code"]) for row in rows)
+        return sorted(codes)
 
     async def get_security_rows(
         self,
@@ -255,18 +271,21 @@ class GreptimeMarginRiskStore:
         if not codes:
             return []
         code_sql = ",".join(_q(code) for code in codes)
-        rows = await self._db.fetch(
-            "SELECT stock_code,ts,financing_balance,financing_buy_amount,"
-            "financing_repayment_amount FROM margin_risk_security_daily "
-            f"WHERE ts >= {date_to_epoch_ms(start)} AND ts <= {date_to_epoch_ms(end)} "
-            f"AND stock_code IN ({code_sql}) ORDER BY stock_code,ts"
-        )
         output: list[dict[str, Any]] = []
-        for raw in rows:
-            item = dict(raw)
-            item["trade_date"] = ts_to_date(item.pop("ts"))
-            item["ts_code"] = item["stock_code"]
-            output.append(item)
+        for window_start, window_end in _date_windows(start, end):
+            rows = await self._db.fetch(
+                "SELECT stock_code,ts,financing_balance,financing_buy_amount,"
+                "financing_repayment_amount FROM margin_risk_security_daily "
+                f"WHERE ts >= {date_to_epoch_ms(window_start)} "
+                f"AND ts <= {date_to_epoch_ms(window_end)} "
+                f"AND stock_code IN ({code_sql}) ORDER BY stock_code,ts"
+            )
+            for raw in rows:
+                item = dict(raw)
+                item["trade_date"] = ts_to_date(item.pop("ts"))
+                item["ts_code"] = item["stock_code"]
+                output.append(item)
+        output.sort(key=lambda item: (str(item["stock_code"]), item["trade_date"]))
         return output
 
     async def replace_metrics(

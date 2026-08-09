@@ -13,6 +13,7 @@ _TZ = ZoneInfo("Asia/Shanghai")
 _RUN_AT = time(8, 50)  # Tushare documents margin data as updating around 08:30.
 _STARTUP_DELAY_SECONDS = 5
 _STARTUP_RETRY_SECONDS = 15
+_STARTUP_ERROR_RETRY_SECONDS = 300
 
 
 class MarginRiskRefreshScheduler:
@@ -48,6 +49,13 @@ class MarginRiskRefreshScheduler:
             result = await self._refresh_once(trigger="startup", max_days=None)
             if result is None or result.get("status") == "BUSY":
                 await asyncio.sleep(_STARTUP_RETRY_SECONDS)
+                continue
+            if result.get("status") == "ERROR":
+                logger.warning(
+                    "MEWS startup refresh will retry in %s seconds",
+                    _STARTUP_ERROR_RETRY_SECONDS,
+                )
+                await asyncio.sleep(_STARTUP_ERROR_RETRY_SECONDS)
                 continue
             return
 

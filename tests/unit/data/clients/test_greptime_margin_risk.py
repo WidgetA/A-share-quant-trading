@@ -69,6 +69,74 @@ async def test_security_day_write_is_idempotent_and_keeps_all_three_margin_facts
 
 
 @pytest.mark.asyncio
+async def test_security_code_read_splits_wide_range_and_deduplicates_codes() -> None:
+    class _WindowDB:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def fetch(self, sql: str):
+            self.queries.append(sql)
+            if len(self.queries) == 1:
+                return [{"stock_code": "600000.SH"}, {"stock_code": "000001.SZ"}]
+            return [{"stock_code": "000001.SZ"}, {"stock_code": "300001.SZ"}]
+
+    db = _WindowDB()
+    store = GreptimeMarginRiskStore(SimpleNamespace(db=db))
+
+    codes = await store.get_security_codes(date(2026, 1, 1), date(2026, 4, 30))
+
+    assert codes == ["000001.SZ", "300001.SZ", "600000.SH"]
+    assert len(db.queries) == 2
+    assert f"ts >= {date_to_epoch_ms(date(2026, 1, 1))}" in db.queries[0]
+    assert f"ts <= {date_to_epoch_ms(date(2026, 3, 1))}" in db.queries[0]
+    assert f"ts >= {date_to_epoch_ms(date(2026, 3, 2))}" in db.queries[1]
+    assert f"ts <= {date_to_epoch_ms(date(2026, 4, 30))}" in db.queries[1]
+
+
+@pytest.mark.asyncio
+async def test_security_row_read_splits_wide_range_and_restores_global_order() -> None:
+    class _WindowDB:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def fetch(self, sql: str):
+            self.queries.append(sql)
+            if len(self.queries) == 1:
+                return [
+                    {
+                        "stock_code": "600000.SH",
+                        "ts": date_to_epoch_ms(date(2026, 2, 27)),
+                        "financing_balance": 2.0,
+                        "financing_buy_amount": 1.0,
+                        "financing_repayment_amount": 0.5,
+                    }
+                ]
+            return [
+                {
+                    "stock_code": "000001.SZ",
+                    "ts": date_to_epoch_ms(date(2026, 3, 2)),
+                    "financing_balance": 3.0,
+                    "financing_buy_amount": 1.5,
+                    "financing_repayment_amount": 0.8,
+                }
+            ]
+
+    db = _WindowDB()
+    store = GreptimeMarginRiskStore(SimpleNamespace(db=db))
+
+    rows = await store.get_security_rows(
+        date(2026, 1, 1),
+        date(2026, 4, 30),
+        ["000001.SZ", "600000.SH"],
+    )
+
+    assert len(db.queries) == 2
+    assert [row["stock_code"] for row in rows] == ["000001.SZ", "600000.SH"]
+    assert [row["ts_code"] for row in rows] == ["000001.SZ", "600000.SH"]
+    assert [row["trade_date"] for row in rows] == [date(2026, 3, 2), date(2026, 2, 27)]
+
+
+@pytest.mark.asyncio
 async def test_metric_list_is_oldest_first_and_serializes_availability_date() -> None:
     db = _FakeDB()
     first = date(2026, 8, 5)
