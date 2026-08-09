@@ -84,6 +84,12 @@ class MarginRiskProductionService:
     async def ensure_schema(self) -> None:
         await self.store.ensure_schema()
 
+    @property
+    def is_running(self) -> bool:
+        """Whether an ingestion/recalculation pass currently owns the service."""
+
+        return self._lock.locked()
+
     async def audit_and_fill(
         self,
         *,

@@ -110,6 +110,13 @@
 
 /* MEWS financing-risk curve */
 .risk-card { margin-bottom: 1rem; overflow: hidden; }
+.risk-title-row { display: flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.risk-title-row h3 { margin: 0; }
+.risk-explain-button {
+    border: 1px solid #d7dce0; color: #546e7a; background: #fff; border-radius: 999px;
+    padding: 0.2rem 0.58rem; font-size: 0.72rem; cursor: pointer; white-space: nowrap;
+}
+.risk-explain-button:hover { border-color: #78909c; background: #f2f5f6; color: #37474f; }
 .risk-header-right { display: flex; align-items: center; gap: 0.6rem; }
 .risk-state {
     display: inline-flex; align-items: center; min-width: 64px; justify-content: center;
@@ -127,16 +134,11 @@
 .risk-summary-main { font-size: 1.85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .risk-summary-value { font-size: 0.9rem; color: #444; }
 .risk-summary-note { font-size: 0.72rem; color: #888; margin-top: 2px; }
-.risk-toolbar {
+.risk-interaction-bar {
     display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
     gap: 0.55rem; margin-bottom: 0.55rem;
 }
-.risk-range-buttons, .risk-zoom-buttons { display: inline-flex; gap: 0.25rem; }
-.risk-tool-button {
-    border: 1px solid #d7dce0; color: #555; background: #fff; border-radius: 5px;
-    padding: 0.24rem 0.55rem; font-size: 0.75rem; cursor: pointer;
-}
-.risk-tool-button:hover, .risk-tool-button.active { border-color: #78909c; background: #f2f5f6; }
+.risk-interaction-hint { color: #666; font-size: 0.75rem; }
 .risk-range-label { color: #777; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
 .risk-series-picker { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0 0 0.55rem; }
 .risk-series-chip {
@@ -147,7 +149,7 @@
 .risk-series-chip:has(input:checked) { color: #333; background: #fafafa; }
 .risk-series-chip input { width: 12px; height: 12px; margin: 0; accent-color: var(--series-color); }
 .risk-series-swatch { width: 12px; height: 3px; border-radius: 2px; background: var(--series-color); }
-.risk-chart-wrap { position: relative; width: 100%; min-height: 290px; cursor: crosshair; }
+.risk-chart-wrap { position: relative; width: 100%; min-height: 290px; cursor: grab; }
 .risk-chart-wrap.dragging { cursor: grabbing; }
 .risk-chart-wrap svg { display: block; width: 100%; height: auto; touch-action: none; }
 .risk-tooltip {
@@ -162,12 +164,34 @@
 .risk-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem;
     color: #888; font-size: 0.7rem; margin-top: 0.35rem; }
 .risk-data-partial { color: #c45100; }
+.risk-explainer-dialog { max-width: 960px; }
+.risk-explainer-intro { margin: 0 0 0.9rem; color: #555; line-height: 1.6; }
+.risk-explainer-list { display: grid; gap: 0; }
+.risk-explainer-item { padding: 0.9rem 0; border-bottom: 1px solid #eceff1; }
+.risk-explainer-item:first-child { padding-top: 0; }
+.risk-explainer-item h4 {
+    display: flex; align-items: center; gap: 0.45rem; margin: 0 0 0.55rem;
+    color: #263238; font-size: 0.95rem;
+}
+.risk-explainer-swatch {
+    display: inline-block; width: 16px; height: 3px; border-radius: 2px;
+    background: var(--series-color);
+}
+.risk-explainer-detail { display: grid; grid-template-columns: 82px 1fr; margin: 0; gap: 0.35rem 0.75rem; }
+.risk-explainer-detail dt { color: #78909c; font-size: 0.76rem; font-weight: 600; }
+.risk-explainer-detail dd { margin: 0; color: #444; font-size: 0.8rem; line-height: 1.55; }
+.risk-state-guide { margin-top: 1rem; padding-top: 0.2rem; }
+.risk-state-guide h4 { margin: 0 0 0.5rem; }
+.risk-state-guide ul { margin: 0; padding-left: 1.2rem; color: #555; font-size: 0.8rem; line-height: 1.7; }
 @media (max-width: 700px) {
     .overview-body { grid-template-columns: 1fr; }
     .overview-stats { gap: 1rem 1.5rem; }
     .risk-summary { grid-template-columns: 1fr 1fr; }
     .risk-summary > :last-child { grid-column: 1 / -1; }
     .risk-chart-wrap { min-height: 230px; }
+    .risk-header-right { gap: 0.35rem; }
+    .risk-explainer-detail { grid-template-columns: 1fr; gap: 0.12rem; }
+    .risk-explainer-detail dd { margin-bottom: 0.35rem; }
 }
 
 /* Toast */
@@ -264,7 +288,12 @@
     <!-- MEWS production risk curve: immediately below account net-value area -->
     <div class="status-card risk-card" id="marginRiskCard">
         <div class="status-card-header">
-            <h3>融资耗竭风险曲线（MEWS）</h3>
+            <div class="risk-title-row">
+                <h3>融资耗竭风险曲线（MEWS）</h3>
+                <button type="button" class="risk-explain-button" id="riskMetricGuideButton"
+                    aria-haspopup="dialog" aria-controls="riskMetricGuide"
+                    onclick="openRiskMetricGuide()">指标说明</button>
+            </div>
             <div class="risk-header-right">
                 <span style="font-size:0.72rem;color:#999;" id="riskUpdatedAt"></span>
                 <span class="risk-state" id="riskStateBadge">--</span>
@@ -286,19 +315,9 @@
                 <div class="risk-summary-note" id="riskCoverage"></div>
             </div>
         </div>
-        <div class="risk-toolbar">
-            <div class="risk-range-buttons" aria-label="风险曲线时间范围">
-                <button class="risk-tool-button" data-risk-range="126" onclick="setRiskRange(126)">6月</button>
-                <button class="risk-tool-button" data-risk-range="252" onclick="setRiskRange(252)">1年</button>
-                <button class="risk-tool-button active" data-risk-range="756" onclick="setRiskRange(756)">3年</button>
-                <button class="risk-tool-button" data-risk-range="all" onclick="setRiskRange('all')">全部</button>
-            </div>
+        <div class="risk-interaction-bar">
+            <span class="risk-interaction-hint">在图上滚轮或双指缩放，按住拖动平移，双击恢复全部</span>
             <span class="risk-range-label" id="riskRangeLabel">--</span>
-            <div class="risk-zoom-buttons" aria-label="风险曲线缩放">
-                <button class="risk-tool-button" onclick="zoomRiskCurve(0.65)" title="放大时间段">＋ 放大</button>
-                <button class="risk-tool-button" onclick="zoomRiskCurve(1.55)" title="缩小时间段">－ 缩小</button>
-                <button class="risk-tool-button" onclick="setRiskRange(756)" title="恢复近三年">重置</button>
-            </div>
         </div>
         <div class="risk-series-picker" id="riskSeriesPicker" aria-label="选择要显示的指标"></div>
         <div class="risk-chart-wrap" id="riskChartWrap">
@@ -306,8 +325,156 @@
             <div class="risk-tooltip" id="riskTooltip"></div>
         </div>
         <div class="risk-footer">
-            <span>纵轴统一为 0—100；滚轮缩放，按住曲线左右拖动平移</span>
+            <span>纵轴统一为 0—100；数据状态异常的日期不连线</span>
             <span id="riskStorageStatus"></span>
+        </div>
+    </div>
+
+    <div class="modal hidden" id="riskMetricGuide" role="dialog" aria-modal="true"
+        aria-labelledby="riskMetricGuideTitle">
+        <div class="modal-content modal-large risk-explainer-dialog">
+            <div class="modal-header">
+                <h3 id="riskMetricGuideTitle">MEWS 指标说明</h3>
+                <button type="button" class="modal-close" id="riskMetricGuideClose"
+                    aria-label="关闭指标说明" onclick="closeRiskMetricGuide()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="risk-explainer-intro">所有分数均为 0—100。分数越高表示对应条件越强，不代表未来下跌概率；最终风险状态由固定阈值和连续日规则决定。</p>
+                <div class="risk-explainer-list">
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#c62828"></span>MEWS 主指数</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>购买力耗竭路径与持续去杠杆路径两者中的较高值。</dd>
+                            <dt>表明什么</dt><dd>越高表示至少一条融资风险链条越完整；越低只表示融资链条暂未形成明显组合风险。</dd>
+                            <dt>导向结果</dt><dd>直接进入 NORMAL、WATCH、WARNING、DANGER 状态机；它不是大盘涨跌预测。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#ef6c00"></span>购买力耗竭路径</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>立方根〔耗竭强度 × MLS 融资负荷 × NIB 负脉冲〕。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资存量偏重，同时新增融资动能正在广泛减弱。</dd>
+                            <dt>导向结果</dt><dd>作为 MEWS 的候选值；高于另一条路径时成为主导路径并推高 MEWS。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#7b1fa2"></span>持续去杠杆路径</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>立方根〔MLS 融资负荷 × DLB 去杠杆覆盖 × 持续净偿还〕。</dd>
+                            <dt>表明什么</dt><dd>越高表示高融资负荷下，融资净偿还已经广泛扩散并持续存在。</dd>
+                            <dt>导向结果</dt><dd>作为 MEWS 的候选值；连续满足专用阈值时还会参与 DANGER 判定。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#ad1457"></span>耗竭强度（100−MPI）</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>MPI 的反向分数，用于把“融资动能弱”转换成“耗竭程度高”。</dd>
+                            <dt>表明什么</dt><dd>越高表示近期融资扩张速度相对过去一个月越弱。</dd>
+                            <dt>导向结果</dt><dd>直接抬高购买力耗竭路径；不单独改变风险状态。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#1976d2"></span>MPI 融资脉冲</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>市场融资流率 EMA5 减 EMA20 后，在最近 500 个交易日中的历史分位。</dd>
+                            <dt>表明什么</dt><dd>越高表示新增融资动能越强；越低表示边际购买力越弱。</dd>
+                            <dt>导向结果</dt><dd>核心公式使用 100−MPI，因此 MPI 越低，购买力耗竭路径越容易上升。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#5e35b1"></span>MLS 融资负荷</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>融资余额相对前 20 个交易日自由流通市值中位数的历史分位。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资存量相对市场承载规模越重，融资脆弱性越高。</dd>
+                            <dt>导向结果</dt><dd>同时进入两条风险路径；MLS 高是放大条件，但单独升高不会触发风险状态。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#00897b"></span>NIB 负脉冲</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>NIB 覆盖与 NIB 幅度的几何平均，兼顾负融资脉冲的范围和深度。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资动能减弱覆盖的融资持仓越广、减弱程度越深。</dd>
+                            <dt>导向结果</dt><dd>直接进入购买力耗竭路径；范围或幅度任一不足都会压低该路径。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#26a69a"></span>NIB 覆盖</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>出现标准化负融资脉冲的股票，按前一日融资余额加权后的占比。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资动能转弱不是少数个股现象，而是在更大融资持仓范围扩散。</dd>
+                            <dt>导向结果</dt><dd>与 NIB 幅度共同生成 NIB，间接推高购买力耗竭路径。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#80cbc4"></span>NIB 幅度</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>各股票负融资脉冲超过固定门槛后的标准化深度，并按融资余额加权。</dd>
+                            <dt>表明什么</dt><dd>越高表示已经转弱的股票，其融资动能下降得越深。</dd>
+                            <dt>导向结果</dt><dd>与 NIB 覆盖共同生成 NIB，间接推高购买力耗竭路径。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#455a64"></span>DLB 去杠杆覆盖</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>连续五日累计净融资为负的股票，按前一日融资余额加权后的占比。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资负债收缩已扩散到更大比例的融资持仓。</dd>
+                            <dt>导向结果</dt><dd>直接进入持续去杠杆路径；DLB≥75 且持续净偿还≥99 时可直接触发 DANGER。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#3949ab"></span>持续净偿还</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>市场融资流率 EMA5 取反后，在最近 500 个交易日中的历史分位。</dd>
+                            <dt>表明什么</dt><dd>越高表示市场整体持续净融资偿还的程度越异常。</dd>
+                            <dt>导向结果</dt><dd>直接进入持续去杠杆路径；达到 99 且 DLB≥75 时可直接触发 DANGER。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#f9a825"></span>融资买入不足</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>近期融资买入强度历史分位的反向分数。</dd>
+                            <dt>表明什么</dt><dd>越高表示近期融资买入水平越低，可用于确认购买力是否真的收缩。</dd>
+                            <dt>导向结果</dt><dd>仅作诊断，不进入 MEWS 两条路径，也不直接参与状态判断。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#6d4c41"></span>偿还水平</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>近期融资偿还强度在最近 500 个交易日中的历史分位。</dd>
+                            <dt>表明什么</dt><dd>越高表示近期融资偿还额相对融资余额处于越高水平。</dd>
+                            <dt>导向结果</dt><dd>仅作诊断，不进入 MEWS 两条路径，也不直接参与状态判断。</dd>
+                        </dl>
+                    </section>
+                    <section class="risk-explainer-item">
+                        <h4><span class="risk-explainer-swatch" style="--series-color:#607d8b"></span>MEWS 历史分位</h4>
+                        <dl class="risk-explainer-detail">
+                            <dt>是什么</dt><dd>当前 MEWS 在最近 500 个交易日有效观测中的相对位置。</dd>
+                            <dt>表明什么</dt><dd>越高表示当前 MEWS 相对近期历史越少见，不表示风险发生概率。</dd>
+                            <dt>导向结果</dt><dd>仅作历史定位；生产状态使用冻结阈值，不使用该滚动分位重新定级。</dd>
+                        </dl>
+                    </section>
+                </div>
+                <section class="risk-state-guide">
+                    <h4>最终状态如何形成</h4>
+                    <ul>
+                        <li>NORMAL：没有形成持续的高融资风险组合。</li>
+                        <li>WATCH：最近三个交易日中至少两日 MEWS 不低于 57.8648。</li>
+                        <li>WARNING：最近三个交易日中至少两日 MEWS 不低于 68.0185。</li>
+                        <li>DANGER：连续两日 MEWS≥68.0185 且持续去杠杆路径≥57.3157，或当日 DLB≥75 且持续净偿还≥99。</li>
+                        <li>解除：MEWS 连续五个交易日低于 49.5390 后回到 NORMAL；中间状态每日最多下降一级。</li>
+                    </ul>
+                </section>
+                <section class="risk-state-guide">
+                    <h4>数据状态如何阅读</h4>
+                    <ul>
+                        <li>明细覆盖：普通A股逐股两融余额相对沪深市场汇总的覆盖比例。</li>
+                        <li>广度覆盖：实际进入NIB、DLB等逐股指标的有效融资余额比例。</li>
+                        <li>自由流通市值覆盖：取得有效收盘价与自由流通股本的股票比例。</li>
+                        <li>数据状态不是OK时，该日不连线、不作市场解释，也不会被当成低风险。</li>
+                        <li>数据日 t 的信号只在下一个交易日的 signal_available_date 才能用于决策。</li>
+                    </ul>
+                </section>
+            </div>
         </div>
     </div>
 
@@ -1932,8 +2099,11 @@ const RISK_SERIES = [
 const riskEnabledSeries = new Set(RISK_SERIES.filter(s => s.enabled).map(s => s.key));
 let marginRiskPoints = [];
 let marginRiskThresholds = {};
+let marginRiskStorage = {};
 let riskViewStart = 0;
 let riskViewEnd = -1;
+let riskMetricGuideReturnFocus = null;
+let riskBackfillPollTimer = null;
 
 function riskNumber(value) {
     if (value == null || value === '') return null;
@@ -1972,14 +2142,23 @@ function initRiskSeriesPicker() {
     }
 }
 
-function setRiskRange(days) {
-    if (!marginRiskPoints.length) return;
-    riskViewEnd = marginRiskPoints.length - 1;
-    riskViewStart = days === 'all' ? 0 : Math.max(0, riskViewEnd - Number(days) + 1);
-    document.querySelectorAll('[data-risk-range]').forEach(button => {
-        button.classList.toggle('active', button.dataset.riskRange === String(days));
-    });
-    renderRiskChart();
+function openRiskMetricGuide() {
+    const modal = document.getElementById('riskMetricGuide');
+    riskMetricGuideReturnFocus = document.activeElement;
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    document.getElementById('riskMetricGuideClose').focus();
+}
+
+function closeRiskMetricGuide() {
+    const modal = document.getElementById('riskMetricGuide');
+    if (modal.classList.contains('hidden')) return;
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+    if (riskMetricGuideReturnFocus && riskMetricGuideReturnFocus.focus) {
+        riskMetricGuideReturnFocus.focus();
+    }
+    riskMetricGuideReturnFocus = null;
 }
 
 function setRiskWindow(start, end) {
@@ -1990,7 +2169,6 @@ function setRiskWindow(start, end) {
     boundedStart = Math.max(0, Math.min(total - span, boundedStart));
     riskViewStart = boundedStart;
     riskViewEnd = boundedStart + span - 1;
-    document.querySelectorAll('[data-risk-range]').forEach(button => button.classList.remove('active'));
 }
 
 function zoomRiskCurveAt(factor, anchorFraction) {
@@ -2004,14 +2182,29 @@ function zoomRiskCurveAt(factor, anchorFraction) {
     renderRiskChart();
 }
 
-function zoomRiskCurve(factor) { zoomRiskCurveAt(factor, 0.5); }
-
 function panRiskCurve(shift) {
     if (!shift) return;
     const span = riskViewEnd - riskViewStart + 1;
     setRiskWindow(riskViewStart + shift, riskViewStart + shift + span - 1);
     renderRiskChart();
 }
+
+function resetRiskCurveView() {
+    if (!marginRiskPoints.length) return;
+    riskViewStart = 0;
+    riskViewEnd = marginRiskPoints.length - 1;
+    renderRiskChart();
+}
+
+document.getElementById('riskMetricGuide').addEventListener('click', event => {
+    if (event.target === event.currentTarget) closeRiskMetricGuide();
+});
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' &&
+        !document.getElementById('riskMetricGuide').classList.contains('hidden')) {
+        closeRiskMetricGuide();
+    }
+});
 
 function appendRiskTooltipRow(container, label, value, color) {
     const row = document.createElement('div');
@@ -2036,7 +2229,9 @@ function renderRiskChart() {
         const empty = document.createElement('div');
         empty.className = 'empty-state small';
         const p = document.createElement('p');
-        p.textContent = '暂无 MEWS 数据；执行一次“数据检查和补充”后会自动建立历史曲线';
+        p.textContent = marginRiskStorage.maintenance_running
+            ? '正在自动补齐 MEWS 历史数据，完成后曲线会自动出现'
+            : '暂无 MEWS 数据；服务就绪后会自动触发历史补全';
         empty.appendChild(p); container.appendChild(empty);
         document.getElementById('riskRangeLabel').textContent = '--';
         return;
@@ -2134,21 +2329,80 @@ function renderRiskChart() {
         fill: 'transparent', tabindex: 0, 'aria-label': '可缩放和平移的MEWS曲线'});
     svg.appendChild(overlay);
 
-    let dragStartX = null;
-    let dragStartWindow = null;
+    const activePointers = new Map();
+    let gesture = null;
     function pointIndexFromEvent(event) {
         const rect = svg.getBoundingClientRect();
         const x = (event.clientX - rect.left) / rect.width * W;
         const ratio = Math.max(0, Math.min(1, (x - PL) / plotW));
         return Math.round(ratio * (points.length - 1));
     }
+    function plotAnchorFromClientX(clientX) {
+        const rect = svg.getBoundingClientRect();
+        const x = (clientX - rect.left) / rect.width * W;
+        return Math.max(0, Math.min(1, (x - PL) / plotW));
+    }
     function hideHover() {
         crosshair.setAttribute('visibility', 'hidden');
         hoverDot.setAttribute('visibility', 'hidden');
         tooltip.style.display = 'none';
     }
+    function beginGesture() {
+        const pointers = Array.from(activePointers.values());
+        if (pointers.length >= 2) {
+            const first = pointers[0], second = pointers[1];
+            const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+            gesture = {
+                type: 'pinch', startDistance: distance, currentDistance: distance,
+                anchor: plotAnchorFromClientX((first.x + second.x) / 2),
+                startWindow: [riskViewStart, riskViewEnd]
+            };
+        } else if (pointers.length === 1) {
+            gesture = {
+                type: 'pan', startX: pointers[0].x, currentX: pointers[0].x,
+                startWindow: [riskViewStart, riskViewEnd]
+            };
+        }
+        wrap.classList.add('dragging');
+        hideHover();
+    }
+    function previewGesture() {
+        if (!gesture) return;
+        const rect = svg.getBoundingClientRect();
+        if (gesture.type === 'pan') {
+            const dx = (gesture.currentX - gesture.startX) / rect.width * W;
+            lineLayer.setAttribute('transform', 'translate(' + dx.toFixed(2) + ' 0)');
+            return;
+        }
+        const scale = Math.max(0.5, Math.min(2, gesture.currentDistance / gesture.startDistance));
+        const anchorX = PL + plotW * gesture.anchor;
+        lineLayer.setAttribute('transform', 'translate(' + anchorX.toFixed(2) + ' 0) scale(' +
+            scale.toFixed(3) + ' 1) translate(' + (-anchorX).toFixed(2) + ' 0)');
+    }
+    function clearGesture() {
+        for (const pointerId of activePointers.keys()) {
+            try {
+                if (overlay.hasPointerCapture(pointerId)) overlay.releasePointerCapture(pointerId);
+            } catch (e) {}
+        }
+        activePointers.clear();
+        gesture = null;
+        lineLayer.removeAttribute('transform');
+        wrap.classList.remove('dragging');
+    }
     overlay.addEventListener('pointermove', event => {
-        if (dragStartX != null) return;
+        if (activePointers.has(event.pointerId)) {
+            activePointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+            if (activePointers.size >= 2 && (!gesture || gesture.type !== 'pinch')) beginGesture();
+            if (gesture && gesture.type === 'pan') gesture.currentX = event.clientX;
+            if (gesture && gesture.type === 'pinch') {
+                const pointers = Array.from(activePointers.values());
+                gesture.currentDistance = Math.max(1,
+                    Math.hypot(pointers[1].x - pointers[0].x, pointers[1].y - pointers[0].y));
+            }
+            previewGesture();
+            return;
+        }
         const index = pointIndexFromEvent(event);
         const point = points[index];
         const x = xAt(index);
@@ -2181,32 +2435,56 @@ function renderRiskChart() {
         tooltip.style.left = Math.max(0, left) + 'px';
         tooltip.style.top = '10px';
     });
-    overlay.addEventListener('pointerleave', () => { if (dragStartX == null) hideHover(); });
+    overlay.addEventListener('pointerleave', () => { if (!activePointers.size) hideHover(); });
     overlay.addEventListener('pointerdown', event => {
-        dragStartX = event.clientX;
-        dragStartWindow = [riskViewStart, riskViewEnd];
-        wrap.classList.add('dragging'); hideHover();
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        event.preventDefault();
+        activePointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
         overlay.setPointerCapture(event.pointerId);
+        beginGesture();
     });
-    function finishDrag(event) {
-        if (dragStartX == null || !dragStartWindow) return;
+    function finishGesture(event) {
+        if (!gesture || !activePointers.has(event.pointerId)) return;
+        activePointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
         const rect = svg.getBoundingClientRect();
-        const span = dragStartWindow[1] - dragStartWindow[0] + 1;
-        const shift = Math.round(-(event.clientX - dragStartX) / rect.width * span);
-        dragStartX = null; dragStartWindow = null; wrap.classList.remove('dragging');
-        panRiskCurve(shift);
+        const completed = gesture;
+        if (completed.type === 'pinch') {
+            const pointers = Array.from(activePointers.values());
+            if (pointers.length >= 2) {
+                completed.currentDistance = Math.max(1,
+                    Math.hypot(pointers[1].x - pointers[0].x, pointers[1].y - pointers[0].y));
+            }
+            const factor = completed.startDistance / completed.currentDistance;
+            clearGesture();
+            zoomRiskCurveAt(factor, completed.anchor);
+        } else {
+            const span = completed.startWindow[1] - completed.startWindow[0] + 1;
+            const plotPixelWidth = rect.width * plotW / W;
+            const shift = Math.round(-(event.clientX - completed.startX) / plotPixelWidth * span);
+            clearGesture();
+            if (shift) panRiskCurve(shift);
+        }
     }
-    overlay.addEventListener('pointerup', finishDrag);
-    overlay.addEventListener('pointercancel', event => {
-        dragStartX = null; dragStartWindow = null; wrap.classList.remove('dragging');
-        try { overlay.releasePointerCapture(event.pointerId); } catch (e) {}
-    });
+    overlay.addEventListener('pointerup', finishGesture);
+    overlay.addEventListener('pointercancel', clearGesture);
     overlay.addEventListener('wheel', event => {
         event.preventDefault();
-        const rect = svg.getBoundingClientRect();
-        const anchor = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-        zoomRiskCurveAt(event.deltaY < 0 ? 0.78 : 1.28, anchor);
+        zoomRiskCurveAt(event.deltaY < 0 ? 0.78 : 1.28, plotAnchorFromClientX(event.clientX));
     }, {passive: false});
+    overlay.addEventListener('dblclick', event => {
+        event.preventDefault();
+        resetRiskCurveView();
+    });
+    overlay.addEventListener('keydown', event => {
+        const span = riskViewEnd - riskViewStart + 1;
+        if (event.key === '+' || event.key === '=') zoomRiskCurveAt(0.78, 0.5);
+        else if (event.key === '-') zoomRiskCurveAt(1.28, 0.5);
+        else if (event.key === 'ArrowLeft') panRiskCurve(-Math.max(1, Math.round(span * 0.1)));
+        else if (event.key === 'ArrowRight') panRiskCurve(Math.max(1, Math.round(span * 0.1)));
+        else if (event.key === 'Home' || event.key === '0') resetRiskCurveView();
+        else return;
+        event.preventDefault();
+    });
 
     container.appendChild(svg);
     document.getElementById('riskRangeLabel').textContent =
@@ -2236,12 +2514,15 @@ function renderRiskLatest(data) {
         : '';
 
     const storage = data.storage || {};
+    marginRiskStorage = storage;
     const latestRawFailed = storage.latest_raw_date && storage.latest_ingestion_status !== 'OK' &&
         (!latest || storage.latest_raw_date > latest.date);
     const status = latest ? latest.data_status : null;
     const statusEl = document.getElementById('riskDataStatus');
     let statusText = '尚无有效指标';
-    if (latestRawFailed) statusText = storage.latest_raw_date + ' 摄取失败，等待自动重试';
+    if (storage.maintenance_running && !latest) statusText = '首次历史补数正在自动执行';
+    else if (storage.maintenance_running) statusText = '自动查漏补数中，当前曲线可先查看';
+    else if (latestRawFailed) statusText = storage.latest_raw_date + ' 摄取失败，等待自动重试';
     else if (status === 'OK' && score != null) statusText = '完整，可作市场解释';
     else if (status === 'OK') statusText = '数据完整，有效历史尚不足';
     else if (status) statusText = status + '，本日不作市场解释';
@@ -2257,10 +2538,16 @@ function renderRiskLatest(data) {
           ' · 自由流通市值 ' + coverage(latest.ffmv_coverage)
         : '';
 
-    document.getElementById('riskStorageStatus').textContent = storage.raw_end
+    const fillResult = storage.last_fill_result || {};
+    let storageText = storage.raw_end
         ? '原始数据至 ' + storage.raw_end + ' · 指数至 ' + (storage.metric_end || '--') +
           (storage.failed_days ? ' · 待重试 ' + storage.failed_days + '日' : '')
-        : '等待首次补数';
+        : '等待自动补数启动';
+    if (storage.maintenance_running) storageText = '自动补数中 · ' + storageText;
+    else if (!storage.raw_end && fillResult.status === 'ERROR') {
+        storageText = '自动补数失败，等待下次重试：' + (fillResult.message || '未知错误');
+    }
+    document.getElementById('riskStorageStatus').textContent = storageText;
     document.getElementById('riskUpdatedAt').textContent =
         '更新于 ' + new Date().toTimeString().slice(0, 5);
 }
@@ -2281,6 +2568,11 @@ async function loadMarginRiskCurve() {
         marginRiskPoints = data.points || [];
         marginRiskThresholds = data.thresholds || {};
         renderRiskLatest(data);
+        if (riskBackfillPollTimer) clearTimeout(riskBackfillPollTimer);
+        const retryDelay = !marginRiskPoints.length
+            ? 15000
+            : (marginRiskStorage.maintenance_running ? 60000 : 0);
+        riskBackfillPollTimer = retryDelay ? setTimeout(loadMarginRiskCurve, retryDelay) : null;
         if (!oldLength || riskViewEnd < 0) {
             riskViewEnd = marginRiskPoints.length - 1;
             riskViewStart = Math.max(0, riskViewEnd - 755);
@@ -2293,6 +2585,8 @@ async function loadMarginRiskCurve() {
         }
         renderRiskChart();
     } catch (error) {
+        if (riskBackfillPollTimer) clearTimeout(riskBackfillPollTimer);
+        riskBackfillPollTimer = setTimeout(loadMarginRiskCurve, 30000);
         const container = document.getElementById('riskChart');
         container.textContent = '';
         const empty = document.createElement('div');

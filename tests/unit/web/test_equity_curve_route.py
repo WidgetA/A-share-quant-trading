@@ -221,7 +221,13 @@ class _FakeMarginRiskStore:
 def test_margin_risk_curve_returns_all_components_and_frozen_thresholds(monkeypatch):
     store = _FakeMarginRiskStore()
     client = _client(
-        {"margin_risk_service": SimpleNamespace(store=store)},
+        {
+            "margin_risk_service": SimpleNamespace(
+                store=store,
+                is_running=True,
+                last_result={"status": "OK", "filled": 12},
+            )
+        },
         monkeypatch,
     )
 
@@ -236,6 +242,8 @@ def test_margin_risk_curve_returns_all_components_and_frozen_thresholds(monkeypa
     assert payload["points"][0]["mpi"] == 20.0
     assert payload["thresholds"]["watch"] == pytest.approx(57.864792713230436)
     assert payload["storage"]["failed_days"] == 0
+    assert payload["storage"]["maintenance_running"] is True
+    assert payload["storage"]["last_fill_result"]["filled"] == 12
 
 
 def test_margin_risk_curve_503_when_service_or_storage_is_unavailable(monkeypatch):

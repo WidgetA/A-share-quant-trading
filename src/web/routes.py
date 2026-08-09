@@ -3536,6 +3536,8 @@ def create_trading_router() -> APIRouter:
         try:
             points = await service.store.list_metrics(days=days)
             storage_status = await service.store.status()
+            storage_status["maintenance_running"] = bool(getattr(service, "is_running", False))
+            storage_status["last_fill_result"] = getattr(service, "last_result", None)
         except Exception as exc:
             logger.exception("margin risk curve query failed: %s", exc)
             raise HTTPException(status_code=503, detail=f"MEWS曲线查询失败: {exc}") from exc
