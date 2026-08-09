@@ -250,9 +250,7 @@ class MarginRiskProductionService:
             raise MarginRiskDataError("margin_detail contains no ordinary A-share rows")
 
         basic_rows = await source.fetch_daily_basic(day)
-        active_codes = {
-            str(row["ts_code"]) for row in ordinary_stocks if is_active_on(row, day)
-        }
+        active_codes = {str(row["ts_code"]) for row in ordinary_stocks if is_active_on(row, day)}
         ffmv = 0.0
         ffmv_valid = 0
         for row in basic_rows:
@@ -321,9 +319,7 @@ class MarginRiskProductionService:
         count = len(dates)
 
         aggregates = await self._security_aggregates(window_start, raw_end, dates)
-        ordinary_coverage = [
-            _number(row.get("ordinary_margin_coverage")) for row in market_rows
-        ]
+        ordinary_coverage = [_number(row.get("ordinary_margin_coverage")) for row in market_rows]
         coverage_base = prior_rolling_median(
             ordinary_coverage,
             self.config.detail_coverage_window,

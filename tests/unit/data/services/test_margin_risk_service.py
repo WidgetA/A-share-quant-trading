@@ -107,10 +107,7 @@ class _AuditSource:
         self.stopped = True
 
     async def fetch_trade_calendar(self, exchange: str, start: date, end: date):
-        return [
-            {"exchange": exchange, "cal_date": day, "is_open": True}
-            for day in self.dates
-        ]
+        return [{"exchange": exchange, "cal_date": day, "is_open": True} for day in self.dates]
 
     async def fetch_stock_basic(self):
         self.stock_basic_calls += 1

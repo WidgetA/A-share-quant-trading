@@ -147,14 +147,9 @@ class GreptimeMarginRiskStore:
         rows: Sequence[Mapping[str, Any]],
     ) -> int:
         ts_ms = date_to_epoch_ms(trade_date)
-        await self._db.execute(
-            f"DELETE FROM margin_risk_security_daily WHERE ts = {ts_ms}"
-        )
+        await self._db.execute(f"DELETE FROM margin_risk_security_daily WHERE ts = {ts_ms}")
         written = 0
-        columns = (
-            "stock_code,ts,financing_balance,financing_buy_amount,"
-            "financing_repayment_amount"
-        )
+        columns = "stock_code,ts,financing_balance,financing_buy_amount,financing_repayment_amount"
         for batch in _chunks(rows):
             values = ",".join(
                 "("
@@ -402,20 +397,16 @@ class GreptimeMarginRiskStore:
         raw_start, raw_end = await self.get_raw_date_range()
         latest = await self.get_latest_metric()
         failures = await self._db.fetchrow(
-            "SELECT COUNT(*) AS count FROM margin_risk_market_daily "
-            "WHERE ingestion_status != 'OK'"
+            "SELECT COUNT(*) AS count FROM margin_risk_market_daily WHERE ingestion_status != 'OK'"
         )
         latest_ingestion = await self._db.fetchrow(
-            "SELECT ts,ingestion_status FROM margin_risk_market_daily "
-            "ORDER BY ts DESC LIMIT 1"
+            "SELECT ts,ingestion_status FROM margin_risk_market_daily ORDER BY ts DESC LIMIT 1"
         )
         latest_ingestion_item = dict(latest_ingestion) if latest_ingestion else {}
         return {
             "raw_start": raw_start.isoformat() if raw_start else None,
             "raw_end": raw_end.isoformat() if raw_end else None,
-            "metric_end": (
-                latest["trade_date"].isoformat() if latest is not None else None
-            ),
+            "metric_end": (latest["trade_date"].isoformat() if latest is not None else None),
             "failed_days": int(failures["count"] or 0) if failures else 0,
             "latest_raw_date": (
                 ts_to_date(latest_ingestion_item["ts"]).isoformat()

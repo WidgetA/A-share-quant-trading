@@ -661,9 +661,7 @@ def create_app(
 
         margin_risk_scheduler = MarginRiskRefreshScheduler(app.state)
         app.state.margin_risk_scheduler = margin_risk_scheduler
-        app.state.margin_risk_scheduler_task = asyncio.create_task(
-            margin_risk_scheduler.run()
-        )
+        app.state.margin_risk_scheduler_task = asyncio.create_task(margin_risk_scheduler.run())
         logger.info("MEWS refresh scheduler started (08:50 daily)")
 
         # Auto-start model training scheduler (finetune every 20 trading days)

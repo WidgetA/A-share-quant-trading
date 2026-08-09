@@ -147,7 +147,9 @@ def reconstruct_equity(
 
     # ---- 逐日盈亏 + 净值倒推 ----
     def mv(i: int) -> float:
-        return sum(q * book.close_at(c, axis[i]) for c, q in pos[i].items())  # type: ignore[union-attr]
+        positions = pos[i]
+        assert positions is not None
+        return sum(q * book.close_at(c, axis[i]) for c, q in positions.items())
 
     equity = [0.0] * n
     equity[n - 1] = anchor_equity

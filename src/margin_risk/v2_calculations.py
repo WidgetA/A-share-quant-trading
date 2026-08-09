@@ -257,9 +257,7 @@ def calculate_v2_market_metrics(
         config.rank_min_periods,
     )
     net_flow_level_raw = flow_fast
-    net_outflow_level_raw = [
-        -value if value is not None else None for value in net_flow_level_raw
-    ]
+    net_outflow_level_raw = [-value if value is not None else None for value in net_flow_level_raw]
     net_outflow_level_score = rolling_midrank_percentile(
         net_outflow_level_raw,
         config.rank_window,
@@ -395,10 +393,7 @@ def calculate_v2_market_metrics(
         "pulse_raw_v1",
         "risk_state_v1",
     }
-    optional = {
-        name: values.get(name, [None] * count)
-        for name in optional_names
-    }
+    optional = {name: values.get(name, [None] * count) for name in optional_names}
     for name, series_values in optional.items():
         if len(series_values) != count:
             raise ValueError(f"v2 optional input series {name!r} has the wrong length")
@@ -407,9 +402,7 @@ def calculate_v2_market_metrics(
     for index, day in enumerate(trading_dates):
         metric: dict[str, Any] = {
             "trade_date": day,
-            "signal_available_date": (
-                trading_dates[index + 1] if index + 1 < count else None
-            ),
+            "signal_available_date": (trading_dates[index + 1] if index + 1 < count else None),
             "market_total_margin_balance": market_total[index],
             "market_total_financing_buy_amount": optional["market_total_buy"][index],
             "market_total_financing_repayment_amount": optional["market_total_repay"][index],

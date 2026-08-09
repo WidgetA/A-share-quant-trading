@@ -32,6 +32,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from src.assistant.kimi_runner import SKILLS_DIR, run_kimi_assistant_task
 from src.common.config import get_assistant_allowed_users, get_assistant_readonly_key
@@ -179,7 +180,7 @@ class AssistantDispatcher:
         self._ws_thread: threading.Thread | None = None
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque(maxlen=512)
-        self._api_client = None  # lazy lark.Client, built inside to_thread
+        self._api_client: Any = None  # lazy lark.Client, built inside to_thread
         self._api_client_lock = threading.Lock()
 
     # ── lifecycle (main loop) ────────────────────────────────────────────
