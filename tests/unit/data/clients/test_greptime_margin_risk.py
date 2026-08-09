@@ -83,14 +83,37 @@ async def test_security_code_read_splits_wide_range_and_deduplicates_codes() -> 
     db = _WindowDB()
     store = GreptimeMarginRiskStore(SimpleNamespace(db=db))
 
-    codes = await store.get_security_codes(date(2026, 1, 1), date(2026, 4, 30))
+    codes = await store.get_security_codes(date(2025, 1, 1), date(2026, 12, 31))
 
     assert codes == ["000001.SZ", "300001.SZ", "600000.SH"]
     assert len(db.queries) == 2
-    assert f"ts >= {date_to_epoch_ms(date(2026, 1, 1))}" in db.queries[0]
-    assert f"ts <= {date_to_epoch_ms(date(2026, 3, 1))}" in db.queries[0]
-    assert f"ts >= {date_to_epoch_ms(date(2026, 3, 2))}" in db.queries[1]
-    assert f"ts <= {date_to_epoch_ms(date(2026, 4, 30))}" in db.queries[1]
+    assert f"ts >= {date_to_epoch_ms(date(2025, 1, 1))}" in db.queries[0]
+    assert f"ts <= {date_to_epoch_ms(date(2025, 12, 31))}" in db.queries[0]
+    assert f"ts >= {date_to_epoch_ms(date(2026, 1, 1))}" in db.queries[1]
+    assert f"ts <= {date_to_epoch_ms(date(2026, 12, 31))}" in db.queries[1]
+
+
+@pytest.mark.asyncio
+async def test_security_read_adaptively_splits_on_greptime_file_limit() -> None:
+    class _LimitDB:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def fetch(self, sql: str):
+            self.queries.append(sql)
+            if len(self.queries) == 1:
+                raise RuntimeError("Too many files to read concurrently: 500, max allowed: 384")
+            return [{"stock_code": "000001.SZ"}]
+
+    db = _LimitDB()
+    store = GreptimeMarginRiskStore(SimpleNamespace(db=db))
+
+    codes = await store.get_security_codes(date(2026, 1, 1), date(2026, 12, 31))
+
+    assert codes == ["000001.SZ"]
+    assert len(db.queries) == 3
+    assert f"ts <= {date_to_epoch_ms(date(2026, 7, 2))}" in db.queries[1]
+    assert f"ts >= {date_to_epoch_ms(date(2026, 7, 3))}" in db.queries[2]
 
 
 @pytest.mark.asyncio
@@ -105,7 +128,7 @@ async def test_security_row_read_splits_wide_range_and_restores_global_order() -
                 return [
                     {
                         "stock_code": "600000.SH",
-                        "ts": date_to_epoch_ms(date(2026, 2, 27)),
+                        "ts": date_to_epoch_ms(date(2025, 2, 27)),
                         "financing_balance": 2.0,
                         "financing_buy_amount": 1.0,
                         "financing_repayment_amount": 0.5,
@@ -125,15 +148,15 @@ async def test_security_row_read_splits_wide_range_and_restores_global_order() -
     store = GreptimeMarginRiskStore(SimpleNamespace(db=db))
 
     rows = await store.get_security_rows(
-        date(2026, 1, 1),
-        date(2026, 4, 30),
+        date(2025, 1, 1),
+        date(2026, 12, 31),
         ["000001.SZ", "600000.SH"],
     )
 
     assert len(db.queries) == 2
     assert [row["stock_code"] for row in rows] == ["000001.SZ", "600000.SH"]
     assert [row["ts_code"] for row in rows] == ["000001.SZ", "600000.SH"]
-    assert [row["trade_date"] for row in rows] == [date(2026, 3, 2), date(2026, 2, 27)]
+    assert [row["trade_date"] for row in rows] == [date(2026, 3, 2), date(2025, 2, 27)]
 
 
 @pytest.mark.asyncio

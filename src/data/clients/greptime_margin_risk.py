@@ -7,6 +7,8 @@ and repair semantics.  All writes are idempotent on (primary key, trade date).
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
@@ -98,7 +100,10 @@ CREATE TABLE IF NOT EXISTS margin_risk_metric_daily (
 _SERIES = "MEWS"
 _VERSION = "mews_v2"
 _WRITE_BATCH = 100
-_READ_WINDOW_DAYS = 60
+_READ_WINDOW_DAYS = 365
+_FILE_READ_LIMIT_ERROR = "Too many files to read concurrently"
+
+logger = logging.getLogger(__name__)
 
 
 def _q(value: str) -> str:
@@ -148,6 +153,30 @@ class GreptimeMarginRiskStore:
 
     def __init__(self, storage: Any) -> None:
         self._db = storage.db
+
+    async def _fetch_date_window(
+        self,
+        start: date,
+        end: date,
+        build_sql: Callable[[date, date], str],
+    ) -> list[Any]:
+        """Read one window, recursively shrinking only on Greptime's file fan-out limit."""
+
+        try:
+            return list(await self._db.fetch(build_sql(start, end)))
+        except Exception as exc:
+            if _FILE_READ_LIMIT_ERROR not in str(exc) or start >= end:
+                raise
+            midpoint = start + timedelta(days=(end - start).days // 2)
+            logger.warning(
+                "MEWS Greptime read %s..%s exceeded the file limit; splitting at %s",
+                start,
+                end,
+                midpoint,
+            )
+            left = await self._fetch_date_window(start, midpoint, build_sql)
+            right = await self._fetch_date_window(midpoint + timedelta(days=1), end, build_sql)
+            return [*left, *right]
 
     async def ensure_schema(self) -> None:
         await self._db.execute(_CREATE_SECURITY_SQL)
@@ -252,13 +281,16 @@ class GreptimeMarginRiskStore:
         return output
 
     async def get_security_codes(self, start: date, end: date) -> list[str]:
-        codes: set[str] = set()
-        for window_start, window_end in _date_windows(start, end):
-            rows = await self._db.fetch(
+        def build_sql(window_start: date, window_end: date) -> str:
+            return (
                 "SELECT DISTINCT stock_code FROM margin_risk_security_daily "
                 f"WHERE ts >= {date_to_epoch_ms(window_start)} "
                 f"AND ts <= {date_to_epoch_ms(window_end)} ORDER BY stock_code"
             )
+
+        codes: set[str] = set()
+        for window_start, window_end in _date_windows(start, end):
+            rows = await self._fetch_date_window(window_start, window_end, build_sql)
             codes.update(str(row["stock_code"]) for row in rows)
         return sorted(codes)
 
@@ -271,15 +303,19 @@ class GreptimeMarginRiskStore:
         if not codes:
             return []
         code_sql = ",".join(_q(code) for code in codes)
-        output: list[dict[str, Any]] = []
-        for window_start, window_end in _date_windows(start, end):
-            rows = await self._db.fetch(
+
+        def build_sql(window_start: date, window_end: date) -> str:
+            return (
                 "SELECT stock_code,ts,financing_balance,financing_buy_amount,"
                 "financing_repayment_amount FROM margin_risk_security_daily "
                 f"WHERE ts >= {date_to_epoch_ms(window_start)} "
                 f"AND ts <= {date_to_epoch_ms(window_end)} "
                 f"AND stock_code IN ({code_sql}) ORDER BY stock_code,ts"
             )
+
+        output: list[dict[str, Any]] = []
+        for window_start, window_end in _date_windows(start, end):
+            rows = await self._fetch_date_window(window_start, window_end, build_sql)
             for raw in rows:
                 item = dict(raw)
                 item["trade_date"] = ts_to_date(item.pop("ts"))
