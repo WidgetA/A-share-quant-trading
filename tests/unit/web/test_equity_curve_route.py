@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -182,6 +183,98 @@ def test_equity_curve_503_when_storage_missing(monkeypatch):
     client = _client({"storage": None}, monkeypatch)
     resp = client.get("/api/trading/equity-curve", headers=_KEY)
     assert resp.status_code == 503
+
+
+class _FakeMarginRiskStore:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.requested_days: int | None = None
+
+    async def list_metrics(self, days: int):
+        self.requested_days = days
+        if self.fail:
+            raise RuntimeError("Greptime unavailable")
+        return [
+            {
+                "date": "2026-08-06",
+                "signal_available_date": "2026-08-07",
+                "mews": 62.5,
+                "exhaustion_path": 62.5,
+                "persistent_deleveraging_path": 48.0,
+                "mpi": 20.0,
+                "mls": 75.0,
+                "nib": 50.0,
+                "risk_state": "WATCH",
+                "data_status": "OK",
+            }
+        ]
+
+    async def status(self):
+        return {
+            "raw_start": "2014-09-22",
+            "raw_end": "2026-08-06",
+            "metric_end": "2026-08-06",
+            "failed_days": 0,
+        }
+
+
+def test_margin_risk_curve_returns_all_components_and_frozen_thresholds(monkeypatch):
+    store = _FakeMarginRiskStore()
+    client = _client(
+        {"margin_risk_service": SimpleNamespace(store=store)},
+        monkeypatch,
+    )
+
+    response = client.get("/api/trading/margin-risk-curve?days=300", headers=_KEY)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert store.requested_days == 300
+    assert payload["version"] == "mews_v2"
+    assert payload["latest"]["mews"] == 62.5
+    assert payload["latest_valid"]["mews"] == 62.5
+    assert payload["points"][0]["mpi"] == 20.0
+    assert payload["thresholds"]["watch"] == pytest.approx(57.864792713230436)
+    assert payload["storage"]["failed_days"] == 0
+
+
+def test_margin_risk_curve_503_when_service_or_storage_is_unavailable(monkeypatch):
+    missing = _client({"margin_risk_service": None}, monkeypatch)
+    assert missing.get("/api/trading/margin-risk-curve", headers=_KEY).status_code == 503
+
+    broken = _client(
+        {"margin_risk_service": SimpleNamespace(store=_FakeMarginRiskStore(fail=True))},
+        monkeypatch,
+    )
+    response = broken.get("/api/trading/margin-risk-curve", headers=_KEY)
+    assert response.status_code == 503
+    assert "Greptime unavailable" in response.json()["detail"]
+
+
+def test_margin_risk_curve_does_not_hide_latest_partial_day(monkeypatch):
+    class _PartialStore(_FakeMarginRiskStore):
+        async def list_metrics(self, days: int):
+            points = await super().list_metrics(days)
+            return points + [
+                {
+                    "date": "2026-08-07",
+                    "signal_available_date": "2026-08-10",
+                    "mews": None,
+                    "risk_state": "WATCH",
+                    "data_status": "PARTIAL",
+                }
+            ]
+
+    client = _client(
+        {"margin_risk_service": SimpleNamespace(store=_PartialStore())},
+        monkeypatch,
+    )
+
+    payload = client.get("/api/trading/margin-risk-curve", headers=_KEY).json()
+
+    assert payload["latest"]["date"] == "2026-08-07"
+    assert payload["latest"]["data_status"] == "PARTIAL"
+    assert payload["latest_valid"]["date"] == "2026-08-06"
 
 
 # ---------- 手动校准基准点端点 ----------

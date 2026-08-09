@@ -107,9 +107,67 @@
 .weekly-pct { text-align: right; font-variant-numeric: tabular-nums; }
 #overviewHoldings { overflow-x: auto; }
 .section-subtitle { font-size: 0.85rem; font-weight: 600; color: #555; margin: 0 0 0.5rem 0; }
+
+/* MEWS financing-risk curve */
+.risk-card { margin-bottom: 1rem; overflow: hidden; }
+.risk-header-right { display: flex; align-items: center; gap: 0.6rem; }
+.risk-state {
+    display: inline-flex; align-items: center; min-width: 64px; justify-content: center;
+    padding: 0.18rem 0.55rem; border-radius: 999px; font-size: 0.72rem;
+    font-weight: 700; letter-spacing: 0.02em; background: #eceff1; color: #546e7a;
+}
+.risk-state.watch { background: #fff8e1; color: #9a6700; }
+.risk-state.warning { background: #fff3e0; color: #c45100; }
+.risk-state.danger { background: #ffebee; color: #c62828; }
+.risk-summary {
+    display: grid; grid-template-columns: 140px minmax(160px, 1fr) minmax(210px, 1.4fr);
+    gap: 0.75rem 1.5rem; align-items: end; margin: 0.2rem 0 0.8rem;
+}
+.risk-summary-label { color: #888; font-size: 0.72rem; margin-bottom: 2px; }
+.risk-summary-main { font-size: 1.85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.risk-summary-value { font-size: 0.9rem; color: #444; }
+.risk-summary-note { font-size: 0.72rem; color: #888; margin-top: 2px; }
+.risk-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 0.55rem; margin-bottom: 0.55rem;
+}
+.risk-range-buttons, .risk-zoom-buttons { display: inline-flex; gap: 0.25rem; }
+.risk-tool-button {
+    border: 1px solid #d7dce0; color: #555; background: #fff; border-radius: 5px;
+    padding: 0.24rem 0.55rem; font-size: 0.75rem; cursor: pointer;
+}
+.risk-tool-button:hover, .risk-tool-button.active { border-color: #78909c; background: #f2f5f6; }
+.risk-range-label { color: #777; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.risk-series-picker { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0 0 0.55rem; }
+.risk-series-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.18rem 0.45rem;
+    border: 1px solid #e0e0e0; border-radius: 999px; color: #777; font-size: 0.7rem;
+    cursor: pointer; user-select: none; background: #fff;
+}
+.risk-series-chip:has(input:checked) { color: #333; background: #fafafa; }
+.risk-series-chip input { width: 12px; height: 12px; margin: 0; accent-color: var(--series-color); }
+.risk-series-swatch { width: 12px; height: 3px; border-radius: 2px; background: var(--series-color); }
+.risk-chart-wrap { position: relative; width: 100%; min-height: 290px; cursor: crosshair; }
+.risk-chart-wrap.dragging { cursor: grabbing; }
+.risk-chart-wrap svg { display: block; width: 100%; height: auto; touch-action: none; }
+.risk-tooltip {
+    position: absolute; display: none; pointer-events: none; z-index: 30;
+    min-width: 210px; max-height: 270px; overflow: hidden; padding: 0.5rem 0.65rem;
+    background: rgba(255,255,255,0.98); border: 1px solid #d8d8d8; border-radius: 6px;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.13); font-size: 0.72rem;
+}
+.risk-tooltip-date { color: #777; margin-bottom: 0.3rem; }
+.risk-tooltip-row { display: flex; justify-content: space-between; gap: 1rem; line-height: 1.55; }
+.risk-tooltip-row span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
+.risk-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem;
+    color: #888; font-size: 0.7rem; margin-top: 0.35rem; }
+.risk-data-partial { color: #c45100; }
 @media (max-width: 700px) {
     .overview-body { grid-template-columns: 1fr; }
     .overview-stats { gap: 1rem 1.5rem; }
+    .risk-summary { grid-template-columns: 1fr 1fr; }
+    .risk-summary > :last-child { grid-column: 1 / -1; }
+    .risk-chart-wrap { min-height: 230px; }
 }
 
 /* Toast */
@@ -200,6 +258,56 @@
         <div style="margin-top: 1rem;">
             <p class="section-subtitle">持仓明细 <span class="badge" id="ovHoldingsCount" style="font-weight:400;">0</span></p>
             <div id="overviewHoldings"><div class="empty-state small"><p>加载中...</p></div></div>
+        </div>
+    </div>
+
+    <!-- MEWS production risk curve: immediately below account net-value area -->
+    <div class="status-card risk-card" id="marginRiskCard">
+        <div class="status-card-header">
+            <h3>融资耗竭风险曲线（MEWS）</h3>
+            <div class="risk-header-right">
+                <span style="font-size:0.72rem;color:#999;" id="riskUpdatedAt"></span>
+                <span class="risk-state" id="riskStateBadge">--</span>
+            </div>
+        </div>
+        <div class="risk-summary">
+            <div>
+                <div class="risk-summary-label">最新 MEWS</div>
+                <div class="risk-summary-main" id="riskLatestScore">--</div>
+            </div>
+            <div>
+                <div class="risk-summary-label">主导路径</div>
+                <div class="risk-summary-value" id="riskDominantPath">--</div>
+                <div class="risk-summary-note" id="riskLatestDate"></div>
+            </div>
+            <div>
+                <div class="risk-summary-label">数据状态</div>
+                <div class="risk-summary-value" id="riskDataStatus">加载中...</div>
+                <div class="risk-summary-note" id="riskCoverage"></div>
+            </div>
+        </div>
+        <div class="risk-toolbar">
+            <div class="risk-range-buttons" aria-label="风险曲线时间范围">
+                <button class="risk-tool-button" data-risk-range="126" onclick="setRiskRange(126)">6月</button>
+                <button class="risk-tool-button" data-risk-range="252" onclick="setRiskRange(252)">1年</button>
+                <button class="risk-tool-button active" data-risk-range="756" onclick="setRiskRange(756)">3年</button>
+                <button class="risk-tool-button" data-risk-range="all" onclick="setRiskRange('all')">全部</button>
+            </div>
+            <span class="risk-range-label" id="riskRangeLabel">--</span>
+            <div class="risk-zoom-buttons" aria-label="风险曲线缩放">
+                <button class="risk-tool-button" onclick="zoomRiskCurve(0.65)" title="放大时间段">＋ 放大</button>
+                <button class="risk-tool-button" onclick="zoomRiskCurve(1.55)" title="缩小时间段">－ 缩小</button>
+                <button class="risk-tool-button" onclick="setRiskRange(756)" title="恢复近三年">重置</button>
+            </div>
+        </div>
+        <div class="risk-series-picker" id="riskSeriesPicker" aria-label="选择要显示的指标"></div>
+        <div class="risk-chart-wrap" id="riskChartWrap">
+            <div id="riskChart"><div class="empty-state small"><p>加载中...</p></div></div>
+            <div class="risk-tooltip" id="riskTooltip"></div>
+        </div>
+        <div class="risk-footer">
+            <span>纵轴统一为 0—100；滚轮缩放，按住曲线左右拖动平移</span>
+            <span id="riskStorageStatus"></span>
         </div>
     </div>
 
@@ -1802,6 +1910,401 @@ async function loadEquityCurve() {
     }
 }
 
+// --- MEWS production financing-risk curve ---
+
+const RISK_SERIES = [
+    {key: 'mews', label: 'MEWS', color: '#c62828', width: 2.8, enabled: true},
+    {key: 'exhaustion_path', label: '购买力耗竭路径', color: '#ef6c00', width: 2.1, enabled: true},
+    {key: 'persistent_deleveraging_path', label: '持续去杠杆路径', color: '#7b1fa2', width: 2.1, enabled: true},
+    {key: 'exhaustion_strength', source: 'mpi', transform: v => 100 - v,
+        label: '耗竭强度(100−MPI)', color: '#ad1457'},
+    {key: 'mpi', label: 'MPI融资脉冲', color: '#1976d2'},
+    {key: 'mls', label: 'MLS融资负荷', color: '#5e35b1'},
+    {key: 'nib', label: 'NIB负脉冲', color: '#00897b'},
+    {key: 'nib_breadth', label: 'NIB覆盖', color: '#26a69a'},
+    {key: 'nib_magnitude', label: 'NIB幅度', color: '#80cbc4'},
+    {key: 'deleveraging_breadth', label: 'DLB去杠杆覆盖', color: '#455a64'},
+    {key: 'net_outflow_level_score', label: '持续净偿还', color: '#3949ab'},
+    {key: 'buy_shortfall_score', label: '融资买入不足', color: '#f9a825'},
+    {key: 'repay_level_score', label: '偿还水平', color: '#6d4c41'},
+    {key: 'mews_rolling_percentile', label: 'MEWS历史分位', color: '#607d8b'}
+];
+const riskEnabledSeries = new Set(RISK_SERIES.filter(s => s.enabled).map(s => s.key));
+let marginRiskPoints = [];
+let marginRiskThresholds = {};
+let riskViewStart = 0;
+let riskViewEnd = -1;
+
+function riskNumber(value) {
+    if (value == null || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function riskValue(point, series) {
+    if (!point || point.data_status !== 'OK') return null;
+    const value = riskNumber(point[series.source || series.key]);
+    return value == null ? null : (series.transform ? series.transform(value) : value);
+}
+
+function initRiskSeriesPicker() {
+    const picker = document.getElementById('riskSeriesPicker');
+    if (picker.childElementCount) return;
+    for (const series of RISK_SERIES) {
+        const label = document.createElement('label');
+        label.className = 'risk-series-chip';
+        label.style.setProperty('--series-color', series.color);
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = riskEnabledSeries.has(series.key);
+        input.setAttribute('aria-label', '显示' + series.label);
+        input.addEventListener('change', () => {
+            if (input.checked) riskEnabledSeries.add(series.key);
+            else riskEnabledSeries.delete(series.key);
+            renderRiskChart();
+        });
+        const swatch = document.createElement('span');
+        swatch.className = 'risk-series-swatch';
+        const text = document.createElement('span');
+        text.textContent = series.label;
+        label.appendChild(input); label.appendChild(swatch); label.appendChild(text);
+        picker.appendChild(label);
+    }
+}
+
+function setRiskRange(days) {
+    if (!marginRiskPoints.length) return;
+    riskViewEnd = marginRiskPoints.length - 1;
+    riskViewStart = days === 'all' ? 0 : Math.max(0, riskViewEnd - Number(days) + 1);
+    document.querySelectorAll('[data-risk-range]').forEach(button => {
+        button.classList.toggle('active', button.dataset.riskRange === String(days));
+    });
+    renderRiskChart();
+}
+
+function setRiskWindow(start, end) {
+    const total = marginRiskPoints.length;
+    if (!total) return;
+    const span = Math.min(total, Math.max(10, end - start + 1));
+    let boundedStart = Math.round(start);
+    boundedStart = Math.max(0, Math.min(total - span, boundedStart));
+    riskViewStart = boundedStart;
+    riskViewEnd = boundedStart + span - 1;
+    document.querySelectorAll('[data-risk-range]').forEach(button => button.classList.remove('active'));
+}
+
+function zoomRiskCurveAt(factor, anchorFraction) {
+    if (marginRiskPoints.length < 2 || riskViewEnd < riskViewStart) return;
+    const total = marginRiskPoints.length;
+    const oldSpan = riskViewEnd - riskViewStart + 1;
+    const newSpan = Math.max(10, Math.min(total, Math.round(oldSpan * factor)));
+    const anchor = riskViewStart + (oldSpan - 1) * Math.max(0, Math.min(1, anchorFraction));
+    const start = anchor - (newSpan - 1) * anchorFraction;
+    setRiskWindow(start, start + newSpan - 1);
+    renderRiskChart();
+}
+
+function zoomRiskCurve(factor) { zoomRiskCurveAt(factor, 0.5); }
+
+function panRiskCurve(shift) {
+    if (!shift) return;
+    const span = riskViewEnd - riskViewStart + 1;
+    setRiskWindow(riskViewStart + shift, riskViewStart + shift + span - 1);
+    renderRiskChart();
+}
+
+function appendRiskTooltipRow(container, label, value, color) {
+    const row = document.createElement('div');
+    row.className = 'risk-tooltip-row';
+    const left = document.createElement('span');
+    left.textContent = label;
+    if (color) left.style.color = color;
+    const right = document.createElement('span');
+    right.textContent = value;
+    row.appendChild(left); row.appendChild(right); container.appendChild(row);
+}
+
+function renderRiskChart() {
+    const container = document.getElementById('riskChart');
+    const tooltip = document.getElementById('riskTooltip');
+    const wrap = document.getElementById('riskChartWrap');
+    container.textContent = '';
+    tooltip.style.display = 'none';
+    wrap.classList.remove('dragging');
+
+    if (!marginRiskPoints.length || riskViewEnd < riskViewStart) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state small';
+        const p = document.createElement('p');
+        p.textContent = '暂无 MEWS 数据；执行一次“数据检查和补充”后会自动建立历史曲线';
+        empty.appendChild(p); container.appendChild(empty);
+        document.getElementById('riskRangeLabel').textContent = '--';
+        return;
+    }
+
+    const points = marginRiskPoints.slice(riskViewStart, riskViewEnd + 1);
+    const W = 1040, H = 340, PL = 50, PR = 20, PT = 18, PB = 32;
+    const plotW = W - PL - PR, plotH = H - PT - PB;
+    const xAt = index => PL + plotW * (points.length === 1 ? 0.5 : index / (points.length - 1));
+    const yAt = value => PT + plotH * (1 - Math.max(0, Math.min(100, value)) / 100);
+    const svg = svgEl('svg', {
+        viewBox: '0 0 ' + W + ' ' + H,
+        role: 'img',
+        'aria-label': 'MEWS融资风险曲线，' + points[0].date + ' 至 ' + points[points.length - 1].date
+    });
+
+    const defs = svgEl('defs', {});
+    const clip = svgEl('clipPath', {id: 'riskPlotClip'});
+    clip.appendChild(svgEl('rect', {x: PL, y: PT, width: plotW, height: plotH}));
+    defs.appendChild(clip); svg.appendChild(defs);
+
+    const watch = riskNumber(marginRiskThresholds.watch);
+    const warning = riskNumber(marginRiskThresholds.warning);
+    if (warning != null) {
+        svg.appendChild(svgEl('rect', {x: PL, y: PT, width: plotW,
+            height: Math.max(0, yAt(warning) - PT), fill: '#ffebee', 'fill-opacity': 0.42}));
+    }
+    if (watch != null && warning != null) {
+        svg.appendChild(svgEl('rect', {x: PL, y: yAt(warning), width: plotW,
+            height: Math.max(0, yAt(watch) - yAt(warning)), fill: '#fff8e1', 'fill-opacity': 0.52}));
+    }
+
+    for (let value = 0; value <= 100; value += 20) {
+        const y = yAt(value);
+        svg.appendChild(svgEl('line', {x1: PL, y1: y, x2: W - PR, y2: y,
+            stroke: '#eceff1', 'stroke-width': 1}));
+        const label = svgEl('text', {x: PL - 8, y: y + 4, 'text-anchor': 'end',
+            'font-size': 11, fill: '#8b9499'});
+        label.textContent = String(value); svg.appendChild(label);
+    }
+
+    const thresholdLines = [
+        {value: marginRiskThresholds.clear, label: '解除', color: '#90a4ae'},
+        {value: marginRiskThresholds.watch, label: '关注', color: '#d69e00'},
+        {value: marginRiskThresholds.warning, label: '警告', color: '#d84315'}
+    ];
+    for (const threshold of thresholdLines) {
+        const value = riskNumber(threshold.value);
+        if (value == null) continue;
+        const y = yAt(value);
+        svg.appendChild(svgEl('line', {x1: PL, y1: y, x2: W - PR, y2: y,
+            stroke: threshold.color, 'stroke-width': 1, 'stroke-dasharray': '5 4', opacity: 0.72}));
+        const label = svgEl('text', {x: W - PR - 3, y: y - 4, 'text-anchor': 'end',
+            'font-size': 10, fill: threshold.color});
+        label.textContent = threshold.label + ' ' + value.toFixed(1); svg.appendChild(label);
+    }
+
+    const tickCount = Math.min(5, points.length);
+    const xIndexes = [];
+    for (let tick = 0; tick < tickCount; tick++) {
+        const index = tickCount === 1 ? 0 : Math.round(tick * (points.length - 1) / (tickCount - 1));
+        if (!xIndexes.includes(index)) xIndexes.push(index);
+    }
+    for (const index of xIndexes) {
+        const label = svgEl('text', {x: xAt(index), y: H - 9,
+            'text-anchor': index === 0 ? 'start' : (index === points.length - 1 ? 'end' : 'middle'),
+            'font-size': 11, fill: '#8b9499'});
+        label.textContent = points[index].date.slice(0, 7); svg.appendChild(label);
+    }
+
+    const lineLayer = svgEl('g', {'clip-path': 'url(#riskPlotClip)'});
+    for (const series of RISK_SERIES) {
+        if (!riskEnabledSeries.has(series.key)) continue;
+        let path = '';
+        let drawing = false;
+        for (let index = 0; index < points.length; index++) {
+            const value = riskValue(points[index], series);
+            if (value == null) { drawing = false; continue; }
+            path += (drawing ? 'L' : 'M') + xAt(index).toFixed(2) + ',' + yAt(value).toFixed(2);
+            drawing = true;
+        }
+        if (path) lineLayer.appendChild(svgEl('path', {d: path, fill: 'none', stroke: series.color,
+            'stroke-width': series.width || 1.45, 'stroke-linejoin': 'round',
+            'stroke-linecap': 'round', opacity: series.key === 'mews' ? 1 : 0.88}));
+    }
+    svg.appendChild(lineLayer);
+
+    const crosshair = svgEl('line', {x1: PL, y1: PT, x2: PL, y2: H - PB,
+        stroke: '#78909c', 'stroke-width': 1, visibility: 'hidden'});
+    svg.appendChild(crosshair);
+    const hoverDot = svgEl('circle', {r: 4, fill: '#c62828', stroke: '#fff',
+        'stroke-width': 2, visibility: 'hidden'});
+    svg.appendChild(hoverDot);
+    const overlay = svgEl('rect', {x: PL, y: PT, width: plotW, height: plotH,
+        fill: 'transparent', tabindex: 0, 'aria-label': '可缩放和平移的MEWS曲线'});
+    svg.appendChild(overlay);
+
+    let dragStartX = null;
+    let dragStartWindow = null;
+    function pointIndexFromEvent(event) {
+        const rect = svg.getBoundingClientRect();
+        const x = (event.clientX - rect.left) / rect.width * W;
+        const ratio = Math.max(0, Math.min(1, (x - PL) / plotW));
+        return Math.round(ratio * (points.length - 1));
+    }
+    function hideHover() {
+        crosshair.setAttribute('visibility', 'hidden');
+        hoverDot.setAttribute('visibility', 'hidden');
+        tooltip.style.display = 'none';
+    }
+    overlay.addEventListener('pointermove', event => {
+        if (dragStartX != null) return;
+        const index = pointIndexFromEvent(event);
+        const point = points[index];
+        const x = xAt(index);
+        crosshair.setAttribute('x1', x); crosshair.setAttribute('x2', x);
+        crosshair.setAttribute('visibility', 'visible');
+        const mews = riskValue(point, RISK_SERIES[0]);
+        if (mews != null) {
+            hoverDot.setAttribute('cx', x); hoverDot.setAttribute('cy', yAt(mews));
+            hoverDot.setAttribute('visibility', 'visible');
+        } else hoverDot.setAttribute('visibility', 'hidden');
+
+        tooltip.textContent = '';
+        const dateLine = document.createElement('div');
+        dateLine.className = 'risk-tooltip-date';
+        dateLine.textContent = point.date + (point.signal_available_date
+            ? ' · 可用于 ' + point.signal_available_date : '');
+        tooltip.appendChild(dateLine);
+        for (const series of RISK_SERIES) {
+            if (!riskEnabledSeries.has(series.key)) continue;
+            const value = riskValue(point, series);
+            appendRiskTooltipRow(tooltip, series.label, value == null ? '--' : value.toFixed(2), series.color);
+        }
+        appendRiskTooltipRow(tooltip, '风险状态', point.risk_state || '--');
+        appendRiskTooltipRow(tooltip, '数据状态', point.data_status || '--');
+        tooltip.style.display = 'block';
+        const svgRect = svg.getBoundingClientRect();
+        const leftAt = x / W * svgRect.width;
+        let left = leftAt + 12;
+        if (left + tooltip.offsetWidth > wrap.clientWidth - 4) left = leftAt - tooltip.offsetWidth - 12;
+        tooltip.style.left = Math.max(0, left) + 'px';
+        tooltip.style.top = '10px';
+    });
+    overlay.addEventListener('pointerleave', () => { if (dragStartX == null) hideHover(); });
+    overlay.addEventListener('pointerdown', event => {
+        dragStartX = event.clientX;
+        dragStartWindow = [riskViewStart, riskViewEnd];
+        wrap.classList.add('dragging'); hideHover();
+        overlay.setPointerCapture(event.pointerId);
+    });
+    function finishDrag(event) {
+        if (dragStartX == null || !dragStartWindow) return;
+        const rect = svg.getBoundingClientRect();
+        const span = dragStartWindow[1] - dragStartWindow[0] + 1;
+        const shift = Math.round(-(event.clientX - dragStartX) / rect.width * span);
+        dragStartX = null; dragStartWindow = null; wrap.classList.remove('dragging');
+        panRiskCurve(shift);
+    }
+    overlay.addEventListener('pointerup', finishDrag);
+    overlay.addEventListener('pointercancel', event => {
+        dragStartX = null; dragStartWindow = null; wrap.classList.remove('dragging');
+        try { overlay.releasePointerCapture(event.pointerId); } catch (e) {}
+    });
+    overlay.addEventListener('wheel', event => {
+        event.preventDefault();
+        const rect = svg.getBoundingClientRect();
+        const anchor = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+        zoomRiskCurveAt(event.deltaY < 0 ? 0.78 : 1.28, anchor);
+    }, {passive: false});
+
+    container.appendChild(svg);
+    document.getElementById('riskRangeLabel').textContent =
+        points[0].date + ' — ' + points[points.length - 1].date + ' · ' + points.length + '个交易日';
+}
+
+function renderRiskLatest(data) {
+    const latest = data.latest;
+    const score = latest ? riskNumber(latest.mews) : null;
+    document.getElementById('riskLatestScore').textContent = score == null ? '--' : score.toFixed(1);
+    const state = latest && latest.risk_state ? latest.risk_state : '--';
+    const badge = document.getElementById('riskStateBadge');
+    badge.textContent = state;
+    badge.className = 'risk-state ' + String(state).toLowerCase();
+
+    const exhaustion = latest ? riskNumber(latest.exhaustion_path) : null;
+    const persistent = latest ? riskNumber(latest.persistent_deleveraging_path) : null;
+    let dominant = '--';
+    if (exhaustion != null && persistent != null) {
+        dominant = persistent > exhaustion
+            ? '持续去杠杆 ' + persistent.toFixed(1)
+            : '购买力耗竭 ' + exhaustion.toFixed(1);
+    }
+    document.getElementById('riskDominantPath').textContent = dominant;
+    document.getElementById('riskLatestDate').textContent = latest
+        ? '数据日 ' + latest.date + (latest.signal_available_date ? ' · 可用于 ' + latest.signal_available_date : '')
+        : '';
+
+    const storage = data.storage || {};
+    const latestRawFailed = storage.latest_raw_date && storage.latest_ingestion_status !== 'OK' &&
+        (!latest || storage.latest_raw_date > latest.date);
+    const status = latest ? latest.data_status : null;
+    const statusEl = document.getElementById('riskDataStatus');
+    let statusText = '尚无有效指标';
+    if (latestRawFailed) statusText = storage.latest_raw_date + ' 摄取失败，等待自动重试';
+    else if (status === 'OK' && score != null) statusText = '完整，可作市场解释';
+    else if (status === 'OK') statusText = '数据完整，有效历史尚不足';
+    else if (status) statusText = status + '，本日不作市场解释';
+    statusEl.textContent = statusText;
+    statusEl.className = 'risk-summary-value' +
+        (latestRawFailed || (status && status !== 'OK') ? ' risk-data-partial' : '');
+    function coverage(value) {
+        const number = riskNumber(value);
+        return number == null ? '--' : (number * 100).toFixed(1) + '%';
+    }
+    document.getElementById('riskCoverage').textContent = latest
+        ? '明细 ' + coverage(latest.detail_coverage) + ' · 广度 ' + coverage(latest.breadth_coverage) +
+          ' · 自由流通市值 ' + coverage(latest.ffmv_coverage)
+        : '';
+
+    document.getElementById('riskStorageStatus').textContent = storage.raw_end
+        ? '原始数据至 ' + storage.raw_end + ' · 指数至 ' + (storage.metric_end || '--') +
+          (storage.failed_days ? ' · 待重试 ' + storage.failed_days + '日' : '')
+        : '等待首次补数';
+    document.getElementById('riskUpdatedAt').textContent =
+        '更新于 ' + new Date().toTimeString().slice(0, 5);
+}
+
+async function loadMarginRiskCurve() {
+    initRiskSeriesPicker();
+    const oldLength = marginRiskPoints.length;
+    const oldAtEnd = oldLength > 0 && riskViewEnd === oldLength - 1;
+    const oldSpan = riskViewEnd >= riskViewStart ? riskViewEnd - riskViewStart + 1 : 756;
+    try {
+        const resp = await tradingFetch('/api/trading/margin-risk-curve?days=5000');
+        if (!resp.ok) {
+            let detail = 'HTTP ' + resp.status;
+            try { detail = (await resp.json()).detail || detail; } catch (e) {}
+            throw new Error(detail);
+        }
+        const data = await resp.json();
+        marginRiskPoints = data.points || [];
+        marginRiskThresholds = data.thresholds || {};
+        renderRiskLatest(data);
+        if (!oldLength || riskViewEnd < 0) {
+            riskViewEnd = marginRiskPoints.length - 1;
+            riskViewStart = Math.max(0, riskViewEnd - 755);
+        } else if (oldAtEnd) {
+            riskViewEnd = marginRiskPoints.length - 1;
+            riskViewStart = Math.max(0, riskViewEnd - oldSpan + 1);
+        } else {
+            riskViewEnd = Math.min(riskViewEnd, marginRiskPoints.length - 1);
+            riskViewStart = Math.min(riskViewStart, Math.max(0, riskViewEnd - 9));
+        }
+        renderRiskChart();
+    } catch (error) {
+        const container = document.getElementById('riskChart');
+        container.textContent = '';
+        const empty = document.createElement('div');
+        empty.className = 'empty-state small';
+        const p = document.createElement('p');
+        p.textContent = 'MEWS 数据加载失败：' + error.message;
+        p.style.color = '#d32f2f'; empty.appendChild(p); container.appendChild(empty);
+        document.getElementById('riskDataStatus').textContent = '服务暂不可用';
+        document.getElementById('riskStorageStatus').textContent = '数据检查和补充会在服务恢复后继续';
+    }
+}
+
 // --- Manual equity baseline (0.22.2) ---
 
 function toggleBaselineForm() {
@@ -1874,7 +2377,9 @@ loadModelStatus();
 loadDataEngineStatus();
 loadPreMarketHoldingButtons();
 loadEquityCurve();
+loadMarginRiskCurve();
 setInterval(loadEquityCurve, 300000);
+setInterval(loadMarginRiskCurve, 300000);
 setInterval(loadPreMarketHoldingButtons, 30000);
 setInterval(loadHoldings, 10000);
 setInterval(loadBrokerStatus, 5000);

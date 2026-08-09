@@ -3,6 +3,7 @@
 # (see docs/data-integrity-pipeline.md §4.1). One sequential, failure-isolated pass:
 #   ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 → ③ 增量重建真值表(只新交易日·含分钟状态)
 #   → ④ 索引驱动补日线 → ⑤ 索引驱动补分钟(带上限+逐批心跳) → ⑥ 重建补过的天(确认日线+分钟)
+#   → ⑦ MEWS 融资风险原始事实查漏、补数和重算
 #   → 一条飞书汇总.
 # 增量查漏(不每晚全表重扫历史)、精准补缺. Steps are failure-isolated; only 3am (no startup run);
 # all run status persisted to GreptimeDB scheduler_log so it survives restarts.
@@ -38,6 +39,7 @@ _STEP_TIMEOUT_REBUILD = 90 * 60  # ③ full-history rebuild (~1640 Tushare calls
 _STEP_TIMEOUT_FILL = 3 * 3600  # ④ index-driven daily fill
 _STEP_TIMEOUT_MINUTE_FILL = 4 * 3600  # ⑤ index-driven minute fill (capped, per-stock stk_mins)
 _STEP_TIMEOUT_CONFIRM = 60 * 60  # ⑥ rebuild only the touched dates (daily+minute)
+_STEP_TIMEOUT_MEWS = 4 * 3600  # ⑦ first manual history build can be large
 # Nightly minute-fill cap: bound the unattended pass so a surprise backlog (minute never
 # ran ⇒ thousands of missing code-days) can't run for hours. ~1 trading day ≈ ~5000
 # code-days; 12000 ≈ ~2.4 days of catch-up per night, the remainder reported + carried to
@@ -296,7 +298,8 @@ class CacheScheduler:
         """The unified daily data-maintenance pass — 先查漏、再精准补缺:
         ① load-tushare 刷名单 → ② kimi 核新代码 + 喂换号对应表 →
         ③ 增量重建真值表(新交易日·含分钟状态) → ④ 索引驱动补日线 →
-        ⑤ 索引驱动补分钟(带上限+逐批心跳) → ⑥ 重建补过的天(确认日线+分钟).
+        ⑤ 索引驱动补分钟(带上限+逐批心跳) → ⑥ 重建补过的天(确认日线+分钟) →
+        ⑦ MEWS融资数据查漏、补数和重算.
 
         Failure-isolated: a failed step is logged + recorded + the pass continues —
         EXCEPT ④/⑤/⑥ are skipped if ③ (rebuild) failed (never fill on a stale index).
@@ -592,6 +595,37 @@ class CacheScheduler:
                 )
         finally:
             await client.stop()
+
+        # ⑦ MEWS — same manual "数据检查和补充" trigger builds all missing
+        # history. The unattended 3am pass is bounded and resume-safe; a separate
+        # post-publication scheduler refreshes the latest day after Tushare's
+        # ~08:30 margin update.
+        margin_service = getattr(self._app_state, "margin_risk_service", None)
+        if margin_service is None:
+            steps.append(("⑦ MEWS融资风险", "跳过", "服务未初始化"))
+        else:
+            max_days = None if trigger == "manual" else 3
+            ok, r = await self._bounded(
+                margin_service.audit_and_fill(max_days=max_days),
+                _STEP_TIMEOUT_MEWS,
+            )
+            if not ok:
+                steps.append(("⑦ MEWS融资风险", "失败", r))
+            elif r.get("status") == "BUSY":
+                steps.append(("⑦ MEWS融资风险", "跳过", "已有MEWS补数任务运行"))
+            else:
+                detail = (
+                    f"补 {r.get('filled', 0)} 天 / 重算 {r.get('metrics', 0)} 天"
+                    f" / 尚缺 {r.get('remaining', 0)} 天"
+                )
+                failures = r.get("failed") or []
+                if failures:
+                    detail += f" / 失败 {len(failures)} 天: {'、'.join(failures[:3])}"
+                    steps.append(("⑦ MEWS融资风险", "警告", detail))
+                elif r.get("remaining"):
+                    steps.append(("⑦ MEWS融资风险", "警告", detail))
+                else:
+                    steps.append(("⑦ MEWS融资风险", "成功", detail))
 
         # Final library snapshot (read-only, truth-table = single source). Pull the
         # actual problem codes (orphan / missing / wrong_suspended) so the ONE summary

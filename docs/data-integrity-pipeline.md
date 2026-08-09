@@ -80,7 +80,8 @@
 ④ 补日线      fill_daily_from_calendar          —— 只补 daily_state=missing/wrong_suspended(绝不全量重下)
 ⑤ 补分钟      fill_minute_from_calendar(每晚上限) —— 只补 minute_state=missing;逐批心跳日志;超上限下次续补;源头不满 241 → 标 source_short
 ⑥ 确认        build_calendar(④⑤补过的天, with_minute) —— 重建被补过的天,确认缺口归零 + 持久化 source_short
-⑦ 一条飞书汇总(逐步结果 + 最终分类计数 + 点名待修代码)
+⑦ MEWS补数    audit_and_fill                    —— 补逐股两融/自由流通市值并重算风险指标
+⑧ 一条飞书汇总(逐步结果 + 最终分类计数 + 点名待修代码)
 ```
 
 设计要点:
@@ -107,6 +108,25 @@
   `audit_daily_gaps`、跟真值表两套打架);每日就这一条真值表汇总、末尾点名待修代码,深挖走手动
   `POST /api/audit/diagnose-gaps`。
 - 手动端点(`/calendar/rebuild`、`/backfill-daily`、`/listing-info/*`)全保留。
+
+### 4.2 MEWS数据维护
+
+MEWS与行情真值表共用“数据检查和补充”的统一触发入口，但使用独立的事实表和质量规则：
+
+- 手动触发不限制天数，首次运行从2014-09-22开始建立完整历史；摄取按交易日幂等，可中断续跑。
+- 凌晨3点统一任务每次最多续补3个缺失交易日，08:50任务每次最多5日；有上限的自动任务优先最近缺口，再逐步向前补历史，避免新发布日被历史积压阻塞。
+- Tushare两融数据约08:30发布，独立任务每天08:50再检查最近缺口，每次最多补5日。
+- 同一天必须同时取得SSE、SZSE的`margin`汇总；只有一个交易所时该日记为`FAILED`，下次继续重试。
+- 若原始数据末日领先于指标末日，下一次任务即使没有原始缺口也会恢复指标重算。
+- 自动任务从近期向前建底时，在累计满550个连续交易日的计算上下文前将指标标为`PARTIAL`，不把截断样本上的临时分位当成生产信号；手动完整建底不受此等待影响。
+
+GreptimeDB生产表：
+
+| 表 | 内容 |
+|---|---|
+| `margin_risk_security_daily` | 普通A股逐股融资余额、融资买入额、融资偿还额 |
+| `margin_risk_market_daily` | 市场与普通A股汇总、自由流通市值、覆盖率、沪深完整性、摄取状态 |
+| `margin_risk_metric_daily` | MEWS及全部组成指标、风险/数据状态、信号可用日、冻结阈值 |
 
 ---
 

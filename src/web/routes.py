@@ -128,6 +128,7 @@ ASSISTANT_READONLY_GET_PATHS = frozenset(
     {
         "/api/trading/holdings",
         "/api/trading/equity-curve",  # 账户概览:总资产/今日/本周/可用资金(只读)
+        "/api/trading/margin-risk-curve",  # MEWS融资风险曲线及组成指标(只读)
         "/api/trading/assistant-sql",  # SQL 只读代理(服务端强制 SELECT 族+LIMIT+审计)
     }
 )
@@ -3520,6 +3521,43 @@ def create_trading_router() -> APIRouter:
                 "today_pnl": today_pnl,
                 "today_pnl_pct": today_pnl_pct,
             },
+        }
+
+    @router.get("/api/trading/margin-risk-curve")
+    async def get_margin_risk_curve(request: Request, days: int = 5000) -> dict:
+        """Return production MEWS observations and every published component."""
+
+        service = getattr(request.app.state, "margin_risk_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="MEWS数据服务未连接")
+
+        from src.data.services.margin_risk_service import PRODUCTION_THRESHOLDS
+
+        try:
+            points = await service.store.list_metrics(days=days)
+            storage_status = await service.store.status()
+        except Exception as exc:
+            logger.exception("margin risk curve query failed: %s", exc)
+            raise HTTPException(status_code=503, detail=f"MEWS曲线查询失败: {exc}") from exc
+
+        latest = points[-1] if points else None
+        latest_valid = next(
+            (point for point in reversed(points) if point.get("mews") is not None),
+            None,
+        )
+        return {
+            "index": "MEWS",
+            "version": "mews_v2",
+            "points": points,
+            "latest": latest,
+            "latest_valid": latest_valid,
+            "thresholds": {
+                "watch": PRODUCTION_THRESHOLDS.watch,
+                "warning": PRODUCTION_THRESHOLDS.warning,
+                "clear": PRODUCTION_THRESHOLDS.clear,
+                "persistent_danger": PRODUCTION_THRESHOLDS.persistent_danger,
+            },
+            "storage": storage_status,
         }
 
     @router.post("/api/trading/equity-baseline")

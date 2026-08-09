@@ -7,6 +7,8 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 0.25.2 | 2026-08-09 | - | DAT-007 **MEWS生产化**：GreptimeDB新增逐股两融事实、市场汇总/质量、每日指标三张幂等时序表；统一“数据检查和补充”会补齐全部缺失交易日并重算指标，另于08:50在Tushare发布后增量刷新。交易看板净值板块下方新增0—100同轴风险曲线，支持全组成指标开关、时间快捷范围、滚轮/按钮缩放、拖动平移和逐日悬浮解释；新增只读API `GET /api/trading/margin-risk-curve`。 |
+| 0.25.1 | 2026-08-06 | - | DAT-007 **A股融资耗竭风险指数（MEWS）**：基于沪深普通A股统一口径，以融资负荷、融资脉冲、鲁棒负脉冲扩散、五日净偿还扩散和持续净偿还水平构造融资购买力耗竭与持续去杠杆两条路径，主指数取两者较高值；状态阈值来自固定开发样本，信号按次一交易日可用。 |
 | 0.24.1 | 2026-07-13 | - | SYS-006 新增**早盘选股健康巡检**:08:00 检测 `_run_intraday_monitor` 协程是否存活 + 每日选股开关是否开启,任一异常飞书告警,给 09:39 扫描窗口留出约 90 分钟修复时间。起因:该协程 07-10 之后静默崩溃退出,无监督者重启、无告警,整个周末未被发现,导致 07-13 周一早盘选股完全没触发(事后手动 `POST /api/momentum/monitor/start` 救活)。 |
 | 0.24.0 | 2026-07-08 | - | AST-001 **Phase 2 自由问答通道上线**(用户拍板:代码仓库、数据都开放):@机器人 说大白话 → 排队 → kimi 现场解决(自由任务**开 thinking**,斜杠命令继续关)。资源指南进任务书:①只读接口(holdings/equity-curve);②**SQL 只读代理** `GET /api/trading/assistant-sql?sql=`——服务端强制只准 SELECT/SHOW/DESCRIBE/WITH、拒多语句、无 LIMIT 自动加 200、上限 2000 行、每条记审计日志,进只读 key 白名单;③代码仓库 `/app`(src/docs/scripts 只读);④Tushare HTTP(token 在容器内,任务书要求省配额);⑤kimi 原生网络搜索。禁令:SQL 只走代理、不改文件、不装包、不碰交易。帮助文案同步更新。 |
 | 0.23.6 | 2026-07-08 | - | AST-001 **`/持仓` 对齐主页账户概览**(用户要求):回复改为 总资产(今日变动额/%)+ 持仓市值 + 可用资金 + 本周收益(额/%)+ 持仓明细(成本/现价/市值/盈亏,null 显示 --)。只读白名单新增 `GET /api/trading/equity-curve`(与 holdings 同为 TRD-001 数据源);技能改两条 curl(`equity-curve?days=30` + `holdings`),任一接口失败如实报哪个没通、绝不编数。 |
@@ -118,7 +120,7 @@ uv run uvicorn src.web.app:create_app --factory --host 0.0.0.0 --port 8000
 5. Start ML monitoring scheduler (daily readiness report + broker health check) — **before** cache loading + audit (safety-critical, see trading-safety-patterns.md)
 6. Connect GreptimeDB storage + CachePipeline (background retry if unavailable)
 7. Run trading safety audit (Feishu alert on CRITICAL)
-8. Start cache scheduler (3am), model training scheduler, pre-market report scheduler (8am), intraday momentum monitor
+8. Start cache scheduler (3am), MEWS post-publication refresh (8:50am), model training scheduler, pre-market report scheduler (8am), intraday momentum monitor
 
 **Files**:
 - `src/web/app.py` - FastAPI application factory
@@ -818,6 +820,38 @@ Trading is handled through the broker interface (STR-005). Order placement lives
 ---
 
 ## Module: Data
+
+### [DAT-007] A股融资耗竭风险指数（MEWS）
+
+MEWS观察沪深普通A股的融资负荷、融资购买力耗竭和融资负债收缩扩散。它以
+`ExhaustionPath`和`PersistentDeleveragingPath`两条路径中的较高值作为主指数，
+用于描述融资链条形成系统性去杠杆风险的强度。除计算自由流通市值所需的收盘价外，
+价格信号、技术指标、行业、新闻和其他资金流数据不进入指数。当前定义、计算公式和解释见
+[`docs/margin-exhaustion-warning.md`](margin-exhaustion-warning.md)。
+
+**Status**: Completed（生产）
+
+**生产数据与恢复机制**：
+
+- `margin_risk_security_daily`：逐股融资余额、买入额、偿还额。
+- `margin_risk_market_daily`：沪深市场汇总、普通A股汇总、自由流通市值、覆盖率、交易所完整性和摄取状态。
+- `margin_risk_metric_daily`：MEWS、两条路径、MPI、MLS、NIB及其宽度/幅度、DLB、持续净偿还、风险状态、数据状态和冻结阈值。
+- 启动时幂等建表；手动“数据检查和补充”补完整历史，凌晨3点任务有界续补，08:50在Tushare约08:30发布后补最新日。原始数据已齐但指标重算中断时，下一次检查会按原始末日与指标末日的差异续算。
+- 任一交易所汇总缺失或覆盖异常时标记失败/部分，不发布可解释的MEWS值，也不把缺数当成低风险。
+
+**生产界面/API**：
+
+- 交易看板账户净值下方展示互动曲线，默认MEWS和两条路径，可勾选全部组成项；支持6月/1年/3年/全部、滚轮与按钮缩放、拖动平移、逐日悬浮明细。
+- `GET /api/trading/margin-risk-curve?days=5000`返回时间序列、最新状态、冻结阈值和存储完整性摘要，并纳入助手只读Key白名单。
+
+**Files**：
+
+- `src/data/clients/greptime_margin_risk.py`
+- `src/data/services/margin_risk_service.py`
+- `src/data/services/margin_risk_scheduler.py`
+- `src/margin_risk/v2_calculations.py`
+- `src/web/routes.py`
+- `src/web/templates/index.html`
 
 ### [DAT-001] Market Data Sources
 

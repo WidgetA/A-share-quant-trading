@@ -114,6 +114,18 @@ async def _try_connect_greptime(app: FastAPI) -> bool:
     except Exception as e:
         logger.exception(f"account_equity_snapshot schema ensure failed: {e}")
 
+    # Production MEWS facts + metrics.  Schema failure is non-fatal for the
+    # trading path; the risk API reports 503 until the next reconnect succeeds.
+    try:
+        from src.data.services.margin_risk_service import MarginRiskProductionService
+
+        margin_risk_service = MarginRiskProductionService(storage)
+        await margin_risk_service.ensure_schema()
+        app.state.margin_risk_service = margin_risk_service
+    except Exception as e:
+        app.state.margin_risk_service = None
+        logger.exception(f"margin risk schema/service initialization failed: {e}")
+
     app.state.pipeline = CachePipeline(
         storage=storage,
         daily_source=TushareDailySource(),
@@ -643,6 +655,17 @@ def create_app(
         app.state.cache_scheduler_task = asyncio.create_task(cache_scheduler.run())
         logger.info("Cache scheduler started (3am daily)")
 
+        # Margin data is published around 08:30. Refresh at 08:50 so trade-date
+        # t becomes visible on its documented next-trading-day availability.
+        from src.data.services.margin_risk_scheduler import MarginRiskRefreshScheduler
+
+        margin_risk_scheduler = MarginRiskRefreshScheduler(app.state)
+        app.state.margin_risk_scheduler = margin_risk_scheduler
+        app.state.margin_risk_scheduler_task = asyncio.create_task(
+            margin_risk_scheduler.run()
+        )
+        logger.info("MEWS refresh scheduler started (08:50 daily)")
+
         # Auto-start model training scheduler (finetune every 20 trading days)
         from src.data.services.model_training_scheduler import ModelTrainingScheduler
 
@@ -769,6 +792,11 @@ def create_app(
         if cache_task and not cache_task.done():
             cache_task.cancel()
             logger.info("Cache scheduler stopped")
+
+        margin_risk_task = getattr(app.state, "margin_risk_scheduler_task", None)
+        if margin_risk_task and not margin_risk_task.done():
+            margin_risk_task.cancel()
+            logger.info("MEWS refresh scheduler stopped")
 
         # Stop model training scheduler
         model_task = getattr(app.state, "model_scheduler_task", None)

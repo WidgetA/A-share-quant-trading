@@ -96,6 +96,21 @@ class _FakeLV:
         return self._result
 
 
+class _FakeMarginRiskService:
+    def __init__(self) -> None:
+        self.max_days_calls: list[int | None] = []
+
+    async def audit_and_fill(self, *, max_days=None):
+        self.max_days_calls.append(max_days)
+        return {
+            "status": "OK",
+            "filled": 2,
+            "metrics": 2,
+            "remaining": 0,
+            "failed": [],
+        }
+
+
 class _AppState:
     def __init__(self, storage, pipeline, lv=None):
         self.storage = storage
@@ -170,6 +185,24 @@ async def test_pipeline_happy_path_no_gaps_runs_in_order(monkeypatch):
     # ① load → ② kimi → ③ rebuild → ④ 补日线 → ⑤ 补分钟; ⑥ confirm skipped (nothing touched).
     assert calls[:5] == ["load", "kimi", "rebuild_full", "fill", "fill_minute"]
     assert "rebuild_days" not in calls  # ⑥ confirm skipped when nothing was filled
+
+
+@pytest.mark.parametrize(("trigger", "expected_limit"), [("scheduled", 3), ("manual", None)])
+@pytest.mark.asyncio
+async def test_pipeline_includes_mews_and_manual_trigger_is_unbounded(
+    monkeypatch,
+    trigger,
+    expected_limit,
+):
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
+    state = _AppState(_FakeStorage(), _FakePipeline(_NO_GAPS, calls))
+    margin = _FakeMarginRiskService()
+    state.margin_risk_service = margin
+
+    result, _message = await CacheScheduler(state)._run_pipeline(trigger)
+
+    assert result == "success"
+    assert margin.max_days_calls == [expected_limit]
 
 
 @pytest.mark.asyncio

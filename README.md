@@ -97,6 +97,15 @@ kimi 现场查:数据库只读 SQL 代理(服务端强制 SELECT 族+LIMIT+审�
   缺配置时助手不启动,其余功能不受影响
 - 详细设计:[docs/features.md AST-001](docs/features.md)
 
+## A股融资耗竭风险指数（MEWS）
+
+MEWS用于识别高融资负荷下，新增融资购买力广泛减弱或融资负债持续收缩所形成的
+系统性去杠杆风险。它仅使用沪深普通A股的融资与自由流通市值数据，不是大盘涨跌预测，
+也不覆盖融资链条以外的风险来源。生产看板在账户净值板块下方展示可缩放、可平移的
+MEWS及全部组成指标；统一“数据检查和补充”会建立和修复历史数据，08:50自动刷新最新数据。
+当前定义、完整公式和指标解释见
+[docs/margin-exhaustion-warning.md](docs/margin-exhaustion-warning.md)。
+
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for development guidelines.
