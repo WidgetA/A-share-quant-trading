@@ -166,6 +166,29 @@
 .risk-data-partial { color: #c45100; }
 .risk-explainer-dialog { max-width: 960px; }
 .risk-explainer-intro { margin: 0 0 0.9rem; color: #555; line-height: 1.6; }
+.risk-thesis {
+    margin: 0 0 1rem; padding: 1rem; border: 1px solid #e1e8ed; border-radius: 8px;
+    background: linear-gradient(135deg, #f7fbff 0%, #fffaf5 100%);
+}
+.risk-thesis h4 { margin: 0 0 0.55rem; color: #263238; font-size: 0.98rem; }
+.risk-thesis p { margin: 0; color: #455a64; font-size: 0.82rem; line-height: 1.7; }
+.risk-thesis-flow {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: stretch; gap: 0.65rem; margin: 0.85rem 0;
+}
+.risk-thesis-stage {
+    padding: 0.7rem 0.8rem; border-radius: 6px; border: 1px solid #dce5ea;
+    background: rgba(255,255,255,0.78);
+}
+.risk-thesis-stage strong { display: block; margin-bottom: 0.3rem; color: #37474f; font-size: 0.8rem; }
+.risk-thesis-stage span { color: #546e7a; font-size: 0.76rem; line-height: 1.55; }
+.risk-thesis-stage.expansion { border-left: 4px solid #2e7d32; }
+.risk-thesis-stage.contraction { border-left: 4px solid #c62828; }
+.risk-thesis-turn {
+    display: flex; align-items: center; justify-content: center; padding: 0 0.25rem;
+    color: #ad1457; font-size: 0.75rem; font-weight: 700; text-align: center;
+}
+.risk-thesis-note { color: #6d4c41 !important; }
 .risk-explainer-list { display: grid; gap: 0; }
 .risk-explainer-item { padding: 0.9rem 0; border-bottom: 1px solid #eceff1; }
 .risk-explainer-item:first-child { padding-top: 0; }
@@ -190,6 +213,8 @@
     .risk-summary > :last-child { grid-column: 1 / -1; }
     .risk-chart-wrap { min-height: 230px; }
     .risk-header-right { gap: 0.35rem; }
+    .risk-thesis-flow { grid-template-columns: 1fr; }
+    .risk-thesis-turn { padding: 0.1rem 0; }
     .risk-explainer-detail { grid-template-columns: 1fr; gap: 0.12rem; }
     .risk-explainer-detail dd { margin-bottom: 0.35rem; }
 }
@@ -339,121 +364,146 @@
                     aria-label="关闭指标说明" onclick="closeRiskMetricGuide()">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="risk-explainer-intro">所有分数均为 0—100。分数越高表示对应条件越强，不代表未来下跌概率；最终风险状态由固定阈值和连续日规则决定。</p>
+                <section class="risk-thesis" aria-labelledby="riskThesisTitle">
+                    <h4 id="riskThesisTitle">研究框架：从融资扩张的正反馈寻找下行拐点</h4>
+                    <p>上涨行情往往伴随风险预算和资产负债表扩张。融资增加把未来偿付能力转化为当下购买力，主动买单增多；价格与趋势得到确认后，趋势资金继续加仓，又反过来支持风险预算扩张，形成自我强化的上行循环。</p>
+                    <div class="risk-thesis-flow" aria-label="融资扩张由上行正反馈转向去杠杆负反馈的过程">
+                        <div class="risk-thesis-stage expansion">
+                            <strong>上行正反馈</strong>
+                            <span>风险预算增加 → 融资扩张 → 主动购买力增强 → 趋势资金加仓</span>
+                        </div>
+                        <div class="risk-thesis-turn">MEWS 观察<br>减速与反向</div>
+                        <div class="risk-thesis-stage contraction">
+                            <strong>下行负反馈</strong>
+                            <span>扩张减速 → 个股融资动能广泛转弱 → 净偿还扩散 → 去杠杆</span>
+                        </div>
+                    </div>
+                    <p class="risk-thesis-note">因此，MEWS 关注的不是“融资余额高就会下跌”，而是融资负荷已经积累时，推动上涨的融资扩张何时减速、扩散并最终反向。它把过程拆成较早的“购买力耗竭”和较后的“持续去杠杆”两条路径。融资是这套机制的重要可观测代理，但不代表市场全部风险预算和资金来源。</p>
+                </section>
+                <p class="risk-explainer-intro">所有分数均为 0—100。越高表示对应环节越强，不是未来下跌概率；价格涨跌本身不进入公式，最终风险状态由冻结阈值和连续日规则决定。</p>
                 <div class="risk-explainer-list">
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#c62828"></span>MEWS 主指数</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>购买力耗竭路径与持续去杠杆路径两者中的较高值。</dd>
-                            <dt>表明什么</dt><dd>越高表示至少一条融资风险链条越完整；越低只表示融资链条暂未形成明显组合风险。</dd>
-                            <dt>导向结果</dt><dd>直接进入 NORMAL、WATCH、WARNING、DANGER 状态机；它不是大盘涨跌预测。</dd>
+                            <dt>是什么</dt><dd>购买力耗竭路径与持续去杠杆路径的较高值，用一个分数保留融资正反馈反转的不同阶段。</dd>
+                            <dt>表明什么</dt><dd>越高表示“高融资负荷＋扩张减速”或“高融资负荷＋实际收缩”至少一条链条已经较完整；低分只说明融资链条暂未形成组合风险。</dd>
+                            <dt>导向结果</dt><dd>直接进入 NORMAL、WATCH、WARNING、DANGER 状态机。它衡量融资条件，不等同于大盘下跌预测。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#ef6c00"></span>购买力耗竭路径</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>立方根〔耗竭强度 × MLS 融资负荷 × NIB 负脉冲〕。</dd>
-                            <dt>表明什么</dt><dd>越高表示融资存量偏重，同时新增融资动能正在广泛减弱。</dd>
-                            <dt>导向结果</dt><dd>作为 MEWS 的候选值；高于另一条路径时成为主导路径并推高 MEWS。</dd>
+                            <dt>是什么</dt><dd>立方根〔耗竭强度 × MLS 融资负荷 × NIB 负脉冲〕，对应融资扩张由加速转为减速的较早阶段。</dd>
+                            <dt>表明什么</dt><dd>越高表示此前累积的融资负荷较重，但新增融资形成的边际购买力正在减弱，而且转弱已从少数股票向更大融资持仓扩散；此时总融资余额未必已经下降。</dd>
+                            <dt>导向结果</dt><dd>作为 MEWS 的候选值；高于持续去杠杆路径时成为主导路径，用于提示上行正反馈正在失去增量燃料。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#7b1fa2"></span>持续去杠杆路径</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>立方根〔MLS 融资负荷 × DLB 去杠杆覆盖 × 持续净偿还〕。</dd>
-                            <dt>表明什么</dt><dd>越高表示高融资负荷下，融资净偿还已经广泛扩散并持续存在。</dd>
-                            <dt>导向结果</dt><dd>作为 MEWS 的候选值；连续满足专用阈值时还会参与 DANGER 判定。</dd>
+                            <dt>是什么</dt><dd>立方根〔MLS 融资负荷 × DLB 去杠杆覆盖 × 持续净偿还〕，对应融资资产负债表已经开始收缩的较后阶段。</dd>
+                            <dt>表明什么</dt><dd>越高表示净偿还不只是个别大户或单日波动，而是在较重融资负荷下广泛扩散并持续存在，融资购买力正在转化为偿债压力。</dd>
+                            <dt>导向结果</dt><dd>作为 MEWS 的候选值；连续高企会参与 DANGER 判定，代表下行负反馈已比单纯“扩张减速”更明确。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#ad1457"></span>耗竭强度（100−MPI）</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>MPI 的反向分数，用于把“融资动能弱”转换成“耗竭程度高”。</dd>
-                            <dt>表明什么</dt><dd>越高表示近期融资扩张速度相对过去一个月越弱。</dd>
-                            <dt>导向结果</dt><dd>直接抬高购买力耗竭路径；不单独改变风险状态。</dd>
+                            <dt>是什么</dt><dd>MPI 的反向分数，把“融资扩张动能处于低位”转换为“推动上涨的边际融资购买力正在耗竭”。</dd>
+                            <dt>表明什么</dt><dd>越高表示短期融资净流率相对中期明显减速；即使净融资仍为正，只要增量速度持续回落，也可能先出现高耗竭强度。</dd>
+                            <dt>导向结果</dt><dd>直接进入购买力耗竭路径，但必须与高 MLS 和广泛 NIB 同时出现才会显著推高该路径。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#1976d2"></span>MPI 融资脉冲</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>市场融资流率 EMA5 减 EMA20 后，在最近 500 个交易日中的历史分位。</dd>
-                            <dt>表明什么</dt><dd>越高表示新增融资动能越强；越低表示边际购买力越弱。</dd>
-                            <dt>导向结果</dt><dd>核心公式使用 100−MPI，因此 MPI 越低，购买力耗竭路径越容易上升。</dd>
+                            <dt>是什么</dt><dd>普通 A 股融资净流率的 EMA5 减 EMA20，再取最近 500 个交易日的历史分位；它观察的是扩张速度变化，不是融资余额水平。</dd>
+                            <dt>表明什么</dt><dd>越高表示短期净融资率强于中期、融资购买力仍在加速；越低表示扩张正在减速或反向，是上行正反馈可能转折的第一层信号。</dd>
+                            <dt>导向结果</dt><dd>核心路径使用 100−MPI，因此 MPI 越低，耗竭强度越高；MPI 高则说明融资扩张引擎仍有动能。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#5e35b1"></span>MLS 融资负荷</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>融资余额相对前 20 个交易日自由流通市值中位数的历史分位。</dd>
-                            <dt>表明什么</dt><dd>越高表示融资存量相对市场承载规模越重，融资脆弱性越高。</dd>
-                            <dt>导向结果</dt><dd>同时进入两条风险路径；MLS 高是放大条件，但单独升高不会触发风险状态。</dd>
+                            <dt>是什么</dt><dd>普通 A 股融资余额相对前 20 个交易日自由流通市值中位数的比率，再取 500 日历史分位。</dd>
+                            <dt>表明什么</dt><dd>越高表示上涨过程中积累的融资资产负债表相对市场承载规模越重：它既可能继续提供购买力，也意味着一旦扩张停止，需要被消化或偿还的负债更多。</dd>
+                            <dt>导向结果</dt><dd>同时进入两条路径，作为脆弱性和放大条件。MLS 高但 MPI 仍高时只是“高负荷、仍扩张”，不会单独触发风险。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#00897b"></span>NIB 负脉冲</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>NIB 覆盖与 NIB 幅度的几何平均，兼顾负融资脉冲的范围和深度。</dd>
-                            <dt>表明什么</dt><dd>越高表示融资动能减弱覆盖的融资持仓越广、减弱程度越深。</dd>
-                            <dt>导向结果</dt><dd>直接进入购买力耗竭路径；范围或幅度任一不足都会压低该路径。</dd>
+                            <dt>是什么</dt><dd>NIB 覆盖与 NIB 幅度的几何平均，检验总量融资减速是否也出现在逐股资产负债表上。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资扩张减速既覆盖更大融资持仓，又具有更深的标准化降幅，因而更像市场性拐点而不是少数权重股噪声。</dd>
+                            <dt>导向结果</dt><dd>直接进入购买力耗竭路径；覆盖范围或转弱深度任一不足，都会压低路径并减少误报。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#26a69a"></span>NIB 覆盖</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>出现标准化负融资脉冲的股票，按前一日融资余额加权后的占比。</dd>
-                            <dt>表明什么</dt><dd>越高表示融资动能转弱不是少数个股现象，而是在更大融资持仓范围扩散。</dd>
-                            <dt>导向结果</dt><dd>与 NIB 幅度共同生成 NIB，间接推高购买力耗竭路径。</dd>
+                            <dt>是什么</dt><dd>出现标准化负融资脉冲的股票，按前一日融资余额加权后占全部有效融资余额的比例。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资动能转弱已覆盖更大比例的融资资产负债表，而非只发生在若干小股票；它回答“减速有多广”。</dd>
+                            <dt>导向结果</dt><dd>与 NIB 幅度共同生成 NIB；只有广度扩散，个股转弱才更可能上升为市场级购买力耗竭。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#80cbc4"></span>NIB 幅度</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>各股票负融资脉冲超过固定门槛后的标准化深度，并按融资余额加权。</dd>
-                            <dt>表明什么</dt><dd>越高表示已经转弱的股票，其融资动能下降得越深。</dd>
-                            <dt>导向结果</dt><dd>与 NIB 覆盖共同生成 NIB，间接推高购买力耗竭路径。</dd>
+                            <dt>是什么</dt><dd>逐股负融资脉冲超过固定门槛后的标准化深度，按前一日融资余额加权汇总。</dd>
+                            <dt>表明什么</dt><dd>越高表示重要融资持仓中的扩张速度下降得越深；它回答“减速有多重”，并避免把轻微波动当成显著反转。</dd>
+                            <dt>导向结果</dt><dd>与 NIB 覆盖共同生成 NIB；只有深度与广度共同上升，购买力耗竭路径才会明显增强。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#455a64"></span>DLB 去杠杆覆盖</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>连续五日累计净融资为负的股票，按前一日融资余额加权后的占比。</dd>
-                            <dt>表明什么</dt><dd>越高表示融资负债收缩已扩散到更大比例的融资持仓。</dd>
+                            <dt>是什么</dt><dd>最近五个交易日累计净融资为负的股票，按前一日融资余额加权后的占比。</dd>
+                            <dt>表明什么</dt><dd>越高表示融资资产负债表的实际收缩已覆盖更大比例持仓，从“扩张减速”进入“广泛去杠杆”。</dd>
                             <dt>导向结果</dt><dd>直接进入持续去杠杆路径；DLB≥75 且持续净偿还≥99 时可直接触发 DANGER。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#3949ab"></span>持续净偿还</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>市场融资流率 EMA5 取反后，在最近 500 个交易日中的历史分位。</dd>
-                            <dt>表明什么</dt><dd>越高表示市场整体持续净融资偿还的程度越异常。</dd>
+                            <dt>是什么</dt><dd>普通 A 股融资净流率 EMA5 取反后，在最近 500 个交易日中的历史分位，观察市场总量收缩的持续水平。</dd>
+                            <dt>表明什么</dt><dd>越高表示近期净融资率越偏负、融资负债偿还相对历史越强；它与 DLB 分别回答“总量收缩多强”和“收缩覆盖多广”。</dd>
                             <dt>导向结果</dt><dd>直接进入持续去杠杆路径；达到 99 且 DLB≥75 时可直接触发 DANGER。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#f9a825"></span>融资买入不足</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>近期融资买入强度历史分位的反向分数。</dd>
-                            <dt>表明什么</dt><dd>越高表示近期融资买入水平越低，可用于确认购买力是否真的收缩。</dd>
-                            <dt>导向结果</dt><dd>仅作诊断，不进入 MEWS 两条路径，也不直接参与状态判断。</dd>
+                            <dt>是什么</dt><dd>融资买入额相对前一日融资余额的 EMA5 历史分位，再取反向分数。</dd>
+                            <dt>表明什么</dt><dd>越高表示新融资买盘不足，可用于判断净流量转弱是否主要来自“新增风险预算不再进入”。</dd>
+                            <dt>导向结果</dt><dd>仅作原因诊断，不进入两条路径，也不直接参与状态判断；它帮助区分买入退潮与偿还上升。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#6d4c41"></span>偿还水平</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>近期融资偿还强度在最近 500 个交易日中的历史分位。</dd>
-                            <dt>表明什么</dt><dd>越高表示近期融资偿还额相对融资余额处于越高水平。</dd>
-                            <dt>导向结果</dt><dd>仅作诊断，不进入 MEWS 两条路径，也不直接参与状态判断。</dd>
+                            <dt>是什么</dt><dd>融资偿还额相对前一日融资余额的 EMA5，在最近 500 个交易日中的历史分位。</dd>
+                            <dt>表明什么</dt><dd>越高表示偿债和降杠杆流量相对融资存量越强，可用于判断收缩是否主要由偿还端推动；偿还不必然等同于卖股。</dd>
+                            <dt>导向结果</dt><dd>仅作原因诊断，不进入两条路径，也不直接参与状态判断；需与融资买入不足和净流量共同阅读。</dd>
                         </dl>
                     </section>
                     <section class="risk-explainer-item">
                         <h4><span class="risk-explainer-swatch" style="--series-color:#607d8b"></span>MEWS 历史分位</h4>
                         <dl class="risk-explainer-detail">
-                            <dt>是什么</dt><dd>当前 MEWS 在最近 500 个交易日有效观测中的相对位置。</dd>
-                            <dt>表明什么</dt><dd>越高表示当前 MEWS 相对近期历史越少见，不表示风险发生概率。</dd>
-                            <dt>导向结果</dt><dd>仅作历史定位；生产状态使用冻结阈值，不使用该滚动分位重新定级。</dd>
+                            <dt>是什么</dt><dd>当前 MEWS 原始分数在最近 500 个交易日有效观测中的中位秩位置，至少需要 120 个有效值。</dd>
+                            <dt>表明什么</dt><dd>越高表示当前融资反转链条相对近两年历史越少见；它是相对位置，不是下跌概率，也不说明未来跌幅。</dd>
+                            <dt>导向结果</dt><dd>仅作历史定位。生产状态使用冻结的原始分数阈值，避免滚动分位随市场变化而移动风险标准。</dd>
                         </dl>
                     </section>
                 </div>
+                <section class="risk-state-guide">
+                    <h4>把指标连起来读</h4>
+                    <ul>
+                        <li>MLS 先回答资产负债表扩张累积得有多重；MLS 高但 MPI 高，表示高负荷下融资动能仍强，尚不是耗竭。</li>
+                        <li>MPI 与耗竭强度回答总量扩张是否减速，NIB 覆盖与幅度再确认减速是否已向逐股融资持仓扩散。</li>
+                        <li>DLB 与持续净偿还回答融资是否已经从“少增”变为“广泛缩表”，用于识别更明确的去杠杆阶段。</li>
+                        <li>融资买入不足和偿还水平只拆解原因；最终看两条路径、MEWS、数据状态及信号可用日。</li>
+                    </ul>
+                </section>
                 <section class="risk-state-guide">
                     <h4>最终状态如何形成</h4>
                     <ul>

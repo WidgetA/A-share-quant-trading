@@ -19,6 +19,12 @@ def test_margin_risk_metric_guide_explains_every_chart_metric() -> None:
 
     assert 'id="riskMetricGuideButton"' in html
     assert 'role="dialog"' in html
+    assert "从融资扩张的正反馈寻找下行拐点" in html
+    assert "风险预算增加 → 融资扩张 → 主动购买力增强 → 趋势资金加仓" in html
+    assert "扩张减速 → 个股融资动能广泛转弱 → 净偿还扩散 → 去杠杆" in html
+    assert "融资余额高就会下跌" in html
+    assert "不代表市场全部风险预算和资金来源" in html
+    assert "把指标连起来读" in html
     assert html.count('class="risk-explainer-item"') == 14
     assert html.count("<dt>是什么</dt>") == 14
     assert html.count("<dt>表明什么</dt>") == 14
