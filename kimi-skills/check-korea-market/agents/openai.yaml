@@ -1,0 +1,4 @@
+interface:
+  display_name: "韩国股市查询"
+  short_description: "查询KOSPI和KOSDAQ在北京时间指定时刻的双源行情"
+  default_prompt: "使用 $check-korea-market 查询韩国股市；未指定时间时查询北京时间09:00。"

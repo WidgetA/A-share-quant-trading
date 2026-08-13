@@ -80,6 +80,8 @@ def test_extract_text_rejects_non_text_and_bad_json():
 def test_route_classification():
     assert route("/持仓") == ("slash", "/持仓")
     assert route("/持仓 请查一下") == ("slash", "/持仓")
+    assert route("/韩股") == ("slash", "/韩股")
+    assert route("/预警 立航科技跌破68提醒我") == ("slash", "/预警")
     assert route("/帮助") == ("help", "/帮助")
     assert route("/help") == ("help", "/help")
     assert route("/不存在") == ("unknown_slash", "/不存在")
@@ -91,6 +93,18 @@ def test_build_task_prompt_pins_skill_and_rules():
     prompt = build_task_prompt("/持仓")
     assert "check-holdings" in prompt
     assert "只做只读查询" in prompt  # task book actually embedded
+
+
+def test_korea_command_preserves_explicit_time():
+    prompt = build_task_prompt("/韩股", "/韩股 北京时间10:30")
+    assert "check-korea-market" in prompt
+    assert "用户原话:/韩股 北京时间10:30" in prompt
+
+
+def test_price_alert_command_preserves_stock_condition():
+    prompt = build_task_prompt("/预警", "/预警 立航科技跌破68提醒我")
+    assert "manage-price-alerts" in prompt
+    assert "用户原话:/预警 立航科技跌破68提醒我" in prompt
 
 
 # ── _handle behaviour ────────────────────────────────────────────────────
@@ -166,6 +180,8 @@ async def test_help_command_lists_capabilities(monkeypatch: pytest.MonkeyPatch):
     assert len(replies) == 2
     for r in replies:
         assert "/持仓" in r and "总资产" in r  # 列表带命令和大白话说明
+        assert "/韩股" in r and "09:00" in r
+        assert "/预警" in r and "只通知不交易" in r
         assert "/帮助" in r
 
 

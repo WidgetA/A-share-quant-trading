@@ -52,6 +52,16 @@ SLASH_COMMANDS: dict[str, dict[str, str]] = {
         "desc": "查账户概览+持仓:总资产/今日/本周/可用资金 + 每只的成本、现价、市值、盈亏",
         "ack": "收到,正在查询账户概览和持仓,大约一分钟,查到就回在这里。",
     },
+    "/韩股": {
+        "skill": "check-korea-market",
+        "desc": "查KOSPI/KOSDAQ；不写时间默认北京时间09:00，并区分截面双红和开盘双红",
+        "ack": "收到,正在双源核对韩国股市,没写时间就查北京时间09:00。",
+    },
+    "/预警": {
+        "skill": "manage-price-alerts",
+        "desc": "创建、查看或取消持仓价格预警；条件命中后发飞书，只通知不交易",
+        "ack": "收到,正在核对持仓和价格条件,并设置或查询预警。",
+    },
 }
 
 # Help is meta-information — answered instantly by the dispatcher, no kimi run.
@@ -120,14 +130,16 @@ def route(text: str) -> tuple[str, str]:
     return ("free", text)
 
 
-def build_task_prompt(command: str) -> str:
+def build_task_prompt(command: str, user_text: str | None = None) -> str:
     """Task prompt for one slash command: task book + pinned skill."""
     instructions = _INSTRUCTIONS_PATH.read_text(encoding="utf-8")
     skill = SLASH_COMMANDS[command]["skill"]
+    original = user_text or command
     return (
         f"{instructions}\n\n"
         f"## 本次任务\n\n"
         f"用户命令:{command}\n"
+        f"用户原话:{original}\n"
         f"指定执行的技能:{skill}(已在你的技能列表里,技能文件在 "
         f"{SKILLS_DIR / skill / 'SKILL.md'},先读它,严格照做)。\n"
     )
@@ -319,7 +331,7 @@ class AssistantDispatcher:
             try:
                 if kind == "slash":
                     # 照本宣科的技能:关 thinking 换速度
-                    prompt, thinking = build_task_prompt(value), False
+                    prompt, thinking = build_task_prompt(value, text), False
                 else:
                     # 自由发挥:开 thinking——选表/选工具/失败绕道全靠推理
                     prompt, thinking = build_free_task_prompt(text), True

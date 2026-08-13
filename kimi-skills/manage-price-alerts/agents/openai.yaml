@@ -1,0 +1,4 @@
+interface:
+  display_name: "持仓价格预警"
+  short_description: "根据持仓股票价格条件创建、查看、取消并触发飞书预警任务"
+  default_prompt: "使用 $manage-price-alerts 创建、查看或取消持仓价格预警。"

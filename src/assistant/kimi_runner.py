@@ -86,6 +86,9 @@ async def run_kimi_assistant_task(
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["ASSISTANT_API_BASE"] = api_base
+    # Bundled skills may invoke deterministic helper scripts. Kimi runs in a
+    # scratch work_dir, so expose the real repository/image skill root.
+    env["ASSISTANT_SKILLS_DIR"] = str(SKILLS_DIR)
     if readonly_key:
         env["ASSISTANT_READONLY_KEY"] = readonly_key
     # NEVER hand the trading key to kimi — read-only key or nothing.

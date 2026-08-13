@@ -598,6 +598,24 @@ def create_app(
                 git_branch=os.environ.get("GIT_BRANCH"),
             )
 
+        # Persistent holding-price alerts. Kimi only writes a small rule into
+        # data/price_alerts.sqlite3; this deterministic monitor owns evaluation
+        # and Feishu delivery. It consumes the existing 30-second broker cache
+        # and never calls any trading endpoint.
+        app.state.price_alert_monitor = None
+        app.state.price_alert_monitor_task = None
+        try:
+            from src.assistant.price_alerts import PriceAlertMonitor
+
+            price_alert_monitor = PriceAlertMonitor(app.state)
+            app.state.price_alert_monitor = price_alert_monitor
+            app.state.price_alert_monitor_task = asyncio.create_task(price_alert_monitor.run())
+            logger.info("Holding price alert monitor started")
+        except Exception as exc:
+            logger.exception("Holding price alert monitor failed to start")
+            if bot.is_configured():
+                await bot.send_message(f"[持仓价格预警] 监控未启动: {exc}", max_retries=2)
+
         # Auto-start ML monitoring scheduler (readiness, broker alerts).
         # CRITICAL: must start before non-critical tasks (cache loading + audit) —
         # safety monitoring cannot be skipped (see docs/trading-safety-patterns.md
@@ -819,6 +837,11 @@ def create_app(
         if assistant is not None:
             assistant.stop()
             logger.info("Feishu assistant stopped")
+
+        price_alert_task = getattr(app.state, "price_alert_monitor_task", None)
+        if price_alert_task and not price_alert_task.done():
+            price_alert_task.cancel()
+            logger.info("Holding price alert monitor stopped")
 
         # Stop momentum monitor
         monitor_state = getattr(app.state, "momentum_monitor_state", None)
