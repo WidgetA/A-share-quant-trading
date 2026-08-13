@@ -48,7 +48,7 @@ async def test_scheduled_refresh_remains_bounded() -> None:
     state = SimpleNamespace(margin_risk_service=service, cache_fill_running=False)
     scheduler = MarginRiskRefreshScheduler(state)
 
-    result = await scheduler._refresh_once(trigger="08:50", max_days=5)
+    result = await scheduler._refresh_once(trigger="09:10", max_days=5)
 
     assert result == {"status": "OK", "filled": 0, "remaining": 0}
     assert service.max_days_calls == [5]

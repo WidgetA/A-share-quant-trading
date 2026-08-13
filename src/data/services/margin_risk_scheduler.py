@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 _TZ = ZoneInfo("Asia/Shanghai")
-_RUN_AT = time(8, 50)  # Tushare documents margin data as updating around 08:30.
+_RUN_AT = time(9, 10)  # Leave enough time for the upstream margin data publication.
 _STARTUP_DELAY_SECONDS = 5
 _STARTUP_RETRY_SECONDS = 15
 _STARTUP_ERROR_RETRY_SECONDS = 300
@@ -60,7 +60,7 @@ class MarginRiskRefreshScheduler:
             return
 
     async def run(self) -> None:
-        logger.info("MEWS refresh scheduler started (startup bootstrap + 08:50 Asia/Shanghai)")
+        logger.info("MEWS refresh scheduler started (startup bootstrap + 09:10 Asia/Shanghai)")
         try:
             await self._bootstrap_history()
             while True:
@@ -69,6 +69,6 @@ class MarginRiskRefreshScheduler:
                 if now >= target:
                     target += timedelta(days=1)
                 await asyncio.sleep((target - now).total_seconds())
-                await self._refresh_once(trigger="08:50", max_days=5)
+                await self._refresh_once(trigger="09:10", max_days=5)
         except asyncio.CancelledError:
             logger.info("MEWS refresh scheduler cancelled")
