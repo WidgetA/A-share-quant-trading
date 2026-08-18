@@ -18,6 +18,7 @@ from src.margin_risk.calculations import (
 )
 from src.margin_risk.config import MarginRiskConfig
 from src.margin_risk.models import DataStatus, RiskState
+from src.margin_risk.publication import latest_published_trade_date
 from src.margin_risk.tushare_source import TushareMarginRiskSource
 from src.margin_risk.universe import is_active_on, is_ordinary_a_stock
 from src.margin_risk.v2_calculations import (
@@ -102,6 +103,13 @@ class MarginRiskProductionService:
         Manual data maintenance calls this without ``max_days`` so the first run
         builds the full history.  Scheduled runs use a small bound and are
         resume-safe through the per-day ``ingestion_status='OK'`` checkpoint.
+
+        The target end is always clamped to the last trading day whose margin
+        data upstream has actually published (09:10 Beijing on the next trading
+        day).  That publication time is the data's own availability boundary,
+        not a failure: runs that start earlier — the 3am maintenance pass, a
+        restart bootstrap — simply have nothing newer to fetch, so an
+        unpublished day is never counted as a gap or recorded as FAILED.
         """
 
         if self._lock.locked():
@@ -109,25 +117,29 @@ class MarginRiskProductionService:
         async with self._lock:
             await self.ensure_schema()
             start = start or self.config.history_start
-            end = end or (datetime.now(BEIJING_TZ).date() - timedelta(days=1))
-            if end < start:
-                result = {"status": "OK", "filled": 0, "failed": [], "metrics": 0}
-                self.last_result = result
-                return result
+            now = datetime.now(BEIJING_TZ)
+            requested_end = end
 
             source = self._source_factory()
             await source.start()
             try:
                 # Keep enough future calendar to assign signal_available_date
                 # across Spring Festival and other extended exchange closures.
-                calendar_end = end + timedelta(days=31)
+                calendar_end = max(now.date(), requested_end or now.date()) + timedelta(days=31)
                 sse = await source.fetch_trade_calendar("SSE", start, calendar_end)
                 szse = await source.fetch_trade_calendar("SZSE", start, calendar_end)
                 sse_open = {row["cal_date"] for row in sse if row["is_open"]}
                 szse_open = {row["cal_date"] for row in szse if row["is_open"]}
                 if sse_open != szse_open:
                     raise MarginRiskDataError("SSE/SZSE trade calendars are inconsistent")
-                target_dates = sorted(day for day in sse_open if start <= day <= end)
+                open_days = sorted(sse_open)
+                published_through = latest_published_trade_date(open_days, now=now)
+                if published_through is None:
+                    return self._empty_result(published_through=None)
+                end = min(requested_end, published_through) if requested_end else published_through
+                if end < start:
+                    return self._empty_result(published_through=published_through)
+                target_dates = [day for day in open_days if start <= day <= end]
                 completed = await self.store.get_complete_dates(start, end)
                 missing = [day for day in target_dates if day not in completed]
                 if max_days is not None:
@@ -193,14 +205,20 @@ class MarginRiskProductionService:
                         )
                 if changed_from is not None and raw_end is not None:
                     next_open = next(
-                        (day for day in sorted(sse_open) if day > raw_end),
+                        (day for day in open_days if day > raw_end),
                         None,
                     )
                     metrics = await self.recompute(
                         changed_from=changed_from,
                         next_open=next_open,
                     )
-                remaining = max(0, len(target_dates) - len(completed | set(filled)))
+                stored = {day for day in target_dates if day in completed} | set(filled)
+                remaining = max(0, len(target_dates) - len(stored))
+                # ``latest_complete == published_through`` is the only honest
+                # "we are caught up" test: a call can succeed while the newest
+                # published day is still missing, and the refresh scheduler
+                # retries on exactly that difference.
+                latest_complete = max(stored) if stored else None
                 result = {
                     "status": "OK" if not failed else "PARTIAL",
                     "target_days": len(target_dates),
@@ -208,11 +226,29 @@ class MarginRiskProductionService:
                     "failed": [day.isoformat() for day in failed],
                     "remaining": remaining,
                     "metrics": metrics,
+                    "published_through": published_through.isoformat(),
+                    "latest_complete": latest_complete.isoformat() if latest_complete else None,
                 }
                 self.last_result = result
                 return result
             finally:
                 await source.stop()
+
+    def _empty_result(self, *, published_through: date | None) -> dict[str, Any]:
+        """Nothing to do — no published day yet, or the window ends before it starts."""
+
+        result: dict[str, Any] = {
+            "status": "OK",
+            "target_days": 0,
+            "filled": 0,
+            "failed": [],
+            "remaining": 0,
+            "metrics": 0,
+            "published_through": published_through.isoformat() if published_through else None,
+            "latest_complete": None,
+        }
+        self.last_result = result
+        return result
 
     async def _ingest_day(
         self,

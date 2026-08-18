@@ -121,7 +121,7 @@ uv run uvicorn src.web.app:create_app --factory --host 0.0.0.0 --port 8000
 5. Start ML monitoring scheduler (daily readiness report + broker health check) — **before** cache loading + audit (safety-critical, see trading-safety-patterns.md)
 6. Connect GreptimeDB storage + CachePipeline (background retry if unavailable)
 7. Run trading safety audit (Feishu alert on CRITICAL)
-8. Start cache scheduler (3am), MEWS post-publication refresh (8:50am), model training scheduler, pre-market report scheduler (8am), intraday momentum monitor
+8. Start cache scheduler (3am), MEWS post-publication refresh (9:15am, retries until the 9:10 upstream publication lands), model training scheduler, pre-market report scheduler (8am), intraday momentum monitor
 
 **Files**:
 - `src/web/app.py` - FastAPI application factory
@@ -837,12 +837,14 @@ MEWS观察沪深普通A股的融资负荷、融资购买力耗竭和融资负债
 - `margin_risk_security_daily`：逐股融资余额、买入额、偿还额。
 - `margin_risk_market_daily`：沪深市场汇总、普通A股汇总、自由流通市值、覆盖率、交易所完整性和摄取状态。
 - `margin_risk_metric_daily`：MEWS、两条路径、MPI、MLS、NIB及其宽度/幅度、DLB、持续净偿还、风险状态、数据状态和冻结阈值。
-- 启动时幂等建表并立即后台触发MEWS完整历史补全；GreptimeDB未就绪或数据维护占用时自动等待后再执行。手动“数据检查和补充”同样补完整历史，凌晨3点任务有界续补，08:50在Tushare约08:30发布后补最新日。原始数据已齐但指标重算中断时，下一次检查会按原始末日与指标末日的差异续算。
+- 启动时幂等建表并立即后台触发MEWS完整历史补全；GreptimeDB未就绪或数据维护占用时自动等待后再执行。手动“数据检查和补充”同样补完整历史，凌晨3点任务有界续补。原始数据已齐但指标重算中断时，下一次检查会按原始末日与指标末日的差异续算。
+- **发布时点是数据的可用边界（上游节奏，非故障）**：两融数据由交易所盘后汇总，Tushare（`margin`/`margin_detail`）在下一交易日09:10（北京）才提供上一交易日的数据。所有补数入口（启动补全、凌晨3点第⑦步、手动检查）统一把目标末日截到「此刻已发布的最新交易日」——凌晨3点跑时上一交易日尚未发布，只补更早的历史缺口，不把未发布日记成缺口或失败，因此每日维护汇总里第⑦步显示成功并附注“上游已发布至 YYYY-MM-DD”，不再为此发飞书告警（真实缺口/摄取失败仍照常告警）。09:15的发布后刷新负责补上当天新发布的那一天；若上游延迟，每10分钟重试一次，最多6次（约到10:15）后交给下一轮。
 - 任一交易所汇总缺失或覆盖异常时标记失败/部分，不发布可解释的MEWS值，也不把缺数当成低风险。
 
 **生产界面/API**：
 
 - 交易看板账户净值下方展示互动曲线，默认MEWS和两条路径，可勾选全部组成项；直接在图内使用滚轮/双指缩放、按住拖动平移、双击恢复全部，并提供逐日悬浮明细。标题旁“指标说明”弹窗逐项解释全部14条曲线是什么、数值表明什么以及如何导向最终状态。
+- 看板上的“更新于 HH:MM (北京)”一律按北京时间（`Asia/Shanghai`）渲染，不跟随浏览器本地时区——A股全系统统一北京时间口径，同一条时间戳在任何机器上读数必须一致（MEWS 卡片与账户净值卡片共用 `beijingHM()`）。
 - `GET /api/trading/margin-risk-curve?days=5000`返回时间序列、最新状态、冻结阈值和存储完整性摘要，并纳入助手只读Key白名单。
 
 **Files**：

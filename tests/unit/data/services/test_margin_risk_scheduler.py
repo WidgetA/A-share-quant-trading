@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import time
 from types import SimpleNamespace
 
 import pytest
 
 from src.data.services import margin_risk_scheduler as scheduler_module
-from src.data.services.margin_risk_scheduler import MarginRiskRefreshScheduler
+from src.data.services.margin_risk_scheduler import (
+    MarginRiskRefreshScheduler,
+    _is_caught_up,
+)
+from src.margin_risk.publication import MARGIN_PUBLISH_TIME
 
 
 class _MarginRiskService:
@@ -48,10 +53,95 @@ async def test_scheduled_refresh_remains_bounded() -> None:
     state = SimpleNamespace(margin_risk_service=service, cache_fill_running=False)
     scheduler = MarginRiskRefreshScheduler(state)
 
-    result = await scheduler._refresh_once(trigger="09:10", max_days=5)
+    result = await scheduler._refresh_once(trigger="09:15", max_days=5)
 
     assert result == {"status": "OK", "filled": 0, "remaining": 0}
     assert service.max_days_calls == [5]
+
+
+def test_refresh_scheduled_after_the_upstream_publication_time() -> None:
+    # Upstream publishes the previous session at 09:10; the refresh must sit
+    # after it, not race it.
+    assert scheduler_module._RUN_AT > MARGIN_PUBLISH_TIME
+    assert scheduler_module._RUN_AT == time(9, 15)
+
+
+def test_caught_up_means_the_published_day_is_stored_not_merely_no_error() -> None:
+    published = {"status": "OK", "published_through": "2026-08-10"}
+    assert not _is_caught_up({**published, "latest_complete": "2026-08-07"})
+    assert not _is_caught_up({**published, "latest_complete": None})
+    assert _is_caught_up({**published, "latest_complete": "2026-08-10"})
+    # A PARTIAL run that still stored the newest published day is caught up.
+    assert _is_caught_up(
+        {"status": "PARTIAL", "published_through": "2026-08-10", "latest_complete": "2026-08-10"}
+    )
+    assert not _is_caught_up({"status": "ERROR", "message": "boom"})
+    assert not _is_caught_up(None)
+    # Nothing published yet → no retry can help.
+    assert _is_caught_up({"status": "OK", "published_through": None, "latest_complete": None})
+
+
+@pytest.mark.asyncio
+async def test_late_publication_is_retried_until_the_newest_day_lands(monkeypatch) -> None:
+    class _LateService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def audit_and_fill(self, *, max_days: int | None = None) -> dict:
+            self.calls += 1
+            latest = "2026-08-10" if self.calls >= 3 else "2026-08-07"
+            return {
+                "status": "OK",
+                "published_through": "2026-08-10",
+                "latest_complete": latest,
+            }
+
+    service = _LateService()
+    state = SimpleNamespace(margin_risk_service=service, cache_fill_running=False)
+    scheduler = MarginRiskRefreshScheduler(state)
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+
+    result = await scheduler._refresh_until_published_day_is_stored(trigger="09:15")
+
+    assert service.calls == 3
+    assert sleeps == [scheduler_module._RETRY_INTERVAL_SECONDS] * 2
+    assert result["latest_complete"] == "2026-08-10"
+
+
+@pytest.mark.asyncio
+async def test_retries_are_bounded_when_upstream_never_publishes(monkeypatch) -> None:
+    class _NeverService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def audit_and_fill(self, *, max_days: int | None = None) -> dict:
+            self.calls += 1
+            return {
+                "status": "OK",
+                "published_through": "2026-08-10",
+                "latest_complete": "2026-08-07",
+            }
+
+    service = _NeverService()
+    state = SimpleNamespace(margin_risk_service=service, cache_fill_running=False)
+    scheduler = MarginRiskRefreshScheduler(state)
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(scheduler_module, "_MAX_RETRIES", 2)
+
+    result = await scheduler._refresh_until_published_day_is_stored(trigger="09:15")
+
+    # Hand back to the next scheduled pass instead of hammering upstream forever.
+    assert service.calls == 3
+    assert result["latest_complete"] == "2026-08-07"
 
 
 @pytest.mark.asyncio

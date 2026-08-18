@@ -206,6 +206,50 @@ async def test_pipeline_includes_mews_and_manual_trigger_is_unbounded(
 
 
 @pytest.mark.asyncio
+async def test_mews_step_is_not_an_alert_when_the_latest_session_is_unpublished(monkeypatch):
+    """3am runs before the 09:10 margin publication — that is not a gap.
+
+    ``audit_and_fill`` clamps its target to the last published trading day, so
+    the nightly summary reports 成功 and names the boundary instead of raising a
+    Feishu 告警 about a day upstream simply has not released yet.
+    """
+
+    calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN])
+    sent: list[str] = []
+
+    async def capture_notify(msg):
+        calls.append("notify")
+        sent.append(msg)
+
+    monkeypatch.setattr(mod, "_notify_feishu", capture_notify)
+
+    class _UpToDateMarginRiskService(_FakeMarginRiskService):
+        async def audit_and_fill(self, *, max_days=None):
+            self.max_days_calls.append(max_days)
+            return {
+                "status": "OK",
+                "filled": 0,
+                "metrics": 0,
+                "remaining": 0,
+                "failed": [],
+                "published_through": "2026-08-14",
+                "latest_complete": "2026-08-14",
+            }
+
+    lv = _FakeLV({"checked": 0, "verified": 0, "failed": 0, "remaining": 0, "findings": []}, calls)
+    state = _AppState(_FakeStorage(), _FakePipeline(_NO_GAPS, calls), lv=lv)
+    state.margin_risk_service = _UpToDateMarginRiskService()
+
+    result, message = await CacheScheduler(state)._run_pipeline("scheduled")
+
+    assert result == "success"
+    assert "告警" not in message
+    assert "⚠️" not in sent[0]
+    assert "✅ ⑦ MEWS融资风险" in sent[0]
+    assert "上游已发布至 2026-08-14" in sent[0]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_fill_gaps_triggers_confirm_rebuild(monkeypatch):
     # ③ then ⑥ both rebuild → supply two results.
     calls = _patch(monkeypatch, rebuild_results=[_RB_CLEAN, _RB_CLEAN])

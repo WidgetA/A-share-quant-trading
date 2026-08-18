@@ -29,3 +29,15 @@ def test_margin_risk_metric_guide_explains_every_chart_metric() -> None:
     assert html.count("<dt>是什么</dt>") == 14
     assert html.count("<dt>表明什么</dt>") == 14
     assert html.count("<dt>导向结果</dt>") == 14
+
+
+def test_updated_at_labels_render_beijing_time_not_browser_local_time() -> None:
+    """A股口径统一按北京时间;页面在任何时区打开都必须显示同一个读数。"""
+
+    html = _TEMPLATE.read_text(encoding="utf-8")
+
+    assert "timeZone: 'Asia/Shanghai'" in html
+    assert "hourCycle: 'h23'" in html
+    # 旧写法跟着浏览器本地时区走,不能再出现。
+    assert "toTimeString()" not in html
+    assert html.count("'更新于 ' + beijingHM() + ' (北京)'") == 2

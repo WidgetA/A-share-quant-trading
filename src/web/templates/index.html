@@ -1775,6 +1775,17 @@ async function clearDataEngineError() {
 
 // --- Account Overview (TRD-001) ---
 
+function beijingHM() {
+    // A股全系统按北京时间(UTC+8)口径,页面在任何时区打开都必须显示北京时间,
+    // 不能跟着浏览器本地时区走——否则同一条"更新于"在不同机器上读数不同。
+    return new Date().toLocaleTimeString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',  // 不用 hour12:false —— 部分浏览器在 0 点会渲染成 "24:xx"
+    });
+}
+
 function fmtMoney(v) {
     if (v == null || isNaN(v)) return '--';
     return Number(v).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
@@ -2113,7 +2124,7 @@ async function loadEquityCurve() {
             warnEl.appendChild(d);
         }
         const upd = document.getElementById('overviewUpdatedAt');
-        upd.textContent = '更新于 ' + new Date().toTimeString().slice(0, 5);
+        upd.textContent = '更新于 ' + beijingHM() + ' (北京)';
     } catch (e) {
         const container = document.getElementById('equityChart');
         container.textContent = '';
@@ -2598,8 +2609,7 @@ function renderRiskLatest(data) {
         storageText = '自动补数失败，等待下次重试：' + (fillResult.message || '未知错误');
     }
     document.getElementById('riskStorageStatus').textContent = storageText;
-    document.getElementById('riskUpdatedAt').textContent =
-        '更新于 ' + new Date().toTimeString().slice(0, 5);
+    document.getElementById('riskUpdatedAt').textContent = '更新于 ' + beijingHM() + ' (北京)';
 }
 
 async function loadMarginRiskCurve() {

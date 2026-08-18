@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from src.data.services.margin_risk_service import (
+    BEIJING_TZ,
     MarginRiskDataError,
     MarginRiskProductionService,
 )
 from src.margin_risk.config import MarginRiskConfig
+from src.margin_risk.publication import latest_published_trade_date
 
 
 class _IngestStore:
@@ -202,3 +204,46 @@ async def test_audit_retries_stale_metric_calculation_even_when_raw_days_are_com
     assert recompute_args == {"changed_from": dates[1], "next_open": dates[2]}
     assert result["filled"] == 0
     assert result["metrics"] == 1
+
+
+@pytest.mark.asyncio
+async def test_audit_stops_at_the_last_trading_day_upstream_has_published(monkeypatch) -> None:
+    """Margin data only exists from 09:10 of the next trading day.
+
+    Unattended runs start well before that (3am pipeline, restart bootstrap), so
+    the target end must follow the publication boundary rather than "today - 1
+    day" — an unpublished session is not a gap and must never be ingested or
+    recorded as a failure.
+    """
+
+    now = datetime.now(BEIJING_TZ)
+    days = [now.date() - timedelta(days=offset) for offset in (3, 2, 1, 0)]
+    published_through = latest_published_trade_date(days, now=now)
+    assert published_through is not None and published_through < now.date()
+
+    source = _AuditSource(days)
+    service = MarginRiskProductionService(
+        SimpleNamespace(db=object()),
+        config=MarginRiskConfig(history_start=days[0]),
+        source_factory=lambda: source,  # type: ignore[arg-type]
+    )
+    service.store = _AuditStore(days[0])  # type: ignore[assignment]
+    ingested: list[date] = []
+
+    async def fake_ingest(source_arg, day, ordinary_stocks, ordinary_codes):
+        ingested.append(day)
+
+    async def fake_recompute(*, changed_from, next_open=None):
+        return 1
+
+    monkeypatch.setattr(service, "_ingest_day", fake_ingest)
+    monkeypatch.setattr(service, "recompute", fake_recompute)
+
+    result = await service.audit_and_fill()
+
+    assert ingested == [day for day in days if day <= published_through]
+    assert now.date() not in ingested
+    assert result["published_through"] == published_through.isoformat()
+    assert result["latest_complete"] == published_through.isoformat()
+    assert result["remaining"] == 0
+    assert result["failed"] == []

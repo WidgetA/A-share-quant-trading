@@ -674,13 +674,14 @@ def create_app(
         logger.info("Cache scheduler started (3am daily)")
 
         # Bootstrap the full, idempotent MEWS history immediately in the
-        # background, then refresh around 09:10 after each upstream publication.
+        # background, then refresh at 09:15 — just after the upstream 09:10
+        # publication of the previous trading day's margin data.
         from src.data.services.margin_risk_scheduler import MarginRiskRefreshScheduler
 
         margin_risk_scheduler = MarginRiskRefreshScheduler(app.state)
         app.state.margin_risk_scheduler = margin_risk_scheduler
         app.state.margin_risk_scheduler_task = asyncio.create_task(margin_risk_scheduler.run())
-        logger.info("MEWS refresh scheduler started (startup bootstrap + 09:10 daily)")
+        logger.info("MEWS refresh scheduler started (startup bootstrap + 09:15 daily)")
 
         # Auto-start model training scheduler (finetune every 20 trading days)
         from src.data.services.model_training_scheduler import ModelTrainingScheduler

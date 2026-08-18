@@ -597,9 +597,11 @@ class CacheScheduler:
             await client.stop()
 
         # ⑦ MEWS — same manual "数据检查和补充" trigger builds all missing
-        # history. The unattended 3am pass is bounded and resume-safe; a separate
-        # post-publication scheduler refreshes the latest day after Tushare's
-        # ~08:30 margin update.
+        # history. The unattended 3am pass is bounded and resume-safe.
+        # 两融数据要到次一交易日 09:10 才发布,所以 3 点这一趟看不到上一交易日
+        # (这是数据的可用边界,不是缺数): audit_and_fill 自己把目标末日截到
+        # 「已发布的最新交易日」,这里只补更早的真实缺口;最新那天由 09:15 的
+        # 发布后刷新调度器补。
         margin_service = getattr(self._app_state, "margin_risk_service", None)
         if margin_service is None:
             steps.append(("⑦ MEWS融资风险", "跳过", "服务未初始化"))
@@ -618,6 +620,10 @@ class CacheScheduler:
                     f"补 {r.get('filled', 0)} 天 / 重算 {r.get('metrics', 0)} 天"
                     f" / 尚缺 {r.get('remaining', 0)} 天"
                 )
+                # 说清这一趟的数据边界:上一交易日的两融要次日 09:10 才发布,3 点
+                # 看不到它是正常的,不是漏补——报告里点明,免得看着像少了一天。
+                if r.get("published_through"):
+                    detail += f" (上游已发布至 {r['published_through']})"
                 failures = r.get("failed") or []
                 if failures:
                     detail += f" / 失败 {len(failures)} 天: {'、'.join(failures[:3])}"
