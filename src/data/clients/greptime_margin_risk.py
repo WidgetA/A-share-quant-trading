@@ -97,8 +97,44 @@ CREATE TABLE IF NOT EXISTS margin_risk_metric_daily (
 )
 """
 
+_CREATE_SECURITY_STATE_SQL = """
+CREATE TABLE IF NOT EXISTS margin_risk_security_state (
+    feature_version STRING,
+    stock_code STRING,
+    ts TIMESTAMP TIME INDEX,
+    current_balance FLOAT64,
+    ema_fast_state FLOAT64,
+    ema_fast_old_weight FLOAT64,
+    ema_slow_state FLOAT64,
+    ema_slow_old_weight FLOAT64,
+    valid_history STRING,
+    net_flow_history STRING,
+    impulse_history STRING,
+    updated_at INT64,
+    PRIMARY KEY (feature_version, stock_code)
+)
+"""
+
+_CREATE_AGGREGATE_SQL = """
+CREATE TABLE IF NOT EXISTS margin_risk_aggregate_daily (
+    materialization_version STRING,
+    ts TIMESTAMP TIME INDEX,
+    valid_balance FLOAT64,
+    nib_breadth FLOAT64,
+    nib_magnitude FLOAT64,
+    deleveraging_breadth FLOAT64,
+    state_count INT32,
+    source_updated_at INT64,
+    calculation_status STRING,
+    updated_at INT64,
+    PRIMARY KEY (materialization_version)
+)
+"""
+
 _SERIES = "MEWS"
 _VERSION = "mews_v2"
+_FEATURE_VERSION = "mews_security_v2_state_v1"
+_MATERIALIZATION_VERSION = "mews_security_v2_daily_v1"
 _WRITE_BATCH = 100
 _READ_WINDOW_DAYS = 365
 _FILE_READ_LIMIT_ERROR = "Too many files to read concurrently"
@@ -181,6 +217,8 @@ class GreptimeMarginRiskStore:
     async def ensure_schema(self) -> None:
         await self._db.execute(_CREATE_SECURITY_SQL)
         await self._db.execute(_CREATE_MARKET_SQL)
+        await self._db.execute(_CREATE_SECURITY_STATE_SQL)
+        await self._db.execute(_CREATE_AGGREGATE_SQL)
         await self._db.execute(_CREATE_METRIC_SQL)
 
     async def replace_security_day(
@@ -323,6 +361,171 @@ class GreptimeMarginRiskStore:
                 output.append(item)
         output.sort(key=lambda item: (str(item["stock_code"]), item["trade_date"]))
         return output
+
+    async def get_all_security_rows(self, start: date, end: date) -> list[dict[str, Any]]:
+        """Read a narrow date range without first discovering every stock code."""
+
+        def build_sql(window_start: date, window_end: date) -> str:
+            return (
+                "SELECT stock_code,ts,financing_balance,financing_buy_amount,"
+                "financing_repayment_amount FROM margin_risk_security_daily "
+                f"WHERE ts >= {date_to_epoch_ms(window_start)} "
+                f"AND ts <= {date_to_epoch_ms(window_end)} ORDER BY stock_code,ts"
+            )
+
+        output: list[dict[str, Any]] = []
+        for window_start, window_end in _date_windows(start, end):
+            rows = await self._fetch_date_window(window_start, window_end, build_sql)
+            for raw in rows:
+                item = dict(raw)
+                item["trade_date"] = ts_to_date(item.pop("ts"))
+                item["ts_code"] = item["stock_code"]
+                output.append(item)
+        output.sort(key=lambda item: (item["trade_date"], str(item["stock_code"])))
+        return output
+
+    async def replace_security_states(
+        self,
+        trade_date: date,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Write one complete per-security calculation-state generation."""
+
+        ts_ms = date_to_epoch_ms(trade_date)
+        await self._db.execute(
+            "DELETE FROM margin_risk_security_state "
+            f"WHERE feature_version = {_q(_FEATURE_VERSION)} AND ts = {ts_ms}"
+        )
+        columns = (
+            "feature_version,stock_code,ts,current_balance,ema_fast_state,"
+            "ema_fast_old_weight,ema_slow_state,ema_slow_old_weight,valid_history,"
+            "net_flow_history,impulse_history,updated_at"
+        )
+        updated_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+        written = 0
+        for batch in _chunks(rows):
+            values = []
+            for row in batch:
+                ordered = (
+                    _q(_FEATURE_VERSION),
+                    _q(str(row["stock_code"])),
+                    str(ts_ms),
+                    _num(row.get("current_balance")),
+                    _num(row.get("ema_fast_state")),
+                    _num(row.get("ema_fast_old_weight")),
+                    _num(row.get("ema_slow_state")),
+                    _num(row.get("ema_slow_old_weight")),
+                    _text(row.get("valid_history")),
+                    _text(row.get("net_flow_history")),
+                    _text(row.get("impulse_history")),
+                    str(updated_at),
+                )
+                values.append("(" + ",".join(ordered) + ")")
+            if values:
+                await self._db.execute(
+                    f"INSERT INTO margin_risk_security_state ({columns}) VALUES " + ",".join(values)
+                )
+                written += len(batch)
+        return written
+
+    async def get_security_states(self, trade_date: date) -> list[dict[str, Any]]:
+        rows = await self._db.fetch(
+            "SELECT stock_code,current_balance,ema_fast_state,ema_fast_old_weight,"
+            "ema_slow_state,ema_slow_old_weight,valid_history,net_flow_history,"
+            "impulse_history FROM margin_risk_security_state "
+            f"WHERE feature_version = {_q(_FEATURE_VERSION)} "
+            f"AND ts = {date_to_epoch_ms(trade_date)} ORDER BY stock_code"
+        )
+        return [dict(row) for row in rows]
+
+    async def prune_security_states_before(self, trade_date: date) -> None:
+        """Keep state storage bounded after a newer READY checkpoint is published."""
+
+        await self._db.execute(
+            "DELETE FROM margin_risk_security_state "
+            f"WHERE feature_version = {_q(_FEATURE_VERSION)} "
+            f"AND ts < {date_to_epoch_ms(trade_date)}"
+        )
+
+    async def replace_aggregate_rows(
+        self,
+        start: date,
+        end: date,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Replace a complete range of materialized daily security aggregates."""
+
+        await self._db.execute(
+            "DELETE FROM margin_risk_aggregate_daily "
+            f"WHERE materialization_version = {_q(_MATERIALIZATION_VERSION)} "
+            f"AND ts >= {date_to_epoch_ms(start)} AND ts <= {date_to_epoch_ms(end)}"
+        )
+        columns = (
+            "materialization_version,ts,valid_balance,nib_breadth,nib_magnitude,"
+            "deleveraging_breadth,state_count,source_updated_at,calculation_status,updated_at"
+        )
+        updated_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+        written = 0
+        for batch in _chunks(rows):
+            values = []
+            for row in batch:
+                ordered = (
+                    _q(_MATERIALIZATION_VERSION),
+                    str(date_to_epoch_ms(row["trade_date"])),
+                    _num(row.get("valid_balance")),
+                    _num(row.get("nib_breadth")),
+                    _num(row.get("nib_magnitude")),
+                    _num(row.get("dlb")),
+                    _integer(row.get("state_count")),
+                    _integer(row.get("source_updated_at")),
+                    _text(row.get("calculation_status") or "READY"),
+                    str(updated_at),
+                )
+                values.append("(" + ",".join(ordered) + ")")
+            if values:
+                await self._db.execute(
+                    f"INSERT INTO margin_risk_aggregate_daily ({columns}) VALUES "
+                    + ",".join(values)
+                )
+                written += len(batch)
+        return written
+
+    async def replace_aggregate_day(self, trade_date: date, row: Mapping[str, Any]) -> None:
+        await self.replace_aggregate_rows(
+            trade_date,
+            trade_date,
+            [{**row, "trade_date": trade_date}],
+        )
+
+    async def get_aggregate_rows(self, start: date, end: date) -> list[dict[str, Any]]:
+        rows = await self._db.fetch(
+            "SELECT ts,valid_balance,nib_breadth,nib_magnitude,deleveraging_breadth,"
+            "state_count,source_updated_at,calculation_status "
+            "FROM margin_risk_aggregate_daily "
+            f"WHERE materialization_version = {_q(_MATERIALIZATION_VERSION)} "
+            f"AND ts >= {date_to_epoch_ms(start)} AND ts <= {date_to_epoch_ms(end)} "
+            "AND calculation_status = 'READY' ORDER BY ts"
+        )
+        output: list[dict[str, Any]] = []
+        for raw in rows:
+            item = dict(raw)
+            item["trade_date"] = ts_to_date(item.pop("ts"))
+            item["dlb"] = item.pop("deleveraging_breadth", None)
+            output.append(item)
+        return output
+
+    async def get_latest_aggregate(self) -> dict[str, Any] | None:
+        row = await self._db.fetchrow(
+            "SELECT ts,state_count,source_updated_at,calculation_status "
+            "FROM margin_risk_aggregate_daily "
+            f"WHERE materialization_version = {_q(_MATERIALIZATION_VERSION)} "
+            "AND calculation_status = 'READY' ORDER BY ts DESC LIMIT 1"
+        )
+        if row is None:
+            return None
+        item = dict(row)
+        item["trade_date"] = ts_to_date(item.pop("ts"))
+        return item
 
     async def replace_metrics(
         self,

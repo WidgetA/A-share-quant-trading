@@ -35,10 +35,56 @@ async def test_ensure_schema_creates_raw_and_metric_tables() -> None:
     ddl = "\n".join(db.executed)
     assert "margin_risk_security_daily" in ddl
     assert "margin_risk_market_daily" in ddl
+    assert "margin_risk_security_state" in ddl
+    assert "margin_risk_aggregate_daily" in ddl
     assert "margin_risk_metric_daily" in ddl
     assert "financing_repayment_amount FLOAT64" in ddl
     assert "persistent_deleveraging_path FLOAT64" in ddl
     assert "data_status STRING" in ddl
+
+
+@pytest.mark.asyncio
+async def test_materialized_state_and_aggregate_writes_are_versioned_and_checkpointed() -> None:
+    db = _FakeDB()
+    store = GreptimeMarginRiskStore(SimpleNamespace(db=db))
+    day = date(2026, 8, 6)
+
+    states = await store.replace_security_states(
+        day,
+        [
+            {
+                "stock_code": "000001.SZ",
+                "current_balance": 100.0,
+                "ema_fast_state": 0.1,
+                "ema_fast_old_weight": 1.0,
+                "ema_slow_state": 0.05,
+                "ema_slow_old_weight": 1.0,
+                "valid_history": "[true]",
+                "net_flow_history": "[1.0]",
+                "impulse_history": "[0.05]",
+            }
+        ],
+    )
+    await store.replace_aggregate_day(
+        day,
+        {
+            "valid_balance": 100.0,
+            "nib_breadth": 25.0,
+            "nib_magnitude": 10.0,
+            "dlb": 40.0,
+            "state_count": 1,
+            "source_updated_at": 123,
+            "calculation_status": "READY",
+        },
+    )
+
+    assert states == 1
+    sql = "\n".join(db.executed)
+    assert "mews_security_v2_state_v1" in sql
+    assert "mews_security_v2_daily_v1" in sql
+    assert "margin_risk_security_state" in sql
+    assert "margin_risk_aggregate_daily" in sql
+    assert "'READY'" in sql
 
 
 @pytest.mark.asyncio

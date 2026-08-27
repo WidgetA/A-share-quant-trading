@@ -9,9 +9,13 @@ from src.data.services.margin_risk_service import (
     BEIJING_TZ,
     MarginRiskDataError,
     MarginRiskProductionService,
+    _empty_security_state,
+    _encode_security_state,
 )
+from src.margin_risk.calculations import calculate_security_features
 from src.margin_risk.config import MarginRiskConfig
 from src.margin_risk.publication import latest_published_trade_date
+from src.margin_risk.v2_calculations import robust_impulse_features
 
 
 class _IngestStore:
@@ -132,6 +136,9 @@ class _AuditStore:
     async def get_latest_metric(self):
         return None
 
+    async def get_latest_aggregate(self):
+        return {"trade_date": self.raw_end}
+
 
 @pytest.mark.asyncio
 async def test_bounded_backfill_marks_latest_metric_available_on_next_actual_open_day(
@@ -207,6 +214,50 @@ async def test_audit_retries_stale_metric_calculation_even_when_raw_days_are_com
 
 
 @pytest.mark.asyncio
+async def test_audit_bootstraps_materialization_when_final_metric_is_already_current(
+    monkeypatch,
+) -> None:
+    dates = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+    source = _AuditSource(dates)
+
+    class _CurrentMetricWithoutMaterializationStore(_AuditStore):
+        async def get_complete_dates(self, start: date, end: date):
+            return {dates[0], dates[1]}
+
+        async def get_raw_date_range(self):
+            return dates[0], dates[1]
+
+        async def get_latest_metric(self):
+            return {"trade_date": dates[1]}
+
+        async def get_latest_aggregate(self):
+            return None
+
+    service = MarginRiskProductionService(
+        SimpleNamespace(db=object()),
+        config=MarginRiskConfig(history_start=dates[0]),
+        source_factory=lambda: source,  # type: ignore[arg-type]
+    )
+    service.store = _CurrentMetricWithoutMaterializationStore(  # type: ignore[assignment]
+        dates[1]
+    )
+    recompute_args: dict = {}
+
+    async def fake_recompute(*, changed_from, next_open=None):
+        recompute_args.update(changed_from=changed_from, next_open=next_open)
+        return 1
+
+    monkeypatch.setattr(service, "recompute", fake_recompute)
+
+    result = await service.audit_and_fill(start=dates[0], end=dates[1])
+
+    assert source.stock_basic_calls == 0
+    assert recompute_args == {"changed_from": dates[1], "next_open": dates[2]}
+    assert result["filled"] == 0
+    assert result["metrics"] == 1
+
+
+@pytest.mark.asyncio
 async def test_audit_stops_at_the_last_trading_day_upstream_has_published(monkeypatch) -> None:
     """Margin data only exists from 09:10 of the next trading day.
 
@@ -247,3 +298,150 @@ async def test_audit_stops_at_the_last_trading_day_upstream_has_published(monkey
     assert result["latest_complete"] == published_through.isoformat()
     assert result["remaining"] == 0
     assert result["failed"] == []
+
+
+def test_incremental_security_state_matches_existing_batch_formula() -> None:
+    config = MarginRiskConfig()
+    service = MarginRiskProductionService(SimpleNamespace(db=object()), config=config)
+    first = date(2026, 1, 1)
+    dates = [first + timedelta(days=index) for index in range(100)]
+    rows = []
+    for index, day in enumerate(dates):
+        if index % 17 == 0:
+            continue
+        buy_amount = 30.0 + (index % 9) * 2.5
+        repayment_amount = 24.0 + (index % 7) * 3.0
+        # Incomplete rows must not become valid robust-window observations,
+        # while their balance remains the next row's denominator.
+        if index in {45, 70, 82}:
+            buy_amount = None
+        if index in {54, 76}:
+            repayment_amount = None
+        rows.append(
+            {
+                "trade_date": day,
+                "ts_code": "000001.SZ",
+                "stock_code": "000001.SZ",
+                "financing_balance": 1000.0 + index * 3.0,
+                "financing_buy_amount": buy_amount,
+                "financing_repayment_amount": repayment_amount,
+            }
+        )
+
+    batch_features = calculate_security_features(dates, rows, config)
+    batch_robust = robust_impulse_features(
+        [feature["impulse_raw"] for feature in batch_features],
+        window=config.nib_scale_window,
+        min_periods=config.nib_scale_min_periods,
+        threshold=config.negative_impulse_z_threshold,
+        magnitude_normalizer=config.nib_magnitude_normalizer,
+    )
+    expected = {
+        feature["trade_date"]: {**feature, **robust}
+        for feature, robust in zip(batch_features, batch_robust, strict=True)
+    }
+
+    by_date = {row["trade_date"]: row for row in rows}
+    state = _empty_security_state("000001.SZ")
+    for day in dates:
+        actual = service._advance_security_state(state, by_date.get(day))
+        if actual is None:
+            assert day not in expected
+            continue
+        wanted = expected[day]
+        for field in (
+            "financing_balance_prev",
+            "net_flow_5d",
+            "impulse_z",
+            "negative_impulse_magnitude",
+        ):
+            if wanted[field] is None:
+                assert actual[field] is None
+            else:
+                assert actual[field] == pytest.approx(wanted[field])
+        assert actual["is_negative_impulse_v2"] == wanted["is_negative_impulse_v2"]
+
+
+@pytest.mark.asyncio
+async def test_materialization_appends_one_day_from_ready_state_without_historical_scan() -> None:
+    previous = date(2026, 8, 5)
+    current = date(2026, 8, 6)
+    state = _empty_security_state("000001.SZ")
+    state.update(
+        {
+            "current_balance": 100.0,
+            "valid_history": [True] * 25,
+            "net_flow_history": [1.0] * 4,
+            "ema_fast_state": 0.01,
+            "ema_slow_state": 0.005,
+            "impulse_history": [0.001 + index * 0.0001 for index in range(60)],
+        }
+    )
+
+    class _IncrementalStore:
+        def __init__(self) -> None:
+            self.state_days: list[date] = []
+            self.aggregate_days: list[date] = []
+
+        async def get_aggregate_rows(self, start: date, end: date):
+            return [
+                {
+                    "trade_date": previous,
+                    "source_updated_at": 1,
+                    "state_count": 1,
+                }
+            ]
+
+        async def get_latest_aggregate(self):
+            return {"trade_date": previous, "state_count": 1}
+
+        async def get_security_states(self, day: date):
+            assert day == previous
+            return [_encode_security_state(state)]
+
+        async def get_all_security_rows(self, start: date, end: date):
+            assert (start, end) == (current, current)
+            return [
+                {
+                    "trade_date": current,
+                    "stock_code": "000001.SZ",
+                    "financing_balance": 101.0,
+                    "financing_buy_amount": 12.0,
+                    "financing_repayment_amount": 10.0,
+                }
+            ]
+
+        async def replace_security_states(self, day: date, rows):
+            self.state_days.append(day)
+            assert len(rows) == 1
+
+        async def replace_aggregate_day(self, day: date, row):
+            self.aggregate_days.append(day)
+            assert row["source_updated_at"] == 2
+
+        async def prune_security_states_before(self, day: date):
+            assert day == current
+
+        async def get_security_codes(self, start: date, end: date):
+            raise AssertionError("incremental path must not discover historical codes")
+
+        async def get_security_rows(self, start: date, end: date, codes):
+            raise AssertionError("incremental path must not scan historical security rows")
+
+    store = _IncrementalStore()
+    service = MarginRiskProductionService(SimpleNamespace(db=object()))
+    service.store = store  # type: ignore[assignment]
+    market_rows = [
+        {"trade_date": previous, "updated_at": 1},
+        {"trade_date": current, "updated_at": 2},
+    ]
+
+    await service._ensure_security_materialization(
+        previous,
+        current,
+        [previous, current],
+        market_rows,
+    )
+
+    assert store.state_days == [current]
+    assert store.aggregate_days == [current]
