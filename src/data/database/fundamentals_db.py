@@ -16,16 +16,18 @@ import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import asyncpg
 import httpx
 
 from src.common.config import get_tushare_token
+from src.data.database.tls import verified_postgres_ssl_context
 
 logger = logging.getLogger(__name__)
 
-_TUSHARE_URL = "http://api.tushare.pro"
+_TUSHARE_URL = "https://api.tushare.pro"
 _ST_PREFIXES = ("ST", "*ST")
 # Tushare ``stock_basic`` caps ``ts_code`` at 1000 codes/request (error 50101).
 # Chunk below that with margin so a single oversized batch can't blow the limit.
@@ -40,7 +42,11 @@ def _to_ts_code(code: str) -> str:
     return f"{code}.SH" if code and code[0] in "569" else f"{code}.SZ"
 
 
-async def _fetch_tushare_names(stock_codes: list[str]) -> dict[str, str]:
+async def _fetch_tushare_names(
+    stock_codes: list[str],
+    *,
+    token: str | None = None,
+) -> dict[str, str]:
     """Fetch current company names from Tushare ``stock_basic``.
 
     Returns a ``{6-digit code: name}`` map. Tushare's ``ts_code`` parameter
@@ -51,6 +57,7 @@ async def _fetch_tushare_names(stock_codes: list[str]) -> dict[str, str]:
     """
     if not stock_codes:
         return {}
+    resolved_token = token if token is not None else get_tushare_token()
     ts_codes = [_to_ts_code(c) for c in stock_codes]
     names: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -58,7 +65,7 @@ async def _fetch_tushare_names(stock_codes: list[str]) -> dict[str, str]:
             batch = ts_codes[start : start + _STOCK_BASIC_BATCH_SIZE]
             body = {
                 "api_name": "stock_basic",
-                "token": get_tushare_token(),
+                "token": resolved_token,
                 "params": {"ts_code": ",".join(batch)},
                 "fields": "ts_code,name",
             }
@@ -86,6 +93,19 @@ class FundamentalsDBConfig:
     pool_min_size: int = 2
     pool_max_size: int = 5
     schema: str = "public"
+    ssl_mode: str = "require"
+    ssl_root_cert: str = ""
+    ssl_root_cert_sha256: str = ""
+    connect_timeout_seconds: float = 5.0
+    command_timeout_seconds: float = 15.0
+
+    def __post_init__(self) -> None:
+        if self.ssl_mode not in {"require", "verify-ca", "verify-full"}:
+            raise ValueError("fundamentals database SSL mode must require TLS")
+        if not 0 < self.connect_timeout_seconds <= 60:
+            raise ValueError("fundamentals connect timeout must be in (0, 60]")
+        if not 0 < self.command_timeout_seconds <= 60:
+            raise ValueError("fundamentals command timeout must be in (0, 60]")
 
 
 @dataclass
@@ -130,8 +150,11 @@ class FundamentalsDB:
         await db.close()
     """
 
-    def __init__(self, config: FundamentalsDBConfig):
+    def __init__(self, config: FundamentalsDBConfig, *, tushare_token: str | None = None):
         self._config = config
+        # V20 injects its reviewed environment token. Legacy callers omit this
+        # argument and retain the historical file-first token resolver.
+        self._tushare_token = tushare_token
         self._pool: asyncpg.Pool | None = None
         self._is_connected = False
         self._schema = config.schema
@@ -154,6 +177,13 @@ class FundamentalsDB:
                 f"/{self._config.database}"
             )
 
+            ssl_config: str | object = self._config.ssl_mode
+            if self._config.ssl_mode == "verify-full":
+                ssl_config = verified_postgres_ssl_context(
+                    ssl_mode=self._config.ssl_mode,
+                    ssl_root_cert=self._config.ssl_root_cert,
+                    expected_sha256=self._config.ssl_root_cert_sha256,
+                )
             self._pool = await asyncpg.create_pool(
                 host=self._config.host,
                 port=self._config.port,
@@ -162,6 +192,13 @@ class FundamentalsDB:
                 password=self._config.password,
                 min_size=self._config.pool_min_size,
                 max_size=self._config.pool_max_size,
+                ssl=ssl_config,
+                timeout=self._config.connect_timeout_seconds,
+                command_timeout=self._config.command_timeout_seconds,
+                server_settings={
+                    "lock_timeout": "3000",
+                    "idle_in_transaction_session_timeout": "15000",
+                },
             )
 
             self._is_connected = True
@@ -194,6 +231,12 @@ class FundamentalsDB:
     @property
     def is_connected(self) -> bool:
         return self._is_connected
+
+    @property
+    def config(self) -> FundamentalsDBConfig:
+        """Return the immutable connection inputs consumed by ``connect``."""
+
+        return self._config
 
     async def get_fundamentals(self, stock_code: str) -> StockFundamentals | None:
         """
@@ -306,7 +349,7 @@ class FundamentalsDB:
         Returns True if name is prefixed with ``ST``/``*ST``, or if Tushare
         doesn't return the stock (fail-safe: exclude unknown stocks).
         """
-        names = await _fetch_tushare_names([stock_code])
+        names = await _fetch_tushare_names([stock_code], token=self._tushare_token)
         name = names.get(stock_code)
         if name is None:
             return True  # fail-safe: unknown stock treated as excluded
@@ -343,7 +386,7 @@ class FundamentalsDB:
         if not stock_codes:
             return []
 
-        names = await _fetch_tushare_names(stock_codes)
+        names = await _fetch_tushare_names(stock_codes, token=self._tushare_token)
         return [c for c in stock_codes if c in names and not names[c].startswith(_ST_PREFIXES)]
 
     async def batch_current_names(self, stock_codes: list[str]) -> dict[str, str]:
@@ -355,7 +398,7 @@ class FundamentalsDB:
         yet still carried as "*ST华微"). Display only; ST *filtering* uses the
         same live source via :meth:`batch_filter_st`.
         """
-        return await _fetch_tushare_names(stock_codes)
+        return await _fetch_tushare_names(stock_codes, token=self._tushare_token)
 
     def _row_to_model(self, row: asyncpg.Record) -> StockFundamentals:
         """Convert database row to StockFundamentals."""
@@ -384,7 +427,11 @@ class FundamentalsDB:
         )
 
 
-def create_fundamentals_db_from_config() -> FundamentalsDB:
+def create_fundamentals_db_from_config(
+    config_path: str | Path = "config/database-config.yaml",
+    *,
+    tushare_token: str | None = None,
+) -> FundamentalsDB:
     """
     Create FundamentalsDB from configuration file.
 
@@ -393,7 +440,7 @@ def create_fundamentals_db_from_config() -> FundamentalsDB:
     """
     from src.common.config import load_config
 
-    config = load_config("config/database-config.yaml")
+    config = load_config(config_path)
     db_config = config.get_dict("database.fundamentals", {})
 
     if not db_config:
@@ -418,6 +465,11 @@ def create_fundamentals_db_from_config() -> FundamentalsDB:
         pool_min_size=db_config.get("pool_min_size", 2),
         pool_max_size=db_config.get("pool_max_size", 5),
         schema=db_config.get("schema", "public"),
+        ssl_mode=str(resolve_env(db_config.get("ssl_mode", "require"))),
+        ssl_root_cert=str(resolve_env(db_config.get("ssl_root_cert", ""))),
+        ssl_root_cert_sha256=str(resolve_env(db_config.get("ssl_root_cert_sha256", ""))),
+        connect_timeout_seconds=float(resolve_env(db_config.get("connect_timeout_seconds", 5))),
+        command_timeout_seconds=float(resolve_env(db_config.get("command_timeout_seconds", 15))),
     )
 
-    return FundamentalsDB(fundamentals_config)
+    return FundamentalsDB(fundamentals_config, tushare_token=tushare_token)

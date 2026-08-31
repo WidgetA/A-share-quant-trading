@@ -1,0 +1,271 @@
+{
+  "schema": "v20-retrospective-0941-zero-cost-replay-summary/v1",
+  "artifact_id": "V20_RETROSPECTIVE_0941_ZERO_COST_REPLAY_20260831_V1",
+  "artifact_type": "RETROSPECTIVE_RESEARCH_EVIDENCE_SUMMARY",
+  "artifact_status": "PASS_WITH_EVIDENCE_BOUNDARIES",
+  "artifact_frozen_date": "2026-08-31",
+  "strategy_id": "BAD_E50_G_BASE",
+  "reference_profile_id": "CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+  "return_profile_id": "ZERO_COST_GROSS_PRICE_RETURN_V1",
+  "wealth_profile_id": "FROZEN_RAW_CONTINUITY",
+  "fees": 0,
+  "slippage": 0,
+  "production_bootstrap_eligible": false,
+  "production_enablement_evidence": false,
+  "historical_receipt_clock_status": "UNAVAILABLE_RETROSPECTIVE_RESEARCH_CLOCK",
+  "strict_point_in_time_status": "NOT_STRICT_PIT_CURRENT_TAXONOMY_2023_2025_AND_RETROSPECTIVE_PRICE_CAPTURE",
+  "permitted_use": "HISTORICAL_STRATEGY_NUMERIC_EVIDENCE_AND_REPRODUCIBILITY_ONLY_NOT_PRODUCTION_BOOTSTRAP_OR_ENABLEMENT",
+  "evaluation_scope": {
+    "market_capture_first_trade_date": "2023-04-03",
+    "market_capture_last_trade_date": "2026-08-28",
+    "matured_signal_last_trade_date": "2026-08-26",
+    "market_capture_trade_day_n": 825,
+    "market_capture_row_n": 2622334,
+    "market_capture_unique_bar_per_trade_date_stock": true,
+    "rolling_signal_leg_n": 6774,
+    "rolling_entry_covered_leg_n": 6754,
+    "rolling_missing_leg_n": 20,
+    "rolling_missing_signal_dates": [
+      "2026-06-01",
+      "2026-06-02"
+    ],
+    "previously_complete_rolling_batch_n": 719,
+    "still_complete_rolling_batch_n": 719,
+    "rolling_window_membership_diff_n": 0,
+    "health_effective_relative_label_n": 694,
+    "health_min_scanner_eligible_n": 2944,
+    "old_base_batch_entry_covered_n": 444,
+    "old_base_batch_entry_total_n": 444,
+    "old_base_leg_entry_covered_n": 4299,
+    "old_base_leg_entry_total_n": 4299,
+    "expanded_evaluation_batch_n": 445,
+    "expanded_evaluation_leg_n": 4309,
+    "expanded_evaluation_resolved_exit_leg_n": 4309,
+    "newly_opened_signal_dates": [
+      "2025-05-30"
+    ],
+    "pending_not_evaluated_signal_dates": [
+      "2026-08-27"
+    ]
+  },
+  "historical_state_prewarm": {
+    "uses_2023_history_for_2024_first_decision": true,
+    "empty_state_start_on_2024_01_02": false,
+    "first_evaluated_trade_date": "2024-01-02",
+    "first_evaluated_decision": {
+      "health_state": "PAUSED_R0",
+      "health_recovery_confirmation_count": 0,
+      "health_last3_mean": -0.0023228173324060923,
+      "health_latest_exit_day": "2023-12-29",
+      "health_last3_signal_dates": [
+        "2023-12-22",
+        "2023-12-25",
+        "2023-12-27"
+      ],
+      "base_multiplier": 1.0,
+      "rolling7_state": "BAD",
+      "rolling7_sum": -0.1489987690327476,
+      "rolling7_loss_n": 6,
+      "rolling7_signal_dates": [
+        "2023-12-18",
+        "2023-12-19",
+        "2023-12-20",
+        "2023-12-21",
+        "2023-12-22",
+        "2023-12-25",
+        "2023-12-27"
+      ],
+      "g_known": true,
+      "g_triggered": false,
+      "defense_multiplier": 0.5,
+      "final_multiplier": 0.5
+    },
+    "boundary": "RETROSPECTIVE_PREWARM_EVIDENCE_ONLY_NOT_A_PRODUCTION_GENESIS_OR_CHECKPOINT"
+  },
+  "state_and_path_changes_vs_raw_0940_legacy": {
+    "health_paused_state_changed_decision_day_n": 7,
+    "base_weight_changed_decision_day_n": 4,
+    "rolling7_state_changed_decision_day_n": 7,
+    "rolling7_non_bad_to_bad_dates": [
+      "2024-01-04",
+      "2024-01-11",
+      "2024-07-19"
+    ],
+    "rolling7_bad_to_non_bad_dates": [
+      "2024-09-19",
+      "2024-09-20",
+      "2024-11-25",
+      "2024-11-28"
+    ],
+    "d1_trigger_flag_changed_leg_n": 31,
+    "final_exit_path_changed_leg_n": 294,
+    "unchanged_entry_parity_leg_n": 239,
+    "unchanged_entry_exact_exit_parity_leg_n": 239
+  },
+  "metrics_unit": "ADDITIVE_STANDARD_BATCH_PERCENTAGE_POINTS_NOT_ACCOUNT_RETURN",
+  "metrics": {
+    "2024_FULL": {
+      "batch_n": 165,
+      "base_contribution_pp": 69.23240416545204,
+      "e50_contribution_pp": 84.58835515035311,
+      "v20_contribution_pp": 87.62769335874596,
+      "rolling_e50_delta_pp": 15.355950984901078,
+      "g_marginal_delta_pp": 3.0393382083928704,
+      "v20_minus_base_pp": 18.395289193293944,
+      "base_additive_mdd_pp": -53.96546179744979,
+      "v20_additive_mdd_pp": -43.99917135708551,
+      "base_worst_batch_pp": -9.256964012803289,
+      "v20_worst_batch_pp": -8.546214584300982,
+      "base_es5_pp": -6.953622575129138,
+      "v20_es5_pp": -6.36303416400734,
+      "open_batch_n": 156,
+      "full_batch_n": 115,
+      "half_batch_n": 41,
+      "blocked_batch_n": 9
+    },
+    "2025_FULL": {
+      "batch_n": 191,
+      "base_contribution_pp": 111.735776672236,
+      "e50_contribution_pp": 107.141566849703,
+      "v20_contribution_pp": 105.15844485927897,
+      "rolling_e50_delta_pp": -4.594209822533015,
+      "g_marginal_delta_pp": -1.983121990424023,
+      "v20_minus_base_pp": -6.577331812957038,
+      "base_additive_mdd_pp": -38.99166982902306,
+      "v20_additive_mdd_pp": -25.372618351757136,
+      "base_worst_batch_pp": -10.663001217001153,
+      "v20_worst_batch_pp": -6.348746692496446,
+      "base_es5_pp": -6.247689613177125,
+      "v20_es5_pp": -5.25052203124424,
+      "open_batch_n": 189,
+      "full_batch_n": 163,
+      "half_batch_n": 26,
+      "blocked_batch_n": 2
+    },
+    "2026_YTD_0227_0826": {
+      "batch_n": 89,
+      "base_contribution_pp": 29.04664592074684,
+      "e50_contribution_pp": 21.933275864125715,
+      "v20_contribution_pp": 24.06008028025293,
+      "rolling_e50_delta_pp": -7.113370056621121,
+      "g_marginal_delta_pp": 2.1268044161272126,
+      "v20_minus_base_pp": -4.986565640493907,
+      "base_additive_mdd_pp": -44.030425740284734,
+      "v20_additive_mdd_pp": -29.48387204861291,
+      "base_worst_batch_pp": -8.82607625304635,
+      "v20_worst_batch_pp": -6.594514798489387,
+      "base_es5_pp": -7.030851838350308,
+      "v20_es5_pp": -5.6287014390091095,
+      "open_batch_n": 86,
+      "full_batch_n": 62,
+      "half_batch_n": 24,
+      "blocked_batch_n": 3
+    },
+    "2026_07": {
+      "batch_n": 16,
+      "base_contribution_pp": -23.98962181971311,
+      "e50_contribution_pp": -18.13056208965894,
+      "v20_contribution_pp": -14.164417078517797,
+      "rolling_e50_delta_pp": 5.859059730054171,
+      "g_marginal_delta_pp": 3.9661450111411463,
+      "v20_minus_base_pp": 9.82520474119532,
+      "base_additive_mdd_pp": -31.97115879615152,
+      "v20_additive_mdd_pp": -18.500157741273927,
+      "base_worst_batch_pp": -8.82607625304635,
+      "v20_worst_batch_pp": -6.594514798489387,
+      "base_es5_pp": -8.82607625304635,
+      "v20_es5_pp": -6.594514798489387,
+      "open_batch_n": 14,
+      "full_batch_n": 4,
+      "half_batch_n": 10,
+      "blocked_batch_n": 2
+    },
+    "2026_08_MATURED_TO_0826": {
+      "batch_n": 14,
+      "base_contribution_pp": 45.22069356372022,
+      "e50_contribution_pp": 31.332092112840034,
+      "v20_contribution_pp": 29.4927515178261,
+      "rolling_e50_delta_pp": -13.888601450880186,
+      "g_marginal_delta_pp": -1.8393405950139337,
+      "v20_minus_base_pp": -15.72794204589412,
+      "base_additive_mdd_pp": -5.681440578279001,
+      "v20_additive_mdd_pp": -5.681440578279001,
+      "base_worst_batch_pp": -3.903218834312531,
+      "v20_worst_batch_pp": -3.903218834312531,
+      "base_es5_pp": -3.903218834312531,
+      "v20_es5_pp": -3.903218834312531,
+      "open_batch_n": 13,
+      "full_batch_n": 9,
+      "half_batch_n": 4,
+      "blocked_batch_n": 1
+    },
+    "ALL_2024_2026YTD": {
+      "batch_n": 445,
+      "base_contribution_pp": 210.01482675843494,
+      "e50_contribution_pp": 213.66319786418177,
+      "v20_contribution_pp": 216.84621849827786,
+      "rolling_e50_delta_pp": 3.648371105746942,
+      "g_marginal_delta_pp": 3.18302063409606,
+      "v20_minus_base_pp": 6.831391739843001,
+      "base_additive_mdd_pp": -53.96546179744979,
+      "e50_additive_mdd_pp": -47.668281684196586,
+      "v20_additive_mdd_pp": -43.99917135708551,
+      "base_worst_batch_pp": -10.663001217001153,
+      "v20_worst_batch_pp": -8.546214584300982,
+      "base_es5_pp": -6.871484749009625,
+      "v20_es5_pp": -5.810856965547997,
+      "open_batch_n": 431,
+      "full_batch_n": 340,
+      "half_batch_n": 91,
+      "blocked_batch_n": 14
+    }
+  },
+  "superseded_legacy_numeric_profile": {
+    "reference_profile_id": "RETROSPECTIVE_ZERO_LATENCY_0940_END_LABEL_OPEN_V1",
+    "base_contribution_pp": 222.08,
+    "v20_contribution_pp": 225.60,
+    "v20_additive_mdd_pp": -42.40,
+    "status": "SUPERSEDED_FOR_CURRENT_STRATEGY_NUMERIC_EVIDENCE"
+  },
+  "reproduction_commands": [
+    "py -3.14 strategy-research\\kangdie\\explore\\v16_rolling7_true_defense_20260831\\entry_label_0941_replay\\fetch_market_0941.py --workers 4",
+    "py -3.14 strategy-research\\kangdie\\explore\\v16_rolling7_true_defense_20260831\\entry_label_0941_replay\\rebuild_state_inputs.py",
+    "py -3.14 strategy-research\\kangdie\\explore\\v16_rolling7_true_defense_20260831\\entry_label_0941_replay\\replay_exit_and_v20.py"
+  ],
+  "retrospective_source_artifacts": {
+    "MARKET_0941_CAPTURE.json": {
+      "path": "strategy-research/kangdie/explore/v16_rolling7_true_defense_20260831/entry_label_0941_replay/MARKET_0941_CAPTURE.json",
+      "sha256": "731aa2504a8d2565f25c9c7b3e248ea9f3c5056405d3387c9dd4bd34ac614dd9"
+    },
+    "STATE_INPUT_REBUILD.json": {
+      "path": "strategy-research/kangdie/explore/v16_rolling7_true_defense_20260831/entry_label_0941_replay/STATE_INPUT_REBUILD.json",
+      "sha256": "4a52b2f074176d38e673f91e7cf1df36d0474f5f2371edea1e9c631a5d49471d"
+    },
+    "FULL_CHAIN_REPLAY.json": {
+      "path": "strategy-research/kangdie/explore/v16_rolling7_true_defense_20260831/entry_label_0941_replay/FULL_CHAIN_REPLAY.json",
+      "sha256": "94f655f58aee9e148a97708a8b38acef76e9bd7c821384ee20487e09a52da9fc"
+    },
+    "REPORT.md": {
+      "path": "strategy-research/kangdie/explore/v16_rolling7_true_defense_20260831/entry_label_0941_replay/REPORT.md",
+      "sha256": "12fe7262aef9be454b56d66efe8735ca22c5091fe4f3a3ba0dbd596b9549cd6c"
+    }
+  },
+  "replay_script_sha256": {
+    "fetch_market_0941.py": "a035f041cb5c679284d9d7fc995d380ffc4fd69cf855252409bae9cf52ed8d41",
+    "rebuild_state_inputs.py": "9fe5fc7033dddcc517542ffa8332c0f62992bbda610eb7719f29291a93bbe38b",
+    "replay_exit_and_v20.py": "514c2cecfac77ffee5e705cb36bec7bcf742a66ef1e54c5b2164830b152fc4b1"
+  },
+  "detailed_output_sha256": {
+    "base_exit_leg_results_gross_0941.parquet": "4b40f7db774af21da48ade8956b547856f629969f07066cbbafbd2fa1b6f96c9",
+    "v20_batch_results_gross_0941.csv": "ee3bc82db040124c4ab236c1c5d640c23ab68c84a2b54183787f0d579fd5f774",
+    "v20_metrics_gross_0941.csv": "584d2669a7d0a99f35275c999b735de9fe2690b2c40a28d1dca398dbc5509ff9"
+  },
+  "limitations": [
+    "Historical raw 09:41 prices were captured retrospectively and have no durable first-received clock.",
+    "The 2023-2025 signal and G taxonomy lineage remains current-taxonomy retrospective rather than strict point-in-time evidence.",
+    "Historical MEWS lineage remains mostly retrospective and is not complete online point-in-time evidence.",
+    "FROZEN_RAW_CONTINUITY does not economically adjust dividends, splits, allotments or other corporate actions.",
+    "This artifact is diagnostic evidence and is intentionally excluded from the G runtime manifest.",
+    "Forward shadow, durable receipt, legal genesis or migration, and production company-action validation remain mandatory."
+  ]
+}

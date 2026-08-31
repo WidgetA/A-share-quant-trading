@@ -36,6 +36,8 @@
 | 0.10.4 | 2026-06-01 | - | STR-004: Blacklist 专精特新 board — move into JUNK_BOARDS so is_junk_board() actually excludes it (was leaking via un-filtered BROAD_CONCEPT_BOARDS, dominating universe + best-board labels) |
 | 0.10.5 | 2026-06-01 | - | STR-004: V16 Feishu top-10 report marks picks whose best-board is a BROAD_CONCEPT_BOARD with ⭐ + adds a legend, so vague wide-theme picks are visible at a glance (still un-filtered, just flagged) |
 | 0.10.6 | 2026-07-14 | - | STR-005: V16 daily report (Feishu + `/api/v16/backtest`) lists ALL hot boards a stock belongs to (not just one "best" board) + tags each pick [带动]/[扩增] — whether its own gain alone cleared the hot-board bar, or it only entered via board-level expansion |
+| 0.11.0 | 2026-08-31 | - | STR-006: Add the default-disabled V20 decision and exit-notification service, reusing the main-branch V16 stock selection with strict point-in-time inputs and no order execution |
+| 0.11.1 | 2026-08-31 | - | STR-006: Add an idempotent V20 manual deployment trigger with a durable non-actionable Feishu receipt |
 
 ---
 
@@ -852,6 +854,96 @@ strategy:
 - [x] Monitoring: signal timeout, heartbeat, readiness report, ack confirmation
 - [ ] Unit tests
 - [ ] Production deployment verification
+
+---
+
+### [STR-006] V20 Decision and Exit Notification Service
+
+**Status**: Implementation complete; production activation pending external acceptance gates
+
+**Description**: V20 preserves the `main` branch V16 stock-selection and ranking semantics,
+then applies the frozen market-regime entry policy and D1/D2 exit policy. It is a decision and
+notification service only: it never reads brokerage accounts or positions, computes order sizes,
+or submits orders.
+
+**Requirements**:
+- Freeze the V16 entry snapshot at the raw minute end label `09:39`, so the decision can be
+  published at approximately `09:40` without consuming future bars.
+- Require the prior 37 exchange sessions exactly for every V16 candidate; do not pad missing
+  sessions with older observations. Fail closed when the frozen V16 universe or final scan
+  coverage is below 80%.
+- Publish the complete V16 recommendation list in the same human-readable funnel/board format as
+  the legacy V16 report, preceded by V20's open/defensive/closed decision, effective multiplier,
+  reason codes, and evidence status.
+- Track each notified model batch in a PostgreSQL ledger and publish deterministic D1/D2
+  protective-stop, final-exit, and reminder events. These are model-lot notifications, not real-account
+  position management.
+- Use an idempotent transactional outbox, sealed event payloads, route-scoped delivery ordering,
+  PostgreSQL leader election, runtime-lane health, and fail-closed startup validation.
+- Keep shadow and formal Feishu credentials, streams, lineages, and checkpoints isolated. Formal
+  push requires all three explicit production gates and must never fall back to legacy Feishu
+  credentials. Runtime schema `v20-runtime/v2` binds reviewed relay origin/app/chat hashes and
+  database CA hashes into `config_hash`; the V20-only relay endpoint uses a versioned idempotent
+  envelope, server-side entry expiry, and strict delivery-receipt echoes.
+- Require hostname-verifying `verify-full` PostgreSQL TLS for both V20 database roles, a dedicated
+  writer distinct from the fundamentals reader, and explicit CA paths/content hashes. Protect
+  evidence writes and status reads with two pairwise-distinct API keys; status HTTP serves only a
+  bounded background snapshot and never performs a request-time database query.
+- Run formal V20 in the dedicated `scripts/v20_main.py` process/container target. The process may
+  expose only four V20 routes: status, MEWS evidence, reminder acknowledgement, and the manual
+  deployment trigger. It must not load iQuant, broker, order, or account-management routes.
+- Deliberately leave `POST /api/v20/trigger-scan` without application-layer authentication for now
+  and allow a headerless default call. When `Idempotency-Key` is absent, generate `manual-<uuid>`;
+  every subsequent headerless call creates a new non-actionable receipt. Accept an optional
+  caller key of 8–128 characters for idempotent timeout retries. Retrying that key in the same
+  route/stream/lineage/config scope must return the same event without rerunning the decision cycle
+  or creating a duplicate receipt. Return HTTP 202 only after the receipt is durably queued and
+  sealed; 202 is not proof of Feishu delivery.
+- Never let the manual trigger accept a request body, caller clock, trade date, or force flag.
+  Require a healthy running service and the current PostgreSQL leader. Before 09:40 it may only
+  accelerate the same serialized decision lane; at or after 09:40 it is read-only against the
+  official state and must never recompute a decision from late data. Its own Feishu receipt is
+  always explicitly marked as a non-trading instruction.
+- Keep fees and slippage at zero in strategy semantics. V20 reports relative batch multipliers and
+  stock lists, never assumed capital or share quantities.
+- Default to disabled (`V20_ENABLED=false`, `forward_shadow`) in checked-in configuration.
+
+**Activation gates**:
+- Apply and validate all V20 PostgreSQL migrations with the dedicated least-privilege writer;
+  exercise advisory-leader, CAS, checkpoint, outbox lease, retry, and recovery behavior on the
+  target PostgreSQL version.
+- Verify the production Docker target starts only the dedicated V20 entry point and exposes only
+  the V20 route surface; shared source bytes needed by the V16 scanner may remain in the image but
+  broker, iQuant, account, and order services must never be imported or started by that host.
+- Treat push CI and V20 deployment as separate gates: the current CI builds the default legacy
+  Docker target and checked-in V20 remains disabled. Before a manual trigger, verify status reports
+  the expected enabled/running mode and strategy/config/route/stream/lineage identity; after HTTP
+  202, verify the event reaches `SENT` in the outbox and appears in only the reviewed Feishu chat.
+- Shadow-compare the same legal input against online V16 for zero stock-selection and formatting
+  drift, validate the exchange calendar and Tushare minute labels, and verify both isolated Feishu
+  routes end to end before enabling formal push.
+
+**Key Files**:
+- `docs/strategy-v20.md` - frozen strategy and notification contract
+- `docs/strategy-v20-runbook.md` - deployment, validation, monitoring, rollback, and activation gates
+- `config/v20.yaml` / `config/v20.env.example` - checked-in safe defaults and environment contract
+- `scripts/v20_main.py` - dedicated V20 process entry point
+- `src/web/v20_service.py` - scheduler, point-in-time pipeline orchestration, and runtime health
+- `src/data/database/v20_repository.py` - durable ledger, checkpoint, leader, and outbox repository
+- `src/common/v20_feishu.py` - deterministic formatter and route-scoped outbox publisher
+- `src/strategy/v20/` - frozen entry, regime, exit, identity, and runtime configuration semantics
+
+**Checklist**:
+- [x] Strategy and runbook frozen before formal activation
+- [x] Dedicated decision-only process and routes
+- [x] Raw `09:39` entry cutoff and exact 37-session input contract
+- [x] Durable model-lot ledger, checkpoint, and transactional outbox
+- [x] Entry and D1/D2 exit/reminder Feishu notifications
+- [x] Headerless manual trigger, optional idempotent retry, and durable non-actionable receipt
+- [x] Default-disabled shadow/formal safety gates
+- [x] Unit and static validation in the development workspace
+- [ ] Target PostgreSQL, Docker, Tushare, and Feishu shadow acceptance
+- [ ] Production activation
 
 ---
 

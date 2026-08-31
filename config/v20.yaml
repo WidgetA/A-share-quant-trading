@@ -1,0 +1,78 @@
+schema_version: v20-runtime/v2
+strategy_version: V20_BAD_E50_G_BASE_V1
+official_stream_id: V20_A_SHARE_FORWARD_SHADOW
+
+# Safe default.  Production code is present, but a deployment must explicitly
+# set V20_ENABLED=true, V20_MODE=production_push and
+# V20_ALLOW_PRODUCTION_PUSH=true after forward-shadow acceptance.
+enabled: false
+deployment_mode: forward_shadow
+production_activation_guard: false
+
+timezone: Asia/Shanghai
+return_profile_id: ZERO_COST_GROSS_PRICE_RETURN_V1
+reference_profile_id: CALENDAR_0940_OPEN_END_LABEL_0941_V1
+state_lineage_id: V20_FORWARD_SHADOW_GENESIS_20260831
+
+clock:
+  prewarm: "09:15"
+  minute_collection_start: "09:31"
+  decision_bar_label: "09:39"
+  publish_deadline: "09:40"
+  decision_finalization_deadline: "09:45"
+  reference_bar_label: "09:41"
+  reference_lock_deadline_next_day: "09:30"
+  mews_cutoff_d1: "09:40"
+  plan_exit: "14:57"
+  reminder_check: "09:35"
+
+market_data:
+  minimum_quote_coverage: 0.80
+  minimum_breadth_universe: 1000
+  minute_poll_seconds: 2
+  exit_poll_seconds: 15
+
+policy:
+  health_window: 3
+  health_recovery_confirmations: 3
+  breadth_wilson_z: 1.645
+  breadth_full_upper: 0.50
+  breadth_half_upper: 0.60
+  rolling_window: 7
+  rolling_bad_min_losses: 5
+  g_max_component_size: 3
+  g_weak_amount_min_metrics: 2
+  d1_stop_factor: 0.92
+  d2_stop_factor: 0.88
+  d2_mews_danger_stop_factor: 0.95
+
+artifacts:
+  g_manifest: docs/strategy-v20-artifacts/manifest-v1.json
+  g_manifest_sha256: 377cf1181539ad7d7b2e0407c27e6529e1c911e06052c7968caf057cb0131d32
+
+database:
+  schema: v20
+  pool_min_size: 1
+  pool_max_size: 8
+  # Activation requires reviewed hashes of the mounted PostgreSQL CA bundles.
+  v20_tls_ca_sha256: UNCONFIGURED
+  fundamentals_tls_ca_sha256: UNCONFIGURED
+
+routes:
+  forward_shadow:
+    route_id: V20_SHADOW_FEISHU
+    expected_bot_origin: UNCONFIGURED
+    expected_app_id_sha256: UNCONFIGURED
+    expected_chat_id_sha256: UNCONFIGURED
+  production_push:
+    route_id: V20_FORMAL_FEISHU
+    expected_bot_origin: UNCONFIGURED
+    expected_app_id_sha256: UNCONFIGURED
+    expected_chat_id_sha256: UNCONFIGURED
+
+bootstrap:
+  # Empty genesis is legal only in forward shadow; production requires a
+  # separately accepted CALENDAR_0940_OPEN_END_LABEL_0941_V1 checkpoint.
+  mode: EMPTY_FORWARD_SHADOW
+  checkpoint_path: null
+  checkpoint_sha256: null

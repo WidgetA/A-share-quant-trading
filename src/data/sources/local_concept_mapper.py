@@ -29,10 +29,20 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 # Docker: /app/data is a volume mount, static files go to /app/bundled_data
-_BUNDLED_DIR = _PROJECT_ROOT / "bundled_data"
-_DATA_DIR = _BUNDLED_DIR if _BUNDLED_DIR.exists() else _PROJECT_ROOT / "data"
-_SECTORS_PATH = _DATA_DIR / "sectors.json"
-_CONSTITUENTS_PATH = _DATA_DIR / "board_constituents.json"
+
+
+def resolve_concept_data_path(project_root: Path, filename: str) -> Path:
+    """Resolve exactly the bytes LocalConceptMapper will consume."""
+
+    if filename not in {"sectors.json", "board_constituents.json"}:
+        raise ValueError(f"unsupported concept data filename: {filename!r}")
+    bundled_dir = project_root / "bundled_data"
+    data_dir = bundled_dir if bundled_dir.exists() else project_root / "data"
+    return data_dir / filename
+
+
+_SECTORS_PATH = resolve_concept_data_path(_PROJECT_ROOT, "sectors.json")
+_CONSTITUENTS_PATH = resolve_concept_data_path(_PROJECT_ROOT, "board_constituents.json")
 
 
 class LocalConceptMapper:

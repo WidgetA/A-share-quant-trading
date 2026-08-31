@@ -11,6 +11,8 @@ import pytest
 
 from src.data.database.fundamentals_db import (
     _STOCK_BASIC_BATCH_SIZE,
+    FundamentalsDB,
+    FundamentalsDBConfig,
     _fetch_tushare_names,
 )
 
@@ -89,3 +91,34 @@ async def test_fetch_names_empty_makes_no_request():
 
     assert names == {}
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_v20_injected_token_reaches_fundamentals_st_request():
+    captured_bodies: list[dict] = []
+
+    async def post(_url, json):  # noqa: A002 - mirror httpx.post signature
+        captured_bodies.append(json)
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "code": 0,
+            "data": {"items": [["000001.SZ", "平安银行"]]},
+        }
+        return response
+
+    database = FundamentalsDB(
+        FundamentalsDBConfig(),
+        tushare_token="environment-token",
+    )
+    with (
+        patch(
+            "src.data.database.fundamentals_db.get_tushare_token",
+            side_effect=AssertionError("legacy token resolver must not be called"),
+        ),
+        patch("httpx.AsyncClient") as mock_client,
+    ):
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(side_effect=post)
+        assert await database.batch_filter_st(["000001"]) == ["000001"]
+
+    assert [body["token"] for body in captured_bodies] == ["environment-token"]

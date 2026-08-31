@@ -12,15 +12,20 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from collections.abc import Mapping
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_TUSHARE_API_URL = "http://api.tushare.pro"
+_TUSHARE_API_URL = "https://api.tushare.pro"
 _TUSHARE_DAILY_TIMEOUT = 30.0
+
+
+class IQuantHistoricalAdapterError(RuntimeError):
+    """A requested daily source date could not be fetched authoritatively."""
 
 
 class IQuantHistoricalAdapter:
@@ -40,7 +45,13 @@ class IQuantHistoricalAdapter:
     (shares) at read time so callers see the same unit as iFinD / live snapshots.
     """
 
-    def __init__(self, realtime_client: Any, cache: Any = None) -> None:
+    def __init__(
+        self,
+        realtime_client: Any,
+        cache: Any = None,
+        *,
+        tushare_token: str | None = None,
+    ) -> None:
         """
         Args:
             realtime_client: Duck-typed realtime client for real-time data delegation.
@@ -53,12 +64,16 @@ class IQuantHistoricalAdapter:
                 "realtime_client must implement as_ifind_format(). Use TushareRealtimeClient."
             )
         self._realtime = realtime_client
+        # Production V20 injects its already validated environment token.
+        # ``None`` preserves the legacy file-first resolver for existing users.
+        self._tushare_token = tushare_token
 
         # In-memory daily data downloaded from Tushare API.
         # Keyed by date_str -> {bare_code -> {close, volume, ...}}
         # Populated on first history_quotes() call, reused within the same day.
         self._daily_data: dict[str, dict[str, dict]] = {}
         self._daily_data_loaded_date: str = ""  # YYYY-MM-DD of last load
+        self._exchange_trade_dates: frozenset[date] | None = None
 
         logger.info("IQuantHistoricalAdapter: using Tushare Pro daily for history_quotes")
 
@@ -72,6 +87,23 @@ class IQuantHistoricalAdapter:
 
     async def stop(self) -> None:
         pass  # Realtime client is managed externally
+
+    def set_exchange_trade_calendar(self, calendar: list[date] | tuple[date, ...]) -> None:
+        """Bind authoritative open dates used to classify empty daily responses.
+
+        Tushare legitimately returns an empty ``daily`` response for an exchange
+        holiday, but a transient empty response on an open date must be retried.
+        V20 supplies the already validated exchange calendar before prewarming.
+        """
+
+        normalized = tuple(calendar)
+        if (
+            not normalized
+            or any(type(item) is not date for item in normalized)
+            or tuple(sorted(set(normalized))) != normalized
+        ):
+            raise ValueError("exchange trade calendar must be sorted, unique dates")
+        self._exchange_trade_dates = frozenset(normalized)
 
     async def history_quotes(
         self,
@@ -154,13 +186,17 @@ class IQuantHistoricalAdapter:
             f"({dates_needed[0]} ~ {dates_needed[-1]})"
         )
 
-        token = get_tushare_token()
+        token = self._tushare_token
+        if token is None:
+            token = get_tushare_token()
 
+        failures: list[str] = []
         async with httpx.AsyncClient(timeout=httpx.Timeout(_TUSHARE_DAILY_TIMEOUT)) as client:
             for i, day_date in enumerate(dates_needed):
                 ds_iso = day_date.strftime("%Y-%m-%d")
                 ts_date = day_date.strftime("%Y%m%d")
                 day_data: dict[str, dict] = {}
+                conflicted_tickers: set[str] = set()
 
                 body = {
                     "api_name": "daily",
@@ -173,51 +209,131 @@ class IQuantHistoricalAdapter:
                     resp = await client.post(_TUSHARE_API_URL, json=body)
                     resp.raise_for_status()
                     data = resp.json()
-                except httpx.HTTPError as e:
+                except (httpx.HTTPError, ValueError, TypeError) as e:
                     logger.warning(f"tushare daily {ts_date}: {e}")
-                    self._daily_data[ds_iso] = {}
+                    failures.append(f"{ts_date}:TRANSPORT_OR_JSON")
                     continue
 
+                if not isinstance(data, Mapping):
+                    logger.warning("tushare daily %s returned a non-object payload", ts_date)
+                    failures.append(f"{ts_date}:SCHEMA")
+                    continue
                 if data.get("code") != 0:
                     logger.warning(f"tushare daily {ts_date} error: {data.get('msg', 'unknown')}")
-                    self._daily_data[ds_iso] = {}
+                    failures.append(f"{ts_date}:API_{data.get('code')}")
                     continue
 
-                fields = data.get("data", {}).get("fields", [])
-                items = data.get("data", {}).get("items", [])
+                data_payload = data.get("data")
+                if not isinstance(data_payload, Mapping):
+                    logger.warning("tushare daily %s returned an invalid data object", ts_date)
+                    failures.append(f"{ts_date}:SCHEMA")
+                    continue
+                fields = data_payload.get("fields", [])
+                items = data_payload.get("items", [])
+                required_fields = {"ts_code", "open", "high", "low", "close", "vol"}
+                if (
+                    not isinstance(fields, list)
+                    or not required_fields.issubset(fields)
+                    or not isinstance(items, list)
+                ):
+                    logger.warning("tushare daily %s returned an invalid schema", ts_date)
+                    failures.append(f"{ts_date}:SCHEMA")
+                    continue
                 if items:
                     idx = {f: i for i, f in enumerate(fields)}
                     for row in items:
-                        ts_code = row[idx.get("ts_code", -1)]
+                        if not isinstance(row, list) or len(row) < len(fields):
+                            failures.append(f"{ts_date}:ROW_SCHEMA")
+                            day_data = {}
+                            break
+                        ts_code = row[idx["ts_code"]]
                         if not ts_code:
                             continue
                         ticker = ts_code.split(".")[0]
                         if not ticker or len(ticker) != 6:
                             continue
-                        o = row[idx.get("open", -1)] if "open" in idx else None
-                        c = row[idx.get("close", -1)] if "close" in idx else None
+                        if ticker in conflicted_tickers:
+                            continue
+                        o = row[idx["open"]]
+                        c = row[idx["close"]]
                         if o is None or c is None:
                             continue
-                        h = row[idx.get("high", -1)] if "high" in idx else None
-                        lo = row[idx.get("low", -1)] if "low" in idx else None
-                        v = row[idx.get("vol", -1)] if "vol" in idx else None
-                        day_data[ticker] = {
-                            "open": float(o),
-                            "high": float(h) if h is not None else float(o),
-                            "low": float(lo) if lo is not None else float(o),
-                            "close": float(c),
-                            # tushare `daily` vol in 手; ×100 conversion at read time.
-                            "volume": float(v) if v is not None else 0.0,
-                        }
+                        h = row[idx["high"]]
+                        lo = row[idx["low"]]
+                        v = row[idx["vol"]]
+                        if any(isinstance(item, bool) for item in (o, h, lo, c, v)):
+                            logger.warning(
+                                "tushare daily %s ignored a boolean numeric row for %s",
+                                ts_date,
+                                ticker,
+                            )
+                            continue
+                        try:
+                            parsed_row = {
+                                "open": float(o),
+                                "high": float(h),
+                                "low": float(lo),
+                                "close": float(c),
+                                # Tushare `daily` vol is 手; history_quotes converts it.
+                                "volume": float(v),
+                            }
+                            previous_row = day_data.get(ticker)
+                            if previous_row is not None and previous_row != parsed_row:
+                                day_data.pop(ticker, None)
+                                conflicted_tickers.add(ticker)
+                                logger.warning(
+                                    "tushare daily %s dropped conflicting duplicate rows for %s",
+                                    ts_date,
+                                    ticker,
+                                )
+                                continue
+                            day_data[ticker] = parsed_row
+                        except (TypeError, ValueError, OverflowError):
+                            # One corrupt security must not erase otherwise valid siblings.
+                            logger.warning(
+                                "tushare daily %s ignored an invalid row for %s",
+                                ts_date,
+                                ticker,
+                            )
 
-                # Store even if empty — marks date as checked, avoids re-fetch.
-                self._daily_data[ds_iso] = day_data
+                if f"{ts_date}:ROW_SCHEMA" not in failures:
+                    if day_data:
+                        self._daily_data[ds_iso] = day_data
+                    elif (
+                        self._exchange_trade_dates is not None
+                        and day_date not in self._exchange_trade_dates
+                    ):
+                        # A validated exchange calendar makes this an authoritative
+                        # closed weekday, so the empty marker is safe to cache.
+                        self._daily_data[ds_iso] = {}
+                    elif (
+                        self._exchange_trade_dates is not None
+                        and day_date in self._exchange_trade_dates
+                    ):
+                        # ``code=0`` is not sufficient evidence that an open day's
+                        # market-wide payload was complete.  Fail and retry instead
+                        # of poisoning the in-process cache for the rest of D0.
+                        failures.append(f"{ts_date}:EMPTY_OPEN_DATE")
+                    else:
+                        # Legacy callers do not provide an authoritative calendar.
+                        # Preserve their non-failing behavior, but never cache an
+                        # ambiguous weekday empty response across calls.
+                        logger.warning(
+                            "tushare daily %s returned empty without an exchange calendar; "
+                            "leaving it uncached for retry",
+                            ts_date,
+                        )
 
                 if (i + 1) % 20 == 0:
                     logger.info(f"  tushare daily progress: {i + 1}/{len(dates_needed)}")
 
         trading_days = sum(1 for d in self._daily_data.values() if d)
         logger.info(f"tushare daily data ready: {trading_days} trading days")
+        if failures:
+            sample = ",".join(failures[:5])
+            raise IQuantHistoricalAdapterError(
+                f"tushare daily source failed for {len(failures)} requested dates: {sample}"
+            )
 
     async def real_time_quotation(
         self,

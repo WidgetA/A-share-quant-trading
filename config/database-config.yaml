@@ -29,6 +29,23 @@ database:
     schema: "trading"
     auto_create_schema: true  # Create schema if not exists
 
+  # V20 strategy-decision ledger.  Use a dedicated writer in production; it
+  # owns decisions/outbox only and has no broker/order permissions.
+  v20:
+    host: "${V20_DB_HOST:localhost}"
+    port: ${V20_DB_PORT:5432}
+    database: "${V20_DB_NAME:messages}"
+    user: "${V20_DB_USER:v20_writer}"
+    password: "${V20_DB_PASSWORD}"
+    pool_min_size: 1
+    pool_max_size: 8
+    schema: "v20"
+    ssl_mode: "${V20_DB_SSLMODE:verify-full}"
+    ssl_root_cert: "${V20_DB_SSLROOTCERT}"
+    ssl_root_cert_sha256: "${V20_DB_SSLROOTCERT_SHA256}"
+    connect_timeout_seconds: ${V20_DB_CONNECT_TIMEOUT_SECONDS:5}
+    command_timeout_seconds: ${V20_DB_COMMAND_TIMEOUT_SECONDS:15}
+
   # Stock fundamentals (read-only, populated by external process)
   fundamentals:
     host: "${DB_HOST:localhost}"
@@ -39,3 +56,8 @@ database:
     pool_min_size: 2
     pool_max_size: 5
     schema: "public"
+    ssl_mode: "${DB_SSLMODE:require}"
+    ssl_root_cert: "${DB_SSLROOTCERT}"
+    ssl_root_cert_sha256: "${DB_SSLROOTCERT_SHA256}"
+    connect_timeout_seconds: ${DB_CONNECT_TIMEOUT_SECONDS:5}
+    command_timeout_seconds: ${DB_COMMAND_TIMEOUT_SECONDS:15}

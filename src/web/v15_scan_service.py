@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -31,6 +33,11 @@ logger = logging.getLogger(__name__)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Strong references for observation-only DayGate workers.  These tasks never
+# feed a value back into scan_state or the iQuant signal path.
+_DAY_GATE_SHADOW_TASKS: set[asyncio.Task[None]] = set()
+_DAY_GATE_SHADOW_EXECUTOR: ThreadPoolExecutor | None = None
 
 
 # --- Scan state container ---
@@ -110,6 +117,144 @@ async def _notify_feishu_v16_top10(scan_result: Any) -> None:
             await bot.send_v16_top10_report(scan_result)
     except Exception:
         logger.warning("Failed to send Feishu V16 top-10 report", exc_info=True)
+
+
+async def _notify_feishu_v16_day_gate_shadow(message: str) -> None:
+    """Send the separate DayGate shadow report. Best-effort, never raises."""
+    try:
+        from src.common.feishu_bot import FeishuBot
+
+        bot = FeishuBot()
+        if bot.is_configured():
+            await bot.send_message(message, max_retries=3)
+    except Exception:
+        logger.warning("Failed to send Feishu V16 DayGate shadow report", exc_info=True)
+
+
+def _day_gate_shadow_executor() -> ThreadPoolExecutor:
+    """Return the dedicated, capacity-one executor for local shadow I/O."""
+
+    global _DAY_GATE_SHADOW_EXECUTOR
+    if _DAY_GATE_SHADOW_EXECUTOR is None:
+        _DAY_GATE_SHADOW_EXECUTOR = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="v16-day-gate-shadow",
+        )
+    return _DAY_GATE_SHADOW_EXECUTOR
+
+
+def _execute_v16_day_gate_shadow_sync(
+    frozen_snapshot: dict[str, Any],
+    frozen_runtime: Any,
+) -> tuple[bool, str, str] | None:
+    """Evaluate and append one shadow record in a worker thread.
+
+    This function intentionally has no access to ``scan_state`` and returns no
+    recommendation.  Any exception is handled by the async wrapper and cannot
+    propagate into the scan/trading path.
+    """
+    from src.strategy.v16_day_gate_evidence import (
+        append_v16_day_gate_evidence,
+        build_v16_day_gate_evidence,
+    )
+    from src.strategy.v16_day_gate_shadow import (
+        prepare_shadow_decision,
+        prepared_to_metadata,
+        shadow_message,
+    )
+
+    config = frozen_runtime.config
+    prepared = prepare_shadow_decision(frozen_snapshot, frozen_runtime, _PROJECT_ROOT)
+    evidence_snapshot = {
+        **frozen_snapshot,
+        "shadow_evaluation": prepared_to_metadata(prepared),
+    }
+    evaluated_at = datetime.now(BEIJING_TZ)
+    scanner_version = prepared.provenance.get("scanner_runtime_version") or "unknown"
+    record = build_v16_day_gate_evidence(
+        gate_input=prepared.gate_input,
+        decision=prepared.decision,
+        frozen_snapshot=evidence_snapshot,
+        evaluated_at=evaluated_at,
+        scanner_version=scanner_version,
+        model_version=prepared.gate_input.model_version,
+        taxonomy_version=prepared.gate_input.taxonomy_version,
+        policy_version=prepared.decision.policy_version,
+    )
+    evidence_path = append_v16_day_gate_evidence(config.evidence_dir, record)
+    message = shadow_message(frozen_snapshot, prepared, evidence_path)
+    return config.send_feishu, message, str(evidence_path)
+
+
+async def _run_v16_day_gate_shadow(
+    frozen_snapshot: dict[str, Any],
+    frozen_runtime: Any,
+) -> None:
+    """Run observation-only evaluation without delaying or mutating a trade."""
+    try:
+        loop = asyncio.get_running_loop()
+        outcome = await loop.run_in_executor(
+            _day_gate_shadow_executor(),
+            _execute_v16_day_gate_shadow_sync,
+            frozen_snapshot,
+            frozen_runtime,
+        )
+        if outcome is None:
+            return
+        send_feishu, message, evidence_path = outcome
+        logger.info(
+            "V16 DayGate shadow evidence appended: run_id=%s path=%s",
+            frozen_snapshot.get("run_id"),
+            evidence_path,
+        )
+        if send_feishu:
+            await _notify_feishu_v16_day_gate_shadow(message)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Phase 1 is structurally fail-open: errors are observable but can
+        # neither clear today_recommendation nor set scan_error.
+        logger.warning(
+            "V16 DayGate shadow worker failed: run_id=%s",
+            frozen_snapshot.get("run_id"),
+            exc_info=True,
+        )
+
+
+def _schedule_v16_day_gate_shadow(
+    frozen_snapshot: dict[str, Any],
+    frozen_runtime: Any,
+) -> None:
+    """Schedule a managed shadow worker and return immediately."""
+    task = asyncio.create_task(
+        _run_v16_day_gate_shadow(frozen_snapshot, frozen_runtime),
+        name=f"v16-day-gate-shadow-{frozen_snapshot.get('run_id', 'unknown')}",
+    )
+    _DAY_GATE_SHADOW_TASKS.add(task)
+    task.add_done_callback(_DAY_GATE_SHADOW_TASKS.discard)
+
+
+def _build_v16_recommendation_payload(
+    scan_result: Any,
+    stock_data: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Build the legacy top-1 payload consumed by iQuant, byte-for-byte."""
+    recommended = scan_result.recommended
+    if not recommended:
+        return None
+    top1 = recommended[0]
+    board = scan_result.stock_best_board.get(top1.code, "")
+    return {
+        "stock_code": top1.code,
+        "stock_name": top1.name,
+        "board_name": board,
+        "open_price": round(stock_data[top1.code].open_price, 4),
+        "prev_close": round(stock_data[top1.code].prev_close, 4),
+        "latest_price": round(top1.buy_price, 4),
+        "lgb_score": round(top1.score, 6),
+        "hot_board_count": scan_result.step2_hot_board_count,
+        "final_candidates": scan_result.final_candidates,
+    }
 
 
 async def _notify_feishu_signal(signal: dict) -> None:
@@ -212,6 +357,19 @@ async def cleanup_scan_resources(scan_state: V15ScanState) -> None:
     task = scan_state.scheduler_task
     if task and not task.done():
         task.cancel()
+    shadow_tasks = tuple(_DAY_GATE_SHADOW_TASKS)
+    for shadow_task in shadow_tasks:
+        shadow_task.cancel()
+    if shadow_tasks:
+        await asyncio.gather(*shadow_tasks, return_exceptions=True)
+    global _DAY_GATE_SHADOW_EXECUTOR
+    shadow_executor = _DAY_GATE_SHADOW_EXECUTOR
+    _DAY_GATE_SHADOW_EXECUTOR = None
+    if shadow_executor is not None:
+        # Cancelling an asyncio wrapper cannot stop an already-running thread.
+        # A dedicated executor lets shutdown explicitly drain local evidence I/O,
+        # so no write can continue after resource cleanup returns.
+        shadow_executor.shutdown(wait=True, cancel_futures=False)
     rt_client = scan_state.realtime_client
     if rt_client:
         await rt_client.stop()
@@ -671,24 +829,41 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     # Push top-10 report to Feishu (always, non-critical)
     await _notify_feishu_v16_top10(scan_result)
 
-    recommended = scan_result.recommended
-    if not recommended:
-        return None
+    # Preserve the exact phase-0 top-1 payload consumed by iQuant.  DayGate is
+    # scheduled only after this detached recommendation has been built.
+    recommendation_payload = _build_v16_recommendation_payload(scan_result, stock_data)
 
-    # Return top-1 for trading module (today_recommendation)
-    top1 = recommended[0]
-    board = scan_result.stock_best_board.get(top1.code, "")
-    return {
-        "stock_code": top1.code,
-        "stock_name": top1.name,
-        "board_name": board,
-        "open_price": round(stock_data[top1.code].open_price, 4),
-        "prev_close": round(stock_data[top1.code].prev_close, 4),
-        "latest_price": round(top1.buy_price, 4),
-        "lgb_score": round(top1.score, 6),
-        "hot_board_count": scan_result.step2_hot_board_count,
-        "final_candidates": scan_result.final_candidates,
-    }
+    # Freeze and enqueue only JSON-native evidence.  Neither the worker nor its
+    # failure callback can retain/mutate scan_result or recommendation_payload.
+    try:
+        from src.strategy.v16_day_gate_shadow import (
+            freeze_v16_day_gate_runtime,
+            freeze_v16_scan_snapshot,
+        )
+
+        shadow_cutoff = datetime.now(BEIJING_TZ)
+        frozen_runtime = freeze_v16_day_gate_runtime(
+            _PROJECT_ROOT,
+            ranking_model_sha256=scorer.model_sha256,
+            ranking_feature_list_sha256=scorer.feature_list_sha256,
+            captured_at=shadow_cutoff,
+        )
+        if frozen_runtime is not None:
+            frozen_snapshot = freeze_v16_scan_snapshot(
+                scan_result,
+                stock_data,
+                recommendation_payload,
+                frozen_at=shadow_cutoff,
+            )
+            _schedule_v16_day_gate_shadow(frozen_snapshot, frozen_runtime)
+    except Exception:
+        logger.warning(
+            "V16 DayGate shadow snapshot/scheduling failed; recommendation unchanged",
+            exc_info=True,
+        )
+
+    # Return the unchanged top-1 payload for the trading module.
+    return recommendation_payload
 
 
 # --- Scan scheduler ---

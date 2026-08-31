@@ -1,0 +1,31 @@
+{
+  "taxonomy_version": "example-2026-08-25",
+  "themes": [
+    {
+      "canonical_theme_id": "noise:index_membership",
+      "canonical_name": "指数成分标签",
+      "label": "noise",
+      "aliases": [
+        "沪深300"
+      ]
+    },
+    {
+      "canonical_theme_id": "theme:advanced_packaging",
+      "canonical_name": "先进封装",
+      "label": "theme",
+      "aliases": [
+        "Chiplet概念",
+        "先进封装"
+      ]
+    },
+    {
+      "canonical_theme_id": "umbrella:semiconductors",
+      "canonical_name": "半导体上位主题",
+      "label": "umbrella",
+      "aliases": [
+        "半导体概念",
+        "芯片概念"
+      ]
+    }
+  ]
+}

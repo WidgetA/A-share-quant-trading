@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -325,13 +326,18 @@ class LGBRankScorer:
             raise FileNotFoundError(f"Feature list not found: {feature_list_path}")
 
         # 加载模型
-        self.model = lgb.Booster(model_file=str(model_path))
-        size_kb = model_path.stat().st_size / 1024
+        # Read each artifact exactly once.  These hashes identify the bytes
+        # this scorer actually loaded, not whatever a later worker finds.
+        model_bytes = model_path.read_bytes()
+        self.model_sha256 = hashlib.sha256(model_bytes).hexdigest()
+        self.model = lgb.Booster(model_str=model_bytes.decode("utf-8"))
+        size_kb = len(model_bytes) / 1024
         logger.info(f"[LGBRank] Loaded model: {model_path.name} ({size_kb:.1f} KB)")
 
         # 加载特征列表（顺序敏感！）
-        with open(feature_list_path, "r", encoding="utf-8") as f:
-            feat_info = json.load(f)
+        feature_bytes = feature_list_path.read_bytes()
+        self.feature_list_sha256 = hashlib.sha256(feature_bytes).hexdigest()
+        feat_info = json.loads(feature_bytes.decode("utf-8"))
         self.features: list[str] = feat_info["features"]
         self.raw_features: list[str] = feat_info["raw_features"]
         logger.info(f"[LGBRank] {len(self.features)} features loaded")

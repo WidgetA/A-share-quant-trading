@@ -80,3 +80,7 @@ Thumbs.db
 *.db
 *.sqlite
 data/tushare_token.txt
+
+# V20 frozen strategy artifacts are production inputs, not local result data.
+!/docs/strategy-v20-artifacts/
+!/docs/strategy-v20-artifacts/*.csv

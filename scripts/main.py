@@ -17,14 +17,17 @@
 # Message collection is handled by an external project that streams data into PostgreSQL.
 # This system only READS messages from PostgreSQL via MessageReader.
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -40,9 +43,27 @@ from src.common.strategy_controller import StrategyController, StrategyState
 from src.data.readers.message_reader import MessageReader, MessageReaderConfig
 from src.strategy.base import StrategyContext
 from src.strategy.engine import StrategyEngine
-from src.trading.position_manager import PositionManager
+
+if TYPE_CHECKING:
+    from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
+
+
+def _require_v20_host_when_enabled(web_config: dict[str, Any]) -> None:
+    """Keep formal V20 out of the platform process and require a shadow host."""
+
+    raw = os.getenv("V20_ENABLED", "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        if os.getenv("V20_MODE", "forward_shadow").strip() == "production_push":
+            raise RuntimeError(
+                "V20 production_push requires scripts/v20_main.py or Docker target v20"
+            )
+        if not web_config.get("enabled", False):
+            raise RuntimeError("V20_ENABLED=true requires WEB_ENABLED=true")
+        return
+    if raw not in {"0", "false", "no", "off"}:
+        raise ValueError("V20_ENABLED must be a boolean")
 
 
 def setup_logging(config: Config) -> None:
@@ -117,6 +138,8 @@ class SystemManager:
             config: Loaded configuration.
         """
         self.config = config
+        self._web_config: dict = get_web_config()
+        _require_v20_host_when_enabled(self._web_config)
         self._running = False
         self._shutdown_event = asyncio.Event()
 
@@ -141,7 +164,6 @@ class SystemManager:
         # Web UI components
         self.pending_store: PendingConfirmationStore | None = None
         self._web_server: asyncio.Server | None = None
-        self._web_config: dict = get_web_config()
 
         # Tasks
         self._tasks: list[asyncio.Task] = []
@@ -333,7 +355,7 @@ class SystemManager:
         )
 
         # Initialize PositionManager with same config parameters
-        from src.trading.position_manager import PositionConfig
+        from src.trading.position_manager import PositionConfig, PositionManager
 
         news_cfg = strategy_configs.get("news_analysis")
         if news_cfg:
@@ -434,8 +456,6 @@ class SystemManager:
 
         # Send Feishu startup notification with version info
         if self.feishu_bot.is_configured():
-            import os
-
             asyncio.create_task(
                 self.feishu_bot.send_startup_notification(
                     git_commit=os.environ.get("GIT_COMMIT"),

@@ -10,10 +10,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import yaml
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -30,6 +33,7 @@ from src.web.routes import (
     create_v15_backtest_router,
 )
 from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
+from src.web.v20_routes import create_v20_router
 
 if TYPE_CHECKING:
     from src.common.strategy_controller import StrategyController
@@ -41,6 +45,161 @@ logger = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent
 TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
+PROJECT_ROOT = WEB_DIR.parent.parent
+
+_V20_FORWARD_SHADOW = "forward_shadow"
+_V20_PRODUCTION_PUSH = "production_push"
+
+
+def _create_default_v20_service() -> object:
+    """Create V20 lazily so importing the legacy web app stays side-effect free."""
+
+    from src.web.v20_service import V20Service
+
+    return V20Service.from_default_config()
+
+
+def _default_v20_mode_hint() -> str | None:
+    """Read only enough intent to make a safe legacy-scheduler ownership choice.
+
+    The real service factory still performs complete schema, artifact, activation,
+    and checkpoint validation. This probe exists for the failure path: if a
+    requested production configuration is invalid, V15 must remain off rather
+    than silently taking over.
+    """
+
+    env_mode = os.environ.get("V20_MODE")
+    if env_mode is not None:
+        mode = env_mode.strip()
+        return mode if mode in {_V20_FORWARD_SHADOW, _V20_PRODUCTION_PUSH} else None
+
+    try:
+        raw = yaml.safe_load((PROJECT_ROOT / "config" / "v20.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    mode = str(raw.get("deployment_mode", "")).strip()
+    return mode if mode in {_V20_FORWARD_SHADOW, _V20_PRODUCTION_PUSH} else None
+
+
+def _v20_lifecycle_config(service: object) -> tuple[bool, str]:
+    config = getattr(service, "config", None)
+    enabled = getattr(config, "enabled", None)
+    mode = getattr(config, "deployment_mode", None)
+    if not isinstance(enabled, bool):
+        raise ValueError("V20 service config.enabled must be bool")
+    if mode not in {_V20_FORWARD_SHADOW, _V20_PRODUCTION_PUSH}:
+        raise ValueError("V20 service deployment_mode is invalid")
+    return enabled, mode
+
+
+async def _start_v20_lifecycle(app: FastAPI) -> bool:
+    """Start V20 and return whether the legacy V15 scan may also run.
+
+    Production mode claims scan ownership before ``start`` is attempted. A
+    failed production start therefore leaves both scanners inactive (visible as
+    a V20 startup error) instead of falling back to an unintended strategy.
+    """
+
+    app.state.v20_service_started = False
+    app.state.v20_service_lifecycle_owned = False
+    app.state.v20_start_error = None
+
+    service: Any = getattr(app.state, "v20_service", None)
+    if service is None:
+        mode_hint = _default_v20_mode_hint()
+        try:
+            service = _create_default_v20_service()
+            app.state.v20_service = service
+        except Exception as exc:
+            app.state.v20_deployment_mode = mode_hint
+            app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("Failed to create default V20 service")
+            # Unknown intent is treated like production: absence of a verified
+            # shadow declaration cannot authorize the legacy scanner.
+            return mode_hint == _V20_FORWARD_SHADOW
+
+    try:
+        enabled, mode = _v20_lifecycle_config(service)
+    except Exception as exc:
+        app.state.v20_deployment_mode = None
+        app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("Invalid V20 lifecycle configuration")
+        return False
+
+    app.state.v20_deployment_mode = mode
+    legacy_scan_allowed = mode == _V20_FORWARD_SHADOW
+    if not enabled:
+        logger.info("V20 service disabled (mode=%s)", mode)
+        return legacy_scan_allowed
+    if mode == _V20_PRODUCTION_PUSH:
+        app.state.v20_start_error = (
+            "V20 production_push requires the dedicated src.web.v20_app host"
+        )
+        logger.critical(app.state.v20_start_error)
+        return False
+
+    app.state.v20_service_lifecycle_owned = True
+    try:
+        await service.start()
+    except Exception as exc:
+        app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+        if mode == _V20_PRODUCTION_PUSH:
+            logger.critical(
+                "V20 production service failed to start; legacy V15 scan remains disabled",
+                exc_info=True,
+            )
+        else:
+            logger.exception("V20 forward-shadow service failed; keeping legacy V15 scan")
+        return legacy_scan_allowed
+
+    app.state.v20_service_started = True
+    logger.info("V20 service started (mode=%s)", mode)
+    return legacy_scan_allowed
+
+
+async def _stop_v20_lifecycle(app: FastAPI) -> None:
+    """Stop any enabled V20 service whose lifecycle this app attempted to own."""
+
+    if not getattr(app.state, "v20_service_lifecycle_owned", False):
+        return
+    service = getattr(app.state, "v20_service", None)
+    if service is None:
+        return
+    stop_result = (await asyncio.gather(service.stop(), return_exceptions=True))[0]
+    if isinstance(stop_result, asyncio.CancelledError):
+        raise stop_result
+    if isinstance(stop_result, BaseException):
+        app.state.v20_stop_error = f"{type(stop_result).__name__}: {stop_result}"
+        logger.error(
+            "Failed to stop V20 service cleanly",
+            exc_info=(type(stop_result), stop_result, stop_result.__traceback__),
+        )
+    else:
+        app.state.v20_stop_error = None
+        logger.info("V20 service stopped")
+    app.state.v20_service_started = False
+
+
+async def _start_strategy_services(app: FastAPI) -> None:
+    """Start iQuant monitoring plus the single permitted scan owner(s)."""
+
+    # iQuant trading monitoring is independent of scan ownership and must
+    # remain active in every V20 deployment mode.
+    iquant_router = getattr(app.state, "iquant_router", None)
+    if iquant_router and hasattr(iquant_router, "_start_monitoring"):
+        iquant_router._start_monitoring()
+        logger.info("iQuant V15 monitoring scheduler started")
+
+    legacy_scan_allowed = await _start_v20_lifecycle(app)
+    app.state.legacy_v15_scan_allowed = legacy_scan_allowed
+    v15_scan_state = getattr(app.state, "v15_scan_state", None)
+    if legacy_scan_allowed and v15_scan_state:
+        start_scan_scheduler(v15_scan_state)
+        logger.info("V15 scan scheduler started alongside V20 shadow/disabled mode")
+    elif not legacy_scan_allowed:
+        logger.warning("Legacy V15 scan scheduler disabled by V20 ownership policy")
 
 
 def create_app(
@@ -48,6 +207,7 @@ def create_app(
     web_base_url: str = "http://localhost:8000",
     strategy_controller: StrategyController | None = None,
     position_manager: PositionManager | None = None,
+    v20_service: object | None = None,
 ) -> FastAPI:
     """
     Create FastAPI application.
@@ -57,6 +217,8 @@ def create_app(
         web_base_url: Base URL for generating links in notifications.
         strategy_controller: Controller for strategy start/stop.
         position_manager: Manager for position data.
+        v20_service: Optional V20 decision-notification service. When omitted,
+            startup creates the service from ``config/v20.yaml``.
 
     Returns:
         Configured FastAPI app.
@@ -76,6 +238,7 @@ def create_app(
     app.state.web_base_url = web_base_url
     app.state.strategy_controller = strategy_controller
     app.state.position_manager = position_manager
+    app.state.v20_service = v20_service
 
     # Set up templates
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -114,6 +277,10 @@ def create_app(
     app.include_router(iquant_router)
     app.state.iquant_router = iquant_router  # for shutdown cleanup
 
+    # V20 is a decision/notification boundary only; scan ownership and service
+    # lifecycle are resolved explicitly by the startup hook below.
+    app.include_router(create_v20_router())
+
     # V15 scan state (shared between scan service and trading router)
     scan_state = V15ScanState()
     app.state.v15_scan_state = scan_state
@@ -127,8 +294,6 @@ def create_app(
 
     @app.on_event("startup")
     async def startup():
-        import asyncio
-
         from src.data.clients.ifind_http_client import IFinDHttpClient
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
@@ -211,23 +376,16 @@ def create_app(
                 f"Run 'uv run python scripts/audit_trading_safety.py' for details."
             )
 
-        # Auto-start iQuant monitoring (heartbeat, signal timeout, readiness)
-        # This is independent of trading resources — must always run.
-        iquant_rtr = getattr(app.state, "iquant_router", None)
-        if iquant_rtr and hasattr(iquant_rtr, "_start_monitoring"):
-            iquant_rtr._start_monitoring()
-            logger.info("iQuant V15 monitoring scheduler started")
-
-        # Auto-start V15 scan scheduler (autonomous, independent of iQuant)
-        v15_ss = getattr(app.state, "v15_scan_state", None)
-        if v15_ss:
-            start_scan_scheduler(v15_ss)
-            logger.info("V15 scan scheduler started (autonomous)")
+        # V20 production owns scan decisions exclusively; forward shadow may
+        # coexist with the legacy V15 scanner. iQuant monitoring always runs.
+        await _start_strategy_services(app)
 
     @app.on_event("shutdown")
     async def shutdown():
         logger.info("Web UI stopped")
         store.stop_cleanup_task()
+
+        await _stop_v20_lifecycle(app)
 
         # Close shared iFinD client
         ifind_client = getattr(app.state, "ifind_client", None)

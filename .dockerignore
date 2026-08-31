@@ -1,0 +1,35 @@
+.git
+.github
+.claude
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+logs
+*.log
+
+# Local credentials must never enter the Docker build context. Accepted V20
+# checkpoints are intentionally kept under config/v20-checkpoints/ and are not
+# covered by these exclusions.
+.env
+.env.*
+!.env.example
+config/secrets.yaml
+config/secrets*.yaml
+config/*.env
+config/*.env.*
+!config/*.env.example
+credentials.json
+*.pem
+*.key
+
+# Runtime caches are mounted/provided separately; only the three immutable
+# mappings explicitly copied by Dockerfile are admitted to the build context.
+data/*
+!data/sectors.json
+!data/board_constituents.json
+!data/board_relevance_cache.json

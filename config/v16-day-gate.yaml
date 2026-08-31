@@ -1,0 +1,38 @@
+# V16 day-level gate research configuration.
+#
+# Phase 1 is intentionally observation-only.  The runtime accepts only `off`
+# or `shadow`; no value in this file can block or alter an iQuant order.
+schema_version: v16-day-gate-runtime/v1
+mode: shadow
+top_k: 10
+
+# Every scan attempt is written as a new, content-addressed JSON document.
+evidence_dir: data/v16_day_gate
+send_feishu: true
+
+# Runtime accepts only a human-approval envelope, together with the canonical
+# SHA-256 of that complete envelope.  Raw Codex/Kimi responses and consensus
+# candidate taxonomies lack the envelope and are structurally rejected.
+approved_taxonomy_artifact_path: null
+approved_taxonomy_artifact_sha256: null
+
+# The legacy stock-board relevance cache is deterministic at runtime, but its
+# generation run was not versioned.  Its file hash is stored with every
+# decision and it drives only a parallel diagnostic graph.  The primary graph
+# never treats an unrated edge as a negative.
+board_relevance:
+  cache_path: data/board_relevance_cache.json
+  allowed_levels:
+    - "高"
+  exclude_unrated: false
+  exclude_broad_boards: true
+
+# Thresholds remain null until the historical proxy experiment and a forward
+# shadow sample support a versioned policy.  An empty policy evaluates to
+# WATCH / POLICY_UNCALIBRATED, never to an implicit pass.
+policy:
+  version: research-unfitted-v1
+  min_largest_cluster_share: null
+  max_effective_cluster_count: null
+  min_top3_main_cluster_coverage: null
+  min_driver_breadth: null

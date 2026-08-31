@@ -1,0 +1,96 @@
+{
+  "schema_version": "v20-g-artifact-manifest/v1",
+  "artifact_id": "V20_G_ARTIFACTS_20260831_V1",
+  "artifact_frozen_date": "2026-08-31",
+  "runtime_files": {
+    "semantic_mapping": {
+      "path": "g-theme-mapping-v1.csv",
+      "sha256": "35aa230ae480a0b2d543264063ebded9aca4ebb73d2d135c1242483a69025160",
+      "projection_columns": [
+        "raw_label",
+        "canonical_theme_id",
+        "canonical_theme_name_cn",
+        "label_role",
+        "cluster_allowed"
+      ],
+      "row_n": 301,
+      "unique_raw_label_n": 301,
+      "cluster_allowed_true_n": 230,
+      "unique_canonical_theme_n": 222
+    },
+    "half_year_q25": {
+      "path": "causal-half-year-q25-v1.csv",
+      "sha256": "c1315836ad2dd7f07fb7933bc6608ff0949e7dfa4cfb460e5dd299979bcd8d0f",
+      "required_columns": [
+        "decision_half",
+        "prior_amount_total",
+        "prior_amount_median",
+        "prior_amount_bottom3_sum",
+        "sample_n",
+        "train_start",
+        "train_end",
+        "calibration_as_of_ts",
+        "calibration_time_evidence",
+        "calibration_input_snapshot_hash",
+        "threshold_source_hash",
+        "historical_pit_status"
+      ],
+      "forbidden_runtime_columns": [
+        "rebuilt_available_sample_n",
+        "rebuilt_q25_if_refit_now"
+      ],
+      "row_n": 6,
+      "unique_decision_half_n": 6,
+      "latest_decision_half": "2026H2",
+      "latest_sample_n": 73,
+      "latest_calibration_snapshot_frozen_at": "2026-08-30T17:43:24.751391+08:00",
+      "latest_calibration_time_evidence": "FILESYSTEM_MTIME_ONLY_NOT_CRYPTOGRAPHIC",
+      "late_rebuilt_available_sample_n": 75,
+      "late_rebuild_is_diagnostic_only": true
+    },
+    "half_year_q25_calibration_samples": {
+      "path": "causal-half-year-q25-samples-v1.csv",
+      "sha256": "1e5dad588b3adb9ac987dc8a8231cc8c49dff029b1c0a53604076ee91bf2be24",
+      "columns": [
+        "decision_half",
+        "trade_date",
+        "prior_trade_date",
+        "prior_amount_total",
+        "prior_amount_median",
+        "prior_amount_bottom3_sum"
+      ],
+      "row_n": 555,
+      "row_n_by_decision_half": {
+        "2024H1": 94,
+        "2024H2": 93,
+        "2025H1": 96,
+        "2025H2": 92,
+        "2026H1": 107,
+        "2026H2": 73
+      },
+      "unique_decision_half_trade_date": true,
+      "selection_rule": "exact rows in this artifact where decision_half equals the threshold row decision_half",
+      "2026H2_late_rows_excluded": [
+        "20260601",
+        "20260602"
+      ]
+    }
+  },
+  "semantic_equivalence_checks": {
+    "mapping_projection_matches_four_frozen_research_sources": true,
+    "q25_rows_match_frozen_research_source": true,
+    "q25_recomputes_from_exact_calibration_samples": true
+  },
+  "research_provenance": {
+    "gate_manifest_sha256": "e8af1c8c442ed11b952c0ec4baa83ee1af126845e02f2ad1b552c693bd48e0db",
+    "q25_source_sha256": "4e80d8009501151fb0243c6b23667f9d0900f76259e20fb004c68e1555e5ff2b",
+    "q25_2026h2_original_daily_panel_sha256": "ed38be8f947f8d73e00b5d340b2f066f511178231092155ad781ea703fff737d",
+    "q25_2026h2_threshold_candidates_sha256": "7ad6fb075b4233e1825319cab9d59efafb8faea3814eb7d4182b308583cb8547",
+    "mapping_source_sha256": [
+      "5c47a380d39357cdf5e1017dfc7a87cca07127dc4375eddbc75916e137177984",
+      "251fa5640a55e9abaa40404e290e47a76f96e7cf062aab2696de6da06ff9eb14",
+      "5ddb68444c8b090314f928271af3eb1883b4d8b80713842c226f08d064bd1d84",
+      "d87b421511ef25470614c5d607e202cdf53a2d297dd31d94e2ddc56d040e208d"
+    ]
+  }
+}

@@ -1,0 +1,133 @@
+{
+  "schema": "v20-historical-evidence-seed/v1",
+  "artifact_type": "HISTORICAL_EVIDENCE_SEED_ONLY",
+  "artifact_status": "LEGACY_DIAGNOSTIC_SUPERSEDED_FOR_PRODUCTION",
+  "production_bootstrap_eligible": false,
+  "current_v20_rule_compatible": false,
+  "artifact_id": "V20_2024_FIRST_DECISION_PREWARM_V1",
+  "base_rule_id": "CORR_REL_TRI_0_50_100_W60",
+  "defense_rule_id": "BAD_E50_G_BASE",
+  "reference_profile_id": "RETROSPECTIVE_ZERO_LATENCY_0940_END_LABEL_OPEN_V1",
+  "return_profile_id": "LEGACY_NET_PRICE_RETURN_MINUS_20BPS_V1",
+  "superseded_by_required_profiles": [
+    "CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+    "ZERO_COST_GROSS_PRICE_RETURN_V1"
+  ],
+  "permitted_use": "LEGACY_RESEARCH_DIAGNOSTIC_ONLY_NOT_CURRENT_RULE_REPLAY_OR_BOOTSTRAP",
+  "replay": {
+    "historical_adapter_id": "RETROSPECTIVE_RESEARCH_ADAPTER_V1",
+    "historical_receipt_clock_status": "UNAVAILABLE_RETROSPECTIVE_RESEARCH_CLOCK",
+    "decision_start_trade_date": "2023-04-10",
+    "first_signal_trade_date": "2023-04-11",
+    "first_evaluated_trade_date": "2024-01-02",
+    "availability_rule": "t2_exit_date < decision_trade_date",
+    "matured_complete_batch_n": 164,
+    "unsettled_prior_batch_n": 2,
+    "pending_signal_dates": [
+      "2023-12-28",
+      "2023-12-29"
+    ]
+  },
+  "expected_first_decision": {
+    "health": {
+      "state": "PAUSED_R0",
+      "recovery_count": 0,
+      "event": "PAUSE_CONFIRMED_NEGATIVE",
+      "trailing_mean": -0.0026275652964828275,
+      "latest_exit_date": "2023-12-29",
+      "labels": [
+        {
+          "signal_date": "2023-12-22",
+          "t2_exit_date": "2023-12-26",
+          "top3_net_return": -0.0017603886613094,
+          "comparison_pool_net_return": -0.022787231915830427,
+          "relative_return": 0.021026843254521026,
+          "comparison_valid_n": 2985
+        },
+        {
+          "signal_date": "2023-12-25",
+          "t2_exit_date": "2023-12-27",
+          "top3_net_return": -0.0199504145936835,
+          "comparison_pool_net_return": -0.005052674688018798,
+          "relative_return": -0.014897739905664703,
+          "comparison_valid_n": 2988
+        },
+        {
+          "signal_date": "2023-12-27",
+          "t2_exit_date": "2023-12-29",
+          "top3_net_return": 0.0240687943608481,
+          "comparison_pool_net_return": 0.038080593599152904,
+          "relative_return": -0.014011799238304805,
+          "comparison_valid_n": 2992
+        }
+      ]
+    },
+    "breadth": {
+      "valid_n": 3191,
+      "down_n": 1375,
+      "down_share": 0.43089940457536824,
+      "wilson_lower": 0.4165432908131786,
+      "base_multiplier": 1.0
+    },
+    "rolling7": {
+      "state": "BAD",
+      "r7": -0.15451046910461866,
+      "l7": 6,
+      "positive_batch_n": 1,
+      "incomplete_batch_n": 0,
+      "active_gap_n": 0,
+      "signal_dates": [
+        "2023-12-18",
+        "2023-12-19",
+        "2023-12-20",
+        "2023-12-21",
+        "2023-12-22",
+        "2023-12-25",
+        "2023-12-27"
+      ],
+      "exit_dates": [
+        "2023-12-20",
+        "2023-12-21",
+        "2023-12-22",
+        "2023-12-25",
+        "2023-12-26",
+        "2023-12-27",
+        "2023-12-29"
+      ],
+      "batch_returns": [
+        -0.01472029906816905,
+        -0.00883291370854085,
+        -0.02136392319152801,
+        -0.10256289090454543,
+        -0.01190871972695124,
+        -0.022785694275897092,
+        0.02766397177101302
+      ]
+    },
+    "g": {
+      "known": true,
+      "triggered": false,
+      "largest_component_n": 5,
+      "prior_amount_weak_vote_n": 2,
+      "state": "CLEAR",
+      "pit_status": "RETROSPECTIVE_CURRENT_BOARD_PROXY_NOT_STRICT_PIT"
+    },
+    "defense_multiplier": 0.5,
+    "final_multiplier": 0.5
+  },
+  "source_sha256": {
+    "daily_signal_panel.csv": "deb3c1d4d6edf79d6e2394f9110f61409bb5556658b8cb5f3612c6e3bcdaa203",
+    "relative_market_daily.csv": "557cd2ed084324d1e67cbe53a4cebed00c55d7c60c91039c284760ff7c895a46",
+    "unified_backtest/daily_decisions.csv": "ed933e8c8ab3f949ac130bde43defada31ab891e33589aaa219fa58e3e2cb880",
+    "stage5_residual_fix/daily_decisions.csv": "b946eafcd4d87d0436601724429571f97b6d2d1ad0a3cee3d17572b78d7f0c2c",
+    "ROLLING7_CAUSAL_FEATURES.csv": "ff816e747627f39daab6673f53dd8214f2a273f791faa17fda9889d2e7cd2ac7",
+    "V16_SIGNAL_BATCH_OUTCOMES.csv": "15be48c6d18be2d77f58845b05a9dd06214c4c687707d947408cf9bb89dbf506",
+    "GATE_MASKS_2024_2026.csv": "9cda4106f2afc6e8400c9bb2f50cecdbec64568c39707d67bcf7e42cdf8169b4",
+    "DECISIONS_BEFORE_OUTCOME_JOIN.csv": "9c74892ffdae83232a3ffbeb9e6d8c4313d7a3c20343f222c4cebe555daa1d13"
+  },
+  "excluded_non_authoritative_source": {
+    "path": "health_state_audit.csv",
+    "sha256": "abcff72e2009720bb030c8b176c8f767d3a29b3039cc846fdb6adad684d4336b",
+    "reason": "legacy absolute Top3 C3 state, not V20 U8b relative health"
+  }
+}
