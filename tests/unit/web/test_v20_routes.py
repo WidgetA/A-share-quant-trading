@@ -56,6 +56,8 @@ class StubV20Service:
         self.mews_payload: dict[str, Any] | None = None
         self.ack_payload: dict[str, Any] | None = None
         self.trigger_request_id: str | None = None
+        self.manual_monitor_source_event_id: str | None = None
+        self.manual_monitor_request_id: str | None = None
         self.error: Exception | None = None
 
     def _aware_now(self) -> datetime:
@@ -106,6 +108,26 @@ class StubV20Service:
 
     async def trigger_morning_selection(self, request_id: str) -> dict[str, Any]:
         return await self.trigger_manual_scan(request_id)
+
+    async def enroll_manual_monitor(
+        self,
+        source_event_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        self.manual_monitor_source_event_id = source_event_id
+        self.manual_monitor_request_id = request_id
+        return await self._result(
+            {
+                "accepted": True,
+                "created": True,
+                "armed": True,
+                "manual_request_id": request_id,
+                "source_event_id": source_event_id,
+                "armed_leg_count": 10,
+                "official_state_changed": False,
+                "orders_changed": False,
+            }
+        )
 
 
 class _FreshProbeRepository:
@@ -432,6 +454,7 @@ def test_router_exposes_only_status_evidence_and_manual_trigger_endpoints() -> N
         ("/api/v20/mews-snapshots", frozenset({"POST"})),
         ("/api/v20/reminder-stop-acks", frozenset({"POST"})),
         ("/api/v20/trigger-scan", frozenset({"POST"})),
+        ("/api/v20/manual-monitor", frozenset({"POST"})),
     }
     assert not any(
         word in route.path for route in router.routes for word in ("order", "holding", "fill")
@@ -532,6 +555,14 @@ def test_all_routes_fail_gracefully_when_service_is_unavailable(monkeypatch) -> 
         client.post(
             "/api/v20/trigger-scan",
             headers={"Idempotency-Key": "deploy-check-1"},
+        ).status_code
+        == 503
+    )
+    assert (
+        client.post(
+            "/api/v20/manual-monitor",
+            headers={"Idempotency-Key": "manual-monitor-check-1"},
+            json={"source_event_id": "a" * 64},
         ).status_code
         == 503
     )
@@ -699,6 +730,94 @@ def test_trigger_returns_202_and_passes_idempotency_key_without_api_key() -> Non
         "delivery_status": "PENDING",
         "feishu_delivery_confirmed": False,
     }
+
+
+def test_manual_monitor_returns_202_and_passes_only_source_and_idempotency_key() -> None:
+    service = StubV20Service()
+    source_event_id = "a" * 64
+
+    response = _client(service).post(
+        "/api/v20/manual-monitor",
+        headers={"Idempotency-Key": "manual-monitor-20260831"},
+        json={"source_event_id": source_event_id},
+    )
+
+    assert response.status_code == 202
+    assert service.manual_monitor_source_event_id == source_event_id
+    assert service.manual_monitor_request_id == "manual-monitor-20260831"
+    assert response.json() == {
+        "accepted": True,
+        "created": True,
+        "armed": True,
+        "manual_request_id": "manual-monitor-20260831",
+        "source_event_id": source_event_id,
+        "armed_leg_count": 10,
+        "official_state_changed": False,
+        "orders_changed": False,
+    }
+
+
+def test_manual_monitor_without_key_gets_a_server_owned_request_id() -> None:
+    service = StubV20Service()
+
+    response = _client(service).post(
+        "/api/v20/manual-monitor",
+        json={"source_event_id": "b" * 64},
+    )
+
+    assert response.status_code == 202
+    assert service.manual_monitor_request_id is not None
+    assert service.manual_monitor_request_id.startswith("manual-monitor-")
+    UUID(service.manual_monitor_request_id.removeprefix("manual-monitor-"))
+    assert response.json()["manual_request_id"] == service.manual_monitor_request_id
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"source_event_id": "a" * 64, "trade_date": "2026-08-31"},
+        {"source_event_id": "a" * 63},
+        {"source_event_id": "A" * 64},
+        {"source_event_id": "g" * 64},
+        {"source_event_id": ""},
+        {},
+    ],
+)
+def test_manual_monitor_rejects_extra_fields_and_invalid_source(body: dict[str, Any]) -> None:
+    service = StubV20Service()
+
+    response = _client(service).post("/api/v20/manual-monitor", json=body)
+
+    assert response.status_code == 422
+    assert service.manual_monitor_source_event_id is None
+    assert service.manual_monitor_request_id is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (ValueError("bad request identity"), 400),
+        (V20SemanticConflict("source mismatch"), 409),
+        (V20StateConflict("attachment expired"), 409),
+        (V20LeadershipLost("leader replaced"), 503),
+        (V20RepositoryError("database unavailable"), 503),
+        (RuntimeError("unexpected"), 503),
+    ],
+)
+def test_manual_monitor_service_failures_use_the_v20_error_boundary(
+    error: Exception,
+    expected_status: int,
+) -> None:
+    service = StubV20Service()
+    service.error = error
+
+    response = _client(service).post(
+        "/api/v20/manual-monitor",
+        headers={"Idempotency-Key": "manual-monitor-error-1"},
+        json={"source_event_id": "c" * 64},
+    )
+
+    assert response.status_code == expected_status
 
 
 def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay() -> None:

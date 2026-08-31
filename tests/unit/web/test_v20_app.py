@@ -38,8 +38,14 @@ class _Service:
     async def trigger_manual_scan(self, request_id):
         return {"manual_request_id": request_id}
 
+    async def enroll_manual_monitor(self, source_event_id, request_id):
+        return {
+            "source_event_id": source_event_id,
+            "manual_request_id": request_id,
+        }
 
-def test_dedicated_host_exposes_only_the_four_v20_routes() -> None:
+
+def test_dedicated_host_exposes_only_the_five_v20_routes() -> None:
     app = create_v20_app(v20_service=_Service(enabled=False))
 
     routes = {(route.path, frozenset(route.methods or ())) for route in app.routes}
@@ -49,6 +55,7 @@ def test_dedicated_host_exposes_only_the_four_v20_routes() -> None:
         ("/api/v20/mews-snapshots", frozenset({"POST"})),
         ("/api/v20/reminder-stop-acks", frozenset({"POST"})),
         ("/api/v20/trigger-scan", frozenset({"POST"})),
+        ("/api/v20/manual-monitor", frozenset({"POST"})),
     }
 
 

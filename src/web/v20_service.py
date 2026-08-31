@@ -38,6 +38,10 @@ from src.data.database.v20_repository import (
     CompatibleEntryBinding,
     EntryStatus,
     ExitCommit,
+    ManualMonitorEnrollmentCommit,
+    ManualMonitorEnrollmentRecord,
+    ModelBatchWrite,
+    ModelLegWrite,
     OutboxRecord,
     SelectedMewsRecord,
     ShadowBatchRecord,
@@ -63,7 +67,11 @@ from src.strategy.v20.decision_engine import (
     prepare_entry,
     prepare_invalid_entry,
 )
-from src.strategy.v20.exit_policy import evaluate_exit, is_valid_complete_minute_bar
+from src.strategy.v20.exit_policy import (
+    derive_model_leg_id,
+    evaluate_exit,
+    is_valid_complete_minute_bar,
+)
 from src.strategy.v20.identity import event_id, named_hash
 from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
@@ -122,6 +130,7 @@ MANUAL_TRIGGER_DECISION_LOCK_TIMEOUT_SECONDS = 15.0
 LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS = 180.0
 LATE_0939_REPLAY_RETRY_SECONDS = 900.0
 LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS = 2
+MANUAL_MONITOR_HISTORY_TIMEOUT_SECONDS = 30.0
 V20_RUNTIME_LANE_COUNT = 5
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 
@@ -1046,6 +1055,7 @@ class V20Service:
         self._tasks: list[asyncio.Task[Any]] = []
         self._decision_cycle_lock = asyncio.Lock()
         self._manual_trigger_lock = asyncio.Lock()
+        self._manual_monitor_lock = asyncio.Lock()
         self._late_0939_replay_lock = asyncio.Lock()
         self._late_0939_replay_task: asyncio.Task[Any] | None = None
         self._live_exit_lock = asyncio.Lock()
@@ -1639,6 +1649,463 @@ class V20Service:
             **self._ledger_scope,
         )
         return {"ack_id": str(payload["ack_id"]), "accepted": True, "created": created}
+
+    async def enroll_manual_monitor(
+        self,
+        source_event_id: str,
+        request_id: str,
+    ) -> Mapping[str, Any]:
+        """Attach a sealed retrospective ENTER result to the ordinary exit ledger.
+
+        This alert-only recovery lane never rewrites the failed official entry
+        slot and never creates an account position, order, or fill.  The source
+        replay determines every symbol and weight; callers can only name that
+        immutable event and an idempotency key.
+        """
+
+        await self._require_manual_trigger_ready()
+        if not isinstance(source_event_id, str) or len(source_event_id) != 64:
+            raise ValueError("source_event_id must be a 64-character V20 event id")
+        if any(character not in "0123456789abcdef" for character in source_event_id):
+            raise ValueError("source_event_id must be lowercase hexadecimal")
+        if not isinstance(request_id, str) or _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
+            raise ValueError(
+                "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
+            )
+        await self._repository.assert_runtime_leader()
+        if self._manual_monitor_lock.locked():
+            raise V20StateConflict("another V20 manual monitor attachment is already running")
+
+        async with self._manual_monitor_lock:
+            await self._require_manual_trigger_ready()
+            await self._repository.assert_runtime_leader()
+            source = await self._repository.get_outbox_event(
+                source_event_id,
+                route_id=self.config.route_id,
+                **self._ledger_scope,
+            )
+            if source is None:
+                raise V20RepositoryError("manual monitor source event is unavailable")
+            semantic = source.semantic
+            if (
+                source.event_type != "DATA_ALERT"
+                or source.payload is None
+                or source.payload_hash is None
+                or semantic.get("event_id") != source.event_id
+                or semantic.get("schema_version") != V20_DATA_ALERT_SEMANTIC_SCHEMA
+                or semantic.get("feishu_formatter_profile") != V20_FEISHU_FORMATTER_PROFILE
+                or semantic.get("alert_code") != "MANUAL_0939_CHAIN_PROBE_RESULT"
+                or semantic.get("probe_profile")
+                != "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2"
+                or semantic.get("probe_result") != "PASS"
+                or semantic.get("current_version_recomputed") is not True
+                or semantic.get("replay_reused") is not False
+                or semantic.get("replay_action") != "ENTER"
+                or semantic.get("v20_action") != "ENTER"
+                or semantic.get("official_entry_action") != "INPUT_INVALID"
+                or semantic.get("official_state_changed") is not False
+                or semantic.get("orders_changed") is not False
+                or semantic.get("non_actionable") is not True
+                or semantic.get("retrospective_expired") is not True
+                or semantic.get("visible_message_mode") != "AUTOMATIC_ENTRY_RENDER"
+                or semantic.get("state_semantics_hash") != self.config.state_semantics_hash
+                or semantic.get("strategy_version") != self.config.strategy_version
+            ):
+                raise V20SemanticConflict(
+                    "manual monitor source is not a sealed compatible PASS/ENTER chain probe"
+                )
+            source_config_hash = semantic.get("config_hash")
+            if not isinstance(source_config_hash, str) or len(source_config_hash) != 64:
+                raise V20SemanticConflict("manual monitor source config hash is invalid")
+            source_binding = (
+                source_config_hash[:24],
+                source_config_hash,
+                self.config.state_semantics_hash,
+            )
+            if source_config_hash != self.config.config_hash and (
+                source_binding not in self._compatible_entry_bindings
+                and not await self._repository.is_registered_source_config_compatible(
+                    source_config_hash,
+                    strategy_version=self.config.strategy_version,
+                    state_semantics_hash=self.config.state_semantics_hash,
+                    official_stream_id=self.config.official_stream_id,
+                    lineage_id=self.config.state_lineage_id,
+                    route_id=self.config.route_id,
+                )
+            ):
+                raise V20SemanticConflict(
+                    "manual monitor source belongs to an unaudited historical config"
+                )
+
+            try:
+                signal_date = date.fromisoformat(str(semantic["event_trade_date"]))
+            except (KeyError, ValueError) as exc:
+                raise V20SemanticConflict("manual monitor source trade date is invalid") from exc
+            official = await self._repository.get_entry_status(
+                self.config.official_stream_id,
+                signal_date,
+            )
+            if official is None:
+                raise V20RepositoryError("manual monitor source official slot is unavailable")
+            self._verify_entry_binding(official)
+            if (
+                official.action != "INPUT_INVALID"
+                or official.event_id != semantic.get("official_entry_event_id")
+                or semantic.get("official_entry_event_id_before") != official.event_id
+                or semantic.get("official_entry_event_id_after") != official.event_id
+            ):
+                raise V20SemanticConflict(
+                    "manual monitor source is not bound to the frozen failed official slot"
+                )
+
+            entry_render = semantic.get("entry_render_semantic")
+            symbols = semantic.get("symbols")
+            multiplier = semantic.get("final_multiplier")
+            if (
+                not isinstance(entry_render, Mapping)
+                or not isinstance(symbols, list)
+                or not symbols
+                or entry_render.get("symbols") != symbols
+                or entry_render.get("action") != "ENTER"
+                or entry_render.get("final_multiplier") != multiplier
+                or isinstance(multiplier, bool)
+                or not isinstance(multiplier, (int, float))
+                or not math.isfinite(float(multiplier))
+                or not 0 < float(multiplier) <= 1
+            ):
+                raise V20SemanticConflict("manual monitor source ticket list is inconsistent")
+            normalized_symbols: list[dict[str, Any]] = []
+            seen_codes: set[str] = set()
+            for expected_rank, item in enumerate(symbols, start=1):
+                if not isinstance(item, Mapping):
+                    raise V20SemanticConflict("manual monitor source contains a malformed ticket")
+                code = str(item.get("code", ""))
+                name = str(item.get("name", "")).strip()
+                rank = item.get("rank")
+                snapshot_price = item.get("snapshot_price")
+                if (
+                    rank != expected_rank
+                    or len(code) != 6
+                    or not code.isdigit()
+                    or code in seen_codes
+                    or not name
+                    or isinstance(snapshot_price, bool)
+                    or not isinstance(snapshot_price, (int, float))
+                    or not math.isfinite(float(snapshot_price))
+                    or float(snapshot_price) <= 0
+                ):
+                    raise V20SemanticConflict("manual monitor source ticket identity is invalid")
+                seen_codes.add(code)
+                normalized_symbols.append(
+                    {
+                        "rank": expected_rank,
+                        "code": code,
+                        "name": name,
+                        "snapshot_price": float(snapshot_price),
+                    }
+                )
+
+            existing_enrollment = await self._repository.get_manual_monitor_enrollment(
+                source.event_id,
+                **self._ledger_scope,
+            )
+            if existing_enrollment is not None:
+                return await self._manual_monitor_response(
+                    source=source,
+                    record=existing_enrollment,
+                    request_id=request_id,
+                    normalized_symbols=normalized_symbols,
+                    created=False,
+                )
+
+            now = self._aware_now()
+            calendar = tuple(await self._load_trade_calendar(now.date()))
+            if signal_date not in calendar:
+                raise V20SemanticConflict("manual monitor signal date is not an exchange session")
+            successors = [session for session in calendar if session > signal_date]
+            if len(successors) < 2:
+                raise V20RepositoryError("trade calendar lacks D1/D2 for manual monitoring")
+            d1, d2 = successors[:2]
+            activation_cutoff = _local(
+                d1,
+                self.config.clock.reference_lock_deadline_next_day,
+            )
+            if now >= activation_cutoff:
+                raise V20StateConflict("manual monitoring must be attached before D1 09:30")
+
+            codes = tuple(item["code"] for item in normalized_symbols)
+
+            async def load_reference_evidence() -> _ReferenceArbitration:
+                try:
+                    records = await self._repository.list_raw_minute_bar_records(
+                        codes,
+                        trade_date=signal_date,
+                        end_labels=(self.config.clock.reference_bar_label,),
+                        received_before=activation_cutoff,
+                    )
+                except V20MinuteBarIntegrityConflict as exc:
+                    raise V20SemanticConflict(
+                        "manual monitor reference evidence contains corrupt raw rows"
+                    ) from exc
+                return _arbitrate_reference_records(
+                    records,
+                    codes,
+                    trade_date=signal_date,
+                    expected_label=self.config.clock.reference_bar_label,
+                )
+
+            reference = await load_reference_evidence()
+            if reference.missing_codes or reference.conflict_codes:
+                client = self._scan_state.realtime_client
+                if client is None or not hasattr(client, "batch_get_minute_history_for_date"):
+                    raise V20RepositoryError("manual monitor minute-history adapter is unavailable")
+                history = await asyncio.wait_for(
+                    client.batch_get_minute_history_for_date(list(codes), signal_date),
+                    timeout=MANUAL_MONITOR_HISTORY_TIMEOUT_SECONDS,
+                )
+                evidence_context = _DayContext(
+                    trade_date=signal_date,
+                    calendar=calendar,
+                    entry_status=official,
+                    last_phase="MANUAL_MONITOR_REFERENCE_RECOVERY",
+                )
+                await self._persist_history(evidence_context, history, observed_at=now)
+                reference = await load_reference_evidence()
+            if reference.missing_codes or reference.conflict_codes:
+                raise V20StateConflict(
+                    "manual monitor requires complete legal D0 09:41 reference evidence; "
+                    f"missing={len(reference.missing_codes)}, "
+                    f"conflict={len(reference.conflict_codes)}"
+                )
+
+            calendar_evidence_hash = sha256_json(
+                {
+                    "profile": "V20_MANUAL_MONITOR_D1_D2_CALENDAR_V1",
+                    "signal_date": signal_date.isoformat(),
+                    "d1": d1.isoformat(),
+                    "d2": d2.isoformat(),
+                }
+            )
+            model_batch_id = named_hash(
+                "V20_MANUAL_MONITOR_MODEL_BATCH_ID_V1",
+                {
+                    "source_event_id": source.event_id,
+                    "source_semantic_content_hash": source.semantic_content_hash,
+                },
+            )
+            per_leg_weight = float(multiplier) / len(normalized_symbols)
+            model_batch = ModelBatchWrite(
+                model_batch_id=model_batch_id,
+                multiplier=float(multiplier),
+                evaluation_only=False,
+                reference_profile_id=self.config.reference_profile_id,
+                legs=tuple(
+                    ModelLegWrite(
+                        model_leg_id=derive_model_leg_id(
+                            model_batch_id=model_batch_id,
+                            code=item["code"],
+                        ),
+                        code=item["code"],
+                        stock_name=item["name"],
+                        rank=item["rank"],
+                        relative_weight=per_leg_weight,
+                        d1=d1,
+                        d2=d2,
+                    )
+                    for item in normalized_symbols
+                ),
+            )
+            enrollment_id = named_hash(
+                "V20_MANUAL_MONITOR_ENROLLMENT_ID_V1",
+                {
+                    "source_event_id": source.event_id,
+                    "model_batch_id": model_batch_id,
+                },
+            )
+            enrollment_semantic: dict[str, Any] = {
+                "profile": "V20_MANUAL_MONITOR_ENROLLMENT_V1",
+                "enrollment_id": enrollment_id,
+                "source_event_id": source.event_id,
+                "official_entry_event_id": official.event_id,
+                "source_semantic_content_hash": source.semantic_content_hash,
+                "source_payload_hash": source.payload_hash,
+                "official_stream_id": self.config.official_stream_id,
+                "state_lineage_id": self.config.state_lineage_id,
+                "strategy_version": self.config.strategy_version,
+                "source_config_hash": source_config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
+                "signal_date": signal_date.isoformat(),
+                "d1": d1.isoformat(),
+                "d2": d2.isoformat(),
+                "activation_cutoff_ts": activation_cutoff.isoformat(),
+                "calendar_evidence_hash": calendar_evidence_hash,
+                "reference_profile_id": self.config.reference_profile_id,
+                "reference_evidence_status": "COMPLETE_PENDING_D1_ARBITRATION",
+                "reference_evidence_hash": reference.source_hash,
+                "model_batch_id": model_batch_id,
+                "multiplier": float(multiplier),
+                "symbols": normalized_symbols,
+                "official_state_changed": False,
+                "orders_changed": False,
+            }
+            commit = ManualMonitorEnrollmentCommit(
+                enrollment_id=enrollment_id,
+                source_event_id=source.event_id,
+                official_entry_event_id=official.event_id,
+                request_id=request_id,
+                route_id=self.config.route_id,
+                official_stream_id=self.config.official_stream_id,
+                lineage_id=self.config.state_lineage_id,
+                strategy_version=self.config.strategy_version,
+                source_config_hash=source_config_hash,
+                state_semantics_hash=self.config.state_semantics_hash,
+                signal_date=signal_date,
+                d1=d1,
+                d2=d2,
+                activation_cutoff_ts=activation_cutoff,
+                source_semantic_content_hash=source.semantic_content_hash,
+                source_payload_hash=source.payload_hash,
+                calendar_evidence_hash=calendar_evidence_hash,
+                enrollment_semantic=enrollment_semantic,
+                enrollment_semantic_hash=sha256_json(enrollment_semantic),
+                model_batch=model_batch,
+            )
+            await self._require_manual_trigger_ready()
+            await self._repository.assert_runtime_leader()
+            created = await self._repository.enroll_manual_monitor(commit)
+            record = await self._repository.get_manual_monitor_enrollment(
+                source.event_id,
+                **self._ledger_scope,
+            )
+            if record is None:
+                raise V20RepositoryError("manual monitor enrollment is not readable")
+            return await self._manual_monitor_response(
+                source=source,
+                record=record,
+                request_id=request_id,
+                normalized_symbols=normalized_symbols,
+                created=created,
+            )
+
+    async def _manual_monitor_response(
+        self,
+        *,
+        source: OutboxRecord,
+        record: ManualMonitorEnrollmentRecord,
+        request_id: str,
+        normalized_symbols: Sequence[Mapping[str, Any]],
+        created: bool,
+    ) -> Mapping[str, Any]:
+        """Seal a readable confirmation and prove every enrolled leg is durable."""
+
+        if (
+            record.source_event_id != source.event_id
+            or record.official_entry_event_id != source.semantic.get("official_entry_event_id")
+            or record.source_semantic_content_hash != source.semantic_content_hash
+            or record.source_payload_hash != source.payload_hash
+            or record.semantic.get("profile") != "V20_MANUAL_MONITOR_ENROLLMENT_V1"
+            or record.semantic.get("source_event_id") != source.event_id
+            or record.semantic.get("official_entry_event_id") != record.official_entry_event_id
+            or record.semantic.get("model_batch_id") != record.model_batch_id
+            or record.semantic.get("official_stream_id") != self.config.official_stream_id
+            or record.semantic.get("state_lineage_id") != self.config.state_lineage_id
+            or record.semantic.get("source_config_hash") != source.semantic.get("config_hash")
+            or not isinstance(record.semantic.get("reference_profile_id"), str)
+            or not record.semantic.get("reference_profile_id")
+            or record.semantic.get("symbols") != [dict(item) for item in normalized_symbols]
+            or record.signal_date >= record.d1
+            or record.d1 >= record.d2
+        ):
+            raise V20SemanticConflict("manual monitor enrollment/source binding is invalid")
+        enrolled_legs = await self._repository.list_manual_monitor_batch_legs(
+            record.model_batch_id,
+            **self._ledger_scope,
+        )
+        expected_legs = [(item["rank"], item["code"], item["name"]) for item in normalized_symbols]
+        actual_legs = [(leg.rank, leg.code, leg.stock_name) for leg in enrolled_legs]
+        if actual_legs != expected_legs or any(
+            leg.model_batch_id != record.model_batch_id
+            or leg.origin_kind != "MANUAL_MONITOR"
+            or leg.source_event_id != source.event_id
+            or leg.signal_date != record.signal_date
+            or leg.d1 != record.d1
+            or leg.d2 != record.d2
+            or leg.evaluation_only
+            for leg in enrolled_legs
+        ):
+            raise V20StateConflict("manual monitor model batch is incomplete or inconsistent")
+
+        confirmation_event_id = named_hash(
+            "V20_MANUAL_MONITOR_ARMED_EVENT_ID_V1",
+            {"enrollment_id": record.enrollment_id},
+        )
+        confirmation_semantic = {
+            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": confirmation_event_id,
+            "strategy_version": source.semantic["strategy_version"],
+            "config_hash": record.semantic["source_config_hash"],
+            "state_semantics_hash": source.semantic["state_semantics_hash"],
+            "deployment_mode": source.semantic["deployment_mode"],
+            "official_stream_id": self.config.official_stream_id,
+            "state_lineage_id": self.config.state_lineage_id,
+            "alert_code": "MANUAL_MONITOR_ARMED",
+            "delivery_priority_class": "OPERATOR_NOTIFICATION",
+            "event_trade_date": record.d1.isoformat(),
+            "enrollment_id": record.enrollment_id,
+            "source_event_id": source.event_id,
+            "official_entry_event_id": record.official_entry_event_id,
+            "model_batch_id": record.model_batch_id,
+            "signal_date": record.signal_date.isoformat(),
+            "d1": record.d1.isoformat(),
+            "d2": record.d2.isoformat(),
+            "activation_cutoff_ts": record.activation_cutoff_ts.isoformat(),
+            "reference_profile_id": record.semantic["reference_profile_id"],
+            "reference_evidence_status": "COMPLETE_PENDING_D1_ARBITRATION",
+            "armed_leg_count": len(enrolled_legs),
+            "symbols": [dict(item) for item in normalized_symbols],
+            "official_state_changed": False,
+            "orders_changed": False,
+            "message": (
+                f"已把 {record.signal_date.isoformat()} 的 {len(enrolled_legs)} 只冻结票单补挂到"
+                " V20 卖出监控；参考价将按原始 09:41 bar.open 在 D1 09:30"
+                " 仲裁锁定，D1/D2 止损和 D2 14:57 退出提醒均已接入。"
+            ),
+        }
+        await self._repository.enqueue_alert(
+            confirmation_event_id,
+            self.config.route_id,
+            confirmation_semantic,
+            sha256_json(confirmation_semantic),
+            **self._ledger_scope,
+        )
+        confirmation = await self._repository.seal_event(
+            confirmation_event_id,
+            seal_v20_payload,
+        )
+        return {
+            "accepted": True,
+            "created": created,
+            "armed": True,
+            "manual_request_id": request_id,
+            "enrollment_id": record.enrollment_id,
+            "source_event_id": source.event_id,
+            "model_batch_id": record.model_batch_id,
+            "signal_date": record.signal_date.isoformat(),
+            "d1": record.d1.isoformat(),
+            "d2": record.d2.isoformat(),
+            "activation_cutoff_ts": record.activation_cutoff_ts.isoformat(),
+            "reference_profile_id": record.semantic["reference_profile_id"],
+            "reference_evidence_complete": True,
+            "reference_locked": all(leg.reference_status == "LOCKED" for leg in enrolled_legs),
+            "armed_leg_count": len(enrolled_legs),
+            "symbols": [dict(item) for item in normalized_symbols],
+            "official_state_changed": False,
+            "orders_changed": False,
+            "confirmation_event_id": confirmation.event_id,
+            "delivery_status": confirmation.delivery_status,
+            "feishu_delivery_confirmed": confirmation.delivery_status == "SENT",
+        }
 
     async def trigger_manual_scan(self, request_id: str) -> Mapping[str, Any]:
         """Accelerate a legal decision cycle and queue a non-actionable receipt.
@@ -5086,6 +5553,8 @@ class V20Service:
             "model_batch_id": record.model_batch_id,
             "model_leg_id": record.model_leg_id,
             "origin_decision_id": record.decision_id,
+            "origin_kind": record.origin_kind,
+            "origin_source_event_id": record.source_event_id,
             "code": record.code,
             "stock_name": record.stock_name,
             "rank": record.rank,

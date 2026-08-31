@@ -36,7 +36,7 @@ def create_v20_app(
     v20_service: Any | None = None,
     service_factory: ServiceFactory | None = None,
 ) -> FastAPI:
-    """Create the four-route V20 host with no platform execution surface."""
+    """Create the five-route V20 host with no platform execution surface."""
 
     if v20_service is not None and service_factory is not None:
         raise ValueError("provide either v20_service or service_factory, not both")

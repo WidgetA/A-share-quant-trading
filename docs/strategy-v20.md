@@ -300,6 +300,7 @@ GET  /api/v20/status
 POST /api/v20/mews-snapshots
 POST /api/v20/reminder-stop-acks
 POST /api/v20/trigger-scan
+POST /api/v20/manual-monitor
 ```
 
 专用进程不加载平台 `SystemManager`、`PositionManager`、iQuant、订单、持仓或成交路由。
@@ -330,6 +331,13 @@ request body、时钟、交易日或强制参数。09:15 至 09:40 前且当日�
 09:40 前有效、迟到不得追买”。盘后两种路径都不得创建或修改正式状态、shadow batch、
 模型腿、MEWS 选择、卖出信号、订单或券商状态。重算失败时只能发送明确的失败报警，
 不能伪造一条不存在的成功早盘消息。
+
+上述盘后重算仍然不会自行创建模型腿。只有操作人随后显式调用
+`POST /api/v20/manual-monitor`，并提交该条已密封 `PASS/ENTER` 重算事件的完整 64 位
+`source_event_id`，才允许在 D1 09:30 前建立独立的 `MANUAL_MONITOR` 批次。调用方不能
+改票、权重、交易日、参考价或退出规则；全部票的 D0 原始 09:41 bar 必须先完整合法落库，
+最终参考价仍在 D1 09:30 仲裁锁定为 bar.open。人工腿只复用既有 D1/D2 卖出提醒，不修改
+正式入场槽位和状态，不创建账户持仓、订单或成交。详细操作与验收见运行手册 5.5。
 
 复盘分钟线必须先按数据库真实接收时钟持久化，再由持久化 raw bar 计算；`data_cutoff=09:39`
 不等于这些字节在 09:40 前已经收到。BASE/滚动7读取失败槽内冻结的 `policy_inputs`，不得
@@ -398,7 +406,7 @@ V20_ALLOW_PRODUCTION_PUSH=true
 代码实现完成不等于已经启用。正式切换前至少完成：
 
 1. 全量单测、静态检查、迁移与镜像只读 smoke 通过；
-2. 独立 V20 进程确认只有四个 `/api/v20` 路由，没有账户、订单、持仓或 iQuant 路由；
+2. 独立 V20 进程确认只有五个 `/api/v20` 路由，没有账户、订单、持仓或 iQuant 路由；
 3. 专用 writer 的 schema 权限、单 leader、重启补槽和 checkpoint 演练通过；
 4. 连续前向影子覆盖正常日、无票日、BAD/G、09:40 边界、行情缺口/修订、重启、
    Feishu 失败、D1/D2 止损、MEWS 缺失及 D2 14:57 兜底；

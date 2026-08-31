@@ -364,6 +364,35 @@ def _render_data_alert_for_operator(
     """Give runtime alerts a human title and an explicit operator impact."""
 
     code = str(semantic.get("alert_code", "UNKNOWN"))
+    if code == "MANUAL_MONITOR_ARMED":
+        symbols = semantic.get("symbols") or []
+        tickets = "、".join(
+            f"{item.get('code', '-')} {item.get('name', '')}".rstrip()
+            for item in symbols
+            if isinstance(item, Mapping)
+        )
+        return "\n".join(
+            [
+                f"{title_prefix} 人工补挂卖出监控已启用",
+                "",
+                f"🟢 已启用：{semantic.get('armed_leg_count', 0)} 只模型腿",
+                f"票单：{tickets or '无'}",
+                ("参考价：D0 原始 09:41 bar.open；在 D1 09:30 按固定截止时间统一仲裁锁定"),
+                "D1 保护：任一有效分钟 bar.close ≤ 参考价 92%，触发整腿卖出提醒",
+                (
+                    "D2 保护：任一有效分钟 bar.close ≤ 参考价 88%；"
+                    "合格 MEWS=DANGER 时提高到 95%；14:57 无条件提醒退出"
+                ),
+                "",
+                "边界：只新增卖出监控腿；未修改正式入场决定，也未创建订单、持仓或成交。",
+                (
+                    f"D0={semantic.get('signal_date', '-')} | "
+                    f"D1={semantic.get('d1', '-')} | D2={semantic.get('d2', '-')}"
+                ),
+                f"来源事件：{str(semantic.get('source_event_id', '-'))[:16]}",
+                f"确认事件：{event_id[:16]}",
+            ]
+        )
     no_buy_reasons = {
         "ENTRY_CALENDAR_UNKNOWN_NO_BUY": "09:40仍无法确认交易日历，系统不能安全运行入场策略。",
         "ENTRY_CUTOFF_NO_BUY": "09:40截止前没有冻结出可执行的入场决策。",
@@ -681,6 +710,8 @@ def render_exit_message(
         ),
         f"触发: {_EXIT_LABELS.get(signal_type, signal_type)}",
     ]
+    if semantic.get("origin_kind") == "MANUAL_MONITOR":
+        lines.append("来源：人工补挂的冻结票单监控腿（只发卖出提醒，不代表系统已下单或持仓）")
     if semantic.get("origin_final_relative_weight") is not None:
         lines.append(
             f"该模型腿相对标准批次份额: {_pct(float(semantic['origin_final_relative_weight']))}"
@@ -1131,7 +1162,56 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
         message = semantic.get("message", semantic.get("reason"))
         if not isinstance(message, str) or not message:
             raise ValueError("V20 DATA_ALERT semantic requires a message")
-        if semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT":
+        if semantic.get("alert_code") == "MANUAL_MONITOR_ARMED":
+            _require_fields(
+                semantic,
+                {
+                    "event_id",
+                    "enrollment_id",
+                    "source_event_id",
+                    "model_batch_id",
+                    "signal_date",
+                    "d1",
+                    "d2",
+                    "activation_cutoff_ts",
+                    "reference_profile_id",
+                    "reference_evidence_status",
+                    "armed_leg_count",
+                    "symbols",
+                    "official_state_changed",
+                    "orders_changed",
+                    "delivery_priority_class",
+                },
+                subject="V20 manual monitor confirmation",
+            )
+            if (
+                semantic["event_id"] != record.event_id
+                or semantic["delivery_priority_class"] != "OPERATOR_NOTIFICATION"
+                or semantic["reference_evidence_status"] != "COMPLETE_PENDING_D1_ARBITRATION"
+                or semantic["official_state_changed"] is not False
+                or semantic["orders_changed"] is not False
+                or not isinstance(semantic["symbols"], list)
+                or isinstance(semantic["armed_leg_count"], bool)
+                or semantic["armed_leg_count"] != len(semantic["symbols"])
+                or semantic["armed_leg_count"] <= 0
+            ):
+                raise ValueError("V20 manual monitor confirmation is inconsistent")
+            try:
+                signal_date = date.fromisoformat(str(semantic["signal_date"]))
+                d1 = date.fromisoformat(str(semantic["d1"]))
+                d2 = date.fromisoformat(str(semantic["d2"]))
+                activation_cutoff = datetime.fromisoformat(str(semantic["activation_cutoff_ts"]))
+            except ValueError as exc:
+                raise ValueError("V20 manual monitor dates are invalid") from exc
+            if (
+                not signal_date < d1 < d2
+                or activation_cutoff.tzinfo is None
+                or activation_cutoff.utcoffset() is None
+                or activation_cutoff.astimezone(SHANGHAI).date() != d1
+                or activation_cutoff.astimezone(SHANGHAI).time().replace(tzinfo=None) != time(9, 30)
+            ):
+                raise ValueError("V20 manual monitor activation boundary is invalid")
+        elif semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT":
             _validate_manual_0939_chain_probe(record, semantic)
         elif semantic.get("alert_code") == "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY":
             _validate_frozen_entry_message_replay(record, semantic)

@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,6 +19,8 @@ from src.data.database.fundamentals_db import FundamentalsDBConfig
 from src.data.database.v20_repository import (
     ActiveModelLeg,
     EntryStatus,
+    ManualMonitorEnrollmentRecord,
+    MinuteBarRecord,
     OutboxRecord,
     StateRecord,
     V20DatabaseConfig,
@@ -53,6 +55,7 @@ from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_service import (
     FULL_EXIT_LABELS,
     V20Service,
+    _bar_payload,
     _bootstrap_bundle,
     _cleanup_embedded_v20_scan_resources,
     _cleanup_v20_scan_resources,
@@ -3751,18 +3754,24 @@ async def test_reference_cycle_keeps_staging_revisions_until_collection_window_c
 
 
 class _RestartReferenceRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, origin_kind: str = "OFFICIAL_ENTRY") -> None:
         self.locked: tuple[str, float] | None = None
         self.received_before: datetime | None = None
         self.finalized = False
         self.rows: list[Any] | None = None
+        self.origin_kind = origin_kind
+        self.reference_status = "PENDING"
+        self.reference_price: float | None = None
+        self.reference_snapshot_hash: str | None = None
+        self.list_active_calls = 0
 
     async def list_active_legs(self, trade_date, **kwargs):
+        self.list_active_calls += 1
         return [
             ActiveModelLeg(
                 model_leg_id="leg",
                 model_batch_id="batch",
-                decision_id="decision",
+                decision_id=("decision" if self.origin_kind == "OFFICIAL_ENTRY" else None),
                 signal_date=date(2026, 8, 28),
                 code="000001",
                 stock_name="测试股",
@@ -3770,13 +3779,17 @@ class _RestartReferenceRepository:
                 relative_weight=1.0,
                 d1=date(2026, 8, 31),
                 d2=date(2026, 9, 1),
-                reference_status="PENDING",
-                reference_price=None,
-                reference_snapshot_hash=None,
+                reference_status=self.reference_status,
+                reference_price=self.reference_price,
+                reference_snapshot_hash=self.reference_snapshot_hash,
                 evaluation_only=False,
                 mews_snapshot_id=None,
                 mews_fast_state=None,
                 exit_intent_id=None,
+                origin_kind=self.origin_kind,
+                source_event_id=(
+                    "entry-source" if self.origin_kind == "OFFICIAL_ENTRY" else "d" * 64
+                ),
             )
         ]
 
@@ -3826,6 +3839,9 @@ class _RestartReferenceRepository:
         self, model_leg_id, *, reference_profile_id, price, snapshot_hash, **kwargs
     ):
         self.locked = (model_leg_id, price)
+        self.reference_status = "LOCKED"
+        self.reference_price = price
+        self.reference_snapshot_hash = snapshot_hash
 
     async def finalize_pending_references_unavailable(self, *args, **kwargs):
         self.finalized = True
@@ -3850,6 +3866,37 @@ async def test_d1_restart_recovers_only_reference_received_before_fixed_deadline
     assert repository.received_before == datetime(2026, 8, 31, 9, 30, tzinfo=TZ)
     assert repository.locked == ("leg", 10.2)
     assert repository.finalized is True
+
+
+async def test_manual_monitor_restart_locks_reference_and_enters_ordinary_exit_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _RestartReferenceRepository(origin_kind="MANUAL_MONITOR")
+    service = _service(monkeypatch, repository)
+    context = _DayContext(
+        trade_date=date(2026, 8, 31),
+        calendar=(date(2026, 8, 31), date(2026, 9, 1)),
+    )
+    now = datetime(2026, 8, 31, 9, 30, tzinfo=TZ)
+
+    await service._expire_reference_gaps(context, now)
+
+    evaluated: list[ActiveModelLeg] = []
+
+    async def capture(active, _now, _calendar=()):
+        evaluated.extend(active)
+
+    monkeypatch.setattr(service, "_evaluate_active_exits", capture)
+    await service._run_exit_cycle(context, now, include_stale=False)
+
+    assert repository.received_before == datetime(2026, 8, 31, 9, 30, tzinfo=TZ)
+    assert repository.locked == ("leg", 10.2)
+    assert repository.list_active_calls >= 2
+    assert evaluated
+    assert all(leg.origin_kind == "MANUAL_MONITOR" for leg in evaluated)
+    assert all(leg.decision_id is None for leg in evaluated)
+    assert all(leg.reference_status == "LOCKED" for leg in evaluated)
+    assert all(leg.reference_price == 10.2 for leg in evaluated)
 
 
 def _reference_record(price: float, received_at: datetime) -> Any:
@@ -5107,3 +5154,584 @@ async def test_missing_or_failed_status_snapshot_is_unhealthy(
     assert missing["status_snapshot"]["stale"] is True
     assert failed["healthy"] is False
     assert failed["status_snapshot"]["last_error"] == ("RuntimeError: database unavailable")
+
+
+class _ManualMonitorRepository:
+    def __init__(self, service: V20Service, *, source_config_hash: str | None = None) -> None:
+        self.service = service
+        self.source_event_id = "d" * 64
+        self.source_config_hash = source_config_hash or service.config.config_hash
+        self.official_config_hash = service.config.config_hash
+        self.symbols = [
+            {"rank": 1, "code": "605189", "name": "富春染织", "snapshot_price": 15.32},
+            {"rank": 2, "code": "002860", "name": "星帅尔", "snapshot_price": 16.77},
+        ]
+        self.official_event_id = "official-failed-entry"
+        entry_render = {
+            "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": "retrospective-entry-render",
+            "decision_id": "retrospective-decision",
+            "strategy_version": service.config.strategy_version,
+            "config_hash": self.source_config_hash,
+            "state_semantics_hash": service.config.state_semantics_hash,
+            "trade_date": "2026-08-31",
+            "action": "ENTER",
+            "final_multiplier": 1.0,
+            "reference_profile_id": service.config.reference_profile_id,
+            "symbols": self.symbols,
+        }
+        source_semantic = {
+            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": self.source_event_id,
+            "strategy_version": service.config.strategy_version,
+            "config_hash": self.source_config_hash,
+            "state_semantics_hash": service.config.state_semantics_hash,
+            "deployment_mode": service.config.deployment_mode,
+            "official_stream_id": service.config.official_stream_id,
+            "state_lineage_id": service.config.state_lineage_id,
+            "alert_code": "MANUAL_0939_CHAIN_PROBE_RESULT",
+            "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2",
+            "probe_result": "PASS",
+            "current_version_recomputed": True,
+            "replay_reused": False,
+            "replay_action": "ENTER",
+            "v20_action": "ENTER",
+            "final_multiplier": 1.0,
+            "official_entry_action": "INPUT_INVALID",
+            "official_entry_event_id": self.official_event_id,
+            "official_entry_event_id_before": self.official_event_id,
+            "official_entry_event_id_after": self.official_event_id,
+            "official_state_changed": False,
+            "orders_changed": False,
+            "non_actionable": True,
+            "retrospective_expired": True,
+            "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
+            "event_trade_date": "2026-08-31",
+            "symbols": self.symbols,
+            "entry_render_semantic": entry_render,
+        }
+        source_payload = {"message": "sealed retrospective morning result"}
+        self.source = OutboxRecord(
+            event_id=self.source_event_id,
+            event_type="DATA_ALERT",
+            route_id=service.config.route_id,
+            official_stream_id=service.config.official_stream_id,
+            lineage_id=service.config.state_lineage_id,
+            semantic=source_semantic,
+            semantic_content_hash=sha256_json(source_semantic),
+            payload=source_payload,
+            payload_hash=sha256_json(source_payload),
+            generated_at=datetime(2026, 8, 31, 10, 1, tzinfo=TZ),
+            commit_marker=10,
+            action_expiry_ts=None,
+            delivery_status="SENT",
+            attempt_count=1,
+        )
+        failed_semantic = {
+            "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "strategy_version": service.config.strategy_version,
+            "config_hash": self.official_config_hash,
+            "state_semantics_hash": service.config.state_semantics_hash,
+            "action": "INPUT_INVALID",
+            "state_after_hash": "e" * 64,
+        }
+        failed_snapshot = {
+            "schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
+            "state_semantics_hash": service.config.state_semantics_hash,
+        }
+        self.official = EntryStatus(
+            official_stream_id=service.config.official_stream_id,
+            trade_date=date(2026, 8, 31),
+            slot_id="failed-slot",
+            slot_status="FAILED",
+            slot_revision=1,
+            strategy_version=service.config.strategy_version,
+            config_id=self.official_config_hash[:24],
+            config_hash=self.official_config_hash,
+            lineage_id=service.config.state_lineage_id,
+            decision_id="failed-decision",
+            event_id=self.official_event_id,
+            action="INPUT_INVALID",
+            final_multiplier=0.0,
+            semantic_content_hash=sha256_json(failed_semantic),
+            semantic=failed_semantic,
+            snapshot_id="failed-snapshot",
+            snapshot_hash=sha256_json(failed_snapshot),
+            snapshot=failed_snapshot,
+            action_expiry_ts=datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+        )
+        self.records = [
+            self._reference_record(item, 20.0 + index) for index, item in enumerate(self.symbols)
+        ]
+        self.enrollment_commit: Any | None = None
+        self.enrollment: ManualMonitorEnrollmentRecord | None = None
+        self.events: dict[str, OutboxRecord] = {self.source_event_id: self.source}
+        self.alert_semantics: list[Mapping[str, Any]] = []
+        self.registered_config_compatible = True
+        self.registered_config_checks = 0
+        self.manual_legs_exited = False
+        self.fail_confirmation_seal_once = False
+        self.active_leg_reads = 0
+        self.batch_leg_reads = 0
+        self.reference_reads: list[datetime | None] = []
+        self.persisted_minute_payloads: list[Mapping[str, Any]] = []
+
+    @staticmethod
+    def _reference_record(item: Mapping[str, Any], open_price: float) -> MinuteBarRecord:
+        bar = TushareMinuteBar(
+            stock_code=str(item["code"]),
+            bar_end=datetime(2026, 8, 31, 9, 41, tzinfo=TZ),
+            end_label="09:41",
+            open_price=open_price,
+            high_price=open_price + 0.2,
+            low_price=open_price - 0.2,
+            close_price=open_price + 0.1,
+            volume=100_000.0,
+            amount=2_000_000.0,
+        )
+        payload = _bar_payload(bar)
+        return MinuteBarRecord(
+            code=bar.stock_code,
+            bar_end=bar.bar_end,
+            end_label=bar.end_label,
+            source_hash=sha256_json(payload),
+            payload=payload,
+            first_received_at=datetime(2026, 8, 31, 15, 1, tzinfo=TZ),
+        )
+
+    async def assert_runtime_leader(self) -> None:
+        return None
+
+    async def get_outbox_event(self, event_id: str, **_kwargs: Any) -> OutboxRecord | None:
+        return self.events.get(event_id)
+
+    async def get_entry_status(self, _stream: str, trade_date: date) -> EntryStatus | None:
+        return self.official if trade_date == self.official.trade_date else None
+
+    async def is_registered_source_config_compatible(self, *_args: Any, **_kwargs: Any) -> bool:
+        self.registered_config_checks += 1
+        return self.registered_config_compatible
+
+    async def list_raw_minute_bar_records(
+        self,
+        codes: Sequence[str],
+        *,
+        trade_date: date,
+        end_labels: Sequence[str],
+        received_before: datetime | None = None,
+    ) -> list[Any]:
+        self.reference_reads.append(received_before)
+        return [
+            record
+            for record in self.records
+            if record.code in codes
+            and record.bar_end.astimezone(TZ).date() == trade_date
+            and record.end_label in end_labels
+            and (received_before is None or record.first_received_at < received_before)
+        ]
+
+    async def record_minute_bars(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> frozenset[str]:
+        receipt = self.service._aware_now()
+        sealed: set[str] = set()
+        existing_hashes = {record.source_hash for record in self.records}
+        for raw in rows:
+            payload = dict(raw)
+            source_hash = sha256_json(payload)
+            sealed.add(source_hash)
+            self.persisted_minute_payloads.append(payload)
+            if source_hash in existing_hashes:
+                continue
+            bar_end = datetime.fromisoformat(str(payload["bar_end"]))
+            self.records.append(
+                MinuteBarRecord(
+                    code=str(payload["stock_code"]),
+                    bar_end=bar_end,
+                    end_label=str(payload["end_label"]),
+                    source_hash=source_hash,
+                    payload=payload,
+                    first_received_at=receipt,
+                )
+            )
+            existing_hashes.add(source_hash)
+        return frozenset(sealed)
+
+    async def enroll_manual_monitor(self, commit: Any) -> bool:
+        self.enrollment_commit = commit
+        if self.enrollment is not None:
+            return False
+        self.enrollment = ManualMonitorEnrollmentRecord(
+            enrollment_id=commit.enrollment_id,
+            source_event_id=commit.source_event_id,
+            official_entry_event_id=commit.official_entry_event_id,
+            model_batch_id=commit.model_batch.model_batch_id,
+            request_id=commit.request_id,
+            signal_date=commit.signal_date,
+            d1=commit.d1,
+            d2=commit.d2,
+            activation_cutoff_ts=commit.activation_cutoff_ts,
+            source_semantic_content_hash=commit.source_semantic_content_hash,
+            source_payload_hash=commit.source_payload_hash,
+            calendar_evidence_hash=commit.calendar_evidence_hash,
+            semantic=commit.enrollment_semantic,
+            created_at=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+        )
+        return True
+
+    async def get_manual_monitor_enrollment(self, _source: str, **_kwargs: Any) -> Any:
+        return self.enrollment
+
+    def _manual_monitor_legs(self) -> list[ActiveModelLeg]:
+        if self.enrollment_commit is None:
+            return []
+        batch = self.enrollment_commit.model_batch
+        return [
+            ActiveModelLeg(
+                model_leg_id=leg.model_leg_id,
+                model_batch_id=batch.model_batch_id,
+                decision_id=None,
+                signal_date=self.enrollment_commit.signal_date,
+                code=leg.code,
+                stock_name=leg.stock_name,
+                rank=leg.rank,
+                relative_weight=leg.relative_weight,
+                d1=leg.d1,
+                d2=leg.d2,
+                reference_status="PENDING",
+                reference_price=None,
+                reference_snapshot_hash=None,
+                evaluation_only=False,
+                mews_snapshot_id=None,
+                mews_fast_state=None,
+                exit_intent_id=(f"exit-{leg.model_leg_id}" if self.manual_legs_exited else None),
+                origin_kind="MANUAL_MONITOR",
+                source_event_id=self.source_event_id,
+            )
+            for leg in batch.legs
+        ]
+
+    async def list_active_legs(self, _trade_date: date, **_kwargs: Any) -> list[Any]:
+        self.active_leg_reads += 1
+        return [leg for leg in self._manual_monitor_legs() if leg.exit_intent_id is None]
+
+    async def list_manual_monitor_batch_legs(
+        self,
+        model_batch_id: str,
+        **_kwargs: Any,
+    ) -> list[ActiveModelLeg]:
+        self.batch_leg_reads += 1
+        return [leg for leg in self._manual_monitor_legs() if leg.model_batch_id == model_batch_id]
+
+    async def enqueue_alert(
+        self,
+        event_id: str,
+        route_id: str,
+        semantic: Mapping[str, Any],
+        semantic_hash: str,
+        **scope: Any,
+    ) -> bool:
+        self.alert_semantics.append(semantic)
+        if event_id in self.events:
+            return False
+        self.events[event_id] = OutboxRecord(
+            event_id=event_id,
+            event_type="DATA_ALERT",
+            route_id=route_id,
+            official_stream_id=scope["official_stream_id"],
+            lineage_id=scope["lineage_id"],
+            semantic=semantic,
+            semantic_content_hash=semantic_hash,
+            payload=None,
+            payload_hash=None,
+            generated_at=None,
+            commit_marker=None,
+            action_expiry_ts=None,
+            delivery_status="PENDING",
+            attempt_count=0,
+        )
+        return True
+
+    async def seal_event(self, event_id: str, formatter: Any) -> OutboxRecord:
+        record = self.events[event_id]
+        if record.payload is not None:
+            return record
+        if self.fail_confirmation_seal_once:
+            self.fail_confirmation_seal_once = False
+            raise RuntimeError("injected manual-monitor confirmation seal failure")
+        generated_at = datetime(2026, 9, 1, 2, 1, tzinfo=TZ)
+        payload = formatter(record, generated_at, 11, True)
+        sealed = replace(
+            record,
+            payload=payload,
+            payload_hash=sha256_json(payload),
+            generated_at=generated_at,
+            commit_marker=11,
+        )
+        self.events[event_id] = sealed
+        return sealed
+
+
+class _ManualMonitorHistoryClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[str, ...], date]] = []
+
+    async def batch_get_minute_history_for_date(
+        self,
+        codes: Sequence[str],
+        trade_date: date,
+    ) -> Mapping[str, Sequence[TushareMinuteBar]]:
+        normalized = tuple(codes)
+        self.calls.append((normalized, trade_date))
+        return {
+            code: (
+                _bar(
+                    code,
+                    "09:41",
+                    open_price=30.0 + index,
+                    close=30.0 + index,
+                    trade_date=trade_date,
+                ),
+            )
+            for index, code in enumerate(normalized)
+        }
+
+
+async def _manual_monitor_service(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    now: datetime,
+    source_config_hash: str | None = None,
+    client: Any = None,
+) -> tuple[V20Service, _ManualMonitorRepository]:
+    service = _service(monkeypatch, SimpleNamespace(), client)
+    repository = _ManualMonitorRepository(service, source_config_hash=source_config_hash)
+    service._repository = repository
+    service._clock = lambda: now
+
+    async def ready() -> None:
+        return None
+
+    async def calendar() -> tuple[date, ...]:
+        return (
+            date(2026, 8, 31),
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        )
+
+    service._require_manual_trigger_ready = ready  # type: ignore[method-assign]
+    service._calendar_provider = calendar
+    return service, repository
+
+
+async def test_manual_monitor_arms_complete_0941_evidence_without_using_snapshot_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+    )
+
+    result = await service.enroll_manual_monitor(
+        repository.source_event_id,
+        "manual-monitor-20260831",
+    )
+
+    assert result["created"] is True
+    assert result["armed"] is True
+    assert result["armed_leg_count"] == 2
+    assert result["reference_evidence_complete"] is True
+    assert result["reference_locked"] is False
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    commit = repository.enrollment_commit
+    assert commit is not None
+    assert commit.model_batch.evaluation_only is False
+    assert commit.model_batch.multiplier == 1.0
+    assert [leg.relative_weight for leg in commit.model_batch.legs] == [0.5, 0.5]
+    assert commit.enrollment_semantic["reference_evidence_status"] == (
+        "COMPLETE_PENDING_D1_ARBITRATION"
+    )
+    assert all(
+        record.payload["open"] != item["snapshot_price"]
+        for record, item in zip(repository.records, repository.symbols, strict=True)
+    )
+    confirmation = repository.events[result["confirmation_event_id"]]
+    assert confirmation.payload is not None
+    assert "09:41 bar.open" in confirmation.payload["message"]
+    assert "未创建订单、持仓或成交" in confirmation.payload["message"]
+
+
+async def test_manual_monitor_recovers_and_persists_d0_0941_before_enrollment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ManualMonitorHistoryClient()
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 9, 20, tzinfo=TZ),
+        client=client,
+    )
+    repository.records.clear()
+
+    result = await service.enroll_manual_monitor(
+        repository.source_event_id,
+        "manual-monitor-history-recovery",
+    )
+
+    expected_codes = tuple(item["code"] for item in repository.symbols)
+    cutoff = datetime(2026, 9, 1, 9, 30, tzinfo=TZ)
+    assert result["created"] is True
+    assert result["armed_leg_count"] == len(expected_codes)
+    assert client.calls == [(expected_codes, date(2026, 8, 31))]
+    assert repository.reference_reads == [cutoff, cutoff]
+    assert {row["stock_code"] for row in repository.persisted_minute_payloads} == set(
+        expected_codes
+    )
+    assert {record.code for record in repository.records} == set(expected_codes)
+    assert all(record.first_received_at < cutoff for record in repository.records)
+    assert repository.enrollment_commit is not None
+    assert repository.enrollment_commit.enrollment_semantic["reference_evidence_status"] == (
+        "COMPLETE_PENDING_D1_ARBITRATION"
+    )
+
+
+async def test_manual_monitor_accepts_an_audited_previous_full_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_hash = "7" * 64
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+        source_config_hash=old_hash,
+    )
+    service._compatible_entry_bindings.add(
+        ("unrelated-config-id", "6" * 64, service.config.state_semantics_hash)
+    )
+
+    result = await service.enroll_manual_monitor(
+        repository.source_event_id,
+        "manual-monitor-old-config",
+    )
+
+    assert result["created"] is True
+    assert repository.enrollment_commit.source_config_hash == old_hash
+    assert repository.registered_config_checks == 1
+
+
+async def test_manual_monitor_rejects_an_unregistered_previous_full_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+        source_config_hash="7" * 64,
+    )
+    repository.registered_config_compatible = False
+
+    with pytest.raises(V20SemanticConflict, match="unaudited historical config"):
+        await service.enroll_manual_monitor(
+            repository.source_event_id,
+            "manual-monitor-unknown-config",
+        )
+
+    assert repository.enrollment_commit is None
+
+
+async def test_manual_monitor_rejects_exact_d1_cutoff_before_any_model_leg_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 9, 30, tzinfo=TZ),
+    )
+
+    with pytest.raises(V20StateConflict, match="before D1 09:30"):
+        await service.enroll_manual_monitor(
+            repository.source_event_id,
+            "manual-monitor-too-late",
+        )
+
+    assert repository.enrollment_commit is None
+    assert repository.alert_semantics == []
+
+
+async def test_manual_monitor_retry_after_cutoff_recovers_existing_enrollment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+    )
+    first = await service.enroll_manual_monitor(
+        repository.source_event_id,
+        "manual-monitor-before-cutoff",
+    )
+    service._clock = lambda: datetime(2026, 9, 1, 10, 0, tzinfo=TZ)
+
+    retry = await service.enroll_manual_monitor(
+        repository.source_event_id,
+        "manual-monitor-retry-after-cutoff",
+    )
+
+    assert first["created"] is True
+    assert retry["created"] is False
+    assert retry["armed"] is True
+    assert retry["enrollment_id"] == first["enrollment_id"]
+    assert retry["confirmation_event_id"] == first["confirmation_event_id"]
+
+
+async def test_manual_monitor_retry_seals_confirmation_after_every_leg_has_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+    )
+    request_id = "manual-monitor-confirmation-recovery"
+    repository.fail_confirmation_seal_once = True
+
+    with pytest.raises(RuntimeError, match="confirmation seal failure"):
+        await service.enroll_manual_monitor(repository.source_event_id, request_id)
+
+    assert repository.enrollment is not None
+    confirmation_ids = [
+        event_id for event_id in repository.events if event_id != repository.source_event_id
+    ]
+    assert len(confirmation_ids) == 1
+    confirmation_event_id = confirmation_ids[0]
+    assert repository.events[confirmation_event_id].payload is None
+
+    repository.manual_legs_exited = True
+    service._clock = lambda: datetime(2026, 9, 1, 10, 0, tzinfo=TZ)
+    recovered = await service.enroll_manual_monitor(repository.source_event_id, request_id)
+
+    assert recovered["created"] is False
+    assert recovered["armed"] is True
+    assert recovered["confirmation_event_id"] == confirmation_event_id
+    assert repository.events[confirmation_event_id].payload is not None
+    assert repository.active_leg_reads == 0
+    assert repository.batch_leg_reads == 2
+    assert repository.alert_semantics[0] == repository.alert_semantics[1]
+
+
+async def test_manual_monitor_requires_all_ticket_reference_rows_before_writing_legs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+    )
+    repository.records.pop()
+
+    with pytest.raises(V20RepositoryError, match="minute-history adapter"):
+        await service.enroll_manual_monitor(
+            repository.source_event_id,
+            "manual-monitor-missing-reference",
+        )
+
+    assert repository.enrollment_commit is None

@@ -145,7 +145,7 @@ V16 保持运行，公开 `/api/status` 只显示 `start_error_type` 而不泄�
 leader，容器关闭时先取消重试再释放 V20 资源。`/api/status` 的 `retrying=true` 表示正在
 自愈，不表示决策服务已经可触发。
 
-正式 V20 必须使用独立进程 `scripts/v20_main.py`。该进程只创建 V20 service 和四个
+正式 V20 必须使用独立进程 `scripts/v20_main.py`。该进程只创建 V20 service 和五个
 `/api/v20` 接口，不创建平台 state manager、PositionManager、订单/持仓接口或 iQuant
 router。V20 初始化自身仍会读取 fundamentals 并创建 Tushare 客户端，因此除专用
 writer 外还需要为 fundamentals 提供最小只读 `DB_HOST/PORT/NAME/USER/PASSWORD`、
@@ -299,7 +299,8 @@ outbox 标为 SENT（布尔 `false` 不能冒充整数 code 0）。
 
 ## 5. HTTP 运维与验收接口
 
-四个接口分别用于状态、证据、停止提醒确认和部署验收；没有账户或订单 API。
+五个接口分别用于状态、证据、停止提醒确认、早盘触发验收和人工补挂卖出监控；没有
+账户或订单 API。
 
 ### 5.1 状态/健康
 
@@ -498,6 +499,45 @@ header 调用会成为新请求并创建新的复发运输事件。成功收到�
 同一结果。失去 leader、任一 status 健康条件为红（含 lane 不新鲜/有错或 outbox 投递
 错误）、runtime lane 停止、服务未启用或持久层不可用返回 503，均不得当作验收成功。
 
+### 5.5 在 D1 前人工补挂一次卖出监控
+
+`POST /api/v20/trigger-scan` 的盘后重算本身永远不创建模型腿。若操作人明确决定把其中一条
+已密封、重算通过且结论为 `ENTER` 的 `MANUAL_0939_CHAIN_PROBE_RESULT` 票单纳入随后两日
+的卖出监控，使用独立接口：
+
+```bash
+V20_MONITOR_REQUEST_ID="manual-monitor-REVIEWED-SOURCE"
+curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/manual-monitor \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $V20_MONITOR_REQUEST_ID" \
+  -d '{"source_event_id":"FULL_64_HEX_CHAIN_PROBE_EVENT_ID"}'
+```
+
+请求 body 只能给出完整 `source_event_id`，不能指定股票、权重、日期、价格、时钟或退出
+参数。接口当前与人工早盘触发一样不做应用层鉴权，网络层必须限制在内网；重复请求不会
+下单，但首次调用会创建未来可能产生卖出提醒的模型监控腿，因此操作前必须人工核对来源
+事件和票单。
+
+服务只接受同 route/stream/lineage、已密封、`PASS`、当前代码确实重算、结果为 `ENTER`
+且 state semantics 与当前版本相同的来源；full config 可以是同一 lineage 中已经审计为
+兼容的上一部署。服务根据交易所日历自行固定 D1/D2，并先恢复 D0 原始结束标签 `09:41`
+bar。全部票都具有合法、无冲突且在 D1 09:30 前首次落库的证据后，数据库事务才一次性
+建立 `origin_kind=MANUAL_MONITOR` 的批次和全部 PENDING 腿；任一票缺失或冲突则整批不建。
+09:39 展示价绝不能充当参考价。最终参考价仍由正常恢复链在 D1 09:30 从合格修订中统一
+仲裁并锁定为 `09:41 bar.open`。
+
+首次创建和数据库最终截止都要求严格早于 D1 09:30；等于或晚于该时点一律拒绝，避免
+漏掉 D1 保护窗口。建立后完全复用普通模型腿的退出链：D1 任一有效分钟 `bar.close`
+触及 -8%，D2 任一有效分钟 `bar.close` 触及常规 -12%，合格 `MEWS=DANGER` 时 D2 -5%，
+以及 D2 14:57 无条件退出。命中时只向飞书推送整条模型腿
+的卖出建议；系统仍不读取真实账户，不建立真实持仓，也不创建订单、撤单或成交。
+
+成功响应必须同时核对 `armed=true`、`armed_leg_count` 等于来源完整票数、
+`reference_evidence_complete=true`、D1/D2 正确、`official_state_changed=false` 和
+`orders_changed=false`。随后确认 `confirmation_event_id` 的 outbox 最终为 `SENT`，并在
+飞书看到“人工补挂卖出监控已启用”。`reference_locked=false` 在 D1 09:30 前是预期状态，
+不表示监控腿缺失。
+
 ## 6. 前向影子部署
 
 使用以下环境覆盖并部署：
@@ -602,7 +642,7 @@ V20_ALLOW_PRODUCTION_PUSH=true
 
 三项缺一不可；但三项齐全也不能替代 checkpoint 和前向影子门槛。正式启动后应
 确认容器来自 Docker `v20` target、`/api/v20/status` 是预期 lineage/config hash，
-除四个 `/api/v20` 路径外没有平台、订单、持仓或 iQuant 路由，
+除五个 `/api/v20` 路径外没有平台、订单、持仓或 iQuant 路由，
 影子群没有收到正式事件，正式群也没有收到影子事件。
 
 共享 schema 升级后，outbox worker 只扫描和租赁与当前

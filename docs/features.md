@@ -41,6 +41,7 @@
 | 0.11.2 | 2026-08-31 | - | STR-006: Embed V20 forward-shadow in the existing main/V16 runtime, reusing deployed DB, Tushare, and Feishu infrastructure while preserving an isolated ledger/outbox and notification-only boundary |
 | 0.11.3 | 2026-08-31 | - | STR-006: Add a durable, non-actionable exact-09:39 retrospective replay when a late deployment has already failed the official entry slot |
 | 0.11.4 | 2026-08-31 | - | STR-006: Separate deploy-byte identity from V20 state semantics and add an authenticated, append-only legacy-to-core compatibility bridge so notification/replay-only releases can reattach terminal state without rewriting the ledger |
+| 0.11.5 | 2026-09-01 | - | STR-006: Add explicit, idempotent pre-D1 enrollment of a sealed retrospective ticket list into the existing D1/D2 exit-notification ledger without changing official state or creating orders |
 
 ---
 
@@ -895,8 +896,9 @@ or submits orders.
   evidence writes and status reads with two pairwise-distinct API keys; status HTTP serves only a
   bounded background snapshot and never performs a request-time database query.
 - Run formal V20 in the dedicated `scripts/v20_main.py` process/container target. The process may
-  expose only four V20 routes: status, MEWS evidence, reminder acknowledgement, and the manual
-  deployment trigger. It must not load iQuant, broker, order, or account-management routes.
+  expose only five V20 routes: status, MEWS evidence, reminder acknowledgement, the manual
+  deployment trigger, and explicit retrospective-ticket exit-monitor enrollment. It must not load
+  iQuant, broker, order, or account-management routes.
 - Run the deployed main image with an explicit embedded forward-shadow integration by default. It
   reuses the existing `DB_*`, persisted/environment Tushare token, and `FEISHU_*` destination while
   borrowing main's connected fundamentals pool without taking lifecycle ownership, and retaining

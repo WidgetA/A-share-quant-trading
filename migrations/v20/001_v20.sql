@@ -170,7 +170,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_v20_shadow_source_mapping
 
 CREATE TABLE IF NOT EXISTS v20.model_batches (
     model_batch_id TEXT PRIMARY KEY,
-    decision_id TEXT NOT NULL UNIQUE REFERENCES v20.entry_decisions(decision_id),
+    decision_id TEXT UNIQUE REFERENCES v20.entry_decisions(decision_id),
+    origin_kind TEXT NOT NULL DEFAULT 'OFFICIAL_ENTRY',
+    source_event_id TEXT,
+    official_stream_id TEXT,
+    lineage_id TEXT,
     signal_date DATE NOT NULL,
     multiplier DOUBLE PRECISION NOT NULL CHECK (multiplier > 0 AND multiplier <= 1),
     evaluation_only BOOLEAN NOT NULL,
@@ -282,6 +286,111 @@ CREATE TABLE IF NOT EXISTS v20.outbox_events (
         OR (delivery_status<>'LEASED' AND lease_owner IS NULL AND lease_until IS NULL)),
     CHECK (event_type<>'ENTRY_DECISION' OR action_expiry_ts IS NOT NULL)
 );
+
+ALTER TABLE v20.model_batches
+    ADD COLUMN IF NOT EXISTS origin_kind TEXT NOT NULL DEFAULT 'OFFICIAL_ENTRY';
+ALTER TABLE v20.model_batches
+    ADD COLUMN IF NOT EXISTS source_event_id TEXT;
+ALTER TABLE v20.model_batches
+    ADD COLUMN IF NOT EXISTS official_stream_id TEXT;
+ALTER TABLE v20.model_batches
+    ADD COLUMN IF NOT EXISTS lineage_id TEXT;
+ALTER TABLE v20.model_batches
+    ALTER COLUMN decision_id DROP NOT NULL;
+UPDATE v20.model_batches AS batch
+SET source_event_id=decision.event_id,
+    official_stream_id=slot.official_stream_id,
+    lineage_id=slot.lineage_id,
+    origin_kind='OFFICIAL_ENTRY'
+FROM v20.entry_decisions AS decision
+JOIN v20.decision_slots AS slot USING (slot_id)
+WHERE batch.decision_id=decision.decision_id
+  AND (
+      batch.source_event_id IS NULL OR batch.official_stream_id IS NULL
+      OR batch.lineage_id IS NULL
+  );
+ALTER TABLE v20.model_batches
+    ALTER COLUMN source_event_id SET NOT NULL;
+ALTER TABLE v20.model_batches
+    ALTER COLUMN official_stream_id SET NOT NULL;
+ALTER TABLE v20.model_batches
+    ALTER COLUMN lineage_id SET NOT NULL;
+DO $v20_model_batch_constraints$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='ck_v20_model_batch_origin'
+          AND conrelid='v20.model_batches'::regclass
+    ) THEN
+        ALTER TABLE v20.model_batches
+            ADD CONSTRAINT ck_v20_model_batch_origin CHECK (
+                (origin_kind='OFFICIAL_ENTRY' AND decision_id IS NOT NULL)
+                OR (origin_kind='MANUAL_MONITOR' AND decision_id IS NULL)
+            );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='fk_v20_model_batch_source_event'
+          AND conrelid='v20.model_batches'::regclass
+    ) THEN
+        ALTER TABLE v20.model_batches
+            ADD CONSTRAINT fk_v20_model_batch_source_event
+            FOREIGN KEY (source_event_id) REFERENCES v20.outbox_events(event_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END
+$v20_model_batch_constraints$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_v20_model_batch_source_event
+    ON v20.model_batches(source_event_id);
+
+CREATE TABLE IF NOT EXISTS v20.manual_monitor_enrollments (
+    enrollment_id TEXT PRIMARY KEY,
+    source_event_id TEXT NOT NULL UNIQUE REFERENCES v20.outbox_events(event_id),
+    official_entry_event_id TEXT NOT NULL,
+    model_batch_id TEXT NOT NULL UNIQUE REFERENCES v20.model_batches(model_batch_id),
+    request_id TEXT NOT NULL,
+    official_stream_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    signal_date DATE NOT NULL,
+    d1 DATE NOT NULL,
+    d2 DATE NOT NULL,
+    activation_cutoff_ts TIMESTAMPTZ NOT NULL,
+    source_semantic_content_hash CHAR(64) NOT NULL,
+    source_payload_hash CHAR(64) NOT NULL,
+    calendar_evidence_hash CHAR(64) NOT NULL,
+    enrollment_semantic_hash CHAR(64) NOT NULL,
+    enrollment_fingerprint CHAR(64) NOT NULL,
+    enrollment_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CHECK (signal_date < d1 AND d1 < d2),
+    CHECK (request_id <> ''),
+    UNIQUE (official_stream_id,lineage_id,request_id)
+);
+ALTER TABLE v20.manual_monitor_enrollments
+    ADD COLUMN IF NOT EXISTS official_entry_event_id TEXT;
+UPDATE v20.manual_monitor_enrollments AS enrollment
+SET official_entry_event_id=source.semantic_json->>'official_entry_event_id'
+FROM v20.outbox_events AS source
+WHERE source.event_id=enrollment.source_event_id
+  AND enrollment.official_entry_event_id IS NULL;
+ALTER TABLE v20.manual_monitor_enrollments
+    ALTER COLUMN official_entry_event_id SET NOT NULL;
+DO $v20_manual_monitor_constraints$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='fk_v20_manual_monitor_official_entry'
+          AND conrelid='v20.manual_monitor_enrollments'::regclass
+    ) THEN
+        ALTER TABLE v20.manual_monitor_enrollments
+            ADD CONSTRAINT fk_v20_manual_monitor_official_entry
+            FOREIGN KEY (official_entry_event_id) REFERENCES v20.outbox_events(event_id);
+    END IF;
+END
+$v20_manual_monitor_constraints$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_v20_manual_monitor_official_entry
+    ON v20.manual_monitor_enrollments
+        (official_stream_id,lineage_id,official_entry_event_id);
 
 -- Upgrade shared schemas without assigning legacy events to a live worker by
 -- guesswork. Relationally bound rows are recovered; anything else is retained

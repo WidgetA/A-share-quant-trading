@@ -65,6 +65,8 @@ class V20RouteService(Protocol):
 
     async def trigger_morning_selection(self, request_id: str) -> Any: ...
 
+    async def enroll_manual_monitor(self, source_event_id: str, request_id: str) -> Any: ...
+
 
 class MewsSnapshotRequest(BaseModel):
     """Immutable MEWS evidence accepted from the external research process."""
@@ -104,6 +106,14 @@ class ReminderStopAckRequest(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("ack_ts must be timezone-aware")
         return value
+
+
+class ManualMonitorRequest(BaseModel):
+    """Name one immutable replay event; all tickets and dates remain server-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_event_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 def _require_ingest_api_key(
@@ -934,5 +944,22 @@ def create_v20_router() -> APIRouter:
         service = _get_service(request)
         request_id = idempotency_key or f"manual-{uuid4()}"
         return await _call_service(lambda: _dispatch_manual_trigger(service, request_id))
+
+    @router.post(
+        "/manual-monitor",
+        status_code=202,
+    )
+    async def enroll_manual_monitor(
+        request: Request,
+        body: ManualMonitorRequest,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> Any:
+        """Arm the ordinary D1/D2 exit lane for a sealed retrospective ticket list."""
+
+        service = _get_service(request)
+        request_id = idempotency_key or f"manual-monitor-{uuid4()}"
+        return await _call_service(
+            lambda: service.enroll_manual_monitor(body.source_event_id, request_id)
+        )
 
     return router

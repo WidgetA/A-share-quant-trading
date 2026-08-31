@@ -43,6 +43,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ENV_VALUE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}$")
 _ENTRY_NORMAL_DEADLINE_WALL = time(9, 40)
 _ENTRY_FINALIZATION_WALL = time(9, 45)
+_MANUAL_MONITOR_ENROLLMENT_DEADLINE_WALL = time(9, 30)
 _BOOTSTRAP_CHECKPOINT_SCHEMA = "v20-bootstrap-checkpoint/v2"
 _BOOTSTRAP_BATCH_ID_PROFILE = "V20_BOOTSTRAP_TARGET_BATCH_ID_V1"
 
@@ -865,6 +866,48 @@ class ModelBatchWrite:
 
 
 @dataclass(frozen=True)
+class ManualMonitorEnrollmentCommit:
+    enrollment_id: str
+    source_event_id: str
+    official_entry_event_id: str
+    request_id: str
+    route_id: str
+    official_stream_id: str
+    lineage_id: str
+    strategy_version: str
+    source_config_hash: str
+    state_semantics_hash: str
+    signal_date: date
+    d1: date
+    d2: date
+    activation_cutoff_ts: datetime
+    source_semantic_content_hash: str
+    source_payload_hash: str
+    calendar_evidence_hash: str
+    enrollment_semantic: Mapping[str, Any]
+    enrollment_semantic_hash: str
+    model_batch: ModelBatchWrite
+
+
+@dataclass(frozen=True)
+class ManualMonitorEnrollmentRecord:
+    enrollment_id: str
+    source_event_id: str
+    official_entry_event_id: str
+    model_batch_id: str
+    request_id: str
+    signal_date: date
+    d1: date
+    d2: date
+    activation_cutoff_ts: datetime
+    source_semantic_content_hash: str
+    source_payload_hash: str
+    calendar_evidence_hash: str
+    semantic: Mapping[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class EntryCommit:
     official_stream_id: str
     slot_id: str
@@ -931,7 +974,7 @@ class OutboxRecord:
 class ActiveModelLeg:
     model_leg_id: str
     model_batch_id: str
-    decision_id: str
+    decision_id: str | None
     signal_date: date
     code: str
     stock_name: str
@@ -946,6 +989,226 @@ class ActiveModelLeg:
     mews_snapshot_id: str | None
     mews_fast_state: str | None
     exit_intent_id: str | None
+    origin_kind: str = "OFFICIAL_ENTRY"
+    source_event_id: str = ""
+
+
+def _active_model_leg_from_row(row: Mapping[str, Any]) -> ActiveModelLeg:
+    return ActiveModelLeg(
+        model_leg_id=row["model_leg_id"],
+        model_batch_id=row["model_batch_id"],
+        decision_id=row["decision_id"],
+        origin_kind=row["origin_kind"],
+        source_event_id=row["source_event_id"],
+        signal_date=row["signal_date"],
+        code=row["code"],
+        stock_name=row["stock_name"],
+        rank=int(row["rank"]),
+        relative_weight=float(row["relative_weight"]),
+        d1=row["d1"],
+        d2=row["d2"],
+        reference_status=row["reference_status"],
+        reference_price=(
+            float(row["reference_price"]) if row["reference_price"] is not None else None
+        ),
+        reference_snapshot_hash=row["reference_snapshot_hash"],
+        evaluation_only=bool(row["evaluation_only"]),
+        mews_snapshot_id=row["mews_snapshot_id"],
+        mews_fast_state=row["mews_fast_state"],
+        exit_intent_id=row["exit_intent_id"],
+    )
+
+
+def _model_batch_authorization_sql(
+    schema: str,
+    *,
+    batch_alias: str = "batch",
+    source_alias: str = "source",
+) -> str:
+    """Return the single dual-origin authorization predicate for model-leg reads."""
+
+    return f"""
+        (
+            ({batch_alias}.origin_kind='OFFICIAL_ENTRY'
+                AND {source_alias}.event_type='ENTRY_DECISION'
+                AND EXISTS (
+                    SELECT 1
+                    FROM {schema}.entry_decisions AS origin_decision
+                    JOIN {schema}.decision_slots AS origin_slot
+                      ON origin_slot.slot_id=origin_decision.slot_id
+                    WHERE origin_decision.decision_id={batch_alias}.decision_id
+                      AND origin_decision.event_id={batch_alias}.source_event_id
+                      AND origin_slot.official_stream_id={batch_alias}.official_stream_id
+                      AND origin_slot.lineage_id={batch_alias}.lineage_id
+                ))
+            OR ({batch_alias}.origin_kind='MANUAL_MONITOR'
+                AND {source_alias}.event_type='DATA_ALERT'
+                AND EXISTS (
+                    SELECT 1
+                    FROM {schema}.manual_monitor_enrollments AS enrollment
+                    WHERE enrollment.model_batch_id={batch_alias}.model_batch_id
+                      AND enrollment.source_event_id={batch_alias}.source_event_id
+                      AND enrollment.official_stream_id={batch_alias}.official_stream_id
+                      AND enrollment.lineage_id={batch_alias}.lineage_id
+                ))
+        )
+    """
+
+
+def _manual_monitor_enrollment_fingerprint(
+    commit: ManualMonitorEnrollmentCommit,
+) -> str:
+    return sha256_json(
+        {
+            "enrollment_id": commit.enrollment_id,
+            "source_event_id": commit.source_event_id,
+            "official_entry_event_id": commit.official_entry_event_id,
+            "route_id": commit.route_id,
+            "official_stream_id": commit.official_stream_id,
+            "lineage_id": commit.lineage_id,
+            "strategy_version": commit.strategy_version,
+            "source_config_hash": commit.source_config_hash,
+            "state_semantics_hash": commit.state_semantics_hash,
+            "signal_date": commit.signal_date.isoformat(),
+            "d1": commit.d1.isoformat(),
+            "d2": commit.d2.isoformat(),
+            "activation_cutoff_ts": commit.activation_cutoff_ts.isoformat(),
+            "source_semantic_content_hash": commit.source_semantic_content_hash,
+            "source_payload_hash": commit.source_payload_hash,
+            "calendar_evidence_hash": commit.calendar_evidence_hash,
+            "enrollment_semantic_hash": commit.enrollment_semantic_hash,
+            "model_batch": _model_batch_semantics(commit.model_batch),
+        }
+    )
+
+
+def _manual_enrollment_from_row(row: Mapping[str, Any]) -> ManualMonitorEnrollmentRecord:
+    return ManualMonitorEnrollmentRecord(
+        enrollment_id=str(row["enrollment_id"]),
+        source_event_id=str(row["source_event_id"]),
+        official_entry_event_id=str(row["official_entry_event_id"]),
+        model_batch_id=str(row["model_batch_id"]),
+        request_id=str(row["request_id"]),
+        signal_date=row["signal_date"],
+        d1=row["d1"],
+        d2=row["d2"],
+        activation_cutoff_ts=row["activation_cutoff_ts"],
+        source_semantic_content_hash=str(row["source_semantic_content_hash"]),
+        source_payload_hash=str(row["source_payload_hash"]),
+        calendar_evidence_hash=str(row["calendar_evidence_hash"]),
+        semantic=_json_value(row["enrollment_json"]),
+        created_at=row["created_at"],
+    )
+
+
+def _registered_source_config_row_is_compatible(
+    row: Mapping[str, Any] | None,
+    *,
+    source_config_hash: str,
+    strategy_version: str,
+    state_semantics_hash: str,
+    official_stream_id: str,
+    lineage_id: str,
+    route_id: str,
+) -> bool:
+    """Authenticate a registered, same-core config without requiring a terminal slot."""
+
+    if row is None:
+        return False
+    try:
+        payload = _json_value(row["config_json"])
+        if not isinstance(payload, Mapping):
+            return False
+        authentic = declared_state_semantics_is_authentic(payload)
+        derived_core_hash = state_semantics_hash_from_frozen_payload(payload)
+        payload_hash = sha256_json(payload)
+    except (KeyError, TypeError, ValueError, V20ConfigError):
+        return False
+    return bool(
+        authentic
+        and row["config_id"] == source_config_hash[:24]
+        and row["config_hash"] == source_config_hash
+        and row["strategy_version"] == strategy_version
+        and row["deployment_mode"] == payload.get("deployment_mode")
+        and payload_hash == source_config_hash
+        and payload.get("strategy_version") == strategy_version
+        and payload.get("official_stream_id") == official_stream_id
+        and payload.get("state_lineage_id") == lineage_id
+        and payload.get("route_id") == route_id
+        and payload.get("state_semantics_hash") == state_semantics_hash
+        and derived_core_hash == state_semantics_hash
+    )
+
+
+def _validate_manual_monitor_commit(commit: ManualMonitorEnrollmentCommit) -> None:
+    _require_outbox_scope(commit.route_id, commit.official_stream_id, commit.lineage_id)
+    if (
+        not commit.enrollment_id
+        or not commit.source_event_id
+        or not commit.official_entry_event_id
+        or not commit.request_id
+    ):
+        raise ValueError(
+            "manual monitor enrollment/source/official-entry/request IDs cannot be empty"
+        )
+    if not commit.strategy_version:
+        raise ValueError("manual monitor strategy_version cannot be empty")
+    if not commit.signal_date < commit.d1 < commit.d2:
+        raise ValueError("manual monitor dates must satisfy signal_date < d1 < d2")
+    _require_aware(commit.activation_cutoff_ts, "manual monitor activation_cutoff_ts")
+    local_cutoff = commit.activation_cutoff_ts.astimezone(BEIJING_TZ)
+    if (
+        local_cutoff.date() != commit.d1
+        or local_cutoff.timetz().replace(tzinfo=None) != _MANUAL_MONITOR_ENROLLMENT_DEADLINE_WALL
+    ):
+        raise ValueError("manual monitor activation cutoff must be D1 09:30 Asia/Shanghai")
+    for value, field_name in (
+        (commit.source_semantic_content_hash, "source_semantic_content_hash"),
+        (commit.source_payload_hash, "source_payload_hash"),
+        (commit.calendar_evidence_hash, "calendar_evidence_hash"),
+        (commit.enrollment_semantic_hash, "enrollment_semantic_hash"),
+        (commit.source_config_hash, "source_config_hash"),
+        (commit.state_semantics_hash, "state_semantics_hash"),
+    ):
+        _require_sha256(value, field_name)
+    if sha256_json(commit.enrollment_semantic) != commit.enrollment_semantic_hash:
+        raise V20SemanticConflict("manual monitor enrollment semantic hash mismatch")
+
+    batch = commit.model_batch
+    if not batch.model_batch_id or not batch.reference_profile_id:
+        raise ValueError("manual monitor model batch IDs/profile cannot be empty")
+    if batch.evaluation_only:
+        raise ValueError("manual monitor batch must be actionable for exit notifications")
+    if not math.isfinite(batch.multiplier) or not 0 < batch.multiplier <= 1:
+        raise ValueError("manual monitor multiplier must be finite and in (0, 1]")
+    if not batch.legs:
+        raise ValueError("manual monitor batch must contain at least one leg")
+    seen_codes: set[str] = set()
+    seen_ranks: set[int] = set()
+    seen_leg_ids: set[str] = set()
+    for leg in batch.legs:
+        if not leg.model_leg_id or not re.fullmatch(r"\d{6}", leg.code):
+            raise ValueError("manual monitor model leg ID/code is invalid")
+        if not leg.stock_name:
+            raise ValueError("manual monitor stock_name cannot be empty")
+        if leg.rank <= 0 or leg.rank in seen_ranks:
+            raise ValueError("manual monitor ranks must be unique positive integers")
+        if leg.code in seen_codes or leg.model_leg_id in seen_leg_ids:
+            raise ValueError("manual monitor leg codes and IDs must be unique")
+        if not math.isfinite(leg.relative_weight) or not 0 < leg.relative_weight <= 1:
+            raise ValueError("manual monitor leg weight must be finite and in (0, 1]")
+        if (leg.d1, leg.d2) != (commit.d1, commit.d2):
+            raise ValueError("manual monitor leg dates must match enrollment D1/D2")
+        seen_codes.add(leg.code)
+        seen_ranks.add(leg.rank)
+        seen_leg_ids.add(leg.model_leg_id)
+    if not math.isclose(
+        sum(leg.relative_weight for leg in batch.legs),
+        batch.multiplier,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("manual monitor leg weights must sum to the batch multiplier")
 
 
 _MIGRATION_TEMPLATE = r"""
@@ -1119,7 +1382,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_v20_shadow_source_mapping
 
 CREATE TABLE IF NOT EXISTS {schema}.model_batches (
     model_batch_id TEXT PRIMARY KEY,
-    decision_id TEXT NOT NULL UNIQUE REFERENCES {schema}.entry_decisions(decision_id),
+    decision_id TEXT UNIQUE REFERENCES {schema}.entry_decisions(decision_id),
+    origin_kind TEXT NOT NULL DEFAULT 'OFFICIAL_ENTRY',
+    source_event_id TEXT,
+    official_stream_id TEXT,
+    lineage_id TEXT,
     signal_date DATE NOT NULL,
     multiplier DOUBLE PRECISION NOT NULL CHECK (multiplier > 0 AND multiplier <= 1),
     evaluation_only BOOLEAN NOT NULL,
@@ -1231,6 +1498,111 @@ CREATE TABLE IF NOT EXISTS {schema}.outbox_events (
         OR (delivery_status<>'LEASED' AND lease_owner IS NULL AND lease_until IS NULL)),
     CHECK (event_type<>'ENTRY_DECISION' OR action_expiry_ts IS NOT NULL)
 );
+
+ALTER TABLE {schema}.model_batches
+    ADD COLUMN IF NOT EXISTS origin_kind TEXT NOT NULL DEFAULT 'OFFICIAL_ENTRY';
+ALTER TABLE {schema}.model_batches
+    ADD COLUMN IF NOT EXISTS source_event_id TEXT;
+ALTER TABLE {schema}.model_batches
+    ADD COLUMN IF NOT EXISTS official_stream_id TEXT;
+ALTER TABLE {schema}.model_batches
+    ADD COLUMN IF NOT EXISTS lineage_id TEXT;
+ALTER TABLE {schema}.model_batches
+    ALTER COLUMN decision_id DROP NOT NULL;
+UPDATE {schema}.model_batches AS batch
+SET source_event_id=decision.event_id,
+    official_stream_id=slot.official_stream_id,
+    lineage_id=slot.lineage_id,
+    origin_kind='OFFICIAL_ENTRY'
+FROM {schema}.entry_decisions AS decision
+JOIN {schema}.decision_slots AS slot USING (slot_id)
+WHERE batch.decision_id=decision.decision_id
+  AND (
+      batch.source_event_id IS NULL OR batch.official_stream_id IS NULL
+      OR batch.lineage_id IS NULL
+  );
+ALTER TABLE {schema}.model_batches
+    ALTER COLUMN source_event_id SET NOT NULL;
+ALTER TABLE {schema}.model_batches
+    ALTER COLUMN official_stream_id SET NOT NULL;
+ALTER TABLE {schema}.model_batches
+    ALTER COLUMN lineage_id SET NOT NULL;
+DO $v20_model_batch_constraints$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='ck_v20_model_batch_origin'
+          AND conrelid='{schema}.model_batches'::regclass
+    ) THEN
+        ALTER TABLE {schema}.model_batches
+            ADD CONSTRAINT ck_v20_model_batch_origin CHECK (
+                (origin_kind='OFFICIAL_ENTRY' AND decision_id IS NOT NULL)
+                OR (origin_kind='MANUAL_MONITOR' AND decision_id IS NULL)
+            );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='fk_v20_model_batch_source_event'
+          AND conrelid='{schema}.model_batches'::regclass
+    ) THEN
+        ALTER TABLE {schema}.model_batches
+            ADD CONSTRAINT fk_v20_model_batch_source_event
+            FOREIGN KEY (source_event_id) REFERENCES {schema}.outbox_events(event_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END
+$v20_model_batch_constraints$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_v20_model_batch_source_event
+    ON {schema}.model_batches(source_event_id);
+
+CREATE TABLE IF NOT EXISTS {schema}.manual_monitor_enrollments (
+    enrollment_id TEXT PRIMARY KEY,
+    source_event_id TEXT NOT NULL UNIQUE REFERENCES {schema}.outbox_events(event_id),
+    official_entry_event_id TEXT NOT NULL,
+    model_batch_id TEXT NOT NULL UNIQUE REFERENCES {schema}.model_batches(model_batch_id),
+    request_id TEXT NOT NULL,
+    official_stream_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    signal_date DATE NOT NULL,
+    d1 DATE NOT NULL,
+    d2 DATE NOT NULL,
+    activation_cutoff_ts TIMESTAMPTZ NOT NULL,
+    source_semantic_content_hash CHAR(64) NOT NULL,
+    source_payload_hash CHAR(64) NOT NULL,
+    calendar_evidence_hash CHAR(64) NOT NULL,
+    enrollment_semantic_hash CHAR(64) NOT NULL,
+    enrollment_fingerprint CHAR(64) NOT NULL,
+    enrollment_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CHECK (signal_date < d1 AND d1 < d2),
+    CHECK (request_id <> ''),
+    UNIQUE (official_stream_id,lineage_id,request_id)
+);
+ALTER TABLE {schema}.manual_monitor_enrollments
+    ADD COLUMN IF NOT EXISTS official_entry_event_id TEXT;
+UPDATE {schema}.manual_monitor_enrollments AS enrollment
+SET official_entry_event_id=source.semantic_json->>'official_entry_event_id'
+FROM {schema}.outbox_events AS source
+WHERE source.event_id=enrollment.source_event_id
+  AND enrollment.official_entry_event_id IS NULL;
+ALTER TABLE {schema}.manual_monitor_enrollments
+    ALTER COLUMN official_entry_event_id SET NOT NULL;
+DO $v20_manual_monitor_constraints$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='fk_v20_manual_monitor_official_entry'
+          AND conrelid='{schema}.manual_monitor_enrollments'::regclass
+    ) THEN
+        ALTER TABLE {schema}.manual_monitor_enrollments
+            ADD CONSTRAINT fk_v20_manual_monitor_official_entry
+            FOREIGN KEY (official_entry_event_id) REFERENCES {schema}.outbox_events(event_id);
+    END IF;
+END
+$v20_manual_monitor_constraints$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_v20_manual_monitor_official_entry
+    ON {schema}.manual_monitor_enrollments
+        (official_stream_id,lineage_id,official_entry_event_id);
 
 -- Upgrade shared schemas without assigning legacy events to a live worker by
 -- guesswork. Relationally bound rows are recovered; anything else is retained
@@ -1633,6 +2005,43 @@ class V20Repository:
             or _json_value(row["config_json"]) != payload
         ):
             raise V20SemanticConflict(f"config_id {config_id!r} already has different semantics")
+
+    async def is_registered_source_config_compatible(
+        self,
+        source_config_hash: str,
+        *,
+        strategy_version: str,
+        state_semantics_hash: str,
+        official_stream_id: str,
+        lineage_id: str,
+        route_id: str,
+    ) -> bool:
+        """Accept a registered same-core config even when it never owned a terminal slot."""
+
+        _require_sha256(source_config_hash, "source_config_hash")
+        _require_sha256(state_semantics_hash, "state_semantics_hash")
+        _require_outbox_scope(route_id, official_stream_id, lineage_id)
+        if not strategy_version:
+            raise ValueError("strategy_version cannot be empty")
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                SELECT config_id,config_hash,strategy_version,deployment_mode,config_json
+                FROM {self.schema}.runtime_configs
+                WHERE config_hash=$1
+                FOR SHARE
+                """,
+                source_config_hash,
+            )
+        return _registered_source_config_row_is_compatible(
+            row,
+            source_config_hash=source_config_hash,
+            strategy_version=strategy_version,
+            state_semantics_hash=state_semantics_hash,
+            official_stream_id=official_stream_id,
+            lineage_id=lineage_id,
+            route_id=route_id,
+        )
 
     async def _prove_state_semantics_compatibility(
         self,
@@ -2602,6 +3011,348 @@ class V20Repository:
             action_expiry_ts=row["action_expiry_ts"],
         )
 
+    async def get_manual_monitor_enrollment(
+        self,
+        source_event_id: str,
+        *,
+        official_stream_id: str,
+        lineage_id: str,
+    ) -> ManualMonitorEnrollmentRecord | None:
+        """Load one durable manual-monitor enrollment inside its ledger scope."""
+
+        _require_scope(official_stream_id, lineage_id)
+        if not source_event_id:
+            raise ValueError("source_event_id cannot be empty")
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                SELECT enrollment.*
+                FROM {self.schema}.manual_monitor_enrollments AS enrollment
+                JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
+                WHERE enrollment.source_event_id=$1
+                  AND batch.origin_kind='MANUAL_MONITOR'
+                  AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                  AND enrollment.official_stream_id=$2 AND enrollment.lineage_id=$3
+                """,
+                source_event_id,
+                official_stream_id,
+                lineage_id,
+            )
+        if row is None:
+            return None
+        record = _manual_enrollment_from_row(row)
+        for value, field_name in (
+            (record.source_semantic_content_hash, "source_semantic_content_hash"),
+            (record.source_payload_hash, "source_payload_hash"),
+            (record.calendar_evidence_hash, "calendar_evidence_hash"),
+        ):
+            try:
+                _require_sha256(value, field_name)
+            except ValueError as exc:
+                raise V20SemanticConflict(
+                    f"persisted manual monitor {field_name} is invalid"
+                ) from exc
+        if sha256_json(record.semantic) != row["enrollment_semantic_hash"]:
+            raise V20SemanticConflict("persisted manual monitor enrollment hash mismatch")
+        if not record.signal_date < record.d1 < record.d2:
+            raise V20SemanticConflict("persisted manual monitor dates are invalid")
+        return record
+
+    async def enroll_manual_monitor(self, commit: ManualMonitorEnrollmentCommit) -> bool:
+        """Atomically enroll a sealed retrospective PASS in the live exit engine.
+
+        This deliberately creates no decision slot, entry decision, official-state
+        revision, shadow batch, holding, order, or fill.  Its model batch has an
+        explicit ``MANUAL_MONITOR`` origin and is authorized only by the sealed
+        probe event named by ``source_event_id``.
+        """
+
+        _validate_manual_monitor_commit(commit)
+        fingerprint = _manual_monitor_enrollment_fingerprint(commit)
+        batch = commit.model_batch
+        async with self.pool.acquire() as connection:
+            # READ COMMITTED plus the durable source-row lock gives same-source
+            # requests a fresh snapshot after waiting, so retries converge on the
+            # enrollment row instead of surfacing a uniqueness race.
+            async with connection.transaction(isolation="read_committed"):
+                source = await connection.fetchrow(
+                    f"""
+                    SELECT event_id,event_type,route_id,official_stream_id,lineage_id,
+                           semantic_content_hash,semantic_json,payload_hash,payload_json,
+                           seal_status
+                    FROM {self.schema}.outbox_events
+                    WHERE event_id=$1
+                    FOR UPDATE
+                    """,
+                    commit.source_event_id,
+                )
+                if source is None:
+                    raise V20RepositoryError("manual monitor source event does not exist")
+                source_semantic = _json_value(source["semantic_json"])
+                source_payload = _optional_json_value(source["payload_json"])
+                if (
+                    source["event_type"] != "DATA_ALERT"
+                    or source["route_id"] != commit.route_id
+                    or source["official_stream_id"] != commit.official_stream_id
+                    or source["lineage_id"] != commit.lineage_id
+                    or source["seal_status"] != "SEALED"
+                    or source_payload is None
+                    or source["semantic_content_hash"] != commit.source_semantic_content_hash
+                    or source["payload_hash"] != commit.source_payload_hash
+                    or sha256_json(source_semantic) != commit.source_semantic_content_hash
+                    or sha256_json(source_payload) != commit.source_payload_hash
+                ):
+                    raise V20SemanticConflict(
+                        "manual monitor source is not the expected sealed event in scope"
+                    )
+
+                if not isinstance(source_semantic, Mapping):
+                    raise V20SemanticConflict("manual monitor source semantic is malformed")
+                entry_render = source_semantic.get("entry_render_semantic")
+                symbols = source_semantic.get("symbols")
+                source_multiplier = source_semantic.get("final_multiplier")
+                if (
+                    source_semantic.get("event_id") != commit.source_event_id
+                    or source_semantic.get("alert_code") != "MANUAL_0939_CHAIN_PROBE_RESULT"
+                    or source_semantic.get("probe_profile")
+                    != "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2"
+                    or source_semantic.get("probe_result") != "PASS"
+                    or source_semantic.get("current_version_recomputed") is not True
+                    or source_semantic.get("replay_reused") is not False
+                    or source_semantic.get("visible_message_mode") != "AUTOMATIC_ENTRY_RENDER"
+                    or source_semantic.get("strategy_version") != commit.strategy_version
+                    or source_semantic.get("config_hash") != commit.source_config_hash
+                    or source_semantic.get("state_semantics_hash") != commit.state_semantics_hash
+                    or source_semantic.get("official_stream_id") != commit.official_stream_id
+                    or source_semantic.get("state_lineage_id") != commit.lineage_id
+                    or source_semantic.get("official_entry_action") != "INPUT_INVALID"
+                    or source_semantic.get("official_entry_event_id")
+                    != commit.official_entry_event_id
+                    or source_semantic.get("official_entry_event_id_before")
+                    != commit.official_entry_event_id
+                    or source_semantic.get("official_entry_event_id_after")
+                    != commit.official_entry_event_id
+                    or source_semantic.get("v20_action") != "ENTER"
+                    or source_semantic.get("replay_action") != "ENTER"
+                    or source_semantic.get("official_state_changed") is not False
+                    or source_semantic.get("orders_changed") is not False
+                    or source_semantic.get("non_actionable") is not True
+                    or source_semantic.get("retrospective_expired") is not True
+                    or source_semantic.get("event_trade_date") != commit.signal_date.isoformat()
+                    or not isinstance(entry_render, Mapping)
+                    or entry_render.get("action") != "ENTER"
+                    or entry_render.get("trade_date") != commit.signal_date.isoformat()
+                    or entry_render.get("final_multiplier") != source_multiplier
+                    or entry_render.get("strategy_version") != commit.strategy_version
+                    or entry_render.get("config_hash") != commit.source_config_hash
+                    or entry_render.get("state_semantics_hash") != commit.state_semantics_hash
+                    or not isinstance(symbols, list)
+                    or entry_render.get("symbols") != symbols
+                    or isinstance(source_multiplier, bool)
+                    or not isinstance(source_multiplier, (int, float))
+                    or not math.isfinite(float(source_multiplier))
+                    or not math.isclose(
+                        float(source_multiplier), batch.multiplier, rel_tol=0.0, abs_tol=1e-12
+                    )
+                    or entry_render.get("reference_profile_id") != batch.reference_profile_id
+                ):
+                    raise V20SemanticConflict(
+                        "manual monitor source is not an eligible current ENTER probe"
+                    )
+
+                normalized_source_symbols: list[tuple[int, str, str]] = []
+                for item in symbols:
+                    if not isinstance(item, Mapping):
+                        raise V20SemanticConflict("manual monitor source symbols are malformed")
+                    rank = item.get("rank")
+                    code = item.get("code")
+                    name = item.get("name")
+                    if (
+                        isinstance(rank, bool)
+                        or not isinstance(rank, int)
+                        or rank <= 0
+                        or not isinstance(code, str)
+                        or re.fullmatch(r"\d{6}", code) is None
+                        or not isinstance(name, str)
+                        or not name
+                    ):
+                        raise V20SemanticConflict("manual monitor source symbols are malformed")
+                    normalized_source_symbols.append((rank, code, name))
+                expected_symbols = sorted(normalized_source_symbols)
+                actual_symbols = sorted((leg.rank, leg.code, leg.stock_name) for leg in batch.legs)
+                if (
+                    len(expected_symbols) != len(set(expected_symbols))
+                    or expected_symbols != actual_symbols
+                ):
+                    raise V20SemanticConflict(
+                        "manual monitor model legs do not exactly match the sealed source tickets"
+                    )
+
+                official_entry = await connection.fetchrow(
+                    f"""
+                    SELECT official.event_id,official.event_type,official.route_id,
+                           official.official_stream_id,official.lineage_id,
+                           official.seal_status,decision.action,
+                           slot.trade_date,slot.slot_status,
+                           slot.official_stream_id AS slot_official_stream_id,
+                           slot.lineage_id AS slot_lineage_id
+                    FROM {self.schema}.outbox_events AS official
+                    JOIN {self.schema}.entry_decisions AS decision
+                      ON decision.event_id=official.event_id
+                    JOIN {self.schema}.decision_slots AS slot
+                      ON slot.slot_id=decision.slot_id
+                    WHERE official.event_id=$1
+                    FOR UPDATE OF official,decision,slot
+                    """,
+                    commit.official_entry_event_id,
+                )
+                if (
+                    official_entry is None
+                    or official_entry["event_id"] != commit.official_entry_event_id
+                    or official_entry["event_type"] != "ENTRY_DECISION"
+                    or official_entry["route_id"] != commit.route_id
+                    or official_entry["official_stream_id"] != commit.official_stream_id
+                    or official_entry["lineage_id"] != commit.lineage_id
+                    or official_entry["seal_status"] != "SEALED"
+                    or official_entry["action"] != "INPUT_INVALID"
+                    or official_entry["trade_date"] != commit.signal_date
+                    or official_entry["slot_status"] != "FAILED"
+                    or official_entry["slot_official_stream_id"] != commit.official_stream_id
+                    or official_entry["slot_lineage_id"] != commit.lineage_id
+                ):
+                    raise V20SemanticConflict(
+                        "manual monitor source is not bound to the sealed failed official slot"
+                    )
+
+                registered_config = await connection.fetchrow(
+                    f"""
+                    SELECT config_id,config_hash,strategy_version,deployment_mode,config_json
+                    FROM {self.schema}.runtime_configs
+                    WHERE config_hash=$1
+                    FOR SHARE
+                    """,
+                    commit.source_config_hash,
+                )
+                if not _registered_source_config_row_is_compatible(
+                    registered_config,
+                    source_config_hash=commit.source_config_hash,
+                    strategy_version=commit.strategy_version,
+                    state_semantics_hash=commit.state_semantics_hash,
+                    official_stream_id=commit.official_stream_id,
+                    lineage_id=commit.lineage_id,
+                    route_id=commit.route_id,
+                ):
+                    raise V20SemanticConflict(
+                        "manual monitor source config is not a registered same-core binding"
+                    )
+
+                existing = await connection.fetchrow(
+                    f"""
+                    SELECT * FROM {self.schema}.manual_monitor_enrollments
+                    WHERE source_event_id=$1 OR enrollment_id=$2 OR model_batch_id=$3
+                       OR (official_stream_id=$4 AND lineage_id=$5 AND request_id=$6)
+                       OR (official_stream_id=$4 AND lineage_id=$5
+                           AND official_entry_event_id=$7)
+                    FOR UPDATE
+                    """,
+                    commit.source_event_id,
+                    commit.enrollment_id,
+                    batch.model_batch_id,
+                    commit.official_stream_id,
+                    commit.lineage_id,
+                    commit.request_id,
+                    commit.official_entry_event_id,
+                )
+                if existing is not None:
+                    if (
+                        existing["source_event_id"] == commit.source_event_id
+                        and existing["enrollment_id"] == commit.enrollment_id
+                        and existing["model_batch_id"] == batch.model_batch_id
+                        and existing["enrollment_fingerprint"] == fingerprint
+                    ):
+                        return False
+                    raise V20SemanticConflict(
+                        "manual monitor enrollment/source/model-batch ID collision"
+                    )
+
+                cutoff_open = await connection.fetchval(
+                    "SELECT clock_timestamp() < $1::timestamptz",
+                    commit.activation_cutoff_ts,
+                )
+                if cutoff_open is not True:
+                    raise V20StateConflict(
+                        "manual monitor enrollment is closed at D1 09:30 Asia/Shanghai"
+                    )
+
+                await connection.execute(
+                    f"""
+                    INSERT INTO {self.schema}.model_batches
+                        (model_batch_id,decision_id,origin_kind,source_event_id,
+                         official_stream_id,lineage_id,signal_date,multiplier,
+                         evaluation_only,reference_profile_id)
+                    VALUES ($1,NULL,'MANUAL_MONITOR',$2,$3,$4,$5,$6,FALSE,$7)
+                    """,
+                    batch.model_batch_id,
+                    commit.source_event_id,
+                    commit.official_stream_id,
+                    commit.lineage_id,
+                    commit.signal_date,
+                    batch.multiplier,
+                    batch.reference_profile_id,
+                )
+                for leg in batch.legs:
+                    await connection.execute(
+                        f"""
+                        INSERT INTO {self.schema}.model_legs
+                            (model_leg_id,model_batch_id,code,stock_name,rank,
+                             relative_weight,d1,d2)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        """,
+                        leg.model_leg_id,
+                        batch.model_batch_id,
+                        leg.code,
+                        leg.stock_name,
+                        leg.rank,
+                        leg.relative_weight,
+                        leg.d1,
+                        leg.d2,
+                    )
+                enrollment_insert = await connection.execute(
+                    f"""
+                    INSERT INTO {self.schema}.manual_monitor_enrollments
+                        (enrollment_id,source_event_id,official_entry_event_id,
+                         model_batch_id,request_id,
+                         official_stream_id,lineage_id,signal_date,d1,d2,activation_cutoff_ts,
+                         source_semantic_content_hash,source_payload_hash,
+                         calendar_evidence_hash,enrollment_semantic_hash,
+                         enrollment_fingerprint,enrollment_json)
+                    SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb
+                    WHERE clock_timestamp() < $11::timestamptz
+                    """,
+                    commit.enrollment_id,
+                    commit.source_event_id,
+                    commit.official_entry_event_id,
+                    batch.model_batch_id,
+                    commit.request_id,
+                    commit.official_stream_id,
+                    commit.lineage_id,
+                    commit.signal_date,
+                    commit.d1,
+                    commit.d2,
+                    commit.activation_cutoff_ts,
+                    commit.source_semantic_content_hash,
+                    commit.source_payload_hash,
+                    commit.calendar_evidence_hash,
+                    commit.enrollment_semantic_hash,
+                    fingerprint,
+                    canonical_json(commit.enrollment_semantic),
+                )
+                if enrollment_insert != "INSERT 0 1":
+                    raise V20StateConflict(
+                        "manual monitor enrollment crossed the D1 09:30 database cutoff"
+                    )
+                return True
+
     async def commit_entry(self, commit: EntryCommit) -> None:
         _require_outbox_scope(commit.route_id, commit.official_stream_id, commit.lineage_id)
         allowed_actions = {"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"}
@@ -2855,12 +3606,16 @@ class V20Repository:
                     await connection.execute(
                         f"""
                         INSERT INTO {self.schema}.model_batches
-                            (model_batch_id,decision_id,signal_date,multiplier,
+                            (model_batch_id,decision_id,origin_kind,source_event_id,
+                             official_stream_id,lineage_id,signal_date,multiplier,
                              evaluation_only,reference_profile_id)
-                        VALUES ($1,$2,$3,$4,$5,$6)
+                        VALUES ($1,$2,'OFFICIAL_ENTRY',$3,$4,$5,$6,$7,$8,$9)
                         """,
                         model_batch.model_batch_id,
                         commit.decision_id,
+                        commit.event_id,
+                        commit.official_stream_id,
+                        commit.lineage_id,
                         commit.trade_date,
                         model_batch.multiplier,
                         model_batch.evaluation_only,
@@ -3818,10 +4573,13 @@ class V20Repository:
                            leg.reference_snapshot_hash,batch.reference_profile_id
                     FROM {self.schema}.model_legs AS leg
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE leg.model_leg_id=$1
-                      AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                      AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                      AND source.official_stream_id=$2 AND source.lineage_id=$3
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                     FOR UPDATE OF leg
                     """,
                     model_leg_id,
@@ -3851,13 +4609,14 @@ class V20Repository:
                     SET reference_status=$1,reference_price=$2,reference_snapshot_hash=$3,
                         reference_locked_at=clock_timestamp()
                     FROM {self.schema}.model_batches AS batch,
-                         {self.schema}.entry_decisions AS decision,
-                         {self.schema}.decision_slots AS slot
+                         {self.schema}.outbox_events AS source
                     WHERE leg.model_leg_id=$4 AND leg.reference_status='PENDING'
                       AND leg.model_batch_id=batch.model_batch_id
-                      AND batch.decision_id=decision.decision_id
-                      AND decision.slot_id=slot.slot_id
-                      AND slot.official_stream_id=$5 AND slot.lineage_id=$6
+                      AND source.event_id=batch.source_event_id
+                      AND batch.official_stream_id=$5 AND batch.lineage_id=$6
+                      AND source.official_stream_id=$5 AND source.lineage_id=$6
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                       AND ($7::timestamptz IS NULL OR clock_timestamp() >= $7)
                     """,
                     status,
@@ -3887,10 +4646,13 @@ class V20Repository:
                        leg.code,batch.reference_profile_id
                 FROM {self.schema}.model_legs AS leg
                 JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                JOIN {self.schema}.outbox_events AS source
+                  ON source.event_id=batch.source_event_id
                 WHERE batch.signal_date=$1 AND leg.reference_status='PENDING'
-                  AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                  AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                  AND source.official_stream_id=$2 AND source.lineage_id=$3
+                  AND source.seal_status='SEALED'
+                  AND {_model_batch_authorization_sql(self.schema)}
                 ORDER BY leg.rank,leg.model_leg_id
                 """,
                 signal_date,
@@ -3932,10 +4694,13 @@ class V20Repository:
                            leg.reference_snapshot_hash,batch.reference_profile_id
                     FROM {self.schema}.model_legs AS leg
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE batch.signal_date=$1
-                      AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                      AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                      AND source.official_stream_id=$2 AND source.lineage_id=$3
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                     ORDER BY leg.model_leg_id
                     FOR UPDATE OF leg
                     """,
@@ -3979,12 +4744,14 @@ class V20Repository:
                       AND batch.signal_date=$2
                       AND batch.reference_profile_id=$3
                       AND leg.reference_status='PENDING'
+                      AND batch.official_stream_id=$4 AND batch.lineage_id=$5
                       AND EXISTS (
-                          SELECT 1
-                          FROM {self.schema}.entry_decisions AS decision
-                          JOIN {self.schema}.decision_slots AS slot USING (slot_id)
-                          WHERE decision.decision_id=batch.decision_id
-                            AND slot.official_stream_id=$4 AND slot.lineage_id=$5
+                          SELECT 1 FROM {self.schema}.outbox_events AS source
+                          WHERE source.event_id=batch.source_event_id
+                            AND source.official_stream_id=$4
+                            AND source.lineage_id=$5
+                            AND source.seal_status='SEALED'
+                            AND {_model_batch_authorization_sql(self.schema)}
                       )
                       AND ($6::timestamptz IS NULL OR clock_timestamp() >= $6)
                     """,
@@ -4010,50 +4777,80 @@ class V20Repository:
         async with self.pool.acquire() as connection:
             rows = await connection.fetch(
                 f"""
-                SELECT l.*,b.decision_id,b.signal_date,b.evaluation_only,
+                SELECT l.*,b.decision_id,b.origin_kind,b.source_event_id,
+                       b.signal_date,b.evaluation_only,
                        ms.snapshot_id AS mews_snapshot_id,ms.fast_state AS mews_fast_state,
                        x.exit_intent_id
                 FROM {self.schema}.model_legs l
                 JOIN {self.schema}.model_batches b USING (model_batch_id)
-                JOIN {self.schema}.entry_decisions d USING (decision_id)
-                JOIN {self.schema}.decision_slots slot USING (slot_id)
-                JOIN {self.schema}.outbox_events o ON o.event_id=d.event_id
+                JOIN {self.schema}.outbox_events source ON source.event_id=b.source_event_id
                 LEFT JOIN {self.schema}.leg_mews_selection s USING (model_leg_id)
                 LEFT JOIN {self.schema}.mews_snapshots ms ON ms.snapshot_id=s.snapshot_id
                 LEFT JOIN {self.schema}.exit_intents x USING (model_leg_id)
                 WHERE l.d1 <= $1 AND x.exit_intent_id IS NULL
-                  AND b.evaluation_only=FALSE AND o.seal_status='SEALED'
-                  AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                  AND b.evaluation_only=FALSE AND source.seal_status='SEALED'
+                  AND b.official_stream_id=$2 AND b.lineage_id=$3
+                  AND source.official_stream_id=$2 AND source.lineage_id=$3
+                  AND {
+                    _model_batch_authorization_sql(
+                        self.schema,
+                        batch_alias="b",
+                        source_alias="source",
+                    )
+                }
                 ORDER BY b.signal_date,l.rank,l.model_leg_id
                 """,
                 trade_date,
                 official_stream_id,
                 lineage_id,
             )
-        return [
-            ActiveModelLeg(
-                model_leg_id=row["model_leg_id"],
-                model_batch_id=row["model_batch_id"],
-                decision_id=row["decision_id"],
-                signal_date=row["signal_date"],
-                code=row["code"],
-                stock_name=row["stock_name"],
-                rank=int(row["rank"]),
-                relative_weight=float(row["relative_weight"]),
-                d1=row["d1"],
-                d2=row["d2"],
-                reference_status=row["reference_status"],
-                reference_price=(
-                    float(row["reference_price"]) if row["reference_price"] is not None else None
-                ),
-                reference_snapshot_hash=row["reference_snapshot_hash"],
-                evaluation_only=bool(row["evaluation_only"]),
-                mews_snapshot_id=row["mews_snapshot_id"],
-                mews_fast_state=row["mews_fast_state"],
-                exit_intent_id=row["exit_intent_id"],
+        return [_active_model_leg_from_row(row) for row in rows]
+
+    async def list_manual_monitor_batch_legs(
+        self,
+        model_batch_id: str,
+        *,
+        official_stream_id: str,
+        lineage_id: str,
+    ) -> list[ActiveModelLeg]:
+        """Read every durable leg in one manual batch, including exited legs."""
+
+        _require_scope(official_stream_id, lineage_id)
+        if not model_batch_id:
+            raise ValueError("model_batch_id cannot be empty")
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                f"""
+                SELECT leg.*,batch.decision_id,batch.origin_kind,batch.source_event_id,
+                       batch.signal_date,batch.evaluation_only,
+                       mews.snapshot_id AS mews_snapshot_id,
+                       mews.fast_state AS mews_fast_state,
+                       exit_intent.exit_intent_id
+                FROM {self.schema}.model_legs AS leg
+                JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
+                JOIN {self.schema}.manual_monitor_enrollments AS enrollment
+                  ON enrollment.model_batch_id=batch.model_batch_id
+                 AND enrollment.source_event_id=batch.source_event_id
+                JOIN {self.schema}.outbox_events AS source
+                  ON source.event_id=batch.source_event_id
+                LEFT JOIN {self.schema}.leg_mews_selection AS selection USING (model_leg_id)
+                LEFT JOIN {self.schema}.mews_snapshots AS mews
+                  ON mews.snapshot_id=selection.snapshot_id
+                LEFT JOIN {self.schema}.exit_intents AS exit_intent USING (model_leg_id)
+                WHERE batch.model_batch_id=$1
+                  AND batch.origin_kind='MANUAL_MONITOR'
+                  AND batch.evaluation_only=FALSE
+                  AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                  AND enrollment.official_stream_id=$2 AND enrollment.lineage_id=$3
+                  AND source.official_stream_id=$2 AND source.lineage_id=$3
+                  AND source.event_type='DATA_ALERT' AND source.seal_status='SEALED'
+                ORDER BY leg.rank,leg.model_leg_id
+                """,
+                model_batch_id,
+                official_stream_id,
+                lineage_id,
             )
-            for row in rows
-        ]
+        return [_active_model_leg_from_row(row) for row in rows]
 
     async def record_mews_snapshot(self, payload: Mapping[str, Any]) -> str:
         required = {
@@ -4127,7 +4924,17 @@ class V20Repository:
         async with self.pool.acquire() as connection:
             async with connection.transaction(isolation="serializable"):
                 leg = await connection.fetchrow(
-                    f"SELECT d1 FROM {self.schema}.model_legs WHERE model_leg_id=$1 FOR UPDATE",
+                    f"""
+                    SELECT leg.d1
+                    FROM {self.schema}.model_legs AS leg
+                    JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
+                    WHERE leg.model_leg_id=$1
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
+                    FOR UPDATE OF leg
+                    """,
                     model_leg_id,
                 )
                 if leg is None:
@@ -4194,10 +5001,15 @@ class V20Repository:
                        snapshot.fast_state,snapshot.model_version,snapshot.data_version,
                        snapshot.content_hash,snapshot.snapshot_json
                 FROM {self.schema}.model_legs AS leg
+                JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
+                JOIN {self.schema}.outbox_events AS source
+                  ON source.event_id=batch.source_event_id
                 JOIN {self.schema}.leg_mews_selection AS selection USING (model_leg_id)
                 LEFT JOIN {self.schema}.mews_snapshots AS snapshot
                     ON snapshot.snapshot_id=selection.snapshot_id
                 WHERE leg.model_leg_id=$1
+                  AND source.seal_status='SEALED'
+                  AND {_model_batch_authorization_sql(self.schema)}
                 """,
                 model_leg_id,
             )
@@ -4283,13 +5095,16 @@ class V20Repository:
                     raise V20StateConflict("database clock has not reached exit trigger_ts")
                 leg = await connection.fetchrow(
                     f"""
-                    SELECT batch.evaluation_only,outbox.seal_status
+                    SELECT batch.evaluation_only,source.seal_status,
+                           batch.origin_kind,source.event_type
                     FROM {self.schema}.model_legs AS leg
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.outbox_events AS outbox ON outbox.event_id=decision.event_id
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE leg.model_leg_id=$1
-                      AND outbox.official_stream_id=$2 AND outbox.lineage_id=$3
+                      AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                      AND source.official_stream_id=$2 AND source.lineage_id=$3
+                      AND {_model_batch_authorization_sql(self.schema)}
                     FOR UPDATE OF leg
                     """,
                     commit.model_leg_id,
@@ -4300,7 +5115,7 @@ class V20Repository:
                     raise V20RepositoryError(f"unknown model leg {commit.model_leg_id!r}")
                 if leg["seal_status"] != "SEALED" or bool(leg["evaluation_only"]):
                     raise V20StateConflict(
-                        "official exit requires a sealed, non-evaluation model batch"
+                        "exit notification requires a sealed, non-evaluation model batch"
                     )
                 await connection.execute(
                     f"""
@@ -4377,10 +5192,14 @@ class V20Repository:
                       ON outbox.event_id=intent.event_id
                     JOIN {self.schema}.model_legs AS leg USING (model_leg_id)
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE intent.event_id=$1 AND outbox.event_type='EXIT_SIGNAL'
-                      AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                      AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                      AND outbox.official_stream_id=$2 AND outbox.lineage_id=$3
+                      AND source.official_stream_id=$2 AND source.lineage_id=$3
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                     FOR UPDATE OF intent
                     """,
                     original_exit_event_id,
@@ -4399,10 +5218,13 @@ class V20Repository:
                       ON intent.event_id=ack.original_exit_event_id
                     JOIN {self.schema}.model_legs AS leg USING (model_leg_id)
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE ack.original_exit_event_id=$1 AND ack.consumer_id=$2
-                      AND slot.official_stream_id=$3 AND slot.lineage_id=$4
+                      AND batch.official_stream_id=$3 AND batch.lineage_id=$4
+                      AND source.official_stream_id=$3 AND source.lineage_id=$4
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                     """,
                     original_exit_event_id,
                     consumer_id,
@@ -4474,12 +5296,16 @@ class V20Repository:
                       ON outbox.event_id=intent.event_id
                     JOIN {self.schema}.model_legs AS leg USING (model_leg_id)
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE intent.initial_exit_persisted_local_date < $1
                       AND outbox.event_type='EXIT_SIGNAL'
                       AND outbox.seal_status='SEALED'
-                      AND slot.official_stream_id=$3 AND slot.lineage_id=$4
+                      AND batch.official_stream_id=$3 AND batch.lineage_id=$4
+                      AND outbox.official_stream_id=$3 AND outbox.lineage_id=$4
+                      AND source.official_stream_id=$3 AND source.lineage_id=$4
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                       AND NOT EXISTS (
                           SELECT 1 FROM {self.schema}.reminder_stop_acks AS ack
                           WHERE ack.original_exit_event_id=intent.event_id
@@ -5064,10 +5890,13 @@ class V20Repository:
                     SELECT model_leg.d1,model_leg.d2
                     FROM {self.schema}.model_legs AS model_leg
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                    JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                    JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                    JOIN {self.schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
                     WHERE model_leg.model_leg_id=$1
-                      AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                      AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                      AND source.official_stream_id=$2 AND source.lineage_id=$3
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self.schema)}
                     FOR UPDATE OF model_leg
                     """,
                     model_leg_id,
@@ -5143,10 +5972,13 @@ class V20Repository:
                 FROM {self.schema}.exit_scan_watermarks AS watermark
                 JOIN {self.schema}.model_legs AS model_leg USING (model_leg_id)
                 JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
-                JOIN {self.schema}.entry_decisions AS decision USING (decision_id)
-                JOIN {self.schema}.decision_slots AS slot USING (slot_id)
+                JOIN {self.schema}.outbox_events AS source
+                  ON source.event_id=batch.source_event_id
                 WHERE watermark.model_leg_id=$1
-                  AND slot.official_stream_id=$2 AND slot.lineage_id=$3
+                  AND batch.official_stream_id=$2 AND batch.lineage_id=$3
+                  AND source.official_stream_id=$2 AND source.lineage_id=$3
+                  AND source.seal_status='SEALED'
+                  AND {_model_batch_authorization_sql(self.schema)}
                 ORDER BY watermark.trade_date
                 """,
                 model_leg_id,
@@ -5338,6 +6170,8 @@ __all__ = [
     "EntryCommit",
     "EntryStatus",
     "ExitCommit",
+    "ManualMonitorEnrollmentCommit",
+    "ManualMonitorEnrollmentRecord",
     "MinuteBarRecord",
     "ModelBatchWrite",
     "ModelLegWrite",

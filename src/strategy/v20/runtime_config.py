@@ -224,12 +224,18 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "95900ffebbdac8f08615c35049cf4d76499059e15ea5a114549045a82dbbcece": (
             "V20_SERVICE_STATE_ORCHESTRATION_V1"
         ),
+        "1c71c2a8ff33f52d0d4f2366a3c7d1316ce24e6a38c9ab75ebbfb7dd982bf0bd": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
             "V20_LEDGER_STATE_CONTRACT_V1"
         ),
         "7167e475f3a6dd857673540a8ac0bf812c4a72b9bff4a871e61ea677c22f1209": (
+            "V20_LEDGER_STATE_CONTRACT_V1"
+        ),
+        "6f74da33d9b8d632b1357e432117600d73356975d59ea96242a7f2c38d815f9f": (
             "V20_LEDGER_STATE_CONTRACT_V1"
         ),
     },

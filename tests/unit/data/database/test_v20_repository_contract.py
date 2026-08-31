@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import ssl
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,12 +16,14 @@ import src.strategy.v20.runtime_config as runtime_config_module
 from src.data.database.v20_repository import (
     EntryCommit,
     ExitCommit,
+    ManualMonitorEnrollmentCommit,
     ModelBatchWrite,
     ModelLegWrite,
     V20DatabaseConfig,
     V20EntryDeadlineExceeded,
     V20MinuteBarIntegrityConflict,
     V20Repository,
+    V20RepositoryError,
     V20SemanticConflict,
     V20StateConflict,
     canonical_json,
@@ -439,8 +442,8 @@ def _compact_sql(value: str) -> str:
 
 def _assert_call_is_scoped(call: tuple[str, str, tuple[object, ...]]) -> None:
     sql = _compact_sql(call[1])
-    assert re.search(r"(?:slot|shadow)\.official_stream_id=", sql)
-    assert re.search(r"(?:slot|shadow)\.lineage_id=", sql)
+    assert re.search(r"(?:slot|shadow|batch|b)\.official_stream_id=", sql)
+    assert re.search(r"(?:slot|shadow|batch|b)\.lineage_id=", sql)
     assert SCOPE["official_stream_id"] in call[2]
     assert SCOPE["lineage_id"] in call[2]
 
@@ -710,6 +713,41 @@ async def test_exit_can_publish_after_trigger_but_before_future_actionable_time(
     guard = [call for call in connection.calls if call[0] == "fetchval"][0]
     assert guard[2] == (commit.trigger_ts,)
     assert len([call for call in connection.calls if call[0] == "execute"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_exit_rejects_a_sealed_official_source_not_bound_to_batch_decision() -> None:
+    semantic = {"event_type": "EXIT_SIGNAL", "code": "000001"}
+    commit = ExitCommit(
+        exit_intent_id="exit-mismatched-source",
+        event_id="exit-event-mismatched-source",
+        model_leg_id="leg-mismatched-source",
+        signal_type="PLAN_1457",
+        trigger_ts=datetime(2026, 8, 31, 14, 57, tzinfo=BEIJING_TZ),
+        rule_actionable_from=datetime(2026, 8, 31, 14, 57, tzinfo=BEIJING_TZ),
+        semantic=semantic,
+        semantic_content_hash=sha256_json(semantic),
+        route_id="formal-route",
+        official_stream_id="official",
+        lineage_id="lineage-1",
+    )
+    # PostgreSQL returns no leg when the sealed source is in scope but the
+    # decision_id -> entry_decisions.event_id binding fails the SQL predicate.
+    connection = _FakeConnection(fetchrows=[None, None], fetchvals=[True])
+
+    with pytest.raises(V20RepositoryError, match="unknown model leg"):
+        await _repository(connection).commit_exit(commit)
+
+    authorization_sql = _compact_sql(
+        next(
+            call[1]
+            for call in connection.calls
+            if call[0] == "fetchrow" and "model_batches" in call[1]
+        )
+    )
+    assert "origin_decision.decision_id=batch.decision_id" in authorization_sql
+    assert "origin_decision.event_id=batch.source_event_id" in authorization_sql
+    assert not any(call[0] == "execute" for call in connection.calls)
 
 
 @pytest.mark.asyncio
@@ -1629,6 +1667,7 @@ def test_operational_ledger_scope_is_explicit_and_keyword_required() -> None:
         "list_pending_reference_legs",
         "finalize_pending_references_unavailable",
         "list_active_legs",
+        "list_manual_monitor_batch_legs",
         "record_reminder_stop_ack",
         "enqueue_due_exit_reminders",
     )
@@ -1641,9 +1680,34 @@ def test_operational_ledger_scope_is_explicit_and_keyword_required() -> None:
             assert parameter.default is inspect.Parameter.empty
 
 
+@pytest.mark.parametrize(
+    ("method_name", "authorization_count"),
+    [
+        ("lock_reference_price", 2),
+        ("list_pending_reference_legs", 1),
+        ("finalize_pending_references_unavailable", 2),
+        ("list_active_legs", 1),
+        ("select_mews_for_leg", 1),
+        ("load_selected_mews_for_leg", 1),
+        ("commit_exit", 1),
+        ("record_reminder_stop_ack", 2),
+        ("enqueue_due_exit_reminders", 1),
+        ("record_exit_scan_watermark", 1),
+        ("get_exit_scan_watermarks", 1),
+    ],
+)
+def test_every_model_leg_downstream_path_uses_dual_origin_authorization(
+    method_name: str,
+    authorization_count: int,
+) -> None:
+    source = inspect.getsource(getattr(V20Repository, method_name))
+
+    assert source.count("_model_batch_authorization_sql") == authorization_count
+
+
 @pytest.mark.asyncio
 async def test_operational_history_reads_filter_stream_and_lineage() -> None:
-    connection = _FakeConnection(fetches=[[], [], [], [], [], []])
+    connection = _FakeConnection(fetches=[[], [], [], [], [], [], []])
     repository = _repository(connection)
 
     await repository.list_pending_shadow_batches(date(2026, 9, 1), **SCOPE)
@@ -1652,11 +1716,17 @@ async def test_operational_history_reads_filter_stream_and_lineage() -> None:
     await repository.load_recent_completed("HEALTH", date(2026, 9, 1), 7, **SCOPE)
     await repository.list_pending_reference_legs(date(2026, 9, 1), **SCOPE)
     await repository.list_active_legs(date(2026, 9, 1), **SCOPE)
+    await repository.list_manual_monitor_batch_legs("manual-batch", **SCOPE)
 
     scoped_reads = [call for call in connection.calls if call[0] == "fetch"]
-    assert len(scoped_reads) == 6
+    assert len(scoped_reads) == 7
     for call in scoped_reads:
         _assert_call_is_scoped(call)
+    active_sql = _compact_sql(scoped_reads[-2][1])
+    assert "origin_decision.decision_id=b.decision_id" in active_sql
+    assert "origin_decision.event_id=b.source_event_id" in active_sql
+    assert "origin_slot.official_stream_id=b.official_stream_id" in active_sql
+    assert "enrollment.source_event_id=b.source_event_id" in active_sql
 
 
 @pytest.mark.asyncio
@@ -2651,3 +2721,517 @@ async def test_entry_status_restores_semantic_and_snapshot_for_reference_lock() 
     assert status.action == "ENTER"
     assert status.semantic == semantic
     assert status.snapshot == snapshot
+
+
+def _registered_same_core_config() -> tuple[dict[str, object], dict[str, object]]:
+    dependencies = {
+        relative: "1" * 64 for relative in runtime_config_module._STATE_SEMANTICS_DEPENDENCY_FILES
+    }
+    dependencies.update(
+        {
+            relative: next(iter(reviewed))
+            for relative, reviewed in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items()
+        }
+    )
+    payload: dict[str, object] = {
+        "strategy_version": "V20",
+        "official_stream_id": "official",
+        "state_lineage_id": "lineage-1",
+        "route_id": "alert-route",
+        "deployment_mode": "forward_shadow",
+        "timezone": "Asia/Shanghai",
+        "return_profile_id": "ZERO_COST_GROSS_PRICE_RETURN_V1",
+        "reference_profile_id": "CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+        "clock": {},
+        "market_data": {},
+        "policy": {},
+        "g_manifest_sha256": "2" * 64,
+        "strategy_dependency_hashes": dependencies,
+    }
+    state_payload = state_semantics_payload_from_frozen_payload(payload)
+    payload["state_semantics_payload"] = state_payload
+    payload["state_semantics_hash"] = sha256_json(state_payload)
+    config_hash = sha256_json(payload)
+    row: dict[str, object] = {
+        "config_id": config_hash[:24],
+        "config_hash": config_hash,
+        "strategy_version": payload["strategy_version"],
+        "deployment_mode": payload["deployment_mode"],
+        "config_json": canonical_json(payload),
+    }
+    return payload, row
+
+
+def _manual_monitor_fixture() -> tuple[
+    ManualMonitorEnrollmentCommit,
+    dict[str, object],
+    dict[str, object],
+]:
+    signal_date = date(2026, 8, 31)
+    d1 = date(2026, 9, 1)
+    d2 = date(2026, 9, 2)
+    source_event_id = "probe-event-1"
+    official_entry_event_id = "official-entry-event-1"
+    registered_payload, registered_row = _registered_same_core_config()
+    source_config_hash = str(registered_row["config_hash"])
+    state_semantics_hash = str(registered_payload["state_semantics_hash"])
+    symbols = [
+        {"rank": 1, "code": "000001", "name": "平安银行", "snapshot_price": 10.2},
+        {"rank": 2, "code": "600000", "name": "浦发银行", "snapshot_price": 12.3},
+    ]
+    entry_render = {
+        "strategy_version": "V20",
+        "config_hash": source_config_hash,
+        "state_semantics_hash": state_semantics_hash,
+        "trade_date": signal_date.isoformat(),
+        "action": "ENTER",
+        "final_multiplier": 1.0,
+        "reference_profile_id": "CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+        "symbols": symbols,
+    }
+    source_semantic = {
+        "event_id": source_event_id,
+        "alert_code": "MANUAL_0939_CHAIN_PROBE_RESULT",
+        "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2",
+        "probe_result": "PASS",
+        "current_version_recomputed": True,
+        "replay_reused": False,
+        "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
+        "strategy_version": "V20",
+        "config_hash": source_config_hash,
+        "state_semantics_hash": state_semantics_hash,
+        "official_stream_id": "official",
+        "state_lineage_id": "lineage-1",
+        "official_entry_action": "INPUT_INVALID",
+        "official_entry_event_id": official_entry_event_id,
+        "official_entry_event_id_before": official_entry_event_id,
+        "official_entry_event_id_after": official_entry_event_id,
+        "v20_action": "ENTER",
+        "replay_action": "ENTER",
+        "official_state_changed": False,
+        "orders_changed": False,
+        "non_actionable": True,
+        "retrospective_expired": True,
+        "event_trade_date": signal_date.isoformat(),
+        "final_multiplier": 1.0,
+        "symbols": symbols,
+        "entry_render_semantic": entry_render,
+    }
+    source_payload = {"message": "frozen automatic morning message"}
+    enrollment_semantic = {
+        "profile": "V20_MANUAL_MONITOR_ENROLLMENT_V1",
+        "source_event_id": source_event_id,
+        "official_entry_event_id": official_entry_event_id,
+        "signal_date": signal_date.isoformat(),
+        "d1": d1.isoformat(),
+        "d2": d2.isoformat(),
+    }
+    batch = ModelBatchWrite(
+        model_batch_id="manual-batch-1",
+        multiplier=1.0,
+        evaluation_only=False,
+        reference_profile_id="CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+        legs=(
+            ModelLegWrite(
+                model_leg_id="manual-leg-1",
+                code="000001",
+                stock_name="平安银行",
+                rank=1,
+                relative_weight=0.5,
+                d1=d1,
+                d2=d2,
+            ),
+            ModelLegWrite(
+                model_leg_id="manual-leg-2",
+                code="600000",
+                stock_name="浦发银行",
+                rank=2,
+                relative_weight=0.5,
+                d1=d1,
+                d2=d2,
+            ),
+        ),
+    )
+    commit = ManualMonitorEnrollmentCommit(
+        enrollment_id="manual-enrollment-1",
+        source_event_id=source_event_id,
+        official_entry_event_id=official_entry_event_id,
+        request_id="manual-request-1",
+        route_id="alert-route",
+        official_stream_id="official",
+        lineage_id="lineage-1",
+        strategy_version="V20",
+        source_config_hash=source_config_hash,
+        state_semantics_hash=state_semantics_hash,
+        signal_date=signal_date,
+        d1=d1,
+        d2=d2,
+        activation_cutoff_ts=datetime(2026, 9, 1, 9, 30, tzinfo=BEIJING_TZ),
+        source_semantic_content_hash=sha256_json(source_semantic),
+        source_payload_hash=sha256_json(source_payload),
+        calendar_evidence_hash="c" * 64,
+        enrollment_semantic=enrollment_semantic,
+        enrollment_semantic_hash=sha256_json(enrollment_semantic),
+        model_batch=batch,
+    )
+    source_row: dict[str, object] = {
+        "event_id": source_event_id,
+        "event_type": "DATA_ALERT",
+        "route_id": "alert-route",
+        "official_stream_id": "official",
+        "lineage_id": "lineage-1",
+        "semantic_content_hash": commit.source_semantic_content_hash,
+        "semantic_json": canonical_json(source_semantic),
+        "payload_hash": commit.source_payload_hash,
+        "payload_json": canonical_json(source_payload),
+        "seal_status": "SEALED",
+    }
+    return commit, source_row, registered_row
+
+
+def _failed_official_entry_row(commit: ManualMonitorEnrollmentCommit) -> dict[str, object]:
+    return {
+        "event_id": commit.official_entry_event_id,
+        "event_type": "ENTRY_DECISION",
+        "route_id": commit.route_id,
+        "official_stream_id": commit.official_stream_id,
+        "lineage_id": commit.lineage_id,
+        "seal_status": "SEALED",
+        "action": "INPUT_INVALID",
+        "trade_date": commit.signal_date,
+        "slot_status": "FAILED",
+        "slot_official_stream_id": commit.official_stream_id,
+        "slot_lineage_id": commit.lineage_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_registered_same_core_source_config_needs_no_terminal_slot() -> None:
+    commit, _source, registered = _manual_monitor_fixture()
+    connection = _FakeConnection(fetchrows=[registered])
+
+    assert (
+        await _repository(connection).is_registered_source_config_compatible(
+            commit.source_config_hash,
+            strategy_version=commit.strategy_version,
+            state_semantics_hash=commit.state_semantics_hash,
+            official_stream_id=commit.official_stream_id,
+            lineage_id=commit.lineage_id,
+            route_id=commit.route_id,
+        )
+        is True
+    )
+    sql = _compact_sql(connection.calls[0][1])
+    assert "FROM v20.runtime_configs" in sql
+    assert "decision_slots" not in sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unregistered", "different_core"])
+async def test_registered_source_config_rejects_missing_or_different_core(
+    failure: str,
+) -> None:
+    commit, _source, registered = _manual_monitor_fixture()
+    row = None if failure == "unregistered" else registered
+    state_semantics_hash = "f" * 64 if failure == "different_core" else commit.state_semantics_hash
+
+    assert (
+        await _repository(_FakeConnection(fetchrows=[row])).is_registered_source_config_compatible(
+            commit.source_config_hash,
+            strategy_version=commit.strategy_version,
+            state_semantics_hash=state_semantics_hash,
+            official_stream_id=commit.official_stream_id,
+            lineage_id=commit.lineage_id,
+            route_id=commit.route_id,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_enrollment_is_atomic_explicit_and_non_official() -> None:
+    commit, source, registered = _manual_monitor_fixture()
+    connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), registered, None],
+        fetchvals=[True],
+        executes=["OK", "OK", "OK", "INSERT 0 1"],
+    )
+
+    assert await _repository(connection).enroll_manual_monitor(commit) is True
+
+    writes = [call for call in connection.calls if call[0] == "execute"]
+    assert len(writes) == 4
+    assert "'MANUAL_MONITOR'" in writes[0][1]
+    assert writes[0][2][1] == commit.source_event_id
+    assert sum("model_legs" in sql for _kind, sql, _args in writes) == 2
+    assert "manual_monitor_enrollments" in writes[-1][1]
+    forbidden = ("official_state", "decision_slots", "entry_decisions", "shadow_batches")
+    assert not any(any(name in sql for name in forbidden) for _kind, sql, _args in writes)
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_same_source_retry_is_idempotent_even_after_cutoff() -> None:
+    commit, source, registered = _manual_monitor_fixture()
+    first_connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), registered, None],
+        fetchvals=[True],
+        executes=["OK", "OK", "OK", "INSERT 0 1"],
+    )
+    assert await _repository(first_connection).enroll_manual_monitor(commit) is True
+    enrollment_insert = next(
+        call
+        for call in first_connection.calls
+        if call[0] == "execute" and "manual_monitor_enrollments" in call[1]
+    )
+    fingerprint = enrollment_insert[2][15]
+    existing = {
+        "source_event_id": commit.source_event_id,
+        "enrollment_id": commit.enrollment_id,
+        "model_batch_id": commit.model_batch.model_batch_id,
+        "enrollment_fingerprint": fingerprint,
+    }
+    retry_connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), registered, existing]
+    )
+
+    assert (
+        await _repository(retry_connection).enroll_manual_monitor(
+            replace(commit, request_id="a-different-retry-key")
+        )
+        is False
+    )
+    assert not any(call[0] == "fetchval" for call in retry_connection.calls)
+    assert not any(call[0] == "execute" for call in retry_connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_same_request_cannot_select_a_different_source() -> None:
+    commit, source, registered = _manual_monitor_fixture()
+    request_collision = {
+        "source_event_id": "another-source",
+        "enrollment_id": "another-enrollment",
+        "model_batch_id": "another-batch",
+        "enrollment_fingerprint": "f" * 64,
+    }
+    connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), registered, request_collision]
+    )
+
+    with pytest.raises(V20SemanticConflict, match="ID collision"):
+        await _repository(connection).enroll_manual_monitor(commit)
+
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_different_probe_for_same_failed_slot_cannot_create_a_second_batch() -> None:
+    commit, source, registered = _manual_monitor_fixture()
+    semantic = json.loads(str(source["semantic_json"]))
+    semantic["event_id"] = "probe-event-2"
+    source = {
+        **source,
+        "event_id": "probe-event-2",
+        "semantic_json": canonical_json(semantic),
+        "semantic_content_hash": sha256_json(semantic),
+    }
+    enrollment_semantic = {
+        **commit.enrollment_semantic,
+        "source_event_id": "probe-event-2",
+    }
+    second_batch = replace(
+        commit.model_batch,
+        model_batch_id="manual-batch-2",
+        legs=tuple(
+            replace(leg, model_leg_id=f"manual-leg-2-{leg.rank}") for leg in commit.model_batch.legs
+        ),
+    )
+    second = replace(
+        commit,
+        enrollment_id="manual-enrollment-2",
+        source_event_id="probe-event-2",
+        request_id="manual-request-2",
+        source_semantic_content_hash=sha256_json(semantic),
+        enrollment_semantic=enrollment_semantic,
+        enrollment_semantic_hash=sha256_json(enrollment_semantic),
+        model_batch=second_batch,
+    )
+    existing = {
+        "source_event_id": commit.source_event_id,
+        "official_entry_event_id": commit.official_entry_event_id,
+        "enrollment_id": commit.enrollment_id,
+        "model_batch_id": commit.model_batch.model_batch_id,
+        "enrollment_fingerprint": "f" * 64,
+    }
+    connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(second), registered, existing]
+    )
+
+    with pytest.raises(V20SemanticConflict, match="ID collision"):
+        await _repository(connection).enroll_manual_monitor(second)
+
+    lock_call = next(
+        call for call in connection.calls if call[0] == "fetchrow" and "entry_decisions" in call[1]
+    )
+    assert "FOR UPDATE OF official,decision,slot" in _compact_sql(lock_call[1])
+    collision_call = connection.calls[-1]
+    assert "official_entry_event_id=$7" in _compact_sql(collision_call[1])
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_rejects_ineligible_probe_without_writes() -> None:
+    commit, source, _registered = _manual_monitor_fixture()
+    semantic = json.loads(str(source["semantic_json"]))
+    semantic["v20_action"] = "BLOCK"
+    source["semantic_json"] = canonical_json(semantic)
+    source["semantic_content_hash"] = sha256_json(semantic)
+    commit = replace(commit, source_semantic_content_hash=sha256_json(semantic))
+    connection = _FakeConnection(fetchrows=[source, None])
+
+    with pytest.raises(V20SemanticConflict, match="eligible current ENTER probe"):
+        await _repository(connection).enroll_manual_monitor(commit)
+
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_transaction_rejects_unregistered_source_config() -> None:
+    commit, source, _registered = _manual_monitor_fixture()
+    connection = _FakeConnection(fetchrows=[source, _failed_official_entry_row(commit), None])
+
+    with pytest.raises(V20SemanticConflict, match="registered same-core binding"):
+        await _repository(connection).enroll_manual_monitor(commit)
+
+    assert any(call[0] == "fetchrow" and "runtime_configs" in call[1] for call in connection.calls)
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("probe_profile", "OLDER_PROFILE"),
+        ("config_hash", "d" * 64),
+        ("state_semantics_hash", "e" * 64),
+    ],
+)
+async def test_manual_monitor_revalidates_probe_profile_and_frozen_bindings(
+    field_name: str,
+    replacement: str,
+) -> None:
+    commit, source, _registered = _manual_monitor_fixture()
+    semantic = json.loads(str(source["semantic_json"]))
+    semantic[field_name] = replacement
+    source["semantic_json"] = canonical_json(semantic)
+    source["semantic_content_hash"] = sha256_json(semantic)
+    commit = replace(commit, source_semantic_content_hash=sha256_json(semantic))
+    connection = _FakeConnection(fetchrows=[source, None])
+
+    with pytest.raises(V20SemanticConflict, match="eligible current ENTER probe"):
+        await _repository(connection).enroll_manual_monitor(commit)
+
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_first_enrollment_fails_closed_at_d1_cutoff() -> None:
+    commit, source, registered = _manual_monitor_fixture()
+    connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), registered, None],
+        fetchvals=[False],
+    )
+
+    with pytest.raises(V20StateConflict, match="closed at D1 09:30"):
+        await _repository(connection).enroll_manual_monitor(commit)
+
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_final_insert_closes_a_cutoff_race() -> None:
+    commit, source, registered = _manual_monitor_fixture()
+    connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), registered, None],
+        fetchvals=[True],
+        executes=["OK", "OK", "OK", "INSERT 0 0"],
+    )
+
+    with pytest.raises(V20StateConflict, match="crossed the D1 09:30"):
+        await _repository(connection).enroll_manual_monitor(commit)
+
+    final_insert = [call for call in connection.calls if call[0] == "execute"][-1]
+    assert "WHERE clock_timestamp() < $11::timestamptz" in _compact_sql(final_insert[1])
+
+
+@pytest.mark.asyncio
+async def test_get_manual_monitor_enrollment_validates_scope_and_hash() -> None:
+    commit, _source, _registered = _manual_monitor_fixture()
+    created_at = datetime(2026, 9, 1, 0, 20, tzinfo=BEIJING_TZ)
+    row = {
+        "enrollment_id": commit.enrollment_id,
+        "source_event_id": commit.source_event_id,
+        "official_entry_event_id": commit.official_entry_event_id,
+        "model_batch_id": commit.model_batch.model_batch_id,
+        "request_id": commit.request_id,
+        "signal_date": commit.signal_date,
+        "d1": commit.d1,
+        "d2": commit.d2,
+        "activation_cutoff_ts": commit.activation_cutoff_ts,
+        "source_semantic_content_hash": commit.source_semantic_content_hash,
+        "source_payload_hash": commit.source_payload_hash,
+        "calendar_evidence_hash": commit.calendar_evidence_hash,
+        "enrollment_semantic_hash": commit.enrollment_semantic_hash,
+        "enrollment_json": canonical_json(commit.enrollment_semantic),
+        "created_at": created_at,
+    }
+
+    record = await _repository(_FakeConnection(fetchrows=[row])).get_manual_monitor_enrollment(
+        commit.source_event_id,
+        **SCOPE,
+    )
+
+    assert record is not None
+    assert record.model_batch_id == commit.model_batch.model_batch_id
+    assert record.official_entry_event_id == commit.official_entry_event_id
+    assert record.semantic == commit.enrollment_semantic
+    assert record.created_at == created_at
+
+
+@pytest.mark.asyncio
+async def test_manual_monitor_batch_read_includes_exited_legs_and_is_strictly_bound() -> None:
+    commit, _source, _registered = _manual_monitor_fixture()
+    leg = commit.model_batch.legs[0]
+    row = {
+        "model_leg_id": leg.model_leg_id,
+        "model_batch_id": commit.model_batch.model_batch_id,
+        "decision_id": None,
+        "origin_kind": "MANUAL_MONITOR",
+        "source_event_id": commit.source_event_id,
+        "signal_date": commit.signal_date,
+        "code": leg.code,
+        "stock_name": leg.stock_name,
+        "rank": leg.rank,
+        "relative_weight": leg.relative_weight,
+        "d1": leg.d1,
+        "d2": leg.d2,
+        "reference_status": "LOCKED",
+        "reference_price": 10.0,
+        "reference_snapshot_hash": "d" * 64,
+        "evaluation_only": False,
+        "mews_snapshot_id": None,
+        "mews_fast_state": None,
+        "exit_intent_id": "already-exited-intent",
+    }
+    connection = _FakeConnection(fetches=[[row]])
+
+    records = await _repository(connection).list_manual_monitor_batch_legs(
+        commit.model_batch.model_batch_id,
+        **SCOPE,
+    )
+
+    assert len(records) == 1
+    assert records[0].exit_intent_id == "already-exited-intent"
+    sql = _compact_sql(connection.calls[0][1])
+    assert "JOIN v20.manual_monitor_enrollments AS enrollment" in sql
+    assert "source.event_type='DATA_ALERT' AND source.seal_status='SEALED'" in sql
+    assert "exit_intent_id IS NULL" not in sql

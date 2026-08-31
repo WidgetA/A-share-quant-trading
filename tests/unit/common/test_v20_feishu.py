@@ -359,6 +359,102 @@ def test_manual_trigger_receipt_is_visibly_non_actionable_and_seals_as_data_aler
     assert "ALREADY_TERMINAL" not in payload["message"]
 
 
+def _manual_monitor_armed_semantic() -> dict:
+    return {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": "manual-monitor-armed-event",
+        "strategy_version": "V20",
+        "config_hash": "a" * 64,
+        "deployment_mode": "production_push",
+        "official_stream_id": "formal-stream",
+        "state_lineage_id": "formal-lineage",
+        "alert_code": "MANUAL_MONITOR_ARMED",
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "enrollment_id": "manual-monitor-enrollment-001",
+        "source_event_id": "frozen-morning-source-event",
+        "model_batch_id": "manual-monitor-batch-001",
+        "signal_date": "2026-08-31",
+        "d1": "2026-09-01",
+        "d2": "2026-09-02",
+        "activation_cutoff_ts": "2026-09-01T09:30:00+08:00",
+        "reference_profile_id": "D0_0941_OPEN_D1_0930_ARBITRATION_V1",
+        "reference_evidence_status": "COMPLETE_PENDING_D1_ARBITRATION",
+        "armed_leg_count": 2,
+        "symbols": [
+            {"code": "000001", "name": "平安银行"},
+            {"code": "600000", "name": "浦发银行"},
+        ],
+        "official_state_changed": False,
+        "orders_changed": False,
+        "message": "manual monitor enrollment confirmation",
+    }
+
+
+def test_manual_monitor_armed_seals_as_explicit_monitor_only_confirmation() -> None:
+    semantic = _manual_monitor_armed_semantic()
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 16, 30, tzinfo=TZ),
+        18,
+        True,
+    )
+    message = str(payload["message"])
+
+    assert payload["event_type"] == "DATA_ALERT"
+    assert "actionable_from" not in payload
+    assert "expired_delivery_message" not in payload
+    assert message.splitlines()[0] == "[V20] 人工补挂卖出监控已启用"
+    assert "🟢 已启用：2 只模型腿" in message
+    assert "票单：000001 平安银行、600000 浦发银行" in message
+    assert "D0 原始 09:41 bar.open" in message
+    assert "D1 09:30" in message
+    assert "D1 保护：任一有效分钟 bar.close ≤ 参考价 92%" in message
+    assert "D2 保护：任一有效分钟 bar.close ≤ 参考价 88%" in message
+    assert "合格 MEWS=DANGER 时提高到 95%；14:57 无条件提醒退出" in message
+    assert "只新增卖出监控腿" in message
+    assert "未修改正式入场决定，也未创建订单、持仓或成交" in message
+    assert "已下单" not in message
+    assert "已持仓" not in message
+
+
+@pytest.mark.parametrize(
+    ("updates", "error"),
+    [
+        ({"event_id": "wrong-event"}, "inconsistent"),
+        ({"delivery_priority_class": "ACTIONABLE_ENTRY"}, "inconsistent"),
+        ({"reference_evidence_status": "LOCKED"}, "inconsistent"),
+        ({"official_state_changed": True}, "inconsistent"),
+        ({"orders_changed": True}, "inconsistent"),
+        ({"armed_leg_count": 1}, "inconsistent"),
+        ({"armed_leg_count": True}, "inconsistent"),
+        ({"symbols": "000001"}, "inconsistent"),
+        ({"signal_date": "not-a-date"}, "dates are invalid"),
+        ({"d2": "2026-09-01"}, "activation boundary"),
+        ({"activation_cutoff_ts": "2026-09-01T09:31:00+08:00"}, "activation boundary"),
+        ({"activation_cutoff_ts": "2026-09-01T09:30:00"}, "activation boundary"),
+    ],
+)
+def test_manual_monitor_armed_rejects_inconsistent_or_unsafe_semantics(
+    updates: dict,
+    error: str,
+) -> None:
+    semantic = {**_manual_monitor_armed_semantic(), **updates}
+
+    with pytest.raises(ValueError, match=error):
+        seal_v20_payload(
+            _outbox_record(
+                "DATA_ALERT",
+                semantic,
+                event_id="manual-monitor-armed-event",
+            ),
+            datetime(2026, 8, 31, 16, 30, tzinfo=TZ),
+            19,
+            True,
+        )
+
+
 def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
     semantic = {
         "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
@@ -878,6 +974,49 @@ def test_exit_is_scoped_to_one_model_leg_not_account_holding() -> None:
     assert "账户全部持仓" in message
     assert "D1 恐慌下杀 -8%" in message
     assert "该模型腿相对标准批次份额: 5.00%" in message
+
+
+def test_manual_monitor_exit_identifies_its_origin_without_claiming_order_or_holding() -> None:
+    semantic = {
+        "schema_version": V20_EXIT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": "manual-monitor-exit",
+        "event_type": "EXIT_SIGNAL",
+        "deployment_mode": "production_push",
+        "exit_signal_type": "D1_CLOSE_CONFIRM_08",
+        "origin_kind": "MANUAL_MONITOR",
+        "source_event_id": "manual-monitor-armed-event",
+        "code": "000001",
+        "stock_name": "平安银行",
+        "signal_date": "2026-08-31",
+        "rank": 1,
+        "model_leg_id": "manual-monitor-leg-000001",
+        "reference_entry_price": 10.0,
+        "observed_close": 9.2,
+        "wealth_factor": 0.92,
+        "origin_final_relative_weight": 0.1,
+        "rule_actionable_from": "2026-09-01T10:01:00+08:00",
+        "detection_trade_date": "2026-09-01",
+        "detection_is_trading_day": True,
+        "market_restriction": "TRADABLE",
+        "reason_codes": [],
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("EXIT_SIGNAL", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 9, 1, 10, 1, 5, tzinfo=TZ),
+        20,
+        True,
+    )
+    message = str(payload["message"])
+
+    assert "来源：人工补挂的冻结票单监控腿" in message
+    assert "只发卖出提醒，不代表系统已下单或持仓" in message
+    assert "建议退出该模型腿100%（不是账户全部持仓）" in message
+    assert "仅提示，不代表券商成交确认" in message
+    assert "已创建订单" not in message
+    assert "已确认持仓" not in message
+    assert "已经卖出" not in message
 
 
 def test_shadow_exit_and_reminder_are_explicitly_observation_only() -> None:
