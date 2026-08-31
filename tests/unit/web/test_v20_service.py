@@ -49,6 +49,7 @@ from src.web.v20_service import (
     FULL_EXIT_LABELS,
     V20Service,
     _bootstrap_bundle,
+    _cleanup_embedded_v20_scan_resources,
     _cleanup_v20_scan_resources,
     _DayContext,
     _embedded_runtime_config,
@@ -471,6 +472,34 @@ async def test_embedded_v20_scan_resources_use_the_same_persisted_token_path_as_
         "realtime": "persisted-v16-token",
         "historical": "persisted-v16-token",
     }
+
+
+async def test_embedded_cleanup_preserves_main_shared_fundamentals_pool() -> None:
+    class _Realtime:
+        stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    class _SharedFundamentals:
+        close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    realtime = _Realtime()
+    fundamentals = _SharedFundamentals()
+    state = V15ScanState(
+        initialized=True,
+        realtime_client=realtime,
+        fundamentals_db=fundamentals,
+    )
+
+    await _cleanup_embedded_v20_scan_resources(state)
+
+    assert realtime.stop_calls == 1
+    assert fundamentals.close_calls == 0
+    assert state.initialized is False
 
 
 def _entry_status(config, *, action: str = "BLOCK") -> EntryStatus:

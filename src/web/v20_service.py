@@ -210,6 +210,15 @@ async def _cleanup_v20_scan_resources(scan_state: V15ScanState) -> None:
             scan_state.initialized = False
 
 
+async def _cleanup_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
+    """Close V20's market client while preserving main's shared DB pool."""
+    try:
+        if scan_state.realtime_client is not None:
+            await scan_state.realtime_client.stop()
+    finally:
+        scan_state.initialized = False
+
+
 @dataclass
 class _DayContext:
     trade_date: date
@@ -960,7 +969,7 @@ class V20Service:
         )
 
     @classmethod
-    def from_legacy_runtime(cls) -> V20Service:
+    def from_legacy_runtime(cls, *, fundamentals_db: Any | None = None) -> V20Service:
         """Embed forward-shadow V20 in the existing main/V16 container.
 
         Strategy semantics, the ledger, outbox, 09:39 input boundary, and
@@ -991,11 +1000,14 @@ class V20Service:
                 "embedded V20 repository differs from the frozen schema/pool settings"
             )
 
-        token = get_tushare_token()
-        fundamentals = create_fundamentals_db_from_config(
-            database_config_path,
-            tushare_token=token,
-        )
+        owns_fundamentals = fundamentals_db is None
+        fundamentals = fundamentals_db
+        if fundamentals is None:
+            token = get_tushare_token()
+            fundamentals = create_fundamentals_db_from_config(
+                database_config_path,
+                tushare_token=token,
+            )
         route = load_legacy_embedded_v20_route()
         if not route.is_configured():
             raise V20ConfigError("legacy main Feishu route is not configured")
@@ -1025,6 +1037,11 @@ class V20Service:
             publisher=publisher,
             routes=routes,
             initialize_resources=_init_embedded_v20_scan_resources,
+            cleanup_resources=(
+                _cleanup_v20_scan_resources
+                if owns_fundamentals
+                else _cleanup_embedded_v20_scan_resources
+            ),
             embedded_legacy=True,
         )
 

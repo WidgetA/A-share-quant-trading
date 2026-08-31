@@ -74,7 +74,7 @@ def _v20_start_error_code(exc: BaseException) -> str:
     return "UNCLASSIFIED_STARTUP_FAILURE"
 
 
-def _create_default_v20_service() -> object:
+def _create_default_v20_service(*, fundamentals_db: object | None = None) -> object:
     """Create V20 lazily so importing the legacy web app stays side-effect free.
 
     Existing main deployments have no dedicated ``V20_*`` secrets because
@@ -93,7 +93,7 @@ def _create_default_v20_service() -> object:
         raise ValueError("V20_EMBEDDED_ENABLED must be true or false")
     if explicit_v20_runtime or embedded_value == "false":
         return V20Service.from_default_config()
-    return V20Service.from_legacy_runtime()
+    return V20Service.from_legacy_runtime(fundamentals_db=fundamentals_db)
 
 
 def _default_v20_mode_hint() -> str | None:
@@ -148,7 +148,9 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     if service is None:
         mode_hint = _default_v20_mode_hint()
         try:
-            service = _create_default_v20_service()
+            service = _create_default_v20_service(
+                fundamentals_db=getattr(app.state, "fundamentals_db", None)
+            )
             app.state.v20_service = service
         except Exception as exc:
             app.state.v20_deployment_mode = mode_hint

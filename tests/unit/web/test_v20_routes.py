@@ -194,7 +194,7 @@ def test_legacy_main_factory_selects_embedded_v20_without_dedicated_activation(
     monkeypatch.setattr(
         V20Service,
         "from_legacy_runtime",
-        classmethod(lambda _cls: embedded),
+        classmethod(lambda _cls, **_kwargs: embedded),
     )
     monkeypatch.setattr(
         V20Service,
@@ -593,11 +593,24 @@ async def test_disabled_service_does_not_start_and_mode_still_controls_ownership
 async def test_default_factory_result_is_injected_and_lifecycle_managed(monkeypatch) -> None:
     service = LifecycleV20Service(enabled=True, deployment_mode="forward_shadow")
     app = _lifecycle_app(None)
-    monkeypatch.setattr(web_app, "_create_default_v20_service", lambda: service)
+    shared_fundamentals = object()
+    app.state.fundamentals_db = shared_fundamentals
+    captured: dict[str, object] = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return service
+
+    monkeypatch.setattr(
+        web_app,
+        "_create_default_v20_service",
+        factory,
+    )
 
     assert await web_app._start_v20_lifecycle(app) is True
     assert app.state.v20_service is service
     assert service.start_calls == 1
+    assert captured == {"fundamentals_db": shared_fundamentals}
 
     await web_app._stop_v20_lifecycle(app)
     assert service.stop_calls == 1
@@ -633,7 +646,7 @@ async def test_default_factory_failure_uses_fail_closed_mode_hint(
 ) -> None:
     app = _lifecycle_app(None)
 
-    def fail_factory() -> object:
+    def fail_factory(**_kwargs) -> object:
         raise RuntimeError("invalid V20 configuration")
 
     monkeypatch.setattr(web_app, "_create_default_v20_service", fail_factory)
