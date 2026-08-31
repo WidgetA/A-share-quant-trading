@@ -274,7 +274,7 @@ def test_entry_current_contract_seals_and_legacy_or_partial_contracts_fail_close
         seal_v20_payload(_outbox_record("ENTRY_DECISION", wrong_profile), generated_at, 4, True)
 
 
-def test_input_invalid_current_contract_seals_with_failure_detail() -> None:
+def test_input_invalid_current_contract_leads_with_operator_action() -> None:
     semantic = {
         "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
@@ -304,7 +304,9 @@ def test_input_invalid_current_contract_seals_with_failure_detail() -> None:
         False,
     )
 
-    assert "quote coverage 70/100 below threshold" in payload["message"]
+    assert "🔴 现在操作：不开仓，不补买，不追买" in payload["message"]
+    assert "关键入场数据不完整" in payload["message"]
+    assert "quote coverage 70/100 below threshold" not in payload["message"]
 
 
 def _manual_trigger_receipt_semantic(*, event_id: str = "manual-event") -> dict:
@@ -350,9 +352,10 @@ def test_manual_trigger_receipt_is_visibly_non_actionable_and_seals_as_data_aler
     assert "actionable_from" not in payload
     assert "expired_delivery_message" not in payload
     lines = str(payload["message"]).splitlines()
-    assert lines[0] == "[V20] 人工触发验证（非交易指令）"
-    assert "仅用于部署验收" in payload["message"]
-    assert "不会创建或修改订单、持仓、卖出信号或券商侧状态" in payload["message"]
+    assert lines[0] == "[V20] 人工触发回执｜非交易指令"
+    assert "🔴 现在操作：不开仓，不补买，不追买" in payload["message"]
+    assert "验收结果：已读取今天已经冻结的结果" in payload["message"]
+    assert "ALREADY_TERMINAL" not in payload["message"]
 
 
 def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
@@ -394,8 +397,123 @@ def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
     assert payload["event_type"] == "DATA_ALERT"
     assert payload["timeliness_status"] == "ON_TIME"
     assert "actionable_from" not in payload
-    assert payload["message"].splitlines()[0] == ("[V20][SHADOW] 09:39复盘（已过期，不可交易）")
-    assert "已过期不可追买" in payload["message"]
+    lines = payload["message"].splitlines()
+    assert lines[0] == "[V20][SHADOW] 现在不开仓｜09:39复盘已过期"
+    assert lines[2] == "🔴 现在操作：不开仓，不补买，不追买"
+    assert lines[3] == "🕘 当时本应：正常开仓（策略倍率100%）；结果已过期"
+    assert "早盘正式记录：未形成按时有效的入场决策" in payload["message"]
+    assert "INPUT_INVALID" not in payload["message"]
+    assert "ENTER" not in payload["message"]
+    assert "ON_TIME" not in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("replay_action", "expected"),
+    [
+        ("BLOCK", "🕘 当时本应：不开仓（风控拦截）；结果已过期"),
+        ("NO_SIGNAL", "🕘 当时本应：不开仓（没有合格候选票）；结果已过期"),
+    ],
+)
+def test_late_0939_replay_translates_non_entry_outcomes(
+    replay_action: str,
+    expected: str,
+) -> None:
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": f"late-{replay_action.lower()}",
+        "strategy_version": "V20",
+        "deployment_mode": "forward_shadow",
+        "alert_code": "LATE_0939_REPLAY_RESULT",
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "event_trade_date": "2026-08-31",
+        "replay_kind": "RETROSPECTIVE_POST_CUTOFF",
+        "non_actionable": True,
+        "official_entry_action": "INPUT_INVALID",
+        "official_entry_event_id": "failed-entry-event",
+        "replay_action": replay_action,
+        "final_multiplier": 0.0,
+        "symbols": [],
+        "data_cutoff": "09:39",
+        "data_receipt_timeliness": "POST_CUTOFF",
+        "computed_at": "2026-08-31T15:30:00+08:00",
+        "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE",
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "pit_limitations": ["POST_CUTOFF_REPLAY"],
+        "message": "retrospective audit detail",
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+        20,
+        True,
+    )
+
+    assert expected in payload["message"]
+    assert "现在操作：不开仓，不补买，不追买" in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("alert_code", "expected_reason"),
+    [
+        (
+            "ENTRY_CALENDAR_UNKNOWN_NO_BUY",
+            "09:40仍无法确认交易日历，系统不能安全运行入场策略",
+        ),
+        ("SLOT_FINALIZED_FAILED", "系统直到09:45仍未完成并冻结早盘入场决策"),
+    ],
+)
+def test_other_entry_failure_alerts_keep_the_same_no_buy_operator_action(
+    alert_code: str,
+    expected_reason: str,
+) -> None:
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": "V20",
+        "deployment_mode": "forward_shadow",
+        "alert_code": alert_code,
+        "event_trade_date": "2026-08-31",
+        "message": "raw engineering detail",
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=f"alert-{alert_code}"),
+        datetime(2026, 8, 31, 9, 45, tzinfo=TZ),
+        20,
+        True,
+    )
+
+    assert "现在操作：不开仓，不补买，不追买" in payload["message"]
+    assert expected_reason in payload["message"]
+    assert "raw engineering detail" not in payload["message"]
+
+
+def test_entry_cutoff_data_alert_is_rendered_as_a_human_no_buy_notice() -> None:
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": "V20",
+        "deployment_mode": "forward_shadow",
+        "alert_code": "ENTRY_CUTOFF_NO_BUY",
+        "event_trade_date": "2026-08-31",
+        "message": "09:40 截止仍没有 durable 正常入场决定；今天不买，不要追买。",
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id="cutoff-alert"),
+        datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+        20,
+        True,
+    )
+
+    lines = payload["message"].splitlines()
+    assert lines[0] == "[V20][SHADOW] 入场报警｜不开仓"
+    assert lines[2] == "🔴 现在操作：不开仓，不补买，不追买"
+    assert "09:40截止前没有冻结出可执行的入场决策" in payload["message"]
+    assert "DATA_ALERT" not in payload["message"]
+    assert "durable" not in payload["message"]
 
 
 @pytest.mark.parametrize(
@@ -441,7 +559,7 @@ def test_late_entry_message_never_suggests_buying() -> None:
     assert "正常建立" not in message
 
 
-def test_input_invalid_message_keeps_cutoff_reason_and_failure_detail() -> None:
+def test_input_invalid_message_translates_cutoff_failure_for_operator() -> None:
     message = render_entry_message(
         {
             "event_id": "invalid",
@@ -458,9 +576,10 @@ def test_input_invalid_message_keeps_cutoff_reason_and_failure_detail() -> None:
         on_time=False,
     )
 
-    assert "输入异常：本日不给入场建议" in message
-    assert "ENTRY_INPUT_UNAVAILABLE_BY_0940" in message
-    assert "故障详情: 09:39 terminal coverage 73/100" in message
+    assert "🔴 现在操作：不开仓，不补买，不追买" in message
+    assert "09:40截止前没有形成完整、可靠的V16入场结果" in message
+    assert "ENTRY_INPUT_UNAVAILABLE_BY_0940" not in message
+    assert "09:39 terminal coverage 73/100" not in message
     assert "建立新模型批次" not in message
 
 

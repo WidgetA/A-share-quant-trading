@@ -1210,7 +1210,9 @@ async def test_manual_trigger_after_cutoff_only_copies_frozen_decision(
     assert record.semantic["delivery_priority_class"] == "OPERATOR_NOTIFICATION"
     assert "正式冻结 V16 票单（1只）" in str(record.semantic["message"])
     assert "000001 平安银行" in str(record.semantic["message"])
-    assert "人工触发验证（非交易指令）" in str(record.payload["message"])
+    assert "人工触发回执｜非交易指令" in str(record.payload["message"])
+    assert "现在操作：不开仓，不补买，不追买" in str(record.payload["message"])
+    assert "早盘正式记录：曾给出开仓建议，现已过期" in str(record.payload["message"])
 
 
 async def test_manual_trigger_after_cutoff_never_backfills_missing_decision(
@@ -1768,7 +1770,8 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     assert "decision_id" not in first.semantic
     assert "state_after_hash" not in first.semantic
     assert first.payload is not None
-    assert "09:39复盘（已过期，不可交易）" in str(first.payload["message"])
+    assert "现在不开仓｜09:39复盘已过期" in str(first.payload["message"])
+    assert "现在操作：不开仓，不补买，不追买" in str(first.payload["message"])
     assert client.calls == [("000001",)]
     assert pipeline.scan_calls == 1
     assert pipeline.observed_early_volume == 900.0

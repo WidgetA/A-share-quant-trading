@@ -105,6 +105,192 @@ def _entry_action_text(multiplier: float, *, on_time: bool) -> str:
         raise ValueError(f"unsupported V20 final multiplier: {multiplier}") from exc
 
 
+def _operator_entry_decision(action: object, multiplier: object = None) -> str:
+    """Translate a machine entry result into one unambiguous operator sentence."""
+
+    action_text = str(action)
+    if action_text == "ENTER":
+        if (
+            isinstance(multiplier, bool)
+            or not isinstance(multiplier, (int, float))
+            or not math.isfinite(multiplier)
+        ):
+            return "开仓（仓位见每日决策消息）"
+        value = float(multiplier)
+        labels = {
+            1.0: "正常开仓（策略倍率100%）",
+            0.5: "减半开仓（策略倍率50%）",
+            0.25: "谨慎开仓（策略倍率25%）",
+        }
+        return labels.get(value, f"按策略倍率{value:.0%}开仓")
+    if action_text == "BLOCK":
+        return "不开仓（风控拦截）"
+    if action_text == "NO_SIGNAL":
+        return "不开仓（没有合格候选票）"
+    if action_text == "INPUT_INVALID":
+        return "未形成按时有效的入场决策"
+    return "未形成可用结论"
+
+
+def _render_late_replay_for_operator(
+    semantic: Mapping[str, Any],
+    *,
+    title_prefix: str,
+    event_id: str,
+) -> str:
+    """Render a late replay without mixing retrospective and current actions."""
+
+    replay_decision = _operator_entry_decision(
+        semantic.get("replay_action"), semantic.get("final_multiplier")
+    )
+    trade_date = str(semantic.get("event_trade_date", "-"))
+    computed_at = datetime.fromisoformat(str(semantic["computed_at"])).astimezone(SHANGHAI)
+    replay_time = computed_at.strftime("%H:%M")
+    lines = [
+        f"{title_prefix} 现在不开仓｜09:39复盘已过期",
+        "",
+        "🔴 现在操作：不开仓，不补买，不追买",
+        f"🕘 当时本应：{replay_decision}；结果已过期",
+    ]
+
+    symbols = semantic.get("symbols") or []
+    if isinstance(symbols, list) and symbols:
+        ticket_text = "、".join(
+            f"{item.get('code', '-')} {item.get('name', '')}".rstrip()
+            for item in symbols
+            if isinstance(item, Mapping)
+        )
+        lines.append(f"当时票单：{ticket_text}")
+    else:
+        lines.append("当时票单：无")
+
+    official_decision = _operator_entry_decision(semantic.get("official_entry_action"))
+    lines.extend(
+        [
+            f"早盘正式记录：{official_decision}。",
+            "说明：数据在截止后取得并还原09:39截面，不代表早上已生成或送达。",
+            "已有持仓不因本消息处理，继续按既定卖出规则管理。",
+            "",
+            f"交易日：{trade_date}｜复盘计算：{replay_time}｜事件：{event_id[:16]}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_manual_receipt_for_operator(
+    semantic: Mapping[str, Any],
+    *,
+    title_prefix: str,
+    event_id: str,
+    generated_at: datetime,
+) -> str:
+    """Keep deployment verification visibly separate from trading instructions."""
+
+    cycle = str(semantic.get("cycle_result", "-"))
+    cycle_text = {
+        "ALREADY_TERMINAL": "已读取今天已经冻结的结果",
+        "DECISION_COMMITTED": "已生成并冻结今天的正式结果",
+        "LATE_0939_REPLAY_READY": "已读取正式结果，并完成09:39迟到复盘",
+        "NON_TRADING_DAY": "今天不是交易日",
+        "BEFORE_WINDOW": "尚未到运行窗口",
+        "COLLECTING": "正在采集决策数据",
+        "DECISION_PENDING": "正式决策尚未冻结",
+        "CUTOFF_WITHOUT_DURABLE_DECISION": "已过截止时间，但正式决策缺失",
+    }.get(cycle, cycle)
+    trade_date = str(semantic.get("event_trade_date", "-"))
+    generated_local = generated_at.astimezone(SHANGHAI)
+    receipt_time = generated_local.strftime("%H:%M")
+    after_entry_cutoff = generated_local.timetz().replace(tzinfo=None) >= time(9, 40)
+    if after_entry_cutoff:
+        current_action = "🔴 现在操作：不开仓，不补买，不追买"
+    elif semantic.get("formal_decision_available"):
+        current_action = "现在操作：以另发的“每日决策”为准；不要根据本回执下单"
+    else:
+        current_action = "现在操作：暂不开仓，等待“每日决策”"
+    lines = [
+        f"{title_prefix} 人工触发回执｜非交易指令",
+        "",
+        current_action,
+        f"验收结果：{cycle_text}。",
+    ]
+
+    if semantic.get("formal_decision_available"):
+        if semantic.get("entry_action") == "ENTER":
+            if after_entry_cutoff:
+                lines.append("早盘正式记录：曾给出开仓建议，现已过期（详见每日决策消息）。")
+            else:
+                lines.append("早盘正式结果已冻结；倍率和票单以另发的“每日决策”为准。")
+        else:
+            lines.append(
+                "早盘正式记录：" + _operator_entry_decision(semantic.get("entry_action")) + "。"
+            )
+    else:
+        lines.append("早盘正式记录：不可用。")
+
+    if semantic.get("late_0939_replay_available"):
+        replay_decision = _operator_entry_decision(
+            semantic.get("late_0939_replay_action"),
+            semantic.get("late_0939_replay_multiplier"),
+        )
+        lines.append(f"09:39还原：当时本应：{replay_decision}；结果已过期，现在不要补买。")
+    elif semantic.get("late_0939_replay_error"):
+        lines.append(f"09:39还原：未完成（{semantic['late_0939_replay_error']}）。")
+
+    lines.extend(
+        [
+            "",
+            (
+                f"交易日：{trade_date}｜回执生成：{receipt_time}｜"
+                f"请求：{semantic.get('manual_request_id', '-')}｜事件：{event_id[:16]}"
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_data_alert_for_operator(
+    semantic: Mapping[str, Any],
+    *,
+    title_prefix: str,
+    event_id: str,
+    generated_at: datetime,
+) -> str:
+    """Give runtime alerts a human title and an explicit operator impact."""
+
+    code = str(semantic.get("alert_code", "UNKNOWN"))
+    no_buy_reasons = {
+        "ENTRY_CALENDAR_UNKNOWN_NO_BUY": "09:40仍无法确认交易日历，系统不能安全运行入场策略。",
+        "ENTRY_CUTOFF_NO_BUY": "09:40截止前没有冻结出可执行的入场决策。",
+        "ENTRY_INPUT_UNAVAILABLE_BY_0940": "09:40截止前没有形成完整、可靠的V16入场结果。",
+        "SLOT_FINALIZED_FAILED": "系统直到09:45仍未完成并冻结早盘入场决策。",
+    }
+    trade_date = str(semantic.get("event_trade_date", "-"))
+    alert_time = generated_at.astimezone(SHANGHAI).strftime("%H:%M")
+    if code in no_buy_reasons:
+        return "\n".join(
+            [
+                f"{title_prefix} 入场报警｜不开仓",
+                "",
+                "🔴 现在操作：不开仓，不补买，不追买",
+                f"原因：{no_buy_reasons[code]}",
+                "已有持仓不因本报警处理，继续按既定卖出规则管理。",
+                "若稍后收到09:39复盘，它也只用于核查，不能据此追买。",
+                "",
+                f"交易日：{trade_date}｜消息生成：{alert_time}｜事件：{event_id[:16]}",
+            ]
+        )
+
+    detail = str(semantic.get("message", semantic.get("reason", "系统运行异常")))
+    return "\n".join(
+        [
+            f"{title_prefix} 系统报警｜需要检查",
+            f"影响：{detail}",
+            f"报警类别：{code}",
+            f"交易日：{trade_date}｜消息生成：{alert_time}｜事件：{event_id[:16]}",
+        ]
+    )
+
+
 def render_entry_message(
     semantic: Mapping[str, Any],
     *,
@@ -119,15 +305,45 @@ def render_entry_message(
     trade_date = str(semantic["trade_date"])
     action = str(semantic.get("action", "INPUT_INVALID"))
     multiplier = float(semantic.get("final_multiplier", 0.0))
+    if action == "INPUT_INVALID":
+        reason_codes = {str(item) for item in (semantic.get("reason_codes") or [])}
+        if "SLOT_FINALIZED_FAILED" in reason_codes:
+            reason = "系统直到09:45仍未完成并冻结早盘入场决策。"
+        elif "ENTRY_INPUT_UNAVAILABLE_BY_0940" in reason_codes:
+            reason = "09:40截止前没有形成完整、可靠的V16入场结果。"
+        else:
+            reason = "关键入场数据不完整，系统无法安全给出买入结论。"
+        lines = [
+            f"{title}｜不开仓 ({trade_date} 09:40)",
+            "",
+            "🔴 现在操作：不开仓，不补买，不追买",
+            f"原因：{reason}",
+            "若稍后收到09:39复盘，它也只用于核查，不能据此追买。",
+        ]
+        if shadow:
+            lines.append("⚪ 当前为前向观察，不替代V16正式建议。")
+        scheduled_exits = semantic.get("scheduled_exits_today") or []
+        if scheduled_exits:
+            lines.extend(["", "已有模型腿的卖出计划不受影响："])
+            for item in scheduled_exits:
+                lines.append(
+                    f"- {item['code']} {item.get('stock_name', '')}："
+                    f"最迟{item.get('plan_time', '14:57')}整腿退出，保护线命中会提前通知"
+                )
+        lines.extend(
+            [
+                "",
+                f"生成时间：{generated_at.astimezone(SHANGHAI).strftime('%H:%M:%S')}｜"
+                f"事件：{str(semantic.get('event_id', '-'))[:16]}",
+            ]
+        )
+        return "\n".join(lines)
+
     lines = [f"{title} ({trade_date} 09:40)"]
     if shadow:
         lines.append("⚪ 前向观察：不替代当前正式策略建议")
     if action == "NO_SIGNAL":
         lines.append("今日V16完整扫描合法无票，不建立新模型批次")
-    elif action == "INPUT_INVALID":
-        lines.append("🚨 输入异常：本日不给入场建议")
-        if semantic.get("failure_detail"):
-            lines.append(f"故障详情: {semantic['failure_detail']}")
     else:
         lines.append(_entry_action_text(multiplier, on_time=on_time))
 
@@ -723,25 +939,27 @@ def seal_v20_payload(
     elif (
         record.event_type == "DATA_ALERT" and semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT"
     ):
-        message = (
-            f"{title_prefix} 人工触发验证（非交易指令）\n"
-            f"{semantic['message']}\n"
-            f"事件: {record.event_id[:16]}"
+        message = _render_manual_receipt_for_operator(
+            semantic,
+            title_prefix=title_prefix,
+            event_id=record.event_id,
+            generated_at=generated_at,
         )
     elif (
         record.event_type == "DATA_ALERT"
         and semantic.get("alert_code") == "LATE_0939_REPLAY_RESULT"
     ):
-        message = (
-            f"{title_prefix} 09:39复盘（已过期，不可交易）\n"
-            f"{semantic['message']}\n"
-            f"事件: {record.event_id[:16]}"
+        message = _render_late_replay_for_operator(
+            semantic,
+            title_prefix=title_prefix,
+            event_id=record.event_id,
         )
     else:
-        message = (
-            f"{title_prefix} {record.event_type}\n"
-            f"{semantic.get('message', semantic.get('reason', ''))}\n"
-            f"事件: {record.event_id[:16]}"
+        message = _render_data_alert_for_operator(
+            semantic,
+            title_prefix=title_prefix,
+            event_id=record.event_id,
+            generated_at=generated_at,
         )
     payload = {
         "schema_version": V20_FEISHU_PAYLOAD_SCHEMA,
