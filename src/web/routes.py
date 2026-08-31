@@ -184,12 +184,29 @@ def create_router() -> APIRouter:
         import os
 
         store = get_store(request)
+        v20_service = getattr(request.app.state, "v20_service", None)
+        v20_config = getattr(v20_service, "config", None)
+        v20_start_error = getattr(request.app.state, "v20_start_error", None)
+        v20_error_type = str(v20_start_error).split(":", 1)[0] if v20_start_error else None
         return {
             "status": "ok",
             "pending_count": len(store),
             "git_commit": os.environ.get("GIT_COMMIT", "unknown"),
             "git_branch": os.environ.get("GIT_BRANCH", "unknown"),
             "build_time": os.environ.get("BUILD_TIME", "unknown"),
+            "v20": {
+                "configured": v20_service is not None,
+                "enabled": getattr(v20_config, "enabled", False),
+                "mode": getattr(request.app.state, "v20_deployment_mode", None),
+                "started": bool(getattr(request.app.state, "v20_service_started", False)),
+                # Never return database/credential exception text publicly.
+                "start_error_type": v20_error_type,
+                "start_error_code": getattr(
+                    request.app.state,
+                    "v20_start_error_code",
+                    None,
+                ),
+            },
         }
 
     @router.get("/api/pending")

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from src.common.v20_feishu import V20FeishuRoute
 from src.data.clients.tushare_realtime import TushareMinuteBar
 from src.data.database.fundamentals_db import FundamentalsDBConfig
 from src.data.database.v20_repository import (
@@ -50,6 +51,8 @@ from src.web.v20_service import (
     _bootstrap_bundle,
     _cleanup_v20_scan_resources,
     _DayContext,
+    _embedded_runtime_config,
+    _init_embedded_v20_scan_resources,
     _init_v20_scan_resources,
 )
 
@@ -154,6 +157,103 @@ def _fundamentals_config() -> FundamentalsDBConfig:
         connect_timeout_seconds=6,
         command_timeout_seconds=16,
     )
+
+
+def test_embedded_runtime_config_binds_legacy_destination_without_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("V20_ENABLED", raising=False)
+    monkeypatch.setenv("V20_MODE", "forward_shadow")
+    base = load_v20_runtime_config(PROJECT_ROOT)
+    route = V20FeishuRoute(
+        route_id=base.route_id,
+        bot_url="https://legacy-relay.example",
+        app_id="legacy-app",
+        app_secret="legacy-secret",
+        chat_id="legacy-chat",
+        transport="legacy_send",
+    )
+
+    embedded = _embedded_runtime_config(base, route)
+
+    assert embedded.enabled is True
+    assert embedded.deployment_mode == "forward_shadow"
+    assert embedded.route_binding.destination_fingerprint == route.destination_fingerprint
+    assert embedded.config_hash == sha256_json(embedded.frozen_payload)
+    serialized = json.dumps(embedded.frozen_payload, sort_keys=True)
+    assert "legacy-secret" not in serialized
+    assert "legacy-app" not in serialized
+    assert "legacy-chat" not in serialized
+    assert embedded.frozen_payload["integration_profile"] == "legacy_main_embedded/v1"
+
+
+def test_legacy_runtime_factory_wires_existing_main_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.common import config as common_config
+    from src.data.database import fundamentals_db as fundamentals_module
+    from src.web import v20_service as service_module
+
+    monkeypatch.delenv("V20_ENABLED", raising=False)
+    monkeypatch.setenv("V20_MODE", "forward_shadow")
+    base = load_v20_runtime_config(PROJECT_ROOT)
+    repository = SimpleNamespace(
+        config=V20DatabaseConfig(
+            schema="v20",
+            pool_min_size=1,
+            pool_max_size=8,
+            ssl_mode="require",
+            connection_profile="legacy_embedded",
+        )
+    )
+    fundamentals = SimpleNamespace()
+    route = V20FeishuRoute(
+        route_id=base.route_id,
+        bot_url="https://legacy-relay.example",
+        app_id="legacy-app",
+        app_secret="legacy-secret",
+        chat_id="legacy-chat",
+        transport="legacy_send",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: base)
+
+    def create_repository(path):
+        captured["database_path"] = path
+        return repository
+
+    monkeypatch.setattr(
+        service_module,
+        "create_embedded_v20_repository_from_config",
+        create_repository,
+    )
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "persisted-token")
+
+    def create_fundamentals(path, *, tushare_token):
+        captured["fundamentals_path"] = path
+        captured["token"] = tushare_token
+        return fundamentals
+
+    monkeypatch.setattr(
+        fundamentals_module,
+        "create_fundamentals_db_from_config",
+        create_fundamentals,
+    )
+    monkeypatch.setattr(service_module, "load_legacy_embedded_v20_route", lambda: route)
+    monkeypatch.setattr(service_module, "V20ScanPipeline", lambda state, root: (state, root))
+    monkeypatch.setattr(service_module, "load_g_artifacts", lambda *_args, **_kwargs: object())
+
+    service = V20Service.from_legacy_runtime()
+
+    assert service.config.enabled is True
+    assert service.config.deployment_mode == "forward_shadow"
+    assert service._repository is repository
+    assert service._scan_state.fundamentals_db is fundamentals
+    assert service._routes == {route.route_id: route}
+    assert service._embedded_legacy is True
+    assert captured["token"] == "persisted-token"
+    assert captured["database_path"] == captured["fundamentals_path"]
 
 
 @pytest.mark.parametrize(
@@ -315,6 +415,61 @@ async def test_v20_scan_resources_use_explicit_environment_token_for_all_clients
     assert captured == {
         "realtime": "environment-token",
         "historical": "environment-token",
+    }
+
+
+async def test_embedded_v20_scan_resources_use_the_same_persisted_token_path_as_v16(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.common import config as common_config
+    from src.data.clients import iquant_historical_adapter as historical_module
+    from src.data.clients import tushare_realtime as realtime_module
+    from src.data.sources import local_concept_mapper as concept_module
+    from src.strategy.filters import stock_filter as stock_filter_module
+
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "persisted-v16-token")
+    captured: dict[str, str] = {}
+
+    class _Realtime:
+        def __init__(self, *, token: str) -> None:
+            captured["realtime"] = token
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    class _Historical:
+        def __init__(
+            self,
+            _client: object,
+            cache: object = None,
+            *,
+            tushare_token: str | None = None,
+        ) -> None:
+            del cache
+            captured["historical"] = str(tushare_token)
+
+    class _Fundamentals:
+        async def connect(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
+    monkeypatch.setattr(historical_module, "IQuantHistoricalAdapter", _Historical)
+    monkeypatch.setattr(concept_module, "LocalConceptMapper", lambda: object())
+    monkeypatch.setattr(stock_filter_module, "StockFilter", lambda _config: object())
+    state = V15ScanState(fundamentals_db=_Fundamentals())
+
+    await _init_embedded_v20_scan_resources(state)
+
+    assert captured == {
+        "realtime": "persisted-v16-token",
+        "historical": "persisted-v16-token",
     }
 
 
@@ -549,6 +704,38 @@ async def test_startup_security_binding_fails_before_database_connect(
         await service.start()
 
     assert repository.connect_calls == 0
+
+
+async def test_embedded_start_reaches_legacy_database_without_v20_api_or_ca_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repository:
+        connect_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+            raise RuntimeError("embedded database probe")
+
+    repository = _Repository()
+    service = _service(monkeypatch, repository)
+    service._embedded_legacy = True
+    monkeypatch.delenv("V20_STATUS_API_KEY", raising=False)
+    monkeypatch.delenv("V20_INGEST_API_KEY", raising=False)
+    monkeypatch.delenv("DB_SSLROOTCERT_SHA256", raising=False)
+    service._routes = {
+        service.config.route_id: SimpleNamespace(
+            chat_id="legacy-chat",
+            app_id="legacy-app",
+            app_secret="legacy-secret",
+            destination_fingerprint=service.config.route_binding.destination_fingerprint,
+            is_configured=lambda: True,
+        )
+    }
+
+    with pytest.raises(RuntimeError, match="embedded database probe"):
+        await service.start()
+
+    assert repository.connect_calls == 1
 
 
 class _AckRepository:

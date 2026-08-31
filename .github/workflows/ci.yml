@@ -94,7 +94,7 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build and push legacy runtime image
+      - name: Build and push runtime image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -107,24 +107,6 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:latest
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ github.sha }}
-          build-args: |
-            GIT_COMMIT=${{ github.sha }}
-            GIT_BRANCH=${{ github.ref_name }}
-            BUILD_TIME=${{ github.event.head_commit.timestamp }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push dedicated V20 image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          target: v20
-          push: true
-          provenance: false
-          sbom: false
-          tags: |
-            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:v20-latest
-            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:v20-${{ github.sha }}
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             GIT_BRANCH=${{ github.ref_name }}

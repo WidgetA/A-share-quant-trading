@@ -56,15 +56,16 @@ def test_docker_context_excludes_local_secrets_but_keeps_checkpoint_directory() 
     )
 
 
-def test_push_ci_publishes_dedicated_v20_target_without_claiming_deployment() -> None:
+def test_push_ci_publishes_one_main_image_for_v16_and_embedded_v20() -> None:
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
-    assert "target: v20" in workflow
-    assert "trading-service:v20-latest" in workflow
-    assert "trading-service:v20-${{ github.sha }}" in workflow
-    assert workflow.count("provenance: false") == 2
-    assert workflow.count("sbom: false") == 2
-    assert workflow.count("docker/build-push-action@v5") == 2
+    assert "target: v20" not in workflow
+    assert "trading-service:v20-latest" not in workflow
+    assert "trading-service:latest" in workflow
+    assert "trading-service:${{ github.sha }}" in workflow
+    assert workflow.count("provenance: false") == 1
+    assert workflow.count("sbom: false") == 1
+    assert workflow.count("docker/build-push-action@v5") == 1
 
 
 def test_checked_in_v20_defaults_are_disabled_and_shadow_isolated() -> None:

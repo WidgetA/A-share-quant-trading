@@ -20,21 +20,22 @@ production_activation_guard: false
 bootstrap.mode: EMPTY_FORWARD_SHADOW
 ```
 
-因此仅构建或部署当前镜像不会开启 V20。不要在未验收时改动这些安全默认值。
-`enabled` 与 `production_activation_guard` 是必须永久保持 `false` 的镜像安全默认；
-loader 会拒绝把它们改成 `true`，启用只能通过本手册列出的显式环境变量完成。
+上述值是 YAML 与专用进程的安全默认，不直接开启 `production_push`。现行 main 镜像在
+没有任何显式 V20 激活变量时，会自动创建内嵌 `forward_shadow` profile：复用线上 V16
+已有的 `DB_*`、Tushare token 和 `FEISHU_*`，但 V20 账本、outbox、连接池和 leader 仍
+隔离在 `v20` schema。设置 `V20_EMBEDDED_ENABLED=false` 可以明确关闭它。
 
-仓库 push CI 会同时发布两个 target：legacy `runtime` 使用 `latest`/提交 SHA tag，专用
-V20 使用 `v20-latest`/`v20-<commit-sha>` tag。CI 只负责检查、构建和推送 ACR，不会创建
-或更新 V20 容器。正式 V20 必须由部署主机显式运行 `v20` tag，并完成本手册的环境变量、
-密钥、迁移、状态和路由核验后，才允许对人工接口发请求。当前默认配置不会开启。不得把
-“push CI 变绿”当成 V20 部署验收。
+仓库 push CI 只发布正常 `runtime` 的 `latest`/提交 SHA tag；现有 main 主机按原 V16
+机制自动更新该镜像，因此无需第二个 V20 容器。CI 变绿仍不等于运行验收：必须检查线上
+`/api/status` 的安全 V20 启动字段并调用人工触发。显式 `production_push` 仍使用专用
+`v20` Docker target/`scripts/v20_main.py` 和后文全部严格配置，但不由默认 CI 自动部署。
 
 运行模式与旧 V16 扫描通知的关系：
 
 | V20 设置 | V20 行为 | 旧 V16 扫描通知 |
 |---|---|---|
-| `V20_ENABLED=false`, `V20_MODE=forward_shadow` | 不启动 | 启动 |
+| main 未设置显式 V20 变量（默认） | 内嵌影子账本；复用现有飞书 | 同时启动 |
+| `V20_EMBEDDED_ENABLED=false` | 不启动 | 启动 |
 | `V20_ENABLED=true`, `V20_MODE=forward_shadow` | 影子账本及影子飞书 | 同时启动 |
 | legacy `runtime` + `V20_MODE=production_push` | 拒绝承载正式 V20 | 一律禁用，进程 fail closed |
 | Docker `v20` target + `production_push` | V20 正式账本及正式飞书 | 不启动旧 V16 通知、iQuant 或交易接口；内部仍复用 V16 选股算法 |
@@ -129,6 +130,12 @@ V20_DB_SSLROOTCERT_SHA256
 该账号只服务 `v20` schema 的策略决定账本和 durable outbox，不应获得券商、
 账户、订单、持仓、成交表或其他业务 schema 的权限。可以使用独立数据库，也可
 使用同库隔离 schema；无论哪种方式，都要独立账号、独立密码和最小权限。
+
+上段是专用 profile 的要求。main 内嵌 profile 有意复用已经承担 `trading` 写入的
+`DB_*` 身份和 fundamentals 的 TLS/超时设置，同时把 schema 固定为 `v20`、连接池固定
+为 1/8；它不会把表写进 `trading` 或 `public`。TLS 最低为 `require`，若现行 DB 配置为
+`verify-full` 则仍校验 CA。若该线上身份没有创建 `v20` schema 的权限，启动会明确失败，
+V16 保持运行，公开 `/api/status` 只显示 `start_error_type` 而不泄露连接异常正文。
 
 正式 V20 必须使用独立进程 `scripts/v20_main.py`。该进程只创建 V20 service 和四个
 `/api/v20` 接口，不创建平台 state manager、PositionManager、订单/持仓接口或 iQuant
@@ -367,22 +374,31 @@ ack 只停止该退出事件未来的提醒，不代表订单已提交或成交�
 可在首次调用前生成 `deploy-<git-sha>` 或部署系统的不可重复 run ID；调用方提供的 key
 必须为 8–128 字符，首字符是字母或数字，其余只允许字母、数字、`.`、`_`、`:`、`-`。
 
-调用前先读取 status：
+main 内嵌部署先读取无需密钥的安全启动摘要，确认提交 SHA 与 `v20.started=true`：
+
+```bash
+curl --fail-with-body http://127.0.0.1:8000/api/status
+```
+
+若部署了 `V20_STATUS_API_KEY`，或正在验收专用 profile，再读取完整 status：
 
 ```bash
 curl --fail-with-body http://127.0.0.1:8000/api/v20/status \
   -H "X-V20-Status-Key: $V20_STATUS_API_KEY"
 ```
 
-只有同时确认以下项目后才能触发：
+完整 status 可用时，应同时确认：
 
 - `enabled=true`、`running=true`、`healthy=true`；
 - `mode` 是部署单预期的 `forward_shadow` 或 `production_push`；
 - `strategy_version`、完整 `config_hash`、`route_id`、`official_stream_id`、
   `state_lineage_id` 与部署单完全一致；
 - 五条 `runtime_lanes` 新鲜且无错误，outbox 没有异常积压；
-- 当前运行的是预期进程/镜像。CI 通过不能替代本检查；默认 CI target 是 legacy
-  `runtime`，仓库默认 `V20_ENABLED=false`。
+- 当前运行的是预期进程/镜像。CI 通过不能替代本检查。
+
+内嵌 profile 没有配置 status key 时，详细 status 保持 503 是预期鉴权行为，不会阻止
+无 key 人工触发；人工触发自身仍会检查 repository leader 和五条 runtime lane，尚未就绪
+会返回 503，而不是绕过健康门禁。
 
 触发命令：
 

@@ -177,6 +177,50 @@ def test_app_factory_reserves_service_state_and_mounts_router() -> None:
     assert "/api/v20/status" in {route.path for route in app.routes}
 
 
+def test_legacy_main_factory_selects_embedded_v20_without_dedicated_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.web.v20_service import V20Service
+
+    for name in (
+        "V20_ENABLED",
+        "V20_MODE",
+        "V20_ALLOW_PRODUCTION_PUSH",
+        "V20_EMBEDDED_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    embedded = object()
+    strict = object()
+    monkeypatch.setattr(
+        V20Service,
+        "from_legacy_runtime",
+        classmethod(lambda _cls: embedded),
+    )
+    monkeypatch.setattr(
+        V20Service,
+        "from_default_config",
+        classmethod(lambda _cls: strict),
+    )
+
+    assert web_app._create_default_v20_service() is embedded
+
+    monkeypatch.setenv("V20_EMBEDDED_ENABLED", "false")
+    assert web_app._create_default_v20_service() is strict
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (RuntimeError("legacy main Feishu route is not configured"), "FEISHU_CONFIGURATION"),
+        (ValueError("Tushare Pro token not configured"), "TUSHARE_CONFIGURATION"),
+        (ConnectionError("Cannot connect to fundamentals database"), "DATABASE_CONNECTION"),
+        (RuntimeError("permission denied for schema v20"), "DATABASE_PERMISSION"),
+    ],
+)
+def test_v20_startup_diagnostics_are_sanitized(error: Exception, code: str) -> None:
+    assert web_app._v20_start_error_code(error) == code
+
+
 def test_authorized_status_returns_disabled_service_structure(monkeypatch) -> None:
     monkeypatch.setenv("V20_STATUS_API_KEY", "status-secret")
     response = _client(StubV20Service()).get(

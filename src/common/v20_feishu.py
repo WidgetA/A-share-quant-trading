@@ -11,7 +11,7 @@ import os
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -803,12 +803,91 @@ class V20RelayClient:
 
 
 @dataclass(frozen=True)
+class V20LegacyRelayClient:
+    """Adapter for the relay already used by the legacy main container.
+
+    PostgreSQL still owns the V20 outbox lease and retry lifecycle.  This
+    adapter changes only the final HTTP shape from the dedicated
+    ``/api/v20/send`` contract to the deployed ``/api/send`` contract.
+    """
+
+    bot_origin: str
+    app_id: str
+    app_secret: str
+    chat_id: str
+    destination_fingerprint: str
+    clock: Callable[[], datetime] = lambda: datetime.now(SHANGHAI)
+
+    async def send_delivery(self, envelope: Mapping[str, Any]) -> bool:
+        expected_request_fields = {
+            "schema_version",
+            "event_id",
+            "event_type",
+            "route_id",
+            "idempotency_key",
+            "payload_hash",
+            "delivery_class",
+            "action_expiry_ts",
+            "message",
+            "expired_delivery_message",
+            "destination_fingerprint",
+        }
+        if set(envelope) != expected_request_fields:
+            raise V20RelayContractError("V20 relay request field set mismatch")
+        if envelope["schema_version"] != V20_RELAY_REQUEST_SCHEMA:
+            raise V20RelayContractError("unsupported V20 relay request schema")
+        if envelope["destination_fingerprint"] != self.destination_fingerprint:
+            raise V20RelayContractError("V20 relay request destination binding mismatch")
+        delivery_class = envelope["delivery_class"]
+        if delivery_class not in _DELIVERY_CLASSES:
+            raise V20RelayContractError("unsupported V20 relay delivery class")
+
+        message = str(envelope["message"])
+        expiry_value = envelope["action_expiry_ts"]
+        if delivery_class == "ACTIONABLE_ENTRY":
+            if not isinstance(expiry_value, str):
+                raise V20RelayContractError("actionable V20 relay entry requires an expiry")
+            try:
+                expiry = datetime.fromisoformat(expiry_value)
+            except ValueError as exc:
+                raise V20RelayContractError("V20 relay action expiry is invalid") from exc
+            if expiry.tzinfo is None or expiry.utcoffset() is None:
+                raise V20RelayContractError("V20 relay action expiry must be timezone-aware")
+            if self.clock().astimezone(SHANGHAI) >= expiry.astimezone(SHANGHAI):
+                message = str(envelope["expired_delivery_message"] or "")
+                if not message:
+                    raise V20RelayContractError("expired V20 entry lacks a safe notice")
+        elif expiry_value is not None:
+            raise V20RelayContractError("non-actionable V20 delivery cannot have an expiry")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.bot_origin}/api/send",
+                json={
+                    "app_id": self.app_id,
+                    "app_secret": self.app_secret,
+                    "chat_id": self.chat_id,
+                    "message": message,
+                },
+            )
+        response.raise_for_status()
+        try:
+            receipt = response.json()
+        except ValueError as exc:
+            raise V20RelayContractError("legacy Feishu relay response is not JSON") from exc
+        if not isinstance(receipt, Mapping) or receipt.get("code") != 0:
+            raise V20RelayContractError("legacy Feishu relay did not return success")
+        return True
+
+
+@dataclass(frozen=True)
 class V20FeishuRoute:
     route_id: str
     bot_url: str
     app_id: str
     app_secret: str
     chat_id: str
+    transport: Literal["v20_relay", "legacy_send"] = "v20_relay"
 
     @property
     def bot_origin(self) -> str:
@@ -833,10 +912,11 @@ class V20FeishuRoute:
             and self.chat_id.strip()
         )
 
-    def relay(self) -> V20RelayClient:
+    def relay(self) -> V20RelayClient | V20LegacyRelayClient:
         if not self.is_configured():
             raise V20RelayContractError(f"V20 route {self.route_id!r} is not configured")
-        return V20RelayClient(
+        relay_type = V20LegacyRelayClient if self.transport == "legacy_send" else V20RelayClient
+        return relay_type(
             bot_origin=self.bot_origin,
             app_id=self.app_id.strip(),
             app_secret=self.app_secret.strip(),
@@ -868,6 +948,21 @@ def load_v20_feishu_routes() -> dict[str, V20FeishuRoute]:
     if shadow.app_secret and formal.app_secret and shadow.app_secret == formal.app_secret:
         raise ValueError("V20 shadow and formal routes cannot share Feishu app credentials")
     return routes
+
+
+def load_legacy_embedded_v20_route() -> V20FeishuRoute:
+    """Bind embedded shadow V20 to the same relay destination as V16."""
+    from src.common.config import get_feishu_config
+
+    config = get_feishu_config()
+    return V20FeishuRoute(
+        route_id="V20_SHADOW_FEISHU",
+        bot_url=config["bot_url"],
+        app_id=config["app_id"],
+        app_secret=config["app_secret"],
+        chat_id=config["chat_id"],
+        transport="legacy_send",
+    )
 
 
 class V20OutboxPublisher:
@@ -1030,6 +1125,19 @@ class V20OutboxPublisher:
                     actionable_timeout = remaining - _ENTRY_ACTION_SEND_GUARD_SECONDS
                 else:
                     actionable_timeout = 0.0
+                    if getattr(route, "transport", "v20_relay") == "legacy_send":
+                        # The legacy relay cannot enforce V20's server-side
+                        # expiry contract.  PostgreSQL's lease clock already
+                        # proves this suggestion is too late, so downgrade the
+                        # outgoing envelope to a plain non-actionable notice
+                        # before any HTTP request is created.
+                        envelope = {
+                            **envelope,
+                            "delivery_class": "NON_ACTIONABLE_ENTRY",
+                            "action_expiry_ts": None,
+                            "message": expired_message,
+                            "expired_delivery_message": None,
+                        }
             error: str | None
             try:
                 send = route.relay().send_delivery(envelope)
@@ -1103,11 +1211,13 @@ class V20OutboxPublisher:
 
 __all__ = [
     "V20FeishuRoute",
+    "V20LegacyRelayClient",
     "V20OutboxPublisher",
     "V20RelayClient",
     "V20RelayContractError",
     "V20_RELAY_REQUEST_SCHEMA",
     "V20_RELAY_RESPONSE_SCHEMA",
+    "load_legacy_embedded_v20_route",
     "load_v20_feishu_routes",
     "render_entry_message",
     "render_exit_message",

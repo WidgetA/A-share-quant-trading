@@ -23,6 +23,7 @@ from src.data.database.v20_repository import (
     V20SemanticConflict,
     V20StateConflict,
     canonical_json,
+    create_embedded_v20_repository_from_config,
     create_v20_repository_from_config,
     migration_sql,
     sha256_json,
@@ -524,6 +525,14 @@ def test_repository_pool_reserves_connections_for_independent_runtime_lanes() ->
 def test_v20_repository_rejects_tls_without_hostname_verification() -> None:
     with pytest.raises(ValueError, match="verify-full"):
         V20DatabaseConfig(ssl_mode="require")
+
+
+def test_embedded_v20_repository_still_rejects_optional_or_disabled_tls() -> None:
+    with pytest.raises(ValueError, match="must require TLS"):
+        V20DatabaseConfig(
+            ssl_mode="prefer",
+            connection_profile="legacy_embedded",
+        )
 
 
 @pytest.mark.asyncio
@@ -1724,6 +1733,82 @@ database:
     assert repository.config.schema == "v20_test"
     assert repository.config.pool_min_size == 2
     assert repository.config.pool_max_size == 7
+
+
+def test_embedded_repository_reuses_db_identity_but_keeps_v20_schema_and_pool(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    for name, value in {
+        "TEST_DB_HOST": "legacy-db.internal",
+        "TEST_DB_PORT": "5544",
+        "TEST_DB_NAME": "strategy",
+        "TEST_DB_USER": "main-writer",
+        "TEST_DB_PASSWORD": "main-secret",
+        "TEST_DB_SSLMODE": "require",
+    }.items():
+        monkeypatch.setenv(name, value)
+    config_path = tmp_path / "database-config.yaml"
+    config_path.write_text(
+        """
+database:
+  trading:
+    host: "${TEST_DB_HOST}"
+    port: "${TEST_DB_PORT}"
+    database: "${TEST_DB_NAME}"
+    user: "${TEST_DB_USER}"
+    password: "${TEST_DB_PASSWORD}"
+    schema: "trading"
+    pool_min_size: 2
+    pool_max_size: 5
+  fundamentals:
+    host: "${TEST_DB_HOST}"
+    port: "${TEST_DB_PORT}"
+    database: "${TEST_DB_NAME}"
+    user: "${TEST_DB_USER}"
+    password: "${TEST_DB_PASSWORD}"
+    schema: "public"
+    ssl_mode: "${TEST_DB_SSLMODE:require}"
+    ssl_root_cert: ""
+    ssl_root_cert_sha256: ""
+    connect_timeout_seconds: 6
+    command_timeout_seconds: 16
+""".strip(),
+        encoding="utf-8",
+    )
+
+    repository = create_embedded_v20_repository_from_config(config_path)
+
+    assert repository.config.host == "legacy-db.internal"
+    assert repository.config.port == 5544
+    assert repository.config.database == "strategy"
+    assert repository.config.user == "main-writer"
+    assert repository.config.password == "main-secret"
+    assert repository.config.schema == "v20"
+    assert (repository.config.pool_min_size, repository.config.pool_max_size) == (1, 8)
+    assert repository.config.ssl_mode == "require"
+    assert repository.config.connection_profile == "legacy_embedded"
+
+
+@pytest.mark.asyncio
+async def test_embedded_repository_passes_required_tls_to_asyncpg(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def create_pool(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    repository = V20Repository(
+        V20DatabaseConfig(
+            ssl_mode="require",
+            connection_profile="legacy_embedded",
+        )
+    )
+    monkeypatch.setattr("src.data.database.v20_repository.asyncpg.create_pool", create_pool)
+
+    await repository.connect(migrate=False)
+
+    assert captured["ssl"] == "require"
 
 
 @pytest.mark.asyncio

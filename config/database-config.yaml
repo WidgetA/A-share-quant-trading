@@ -29,8 +29,9 @@ database:
     schema: "trading"
     auto_create_schema: true  # Create schema if not exists
 
-  # V20 strategy-decision ledger.  Use a dedicated writer in production; it
-  # owns decisions/outbox only and has no broker/order permissions.
+  # Dedicated V20 strategy-decision ledger. The normal main image instead uses
+  # DB_* through the explicit embedded profile, still in an isolated v20 schema.
+  # Formal production_push uses this dedicated writer and no broker permissions.
   v20:
     host: "${V20_DB_HOST:localhost}"
     port: ${V20_DB_PORT:5432}

@@ -8,9 +8,11 @@ import pytest
 from src.common.v20_feishu import (
     V20_RELAY_REQUEST_SCHEMA,
     V20_RELAY_RESPONSE_SCHEMA,
+    V20LegacyRelayClient,
     V20OutboxPublisher,
     V20RelayClient,
     V20RelayContractError,
+    load_legacy_embedded_v20_route,
     load_v20_feishu_routes,
     render_entry_message,
     render_exit_message,
@@ -68,6 +70,22 @@ def test_v20_routes_never_fall_back_to_legacy_feishu_credentials(monkeypatch) ->
 
     assert not routes["V20_SHADOW_FEISHU"].is_configured()
     assert not routes["V20_FORMAL_FEISHU"].is_configured()
+
+
+def test_explicit_embedded_route_reuses_legacy_main_feishu(monkeypatch) -> None:
+    monkeypatch.setenv("FEISHU_APP_ID", "legacy-app")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "legacy-secret")
+    monkeypatch.setenv("FEISHU_CHAT_ID", "legacy-chat")
+    monkeypatch.setenv("FEISHU_BOT_URL", "https://legacy-relay.example")
+
+    route = load_legacy_embedded_v20_route()
+
+    assert route.is_configured()
+    assert route.route_id == "V20_SHADOW_FEISHU"
+    assert route.transport == "legacy_send"
+    assert route.bot_origin == "https://legacy-relay.example"
+    assert route.app_id == "legacy-app"
+    assert route.chat_id == "legacy-chat"
 
 
 def test_v20_route_requires_its_own_https_relay_url(monkeypatch) -> None:
@@ -693,10 +711,11 @@ class _FailingRelay(_CapturingRelay):
         return False
 
 
-def _route(relay):
+def _route(relay, *, transport="v20_relay"):
     return SimpleNamespace(
         is_configured=lambda: True,
         destination_fingerprint="d" * 64,
+        transport=transport,
         relay=lambda: relay,
     )
 
@@ -764,6 +783,46 @@ async def test_publisher_gives_relay_both_buy_and_expired_notice_with_expiry() -
             "destination_fingerprint": "d" * 64,
         }
     ]
+
+
+async def test_embedded_legacy_delivery_is_downgraded_by_database_clock_after_expiry() -> None:
+    expiry = datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
+    record = OutboxRecord(
+        event_id="late-entry-event",
+        event_type="ENTRY_DECISION",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+        semantic={"action": "ENTER", "final_multiplier": 1.0},
+        semantic_content_hash="a" * 64,
+        payload={
+            "message": "buy",
+            "expired_delivery_message": "do not buy",
+        },
+        payload_hash="b" * 64,
+        generated_at=datetime(2026, 8, 31, 9, 39, 59, tzinfo=TZ),
+        commit_marker=1,
+        action_expiry_ts=expiry,
+        delivery_status="PENDING",
+        attempt_count=0,
+        lease_db_ts=datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+    )
+    repository = _PublisherRepository(record)
+    relay = _CapturingRelay()
+    publisher = V20OutboxPublisher(
+        repository,
+        {"route": _route(relay, transport="legacy_send")},
+        worker_id="worker",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+    )
+
+    assert await publisher.publish_once() == 1
+    assert relay.envelopes[0]["delivery_class"] == "NON_ACTIONABLE_ENTRY"
+    assert relay.envelopes[0]["action_expiry_ts"] is None
+    assert relay.envelopes[0]["message"] == "do not buy"
+    assert relay.envelopes[0]["expired_delivery_message"] is None
 
 
 async def test_publisher_preserves_late_input_invalid_reason_message() -> None:
@@ -1059,6 +1118,39 @@ async def test_v20_relay_uses_versioned_endpoint_and_strict_idempotency_envelope
         "app_id": "app",
         "app_secret": "secret",
         "chat_id": "chat",
+    }
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_message"),
+    [
+        (datetime(2026, 8, 31, 9, 39, 59, tzinfo=TZ), "buy"),
+        (datetime(2026, 8, 31, 9, 40, tzinfo=TZ), "do not buy"),
+    ],
+)
+async def test_legacy_embedded_relay_uses_existing_endpoint_and_honors_entry_expiry(
+    monkeypatch,
+    now,
+    expected_message,
+) -> None:
+    monkeypatch.setattr("src.common.v20_feishu.httpx.AsyncClient", _RelayHttpClient)
+    _RelayHttpClient.response_payload = {"code": 0, "msg": "success"}
+    client = V20LegacyRelayClient(
+        bot_origin="https://legacy-relay.example",
+        app_id="legacy-app",
+        app_secret="legacy-secret",
+        chat_id="legacy-chat",
+        destination_fingerprint="d" * 64,
+        clock=lambda: now,
+    )
+
+    assert await client.send_delivery(_relay_envelope()) is True
+    assert _RelayHttpClient.request_url == "https://legacy-relay.example/api/send"
+    assert _RelayHttpClient.request_json == {
+        "app_id": "legacy-app",
+        "app_secret": "legacy-secret",
+        "chat_id": "legacy-chat",
+        "message": expected_message,
     }
 
 

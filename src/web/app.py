@@ -51,12 +51,49 @@ _V20_FORWARD_SHADOW = "forward_shadow"
 _V20_PRODUCTION_PUSH = "production_push"
 
 
+def _v20_start_error_code(exc: BaseException) -> str:
+    """Reduce a startup exception to a public, non-secret diagnostic code."""
+    name = type(exc).__name__.lower()
+    detail = str(exc).lower()
+    if "feishu" in detail or "route" in detail:
+        return "FEISHU_CONFIGURATION"
+    if "tushare" in detail or "token" in detail:
+        return "TUSHARE_CONFIGURATION"
+    if "artifact" in detail or "manifest" in detail:
+        return "ARTIFACT_VALIDATION"
+    if "insufficientprivilege" in name or "permission" in detail or "privilege" in detail:
+        return "DATABASE_PERMISSION"
+    if any(fragment in name for fragment in ("invalidpassword", "authorization")):
+        return "DATABASE_AUTHENTICATION"
+    if any(fragment in name for fragment in ("connection", "timeout", "socket", "network")):
+        return "DATABASE_CONNECTION"
+    if "database" in detail or "postgres" in detail or "schema" in detail:
+        return "DATABASE_INITIALIZATION"
+    if "config" in name or "config" in detail:
+        return "RUNTIME_CONFIGURATION"
+    return "UNCLASSIFIED_STARTUP_FAILURE"
+
+
 def _create_default_v20_service() -> object:
-    """Create V20 lazily so importing the legacy web app stays side-effect free."""
+    """Create V20 lazily so importing the legacy web app stays side-effect free.
+
+    Existing main deployments have no dedicated ``V20_*`` secrets because
+    V16 already owns the process infrastructure.  In that case V20 runs as an
+    embedded forward-shadow service and reuses the deployed data/notification
+    credentials.  Any explicit V20 activation keeps the isolated strict path.
+    """
 
     from src.web.v20_service import V20Service
 
-    return V20Service.from_default_config()
+    explicit_v20_runtime = any(
+        name in os.environ for name in ("V20_ENABLED", "V20_MODE", "V20_ALLOW_PRODUCTION_PUSH")
+    )
+    embedded_value = os.getenv("V20_EMBEDDED_ENABLED", "true").strip().lower()
+    if embedded_value not in {"true", "false"}:
+        raise ValueError("V20_EMBEDDED_ENABLED must be true or false")
+    if explicit_v20_runtime or embedded_value == "false":
+        return V20Service.from_default_config()
+    return V20Service.from_legacy_runtime()
 
 
 def _default_v20_mode_hint() -> str | None:
@@ -105,6 +142,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     app.state.v20_service_started = False
     app.state.v20_service_lifecycle_owned = False
     app.state.v20_start_error = None
+    app.state.v20_start_error_code = None
 
     service: Any = getattr(app.state, "v20_service", None)
     if service is None:
@@ -115,6 +153,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
         except Exception as exc:
             app.state.v20_deployment_mode = mode_hint
             app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+            app.state.v20_start_error_code = _v20_start_error_code(exc)
             logger.exception("Failed to create default V20 service")
             # Unknown intent is treated like production: absence of a verified
             # shadow declaration cannot authorize the legacy scanner.
@@ -125,6 +164,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     except Exception as exc:
         app.state.v20_deployment_mode = None
         app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+        app.state.v20_start_error_code = _v20_start_error_code(exc)
         logger.exception("Invalid V20 lifecycle configuration")
         return False
 
@@ -137,6 +177,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
         app.state.v20_start_error = (
             "V20 production_push requires the dedicated src.web.v20_app host"
         )
+        app.state.v20_start_error_code = "WRONG_PROCESS_HOST"
         logger.critical(app.state.v20_start_error)
         return False
 
@@ -145,6 +186,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
         await service.start()
     except Exception as exc:
         app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+        app.state.v20_start_error_code = _v20_start_error_code(exc)
         if mode == _V20_PRODUCTION_PUSH:
             logger.critical(
                 "V20 production service failed to start; legacy V15 scan remains disabled",
@@ -218,7 +260,8 @@ def create_app(
         strategy_controller: Controller for strategy start/stop.
         position_manager: Manager for position data.
         v20_service: Optional V20 decision-notification service. When omitted,
-            startup creates the service from ``config/v20.yaml``.
+            startup embeds V20 in the legacy main runtime unless an explicit
+            dedicated V20 activation or opt-out is configured.
 
     Returns:
         Configured FastAPI app.

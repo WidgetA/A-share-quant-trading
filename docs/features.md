@@ -38,6 +38,7 @@
 | 0.10.6 | 2026-07-14 | - | STR-005: V16 daily report (Feishu + `/api/v16/backtest`) lists ALL hot boards a stock belongs to (not just one "best" board) + tags each pick [带动]/[扩增] — whether its own gain alone cleared the hot-board bar, or it only entered via board-level expansion |
 | 0.11.0 | 2026-08-31 | - | STR-006: Add the default-disabled V20 decision and exit-notification service, reusing the main-branch V16 stock selection with strict point-in-time inputs and no order execution |
 | 0.11.1 | 2026-08-31 | - | STR-006: Add an idempotent V20 manual deployment trigger with a durable non-actionable Feishu receipt |
+| 0.11.2 | 2026-08-31 | - | STR-006: Embed V20 forward-shadow in the existing main/V16 runtime, reusing deployed DB, Tushare, and Feishu infrastructure while preserving an isolated ledger/outbox and notification-only boundary |
 
 ---
 
@@ -880,9 +881,9 @@ or submits orders.
   position management.
 - Use an idempotent transactional outbox, sealed event payloads, route-scoped delivery ordering,
   PostgreSQL leader election, runtime-lane health, and fail-closed startup validation.
-- Keep shadow and formal Feishu credentials, streams, lineages, and checkpoints isolated. Formal
-  push requires all three explicit production gates and must never fall back to legacy Feishu
-  credentials. Runtime schema `v20-runtime/v2` binds reviewed relay origin/app/chat hashes and
+- Keep dedicated shadow and formal Feishu credentials, streams, lineages, and checkpoints isolated.
+  Formal push requires all three explicit production gates and must never fall back to legacy
+  Feishu credentials. Runtime schema `v20-runtime/v2` binds reviewed relay origin/app/chat hashes and
   database CA hashes into `config_hash`; the V20-only relay endpoint uses a versioned idempotent
   envelope, server-side entry expiry, and strict delivery-receipt echoes.
 - Require hostname-verifying `verify-full` PostgreSQL TLS for both V20 database roles, a dedicated
@@ -892,6 +893,11 @@ or submits orders.
 - Run formal V20 in the dedicated `scripts/v20_main.py` process/container target. The process may
   expose only four V20 routes: status, MEWS evidence, reminder acknowledgement, and the manual
   deployment trigger. It must not load iQuant, broker, order, or account-management routes.
+- Run the deployed main image with an explicit embedded forward-shadow integration by default. It
+  reuses the existing `DB_*`, persisted/environment Tushare token, and `FEISHU_*` destination while
+  retaining the V20-only schema, leader, state ledger, outbox, 09:39 cutoff, and exit schedulers.
+  `V20_EMBEDDED_ENABLED=false` is the explicit opt-out; any explicit V20 activation uses the strict
+  dedicated loader instead of silently falling back.
 - Deliberately leave `POST /api/v20/trigger-scan` without application-layer authentication for now
   and allow a headerless default call. When `Idempotency-Key` is absent, generate `manual-<uuid>`;
   every subsequent headerless call creates a new non-actionable receipt. Accept an optional
@@ -906,7 +912,8 @@ or submits orders.
   always explicitly marked as a non-trading instruction.
 - Keep fees and slippage at zero in strategy semantics. V20 reports relative batch multipliers and
   stock lists, never assumed capital or share quantities.
-- Default to disabled (`V20_ENABLED=false`, `forward_shadow`) in checked-in configuration.
+- Keep checked-in YAML disabled (`V20_ENABLED=false`, `forward_shadow`) so it can never activate
+  formal push. The legacy main app constructs only the bounded embedded shadow profile at runtime.
 
 **Activation gates**:
 - Apply and validate all V20 PostgreSQL migrations with the dedicated least-privilege writer;
@@ -915,9 +922,10 @@ or submits orders.
 - Verify the production Docker target starts only the dedicated V20 entry point and exposes only
   the V20 route surface; shared source bytes needed by the V16 scanner may remain in the image but
   broker, iQuant, account, and order services must never be imported or started by that host.
-- Treat push CI and V20 deployment as separate gates: CI publishes both the default legacy image
-  and a dedicated `v20` target, but checked-in V20 remains disabled and no container is deployed.
-  Before a manual trigger, verify status reports
+- Publish one normal main runtime image through push CI; the existing host watcher deploys it for
+  both V16 and embedded V20. Keep dedicated `production_push` as a separate manual deployment gate.
+  Before a manual trigger, verify public `/api/status` reports the expected commit and V20 startup;
+  when a status key is configured, verify detailed status reports
   the expected enabled/running mode and strategy/config/route/stream/lineage identity; after HTTP
   202, verify the event reaches `SENT` in the outbox and appears in only the reviewed Feishu chat.
 - Shadow-compare the same legal input against online V16 for zero stock-selection and formatting

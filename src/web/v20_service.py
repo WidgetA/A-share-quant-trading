@@ -15,7 +15,7 @@ import math
 import os
 import re
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from src.common.v20_feishu import (
     V20FeishuRoute,
     V20OutboxPublisher,
+    load_legacy_embedded_v20_route,
     load_v20_feishu_routes,
     seal_v20_payload,
 )
@@ -46,6 +47,7 @@ from src.data.database.v20_repository import (
     V20RepositoryError,
     V20SemanticConflict,
     V20StateConflict,
+    create_embedded_v20_repository_from_config,
     create_v20_repository_from_config,
     sha256_json,
 )
@@ -76,6 +78,7 @@ from src.strategy.v20.models import (
 )
 from src.strategy.v20.runtime_config import (
     V20ConfigError,
+    V20RouteBinding,
     V20RuntimeConfig,
     load_v20_runtime_config,
     validate_v20_api_keys,
@@ -122,12 +125,28 @@ CalendarProvider = Callable[[], Awaitable[list[date]]]
 
 async def _init_v20_scan_resources(scan_state: V15ScanState) -> None:
     """Initialize the V16 scanner inputs without legacy scheduler side effects."""
+    await _init_v20_scan_resources_with_token(
+        scan_state,
+        validated_v20_tushare_token(),
+    )
+
+
+async def _init_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
+    """Initialize embedded V20 from the token source already used by V16."""
+    from src.common.config import get_tushare_token
+
+    await _init_v20_scan_resources_with_token(scan_state, get_tushare_token())
+
+
+async def _init_v20_scan_resources_with_token(
+    scan_state: V15ScanState,
+    token: str,
+) -> None:
     from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
     from src.data.clients.tushare_realtime import TushareRealtimeClient
     from src.data.sources.local_concept_mapper import LocalConceptMapper
     from src.strategy.filters.stock_filter import StockFilter, StockFilterConfig
 
-    token = validated_v20_tushare_token()
     fundamentals = scan_state.fundamentals_db
     if fundamentals is None:
         raise V20ConfigError("V20 scan requires prevalidated fundamentals resources")
@@ -781,6 +800,41 @@ def _manual_trigger_response(
     }
 
 
+def _embedded_runtime_config(
+    base: V20RuntimeConfig,
+    route: V20FeishuRoute,
+) -> V20RuntimeConfig:
+    """Activate a reviewed shadow config against the legacy main destination."""
+    if route.route_id != base.route_id or base.deployment_mode != "forward_shadow":
+        raise V20ConfigError("embedded V20 route does not match forward-shadow identity")
+    binding = V20RouteBinding(
+        route_id=route.route_id,
+        expected_bot_origin=route.bot_origin,
+        expected_app_id_sha256=hashlib.sha256(route.app_id.strip().encode("utf-8")).hexdigest(),
+        expected_chat_id_sha256=hashlib.sha256(route.chat_id.strip().encode("utf-8")).hexdigest(),
+    )
+    if route.destination_fingerprint != binding.destination_fingerprint:
+        raise V20ConfigError("embedded V20 route fingerprint is inconsistent")
+
+    route_bindings = {**base.route_bindings, "forward_shadow": binding}
+    frozen_payload = {
+        **base.frozen_payload,
+        "integration_profile": "legacy_main_embedded/v1",
+        "route_id": route.route_id,
+        "route_bindings": {
+            name: route_binding.as_payload() for name, route_binding in route_bindings.items()
+        },
+    }
+    return replace(
+        base,
+        enabled=True,
+        route_bindings=route_bindings,
+        route_binding=binding,
+        frozen_payload=frozen_payload,
+        config_hash=sha256_json(frozen_payload),
+    )
+
+
 class V20Service:
     """Own the causal V20 scheduler and its durable notification boundary."""
 
@@ -798,6 +852,7 @@ class V20Service:
         initialize_resources: ResourceInitializer = _init_v20_scan_resources,
         cleanup_resources: ResourceCleanup = _cleanup_v20_scan_resources,
         calendar_provider: CalendarProvider | None = None,
+        embedded_legacy: bool = False,
     ) -> None:
         self.config = config
         self._repository = repository
@@ -810,6 +865,7 @@ class V20Service:
         self._initialize_resources = initialize_resources
         self._cleanup_resources = cleanup_resources
         self._calendar_provider = calendar_provider
+        self._embedded_legacy = embedded_legacy
         self._calendar_cache: tuple[date, ...] = ()
         self._calendar_loaded_for: date | None = None
         self._stop_event = asyncio.Event()
@@ -903,6 +959,75 @@ class V20Service:
             routes=routes,
         )
 
+    @classmethod
+    def from_legacy_runtime(cls) -> V20Service:
+        """Embed forward-shadow V20 in the existing main/V16 container.
+
+        Strategy semantics, the ledger, outbox, 09:39 input boundary, and
+        notification rules remain V20.  Only operational credentials and the
+        final relay protocol are adapted to infrastructure already deployed by
+        main.  The dedicated V20 host continues to use ``from_default_config``.
+        """
+        from src.common.config import get_tushare_token
+        from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+
+        project_root = Path(__file__).resolve().parents[2]
+        base_config = load_v20_runtime_config(project_root)
+        if base_config.deployment_mode != "forward_shadow":
+            raise V20ConfigError("embedded V20 only supports forward_shadow mode")
+        if base_config.enabled:
+            raise V20ConfigError(
+                "explicit V20 activation must use the dedicated strict runtime factory"
+            )
+
+        database_config_path = project_root / "config" / "database-config.yaml"
+        repository = create_embedded_v20_repository_from_config(database_config_path)
+        if (
+            repository.config.schema != base_config.database_schema
+            or repository.config.pool_min_size != base_config.database_pool_min_size
+            or repository.config.pool_max_size != base_config.database_pool_max_size
+        ):
+            raise V20ConfigError(
+                "embedded V20 repository differs from the frozen schema/pool settings"
+            )
+
+        token = get_tushare_token()
+        fundamentals = create_fundamentals_db_from_config(
+            database_config_path,
+            tushare_token=token,
+        )
+        route = load_legacy_embedded_v20_route()
+        if not route.is_configured():
+            raise V20ConfigError("legacy main Feishu route is not configured")
+        config = _embedded_runtime_config(base_config, route)
+        routes = {route.route_id: route}
+        scan_state = V15ScanState(fundamentals_db=fundamentals)
+        pipeline = V20ScanPipeline(scan_state, project_root)
+        artifacts = load_g_artifacts(
+            config.artifact_manifest_path.parent,
+            expected_manifest_sha256=config.artifact_manifest_sha256,
+        )
+        worker = f"{socket.gethostname()}:{os.getpid()}:v20-embedded"
+        publisher = V20OutboxPublisher(
+            repository,
+            routes,
+            worker_id=worker,
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        return cls(
+            config=config,
+            repository=repository,
+            scan_state=scan_state,
+            scan_pipeline=pipeline,
+            artifacts=artifacts,
+            publisher=publisher,
+            routes=routes,
+            initialize_resources=_init_embedded_v20_scan_resources,
+            embedded_legacy=True,
+        )
+
     async def start(self) -> None:
         if self._started:
             return
@@ -912,13 +1037,17 @@ class V20Service:
             logger.info("V20 is disabled by configuration")
             return
         try:
-            validate_v20_api_keys()
+            if not self._embedded_legacy:
+                validate_v20_api_keys()
             route = self._routes.get(self.config.route_id)
             if route is None or not route.is_configured():
                 raise V20ConfigError(f"V20 Feishu route {self.config.route_id!r} is not configured")
             if route.destination_fingerprint != self.config.route_binding.destination_fingerprint:
                 raise V20ConfigError("active V20 route differs from reviewed destination")
-            if os.environ.get("DB_SSLROOTCERT_SHA256") != self.config.fundamentals_db_ca_sha256:
+            if (
+                not self._embedded_legacy
+                and os.environ.get("DB_SSLROOTCERT_SHA256") != self.config.fundamentals_db_ca_sha256
+            ):
                 raise V20ConfigError("fundamentals CA differs from reviewed runtime configuration")
             configured_chat_ids = [
                 item.chat_id for item in self._routes.values() if item.chat_id.strip()
@@ -1201,6 +1330,9 @@ class V20Service:
             "ledger": ledger,
             "outbox": outbox,
             "order_execution_scope": "OUT_OF_SCOPE",
+            "integration_profile": (
+                "legacy_main_embedded" if self._embedded_legacy else "dedicated"
+            ),
         }
 
     async def _refresh_status_snapshot(self) -> None:

@@ -3,8 +3,8 @@
 > 冻结日期：2026-08-31
 > 策略版本：`V20_BAD_E50_G_BASE_V1`
 > 策略规则：`FROZEN`
-> 生产实现：`COMPLETE_DEFAULT_DISABLED`
-> 仓库默认状态：`NOT_ENABLED / forward_shadow`
+> 生产实现：`COMPLETE_EMBEDDED_FORWARD_SHADOW`
+> main 运行状态：`AUTO_EMBEDDED / forward_shadow`
 > 订单执行：`OUT_OF_SCOPE`
 
 研究数字、反证和制品来源见[研究证据附录](./strategy-v20-evidence.md)，部署步骤见
@@ -254,6 +254,9 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
   `route_id:event_id` 原子去重，并在真实飞书接受后严格回显 event、route、payload hash、
   目的地指纹和接受时刻。未知/错误回显不标记 SENT；可执行入场由 relay 自身时钟在
   09:40 再判定原文或“已过期、不要追买”，不能依靠客户端取消 HTTP 请求兜底；
+- main 内嵌旧 relay 不具备上述 V20 回显协议，因此 publisher 必须先用 PostgreSQL
+  lease 时钟判断剩余窗口：已到截止点时只发送非行动性的过期文案；尚未截止时 HTTP
+  超时必须在 09:40 前额外留出保护余量，适配器本地时钟再做一次只会收紧的过期检查；
 - 服务停机漏过交易日时，按交易日顺序补 `INPUT_INVALID` 终态和 rolling 缺口，不能
   跳日恢复；全新影子 lineage 以显式空前驱开始，生产 lineage 必须从 checkpoint 开始。
 - 交易日历由 V20 已依赖的 Tushare `trade_cal` 独立获取，不复用 legacy 永久缓存；
@@ -280,7 +283,13 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 
 ## 10. 对外接口与生产边界
 
-专用生产进程为 `scripts/v20_main.py`，Docker 目标为 `v20`。该进程只暴露：
+现行 main 部署使用内嵌 `forward_shadow`：V20 与 V16 同容器运行，复用已经工作的
+`DB_*`、Tushare token 来源和 `FEISHU_*` 机器人配置，但仍使用独立 `v20` schema、
+独立连接池、leader、状态账本和 durable outbox。它只产生决策与推送，不接入下单。
+main 中的 V16 调度继续运行；V20 输入仍严格截止到 09:39 完整 bar。
+
+显式 `production_push` 仍只允许专用进程 `scripts/v20_main.py`/Docker `v20` 目标。该进程
+只暴露：
 
 ```text
 GET  /api/v20/status
@@ -289,14 +298,15 @@ POST /api/v20/reminder-stop-acks
 POST /api/v20/trigger-scan
 ```
 
-它不加载平台 `SystemManager`、`PositionManager`、iQuant、订单、持仓或成交路由。
+专用进程不加载平台 `SystemManager`、`PositionManager`、iQuant、订单、持仓或成交路由。
 MEWS 和停止提醒确认两个 POST 接口由 `V20_INGEST_API_KEY`/`X-V20-API-Key`
 保护；status 由独立 `V20_STATUS_API_KEY`/`X-V20-Status-Key` 保护。两套密钥必须显式
 配置、至少 32 字符且彼此不同，不能跨接口授权。人工触发当前有意不做应用层鉴权，
 调用时不需要 API key；这一选择不改变其 health、leader、时点和并发门禁。
 status 只返回后台有界采样的内存快照，请求本身不得查询 PostgreSQL；快照缺失、采样
 失败或过期时 `healthy=false`。网络层仍应限制在内网。影子和正式飞书使用不同 chat、
-APP 凭据及 outbox 作用域，V20 缺少专用凭据时不回退到旧 V16 的飞书凭据。
+APP 凭据及 outbox 作用域。只有明确的 main 内嵌 profile 会复用 V16 飞书目的地和旧
+`/api/send` relay；专用 V20 profile 仍禁止隐式回退。
 
 人工触发接口只用于部署验收，默认无需任何请求 header。未提供 `Idempotency-Key` 时，
 服务端生成 `manual-<uuid>` 作为本次请求 ID；每次无 header 调用都会得到新的请求 ID，
@@ -328,12 +338,18 @@ routes.*.expected_*: UNCONFIGURED
 database.*_tls_ca_sha256: UNCONFIGURED
 ```
 
-因此默认配置无需任何秘密即可加载，但任何 `V20_ENABLED=true` 都必须先填入受审目的地
+这些是配置文件和专用进程的安全默认。main 未提供任何显式 V20 激活变量时，由代码创建
+内嵌 `forward_shadow` profile；可用 `V20_EMBEDDED_ENABLED=false` 明确关闭。内嵌 profile
+动态绑定现有 V16 目的地，并将绑定摘要和 `legacy_main_embedded/v1` 写入 `config_hash`，
+不会把 app secret、数据库密码或 token 写入账本。
+
+任何显式 `V20_ENABLED=true` 都必须先填入受审目的地
 binding、两路 CA 摘要、两组独立数据库身份和两套独立 HTTP API key，否则在数据库
 连接前失败。
 启用时还会核对 `config/database-config.yaml` 解析出的两路实际连接参数与显式环境完全
 一致，并将该文件摘要纳入 `config_hash`；实时、历史日线和 ST 查询统一使用显式
-`TUSHARE_TOKEN`，不读取 legacy token 文件。
+`TUSHARE_TOKEN`，不读取 legacy token 文件；main 内嵌 profile 则与 V16 一样允许读取
+已经由设置页持久化的 token。
 
 正式模式必须由环境同时显式设置：
 

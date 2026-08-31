@@ -2,8 +2,9 @@ schema_version: v20-runtime/v2
 strategy_version: V20_BAD_E50_G_BASE_V1
 official_stream_id: V20_A_SHARE_FORWARD_SHADOW
 
-# Safe default.  Production code is present, but a deployment must explicitly
-# set V20_ENABLED=true, V20_MODE=production_push and
+# Safe dedicated-runtime default. The legacy main app may construct only an
+# embedded forward-shadow profile from this frozen file; production_push still
+# requires V20_ENABLED=true, V20_MODE=production_push and
 # V20_ALLOW_PRODUCTION_PUSH=true after forward-shadow acceptance.
 enabled: false
 deployment_mode: forward_shadow

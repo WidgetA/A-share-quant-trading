@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 
@@ -684,6 +684,7 @@ class V20DatabaseConfig:
     ssl_root_cert_sha256: str = ""
     connect_timeout_seconds: float = 5.0
     command_timeout_seconds: float = 15.0
+    connection_profile: Literal["dedicated", "legacy_embedded"] = "dedicated"
 
     def __post_init__(self) -> None:
         if not _IDENTIFIER.fullmatch(self.schema):
@@ -698,8 +699,14 @@ class V20DatabaseConfig:
             or self.pool_max_size < 7
         ):
             raise ValueError("database pool sizes must satisfy 1 <= min <= max and max >= 7")
-        if self.ssl_mode != "verify-full":
-            raise ValueError("V20 database SSL mode must be verify-full")
+        if self.connection_profile == "dedicated":
+            if self.ssl_mode != "verify-full":
+                raise ValueError("V20 database SSL mode must be verify-full")
+        elif self.connection_profile == "legacy_embedded":
+            if self.ssl_mode not in {"require", "verify-ca", "verify-full"}:
+                raise ValueError("embedded V20 database SSL mode must require TLS")
+        else:
+            raise ValueError("unsupported V20 database connection profile")
         if not 0 < self.connect_timeout_seconds <= 60:
             raise ValueError("V20 database connect timeout must be in (0, 60]")
         if not 0 < self.command_timeout_seconds <= 60:
@@ -1385,11 +1392,17 @@ class V20Repository:
     async def connect(self, *, migrate: bool = True) -> None:
         if self._pool is not None:
             return
-        ssl_context = verified_postgres_ssl_context(
-            ssl_mode=self.config.ssl_mode,
-            ssl_root_cert=self.config.ssl_root_cert,
-            expected_sha256=self.config.ssl_root_cert_sha256,
-        )
+        if self.config.ssl_mode == "verify-full":
+            ssl_context: str | object = verified_postgres_ssl_context(
+                ssl_mode=self.config.ssl_mode,
+                ssl_root_cert=self.config.ssl_root_cert,
+                expected_sha256=self.config.ssl_root_cert_sha256,
+            )
+        else:
+            # This branch is reachable only for the explicit legacy_embedded
+            # profile validated above.  It mirrors the already deployed
+            # fundamentals connection while still requiring PostgreSQL TLS.
+            ssl_context = self.config.ssl_mode
         self._pool = await asyncpg.create_pool(
             host=self.config.host,
             port=self.config.port,
@@ -4852,6 +4865,69 @@ def create_v20_repository_from_config(
     return V20Repository(repository_config)
 
 
+def create_embedded_v20_repository_from_config(
+    config_path: str | Path = "config/database-config.yaml",
+) -> V20Repository:
+    """Create a V20 ledger beside the legacy main runtime.
+
+    The existing main container already has one reviewed ``DB_*`` connection
+    used by both trading state and fundamentals.  Embedded V20 deliberately
+    reuses that endpoint and principal, but owns an isolated ``v20`` schema and
+    its own eight-connection pool.  The dedicated V20 factory above never
+    falls back to this profile.
+    """
+    from src.common.config import load_config
+
+    config = load_config(config_path)
+    trading_raw = config.get_dict("database.trading", {})
+    fundamentals_raw = config.get_dict("database.fundamentals", {})
+    if not trading_raw or not fundamentals_raw:
+        raise ValueError(
+            f"embedded V20 requires database.trading and database.fundamentals in {config_path}"
+        )
+
+    def resolve_env(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        match = _ENV_VALUE.fullmatch(value)
+        if match is None:
+            if value.startswith("${"):
+                raise ValueError(f"invalid environment placeholder: {value!r}")
+            return value
+        variable, default = match.groups()
+        return os.environ.get(variable, default or "")
+
+    identity_fields = ("host", "port", "database", "user", "password")
+    trading_identity = {field: resolve_env(trading_raw.get(field, "")) for field in identity_fields}
+    fundamentals_identity = {
+        field: resolve_env(fundamentals_raw.get(field, "")) for field in identity_fields
+    }
+    if trading_identity != fundamentals_identity:
+        raise ValueError("embedded V20 database identities disagree between config sections")
+
+    repository_config = V20DatabaseConfig(
+        host=str(trading_identity["host"]),
+        port=int(trading_identity["port"]),
+        database=str(trading_identity["database"]),
+        user=str(trading_identity["user"]),
+        password=str(trading_identity["password"]),
+        schema="v20",
+        pool_min_size=1,
+        pool_max_size=8,
+        ssl_mode=str(resolve_env(fundamentals_raw.get("ssl_mode", "require"))),
+        ssl_root_cert=str(resolve_env(fundamentals_raw.get("ssl_root_cert", ""))),
+        ssl_root_cert_sha256=str(resolve_env(fundamentals_raw.get("ssl_root_cert_sha256", ""))),
+        connect_timeout_seconds=float(
+            resolve_env(fundamentals_raw.get("connect_timeout_seconds", 5))
+        ),
+        command_timeout_seconds=float(
+            resolve_env(fundamentals_raw.get("command_timeout_seconds", 15))
+        ),
+        connection_profile="legacy_embedded",
+    )
+    return V20Repository(repository_config)
+
+
 __all__ = [
     "ActiveModelLeg",
     "EntryCommit",
@@ -4875,6 +4951,7 @@ __all__ = [
     "V20SemanticConflict",
     "V20StateConflict",
     "canonical_json",
+    "create_embedded_v20_repository_from_config",
     "create_v20_repository_from_config",
     "migration_sql",
     "sha256_json",
