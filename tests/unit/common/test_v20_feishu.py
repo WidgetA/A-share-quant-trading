@@ -454,6 +454,178 @@ def test_late_0939_replay_translates_non_entry_outcomes(
     assert "现在操作：不开仓，不补买，不追买" in payload["message"]
 
 
+def _manual_0939_chain_probe_semantic(
+    *,
+    event_id: str = "manual-chain-probe-event",
+    probe_result: str = "PASS",
+) -> dict:
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": event_id,
+        "strategy_version": "V20",
+        "config_hash": "a" * 64,
+        "state_semantics_hash": "b" * 64,
+        "deployment_mode": "forward_shadow",
+        "official_stream_id": "formal-stream",
+        "state_lineage_id": "formal-lineage",
+        "alert_code": "MANUAL_0939_CHAIN_PROBE_RESULT",
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "event_trade_date": "2026-08-31",
+        "manual_request_id": "deploy-current-build-001",
+        "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_V1",
+        "probe_result": probe_result,
+        "current_version_recomputed": True,
+        "replay_reused": False,
+        "data_source": "PERSISTED_09:31_09:39",
+        "data_window_start": "09:31",
+        "data_window_end": "09:39",
+        "quote_coverage": 1.0,
+        "raw_fact_n": 18,
+        "v16_count": 1,
+        "v20_action": "ENTER",
+        "final_multiplier": 1.0,
+        "symbols": [
+            {
+                "rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "score": 0.81234,
+                "snapshot_price": 10.26,
+                "boards": ["银行"],
+            }
+        ],
+        "official_entry_action": "INPUT_INVALID",
+        "official_entry_event_id": "failed-entry-event",
+        "official_state_changed": False,
+        "orders_changed": False,
+        "non_actionable": True,
+        "computed_at": "2026-08-31T15:30:00+08:00",
+        "message": "formatter-owned manual full-chain probe detail",
+    }
+    if probe_result == "FAIL":
+        semantic.update(
+            {
+                "current_version_recomputed": False,
+                "v16_count": 0,
+                "v20_action": None,
+                "final_multiplier": None,
+                "symbols": [],
+                "quote_coverage": None,
+                "failure_stage": "V16_SCAN",
+                "failure_reason": "09:39原始行情覆盖不足",
+            }
+        )
+    return semantic
+
+
+def test_manual_0939_chain_probe_pass_message_proves_fresh_current_version_run() -> None:
+    semantic = _manual_0939_chain_probe_semantic()
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        21,
+        True,
+    )
+
+    assert payload["event_type"] == "DATA_ALERT"
+    assert payload["timeliness_status"] == "ON_TIME"
+    assert "actionable_from" not in payload
+    assert "expired_delivery_message" not in payload
+    lines = str(payload["message"]).splitlines()
+    assert lines[0] == "[V20][SHADOW] 当前版本早盘链路重算｜✅ 通过"
+    assert "当前部署版本已完成一次全链路重新计算" in payload["message"]
+    assert "09:31–09:39" in payload["message"]
+    assert "V16选股：1只" in payload["message"]
+    assert "V20重算结论：正常开仓（策略倍率100%）" in payload["message"]
+    assert "本验收消息不能用于下单" in payload["message"]
+    assert "未复用旧回放" in payload["message"]
+    assert "LATE_0939_REPLAY_RESULT" not in payload["message"]
+
+
+def test_manual_0939_chain_probe_can_verify_previous_session_after_midnight() -> None:
+    semantic = {
+        **_manual_0939_chain_probe_semantic(event_id="manual-chain-probe-after-midnight"),
+        "computed_at": "2026-09-01T00:05:00+08:00",
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 9, 1, 0, 5, tzinfo=TZ),
+        24,
+        True,
+    )
+
+    assert "交易日：2026-08-31" in payload["message"]
+    assert "重算完成：00:05:00" in payload["message"]
+    assert "当前版本早盘链路重算｜✅ 通过" in payload["message"]
+
+
+def test_manual_0939_chain_probe_discloses_when_exact_coverage_was_not_frozen() -> None:
+    semantic = {
+        **_manual_0939_chain_probe_semantic(event_id="manual-chain-probe-coverage-note"),
+        "quote_coverage": None,
+        "quote_coverage_note": "NOT_EXPOSED_BY_EXISTING_REPLAY_HELPER",
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+        25,
+        True,
+    )
+
+    assert "行情覆盖：已通过生产≥80%门槛（精确比例未冻结）" in payload["message"]
+
+
+def test_manual_0939_chain_probe_failure_message_is_explicit_and_non_actionable() -> None:
+    semantic = _manual_0939_chain_probe_semantic(
+        event_id="manual-chain-probe-failed",
+        probe_result="FAIL",
+    )
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+        22,
+        True,
+    )
+
+    lines = str(payload["message"]).splitlines()
+    assert lines[0] == "[V20][SHADOW] 当前版本早盘链路重算｜❌ 失败"
+    assert "当前部署版本未能完成全链路重新计算" in payload["message"]
+    assert "失败阶段：V16_SCAN" in payload["message"]
+    assert "失败原因：09:39原始行情覆盖不足" in payload["message"]
+    assert "本验收消息不能用于下单" in payload["message"]
+    assert "当时本应" not in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("updates", "error"),
+    [
+        ({"replay_reused": True}, "exact persisted 09:39 window"),
+        ({"current_version_recomputed": False}, "current version"),
+        ({"official_state_changed": True}, "state-preserving"),
+        ({"orders_changed": True}, "state-preserving"),
+        ({"v16_count": 2}, "V16 count"),
+    ],
+)
+def test_manual_0939_chain_probe_cannot_masquerade_old_or_stateful_work_as_pass(
+    updates: dict,
+    error: str,
+) -> None:
+    semantic = {**_manual_0939_chain_probe_semantic(), **updates}
+
+    with pytest.raises(ValueError, match=error):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+            datetime(2026, 8, 31, 15, 32, tzinfo=TZ),
+            23,
+            True,
+        )
+
+
 @pytest.mark.parametrize(
     ("alert_code", "expected_reason"),
     [

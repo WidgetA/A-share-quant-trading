@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from datetime import date, datetime, time
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI
@@ -13,10 +16,16 @@ from fastapi.testclient import TestClient
 
 import src.web.app as web_app
 from src.data.database.v20_repository import (
+    OutboxRecord,
     V20LeadershipLost,
     V20RepositoryError,
     V20SemanticConflict,
     V20StateConflict,
+    sha256_json,
+)
+from src.strategy.v20.models import (
+    V20_DATA_ALERT_SEMANTIC_SCHEMA,
+    V20_FEISHU_FORMATTER_PROFILE,
 )
 from src.web.app import create_app
 from src.web.v20_routes import create_v20_router
@@ -24,10 +33,31 @@ from src.web.v20_routes import create_v20_router
 
 class StubV20Service:
     def __init__(self) -> None:
+        self.config = SimpleNamespace(
+            clock=SimpleNamespace(prewarm=time(9, 15), publish_deadline=time(9, 40)),
+            config_hash="a" * 64,
+            state_semantics_hash="b" * 64,
+            strategy_version="V20",
+            deployment_mode="forward_shadow",
+            route_id="V20_SHADOW_FEISHU",
+            official_stream_id="formal-stream",
+            state_lineage_id="formal-lineage",
+        )
+        self.now = datetime(2026, 8, 31, 9, 39, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self._context = SimpleNamespace(
+            trade_date=self.now.date(),
+            calendar=(self.now.date(),),
+        )
         self.mews_payload: dict[str, Any] | None = None
         self.ack_payload: dict[str, Any] | None = None
         self.trigger_request_id: str | None = None
         self.error: Exception | None = None
+
+    def _aware_now(self) -> datetime:
+        return self.now
+
+    async def _load_trade_calendar(self, _current_date: date) -> tuple[date, ...]:
+        return (self.now.date(),)
 
     async def _result(self, value: dict[str, Any]) -> dict[str, Any]:
         if self.error is not None:
@@ -68,6 +98,193 @@ class StubV20Service:
                 "feishu_delivery_confirmed": False,
             }
         )
+
+
+class _FreshProbeRepository:
+    def __init__(self, service: "FreshProbeV20Service") -> None:
+        self.service = service
+        self.state = SimpleNamespace(
+            lineage_id=service.config.state_lineage_id,
+            revision=7,
+            state_hash="c" * 64,
+            payload={"state_revision": 7},
+        )
+        self.entry_status = SimpleNamespace(
+            action="INPUT_INVALID",
+            trade_date=date(2026, 8, 31),
+            event_id="failed-entry-event",
+            semantic={"state_after_hash": self.state.state_hash},
+        )
+        self.events: dict[str, OutboxRecord] = {
+            "old-late-replay-event": OutboxRecord(
+                event_id="old-late-replay-event",
+                event_type="DATA_ALERT",
+                route_id=service.config.route_id,
+                official_stream_id=service.config.official_stream_id,
+                lineage_id=service.config.state_lineage_id,
+                semantic={"alert_code": "LATE_0939_REPLAY_RESULT"},
+                semantic_content_hash="d" * 64,
+                payload={"message": "old replay"},
+                payload_hash=sha256_json({"message": "old replay"}),
+                generated_at=service.now,
+                commit_marker=1,
+                action_expiry_ts=None,
+                delivery_status="SENT",
+                attempt_count=1,
+            )
+        }
+        self.leader_calls = 0
+        self.enqueue_calls = 0
+        self.seal_calls = 0
+        self.official_write_calls = 0
+
+    async def assert_runtime_leader(self) -> None:
+        self.leader_calls += 1
+
+    async def load_state(self, lineage_id: str):
+        assert lineage_id == self.service.config.state_lineage_id
+        return self.state
+
+    async def get_entry_status(self, official_stream_id: str, trade_date: date):
+        assert official_stream_id == self.service.config.official_stream_id
+        return self.entry_status if trade_date == self.entry_status.trade_date else None
+
+    async def get_outbox_event(self, event_id: str, **_kwargs):
+        return self.events.get(event_id)
+
+    async def enqueue_alert(
+        self,
+        event_id: str,
+        route_id: str,
+        semantic: dict[str, Any],
+        semantic_hash: str,
+        **scope,
+    ) -> bool:
+        self.enqueue_calls += 1
+        assert route_id == self.service.config.route_id
+        assert scope == {
+            "official_stream_id": self.service.config.official_stream_id,
+            "lineage_id": self.service.config.state_lineage_id,
+        }
+        assert semantic_hash == sha256_json(semantic)
+        if event_id in self.events:
+            return False
+        self.events[event_id] = OutboxRecord(
+            event_id=event_id,
+            event_type="DATA_ALERT",
+            route_id=route_id,
+            official_stream_id=scope["official_stream_id"],
+            lineage_id=scope["lineage_id"],
+            semantic=dict(semantic),
+            semantic_content_hash=semantic_hash,
+            payload=None,
+            payload_hash=None,
+            generated_at=None,
+            commit_marker=None,
+            action_expiry_ts=None,
+            delivery_status="PENDING",
+            attempt_count=0,
+        )
+        return True
+
+    async def seal_event(self, event_id: str, builder) -> OutboxRecord:
+        self.seal_calls += 1
+        current = self.events[event_id]
+        if current.payload is not None:
+            return current
+        payload = dict(builder(current, self.service.now, 100 + self.seal_calls, True))
+        sealed = replace(
+            current,
+            payload=payload,
+            payload_hash=sha256_json(payload),
+            generated_at=self.service.now,
+            commit_marker=100 + self.seal_calls,
+        )
+        self.events[event_id] = sealed
+        return sealed
+
+    async def commit_entry(self, *_args, **_kwargs) -> None:
+        self.official_write_calls += 1
+        raise AssertionError("manual chain probe must not commit an official entry")
+
+    async def commit_exit(self, *_args, **_kwargs) -> None:
+        self.official_write_calls += 1
+        raise AssertionError("manual chain probe must not commit an exit")
+
+
+class FreshProbeV20Service(StubV20Service):
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = datetime(2026, 9, 1, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self._context = None
+        self._repository = _FreshProbeRepository(self)
+        self._manual_trigger_lock = asyncio.Lock()
+        self._late_0939_replay_lock = asyncio.Lock()
+        self.build_calls: list[tuple[date, str]] = []
+        self.ensure_replay_calls = 0
+        self.old_manual_calls = 0
+        self.probe_error: Exception | None = None
+
+    @property
+    def _ledger_scope(self) -> dict[str, str]:
+        return {
+            "official_stream_id": self.config.official_stream_id,
+            "lineage_id": self.config.state_lineage_id,
+        }
+
+    async def _require_manual_trigger_ready(self) -> None:
+        return None
+
+    async def _load_trade_calendar(self, _current_date: date) -> tuple[date, ...]:
+        return (
+            date(2026, 8, 28),
+            date(2026, 8, 31),
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        )
+
+    def _verify_entry_binding(self, status: Any) -> None:
+        assert status is self._repository.entry_status
+
+    async def _build_late_0939_replay_semantic(
+        self,
+        context: Any,
+        now: datetime,
+        *,
+        replay_event_id: str,
+    ) -> dict[str, Any]:
+        self.build_calls.append((context.trade_date, replay_event_id))
+        if self.probe_error is not None:
+            raise self.probe_error
+        return {
+            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": replay_event_id,
+            "strategy_version": self.config.strategy_version,
+            "config_hash": self.config.config_hash,
+            "state_semantics_hash": self.config.state_semantics_hash,
+            "deployment_mode": self.config.deployment_mode,
+            "official_stream_id": self.config.official_stream_id,
+            "state_lineage_id": self.config.state_lineage_id,
+            "event_trade_date": context.trade_date.isoformat(),
+            "official_entry_action": context.entry_status.action,
+            "official_entry_event_id": context.entry_status.event_id,
+            "replay_action": "ENTER",
+            "final_multiplier": 1.0,
+            "symbols": [{"rank": 1, "code": "000001", "name": "平安银行"}],
+            "raw_fact_n": 9,
+            "quote_coverage": 1.0,
+            "computed_at": now.isoformat(),
+        }
+
+    async def _ensure_late_0939_replay(self, *_args, **_kwargs):
+        self.ensure_replay_calls += 1
+        raise AssertionError("fresh chain probe must not reuse the old replay event")
+
+    async def trigger_manual_scan(self, _request_id: str) -> dict[str, Any]:
+        self.old_manual_calls += 1
+        raise AssertionError("post-cutoff route must run the fresh chain probe")
 
 
 class LifecycleV20Service:
@@ -432,6 +649,122 @@ def test_trigger_returns_202_and_passes_idempotency_key_without_api_key() -> Non
         "delivery_status": "PENDING",
         "feishu_delivery_confirmed": False,
     }
+
+
+def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay() -> None:
+    service = FreshProbeV20Service()
+    repository = service._repository
+    state_before = (repository.state.revision, repository.state.state_hash)
+    entry_before = repository.entry_status
+    client = _client(service)
+
+    first = client.post(
+        "/api/v20/trigger-scan",
+        headers={"Idempotency-Key": "deploy-current-chain-001"},
+    )
+    repeated = client.post(
+        "/api/v20/trigger-scan",
+        headers={"Idempotency-Key": "deploy-current-chain-001"},
+    )
+
+    assert first.status_code == 202
+    assert repeated.status_code == 202
+    result = first.json()
+    assert result["accepted"] is True
+    assert result["created"] is True
+    assert result["chain_probe_available"] is True
+    assert result["chain_probe_result"] == "PASS"
+    assert result["current_version_recomputed"] is True
+    assert result["replay_reused"] is False
+    assert result["v16_count"] == 1
+    assert result["v20_action"] == "ENTER"
+    assert result["final_multiplier"] == 1.0
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert result["manual_notice_actionable"] is False
+    assert repeated.json() == {**result, "created": False}
+
+    assert len(service.build_calls) == 1
+    probe_event_id = result["chain_probe_event_id"]
+    assert service.build_calls[0] == (date(2026, 8, 31), probe_event_id)
+    assert probe_event_id != "old-late-replay-event"
+    assert service.ensure_replay_calls == 0
+    assert service.old_manual_calls == 0
+    assert repository.enqueue_calls == 1
+    assert repository.official_write_calls == 0
+    assert repository.entry_status is entry_before
+    assert (repository.state.revision, repository.state.state_hash) == state_before
+
+    probe = repository.events[probe_event_id]
+    assert probe.semantic["alert_code"] == "MANUAL_0939_CHAIN_PROBE_RESULT"
+    assert probe.semantic["manual_request_id"] == "deploy-current-chain-001"
+    assert probe.semantic["config_hash"] == service.config.config_hash
+    assert probe.semantic["probe_result"] == "PASS"
+    assert probe.semantic["current_version_recomputed"] is True
+    assert probe.semantic["replay_reused"] is False
+    assert probe.semantic["data_source"] == "PERSISTED_09:31_09:39"
+    assert probe.semantic["data_window_start"] == "09:31"
+    assert probe.semantic["data_window_end"] == "09:39"
+    assert probe.semantic["official_state_changed"] is False
+    assert probe.semantic["orders_changed"] is False
+    assert probe.semantic["non_actionable"] is True
+    assert probe.payload is not None
+    assert "当前版本早盘链路重算｜✅ 通过" in str(probe.payload["message"])
+    assert "未复用旧回放" in str(probe.payload["message"])
+    assert repository.events["old-late-replay-event"].payload == {"message": "old replay"}
+
+
+def test_same_request_recomputes_again_after_full_config_hash_changes() -> None:
+    service = FreshProbeV20Service()
+    client = _client(service)
+    headers = {"Idempotency-Key": "deploy-current-chain-config"}
+
+    first = client.post("/api/v20/trigger-scan", headers=headers)
+    old_event_id = first.json()["chain_probe_event_id"]
+    service.config.config_hash = "e" * 64
+    second = client.post("/api/v20/trigger-scan", headers=headers)
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["created"] is True
+    assert second.json()["current_version_recomputed"] is True
+    assert second.json()["replay_reused"] is False
+    assert second.json()["chain_probe_event_id"] != old_event_id
+    assert len(service.build_calls) == 2
+    assert (
+        service._repository.events[second.json()["chain_probe_event_id"]].semantic["config_hash"]
+        == "e" * 64
+    )
+
+
+def test_failed_current_chain_probe_is_durable_and_never_falls_back_to_old_replay() -> None:
+    service = FreshProbeV20Service()
+    service.probe_error = RuntimeError("exact 09:39 persisted input is incomplete")
+
+    response = _client(service).post(
+        "/api/v20/trigger-scan",
+        headers={"Idempotency-Key": "deploy-current-chain-fail"},
+    )
+
+    assert response.status_code == 202
+    result = response.json()
+    assert result["created"] is True
+    assert result["chain_probe_available"] is False
+    assert result["chain_probe_result"] == "FAIL"
+    assert result["current_version_recomputed"] is False
+    assert result["replay_reused"] is False
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert service.ensure_replay_calls == 0
+    assert service.old_manual_calls == 0
+    assert service._repository.official_write_calls == 0
+    failed = service._repository.events[result["chain_probe_event_id"]]
+    assert failed.semantic["v20_action"] is None
+    assert failed.semantic["final_multiplier"] is None
+    assert failed.semantic["failure_stage"]
+    assert "exact 09:39 persisted input is incomplete" in failed.semantic["failure_reason"]
+    assert failed.payload is not None
+    assert "当前版本早盘链路重算｜❌ 失败" in str(failed.payload["message"])
 
 
 def test_trigger_rejects_body_instead_of_accepting_force_or_time_overrides() -> None:

@@ -248,6 +248,111 @@ def _render_manual_receipt_for_operator(
     return "\n".join(lines)
 
 
+def _render_manual_0939_chain_probe_for_operator(
+    semantic: Mapping[str, Any],
+    *,
+    title_prefix: str,
+    event_id: str,
+) -> str:
+    """Render an exact-current-code chain probe without presenting it as a trade signal."""
+
+    passed = semantic.get("probe_result") == "PASS"
+    result_mark = "✅ 通过" if passed else "❌ 失败"
+    trade_date = str(semantic.get("event_trade_date", "-"))
+    computed_at = datetime.fromisoformat(str(semantic["computed_at"])).astimezone(SHANGHAI)
+    v16_count = int(semantic.get("v16_count", 0))
+    raw_fact_n = int(semantic.get("raw_fact_n", 0))
+    coverage = semantic.get("quote_coverage")
+    if _finite_number(coverage):
+        coverage_text = _pct(float(coverage), 1)
+    elif semantic.get("quote_coverage_note") == "NOT_EXPOSED_BY_EXISTING_REPLAY_HELPER":
+        coverage_text = "已通过生产≥80%门槛（精确比例未冻结）"
+    else:
+        coverage_text = "未完成"
+    lines = [
+        f"{title_prefix} 当前版本早盘链路重算｜{result_mark}",
+        "",
+    ]
+    if passed:
+        lines.extend(
+            [
+                "✅ 验收结论：当前部署版本已完成一次全链路重新计算。",
+                "收到本条，说明“已落库原始数据 → V16 → V20 → 结果持久化 → 飞书投递”已经跑通。",
+            ]
+        )
+    else:
+        lines.append("❌ 验收结论：当前部署版本未能完成全链路重新计算。")
+        failure_stage = semantic.get("failure_stage")
+        failure_reason = semantic.get("failure_reason") or semantic.get("message")
+        if isinstance(failure_stage, str) and failure_stage:
+            stage_text = {
+                "PERSISTED_FACT_LOAD": "读取已落库原始数据",
+                "V16_SCAN": "V16选股",
+                "V20_DECISION": "V20决策",
+                "PERSIST_RESULT": "结果持久化",
+                "FEISHU_SEAL": "飞书消息生成",
+            }.get(failure_stage)
+            lines.append(f"失败阶段：{failure_stage}{f'（{stage_text}）' if stage_text else ''}")
+        if isinstance(failure_reason, str) and failure_reason:
+            lines.append(f"失败原因：{failure_reason}")
+
+    computation_scope = (
+        "计算口径：当前部署代码重新读取持久化的09:31–09:39原始事实并完整重算；"
+        "不是昨天的冻结结果，未复用旧回放。"
+        if passed
+        else "验收口径：只运行当前部署代码；链路未完成，未复用旧回放或旧决策兜底。"
+    )
+    lines.extend(
+        [
+            computation_scope,
+            "",
+            (
+                f"V16选股：{v16_count}只"
+                if passed
+                else f"V16数量：{v16_count}只（链路失败，不能视为合法无票）"
+            ),
+        ]
+    )
+    if passed:
+        lines.append(
+            "V20重算结论："
+            + _operator_entry_decision(semantic.get("v20_action"), semantic.get("final_multiplier"))
+        )
+    else:
+        lines.append("V20重算结论：未形成可用结论")
+
+    symbols = semantic.get("symbols") or []
+    if isinstance(symbols, list) and symbols:
+        ticket_text = "、".join(
+            f"{item.get('code', '-')} {item.get('name', '')}".rstrip()
+            for item in symbols
+            if isinstance(item, Mapping)
+        )
+        lines.append(f"重算票单：{ticket_text}")
+    else:
+        lines.append("重算票单：无")
+
+    lines.extend(
+        [
+            (
+                f"数据窗口：{semantic.get('data_window_start', '-')}–"
+                f"{semantic.get('data_window_end', '-')}｜原始事实：{raw_fact_n}条｜"
+                f"行情覆盖：{coverage_text}"
+            ),
+            "",
+            "安全边界：本次验收未修改正式决策、正式策略状态、订单、持仓或卖出信号。",
+            "明早执行口径：只认09:40前送达的“V20每日决策”；"
+            "本验收消息不能用于下单，迟到重算也不能追买。",
+            "",
+            (
+                f"交易日：{trade_date}｜重算完成：{computed_at.strftime('%H:%M:%S')}｜"
+                f"请求：{semantic.get('manual_request_id', '-')}｜事件：{event_id[:16]}"
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _render_data_alert_for_operator(
     semantic: Mapping[str, Any],
     *,
@@ -749,6 +854,140 @@ def _validate_entry_formatter_semantic(
             raise ValueError("V20 entry symbol history_hash is invalid")
 
 
+def _validate_manual_0939_chain_probe(
+    record: OutboxRecord,
+    semantic: Mapping[str, Any],
+) -> None:
+    """Fail closed if a stale replay could be presented as a current-code chain probe."""
+
+    _require_fields(
+        semantic,
+        {
+            "event_id",
+            "manual_request_id",
+            "event_trade_date",
+            "probe_profile",
+            "probe_result",
+            "current_version_recomputed",
+            "replay_reused",
+            "data_source",
+            "data_window_start",
+            "data_window_end",
+            "v16_count",
+            "v20_action",
+            "final_multiplier",
+            "symbols",
+            "raw_fact_n",
+            "quote_coverage",
+            "computed_at",
+            "config_hash",
+            "state_semantics_hash",
+            "official_entry_action",
+            "official_entry_event_id",
+            "official_state_changed",
+            "orders_changed",
+            "non_actionable",
+            "delivery_priority_class",
+        },
+        subject="V20 manual 09:39 chain probe",
+    )
+    if semantic["event_id"] != record.event_id:
+        raise ValueError("V20 chain probe event_id does not match outbox event")
+    if not isinstance(semantic["manual_request_id"], str) or not semantic["manual_request_id"]:
+        raise ValueError("V20 chain probe requires a manual request id")
+    if semantic["probe_profile"] != "CURRENT_DEPLOYED_CODE_EXACT_0939_V1":
+        raise ValueError("V20 chain probe has an unsupported computation profile")
+    if (
+        semantic["replay_reused"] is not False
+        or semantic["data_source"] != "PERSISTED_09:31_09:39"
+        or semantic["data_window_start"] != "09:31"
+        or semantic["data_window_end"] != "09:39"
+    ):
+        raise ValueError("V20 chain probe must recompute from the exact persisted 09:39 window")
+    if (
+        semantic["official_state_changed"] is not False
+        or semantic["orders_changed"] is not False
+        or semantic["non_actionable"] is not True
+        or semantic["delivery_priority_class"] != "OPERATOR_NOTIFICATION"
+    ):
+        raise ValueError("V20 chain probe must remain non-actionable and state-preserving")
+    result = semantic["probe_result"]
+    if result not in {"PASS", "FAIL"}:
+        raise ValueError("V20 chain probe result must be PASS or FAIL")
+    if not isinstance(semantic["current_version_recomputed"], bool):
+        raise ValueError("V20 chain probe recomputation flag must be boolean")
+
+    for field in ("v16_count", "raw_fact_n"):
+        value = semantic[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"V20 chain probe {field} is invalid")
+    symbols = semantic["symbols"]
+    if not isinstance(symbols, list) or any(
+        not isinstance(item, Mapping)
+        or not isinstance(item.get("code"), str)
+        or not item.get("code")
+        for item in symbols
+    ):
+        raise ValueError("V20 chain probe symbols are invalid")
+    if semantic["v16_count"] != len(symbols):
+        raise ValueError("V20 chain probe V16 count does not match its frozen symbols")
+
+    for field in ("config_hash", "state_semantics_hash"):
+        value = semantic[field]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"V20 chain probe {field} is invalid")
+    try:
+        trade_date = date.fromisoformat(str(semantic["event_trade_date"]))
+        computed_at = datetime.fromisoformat(str(semantic["computed_at"]))
+    except ValueError as exc:
+        raise ValueError("V20 chain probe has invalid date/time fields") from exc
+    earliest_probe_time = datetime.combine(trade_date, time(9, 40), tzinfo=SHANGHAI)
+    if (
+        computed_at.tzinfo is None
+        or computed_at.utcoffset() is None
+        or computed_at.astimezone(SHANGHAI) < earliest_probe_time
+    ):
+        raise ValueError("V20 chain probe computed_at precedes the frozen 09:39 window")
+
+    if result == "PASS":
+        if semantic["current_version_recomputed"] is not True:
+            raise ValueError("a passing V20 chain probe must be recomputed by the current version")
+        action = semantic["v20_action"]
+        multiplier = semantic["final_multiplier"]
+        coverage = semantic["quote_coverage"]
+        if action not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
+            raise ValueError("passing V20 chain probe action is invalid")
+        if not _finite_number(multiplier) or not 0 <= float(multiplier) <= 1:
+            raise ValueError("passing V20 chain probe multiplier is invalid")
+        if (action == "ENTER") != (float(multiplier) > 0):
+            raise ValueError("passing V20 chain probe action/multiplier are inconsistent")
+        if action == "ENTER" and not symbols:
+            raise ValueError("passing ENTER chain probe requires symbols")
+        if coverage is None:
+            if semantic.get("quote_coverage_note") != ("NOT_EXPOSED_BY_EXISTING_REPLAY_HELPER"):
+                raise ValueError("passing V20 chain probe lacks honest coverage disclosure")
+        elif not _finite_number(coverage) or not 0 <= float(coverage) <= 1:
+            raise ValueError("passing V20 chain probe quote coverage is invalid")
+        if semantic["raw_fact_n"] <= 0:
+            raise ValueError("passing V20 chain probe requires persisted raw facts")
+    else:
+        if semantic["current_version_recomputed"] is not False:
+            raise ValueError("a failed V20 chain probe cannot claim completed recomputation")
+        if semantic["v20_action"] is not None or semantic["final_multiplier"] is not None:
+            raise ValueError("a failed V20 chain probe cannot reuse an old decision result")
+        for field in ("failure_stage", "failure_reason"):
+            value = semantic.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"failed V20 chain probe requires {field}")
+        coverage = semantic["quote_coverage"]
+        if coverage is not None and (not _finite_number(coverage) or not 0 <= float(coverage) <= 1):
+            raise ValueError("failed V20 chain probe quote coverage is invalid")
+
+
 def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, Any]) -> None:
     expected_schema = {
         "ENTRY_DECISION": V20_ENTRY_SEMANTIC_SCHEMA,
@@ -797,7 +1036,9 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
         message = semantic.get("message", semantic.get("reason"))
         if not isinstance(message, str) or not message:
             raise ValueError("V20 DATA_ALERT semantic requires a message")
-        if semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT":
+        if semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT":
+            _validate_manual_0939_chain_probe(record, semantic)
+        elif semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT":
             _require_fields(
                 semantic,
                 {
@@ -935,6 +1176,15 @@ def seal_v20_payload(
             f"原退出规则: {exit_label}\n"
             "建议仍为退出该模型腿100%。若已处理，请通过V20确认接口停止后续提醒。\n"
             f"原事件: {semantic.get('original_exit_event_id', '-')}"
+        )
+    elif (
+        record.event_type == "DATA_ALERT"
+        and semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT"
+    ):
+        message = _render_manual_0939_chain_probe_for_operator(
+            semantic,
+            title_prefix=title_prefix,
+            event_id=record.event_id,
         )
     elif (
         record.event_type == "DATA_ALERT" and semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT"
