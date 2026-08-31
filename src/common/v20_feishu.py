@@ -264,6 +264,7 @@ def _render_manual_0939_chain_probe_for_operator(
     raw_fact_n = int(semantic.get("raw_fact_n", 0))
     coverage = semantic.get("quote_coverage")
     if _finite_number(coverage):
+        assert coverage is not None
         coverage_text = _pct(float(coverage), 1)
     elif semantic.get("quote_coverage_note") == "NOT_EXPOSED_BY_EXISTING_REPLAY_HELPER":
         coverage_text = "已通过生产≥80%门槛（精确比例未冻结）"
