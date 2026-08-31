@@ -199,6 +199,11 @@ def create_router() -> APIRouter:
                 "enabled": getattr(v20_config, "enabled", False),
                 "mode": getattr(request.app.state, "v20_deployment_mode", None),
                 "started": bool(getattr(request.app.state, "v20_service_started", False)),
+                "startup_stage": getattr(v20_service, "startup_stage", None),
+                "retrying": bool(
+                    (retry_task := getattr(request.app.state, "v20_retry_task", None)) is not None
+                    and not retry_task.done()
+                ),
                 # Never return database/credential exception text publicly.
                 "start_error_type": v20_error_type,
                 "start_error_code": getattr(

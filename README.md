@@ -114,7 +114,9 @@ Push CI publishes the normal runtime as `latest` and the commit SHA. The existin
 main host's image watcher deploys that image, so embedded V20 follows the same
 update path as V16; there is no second container to configure. Public
 `/api/status` reports only safe V20 startup fields (`configured`, `enabled`,
-`mode`, `started`, and error type). After deployment, call the manual trigger
+`mode`, `started`, `startup_stage`, `retrying`, and sanitized error fields). Embedded startup
+retries transient dependency failures in the background while V16 stays live. After deployment,
+call the manual trigger
 and verify both its HTTP response and the Feishu receipt. Startup failures also
 include a sanitized `start_error_code`; raw connection text is never exposed.
 

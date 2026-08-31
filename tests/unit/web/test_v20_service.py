@@ -692,12 +692,14 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
         "v20-outbox-publisher",
     }
     assert all(not task.done() for task in service._tasks)
+    assert service.startup_stage == "RUNNING"
 
     await service.stop()
 
     assert resources_stopped is True
     assert repository.closed is True
     assert service._tasks == []
+    assert service.startup_stage == "STOPPED"
 
 
 @pytest.mark.parametrize("failure", ["api_key", "destination", "fundamentals_ca"])
@@ -765,6 +767,7 @@ async def test_embedded_start_reaches_legacy_database_without_v20_api_or_ca_keys
         await service.start()
 
     assert repository.connect_calls == 1
+    assert service.startup_stage == "CONNECTING_LEDGER"
 
 
 class _AckRepository:

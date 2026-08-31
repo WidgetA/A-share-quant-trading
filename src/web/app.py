@@ -49,6 +49,7 @@ PROJECT_ROOT = WEB_DIR.parent.parent
 
 _V20_FORWARD_SHADOW = "forward_shadow"
 _V20_PRODUCTION_PUSH = "production_push"
+_V20_START_RETRY_SECONDS = 15.0
 
 
 def _v20_start_error_code(exc: BaseException) -> str:
@@ -131,6 +132,43 @@ def _v20_lifecycle_config(service: object) -> tuple[bool, str]:
     return enabled, mode
 
 
+async def _retry_v20_shadow_start(app: FastAPI, service: Any) -> None:
+    """Retry a recoverable shadow startup without interrupting legacy V16."""
+    try:
+        while not getattr(app.state, "v20_service_started", False):
+            await asyncio.sleep(_V20_START_RETRY_SECONDS)
+            try:
+                await service.start()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+                app.state.v20_start_error_code = _v20_start_error_code(exc)
+                logger.warning(
+                    "V20 forward-shadow retry failed; retrying in %.0fs (%s)",
+                    _V20_START_RETRY_SECONDS,
+                    app.state.v20_start_error_code,
+                )
+                continue
+            app.state.v20_service_started = True
+            app.state.v20_start_error = None
+            app.state.v20_start_error_code = None
+            logger.info("V20 forward-shadow service recovered on startup retry")
+            return
+    finally:
+        app.state.v20_retry_task = None
+
+
+def _schedule_v20_shadow_retry(app: FastAPI, service: Any) -> None:
+    current = getattr(app.state, "v20_retry_task", None)
+    if current is not None and not current.done():
+        return
+    app.state.v20_retry_task = asyncio.create_task(
+        _retry_v20_shadow_start(app, service),
+        name="v20-startup-retry",
+    )
+
+
 async def _start_v20_lifecycle(app: FastAPI) -> bool:
     """Start V20 and return whether the legacy V15 scan may also run.
 
@@ -143,6 +181,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     app.state.v20_service_lifecycle_owned = False
     app.state.v20_start_error = None
     app.state.v20_start_error_code = None
+    app.state.v20_retry_task = None
 
     service: Any = getattr(app.state, "v20_service", None)
     if service is None:
@@ -196,6 +235,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
             )
         else:
             logger.exception("V20 forward-shadow service failed; keeping legacy V15 scan")
+            _schedule_v20_shadow_retry(app, service)
         return legacy_scan_allowed
 
     app.state.v20_service_started = True
@@ -205,6 +245,12 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
 
 async def _stop_v20_lifecycle(app: FastAPI) -> None:
     """Stop any enabled V20 service whose lifecycle this app attempted to own."""
+
+    retry_task = getattr(app.state, "v20_retry_task", None)
+    if retry_task is not None and not retry_task.done():
+        retry_task.cancel()
+        await asyncio.gather(retry_task, return_exceptions=True)
+    app.state.v20_retry_task = None
 
     if not getattr(app.state, "v20_service_lifecycle_owned", False):
         return

@@ -136,6 +136,9 @@ V20_DB_SSLROOTCERT_SHA256
 为 1/8；它不会把表写进 `trading` 或 `public`。TLS 最低为 `require`，若现行 DB 配置为
 `verify-full` 则仍校验 CA。若该线上身份没有创建 `v20` schema 的权限，启动会明确失败，
 V16 保持运行，公开 `/api/status` 只显示 `start_error_type` 而不泄露连接异常正文。
+内嵌 V20 会每 15 秒重试一次启动依赖；重试任务单例运行，成功后清除错误并启动唯一
+leader，容器关闭时先取消重试再释放 V20 资源。`/api/status` 的 `retrying=true` 表示正在
+自愈，不表示决策服务已经可触发。
 
 正式 V20 必须使用独立进程 `scripts/v20_main.py`。该进程只创建 V20 service 和四个
 `/api/v20` 接口，不创建平台 state manager、PositionManager、订单/持仓接口或 iQuant

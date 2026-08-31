@@ -893,6 +893,7 @@ class V20Service:
         self._last_success_at: datetime | None = None
         self._status_snapshot: Mapping[str, Any] | None = None
         self._status_snapshot_error: str | None = None
+        self._startup_stage = "NOT_STARTED"
         self._lane_health = {
             name: _RuntimeLaneHealth()
             for name in (
@@ -1051,9 +1052,11 @@ class V20Service:
         self._started = True
         self._stop_event.clear()
         if not self.config.enabled:
+            self._startup_stage = "DISABLED"
             logger.info("V20 is disabled by configuration")
             return
         try:
+            self._startup_stage = "VALIDATING_RUNTIME"
             if not self._embedded_legacy:
                 validate_v20_api_keys()
             route = self._routes.get(self.config.route_id)
@@ -1082,13 +1085,16 @@ class V20Service:
                 raise V20ConfigError(
                     "forward-shadow and formal V20 routes cannot share Feishu credentials"
                 )
+            self._startup_stage = "CONNECTING_LEDGER"
             await self._repository.connect()
             self._repository_started = True
+            self._startup_stage = "ACQUIRING_LEADER"
             await self._repository.acquire_runtime_leader(
                 route_id=self.config.route_id,
                 **self._ledger_scope,
             )
             now = self._aware_now()
+            self._startup_stage = "REGISTERING_CONFIG"
             await self._repository.register_config(
                 config_id=self.config.config_hash[:24],
                 config_hash=self.config.config_hash,
@@ -1101,6 +1107,7 @@ class V20Service:
                 self.config,
                 empty_predecessor_trade_date=now.date() - timedelta(days=1),
             )
+            self._startup_stage = "ENSURING_GENESIS"
             await self._repository.ensure_genesis_state(
                 self.config.state_lineage_id,
                 bootstrap.state,
@@ -1112,9 +1119,12 @@ class V20Service:
                 bootstrap_predecessor_trade_date=bootstrap.predecessor_trade_date,
                 bootstrap_shadow_batches=bootstrap.shadow_batches,
             )
+            self._startup_stage = "REFRESHING_STATUS"
             await self._refresh_status_snapshot()
+            self._startup_stage = "INITIALIZING_MARKET_RESOURCES"
             await self._initialize_resources(self._scan_state)
             self._resources_started = True
+            self._startup_stage = "STARTING_LANES"
             self._tasks = [
                 asyncio.create_task(self._run_scheduler(), name="v20-decision-scheduler"),
                 asyncio.create_task(
@@ -1136,6 +1146,7 @@ class V20Service:
             ]
             for task in self._tasks:
                 task.add_done_callback(self._runtime_task_finished)
+            self._startup_stage = "RUNNING"
             logger.info("V20 service started in %s mode", self.config.deployment_mode)
         except BaseException as startup_error:
             self._record_error("STARTUP_FAILED")
@@ -1181,6 +1192,11 @@ class V20Service:
             self._started = False
             raise
 
+    @property
+    def startup_stage(self) -> str:
+        """Expose a secret-free lifecycle stage for legacy host diagnostics."""
+        return self._startup_stage
+
     async def stop(self) -> None:
         self._stop_event.set()
         tasks, self._tasks = self._tasks, []
@@ -1215,6 +1231,7 @@ class V20Service:
                 finally:
                     self._repository_started = False
             self._started = False
+            self._startup_stage = "STOPPED"
         logger.info("V20 service stopped")
         if primary_error is not None:
             raise primary_error
@@ -1308,6 +1325,7 @@ class V20Service:
             "running": running,
             "healthy": (not self.config.enabled)
             or (running and lanes_healthy and not snapshot_stale),
+            "startup_stage": self._startup_stage,
             "strategy_version": self.config.strategy_version,
             "config_hash": self.config.config_hash,
             "route_id": self.config.route_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -562,6 +563,40 @@ async def test_shadow_start_failure_retains_legacy_scan(monkeypatch) -> None:
     assert app.state.legacy_v15_scan_allowed is True
     assert legacy_starts == [app.state.v15_scan_state]
     assert app.state.iquant_router.start_calls == 1
+    assert app.state.v20_retry_task is not None
+
+    await web_app._stop_v20_lifecycle(app)
+    assert app.state.v20_retry_task is None
+
+
+@pytest.mark.asyncio
+async def test_shadow_startup_retry_recovers_without_restarting_v16(monkeypatch) -> None:
+    class _FlakyShadowService(LifecycleV20Service):
+        async def start(self) -> None:
+            self.start_calls += 1
+            if self.start_calls == 1:
+                raise ConnectionError("database warming up")
+
+    service = _FlakyShadowService(enabled=True, deployment_mode="forward_shadow")
+    app = _lifecycle_app(service)
+    legacy_starts: list[object] = []
+    monkeypatch.setattr(web_app, "_V20_START_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
+
+    await web_app._start_strategy_services(app)
+    for _ in range(20):
+        if app.state.v20_service_started:
+            break
+        await asyncio.sleep(0)
+
+    assert app.state.v20_service_started is True
+    assert app.state.v20_start_error is None
+    assert app.state.v20_start_error_code is None
+    assert service.start_calls == 2
+    assert legacy_starts == [app.state.v15_scan_state]
+
+    await web_app._stop_v20_lifecycle(app)
+    assert service.stop_calls == 1
 
 
 @pytest.mark.asyncio
