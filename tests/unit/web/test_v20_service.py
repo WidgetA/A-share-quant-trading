@@ -28,8 +28,11 @@ from src.data.database.v20_repository import (
     V20StateConflict,
     sha256_json,
 )
+from src.strategy.lgbrank_scorer import ScoredStock
+from src.strategy.strategies.v16_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import genesis_state
+from src.strategy.v20.identity import named_hash
 from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
@@ -45,6 +48,7 @@ from src.strategy.v20.runtime_config import (
     load_v20_runtime_config,
 )
 from src.web.v15_scan_service import V15ScanState
+from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_service import (
     FULL_EXIT_LABELS,
     V20Service,
@@ -1177,6 +1181,88 @@ async def test_manual_trigger_after_cutoff_never_backfills_missing_decision(
     assert "不会使用晚到行情补算" in str(record.semantic["message"])
 
 
+async def test_manual_trigger_after_cutoff_reports_independent_0939_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _ManualTriggerRepository()
+    service = _service(monkeypatch, repository)
+    current = _entry_status(service.config)
+    invalid_semantic = {
+        **current.semantic,
+        "action": "INPUT_INVALID",
+        "state_after_hash": "a" * 64,
+        "policy_input_hash": "b" * 64,
+        "scheduled_exits_today": [],
+    }
+    invalid_snapshot = {"schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA}
+    invalid_status = replace(
+        current,
+        slot_status="FAILED",
+        action="INPUT_INVALID",
+        semantic=invalid_semantic,
+        semantic_content_hash=sha256_json(invalid_semantic),
+        snapshot=invalid_snapshot,
+        snapshot_hash=sha256_json(invalid_snapshot),
+    )
+    repository.entry_status = invalid_status
+    service._clock = lambda: datetime(2026, 8, 31, 15, 30, tzinfo=TZ)
+    service._context = _DayContext(
+        trade_date=date(2026, 8, 31),
+        calendar=(date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)),
+        entry_status=invalid_status,
+    )
+    replay_semantic = {
+        "event_id": "late-replay-event",
+        "replay_action": "ENTER",
+        "final_multiplier": 1.0,
+    }
+    replay_record = OutboxRecord(
+        event_id="late-replay-event",
+        event_type="DATA_ALERT",
+        route_id=service.config.route_id,
+        official_stream_id=service.config.official_stream_id,
+        lineage_id=service.config.state_lineage_id,
+        semantic=replay_semantic,
+        semantic_content_hash=sha256_json(replay_semantic),
+        payload={"message": "late replay"},
+        payload_hash=sha256_json({"message": "late replay"}),
+        generated_at=datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        commit_marker=92,
+        action_expiry_ts=None,
+        delivery_status="PENDING",
+        attempt_count=0,
+    )
+    replay_calls = 0
+
+    async def replay(_context: _DayContext, _now: datetime) -> OutboxRecord:
+        nonlocal replay_calls
+        replay_calls += 1
+        return replay_record
+
+    async def forbidden_late_decision(_now: datetime) -> None:
+        raise AssertionError("late replay must not run the official decision lane")
+
+    monkeypatch.setattr(service, "_ensure_late_0939_replay", replay)
+    monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", forbidden_late_decision)
+    tasks = _arm_manual_trigger_runtime(service)
+    try:
+        result = await service.trigger_manual_scan("deploy-20260831-replay")
+    finally:
+        await _disarm_manual_trigger_runtime(service, tasks)
+
+    assert replay_calls == 1
+    assert repository.entry_status is invalid_status
+    assert result["cycle_result"] == "LATE_0939_REPLAY_READY"
+    assert result["entry_action"] == "INPUT_INVALID"
+    assert result["official_state_changed"] is False
+    assert result["late_0939_replay_available"] is True
+    assert result["late_0939_replay_event_id"] == "late-replay-event"
+    assert result["late_0939_replay_action"] == "ENTER"
+    assert result["late_0939_replay_multiplier"] == 1.0
+    manual_record = next(iter(repository.events.values()))
+    assert "已过期不可追买" in str(manual_record.semantic["message"])
+
+
 async def test_manual_trigger_inside_window_uses_serialized_official_decision_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1312,6 +1398,421 @@ async def test_manual_trigger_does_not_race_busy_automatic_decision_lane(
 
     assert repository.enqueue_calls == 0
     assert repository.seal_calls == 0
+
+
+class _LateReplayRepository(_ManualTriggerRepository):
+    def __init__(self, status: EntryStatus, state: StateRecord) -> None:
+        super().__init__(status)
+        self.state = state
+        self.raw: dict[tuple[str, str], Any] = {}
+        self.official_write_calls = 0
+
+    async def load_state(self, _lineage_id: str) -> StateRecord:
+        return self.state
+
+    async def list_raw_minute_bar_records(
+        self,
+        codes,
+        *,
+        trade_date: date,
+        end_labels,
+    ):
+        allowed_codes = set(codes)
+        allowed_labels = set(end_labels)
+        return [
+            record
+            for (code, label), record in sorted(self.raw.items())
+            if code in allowed_codes
+            and label in allowed_labels
+            and record.bar_end.astimezone(TZ).date() == trade_date
+        ]
+
+    async def record_minute_bars(self, rows):
+        hashes: set[str] = set()
+        for payload in rows:
+            payload = dict(payload)
+            code = str(payload["stock_code"])
+            label = str(payload["end_label"])
+            key = (code, label)
+            source_hash = sha256_json(payload)
+            current = self.raw.get(key)
+            if current is not None and current.source_hash != source_hash:
+                raise V20SemanticConflict("conflicting replay minute fact")
+            bar_end = datetime.fromisoformat(str(payload["bar_end"]))
+            self.raw[key] = SimpleNamespace(
+                code=code,
+                bar_end=bar_end,
+                end_label=label,
+                source_hash=source_hash,
+                payload=payload,
+                first_received_at=datetime(2026, 8, 31, 15, 30, 1, tzinfo=TZ),
+            )
+            hashes.add(source_hash)
+        return frozenset(hashes)
+
+    async def commit_entry(self, *_args, **_kwargs):
+        self.official_write_calls += 1
+        raise AssertionError("late replay must not commit an official entry")
+
+    async def commit_exit(self, *_args, **_kwargs):
+        self.official_write_calls += 1
+        raise AssertionError("late replay must not commit an exit")
+
+    async def select_mews_for_leg(self, *_args, **_kwargs):
+        self.official_write_calls += 1
+        raise AssertionError("MEWS is not a 09:39 replay input")
+
+
+class _LateReplayClient:
+    def __init__(self, *, missing_label: str | None = None) -> None:
+        self.missing_label = missing_label
+        self.calls: list[tuple[str, ...]] = []
+
+    async def batch_get_minute_history(self, codes):
+        self.calls.append(tuple(codes))
+        labels = [f"09:{minute:02d}" for minute in range(31, 41)]
+        return {
+            code: tuple(
+                _bar(code, label, close=10.0 + index / 100)
+                for index, label in enumerate(labels, start=1)
+                if label != self.missing_label
+            )
+            for code in codes
+        }
+
+
+class _LateReplayPipeline:
+    def __init__(self, trade_date: date) -> None:
+        self.trade_date = trade_date
+        self.scan_calls = 0
+        self.observed_early_volume: float | None = None
+
+    async def scan(
+        self,
+        _prewarmed,
+        early,
+        *,
+        breadth_early,
+        minimum_quote_coverage,
+    ) -> FrozenV16ScanBundle:
+        self.scan_calls += 1
+        assert minimum_quote_coverage > 0
+        quote = early.quotes.get("000001")
+        if quote is None:
+            raise RuntimeError("exact 09:31..09:39 path is incomplete")
+        self.observed_early_volume = quote.volume
+        assert quote.volume == 900.0
+        assert quote.early_close == pytest.approx(10.09)
+        assert breadth_early.quotes == {}
+        stock = ScoredStock(
+            code="000001",
+            name="平安银行",
+            score=0.8,
+            rank=1,
+            buy_price=float(quote.early_close),
+        )
+        scan = V16ScanResult(
+            recommended=[stock],
+            final_candidates=1,
+            step0_universe_count=1,
+            step2_hot_board_count=1,
+            stock_best_board={"000001": "银行"},
+            stock_all_boards={"000001": ["银行"]},
+            stock_is_driver={"000001": True},
+            stock_cci={"000001": 1.0},
+            stock_early_vol={"000001": 700.0},
+            step2_board_avg_gains={"银行": 1.2},
+        )
+        snapshot = {
+            "schema_version": V20_V16_SNAPSHOT_SCHEMA,
+            "trade_date": self.trade_date.isoformat(),
+            "last_complete_bar": "09:39",
+            "funnel": {
+                "step0_universe_count": 1,
+                "step2_hot_board_count": 1,
+                "final_candidates": 1,
+            },
+            "board_avg_gains": {"银行": 1.2},
+            "symbols": [
+                {
+                    "rank": 1,
+                    "code": "000001",
+                    "name": "平安银行",
+                    "score": 0.8,
+                    "snapshot_price": float(quote.early_close),
+                    "boards": ["银行"],
+                    "best_board": "银行",
+                    "is_driver": True,
+                    "cci": 1.0,
+                    "volume_937": 700.0,
+                    "history_hash": "a" * 64,
+                }
+            ],
+        }
+        return FrozenV16ScanBundle(
+            trade_date=self.trade_date,
+            frozen_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
+            scan_result=scan,
+            stock_data={},
+            comparison_pool_codes=("000001",),
+            breadth_valid_n=0,
+            breadth_down_n=0,
+            prior_trade_date=date(2026, 8, 28),
+            prior_amount_yuan={"000001": 1_000_000_000.0},
+            snapshot=snapshot,
+            snapshot_hash=sha256_json(snapshot),
+        )
+
+
+def _late_replay_status_and_state(service: V20Service) -> tuple[EntryStatus, StateRecord]:
+    trade_date = date(2026, 8, 31)
+    before = genesis_state()
+    before_hash = sha256_json(before)
+    policy_inputs = {
+        "schema_version": "v20-policy-input-snapshot/v1",
+        "completed_health": [],
+        "completed_rolling": [],
+        "maturity_gaps": [],
+    }
+    policy_hash = sha256_json(policy_inputs)
+    failure_gap_id = named_hash(
+        "V20_OFFICIAL_SHADOW_GAP_ID_V1",
+        {
+            "official_stream_id": service.config.official_stream_id,
+            "trade_date": trade_date.isoformat(),
+        },
+    )
+    after = {
+        **json.loads(json.dumps(before)),
+        "state_revision": 1,
+        "official_rolling_gaps": [
+            {
+                "gap_id": failure_gap_id,
+                "signal_date": trade_date.isoformat(),
+                "maturity_date": "2026-09-02",
+                "closed": False,
+                "aged_out": False,
+            }
+        ],
+        "last_terminal_slot_id": "failed-slot",
+        "last_terminal_trade_date": trade_date.isoformat(),
+    }
+    after_hash = sha256_json(after)
+    semantic = {
+        "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "action": "INPUT_INVALID",
+        "state_semantics_hash": service.config.state_semantics_hash,
+        "state_before_hash": before_hash,
+        "state_after_hash": after_hash,
+        "policy_input_hash": policy_hash,
+        "scheduled_exits_today": [],
+    }
+    snapshot = {
+        "schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
+        "trade_date": trade_date.isoformat(),
+        "reason_code": "SLOT_FINALIZED_FAILED",
+        "detail": "late deployment",
+        "state_before_hash": before_hash,
+        "state_semantics_hash": service.config.state_semantics_hash,
+        "policy_input_hash": policy_hash,
+        "policy_inputs": policy_inputs,
+    }
+    status = EntryStatus(
+        official_stream_id=service.config.official_stream_id,
+        trade_date=trade_date,
+        slot_id="failed-slot",
+        slot_status="FAILED",
+        slot_revision=1,
+        strategy_version=service.config.strategy_version,
+        config_id=service.config.config_hash[:24],
+        config_hash=service.config.config_hash,
+        lineage_id=service.config.state_lineage_id,
+        decision_id="failed-decision",
+        event_id="failed-entry-event",
+        action="INPUT_INVALID",
+        final_multiplier=0.0,
+        semantic_content_hash=sha256_json(semantic),
+        semantic=semantic,
+        snapshot_id="failed-snapshot",
+        snapshot_hash=sha256_json(snapshot),
+        snapshot=snapshot,
+        action_expiry_ts=datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+    )
+    state = StateRecord(
+        lineage_id=service.config.state_lineage_id,
+        revision=1,
+        state_hash=after_hash,
+        payload=after,
+    )
+    return status, state
+
+
+def _late_replay_service(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    missing_label: str | None = None,
+) -> tuple[V20Service, _LateReplayRepository, _LateReplayClient, _LateReplayPipeline, _DayContext]:
+    seed = _service(monkeypatch, SimpleNamespace())
+    status, state = _late_replay_status_and_state(seed)
+    repository = _LateReplayRepository(status, state)
+    client = _LateReplayClient(missing_label=missing_label)
+    service = _service(monkeypatch, repository, client)
+    pipeline = _LateReplayPipeline(status.trade_date)
+    service._scan_pipeline = pipeline
+    service._clock = lambda: datetime(2026, 8, 31, 15, 30, 3, tzinfo=TZ)
+    monkeypatch.setattr(service, "_verify_prewarm_dependencies", lambda _prewarmed: None)
+    prewarmed = SimpleNamespace(
+        trade_date=status.trade_date,
+        universe_codes=("000001",),
+        breadth_codes=("000001", "000002"),
+        required_minute_codes=("000001", "000002"),
+    )
+    context = _DayContext(
+        trade_date=status.trade_date,
+        calendar=(status.trade_date, date(2026, 9, 1), date(2026, 9, 2)),
+        entry_status=status,
+        prewarmed=prewarmed,
+    )
+    return service, repository, client, pipeline, context
+
+
+async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, client, pipeline, context = _late_replay_service(monkeypatch)
+    state_before = json.loads(json.dumps(repository.state.payload))
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=TZ)
+
+    first = await service._ensure_late_0939_replay(context, now)
+    second = await service._ensure_late_0939_replay(context, now + timedelta(minutes=1))
+
+    assert first == second
+    assert first.semantic["replay_kind"] == "RETROSPECTIVE_POST_CUTOFF"
+    assert first.semantic["data_receipt_timeliness"] == "POST_CUTOFF"
+    assert first.semantic["data_cutoff"] == "09:39"
+    assert first.semantic["replay_action"] == "ENTER"
+    assert first.semantic["final_multiplier"] == 1.0
+    assert first.semantic["health_state"] == "WARMUP"
+    assert first.semantic["rolling7_state"] == "UNKNOWN"
+    assert first.semantic["breadth_replay_mode"] == ("SKIPPED_NOT_USED_BY_BASE_WARMUP_OR_HEALTHY")
+    assert first.semantic["raw_fact_n"] == 9
+    assert first.semantic["raw_post_cutoff_n"] == 9
+    assert first.semantic["pit_limitations"][-1] == "MEWS_IS_NOT_A_09:39_ENTRY_INPUT"
+    assert first.semantic["state_replay_profile"] == "DEPLOYED_RUNTIME_LINEAGE"
+    assert first.semantic["bootstrap_mode"] == "EMPTY_FORWARD_SHADOW"
+    assert "decision_id" not in first.semantic
+    assert "state_after_hash" not in first.semantic
+    assert first.payload is not None
+    assert "09:39复盘（已过期，不可交易）" in str(first.payload["message"])
+    assert client.calls == [("000001",)]
+    assert pipeline.scan_calls == 1
+    assert pipeline.observed_early_volume == 900.0
+    assert sorted(label for _code, label in repository.raw) == [
+        f"09:{minute:02d}" for minute in range(31, 40)
+    ]
+    assert repository.enqueue_calls == 1
+    assert repository.seal_calls == 1
+    assert repository.official_write_calls == 0
+    assert repository.state.payload == state_before
+    assert context.late_0939_replay_completed is True
+
+
+async def test_late_0939_replay_rejects_state_that_moved_past_failed_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, client, pipeline, context = _late_replay_service(monkeypatch)
+    moved = {**dict(repository.state.payload), "state_revision": 2}
+    repository.state = StateRecord(
+        lineage_id=repository.state.lineage_id,
+        revision=2,
+        state_hash=sha256_json(moved),
+        payload=moved,
+    )
+
+    with pytest.raises(V20StateConflict, match="moved beyond"):
+        await service._ensure_late_0939_replay(
+            context,
+            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        )
+
+    assert client.calls == []
+    assert pipeline.scan_calls == 0
+    assert repository.events == {}
+    assert repository.official_write_calls == 0
+
+
+async def test_late_0939_replay_can_recover_entirely_from_durable_raw_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, client, pipeline, context = _late_replay_service(monkeypatch)
+    await service._persist_history(
+        context,
+        {
+            "000001": tuple(
+                _bar("000001", f"09:{minute:02d}", close=10.0 + (minute - 30) / 100)
+                for minute in range(31, 40)
+            )
+        },
+        observed_at=datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+    )
+
+    record = await service._ensure_late_0939_replay(
+        context,
+        datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+    )
+
+    assert record.semantic["raw_fact_n"] == 9
+    assert client.calls == []
+    assert pipeline.scan_calls == 1
+    assert repository.official_write_calls == 0
+
+
+async def test_late_0939_replay_missing_early_bar_fails_without_replay_or_official_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, client, pipeline, context = _late_replay_service(
+        monkeypatch,
+        missing_label="09:38",
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        await service._ensure_late_0939_replay(
+            context,
+            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        )
+
+    assert client.calls == [("000001",)]
+    assert pipeline.scan_calls == 1
+    assert repository.events == {}
+    assert repository.official_write_calls == 0
+
+
+async def test_automatic_late_replay_task_is_not_a_formal_runtime_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _repository, _client, _pipeline, context = _late_replay_service(monkeypatch)
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def background(_context: _DayContext, _now: datetime) -> None:
+        started.set()
+        await blocked.wait()
+
+    monkeypatch.setattr(service, "_maybe_run_late_0939_replay", background)
+    formal_tasks_before = tuple(service._tasks)
+    service._schedule_late_0939_replay(
+        context,
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+    )
+    await started.wait()
+    replay_task = service._late_0939_replay_task
+    assert replay_task is not None
+    assert replay_task not in service._tasks
+    assert tuple(service._tasks) == formal_tasks_before
+    replay_task.cancel()
+    await asyncio.gather(replay_task, return_exceptions=True)
+    service._late_0939_replay_task = None
 
 
 class _SealRepository:

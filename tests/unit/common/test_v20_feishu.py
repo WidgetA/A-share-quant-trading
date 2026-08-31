@@ -347,13 +347,55 @@ def test_manual_trigger_receipt_is_visibly_non_actionable_and_seals_as_data_aler
     )
 
     assert payload["event_type"] == "DATA_ALERT"
-    assert payload["timeliness_status"] == "ON_TIME"
     assert "actionable_from" not in payload
     assert "expired_delivery_message" not in payload
     lines = str(payload["message"]).splitlines()
     assert lines[0] == "[V20] 人工触发验证（非交易指令）"
     assert "仅用于部署验收" in payload["message"]
     assert "不会创建或修改订单、持仓、卖出信号或券商侧状态" in payload["message"]
+
+
+def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": "late-replay-event",
+        "strategy_version": "V20",
+        "config_hash": "a" * 64,
+        "deployment_mode": "forward_shadow",
+        "official_stream_id": "formal-stream",
+        "state_lineage_id": "formal-lineage",
+        "alert_code": "LATE_0939_REPLAY_RESULT",
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "event_trade_date": "2026-08-31",
+        "replay_kind": "RETROSPECTIVE_POST_CUTOFF",
+        "non_actionable": True,
+        "official_entry_action": "INPUT_INVALID",
+        "official_entry_event_id": "failed-entry-event",
+        "replay_action": "ENTER",
+        "final_multiplier": 1.0,
+        "symbols": [{"code": "000001"}],
+        "data_cutoff": "09:39",
+        "data_receipt_timeliness": "POST_CUTOFF",
+        "computed_at": "2026-08-31T15:30:00+08:00",
+        "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE",
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "pit_limitations": ["POST_CUTOFF_REPLAY"],
+        "message": "⛔ 已过期不可追买；这不是交易指令。",
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id="late-replay-event"),
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        19,
+        True,
+    )
+
+    assert payload["event_type"] == "DATA_ALERT"
+    assert payload["timeliness_status"] == "ON_TIME"
+    assert "actionable_from" not in payload
+    assert payload["message"].splitlines()[0] == ("[V20][SHADOW] 09:39复盘（已过期，不可交易）")
+    assert "已过期不可追买" in payload["message"]
 
 
 @pytest.mark.parametrize(

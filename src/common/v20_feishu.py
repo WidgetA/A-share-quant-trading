@@ -10,7 +10,7 @@ import math
 import os
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -610,6 +610,70 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
                 semantic["official_state_changed"], bool
             ):
                 raise ValueError("V20 manual trigger receipt has invalid decision flags")
+        elif semantic.get("alert_code") == "LATE_0939_REPLAY_RESULT":
+            _require_fields(
+                semantic,
+                {
+                    "event_id",
+                    "event_trade_date",
+                    "replay_kind",
+                    "official_entry_action",
+                    "official_entry_event_id",
+                    "replay_action",
+                    "final_multiplier",
+                    "symbols",
+                    "non_actionable",
+                    "delivery_priority_class",
+                    "data_cutoff",
+                    "data_receipt_timeliness",
+                    "computed_at",
+                    "state_replay_profile",
+                    "bootstrap_mode",
+                    "pit_limitations",
+                },
+                subject="V20 late 09:39 replay",
+            )
+            if semantic["event_id"] != record.event_id:
+                raise ValueError("V20 late replay event_id does not match outbox event")
+            if (
+                semantic["replay_kind"] != "RETROSPECTIVE_POST_CUTOFF"
+                or semantic["official_entry_action"] != "INPUT_INVALID"
+                or semantic["non_actionable"] is not True
+            ):
+                raise ValueError("V20 late replay must remain retrospective and non-actionable")
+            if semantic["delivery_priority_class"] != "OPERATOR_NOTIFICATION":
+                raise ValueError("V20 late replay has invalid delivery priority")
+            if (
+                semantic["data_cutoff"] != "09:39"
+                or semantic["data_receipt_timeliness"] != "POST_CUTOFF"
+                or semantic["state_replay_profile"] != "DEPLOYED_RUNTIME_LINEAGE"
+            ):
+                raise ValueError("V20 late replay has invalid retrospective boundary")
+            if semantic["bootstrap_mode"] not in {"EMPTY_FORWARD_SHADOW", "CHECKPOINT"}:
+                raise ValueError("V20 late replay has invalid bootstrap mode")
+            try:
+                computed_at = datetime.fromisoformat(str(semantic["computed_at"]))
+                replay_date = date.fromisoformat(str(semantic["event_trade_date"]))
+            except ValueError as exc:
+                raise ValueError("V20 late replay has invalid date/time fields") from exc
+            if (
+                computed_at.tzinfo is None
+                or computed_at.utcoffset() is None
+                or computed_at.astimezone(SHANGHAI).date() != replay_date
+                or computed_at.astimezone(SHANGHAI).timetz().replace(tzinfo=None) < time(9, 40)
+            ):
+                raise ValueError("V20 late replay computed_at is not post-cutoff")
+            if not isinstance(semantic["pit_limitations"], list) or not semantic["pit_limitations"]:
+                raise ValueError("V20 late replay must disclose PIT limitations")
+            if semantic["replay_action"] not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
+                raise ValueError("V20 late replay action is invalid")
+            multiplier = semantic["final_multiplier"]
+            if not _finite_number(multiplier) or not 0 <= float(multiplier) <= 1:
+                raise ValueError("V20 late replay multiplier is invalid")
+            if (semantic["replay_action"] == "ENTER") != (float(multiplier) > 0):
+                raise ValueError("V20 late replay action/multiplier are inconsistent")
+            if not isinstance(semantic["symbols"], list):
+                raise ValueError("V20 late replay symbols must be an array")
 
 
 def seal_v20_payload(
@@ -661,6 +725,15 @@ def seal_v20_payload(
     ):
         message = (
             f"{title_prefix} 人工触发验证（非交易指令）\n"
+            f"{semantic['message']}\n"
+            f"事件: {record.event_id[:16]}"
+        )
+    elif (
+        record.event_type == "DATA_ALERT"
+        and semantic.get("alert_code") == "LATE_0939_REPLAY_RESULT"
+    ):
+        message = (
+            f"{title_prefix} 09:39复盘（已过期，不可交易）\n"
             f"{semantic['message']}\n"
             f"事件: {record.event_id[:16]}"
         )

@@ -40,6 +40,7 @@ from src.data.database.v20_repository import (
     OutboxRecord,
     SelectedMewsRecord,
     ShadowBatchRecord,
+    StateRecord,
     V20EntryDeadlineExceeded,
     V20LeadershipLost,
     V20MinuteBarIntegrityConflict,
@@ -71,10 +72,12 @@ from src.strategy.v20.models import (
     V20_FEISHU_FORMATTER_PROFILE,
     V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
     V20_V16_SNAPSHOT_SCHEMA,
+    HealthStatus,
     MewsSnapshot,
     MinuteBar,
     ModelLeg,
     ReferenceStatus,
+    deserialize_health_snapshot,
 )
 from src.strategy.v20.runtime_config import (
     V20ConfigError,
@@ -114,6 +117,9 @@ OUTBOX_RECOVERY_TICK_SECONDS = 2.0
 OUTBOX_RECOVERY_LANE_TIMEOUT_SECONDS = 1.5
 STATUS_SNAPSHOT_MAX_AGE_SECONDS = OUTBOX_RECOVERY_TICK_SECONDS * 3.0 + 1.0
 MANUAL_TRIGGER_DECISION_LOCK_TIMEOUT_SECONDS = 15.0
+LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS = 180.0
+LATE_0939_REPLAY_RETRY_SECONDS = 900.0
+LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS = 2
 V20_RUNTIME_LANE_COUNT = 5
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 
@@ -277,6 +283,9 @@ class _DayContext:
     last_exit_poll_at: datetime | None = None
     last_phase: str = "WAITING"
     last_entry_failure_detail: str | None = None
+    late_0939_replay_last_attempt_at: datetime | None = None
+    late_0939_replay_automatic_attempts: int = 0
+    late_0939_replay_completed: bool = False
 
 
 @dataclass
@@ -696,11 +705,80 @@ def _bootstrap_bundle(
     )
 
 
+def _late_0939_replay_body(
+    *,
+    official_status: EntryStatus,
+    replay_semantic: Mapping[str, Any],
+) -> str:
+    """Render a retrospective result that can never be mistaken for a buy notice."""
+
+    def percent(value: object) -> str:
+        return f"{float(value):.0%}" if isinstance(value, (int, float)) else "-"
+
+    r7 = replay_semantic.get("rolling7_r7")
+    r7_text = f"{float(r7):.2%}" if isinstance(r7, (int, float)) else "-"
+    lines = [
+        "⛔ 已过期不可追买；这不是交易指令，也不会创建模型持仓、退出信号或订单。",
+        "用途: 截止后重拉并截取当日 raw 09:31..09:39，回答策略在该快照上会如何判断。",
+        "口径: RETROSPECTIVE（数据在截止后取得，不宣称当时已按时形成或送达）。",
+        "提示: 消息投递ON_TIME只表示复盘通知及时送达，不表示09:39决策曾按时生成。",
+        (
+            "状态口径: 当前已部署 runtime lineage "
+            f"(bootstrap={replay_semantic.get('bootstrap_mode', '-')})；"
+            "不冒充另一份研究回测或未导入的checkpoint。"
+        ),
+        f"正式实时结果: {official_status.action} | 正式事件: {official_status.event_id}",
+        (
+            f"复盘判断: {replay_semantic.get('replay_action', '-')} | "
+            f"最终倍率: {percent(replay_semantic.get('final_multiplier'))}"
+        ),
+        (
+            f"BASE: {replay_semantic.get('health_state', '-')} / "
+            f"基础倍率 {percent(replay_semantic.get('base_multiplier'))}"
+        ),
+        (
+            f"滚动7: {replay_semantic.get('rolling7_state', '-')} | "
+            f"R7={r7_text} | 亏损批次={replay_semantic.get('rolling7_l7', '-')}"
+        ),
+        (
+            f"极端门G: {replay_semantic.get('g_state', 'NOT_EVALUATED')} | "
+            f"防御倍率 {percent(replay_semantic.get('defense_multiplier'))}"
+        ),
+    ]
+    reasons = replay_semantic.get("reason_codes") or []
+    if reasons:
+        lines.append("原因: " + " / ".join(str(item) for item in reasons))
+    symbols = replay_semantic.get("symbols") or []
+    if isinstance(symbols, list) and symbols:
+        lines.append(f"09:39 V16 复盘票单（{len(symbols)}只）:")
+        for index, item in enumerate(symbols, start=1):
+            if not isinstance(item, Mapping):
+                continue
+            score = item.get("score")
+            price = item.get("snapshot_price")
+            score_text = f"{float(score):.4f}" if isinstance(score, (int, float)) else "-"
+            price_text = f"{float(price):.2f}" if isinstance(price, (int, float)) else "-"
+            boards = item.get("boards") or []
+            board_text = "、".join(str(board) for board in boards) if boards else "-"
+            lines.append(
+                f"{item.get('rank', index)}. {item.get('code', '-')} "
+                f"{item.get('name', '')}  LGB={score_text}  09:39={price_text}  {board_text}"
+            )
+    else:
+        lines.append("09:39 V16 复盘票单: 无")
+    breadth_mode = replay_semantic.get("breadth_replay_mode", "-")
+    lines.append(f"宽度取数: {breadth_mode}")
+    lines.append(f"复盘输入哈希: {replay_semantic.get('v16_snapshot_hash', '-')}")
+    return "\n".join(lines)
+
+
 def _manual_trigger_receipt_body(
     *,
     request_id: str,
     cycle_result: str,
     status: EntryStatus | None,
+    late_replay: Mapping[str, Any] | None = None,
+    late_replay_error: str | None = None,
 ) -> str:
     """Render a stable, explicitly non-actionable deployment receipt."""
 
@@ -758,6 +836,19 @@ def _manual_trigger_receipt_body(
             )
     else:
         lines.append("正式冻结 V16 票单: 无")
+    if late_replay is not None:
+        lines.extend(
+            [
+                "截止后09:39复盘: 已完成（独立审计事件，已过期不可追买）",
+                (
+                    f"复盘判断: {late_replay.get('replay_action', '-')} / "
+                    f"最终倍率 {float(late_replay.get('final_multiplier', 0.0)):.0%}"
+                ),
+                f"复盘事件: {late_replay.get('event_id', '-')}",
+            ]
+        )
+    elif late_replay_error is not None:
+        lines.append(f"截止后09:39复盘: 本次未完成（{late_replay_error}）")
     lines.append("以上仅为正式持久化结果的只读验收副本；人工回执本身不是交易指令。")
     return "\n".join(lines)
 
@@ -820,6 +911,29 @@ def _manual_trigger_response(
         date.fromisoformat(str(semantic["event_trade_date"]))
     except (KeyError, ValueError) as exc:
         raise V20SemanticConflict("manual trigger event has an invalid trade date") from exc
+    replay_available = semantic.get("late_0939_replay_available", False)
+    if not isinstance(replay_available, bool):
+        raise V20SemanticConflict("manual trigger event has an invalid replay flag")
+    replay_fields = (
+        semantic.get("late_0939_replay_event_id"),
+        semantic.get("late_0939_replay_action"),
+    )
+    if replay_available and any(not isinstance(value, str) or not value for value in replay_fields):
+        raise V20SemanticConflict("manual trigger event has an invalid replay binding")
+    if replay_available:
+        replay_multiplier = semantic.get("late_0939_replay_multiplier")
+        if (
+            isinstance(replay_multiplier, bool)
+            or not isinstance(replay_multiplier, (int, float))
+            or not math.isfinite(float(replay_multiplier))
+            or not 0 <= float(replay_multiplier) <= 1
+        ):
+            raise V20SemanticConflict("manual trigger event has an invalid replay multiplier")
+    elif (
+        any(value is not None for value in replay_fields)
+        or semantic.get("late_0939_replay_multiplier") is not None
+    ):
+        raise V20SemanticConflict("manual trigger event has inconsistent replay fields")
     return {
         "accepted": True,
         "created": created,
@@ -832,6 +946,11 @@ def _manual_trigger_response(
         "entry_event_id": semantic.get("entry_event_id"),
         "official_state_changed": bool(semantic["official_state_changed"]),
         "manual_notice_actionable": False,
+        "late_0939_replay_available": replay_available,
+        "late_0939_replay_event_id": semantic.get("late_0939_replay_event_id"),
+        "late_0939_replay_action": semantic.get("late_0939_replay_action"),
+        "late_0939_replay_multiplier": semantic.get("late_0939_replay_multiplier"),
+        "late_0939_replay_error": semantic.get("late_0939_replay_error"),
         "sealed": record.payload is not None,
         "delivery_status": record.delivery_status,
         "feishu_delivery_confirmed": record.delivery_status == "SENT",
@@ -910,6 +1029,8 @@ class V20Service:
         self._tasks: list[asyncio.Task[Any]] = []
         self._decision_cycle_lock = asyncio.Lock()
         self._manual_trigger_lock = asyncio.Lock()
+        self._late_0939_replay_lock = asyncio.Lock()
+        self._late_0939_replay_task: asyncio.Task[Any] | None = None
         self._live_exit_lock = asyncio.Lock()
         self._exit_context: _DayContext | None = None
         self._stale_exit_context: _DayContext | None = None
@@ -1243,6 +1364,9 @@ class V20Service:
     async def stop(self) -> None:
         self._stop_event.set()
         tasks, self._tasks = self._tasks, []
+        late_replay_task, self._late_0939_replay_task = self._late_0939_replay_task, None
+        if late_replay_task is not None:
+            tasks.append(late_replay_task)
         for task in tasks:
             task.cancel()
         primary_error: BaseException | None = None
@@ -1598,6 +1722,36 @@ class V20Service:
             context = (
                 self._context if self._context and self._context.trade_date == trade_date else None
             )
+            late_replay_record: OutboxRecord | None = None
+            late_replay_error: str | None = None
+            if (
+                wall >= self.config.clock.publish_deadline
+                and status_after is not None
+                and status_after.action == "INPUT_INVALID"
+            ):
+                try:
+                    replay_context = context
+                    if replay_context is None or trade_date not in replay_context.calendar:
+                        calendar = await self._load_trade_calendar(trade_date)
+                        if trade_date not in calendar:
+                            raise V20RepositoryError(
+                                "late 09:39 replay date is not an exchange session"
+                            )
+                        replay_context = _DayContext(
+                            trade_date=trade_date,
+                            calendar=calendar,
+                            entry_status=status_after,
+                            last_phase="DECISION_COMMITTED",
+                        )
+                    late_replay_record = await self._ensure_late_0939_replay(
+                        replay_context,
+                        current,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    late_replay_error = f"{type(exc).__name__}: {exc}"
+                    logger.exception("V20 manual late 09:39 replay failed")
             if status_after is not None:
                 cycle_result = "DECISION_COMMITTED" if status_before is None else "ALREADY_TERMINAL"
             elif context is not None and context.last_phase == "NON_TRADING_DAY":
@@ -1610,12 +1764,17 @@ class V20Service:
                 cycle_result = context.last_phase if context is not None else "DECISION_PENDING"
             else:
                 cycle_result = "CUTOFF_WITHOUT_DURABLE_DECISION"
+            if late_replay_record is not None:
+                cycle_result = "LATE_0939_REPLAY_READY"
 
             official_state_changed = status_before is None and status_after is not None
+            late_replay = late_replay_record.semantic if late_replay_record is not None else None
             message = _manual_trigger_receipt_body(
                 request_id=request_id,
                 cycle_result=cycle_result,
                 status=status_after,
+                late_replay=late_replay,
+                late_replay_error=late_replay_error,
             )
             semantic = {
                 "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
@@ -1638,6 +1797,17 @@ class V20Service:
                     status_after.semantic_content_hash if status_after is not None else None
                 ),
                 "official_state_changed": official_state_changed,
+                "late_0939_replay_available": late_replay is not None,
+                "late_0939_replay_event_id": (
+                    late_replay_record.event_id if late_replay_record is not None else None
+                ),
+                "late_0939_replay_action": (
+                    late_replay.get("replay_action") if late_replay is not None else None
+                ),
+                "late_0939_replay_multiplier": (
+                    late_replay.get("final_multiplier") if late_replay is not None else None
+                ),
+                "late_0939_replay_error": late_replay_error,
                 "non_actionable": True,
                 "message": message,
             }
@@ -1854,6 +2024,7 @@ class V20Service:
                 "REFERENCE_LOCK_FAILED",
                 self._run_reference_cycle(context, current),
             )
+            self._schedule_late_0939_replay(context, current)
             await asyncio.gather(*exit_tasks)
         finally:
             for task in exit_tasks:
@@ -2757,6 +2928,628 @@ class V20Service:
             for row in invalid_or_pending
         ]
         return health, rolling, gaps
+
+    def _late_0939_replay_event_id(
+        self,
+        trade_date: date,
+        *,
+        official_entry_event_id: str,
+    ) -> str:
+        return named_hash(
+            "V20_LATE_0939_REPLAY_EVENT_ID_V1",
+            {
+                "route_id": self.config.route_id,
+                "official_stream_id": self.config.official_stream_id,
+                "lineage_id": self.config.state_lineage_id,
+                "config_hash": self.config.config_hash,
+                "trade_date": trade_date.isoformat(),
+                "official_entry_event_id": official_entry_event_id,
+            },
+        )
+
+    def _verify_late_0939_replay_record(
+        self,
+        record: OutboxRecord,
+        *,
+        trade_date: date,
+        official_entry_event_id: str,
+    ) -> None:
+        semantic = record.semantic
+        expected = {
+            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": record.event_id,
+            "strategy_version": self.config.strategy_version,
+            "config_hash": self.config.config_hash,
+            "deployment_mode": self.config.deployment_mode,
+            "official_stream_id": self.config.official_stream_id,
+            "state_lineage_id": self.config.state_lineage_id,
+            "alert_code": "LATE_0939_REPLAY_RESULT",
+            "delivery_priority_class": "OPERATOR_NOTIFICATION",
+            "event_trade_date": trade_date.isoformat(),
+            "replay_kind": "RETROSPECTIVE_POST_CUTOFF",
+            "non_actionable": True,
+        }
+        if (
+            record.event_type != "DATA_ALERT"
+            or record.event_id
+            != self._late_0939_replay_event_id(
+                trade_date,
+                official_entry_event_id=official_entry_event_id,
+            )
+            or (
+                record.route_id,
+                record.official_stream_id,
+                record.lineage_id,
+            )
+            != (
+                self.config.route_id,
+                self.config.official_stream_id,
+                self.config.state_lineage_id,
+            )
+            or any(semantic.get(key) != value for key, value in expected.items())
+        ):
+            raise V20SemanticConflict("late 09:39 replay event has incompatible semantics")
+        if semantic.get("official_entry_action") != "INPUT_INVALID":
+            raise V20SemanticConflict("late 09:39 replay is not bound to a failed live slot")
+        if semantic.get("official_entry_event_id") != official_entry_event_id:
+            raise V20SemanticConflict("late 09:39 replay official event binding is invalid")
+        action = semantic.get("replay_action")
+        multiplier = semantic.get("final_multiplier")
+        if action not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
+            raise V20SemanticConflict("late 09:39 replay action is invalid")
+        if (
+            isinstance(multiplier, bool)
+            or not isinstance(multiplier, (int, float))
+            or not math.isfinite(float(multiplier))
+            or not 0 <= float(multiplier) <= 1
+            or (action == "ENTER") != (float(multiplier) > 0)
+        ):
+            raise V20SemanticConflict("late 09:39 replay multiplier is invalid")
+        if not isinstance(semantic.get("symbols"), list):
+            raise V20SemanticConflict("late 09:39 replay symbols are invalid")
+
+    @staticmethod
+    def _policy_inputs_from_failed_status(
+        status: EntryStatus,
+    ) -> tuple[list[CompletedHealth], list[CompletedRolling], list[ActiveRollingGap]]:
+        raw = status.snapshot.get("policy_inputs")
+        if not isinstance(raw, Mapping) or raw.get("schema_version") != (
+            "v20-policy-input-snapshot/v1"
+        ):
+            raise V20SemanticConflict("failed slot lacks frozen V20 policy inputs")
+        if set(raw) != {
+            "schema_version",
+            "completed_health",
+            "completed_rolling",
+            "maturity_gaps",
+        } or any(
+            not isinstance(raw.get(field), list)
+            for field in ("completed_health", "completed_rolling", "maturity_gaps")
+        ):
+            raise V20SemanticConflict("failed slot policy input field set is malformed")
+        frozen_policy_hash = status.snapshot.get("policy_input_hash")
+        if (
+            not isinstance(frozen_policy_hash, str)
+            or sha256_json(raw) != frozen_policy_hash
+            or frozen_policy_hash != status.semantic.get("policy_input_hash")
+        ):
+            raise V20SemanticConflict("failed slot policy input hash mismatch")
+        if status.snapshot.get(
+            "trade_date"
+        ) != status.trade_date.isoformat() or status.snapshot.get(
+            "state_before_hash"
+        ) != status.semantic.get("state_before_hash"):
+            raise V20SemanticConflict("failed slot snapshot/semantic binding mismatch")
+        try:
+            health: list[CompletedHealth] = []
+            for item in raw["completed_health"]:
+                if not isinstance(item, Mapping) or set(item) != {
+                    "batch_id",
+                    "signal_date",
+                    "t2_date",
+                    "relative_return",
+                    "valid",
+                    "invalid_reason",
+                }:
+                    raise ValueError("health field set")
+                if type(item["valid"]) is not bool:
+                    raise ValueError("health valid flag")
+                signal_date = date.fromisoformat(str(item["signal_date"]))
+                t2_date = date.fromisoformat(str(item["t2_date"]))
+                relative_return = item["relative_return"]
+                if relative_return is not None:
+                    if isinstance(relative_return, bool):
+                        raise ValueError("health return")
+                    relative_return = float(relative_return)
+                    if not math.isfinite(relative_return):
+                        raise ValueError("health return")
+                if bool(item["valid"]) != (relative_return is not None):
+                    raise ValueError("health validity/return")
+                invalid_reason = item["invalid_reason"]
+                if invalid_reason is not None and (
+                    not isinstance(invalid_reason, str) or not invalid_reason
+                ):
+                    raise ValueError("health invalid reason")
+                if not isinstance(item["batch_id"], str) or not item["batch_id"]:
+                    raise ValueError("health batch id")
+                if not signal_date < t2_date < status.trade_date:
+                    raise ValueError("health date order")
+                health.append(
+                    CompletedHealth(
+                        batch_id=item["batch_id"],
+                        signal_date=signal_date,
+                        t2_date=t2_date,
+                        relative_return=relative_return,
+                        valid=item["valid"],
+                        invalid_reason=invalid_reason,
+                    )
+                )
+
+            rolling: list[CompletedRolling] = []
+            for item in raw["completed_rolling"]:
+                if not isinstance(item, Mapping) or set(item) != {
+                    "batch_id",
+                    "signal_date",
+                    "t2_date",
+                    "batch_return",
+                }:
+                    raise ValueError("rolling field set")
+                if not isinstance(item["batch_id"], str) or not item["batch_id"]:
+                    raise ValueError("rolling batch id")
+                if isinstance(item["batch_return"], bool):
+                    raise ValueError("rolling return")
+                signal_date = date.fromisoformat(str(item["signal_date"]))
+                t2_date = date.fromisoformat(str(item["t2_date"]))
+                batch_return = float(item["batch_return"])
+                if not math.isfinite(batch_return) or not signal_date < t2_date < status.trade_date:
+                    raise ValueError("rolling value/date")
+                rolling.append(
+                    CompletedRolling(
+                        batch_id=item["batch_id"],
+                        signal_date=signal_date,
+                        t2_date=t2_date,
+                        batch_return=batch_return,
+                    )
+                )
+
+            gaps: list[ActiveRollingGap] = []
+            for item in raw["maturity_gaps"]:
+                if not isinstance(item, Mapping) or set(item) != {
+                    "gap_id",
+                    "signal_date",
+                    "maturity_date",
+                    "closed",
+                    "aged_out",
+                }:
+                    raise ValueError("gap field set")
+                if (
+                    not isinstance(item["gap_id"], str)
+                    or not item["gap_id"]
+                    or type(item["closed"]) is not bool
+                    or type(item["aged_out"]) is not bool
+                ):
+                    raise ValueError("gap identity/flags")
+                signal_date = date.fromisoformat(str(item["signal_date"]))
+                maturity_date = date.fromisoformat(str(item["maturity_date"]))
+                if not signal_date < maturity_date <= status.trade_date:
+                    raise ValueError("gap date order")
+                gaps.append(
+                    ActiveRollingGap(
+                        gap_id=item["gap_id"],
+                        signal_date=signal_date,
+                        maturity_date=maturity_date,
+                        closed=item["closed"],
+                        aged_out=item["aged_out"],
+                    )
+                )
+            if len({item.batch_id for item in health}) != len(health):
+                raise ValueError("duplicate health batch")
+            if len({item.batch_id for item in rolling}) != len(rolling):
+                raise ValueError("duplicate rolling batch")
+            if len({item.gap_id for item in gaps}) != len(gaps):
+                raise ValueError("duplicate gap")
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise V20SemanticConflict("failed slot policy inputs are malformed") from exc
+        return health, rolling, gaps
+
+    async def _build_late_0939_replay_semantic(
+        self,
+        context: _DayContext,
+        now: datetime,
+        *,
+        replay_event_id: str,
+    ) -> Mapping[str, Any]:
+        """Recompute the strategy in memory from a post-cutoff exact-09:39 pull.
+
+        The official failed slot has already advanced the state ledger.  Health
+        observations are watermark-idempotent, and the failed slot's own gap is
+        not active on D0, but this remains a retrospective calculation.  The
+        result deliberately exposes no synthetic decision/model identifiers.
+        """
+
+        status = context.entry_status
+        if status is None:
+            status = await self._repository.get_entry_status(
+                self.config.official_stream_id,
+                context.trade_date,
+            )
+        if status is None or status.action != "INPUT_INVALID":
+            raise V20StateConflict("late 09:39 replay requires today's INPUT_INVALID slot")
+        self._verify_entry_binding(status)
+        if now < _local(context.trade_date, self.config.clock.publish_deadline):
+            raise V20StateConflict("late 09:39 replay cannot run before the live cutoff")
+        if (
+            status.snapshot.get("state_semantics_hash") != self.config.state_semantics_hash
+            or status.semantic.get("state_semantics_hash") != self.config.state_semantics_hash
+        ):
+            raise V20SemanticConflict("failed slot state semantics differ from active V20")
+
+        state = await self._repository.load_state(self.config.state_lineage_id)
+        if state.state_hash != status.semantic.get("state_after_hash"):
+            raise V20StateConflict("official state has moved beyond the failed replay slot")
+        health_snapshot = deserialize_health_snapshot(state.payload["health"])
+
+        prewarmed = context.prewarmed
+        if prewarmed is None:
+            prewarmed = await self._scan_pipeline.prewarm(
+                context.trade_date,
+                calendar=context.calendar,
+            )
+        if prewarmed.trade_date != context.trade_date:
+            raise V20SemanticConflict("late replay prewarm belongs to another trade date")
+        self._verify_prewarm_dependencies(prewarmed)
+
+        breadth_required = health_snapshot.status not in {
+            HealthStatus.WARMUP,
+            HealthStatus.HEALTHY,
+        }
+        desired_codes = (
+            prewarmed.required_minute_codes if breadth_required else prewarmed.universe_codes
+        )
+        required_labels = tuple(f"09:{minute:02d}" for minute in range(31, 40))
+
+        async def load_persisted_early() -> tuple[
+            list[Any], V20EarlyBarCollector, V20EarlyBarCollector
+        ]:
+            records = list(
+                await self._repository.list_raw_minute_bar_records(
+                    desired_codes,
+                    trade_date=context.trade_date,
+                    end_labels=required_labels,
+                )
+            )
+            universe = V20EarlyBarCollector(
+                context.trade_date,
+                prewarmed.universe_codes,
+            )
+            breadth = V20EarlyBarCollector(
+                context.trade_date,
+                prewarmed.breadth_codes,
+            )
+            for record in records:
+                bar = _tushare_minute_from_record(record.payload)
+                if bar.end_label not in required_labels:
+                    raise V20SemanticConflict("persisted late replay row escaped 09:31..09:39")
+                universe.ingest((bar,))
+                if breadth_required and bar.end_label == "09:39":
+                    breadth.ingest((bar,))
+            return records, universe, breadth
+
+        records, universe_collector, breadth_collector = await load_persisted_early()
+        missing_codes = set(universe_collector.incomplete_codes())
+        if breadth_required:
+            missing_codes.update(
+                set(prewarmed.breadth_codes) - set(breadth_collector.codes_with_label("09:39"))
+            )
+        if missing_codes:
+            client = self._scan_state.realtime_client
+            if client is None or not hasattr(client, "batch_get_minute_history"):
+                raise V20RepositoryError("late replay minute-history adapter is unavailable")
+            histories = await client.batch_get_minute_history(sorted(missing_codes))
+            filtered_history = {
+                code: tuple(bar for bar in rows if bar.end_label in required_labels)
+                for code, rows in histories.items()
+            }
+            await self._persist_history(
+                context,
+                filtered_history,
+                observed_at=self._aware_now(),
+            )
+            # Form the replay only from durable rows.  Their database receipt
+            # clock proves they arrived after cutoff instead of pretending the
+            # afternoon vendor response existed at 09:40.
+            records, universe_collector, breadth_collector = await load_persisted_early()
+
+        early = universe_collector.freeze()
+        breadth_early = breadth_collector.freeze_terminal()
+        bundle = await self._scan_pipeline.scan(
+            prewarmed,
+            early,
+            breadth_early=breadth_early,
+            minimum_quote_coverage=self.config.market.minimum_quote_coverage,
+        )
+
+        completed_health, completed_rolling, maturity_gaps = self._policy_inputs_from_failed_status(
+            status
+        )
+        failure_gap_id = named_hash(
+            "V20_OFFICIAL_SHADOW_GAP_ID_V1",
+            {
+                "official_stream_id": self.config.official_stream_id,
+                "trade_date": context.trade_date.isoformat(),
+            },
+        )
+        raw_gaps = state.payload.get("official_rolling_gaps")
+        if not isinstance(raw_gaps, list) or any(
+            not isinstance(item, Mapping) for item in raw_gaps
+        ):
+            raise V20SemanticConflict("official state rolling gaps are malformed")
+        if sum(item.get("gap_id") == failure_gap_id for item in raw_gaps) != 1:
+            raise V20SemanticConflict("failed slot replay gap is missing or duplicated")
+        replay_gaps = [dict(item) for item in raw_gaps if item.get("gap_id") != failure_gap_id]
+        replay_state_payload = {
+            **dict(state.payload),
+            "official_rolling_gaps": replay_gaps,
+        }
+        replay_state = StateRecord(
+            lineage_id=state.lineage_id,
+            revision=state.revision,
+            state_hash=sha256_json(replay_state_payload),
+            payload=replay_state_payload,
+        )
+        prepared = prepare_entry(
+            config=self.config,
+            state=replay_state,
+            bundle=bundle,
+            completed_health=completed_health,
+            completed_rolling=completed_rolling,
+            maturity_gaps=maturity_gaps,
+            artifacts=self._artifacts,
+            calendar=context.calendar,
+            scheduled_exits_today=tuple(status.semantic.get("scheduled_exits_today") or ()),
+        )
+        pure = prepared.commit.semantic
+        if pure.get("action") == "INPUT_INVALID":
+            raise V20SemanticConflict("late replay unexpectedly produced INPUT_INVALID")
+        computed_at = self._aware_now()
+        receipt_times = [
+            item.first_received_at.astimezone(SHANGHAI)
+            for item in records
+            if isinstance(getattr(item, "first_received_at", None), datetime)
+            and item.first_received_at.tzinfo is not None
+            and item.first_received_at.utcoffset() is not None
+        ]
+        if len(receipt_times) != len(records):
+            raise V20SemanticConflict("late replay raw facts lack durable receipt clocks")
+        live_cutoff = _local(context.trade_date, self.config.clock.publish_deadline)
+        semantic: dict[str, Any] = {
+            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": replay_event_id,
+            "strategy_version": self.config.strategy_version,
+            "config_hash": self.config.config_hash,
+            "deployment_mode": self.config.deployment_mode,
+            "official_stream_id": self.config.official_stream_id,
+            "state_lineage_id": self.config.state_lineage_id,
+            "alert_code": "LATE_0939_REPLAY_RESULT",
+            "delivery_priority_class": "OPERATOR_NOTIFICATION",
+            "event_trade_date": context.trade_date.isoformat(),
+            "replay_kind": "RETROSPECTIVE_POST_CUTOFF",
+            "non_actionable": True,
+            "official_entry_action": status.action,
+            "official_entry_event_id": status.event_id,
+            "replay_action": pure["action"],
+            "final_multiplier": pure["final_multiplier"],
+            "base_multiplier": pure["base_multiplier"],
+            "defense_multiplier": pure["defense_multiplier"],
+            "health_state": pure["health_state"],
+            "rolling7_state": pure["rolling7_state"],
+            "rolling7_r7": pure["rolling7_r7"],
+            "rolling7_l7": pure["rolling7_l7"],
+            "g_state": pure["g_state"],
+            "g_max_component_size": pure["g_max_component_size"],
+            "g_amount_below_q25_count": pure["g_amount_below_q25_count"],
+            "reason_codes": list(pure["reason_codes"]),
+            "symbols": list(pure["symbols"]),
+            "last_complete_bar": pure["last_complete_bar"],
+            "v16_snapshot_hash": bundle.snapshot_hash,
+            "early_market_source_hash": early.source_hash,
+            "policy_input_hash": status.semantic["policy_input_hash"],
+            "requested_at": now.isoformat(),
+            "retrieved_at": computed_at.isoformat(),
+            "computed_at": computed_at.isoformat(),
+            "data_cutoff": "09:39",
+            "data_receipt_timeliness": "POST_CUTOFF",
+            "raw_fact_n": len(records),
+            "raw_first_received_at": (min(receipt_times).isoformat() if receipt_times else None),
+            "raw_last_received_at": (max(receipt_times).isoformat() if receipt_times else None),
+            "raw_pre_cutoff_n": sum(item < live_cutoff for item in receipt_times),
+            "raw_post_cutoff_n": sum(item >= live_cutoff for item in receipt_times),
+            "breadth_replay_mode": (
+                "EXACT_09:39_FULL_MAIN_BOARD"
+                if breadth_required
+                else "SKIPPED_NOT_USED_BY_BASE_WARMUP_OR_HEALTHY"
+            ),
+            "breadth_valid_n": bundle.breadth_valid_n if breadth_required else None,
+            "breadth_down_n": bundle.breadth_down_n if breadth_required else None,
+            "state_reconstruction_profile": (
+                "POST_TERMINAL_STATE_MINUS_D0_FAILURE_GAP_WATERMARK_IDEMPOTENT_V1"
+            ),
+            "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE",
+            "bootstrap_mode": self.config.bootstrap_mode,
+            "pit_limitations": [
+                "RAW_MINUTE_ROWS_RECEIVED_OR_REUSED_AFTER_LIVE_CUTOFF",
+                "CURRENT_FUNDAMENTAL_NAME_AND_ST_METADATA_MAY_REFLECT_LATER_SAME_DAY_STATE",
+                "MEWS_IS_NOT_A_09:39_ENTRY_INPUT",
+            ],
+        }
+        semantic["message"] = _late_0939_replay_body(
+            official_status=status,
+            replay_semantic=semantic,
+        )
+        return semantic
+
+    async def _ensure_late_0939_replay(
+        self,
+        context: _DayContext,
+        now: datetime,
+    ) -> OutboxRecord:
+        status = context.entry_status
+        if status is None:
+            status = await self._repository.get_entry_status(
+                self.config.official_stream_id,
+                context.trade_date,
+            )
+        if status is None or status.action != "INPUT_INVALID":
+            raise V20StateConflict("late 09:39 replay requires today's INPUT_INVALID slot")
+        self._verify_entry_binding(status)
+        replay_event_id = self._late_0939_replay_event_id(
+            context.trade_date,
+            official_entry_event_id=status.event_id,
+        )
+        existing = await self._repository.get_outbox_event(
+            replay_event_id,
+            route_id=self.config.route_id,
+            **self._ledger_scope,
+        )
+        if existing is not None:
+            self._verify_late_0939_replay_record(
+                existing,
+                trade_date=context.trade_date,
+                official_entry_event_id=status.event_id,
+            )
+            if existing.payload is None:
+                await self._repository.assert_runtime_leader()
+                existing = await self._repository.seal_event(
+                    replay_event_id,
+                    seal_v20_payload,
+                )
+            context.late_0939_replay_completed = True
+            return existing
+
+        try:
+            await asyncio.wait_for(
+                self._late_0939_replay_lock.acquire(),
+                timeout=LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise V20StateConflict("late 09:39 replay lane is busy") from exc
+        try:
+            existing = await self._repository.get_outbox_event(
+                replay_event_id,
+                route_id=self.config.route_id,
+                **self._ledger_scope,
+            )
+            if existing is not None:
+                self._verify_late_0939_replay_record(
+                    existing,
+                    trade_date=context.trade_date,
+                    official_entry_event_id=status.event_id,
+                )
+                if existing.payload is None:
+                    await self._repository.assert_runtime_leader()
+                    existing = await self._repository.seal_event(
+                        replay_event_id,
+                        seal_v20_payload,
+                    )
+                context.late_0939_replay_completed = True
+                return existing
+
+            semantic = await asyncio.wait_for(
+                self._build_late_0939_replay_semantic(
+                    context,
+                    now,
+                    replay_event_id=replay_event_id,
+                ),
+                timeout=LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS,
+            )
+            semantic_hash = sha256_json(semantic)
+            await self._repository.assert_runtime_leader()
+            await self._repository.enqueue_alert(
+                replay_event_id,
+                self.config.route_id,
+                dict(semantic),
+                semantic_hash,
+                **self._ledger_scope,
+            )
+            await self._repository.assert_runtime_leader()
+            sealed = await self._repository.seal_event(
+                replay_event_id,
+                seal_v20_payload,
+            )
+            self._verify_late_0939_replay_record(
+                sealed,
+                trade_date=context.trade_date,
+                official_entry_event_id=status.event_id,
+            )
+            context.late_0939_replay_completed = True
+            return sealed
+        finally:
+            self._late_0939_replay_lock.release()
+
+    async def _maybe_run_late_0939_replay(
+        self,
+        context: _DayContext,
+        now: datetime,
+    ) -> None:
+        status = context.entry_status
+        if (
+            now.timetz().replace(tzinfo=None) < self.config.clock.publish_deadline
+            or status is None
+            or status.action != "INPUT_INVALID"
+            or context.late_0939_replay_completed
+        ):
+            return
+        previous = context.late_0939_replay_last_attempt_at
+        if (
+            context.late_0939_replay_automatic_attempts >= LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS
+            or (
+                previous is not None
+                and (now - previous).total_seconds() < LATE_0939_REPLAY_RETRY_SECONDS
+            )
+        ):
+            return
+        context.late_0939_replay_last_attempt_at = now
+        context.late_0939_replay_automatic_attempts += 1
+        try:
+            await self._ensure_late_0939_replay(context, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # This lane is retrospective and must never degrade live entry/exit
+            # health.  It retries with a bounded cadence and a manual trigger
+            # can request an immediate retry.
+            logger.exception("V20 automatic late 09:39 replay failed; will retry")
+
+    def _schedule_late_0939_replay(
+        self,
+        context: _DayContext,
+        now: datetime,
+    ) -> None:
+        """Start the bounded replay off the five production scheduler lanes."""
+
+        if (
+            now.timetz().replace(tzinfo=None) < self.config.clock.publish_deadline
+            or context.entry_status is None
+            or context.entry_status.action != "INPUT_INVALID"
+            or context.late_0939_replay_completed
+            or context.late_0939_replay_automatic_attempts
+            >= LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS
+            or (
+                context.late_0939_replay_last_attempt_at is not None
+                and (now - context.late_0939_replay_last_attempt_at).total_seconds()
+                < LATE_0939_REPLAY_RETRY_SECONDS
+            )
+        ):
+            return
+        current = self._late_0939_replay_task
+        if current is not None and not current.done():
+            return
+        self._late_0939_replay_task = asyncio.create_task(
+            self._maybe_run_late_0939_replay(context, now),
+            name=f"v20-late-0939-replay-{context.trade_date.isoformat()}",
+        )
 
     async def _run_entry_collection_cycle(
         self,

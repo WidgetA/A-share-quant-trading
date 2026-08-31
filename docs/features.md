@@ -39,6 +39,7 @@
 | 0.11.0 | 2026-08-31 | - | STR-006: Add the default-disabled V20 decision and exit-notification service, reusing the main-branch V16 stock selection with strict point-in-time inputs and no order execution |
 | 0.11.1 | 2026-08-31 | - | STR-006: Add an idempotent V20 manual deployment trigger with a durable non-actionable Feishu receipt |
 | 0.11.2 | 2026-08-31 | - | STR-006: Embed V20 forward-shadow in the existing main/V16 runtime, reusing deployed DB, Tushare, and Feishu infrastructure while preserving an isolated ledger/outbox and notification-only boundary |
+| 0.11.3 | 2026-08-31 | - | STR-006: Add a durable, non-actionable exact-09:39 retrospective replay when a late deployment has already failed the official entry slot |
 
 ---
 
@@ -912,9 +913,13 @@ or submits orders.
   sealed; 202 is not proof of Feishu delivery.
 - Never let the manual trigger accept a request body, caller clock, trade date, or force flag.
   Require a healthy running service and the current PostgreSQL leader. Before 09:40 it may only
-  accelerate the same serialized decision lane; at or after 09:40 it is read-only against the
-  official state and must never recompute a decision from late data. Its own Feishu receipt is
-  always explicitly marked as a non-trading instruction.
+  accelerate the same serialized decision lane. At or after 09:40 the official state remains
+  immutable; when that slot is `INPUT_INVALID` because the live cutoff was missed, allow one
+  separately identified retrospective exact-09:39 replay. Persist raw bars with their true late
+  receipt clocks, reuse the failed slot's frozen policy inputs, and mark the replay expired and
+  non-actionable. It must never create or alter official decisions, shadow batches, model legs,
+  MEWS selections, exits, orders, or brokerage state. Its own Feishu receipt is always explicitly
+  marked as a non-trading instruction.
 - Keep fees and slippage at zero in strategy semantics. V20 reports relative batch multipliers and
   stock lists, never assumed capital or share quantities.
 - Keep checked-in YAML disabled (`V20_ENABLED=false`, `forward_shadow`) so it can never activate
