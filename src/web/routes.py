@@ -38,8 +38,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 from collections import defaultdict
+from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -54,6 +58,130 @@ if TYPE_CHECKING:
     from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
+
+_V20_PUBLIC_HEALTH_TIMEOUT_SECONDS = 0.25
+_V20_PUBLIC_LANE_ERROR_PREFIXES: dict[str, tuple[str, ...]] = {
+    "live_exit": (
+        "LEADERSHIP_LOST",
+        "LIVE_EXIT_CYCLE_FAILED",
+        "LIVE_EXIT_CYCLE_TIMEOUT",
+        "LIVE_EXIT_SCHEDULER_FAILED",
+    ),
+    "publisher": (
+        "LEADERSHIP_LOST",
+        "PUBLISH_FAILED",
+    ),
+}
+
+
+def _v20_public_error_code(lane_name: str, value: object) -> str | None:
+    """Reduce an internal lane error to a stable, non-sensitive category."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return "UNCLASSIFIED_ERROR"
+    detail = value.strip()
+    for prefix in _V20_PUBLIC_LANE_ERROR_PREFIXES.get(lane_name, ()):
+        if detail == prefix or detail.startswith(f"{prefix}:"):
+            return prefix
+    return "UNCLASSIFIED_ERROR"
+
+
+def _v20_public_timestamp(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return value
+
+
+def _v20_public_age(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    return normalized if math.isfinite(normalized) and normalized >= 0 else None
+
+
+def _v20_public_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _v20_public_lane(lane_name: str, value: object) -> dict[str, object]:
+    lane = value if isinstance(value, Mapping) else {}
+    return {
+        "healthy": lane.get("healthy") is True,
+        "last_success_at": _v20_public_timestamp(lane.get("last_success_at")),
+        "success_age_seconds": _v20_public_age(lane.get("success_age_seconds")),
+        "last_error_code": _v20_public_error_code(lane_name, lane.get("last_error")),
+    }
+
+
+def _empty_v20_public_health(error_code: str) -> dict[str, object]:
+    return {
+        "health_summary_available": False,
+        "healthy": False,
+        "running": False,
+        "health_error_code": error_code,
+        "runtime_lanes": {
+            "live_exit": _v20_public_lane("live_exit", None),
+            "publisher": _v20_public_lane("publisher", None),
+        },
+        "outbox": {
+            "pending_delivery_n": None,
+            "leased_n": None,
+            "delivery_error_n": None,
+        },
+    }
+
+
+async def _v20_public_health(service: object | None) -> dict[str, object]:
+    """Read V20's cached status without exposing internal diagnostics or secrets."""
+
+    status = getattr(service, "status", None)
+    if not callable(status):
+        return _empty_v20_public_health("STATUS_UNAVAILABLE")
+    try:
+        raw = await asyncio.wait_for(status(), timeout=_V20_PUBLIC_HEALTH_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # The public host health endpoint must stay available during a V20
+        # diagnostic failure.  Log only the exception class, never its message.
+        logger.warning("V20 cached health summary unavailable (%s)", type(exc).__name__)
+        return _empty_v20_public_health("STATUS_UNAVAILABLE")
+    if not isinstance(raw, Mapping):
+        return _empty_v20_public_health("STATUS_SNAPSHOT_INVALID")
+
+    lanes = raw.get("runtime_lanes")
+    outbox = raw.get("outbox")
+    if not isinstance(lanes, Mapping) or not isinstance(outbox, Mapping):
+        return _empty_v20_public_health("STATUS_SNAPSHOT_INVALID")
+    live_exit = lanes.get("live_exit")
+    publisher = lanes.get("publisher")
+    if not isinstance(live_exit, Mapping) or not isinstance(publisher, Mapping):
+        return _empty_v20_public_health("STATUS_SNAPSHOT_INVALID")
+    return {
+        "health_summary_available": True,
+        "healthy": raw.get("healthy") is True,
+        "running": raw.get("running") is True,
+        "health_error_code": None,
+        "runtime_lanes": {
+            "live_exit": _v20_public_lane("live_exit", live_exit),
+            "publisher": _v20_public_lane("publisher", publisher),
+        },
+        "outbox": {
+            "pending_delivery_n": _v20_public_count(outbox.get("pending_delivery_n")),
+            "leased_n": _v20_public_count(outbox.get("leased_n")),
+            "delivery_error_n": _v20_public_count(outbox.get("delivery_error_n")),
+        },
+    }
 
 
 class SubmitRequest(BaseModel):
@@ -188,6 +316,7 @@ def create_router() -> APIRouter:
         v20_config = getattr(v20_service, "config", None)
         v20_start_error = getattr(request.app.state, "v20_start_error", None)
         v20_error_type = str(v20_start_error).split(":", 1)[0] if v20_start_error else None
+        v20_health = await _v20_public_health(v20_service)
         return {
             "status": "ok",
             "pending_count": len(store),
@@ -211,6 +340,7 @@ def create_router() -> APIRouter:
                     "v20_start_error_code",
                     None,
                 ),
+                **v20_health,
             },
         }
 

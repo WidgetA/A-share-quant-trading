@@ -312,33 +312,40 @@ status 只返回后台有界采样的内存快照，请求本身不得查询 Pos
 APP 凭据及 outbox 作用域。只有明确的 main 内嵌 profile 会复用 V16 飞书目的地和旧
 `/api/send` relay；专用 V20 profile 仍禁止隐式回退。
 
-人工触发接口只用于部署验收，默认无需任何请求 header。未提供 `Idempotency-Key` 时，
-服务端生成 `manual-<uuid>` 作为本次请求 ID；每次无 header 调用都会得到新的请求 ID，
-并创建一条新的非交易回执。调用方也可以提供 `Idempotency-Key`：此时必须为 8–128
-字符，首字符是字母或数字，其余只允许字母、数字、`.`、`_`、`:`、`-`，并可在超时或
-结果未知时使用同一值安全重试。接口不接受调用方指定的请求 body、时钟、交易日或强制
-参数。09:15 至 09:40 前且当日尚无终态时，它至多加速一次与自动 scheduler 完全相同的
-串行 decision cycle，仍受交易日历、原始 09:39、数据完整性、
-PostgreSQL leader 和 09:40 截止约束。09:40 起，正式策略槽位和正式状态严格只读，绝不
-用晚到行情替换或新建正式决定；若正式槽位因错过截止而是 `INPUT_INVALID`，服务可以另行
-重拉并严格截取 raw 09:31–09:39，产生一个独立、已过期、不可交易的
-`LATE_0939_REPLAY_RESULT`。该复盘只回答“在这份 09:39 截面上会怎样判断”，必须同时显示
-正式失败结果和复盘动作，不得创建 shadow batch、模型持仓、MEWS 选择、卖出信号或订单。
-每次合法请求还会创建一条明确标记为“非交易指令”的 `DATA_ALERT/NOTIFICATION` 验收回执。
+人工触发接口兼作早盘选股触发与部署验收，默认无需任何请求 header。未提供
+`Idempotency-Key` 时，服务端生成 `manual-<uuid>` 作为本次请求 ID；调用方也可以提供
+8–128 字符的 key，并在超时或结果未知时使用同一值安全重试。接口不接受调用方指定的
+request body、时钟、交易日或强制参数。09:15 至 09:40 前且当日尚无终态时，它加速的
+就是自动 scheduler 的同一条串行 official decision cycle，仍受交易日历、原始 09:39、
+数据完整性、PostgreSQL leader 和 09:40 截止约束；飞书只出现正常
+`ENTRY_DECISION` 正文，不再附加人工回执。若结果为 `ENTER`，同一正式提交会照常创建
+模型批次和模型腿，供 D1/D2 盘中退出链使用。
+
+09:40 起，正式策略槽位和正式状态严格只读，绝不用晚到行情替换或新建正式决定。已有
+正常正式结果时，接口把已密封的官方 `payload.message` 原字节复发，不重新渲染、不加
+标题、前缀、后缀或验收说明。若正式槽是 `INPUT_INVALID` 或没有可复发的正常消息，服务
+重拉并严格截取 raw 09:31–09:39，基于持久化事实和失败槽冻结的 policy inputs 只读重算，
+再调用正常早盘 `render_entry_message` 输出。HTTP 必须标记
+`retrospective_expired=true`、`manual_notice_actionable=false`；正文自身仍保留“仅在
+09:40 前有效、迟到不得追买”。盘后两种路径都不得创建或修改正式状态、shadow batch、
+模型腿、MEWS 选择、卖出信号、订单或券商状态。重算失败时只能发送明确的失败报警，
+不能伪造一条不存在的成功早盘消息。
 
 复盘分钟线必须先按数据库真实接收时钟持久化，再由持久化 raw bar 计算；`data_cutoff=09:39`
 不等于这些字节在 09:40 前已经收到。BASE/滚动7读取失败槽内冻结的 `policy_inputs`，不得
-在下午重新查询成熟事实。复盘事件按 route、stream、lineage、config、交易日和正式失败
-事件固定唯一 ID，不随人工请求 ID 改变。当前内嵌 `EMPTY_FORWARD_SHADOW` 从空状态前向
+在下午重新查询成熟事实。复盘/复发事件按 route、stream、lineage、config、请求 ID 和
+来源证据固定唯一 ID；同一 `Idempotency-Key` 重试返回同一事件，不同无 header 请求允许
+再次推送。当前内嵌 `EMPTY_FORWARD_SHADOW` 从空状态前向
 暖机，因此它能重建当日 V16 票单及当前 shadow lineage 的判断，但不能冒充研究回测或
 尚未导入的生产 checkpoint 状态。
 
-接口返回 HTTP 202 表示回执已经进入 durable outbox 并完成密封，不表示飞书已经接收。
-调用方必须用响应中的 `manual_event_id` 检查 outbox 最终进入 `SENT`，并核对目标飞书群。
+接口返回 HTTP 202 表示对应事件已经进入 durable outbox 并完成密封，不表示飞书已经接收。
+调用方必须用响应中的 `entry_event_id` 或 `replay_event_id` 检查 outbox 最终进入 `SENT`，
+并核对目标飞书群。
 如果需要让网络超时或未知结果可以去重重试，调用方应在首次请求前自行生成并携带
 `Idempotency-Key`，随后始终原样重用；在相同 route、stream、lineage 和 config 下，
-相同 key 返回同一事件且不会重新运行扫描或重复创建回执。若不携带 header，服务端会
-在每次调用生成新 key，因此再次无 header 调用会创建新的非交易回执。
+相同 key 返回同一事件且不会重新运行盘后重算或重复创建运输事件。若不携带 header，
+服务端会在每次调用生成新 key，因此盘后再次无 header 调用会创建新的复发事件。
 
 仓库安全默认固定为：
 
@@ -398,8 +405,9 @@ V20_ALLOW_PRODUCTION_PUSH=true
 5. 逐日核对 V16 推荐列表与线上 main V16；同一份通过第 3.1 节 V20 合法性校验的
    输入交给两边时，推荐和排序必须零差异，并单独核对被历史/分钟门槛排除的代码；
 6. 验证影子/正式路由隔离、过期买入消息替换和事件 ID 去重；
-7. 验证人工触发无应用层鉴权、无 header 自动生成请求 ID、可选 key 重试、每次无 header
-   调用产生新非交易回执、09:40 后禁止晚重算，以及 HTTP 202 后 outbox/飞书的最终投递；
+7. 验证人工触发无应用层鉴权、无 header 自动生成请求 ID、可选 key 重试；验证 09:40
+   前只产生正常早盘正文且 `ENTER` 建立模型腿，09:40 后原消息逐字节复发或只读重算，
+   并核对 HTTP 202 后 outbox/飞书的最终投递；
 8. 审核并接受 checkpoint 后，再选择未来交易日人工切换三重开关。
 
 日历验收还必须确认 Tushare `trade_cal` 网络放行、15 秒有界失败、跨年未来至少两个

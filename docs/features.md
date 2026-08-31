@@ -907,20 +907,21 @@ or submits orders.
   dedicated loader instead of silently falling back.
 - Deliberately leave `POST /api/v20/trigger-scan` without application-layer authentication for now
   and allow a headerless default call. When `Idempotency-Key` is absent, generate `manual-<uuid>`;
-  every subsequent headerless call creates a new non-actionable receipt. Accept an optional
+  every subsequent headerless post-cutoff call creates a new replay transport event. Accept an optional
   caller key of 8–128 characters for idempotent timeout retries. Retrying that key in the same
   route/stream/lineage/config scope must return the same event without rerunning the decision cycle
-  or creating a duplicate receipt. Return HTTP 202 only after the receipt is durably queued and
+  or creating a duplicate replay. Return HTTP 202 only after the relevant event is durably queued and
   sealed; 202 is not proof of Feishu delivery.
 - Never let the manual trigger accept a request body, caller clock, trade date, or force flag.
   Require a healthy running service and the current PostgreSQL leader. Before 09:40 it may only
-  accelerate the same serialized decision lane. At or after 09:40 the official state remains
-  immutable; when that slot is `INPUT_INVALID` because the live cutoff was missed, allow one
-  separately identified retrospective exact-09:39 replay. Persist raw bars with their true late
-  receipt clocks, reuse the failed slot's frozen policy inputs, and mark the replay expired and
-  non-actionable. It must never create or alter official decisions, shadow batches, model legs,
-  MEWS selections, exits, orders, or brokerage state. Its own Feishu receipt is always explicitly
-  marked as a non-trading instruction.
+  accelerate the same serialized official decision lane. Its visible output is only the normal
+  `ENTRY_DECISION`; `ENTER` creates the normal model legs for intraday exits. At or after 09:40 the
+  official state remains immutable. If a sealed normal entry exists, resend its `payload.message`
+  byte-for-byte. Otherwise run a separately identified retrospective exact-09:39 reconstruction,
+  persist raw bars with their true late receipt clocks, reuse the failed slot's frozen policy inputs,
+  and render through the normal morning formatter. Mark retrospective responses expired and
+  non-actionable in HTTP metadata. Post-cutoff paths must never create or alter official decisions,
+  shadow batches, model legs, MEWS selections, exits, orders, or brokerage state.
 - Keep fees and slippage at zero in strategy semantics. V20 reports relative batch multipliers and
   stock lists, never assumed capital or share quantities.
 - Keep checked-in YAML disabled (`V20_ENABLED=false`, `forward_shadow`) so it can never activate
@@ -959,7 +960,7 @@ or submits orders.
 - [x] Raw `09:39` entry cutoff and exact 37-session input contract
 - [x] Durable model-lot ledger, checkpoint, and transactional outbox
 - [x] Entry and D1/D2 exit/reminder Feishu notifications
-- [x] Headerless manual trigger, optional idempotent retry, and durable non-actionable receipt
+- [x] Headerless morning trigger, optional idempotent retry, and byte-identical post-cutoff replay
 - [x] Default-disabled shadow/formal safety gates
 - [x] Unit and static validation in the development workspace
 - [ ] Target PostgreSQL, Docker, Tushare, and Feishu shadow acceptance

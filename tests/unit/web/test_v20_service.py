@@ -1353,6 +1353,61 @@ async def test_manual_trigger_inside_window_uses_serialized_official_decision_la
     assert result["official_state_changed"] is True
 
 
+async def test_morning_selection_trigger_uses_only_official_entry_message_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _ManualTriggerRepository()
+    service = _service(monkeypatch, repository)
+    service._clock = lambda: datetime(2026, 8, 31, 9, 39, 5, tzinfo=TZ)
+    tasks = _arm_manual_trigger_runtime(service)
+    decision_calls: list[datetime] = []
+
+    async def commit_official_decision(now: datetime) -> None:
+        assert service._decision_cycle_lock.locked()
+        decision_calls.append(now)
+        status = _rich_entry_status(service.config)
+        repository.entry_status = status
+        payload = {"message": "the automatic entry message"}
+        repository.events[status.event_id] = OutboxRecord(
+            event_id=status.event_id,
+            event_type="ENTRY_DECISION",
+            route_id=service.config.route_id,
+            official_stream_id=service.config.official_stream_id,
+            lineage_id=service.config.state_lineage_id,
+            semantic=status.semantic,
+            semantic_content_hash=status.semantic_content_hash,
+            payload=payload,
+            payload_hash=sha256_json(payload),
+            generated_at=now,
+            commit_marker=101,
+            action_expiry_ts=datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+            delivery_status="PENDING",
+            attempt_count=0,
+        )
+
+    monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", commit_official_decision)
+    try:
+        result = await service.trigger_morning_selection("deploy-20260831-exact")
+    finally:
+        await _disarm_manual_trigger_runtime(service, tasks)
+
+    assert decision_calls == [datetime(2026, 8, 31, 9, 39, 5, tzinfo=TZ)]
+    assert result["cycle_result"] == "DECISION_COMMITTED"
+    assert result["entry_action"] == "ENTER"
+    assert result["exact_automatic_message"] is True
+    assert result["retrospective_expired"] is False
+    assert result["symbols"] == [
+        {
+            "rank": 1,
+            "code": "000001",
+            "name": "平安银行",
+            "snapshot_price": 10.26,
+        }
+    ]
+    assert repository.enqueue_calls == 0
+    assert set(repository.events) == {repository.entry_status.event_id}
+
+
 async def test_manual_trigger_rejects_failed_runtime_before_any_side_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

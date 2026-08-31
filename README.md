@@ -101,23 +101,29 @@ Explicit `production_push` still runs only through `scripts/v20_main.py` (or the
 Docker `v20` target), preserving the strict isolated boundary. The normal main
 host never turns an implicit embedded profile into `production_push`.
 
-The fourth endpoint, `POST /api/v20/trigger-scan`, is a manual deployment check.
-It intentionally has no application-layer authentication for now and needs no
-request header by default. If `Idempotency-Key` is omitted, the server assigns
-`manual-<uuid>`; each additional headerless call creates a new non-actionable
-verification receipt. A caller may instead supply a valid `Idempotency-Key` and
-reuse it to make timeout retries idempotent. HTTP 202 means that the receipt is
-durably queued, not that Feishu has accepted it. The endpoint never accepts a
-request body, caller time, trade date, or force flag, and at or after 09:40 it
-cannot recompute or replace the frozen decision with late data. Health, leader,
-timing, and concurrency guards remain mandatory. See the runbook for response
-and delivery verification.
+The fourth endpoint, `POST /api/v20/trigger-scan`, is the manual morning-selection
+trigger and deployment check. It intentionally has no application-layer
+authentication for now and needs no request header by default. Before 09:40 it
+runs the same serialized official decision lane as the scheduler: the only
+visible Feishu message is the normal `ENTRY_DECISION`, and an `ENTER` decision
+creates the same model legs used by the intraday exit monitor. At or after 09:40
+official state is immutable. The endpoint either resends an already sealed
+official morning message byte-for-byte, or—when no valid morning message
+exists—performs a read-only exact-09:39 reconstruction and renders it through
+the normal morning formatter. Retrospective responses are explicitly marked
+expired and non-actionable in HTTP metadata and never create model legs or
+orders. If `Idempotency-Key` is omitted, the server assigns `manual-<uuid>`; a
+caller may instead reuse a valid key for idempotent timeout retries. HTTP 202
+means the corresponding outbox event is durably sealed, not that Feishu has
+accepted it. The endpoint never accepts a request body, caller time, trade date,
+or force flag. Health, leader, timing, and concurrency guards remain mandatory.
+See the runbook for response and delivery verification.
 
 Push CI publishes the normal runtime as `latest` and the commit SHA. The existing
 main host's image watcher deploys that image, so embedded V20 follows the same
 update path as V16; there is no second container to configure. Public
-`/api/status` reports only safe V20 startup fields (`configured`, `enabled`,
-`mode`, `started`, `startup_stage`, `retrying`, and sanitized error fields). Embedded startup
+`/api/status` reports safe V20 startup fields plus a strictly sanitized health
+summary for the intraday-exit lane, publisher lane, and outbox counts. Embedded startup
 retries transient dependency failures in the background while V16 stays live. After deployment,
 call the manual trigger
 and verify both its HTTP response and the Feishu receipt. Startup failures also

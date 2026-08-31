@@ -9,7 +9,7 @@ import logging
 import math
 import os
 from collections.abc import Awaitable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
@@ -888,6 +888,8 @@ def _validate_manual_0939_chain_probe(
             "official_state_changed",
             "orders_changed",
             "non_actionable",
+            "retrospective_expired",
+            "visible_message_mode",
             "delivery_priority_class",
         },
         subject="V20 manual 09:39 chain probe",
@@ -896,7 +898,7 @@ def _validate_manual_0939_chain_probe(
         raise ValueError("V20 chain probe event_id does not match outbox event")
     if not isinstance(semantic["manual_request_id"], str) or not semantic["manual_request_id"]:
         raise ValueError("V20 chain probe requires a manual request id")
-    if semantic["probe_profile"] != "CURRENT_DEPLOYED_CODE_EXACT_0939_V1":
+    if semantic["probe_profile"] != "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2":
         raise ValueError("V20 chain probe has an unsupported computation profile")
     if (
         semantic["replay_reused"] is not False
@@ -909,6 +911,7 @@ def _validate_manual_0939_chain_probe(
         semantic["official_state_changed"] is not False
         or semantic["orders_changed"] is not False
         or semantic["non_actionable"] is not True
+        or semantic["retrospective_expired"] is not True
         or semantic["delivery_priority_class"] != "OPERATOR_NOTIFICATION"
     ):
         raise ValueError("V20 chain probe must remain non-actionable and state-preserving")
@@ -975,6 +978,24 @@ def _validate_manual_0939_chain_probe(
             raise ValueError("passing V20 chain probe quote coverage is invalid")
         if semantic["raw_fact_n"] <= 0:
             raise ValueError("passing V20 chain probe requires persisted raw facts")
+        if semantic["visible_message_mode"] != "AUTOMATIC_ENTRY_RENDER":
+            raise ValueError("passing V20 chain probe must use the automatic entry renderer")
+        entry_semantic = semantic.get("entry_render_semantic")
+        if not isinstance(entry_semantic, Mapping):
+            raise ValueError("passing V20 chain probe lacks entry formatter evidence")
+        entry_record = replace(
+            record,
+            event_id=str(entry_semantic.get("event_id", "")),
+            event_type="ENTRY_DECISION",
+            semantic=dict(entry_semantic),
+        )
+        _validate_entry_formatter_semantic(entry_record, entry_semantic)
+        if (
+            entry_semantic.get("action") != action
+            or entry_semantic.get("final_multiplier") != multiplier
+            or entry_semantic.get("symbols") != symbols
+        ):
+            raise ValueError("V20 chain probe entry formatter evidence differs from its result")
     else:
         if semantic["current_version_recomputed"] is not False:
             raise ValueError("a failed V20 chain probe cannot claim completed recomputation")
@@ -987,6 +1008,79 @@ def _validate_manual_0939_chain_probe(
         coverage = semantic["quote_coverage"]
         if coverage is not None and (not _finite_number(coverage) or not 0 <= float(coverage) <= 1):
             raise ValueError("failed V20 chain probe quote coverage is invalid")
+        if semantic["visible_message_mode"] != "FAILURE_ALERT":
+            raise ValueError("failed V20 chain probe must use the failure alert renderer")
+
+
+def _validate_frozen_entry_message_replay(
+    record: OutboxRecord,
+    semantic: Mapping[str, Any],
+) -> None:
+    """Authenticate a byte-for-byte replay of a sealed official entry message."""
+
+    _require_fields(
+        semantic,
+        {
+            "event_id",
+            "manual_request_id",
+            "event_trade_date",
+            "replay_profile",
+            "visible_message_mode",
+            "exact_automatic_message",
+            "retrospective_expired",
+            "source_entry_event_id",
+            "source_entry_action",
+            "source_final_multiplier",
+            "source_semantic_content_hash",
+            "source_payload_hash",
+            "message_sha256",
+            "symbols",
+            "official_state_changed",
+            "orders_changed",
+            "non_actionable",
+            "delivery_priority_class",
+            "message",
+        },
+        subject="V20 frozen morning entry message replay",
+    )
+    if semantic["event_id"] != record.event_id:
+        raise ValueError("V20 frozen morning replay event_id does not match outbox event")
+    if (
+        semantic["replay_profile"] != "FROZEN_OFFICIAL_ENTRY_MESSAGE_V1"
+        or semantic["visible_message_mode"] != "FROZEN_OFFICIAL_PAYLOAD"
+        or semantic["exact_automatic_message"] is not True
+        or semantic["retrospective_expired"] is not True
+        or semantic["official_state_changed"] is not False
+        or semantic["orders_changed"] is not False
+        or semantic["non_actionable"] is not True
+        or semantic["delivery_priority_class"] != "OPERATOR_NOTIFICATION"
+    ):
+        raise ValueError("V20 frozen morning replay must remain exact and non-actionable")
+    message = semantic["message"]
+    if not isinstance(message, str) or not message:
+        raise ValueError("V20 frozen morning replay message is empty")
+    if hashlib.sha256(message.encode("utf-8")).hexdigest() != semantic["message_sha256"]:
+        raise ValueError("V20 frozen morning replay message hash is invalid")
+    for field in ("source_semantic_content_hash", "source_payload_hash"):
+        value = semantic[field]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"V20 frozen morning replay {field} is invalid")
+    if semantic["source_entry_action"] not in {
+        "ENTER",
+        "BLOCK",
+        "NO_SIGNAL",
+        "INPUT_INVALID",
+    }:
+        raise ValueError("V20 frozen morning replay source action is invalid")
+    multiplier = semantic["source_final_multiplier"]
+    if not _finite_number(multiplier) or not 0 <= float(multiplier) <= 1:
+        raise ValueError("V20 frozen morning replay multiplier is invalid")
+    if not isinstance(semantic["symbols"], list):
+        raise ValueError("V20 frozen morning replay symbols must be an array")
 
 
 def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, Any]) -> None:
@@ -1039,6 +1133,8 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
             raise ValueError("V20 DATA_ALERT semantic requires a message")
         if semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT":
             _validate_manual_0939_chain_probe(record, semantic)
+        elif semantic.get("alert_code") == "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY":
+            _validate_frozen_entry_message_replay(record, semantic)
         elif semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT":
             _require_fields(
                 semantic,
@@ -1182,11 +1278,31 @@ def seal_v20_payload(
         record.event_type == "DATA_ALERT"
         and semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT"
     ):
-        message = _render_manual_0939_chain_probe_for_operator(
-            semantic,
-            title_prefix=title_prefix,
-            event_id=record.event_id,
-        )
+        if semantic.get("probe_result") == "PASS":
+            # A passing retrospective probe intentionally shows the exact text
+            # that this production renderer would have emitted in the live
+            # morning path.  Expiry/non-actionability remains transport and
+            # HTTP metadata; no wrapper text may alter the visible comparison.
+            message = render_entry_message(
+                semantic["entry_render_semantic"],
+                generated_at=generated_at,
+                commit_marker=commit_marker,
+                on_time=True,
+            )
+        else:
+            message = _render_manual_0939_chain_probe_for_operator(
+                semantic,
+                title_prefix=title_prefix,
+                event_id=record.event_id,
+            )
+    elif (
+        record.event_type == "DATA_ALERT"
+        and semantic.get("alert_code") == "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
+    ):
+        # The source is an already sealed official ENTRY_DECISION payload.  A
+        # string assignment is the only operation here by design: no title,
+        # warning, timestamp, newline, or renderer pass may change one byte.
+        message = str(semantic["message"])
     elif (
         record.event_type == "DATA_ALERT" and semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT"
     ):

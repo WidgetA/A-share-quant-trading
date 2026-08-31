@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import src.web.app as web_app
+from src.common.v20_feishu import render_entry_message
 from src.data.database.v20_repository import (
     OutboxRecord,
     V20LeadershipLost,
@@ -28,7 +29,11 @@ from src.strategy.v20.models import (
     V20_FEISHU_FORMATTER_PROFILE,
 )
 from src.web.app import create_app
-from src.web.v20_routes import create_v20_router
+from src.web.v20_routes import (
+    _dispatch_manual_trigger,
+    _replay_frozen_entry_message,
+    create_v20_router,
+)
 
 
 class StubV20Service:
@@ -98,6 +103,9 @@ class StubV20Service:
                 "feishu_delivery_confirmed": False,
             }
         )
+
+    async def trigger_morning_selection(self, request_id: str) -> dict[str, Any]:
+        return await self.trigger_manual_scan(request_id)
 
 
 class _FreshProbeRepository:
@@ -215,10 +223,11 @@ class _FreshProbeRepository:
 class FreshProbeV20Service(StubV20Service):
     def __init__(self) -> None:
         super().__init__()
-        self.now = datetime(2026, 9, 1, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.now = datetime(2026, 9, 1, 0, 5, tzinfo=ZoneInfo("Asia/Shanghai"))
         self._context = None
         self._repository = _FreshProbeRepository(self)
         self._manual_trigger_lock = asyncio.Lock()
+        self._decision_cycle_lock = asyncio.Lock()
         self._late_0939_replay_lock = asyncio.Lock()
         self.build_calls: list[tuple[date, str]] = []
         self.ensure_replay_calls = 0
@@ -257,6 +266,21 @@ class FreshProbeV20Service(StubV20Service):
         self.build_calls.append((context.trade_date, replay_event_id))
         if self.probe_error is not None:
             raise self.probe_error
+        symbols = [
+            {
+                "rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "score": 0.81234,
+                "snapshot_price": 10.26,
+                "boards": ["银行"],
+                "best_board": "银行",
+                "is_driver": True,
+                "cci": 88.0,
+                "volume_937": 120000.0,
+                "history_hash": "f" * 64,
+            }
+        ]
         return {
             "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
@@ -272,7 +296,33 @@ class FreshProbeV20Service(StubV20Service):
             "official_entry_event_id": context.entry_status.event_id,
             "replay_action": "ENTER",
             "final_multiplier": 1.0,
-            "symbols": [{"rank": 1, "code": "000001", "name": "平安银行"}],
+            "symbols": symbols,
+            "entry_render_semantic": {
+                "schema_version": "v20-entry-semantic/v2",
+                "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+                "event_id": "hypothetical-entry-event",
+                "deployment_mode": self.config.deployment_mode,
+                "trade_date": context.trade_date.isoformat(),
+                "action": "ENTER",
+                "final_multiplier": 1.0,
+                "base_multiplier": 1.0,
+                "defense_multiplier": 1.0,
+                "health_state": "HEALTHY",
+                "rolling7_state": "NON_BAD",
+                "rolling7_r7": 0.1,
+                "rolling7_l7": 1,
+                "g_state": "NOT_EVALUATED",
+                "reason_codes": [],
+                "last_complete_bar": "09:39",
+                "v16_funnel": {
+                    "step0_universe_count": 100,
+                    "step2_hot_board_count": 1,
+                    "final_candidates": 1,
+                },
+                "v16_board_avg_gains": {"银行": 1.23},
+                "symbols": symbols,
+                "scheduled_exits_today": [],
+            },
             "raw_fact_n": 9,
             "quote_coverage": 1.0,
             "computed_at": now.isoformat(),
@@ -709,9 +759,228 @@ def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay
     assert probe.semantic["orders_changed"] is False
     assert probe.semantic["non_actionable"] is True
     assert probe.payload is not None
-    assert "当前版本早盘链路重算｜✅ 通过" in str(probe.payload["message"])
-    assert "未复用旧回放" in str(probe.payload["message"])
+    assert probe.payload["message"] == render_entry_message(
+        probe.semantic["entry_render_semantic"],
+        generated_at=service.now,
+        commit_marker=101,
+        on_time=True,
+    )
+    assert "当前版本早盘链路重算" not in str(probe.payload["message"])
+    assert result["symbols"] == [
+        {
+            "rank": 1,
+            "code": "000001",
+            "name": "平安银行",
+            "snapshot_price": 10.26,
+        }
+    ]
+    assert result["retrospective_expired"] is True
+    assert result["exact_automatic_message"] is True
     assert repository.events["old-late-replay-event"].payload == {"message": "old replay"}
+
+
+def test_post_cutoff_normal_entry_resends_frozen_message_byte_for_byte() -> None:
+    service = FreshProbeV20Service()
+    repository = service._repository
+    source_message = "[V20][SHADOW] 每日决策 (2026-08-31 09:40)\n原始票单：一字不改 ✅"
+    repository.entry_status.action = "ENTER"
+    repository.entry_status.final_multiplier = 1.0
+    repository.entry_status.semantic = {
+        "symbols": [
+            {
+                "rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "snapshot_price": 10.26,
+            }
+        ]
+    }
+    repository.events[repository.entry_status.event_id] = OutboxRecord(
+        event_id=repository.entry_status.event_id,
+        event_type="ENTRY_DECISION",
+        route_id=service.config.route_id,
+        official_stream_id=service.config.official_stream_id,
+        lineage_id=service.config.state_lineage_id,
+        semantic=repository.entry_status.semantic,
+        semantic_content_hash="1" * 64,
+        payload={"message": source_message},
+        payload_hash="2" * 64,
+        generated_at=service.now,
+        commit_marker=9,
+        action_expiry_ts=None,
+        delivery_status="SENT",
+        attempt_count=1,
+    )
+
+    response = _client(service).post(
+        "/api/v20/trigger-scan",
+        headers={"Idempotency-Key": "replay-frozen-entry-001"},
+    )
+
+    assert response.status_code == 202
+    result = response.json()
+    replay = repository.events[result["replay_event_id"]]
+    assert replay.payload is not None
+    assert replay.payload["message"] == source_message
+    assert str(replay.payload["message"]).encode("utf-8") == source_message.encode("utf-8")
+    assert result["symbols"] == [
+        {
+            "rank": 1,
+            "code": "000001",
+            "name": "平安银行",
+            "snapshot_price": 10.26,
+        }
+    ]
+    assert result["exact_automatic_message"] is True
+    assert result["retrospective_expired"] is True
+    assert service.build_calls == []
+    assert repository.official_write_calls == 0
+
+
+def _install_normal_entry(
+    service: FreshProbeV20Service,
+    *,
+    trade_date: date,
+    event_id: str,
+    message: str,
+) -> Any:
+    semantic = {
+        "symbols": [
+            {
+                "rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "snapshot_price": 10.26,
+            }
+        ]
+    }
+    status = SimpleNamespace(
+        action="ENTER",
+        trade_date=trade_date,
+        event_id=event_id,
+        final_multiplier=1.0,
+        semantic=semantic,
+    )
+    payload = {"message": message}
+    service._repository.events[event_id] = OutboxRecord(
+        event_id=event_id,
+        event_type="ENTRY_DECISION",
+        route_id=service.config.route_id,
+        official_stream_id=service.config.official_stream_id,
+        lineage_id=service.config.state_lineage_id,
+        semantic=semantic,
+        semantic_content_hash="1" * 64,
+        payload=payload,
+        payload_hash=sha256_json(payload),
+        generated_at=service.now,
+        commit_marker=9,
+        action_expiry_ts=None,
+        delivery_status="SENT",
+        attempt_count=1,
+    )
+    return status
+
+
+@pytest.mark.asyncio
+async def test_concurrent_frozen_replay_same_key_enqueues_once_inside_manual_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FreshProbeV20Service()
+    repository = service._repository
+    status = _install_normal_entry(
+        service,
+        trade_date=date(2026, 8, 31),
+        event_id="concurrent-source-entry",
+        message="[V20][SHADOW] 每日决策\n并发时也必须逐字一致",
+    )
+    repository.entry_status = status
+    original_enqueue = repository.enqueue_alert
+    active_enqueues = 0
+    maximum_active_enqueues = 0
+
+    async def slow_enqueue(*args: Any, **kwargs: Any) -> bool:
+        nonlocal active_enqueues, maximum_active_enqueues
+        active_enqueues += 1
+        maximum_active_enqueues = max(maximum_active_enqueues, active_enqueues)
+        try:
+            await asyncio.sleep(0.01)
+            return await original_enqueue(*args, **kwargs)
+        finally:
+            active_enqueues -= 1
+
+    monkeypatch.setattr(repository, "enqueue_alert", slow_enqueue)
+
+    first, second = await asyncio.gather(
+        _replay_frozen_entry_message(service, "same-frozen-request-001", status),
+        _replay_frozen_entry_message(service, "same-frozen-request-001", status),
+    )
+
+    assert sorted((first["created"], second["created"])) == [False, True]
+    assert first["replay_event_id"] == second["replay_event_id"]
+    assert maximum_active_enqueues == 1
+    assert repository.enqueue_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_post_cutoff_current_session_without_terminal_never_replays_prior_day() -> None:
+    service = FreshProbeV20Service()
+    service.now = datetime(2026, 9, 1, 9, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    prior = _install_normal_entry(
+        service,
+        trade_date=date(2026, 8, 31),
+        event_id="prior-day-entry",
+        message="prior day must never be replayed at today's cutoff",
+    )
+    service._repository.entry_status = prior
+
+    with pytest.raises(V20StateConflict, match="refusing prior-day replay"):
+        await _dispatch_manual_trigger(service, "cutoff-no-prior-fallback")
+
+    assert set(service._repository.events) == {"old-late-replay-event", "prior-day-entry"}
+
+
+@pytest.mark.asyncio
+async def test_post_cutoff_waits_for_inflight_current_terminal_before_selecting_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FreshProbeV20Service()
+    service.now = datetime(2026, 9, 1, 9, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    repository = service._repository
+    prior = _install_normal_entry(
+        service,
+        trade_date=date(2026, 8, 31),
+        event_id="race-prior-entry",
+        message="stale prior-day message",
+    )
+    current = _install_normal_entry(
+        service,
+        trade_date=date(2026, 9, 1),
+        event_id="race-current-entry",
+        message="current-day message",
+    )
+    repository.entry_status = current
+    current_visible = False
+
+    async def racing_status(_stream_id: str, trade_date: date) -> Any | None:
+        if trade_date == current.trade_date:
+            return current if current_visible else None
+        return prior if trade_date == prior.trade_date else None
+
+    monkeypatch.setattr(repository, "get_entry_status", racing_status)
+    monkeypatch.setattr(service, "_verify_entry_binding", lambda _status: None)
+    await service._decision_cycle_lock.acquire()
+    pending = asyncio.create_task(_dispatch_manual_trigger(service, "cutoff-inflight-current-001"))
+    await asyncio.sleep(0)
+    current_visible = True
+    service._decision_cycle_lock.release()
+
+    result = await pending
+
+    assert result["source_entry_event_id"] == current.event_id
+    assert result["event_trade_date"] == current.trade_date.isoformat()
+    replay = repository.events[result["replay_event_id"]]
+    assert replay.payload is not None
+    assert replay.payload["message"] == "current-day message"
 
 
 def test_same_request_recomputes_again_after_full_config_hash_changes() -> None:

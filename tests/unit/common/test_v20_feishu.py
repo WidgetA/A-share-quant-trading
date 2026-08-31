@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -459,6 +460,47 @@ def _manual_0939_chain_probe_semantic(
     event_id: str = "manual-chain-probe-event",
     probe_result: str = "PASS",
 ) -> dict:
+    symbols = [
+        {
+            "rank": 1,
+            "code": "000001",
+            "name": "平安银行",
+            "score": 0.81234,
+            "snapshot_price": 10.26,
+            "boards": ["银行"],
+            "best_board": "银行",
+            "is_driver": True,
+            "cci": 88.0,
+            "volume_937": 120000.0,
+            "history_hash": "c" * 64,
+        }
+    ]
+    entry_render_semantic = {
+        "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": "hypothetical-entry-event",
+        "deployment_mode": "forward_shadow",
+        "trade_date": "2026-08-31",
+        "action": "ENTER",
+        "final_multiplier": 1.0,
+        "base_multiplier": 1.0,
+        "defense_multiplier": 1.0,
+        "health_state": "HEALTHY",
+        "rolling7_state": "NON_BAD",
+        "rolling7_r7": 0.1,
+        "rolling7_l7": 1,
+        "g_state": "NOT_EVALUATED",
+        "reason_codes": [],
+        "last_complete_bar": "09:39",
+        "v16_funnel": {
+            "step0_universe_count": 100,
+            "step2_hot_board_count": 1,
+            "final_candidates": 1,
+        },
+        "v16_board_avg_gains": {"银行": 1.23},
+        "symbols": symbols,
+        "scheduled_exits_today": [],
+    }
     semantic = {
         "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
@@ -473,7 +515,7 @@ def _manual_0939_chain_probe_semantic(
         "delivery_priority_class": "OPERATOR_NOTIFICATION",
         "event_trade_date": "2026-08-31",
         "manual_request_id": "deploy-current-build-001",
-        "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_V1",
+        "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2",
         "probe_result": probe_result,
         "current_version_recomputed": True,
         "replay_reused": False,
@@ -485,21 +527,15 @@ def _manual_0939_chain_probe_semantic(
         "v16_count": 1,
         "v20_action": "ENTER",
         "final_multiplier": 1.0,
-        "symbols": [
-            {
-                "rank": 1,
-                "code": "000001",
-                "name": "平安银行",
-                "score": 0.81234,
-                "snapshot_price": 10.26,
-                "boards": ["银行"],
-            }
-        ],
+        "symbols": symbols,
+        "entry_render_semantic": entry_render_semantic,
         "official_entry_action": "INPUT_INVALID",
         "official_entry_event_id": "failed-entry-event",
         "official_state_changed": False,
         "orders_changed": False,
         "non_actionable": True,
+        "retrospective_expired": True,
+        "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
         "computed_at": "2026-08-31T15:30:00+08:00",
         "message": "formatter-owned manual full-chain probe detail",
     }
@@ -514,6 +550,7 @@ def _manual_0939_chain_probe_semantic(
                 "quote_coverage": None,
                 "failure_stage": "V16_SCAN",
                 "failure_reason": "09:39原始行情覆盖不足",
+                "visible_message_mode": "FAILURE_ALERT",
             }
         )
     return semantic
@@ -521,10 +558,11 @@ def _manual_0939_chain_probe_semantic(
 
 def test_manual_0939_chain_probe_pass_message_proves_fresh_current_version_run() -> None:
     semantic = _manual_0939_chain_probe_semantic()
+    generated_at = datetime(2026, 8, 31, 15, 30, tzinfo=TZ)
 
     payload = seal_v20_payload(
         _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
-        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        generated_at,
         21,
         True,
     )
@@ -533,15 +571,15 @@ def test_manual_0939_chain_probe_pass_message_proves_fresh_current_version_run()
     assert payload["timeliness_status"] == "ON_TIME"
     assert "actionable_from" not in payload
     assert "expired_delivery_message" not in payload
-    lines = str(payload["message"]).splitlines()
-    assert lines[0] == "[V20][SHADOW] 当前版本早盘链路重算｜✅ 通过"
-    assert "当前部署版本已完成一次全链路重新计算" in payload["message"]
-    assert "09:31–09:39" in payload["message"]
-    assert "V16选股：1只" in payload["message"]
-    assert "V20重算结论：正常开仓（策略倍率100%）" in payload["message"]
-    assert "本验收消息不能用于下单" in payload["message"]
-    assert "未复用旧回放" in payload["message"]
-    assert "LATE_0939_REPLAY_RESULT" not in payload["message"]
+    assert payload["message"] == render_entry_message(
+        semantic["entry_render_semantic"],
+        generated_at=generated_at,
+        commit_marker=21,
+        on_time=True,
+    )
+    assert str(payload["message"]).startswith("[V20][SHADOW] 每日决策")
+    assert "当前版本早盘链路重算" not in payload["message"]
+    assert "验收" not in payload["message"]
 
 
 def test_manual_0939_chain_probe_can_verify_previous_session_after_midnight() -> None:
@@ -557,9 +595,12 @@ def test_manual_0939_chain_probe_can_verify_previous_session_after_midnight() ->
         True,
     )
 
-    assert "交易日：2026-08-31" in payload["message"]
-    assert "重算完成：00:05:00" in payload["message"]
-    assert "当前版本早盘链路重算｜✅ 通过" in payload["message"]
+    assert payload["message"] == render_entry_message(
+        semantic["entry_render_semantic"],
+        generated_at=datetime(2026, 9, 1, 0, 5, tzinfo=TZ),
+        commit_marker=24,
+        on_time=True,
+    )
 
 
 def test_manual_0939_chain_probe_discloses_when_exact_coverage_was_not_frozen() -> None:
@@ -576,7 +617,12 @@ def test_manual_0939_chain_probe_discloses_when_exact_coverage_was_not_frozen() 
         True,
     )
 
-    assert "行情覆盖：已通过生产≥80%门槛（精确比例未冻结）" in payload["message"]
+    assert payload["message"] == render_entry_message(
+        semantic["entry_render_semantic"],
+        generated_at=datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+        commit_marker=25,
+        on_time=True,
+    )
 
 
 def test_manual_0939_chain_probe_failure_message_is_explicit_and_non_actionable() -> None:
@@ -599,6 +645,57 @@ def test_manual_0939_chain_probe_failure_message_is_explicit_and_non_actionable(
     assert "失败原因：09:39原始行情覆盖不足" in payload["message"]
     assert "本验收消息不能用于下单" in payload["message"]
     assert "当时本应" not in payload["message"]
+
+
+def test_frozen_official_entry_replay_preserves_message_bytes_exactly() -> None:
+    source_message = "[V20] 每日决策 (2026-08-31 09:40)\n逐字原样：空格、换行、✅"
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": "frozen-replay-event",
+        "strategy_version": "V20",
+        "config_hash": "a" * 64,
+        "state_semantics_hash": "b" * 64,
+        "deployment_mode": "production_push",
+        "official_stream_id": "formal-stream",
+        "state_lineage_id": "formal-lineage",
+        "alert_code": "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY",
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "manual_request_id": "manual-replay-001",
+        "event_trade_date": "2026-08-31",
+        "replay_profile": "FROZEN_OFFICIAL_ENTRY_MESSAGE_V1",
+        "visible_message_mode": "FROZEN_OFFICIAL_PAYLOAD",
+        "exact_automatic_message": True,
+        "retrospective_expired": True,
+        "source_entry_event_id": "source-entry-event",
+        "source_entry_action": "ENTER",
+        "source_final_multiplier": 1.0,
+        "source_semantic_content_hash": "c" * 64,
+        "source_payload_hash": "d" * 64,
+        "message_sha256": hashlib.sha256(source_message.encode("utf-8")).hexdigest(),
+        "symbols": [
+            {
+                "rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "snapshot_price": 10.26,
+            }
+        ],
+        "official_state_changed": False,
+        "orders_changed": False,
+        "non_actionable": True,
+        "message": source_message,
+    }
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 9, 1, 0, 5, tzinfo=TZ),
+        26,
+        True,
+    )
+
+    assert payload["message"] == source_message
+    assert payload["message"].encode("utf-8") == source_message.encode("utf-8")
 
 
 @pytest.mark.parametrize(

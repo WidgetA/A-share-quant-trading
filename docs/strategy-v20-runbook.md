@@ -375,14 +375,15 @@ ack 只停止该退出事件未来的提醒，不代表订单已提交或成交�
 ### 5.4 人工触发一次部署验收
 
 人工接口路径为 `POST /api/v20/trigger-scan`。默认调用不携带任何 header，服务端会生成
-`manual-<uuid>` 作为 `manual_request_id`。每次无 header 调用都会生成新的 ID，并创建
-一条新的非交易回执。
+`manual-<uuid>` 作为 `manual_request_id`。每次无 header 调用都会生成新的 ID；盘前若
+尚无终态就推进同一 official decision，盘后则创建新的复发/重算运输事件。
 
 `Idempotency-Key` 是可选 header。需要在 curl 超时、连接中断或结果未知时安全重试，
 可在首次调用前生成 `deploy-<git-sha>` 或部署系统的不可重复 run ID；调用方提供的 key
 必须为 8–128 字符，首字符是字母或数字，其余只允许字母、数字、`.`、`_`、`:`、`-`。
 
-main 内嵌部署先读取无需密钥的安全启动摘要，确认提交 SHA 与 `v20.started=true`：
+main 内嵌部署先读取无需密钥的安全启动摘要，确认提交 SHA、`v20.started=true`，并检查
+脱敏的 `live_exit`、publisher 心跳及 outbox 计数：
 
 ```bash
 curl --fail-with-body http://127.0.0.1:8000/api/status
@@ -404,9 +405,10 @@ curl --fail-with-body http://127.0.0.1:8000/api/v20/status \
 - 五条 `runtime_lanes` 新鲜且无错误，outbox 没有异常积压；
 - 当前运行的是预期进程/镜像。CI 通过不能替代本检查。
 
-内嵌 profile 没有配置 status key 时，详细 status 保持 503 是预期鉴权行为，不会阻止
-无 key 人工触发；人工触发自身仍会检查 repository leader 和五条 runtime lane，尚未就绪
-会返回 503，而不是绕过健康门禁。
+内嵌 profile 没有配置 status key 时，详细 status 保持 503 是预期鉴权行为；公开
+`/api/status` 仍提供严格脱敏的 `runtime_lanes.live_exit`、
+`runtime_lanes.publisher` 和 outbox 数量。人工触发自身还会检查 repository leader 和
+全部五条 runtime lane，尚未就绪会返回 503，而不是绕过健康门禁。
 
 触发命令：
 
@@ -423,27 +425,30 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/trigger-scan \
 ```
 
 接口不接受请求 body、调用方时间、交易日或 `force` 参数。09:15 至 09:40 前且当日尚无
-终态时，它至多加速一次与自动 scheduler 相同的串行 decision cycle；所有交易日历、
-原始 09:39、覆盖率、leader、数据库时钟和 09:40 门禁仍然有效。09:40 起接口对正式
-策略状态只读，绝不会拿晚到行情替换或新建正式决定。若正式结果是因为错过截止形成的
-`INPUT_INVALID`，服务会尝试读取或生成同日唯一的 `LATE_0939_REPLAY_RESULT`：重拉分钟线
-后只保留 raw 09:31–09:39，先按真实下午接收时间落库，再从落库证据计算。该结果明确写
-“已过期、不可追买”，不创建模型腿、退出链或订单；失败槽及 official state 保持不变。
+终态时，它运行自动 scheduler 的同一串行 official decision cycle；所有交易日历、原始
+09:39、覆盖率、leader、数据库时钟和 09:40 门禁仍然有效。此时不会另发人工回执：飞书
+正文就是生产 `ENTRY_DECISION`，`ENTER` 会在正式提交时建立模型批次和模型腿，从而启用
+D1/D2 盘中退出监控。若当日正式终态已经存在，接口只返回该终态；原 official outbox
+仍是唯一早盘事件。
+
+09:40 起接口对正式策略状态只读，绝不会拿晚到行情替换或新建正式决定。已有正常正式
+结果时，接口从已密封 `ENTRY_DECISION` 复制 `payload.message`，UTF-8 字节必须完全相同，
+不添加任何人工触发包装。若正式结果是 `INPUT_INVALID` 或没有正常消息可复制，服务重拉
+分钟线后只保留 raw 09:31–09:39，按真实接收时间落库，再从持久化证据和失败槽冻结输入
+只读重算，并直接调用生产早盘渲染器。成功正文与早盘格式一致；HTTP 同时返回
+`retrospective_expired=true`、`manual_notice_actionable=false`，正文也保留“仅在 09:40
+前有效、迟到不得追买”。两条盘后路径都不创建模型腿、退出链或订单，official state
+保持不变；重算失败则发送失败报警。
 
 内嵌 forward-shadow 当前从 `EMPTY_FORWARD_SHADOW` 开始。首次上线日的复盘可以恢复 V16
 票单，但 BASE/滚动7展示的是这条已部署 shadow lineage 的暖机状态，不是研究回测中截至
 前一交易日的历史状态。只有经审计 checkpoint 才能初始化后者，禁止把回顾性研究制品
 静默写进已经运行的 lineage。
 
-无论当时是否存在正式决定，人工接口都会把一条
-`DATA_ALERT/OPERATOR_NOTIFICATION` 回执写入并密封到 durable outbox。飞书标题明确标记
-“人工触发验证（非交易指令）”；该回执不会创建或修改订单、持仓、卖出信号或券商侧
-状态。若触发发生在 09:40 前并合法推进了正常 decision cycle，由该 cycle 产生的正式
-入场决定仍是独立的正常 V20 事件，不能与人工验收回执混为一条消息。
-
-截止后复盘成功时，响应额外返回 `late_0939_replay_available=true`、复盘 `event_id`、
-`action` 和 `multiplier`，飞书另有标题为“09:39复盘（已过期，不可交易）”的同日唯一
-事件。复盘正在后台生成或本次失败时，人工回执只报告错误，不得降级成正式买入建议。
+09:40 前不会再创建 `MANUAL_TRIGGER_RECEIPT`。09:40 后为完成一次可见验收，接口会创建
+`DATA_ALERT/OPERATOR_NOTIFICATION` 运输事件，但其可见正文只能是：已封存官方正文的
+逐字节副本、生产早盘渲染器的只读重算正文，或重算失败报警。运输事件的非交易属性、
+过期状态和来源绑定保留在 durable semantic 与 HTTP 响应中，不得污染可见早盘正文。
 
 典型首次响应为：
 
@@ -452,24 +457,25 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/trigger-scan \
   "accepted": true,
   "created": true,
   "manual_request_id": "manual-550e8400-e29b-41d4-a716-446655440000",
-  "manual_event_id": "FULL_STABLE_EVENT_ID",
-  "trade_date": "2026-08-31",
-  "cycle_result": "ALREADY_TERMINAL",
-  "formal_decision_available": true,
+  "replay_event_id": "FULL_STABLE_EVENT_ID",
+  "event_trade_date": "2026-08-31",
   "entry_action": "ENTER",
-  "entry_event_id": "FORMAL_ENTRY_EVENT_ID",
+  "source_entry_event_id": "FORMAL_ENTRY_EVENT_ID",
+  "final_multiplier": 1.0,
+  "symbols": [{"rank": 1, "code": "000001", "name": "示例", "snapshot_price": 10.26}],
+  "visible_message_mode": "FROZEN_OFFICIAL_PAYLOAD",
+  "exact_automatic_message": true,
+  "retrospective_expired": true,
   "official_state_changed": false,
   "manual_notice_actionable": false,
-  "sealed": true,
-  "delivery_status": "PENDING",
   "feishu_delivery_confirmed": false
 }
 ```
 
-HTTP 202 只表示非交易回执已持久写入并密封、等待 outbox publisher 投递；不表示飞书
-已经接受消息。`accepted=true` 也不是交易确认。只有 `delivery_status=SENT` 且
-`feishu_delivery_confirmed=true` 的同请求 ID 重试响应，或数据库/目标飞书的独立核对，
-才能证明最终投递。首次响应后使用完整 `manual_event_id` 查询：
+HTTP 202 只表示对应事件已持久写入并密封、等待 outbox publisher 投递；不表示飞书
+已经接受消息。`accepted=true` 也不是交易确认。只有同请求 ID 重试返回
+`feishu_delivery_confirmed=true`，或数据库/目标飞书的独立核对，才能证明最终投递。
+首次响应后使用完整 `replay_event_id`（盘前则使用 `entry_event_id`）查询：
 
 ```sql
 SELECT event_id, event_type, route_id, official_stream_id, lineage_id,
@@ -479,14 +485,14 @@ WHERE event_id = 'FULL_STABLE_EVENT_ID';
 ```
 
 验收完成必须同时满足：该行 `seal_status='SEALED'`、最终
-`delivery_status='SENT'`、`last_error IS NULL`，并且受审目标飞书群收到对应“非交易
-指令”回执；影子/正式另一个群不得收到它。仅看到 HTTP 202 不算通过。
+`delivery_status='SENT'`、`last_error IS NULL`，并且受审目标飞书群收到与模式相符的
+标准早盘正文或失败报警；影子/正式另一个群不得收到它。仅看到 HTTP 202 不算通过。
 
 若首次请求显式提供了 `Idempotency-Key`，curl 超时、连接中断或返回结果未知时必须用
 原值重试，不能换 key 猜测。相同 route、stream、lineage、config 下，同 key 会返回同一
-`manual_event_id`，`created=false`，不会重新运行 decision cycle，也不会创建第二条回执。
-若首次请求没有 header 且结果未知，调用方无法复用服务端生成但未收到的 ID；再次无
-header 调用会成为新请求并创建新的非交易回执。成功收到响应后，可以把返回的
+`replay_event_id`，`created=false`，不会重复重算或创建第二个运输事件。
+若首次请求没有 header 且结果未知，调用方无法复用服务端生成但未收到的 ID；盘后再次无
+header 调用会成为新请求并创建新的复发运输事件。成功收到响应后，可以把返回的
 `manual_request_id` 作为后续 `Idempotency-Key` 重试。任一人工请求仍在处理时，并发请求
 （包括尚未完成首次落盘的同 key）可能返回 409；待首个请求结束后按原 key 重试即可读取
 同一结果。失去 leader、任一 status 健康条件为红（含 lane 不新鲜/有错或 outbox 投递

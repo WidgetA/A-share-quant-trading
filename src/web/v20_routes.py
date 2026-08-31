@@ -3,12 +3,13 @@
 The router deliberately exposes no account, order, holding, fill, or execution
 API.  It reports service health, accepts the two external evidence records
 required by the documented V20 state machine, and exposes one non-bypassable
-manual scan trigger for deployment verification.
+manual trigger for the production morning-selection path.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
@@ -46,7 +47,9 @@ _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 _FRESH_PROBE_LOOKBACK_SESSIONS = 10
 _FRESH_PROBE_LOCK_TIMEOUT_SECONDS = 180.0
 _FRESH_PROBE_ALERT_CODE = "MANUAL_0939_CHAIN_PROBE_RESULT"
-_FRESH_PROBE_PROFILE = "CURRENT_DEPLOYED_CODE_EXACT_0939_V1"
+_FRESH_PROBE_PROFILE = "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2"
+_FROZEN_ENTRY_REPLAY_ALERT_CODE = "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
+_FROZEN_ENTRY_REPLAY_PROFILE = "FROZEN_OFFICIAL_ENTRY_MESSAGE_V1"
 
 
 class V20RouteService(Protocol):
@@ -59,6 +62,8 @@ class V20RouteService(Protocol):
     async def record_reminder_stop_ack(self, payload: Mapping[str, Any]) -> Any: ...
 
     async def trigger_manual_scan(self, request_id: str) -> Any: ...
+
+    async def trigger_morning_selection(self, request_id: str) -> Any: ...
 
 
 class MewsSnapshotRequest(BaseModel):
@@ -171,7 +176,7 @@ def _fresh_probe_event_id(service: Any, request_id: str) -> str:
 
     config = service.config
     return named_hash(
-        "V20_MANUAL_0939_CHAIN_PROBE_EVENT_ID_V1",
+        "V20_MANUAL_0939_CHAIN_PROBE_EVENT_ID_V2",
         {
             "route_id": config.route_id,
             "official_stream_id": config.official_stream_id,
@@ -212,6 +217,7 @@ def _fresh_probe_response(
         "official_state_changed": False,
         "orders_changed": False,
         "non_actionable": True,
+        "retrospective_expired": True,
     }
     if (
         record.event_type != "DATA_ALERT"
@@ -226,6 +232,9 @@ def _fresh_probe_response(
     passed = semantic["probe_result"] == "PASS"
     if passed != bool(semantic["current_version_recomputed"]):
         raise V20SemanticConflict("manual 09:39 chain probe result is inconsistent")
+    expected_message_mode = "AUTOMATIC_ENTRY_RENDER" if passed else "FAILURE_ALERT"
+    if semantic.get("visible_message_mode") != expected_message_mode:
+        raise V20SemanticConflict("manual 09:39 chain probe message mode is inconsistent")
     if record.payload is None:
         raise V20SemanticConflict("manual 09:39 chain probe payload is not sealed")
     return {
@@ -243,10 +252,23 @@ def _fresh_probe_response(
         "v16_count": semantic.get("v16_count", 0),
         "v20_action": semantic.get("v20_action"),
         "final_multiplier": semantic.get("final_multiplier"),
+        "symbols": [
+            {
+                "rank": item.get("rank"),
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "snapshot_price": item.get("snapshot_price"),
+            }
+            for item in (semantic.get("symbols") or [])
+            if isinstance(item, Mapping)
+        ],
         "failure_stage": semantic.get("failure_stage"),
         "failure_reason": semantic.get("failure_reason"),
         "official_state_changed": False,
         "orders_changed": False,
+        "retrospective_expired": True,
+        "exact_automatic_message": passed,
+        "visible_message_mode": expected_message_mode,
         "manual_notice_actionable": False,
         "feishu_delivery_confirmed": record.delivery_status == "SENT",
     }
@@ -342,6 +364,8 @@ def _fresh_probe_failure_semantic(
         "official_state_changed": False,
         "orders_changed": False,
         "non_actionable": True,
+        "retrospective_expired": True,
+        "visible_message_mode": "FAILURE_ALERT",
         "failure_stage": failure_stage,
         "failure_reason": reason,
         "message": (
@@ -359,6 +383,9 @@ def _fresh_probe_pass_semantic(
     request_id: str,
     replay_semantic: Mapping[str, Any],
 ) -> dict[str, Any]:
+    entry_render_semantic = replay_semantic.get("entry_render_semantic")
+    if not isinstance(entry_render_semantic, Mapping):
+        raise V20SemanticConflict("fresh 09:39 chain probe lacks entry formatter evidence")
     symbols = replay_semantic.get("symbols")
     if not isinstance(symbols, list):
         raise V20SemanticConflict("fresh 09:39 chain probe produced an invalid symbol list")
@@ -368,6 +395,12 @@ def _fresh_probe_pass_semantic(
     action = replay_semantic.get("replay_action")
     if action not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
         raise V20SemanticConflict("fresh 09:39 chain probe produced an invalid V20 action")
+    if (
+        entry_render_semantic.get("action") != action
+        or entry_render_semantic.get("final_multiplier") != replay_semantic.get("final_multiplier")
+        or entry_render_semantic.get("symbols") != symbols
+    ):
+        raise V20SemanticConflict("fresh 09:39 formatter evidence differs from its result")
     quote_coverage = replay_semantic.get("quote_coverage")
     if (
         isinstance(quote_coverage, bool)
@@ -401,6 +434,9 @@ def _fresh_probe_pass_semantic(
         "official_state_changed": False,
         "orders_changed": False,
         "non_actionable": True,
+        "retrospective_expired": True,
+        "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
+        "entry_render_semantic": dict(entry_render_semantic),
         "stage_results": {
             "persisted_raw_0931_0939": "PASS",
             "v16_scan": "PASS",
@@ -592,14 +628,268 @@ async def _run_fresh_0939_probe(
         )
 
 
+async def _latest_terminal_entry(service: Any, now: datetime) -> Any | None:
+    """Return the latest durable morning slot at or before the service date."""
+
+    calendar = tuple(await service._load_trade_calendar(now.date()))
+    sessions = [session for session in calendar if session <= now.date()]
+    wall = now.timetz().replace(tzinfo=None)
+    if now.date() in sessions and wall >= service.config.clock.publish_deadline:
+        # At/after today's hard cutoff, serialize behind the production decision
+        # lane before deciding which slot to replay.  Otherwise an HTTP request
+        # can observe today's row just before the scheduler commits it and
+        # incorrectly fall back to yesterday's perfectly valid message.
+        decision_lock = getattr(service, "_decision_cycle_lock", None)
+        if decision_lock is None:
+            raise V20StateConflict("V20 decision lane lock is unavailable")
+        try:
+            await asyncio.wait_for(
+                decision_lock.acquire(),
+                timeout=_FRESH_PROBE_LOCK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise V20StateConflict("V20 decision lane is busy") from exc
+        try:
+            status = await service._repository.get_entry_status(
+                service.config.official_stream_id,
+                now.date(),
+            )
+        finally:
+            decision_lock.release()
+        if status is None:
+            raise V20StateConflict(
+                "current trading day's V20 morning slot is not terminal; refusing prior-day replay"
+            )
+        service._verify_entry_binding(status)
+        return status
+
+    for trade_date in reversed(sessions[-_FRESH_PROBE_LOOKBACK_SESSIONS:]):
+        status = await service._repository.get_entry_status(
+            service.config.official_stream_id,
+            trade_date,
+        )
+        if status is not None:
+            service._verify_entry_binding(status)
+            return status
+    return None
+
+
+def _frozen_entry_replay_event_id(service: Any, request_id: str, source: Any) -> str:
+    config = service.config
+    return named_hash(
+        "V20_MANUAL_MORNING_ENTRY_MESSAGE_REPLAY_EVENT_ID_V1",
+        {
+            "route_id": config.route_id,
+            "official_stream_id": config.official_stream_id,
+            "lineage_id": config.state_lineage_id,
+            "config_hash": config.config_hash,
+            "manual_request_id": request_id,
+            "source_entry_event_id": source.event_id,
+            "source_payload_hash": source.payload_hash,
+        },
+    )
+
+
+def _ticket_summary(semantic: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "rank": item.get("rank"),
+            "code": item.get("code"),
+            "name": item.get("name"),
+            "snapshot_price": item.get("snapshot_price"),
+        }
+        for item in (semantic.get("symbols") or [])
+        if isinstance(item, Mapping)
+    ]
+
+
+def _frozen_entry_replay_response(
+    service: Any,
+    record: Any,
+    *,
+    request_id: str,
+    created: bool,
+) -> Mapping[str, Any]:
+    semantic = record.semantic
+    expected = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": record.event_id,
+        "strategy_version": service.config.strategy_version,
+        "config_hash": service.config.config_hash,
+        "state_semantics_hash": service.config.state_semantics_hash,
+        "deployment_mode": service.config.deployment_mode,
+        "official_stream_id": service.config.official_stream_id,
+        "state_lineage_id": service.config.state_lineage_id,
+        "alert_code": _FROZEN_ENTRY_REPLAY_ALERT_CODE,
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "manual_request_id": request_id,
+        "replay_profile": _FROZEN_ENTRY_REPLAY_PROFILE,
+        "visible_message_mode": "FROZEN_OFFICIAL_PAYLOAD",
+        "exact_automatic_message": True,
+        "retrospective_expired": True,
+        "official_state_changed": False,
+        "orders_changed": False,
+        "non_actionable": True,
+    }
+    if (
+        record.event_type != "DATA_ALERT"
+        or any(semantic.get(key) != value for key, value in expected.items())
+        or record.payload is None
+        or record.payload.get("message") != semantic.get("message")
+    ):
+        raise V20SemanticConflict("manual morning message replay has incompatible semantics")
+    return {
+        "accepted": True,
+        "created": created,
+        "manual_request_id": request_id,
+        "event_trade_date": semantic["event_trade_date"],
+        "entry_action": semantic["source_entry_action"],
+        "final_multiplier": semantic["source_final_multiplier"],
+        "symbols": _ticket_summary(semantic),
+        "source_entry_event_id": semantic["source_entry_event_id"],
+        "replay_event_id": record.event_id,
+        "visible_message_mode": "FROZEN_OFFICIAL_PAYLOAD",
+        "exact_automatic_message": True,
+        "retrospective_expired": True,
+        "official_state_changed": False,
+        "orders_changed": False,
+        "manual_notice_actionable": False,
+        "feishu_delivery_confirmed": record.delivery_status == "SENT",
+    }
+
+
+async def _replay_frozen_entry_message(
+    service: Any,
+    request_id: str,
+    status: Any,
+) -> Mapping[str, Any]:
+    """Queue the already sealed automatic message without changing one byte."""
+
+    if _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
+        raise ValueError(
+            "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
+        )
+    await service._require_manual_trigger_ready()
+    await service._repository.assert_runtime_leader()
+    config = service.config
+    scope = {
+        "official_stream_id": config.official_stream_id,
+        "lineage_id": config.state_lineage_id,
+    }
+    source = await service._repository.get_outbox_event(
+        status.event_id,
+        route_id=config.route_id,
+        **scope,
+    )
+    if source is None or source.event_type != "ENTRY_DECISION":
+        raise V20RepositoryError("latest official morning entry message is unavailable")
+    if source.payload is None:
+        await service._repository.assert_runtime_leader()
+        source = await service._repository.seal_event(source.event_id, seal_v20_payload)
+    source_message = source.payload.get("message") if source.payload is not None else None
+    if not isinstance(source_message, str) or not source_message or not source.payload_hash:
+        raise V20SemanticConflict("latest official morning entry message is not sealed")
+    event_id = _frozen_entry_replay_event_id(service, request_id, source)
+
+    existing = await service._repository.get_outbox_event(
+        event_id,
+        route_id=config.route_id,
+        **scope,
+    )
+    if existing is not None:
+        if existing.payload is None:
+            await service._repository.assert_runtime_leader()
+            existing = await service._repository.seal_event(event_id, seal_v20_payload)
+        return _frozen_entry_replay_response(
+            service,
+            existing,
+            request_id=request_id,
+            created=False,
+        )
+
+    async with service._manual_trigger_lock:
+        await service._require_manual_trigger_ready()
+        await service._repository.assert_runtime_leader()
+        # The first lookup is only a fast path.  A same-key request may have
+        # completed while this request waited for the process-local lock, so
+        # idempotency requires a second durable lookup inside the lock.
+        existing = await service._repository.get_outbox_event(
+            event_id,
+            route_id=config.route_id,
+            **scope,
+        )
+        if existing is not None:
+            if existing.payload is None:
+                existing = await service._repository.seal_event(event_id, seal_v20_payload)
+            return _frozen_entry_replay_response(
+                service,
+                existing,
+                request_id=request_id,
+                created=False,
+            )
+
+        symbols = _ticket_summary(status.semantic)
+        semantic = {
+            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+            "event_id": event_id,
+            "strategy_version": config.strategy_version,
+            "config_hash": config.config_hash,
+            "state_semantics_hash": config.state_semantics_hash,
+            "deployment_mode": config.deployment_mode,
+            "official_stream_id": config.official_stream_id,
+            "state_lineage_id": config.state_lineage_id,
+            "alert_code": _FROZEN_ENTRY_REPLAY_ALERT_CODE,
+            "delivery_priority_class": "OPERATOR_NOTIFICATION",
+            "manual_request_id": request_id,
+            "event_trade_date": status.trade_date.isoformat(),
+            "replay_profile": _FROZEN_ENTRY_REPLAY_PROFILE,
+            "visible_message_mode": "FROZEN_OFFICIAL_PAYLOAD",
+            "exact_automatic_message": True,
+            "retrospective_expired": True,
+            "source_entry_event_id": source.event_id,
+            "source_entry_action": status.action,
+            "source_final_multiplier": status.final_multiplier,
+            "source_semantic_content_hash": source.semantic_content_hash,
+            "source_payload_hash": source.payload_hash,
+            "message_sha256": hashlib.sha256(source_message.encode("utf-8")).hexdigest(),
+            "symbols": symbols,
+            "official_state_changed": False,
+            "orders_changed": False,
+            "non_actionable": True,
+            # The Feishu sealer copies this exact string.  It must not prepend or
+            # append a manual-trigger banner, timestamp, newline, or warning.
+            "message": source_message,
+        }
+        created = await service._repository.enqueue_alert(
+            event_id,
+            config.route_id,
+            semantic,
+            sha256_json(semantic),
+            **scope,
+        )
+        await service._repository.assert_runtime_leader()
+        sealed = await service._repository.seal_event(event_id, seal_v20_payload)
+        return _frozen_entry_replay_response(
+            service,
+            sealed,
+            request_id=request_id,
+            created=created,
+        )
+
+
 async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
-    """Use the live lane only in its legal window; otherwise run a fresh probe."""
+    """Run the official live lane or replay its exact visible morning output."""
 
     now = service._aware_now()
     wall = now.timetz().replace(tzinfo=None)
     clock = service.config.clock
     if clock.prewarm <= wall < clock.publish_deadline:
-        return await service.trigger_manual_scan(request_id)
+        return await service.trigger_morning_selection(request_id)
+    latest = await _latest_terminal_entry(service, now)
+    if latest is not None and latest.action != "INPUT_INVALID":
+        return await _replay_frozen_entry_message(service, request_id, latest)
     return await _run_fresh_0939_probe(service, request_id, now)
 
 
@@ -633,7 +923,7 @@ def create_v20_router() -> APIRouter:
         request: Request,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> Any:
-        """Accelerate the legal decision lane and queue a non-actionable receipt."""
+        """Run/replay morning selection with the exact automatic Feishu text."""
 
         async for chunk in request.stream():
             if chunk:

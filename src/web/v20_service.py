@@ -1877,6 +1877,134 @@ class V20Service:
                 config=self.config,
             )
 
+    async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
+        """Run the real pre-09:40 decision lane without a manual wrapper message.
+
+        A successful new decision is the ordinary ``ENTRY_DECISION`` written by
+        :meth:`_run_decision_iteration_with_cutoff`; consequently model legs and
+        the intraday-exit lane are armed exactly as they are under the automatic
+        scheduler.  This method never creates a second, formatter-specific
+        receipt.  The route may therefore promise that the visible Feishu text
+        comes only from the production entry renderer.
+        """
+
+        await self._require_manual_trigger_ready()
+        if not isinstance(request_id, str) or _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
+            raise ValueError(
+                "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
+            )
+        await self._repository.assert_runtime_leader()
+        now = self._aware_now()
+        wall = now.timetz().replace(tzinfo=None)
+        if not self.config.clock.prewarm <= wall < self.config.clock.publish_deadline:
+            raise V20StateConflict("live morning selection is outside the pre-09:40 window")
+        if self._manual_trigger_lock.locked():
+            raise V20StateConflict("another V20 manual trigger is already running")
+
+        async with self._manual_trigger_lock:
+            await self._require_manual_trigger_ready()
+            await self._repository.assert_runtime_leader()
+            trade_date = self._aware_now().date()
+            status_before = await self._repository.get_entry_status(
+                self.config.official_stream_id,
+                trade_date,
+            )
+            if status_before is not None:
+                self._verify_entry_binding(status_before)
+
+            if status_before is None:
+                try:
+                    await asyncio.wait_for(
+                        self._decision_cycle_lock.acquire(),
+                        timeout=MANUAL_TRIGGER_DECISION_LOCK_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError as exc:
+                    raise V20StateConflict("V20 decision lane is busy") from exc
+                try:
+                    # Re-sample the service clock inside the serialized lane;
+                    # an HTTP request can never extend the legal entry window.
+                    await self._run_decision_iteration_with_cutoff(self._aware_now())
+                finally:
+                    self._decision_cycle_lock.release()
+
+            status_after = await self._repository.get_entry_status(
+                self.config.official_stream_id,
+                trade_date,
+            )
+            completed_at = self._aware_now()
+            retrospective_expired = (
+                completed_at.timetz().replace(tzinfo=None) >= self.config.clock.publish_deadline
+            )
+            if status_after is None:
+                context = (
+                    self._context
+                    if self._context is not None and self._context.trade_date == trade_date
+                    else None
+                )
+                return {
+                    "accepted": True,
+                    "created": False,
+                    "manual_request_id": request_id,
+                    "trade_date": trade_date.isoformat(),
+                    "cycle_result": (
+                        context.last_phase if context is not None else "DECISION_PENDING"
+                    ),
+                    "formal_decision_available": False,
+                    "entry_action": None,
+                    "entry_event_id": None,
+                    "symbols": [],
+                    "official_state_changed": False,
+                    "orders_changed": False,
+                    "retrospective_expired": retrospective_expired,
+                    "exact_automatic_message": False,
+                    "delivery_status": None,
+                    "feishu_delivery_confirmed": False,
+                }
+
+            self._verify_entry_binding(status_after)
+            entry_record = await self._repository.get_outbox_event(
+                status_after.event_id,
+                route_id=self.config.route_id,
+                **self._ledger_scope,
+            )
+            if entry_record is None:
+                raise V20RepositoryError("committed V20 entry outbox event is unreadable")
+            if entry_record.payload is None:
+                await self._require_manual_trigger_ready()
+                await self._repository.assert_runtime_leader()
+                entry_record = await self._repository.seal_event(
+                    status_after.event_id,
+                    seal_v20_payload,
+                )
+            symbols = [
+                {
+                    "rank": item.get("rank"),
+                    "code": item.get("code"),
+                    "name": item.get("name"),
+                    "snapshot_price": item.get("snapshot_price"),
+                }
+                for item in (status_after.semantic.get("symbols") or [])
+                if isinstance(item, Mapping)
+            ]
+            created = status_before is None
+            return {
+                "accepted": True,
+                "created": created,
+                "manual_request_id": request_id,
+                "trade_date": trade_date.isoformat(),
+                "cycle_result": "DECISION_COMMITTED" if created else "ALREADY_TERMINAL",
+                "formal_decision_available": True,
+                "entry_action": status_after.action,
+                "entry_event_id": status_after.event_id,
+                "symbols": symbols,
+                "official_state_changed": created,
+                "orders_changed": False,
+                "retrospective_expired": retrospective_expired,
+                "exact_automatic_message": True,
+                "delivery_status": entry_record.delivery_status,
+                "feishu_delivery_confirmed": entry_record.delivery_status == "SENT",
+            }
+
     async def run_once(
         self,
         now: datetime | None = None,
@@ -3393,6 +3521,11 @@ class V20Service:
             "reason_codes": list(pure["reason_codes"]),
             "symbols": list(pure["symbols"]),
             "last_complete_bar": pure["last_complete_bar"],
+            # Formatter-complete, frozen evidence for the manual endpoint's
+            # byte-identical automatic-message rendering.  It remains nested
+            # inside a non-actionable alert and is never committed as an
+            # official decision, model batch, leg, holding, or order.
+            "entry_render_semantic": dict(pure),
             "v16_snapshot_hash": bundle.snapshot_hash,
             "early_market_source_hash": early.source_hash,
             "policy_input_hash": status.semantic["policy_input_hash"],
