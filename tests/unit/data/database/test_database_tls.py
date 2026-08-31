@@ -13,19 +13,28 @@ from src.data.database.fundamentals_db import (
 
 
 @pytest.mark.asyncio
-async def test_legacy_fundamentals_require_mode_remains_compatible(monkeypatch) -> None:
+async def test_legacy_fundamentals_default_disables_ssl(monkeypatch) -> None:
     captured = {}
+    pool = object()
 
     async def create_pool(**kwargs):
         captured.update(kwargs)
-        return object()
+        return pool
 
     monkeypatch.setattr("src.data.database.fundamentals_db.asyncpg.create_pool", create_pool)
-    database = FundamentalsDB(FundamentalsDBConfig(ssl_mode="require"))
+    database = FundamentalsDB(FundamentalsDBConfig())
 
     await database.connect()
 
-    assert captured["ssl"] == "require"
+    assert captured["ssl"] is False
+    assert database.connection_pool is pool
+
+
+def test_connection_pool_requires_an_active_connection() -> None:
+    database = FundamentalsDB(FundamentalsDBConfig())
+
+    with pytest.raises(RuntimeError, match="FundamentalsDB is not connected"):
+        _ = database.connection_pool
 
 
 @pytest.mark.asyncio
@@ -89,7 +98,7 @@ database:
     user: reader
     password: secret
     schema: public
-    ssl_mode: require
+    ssl_mode: disable
 """.strip(),
         encoding="utf-8",
     )
@@ -100,4 +109,20 @@ database:
     database = create_fundamentals_db_from_config(config_path.resolve())
 
     assert database._config.host == "db.internal"
-    assert database._config.ssl_mode == "require"
+    assert database._config.ssl_mode == "disable"
+
+
+def test_fundamentals_factory_defaults_to_legacy_non_ssl_transport(tmp_path) -> None:
+    config_path = tmp_path / "database-config.yaml"
+    config_path.write_text(
+        """
+database:
+  fundamentals:
+    host: db.internal
+""".strip(),
+        encoding="utf-8",
+    )
+
+    database = create_fundamentals_db_from_config(config_path)
+
+    assert database.config.ssl_mode == "disable"

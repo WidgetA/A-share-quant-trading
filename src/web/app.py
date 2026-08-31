@@ -177,6 +177,15 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     a V20 startup error) instead of falling back to an unintended strategy.
     """
 
+    # A second lifecycle invocation must not discard the only handle capable
+    # of cancelling an in-flight retry during shutdown.  Retries are scheduled
+    # only for forward-shadow mode, so preserving the existing owner is also
+    # the complete idempotent result for this invocation.
+    existing_retry = getattr(app.state, "v20_retry_task", None)
+    if existing_retry is not None and not existing_retry.done():
+        logger.info("V20 forward-shadow startup retry is already active")
+        return True
+
     app.state.v20_service_started = False
     app.state.v20_service_lifecycle_owned = False
     app.state.v20_start_error = None

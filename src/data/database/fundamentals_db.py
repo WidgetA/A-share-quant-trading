@@ -93,15 +93,20 @@ class FundamentalsDBConfig:
     pool_min_size: int = 2
     pool_max_size: int = 5
     schema: str = "public"
-    ssl_mode: str = "require"
+    # Preserve the legacy main/V16 transport by default. Dedicated V20
+    # deployments explicitly override this with ``verify-full`` and validate
+    # the reviewed CA before constructing this object.
+    ssl_mode: str = "disable"
     ssl_root_cert: str = ""
     ssl_root_cert_sha256: str = ""
     connect_timeout_seconds: float = 5.0
     command_timeout_seconds: float = 15.0
 
     def __post_init__(self) -> None:
-        if self.ssl_mode not in {"require", "verify-ca", "verify-full"}:
-            raise ValueError("fundamentals database SSL mode must require TLS")
+        if self.ssl_mode not in {"disable", "require", "verify-ca", "verify-full"}:
+            raise ValueError(
+                "fundamentals database SSL mode must be disable, require, verify-ca, or verify-full"
+            )
         if not 0 < self.connect_timeout_seconds <= 60:
             raise ValueError("fundamentals connect timeout must be in (0, 60]")
         if not 0 < self.command_timeout_seconds <= 60:
@@ -177,13 +182,15 @@ class FundamentalsDB:
                 f"/{self._config.database}"
             )
 
-            ssl_config: str | object = self._config.ssl_mode
+            ssl_config: str | object = False
             if self._config.ssl_mode == "verify-full":
                 ssl_config = verified_postgres_ssl_context(
                     ssl_mode=self._config.ssl_mode,
                     ssl_root_cert=self._config.ssl_root_cert,
                     expected_sha256=self._config.ssl_root_cert_sha256,
                 )
+            elif self._config.ssl_mode != "disable":
+                ssl_config = self._config.ssl_mode
             self._pool = await asyncpg.create_pool(
                 host=self._config.host,
                 port=self._config.port,
@@ -227,6 +234,12 @@ class FundamentalsDB:
         self._ensure_connected()
         assert self._pool is not None
         return self._pool
+
+    @property
+    def connection_pool(self) -> asyncpg.Pool:
+        """Return the connected pool without transferring its ownership."""
+
+        return self._db_pool
 
     @property
     def is_connected(self) -> bool:
@@ -465,7 +478,7 @@ def create_fundamentals_db_from_config(
         pool_min_size=db_config.get("pool_min_size", 2),
         pool_max_size=db_config.get("pool_max_size", 5),
         schema=db_config.get("schema", "public"),
-        ssl_mode=str(resolve_env(db_config.get("ssl_mode", "require"))),
+        ssl_mode=str(resolve_env(db_config.get("ssl_mode", "disable"))),
         ssl_root_cert=str(resolve_env(db_config.get("ssl_root_cert", ""))),
         ssl_root_cert_sha256=str(resolve_env(db_config.get("ssl_root_cert_sha256", ""))),
         connect_timeout_seconds=float(resolve_env(db_config.get("connect_timeout_seconds", 5))),

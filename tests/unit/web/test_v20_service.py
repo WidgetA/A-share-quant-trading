@@ -54,6 +54,7 @@ from src.web.v20_service import (
     _DayContext,
     _embedded_runtime_config,
     _init_embedded_v20_scan_resources,
+    _init_owned_embedded_v20_scan_resources,
     _init_v20_scan_resources,
 )
 
@@ -220,8 +221,11 @@ def test_legacy_runtime_factory_wires_existing_main_infrastructure(
 
     monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: base)
 
-    def create_repository(path):
+    repository_pools: list[object | None] = []
+
+    def create_repository(path, *, shared_pool=None):
         captured["database_path"] = path
+        repository_pools.append(shared_pool)
         return repository
 
     monkeypatch.setattr(
@@ -253,8 +257,20 @@ def test_legacy_runtime_factory_wires_existing_main_infrastructure(
     assert service._scan_state.fundamentals_db is fundamentals
     assert service._routes == {route.route_id: route}
     assert service._embedded_legacy is True
+    assert service._initialize_resources is _init_owned_embedded_v20_scan_resources
+    assert service._cleanup_resources is _cleanup_v20_scan_resources
     assert captured["token"] == "persisted-token"
     assert captured["database_path"] == captured["fundamentals_path"]
+    assert repository_pools == [None]
+
+    shared_pool = object()
+    shared_fundamentals = SimpleNamespace(connection_pool=shared_pool)
+    shared_service = V20Service.from_legacy_runtime(fundamentals_db=shared_fundamentals)
+
+    assert shared_service._scan_state.fundamentals_db is shared_fundamentals
+    assert shared_service._initialize_resources is _init_embedded_v20_scan_resources
+    assert shared_service._cleanup_resources is _cleanup_embedded_v20_scan_resources
+    assert repository_pools == [None, shared_pool]
 
 
 @pytest.mark.parametrize(
@@ -499,6 +515,157 @@ async def test_embedded_cleanup_preserves_main_shared_fundamentals_pool() -> Non
 
     assert realtime.stop_calls == 1
     assert fundamentals.close_calls == 0
+    assert state.initialized is False
+
+
+async def test_embedded_initializer_failure_preserves_shared_fundamentals_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.common import config as common_config
+    from src.data.clients import iquant_historical_adapter as historical_module
+    from src.data.clients import tushare_realtime as realtime_module
+
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "persisted-v16-token")
+
+    class _Realtime:
+        instance: _Realtime | None = None
+
+        def __init__(self, *, token: str) -> None:
+            assert token == "persisted-v16-token"
+            self.stop_calls = 0
+            type(self).instance = self
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    class _BrokenHistorical:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("historical adapter failed")
+
+    class _SharedFundamentals:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+            self.close_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
+    monkeypatch.setattr(historical_module, "IQuantHistoricalAdapter", _BrokenHistorical)
+    fundamentals = _SharedFundamentals()
+    state = V15ScanState(fundamentals_db=fundamentals)
+
+    with pytest.raises(RuntimeError, match="historical adapter failed"):
+        await _init_embedded_v20_scan_resources(state)
+
+    assert _Realtime.instance is not None
+    assert _Realtime.instance.stop_calls == 1
+    assert fundamentals.connect_calls == 0
+    assert fundamentals.close_calls == 0
+    assert state.realtime_client is None
+    assert state.initialized is False
+
+
+async def test_cancelling_embedded_initializer_stops_tushare_but_preserves_shared_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.common import config as common_config
+    from src.data.clients import tushare_realtime as realtime_module
+
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "persisted-v16-token")
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+
+    class _Realtime:
+        instance: _Realtime | None = None
+
+        def __init__(self, *, token: str) -> None:
+            assert token == "persisted-v16-token"
+            self.stop_calls = 0
+            type(self).instance = self
+
+        async def start(self) -> None:
+            start_entered.set()
+            await release_start.wait()
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    class _SharedFundamentals:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+            self.close_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
+    fundamentals = _SharedFundamentals()
+    state = V15ScanState(fundamentals_db=fundamentals)
+    task = asyncio.create_task(_init_embedded_v20_scan_resources(state))
+    await asyncio.wait_for(start_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _Realtime.instance is not None
+    assert _Realtime.instance.stop_calls == 1
+    assert fundamentals.connect_calls == 0
+    assert fundamentals.close_calls == 0
+    assert state.realtime_client is None
+    assert state.initialized is False
+
+
+async def test_embedded_tushare_start_failure_is_rolled_back_without_shared_pool_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.common import config as common_config
+    from src.data.clients import tushare_realtime as realtime_module
+
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "persisted-v16-token")
+
+    class _Realtime:
+        instance: _Realtime | None = None
+
+        def __init__(self, *, token: str) -> None:
+            assert token == "persisted-v16-token"
+            self.stop_calls = 0
+            type(self).instance = self
+
+        async def start(self) -> None:
+            raise RuntimeError("Tushare start failed after allocation")
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    class _SharedFundamentals:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
+    fundamentals = _SharedFundamentals()
+    state = V15ScanState(fundamentals_db=fundamentals)
+
+    with pytest.raises(RuntimeError, match="Tushare start failed"):
+        await _init_embedded_v20_scan_resources(state)
+
+    assert _Realtime.instance is not None
+    assert _Realtime.instance.stop_calls == 1
+    assert fundamentals.close_calls == 0
+    assert state.realtime_client is None
     assert state.initialized is False
 
 
@@ -1446,6 +1613,7 @@ async def test_fatal_runtime_lane_cancels_blocked_siblings_even_after_stop_is_se
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(monkeypatch, SimpleNamespace())
+    service._startup_stage = "RUNNING"
     sibling_started = asyncio.Event()
     sibling_cancelled = asyncio.Event()
 
@@ -1474,6 +1642,7 @@ async def test_fatal_runtime_lane_cancels_blocked_siblings_even_after_stop_is_se
     assert isinstance(results[1], V20LeadershipLost)
     assert sibling_cancelled.is_set()
     assert service._stop_event.is_set()
+    assert service.startup_stage == "RUNTIME_FAILED"
 
 
 async def test_outbox_recovery_lane_reseals_exit_while_decision_is_unavailable(

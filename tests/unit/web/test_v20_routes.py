@@ -600,6 +600,58 @@ async def test_shadow_startup_retry_recovers_without_restarting_v16(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_repeated_lifecycle_keeps_retry_owner_and_shutdown_cannot_revive_v20(
+    monkeypatch,
+) -> None:
+    retry_entered = asyncio.Event()
+    retry_release = asyncio.Event()
+    retry_cancelled = asyncio.Event()
+
+    class _BlockingRetryService(LifecycleV20Service):
+        async def start(self) -> None:
+            self.start_calls += 1
+            if self.start_calls == 1:
+                raise ConnectionError("database warming up")
+            if self.start_calls == 2:
+                retry_entered.set()
+                try:
+                    await retry_release.wait()
+                except asyncio.CancelledError:
+                    retry_cancelled.set()
+                    raise
+                return
+            # Before the lifecycle guard existed, the repeated invocation
+            # reached this branch, discarded the blocked retry task reference,
+            # and allowed that old task to revive V20 after shutdown.
+            return
+
+    service = _BlockingRetryService(enabled=True, deployment_mode="forward_shadow")
+    app = _lifecycle_app(service)
+    monkeypatch.setattr(web_app, "_V20_START_RETRY_SECONDS", 0.0)
+
+    assert await web_app._start_v20_lifecycle(app) is True
+    await asyncio.wait_for(retry_entered.wait(), timeout=1.0)
+    retry_task = app.state.v20_retry_task
+    assert retry_task is not None
+
+    assert await web_app._start_v20_lifecycle(app) is True
+    assert app.state.v20_retry_task is retry_task
+    assert service.start_calls == 2
+
+    await web_app._stop_v20_lifecycle(app)
+    retry_release.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert retry_cancelled.is_set()
+    assert retry_task.done()
+    assert service.start_calls == 2
+    assert service.stop_calls == 1
+    assert app.state.v20_retry_task is None
+    assert app.state.v20_service_started is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "legacy_allowed"),
     [("forward_shadow", True), ("production_push", False)],

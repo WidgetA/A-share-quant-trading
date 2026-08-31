@@ -128,19 +128,37 @@ async def _init_v20_scan_resources(scan_state: V15ScanState) -> None:
     await _init_v20_scan_resources_with_token(
         scan_state,
         validated_v20_tushare_token(),
+        manage_fundamentals=True,
     )
 
 
 async def _init_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
-    """Initialize embedded V20 from the token source already used by V16."""
+    """Initialize embedded V20 while borrowing main's connected DB pool."""
     from src.common.config import get_tushare_token
 
-    await _init_v20_scan_resources_with_token(scan_state, get_tushare_token())
+    await _init_v20_scan_resources_with_token(
+        scan_state,
+        get_tushare_token(),
+        manage_fundamentals=False,
+    )
+
+
+async def _init_owned_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
+    """Initialize embedded V20 when main has no shared fundamentals pool."""
+    from src.common.config import get_tushare_token
+
+    await _init_v20_scan_resources_with_token(
+        scan_state,
+        get_tushare_token(),
+        manage_fundamentals=True,
+    )
 
 
 async def _init_v20_scan_resources_with_token(
     scan_state: V15ScanState,
     token: str,
+    *,
+    manage_fundamentals: bool,
 ) -> None:
     from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
     from src.data.clients.tushare_realtime import TushareRealtimeClient
@@ -151,18 +169,19 @@ async def _init_v20_scan_resources_with_token(
     if fundamentals is None:
         raise V20ConfigError("V20 scan requires prevalidated fundamentals resources")
     tushare = TushareRealtimeClient(token=token)
-    await tushare.start()
     try:
-        await fundamentals.connect()
-        scan_state.realtime_client = tushare
-        scan_state.v15_scan_db = None
-        scan_state.historical_adapter = IQuantHistoricalAdapter(
+        # ``start`` may allocate sockets before reporting a failure.  Keep it
+        # inside the rollback boundary so every retry owns exactly one client.
+        await tushare.start()
+        if manage_fundamentals:
+            await fundamentals.connect()
+        historical_adapter = IQuantHistoricalAdapter(
             tushare,
             cache=scan_state.tushare_cache,
             tushare_token=token,
         )
-        scan_state.concept_mapper = LocalConceptMapper()
-        scan_state.stock_filter = StockFilter(
+        concept_mapper = LocalConceptMapper()
+        stock_filter = StockFilter(
             StockFilterConfig(
                 exclude_bse=True,
                 exclude_chinext=True,
@@ -170,12 +189,22 @@ async def _init_v20_scan_resources_with_token(
                 exclude_sme=False,
             )
         )
+        # Publish the resource set only after every constructor has succeeded;
+        # a failed retry must not leave stopped/partial objects on shared state.
+        scan_state.realtime_client = tushare
+        scan_state.v15_scan_db = None
+        scan_state.historical_adapter = historical_adapter
+        scan_state.concept_mapper = concept_mapper
+        scan_state.stock_filter = stock_filter
         scan_state.initialized = True
     except BaseException as initialization_error:
-        cleanup_labels = ("fundamentals", "Tushare")
+        cleanup_labels: list[str] = ["Tushare"]
+        cleanup_operations: list[Awaitable[None]] = [tushare.stop()]
+        if manage_fundamentals:
+            cleanup_labels.insert(0, "fundamentals")
+            cleanup_operations.insert(0, fundamentals.close())
         cleanup_results = await asyncio.gather(
-            fundamentals.close(),
-            tushare.stop(),
+            *cleanup_operations,
             return_exceptions=True,
         )
         for label, cleanup_result in zip(cleanup_labels, cleanup_results, strict=True):
@@ -991,16 +1020,6 @@ class V20Service:
             )
 
         database_config_path = project_root / "config" / "database-config.yaml"
-        repository = create_embedded_v20_repository_from_config(database_config_path)
-        if (
-            repository.config.schema != base_config.database_schema
-            or repository.config.pool_min_size != base_config.database_pool_min_size
-            or repository.config.pool_max_size != base_config.database_pool_max_size
-        ):
-            raise V20ConfigError(
-                "embedded V20 repository differs from the frozen schema/pool settings"
-            )
-
         owns_fundamentals = fundamentals_db is None
         fundamentals = fundamentals_db
         if fundamentals is None:
@@ -1008,6 +1027,26 @@ class V20Service:
             fundamentals = create_fundamentals_db_from_config(
                 database_config_path,
                 tushare_token=token,
+            )
+        shared_ledger_pool = None
+        if not owns_fundamentals:
+            try:
+                shared_ledger_pool = fundamentals.connection_pool
+            except (AttributeError, RuntimeError) as exc:
+                raise V20ConfigError(
+                    "embedded V20 requires a connected shared fundamentals pool"
+                ) from exc
+        repository = create_embedded_v20_repository_from_config(
+            database_config_path,
+            shared_pool=shared_ledger_pool,
+        )
+        if (
+            repository.config.schema != base_config.database_schema
+            or repository.config.pool_min_size != base_config.database_pool_min_size
+            or repository.config.pool_max_size != base_config.database_pool_max_size
+        ):
+            raise V20ConfigError(
+                "embedded V20 repository differs from the frozen schema/pool settings"
             )
         route = load_legacy_embedded_v20_route()
         if not route.is_configured():
@@ -1037,7 +1076,11 @@ class V20Service:
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
-            initialize_resources=_init_embedded_v20_scan_resources,
+            initialize_resources=(
+                _init_owned_embedded_v20_scan_resources
+                if owns_fundamentals
+                else _init_embedded_v20_scan_resources
+            ),
             cleanup_resources=(
                 _cleanup_v20_scan_resources
                 if owns_fundamentals
@@ -1254,6 +1297,7 @@ class V20Service:
             if failure is not None
             else f"RUNTIME_TASK_STOPPED:{finished.get_name()}"
         )
+        self._startup_stage = "RUNTIME_FAILED"
         self._record_error(detail)
         self._stop_event.set()
         for sibling in self._tasks:

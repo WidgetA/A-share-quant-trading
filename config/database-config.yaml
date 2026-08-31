@@ -17,7 +17,9 @@ database:
     read_only: true
 
   # Trading data (positions, orders, transactions)
-  # Uses separate schema for isolation from messages
+  # Uses separate schema for isolation from messages. Existing main pools use
+  # asyncpg's default non-SSL transport; embedded V20's fallback pool mirrors
+  # this section while still writing only to its v20 schema.
   trading:
     host: "${DB_HOST:localhost}"
     port: ${DB_PORT:5432}
@@ -48,6 +50,8 @@ database:
     command_timeout_seconds: ${V20_DB_COMMAND_TIMEOUT_SECONDS:15}
 
   # Stock fundamentals (read-only, populated by external process)
+  # Preserve the deployed main/V16 non-SSL transport by default. A dedicated
+  # V20 process must explicitly set DB_SSLMODE=verify-full and its reviewed CA.
   fundamentals:
     host: "${DB_HOST:localhost}"
     port: ${DB_PORT:5432}
@@ -55,9 +59,11 @@ database:
     user: "${DB_USER:reader}"
     password: "${DB_PASSWORD}"
     pool_min_size: 2
-    pool_max_size: 5
+    # Embedded V20 borrows this already-connected pool. One connection is held
+    # by its advisory leader; eight keeps bounded room for ledger + readers.
+    pool_max_size: 8
     schema: "public"
-    ssl_mode: "${DB_SSLMODE:require}"
+    ssl_mode: "${DB_SSLMODE:disable}"
     ssl_root_cert: "${DB_SSLROOTCERT}"
     ssl_root_cert_sha256: "${DB_SSLROOTCERT_SHA256}"
     connect_timeout_seconds: ${DB_CONNECT_TIMEOUT_SECONDS:5}

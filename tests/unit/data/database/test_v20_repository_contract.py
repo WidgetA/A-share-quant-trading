@@ -527,12 +527,114 @@ def test_v20_repository_rejects_tls_without_hostname_verification() -> None:
         V20DatabaseConfig(ssl_mode="require")
 
 
-def test_embedded_v20_repository_still_rejects_optional_or_disabled_tls() -> None:
-    with pytest.raises(ValueError, match="must require TLS"):
+@pytest.mark.parametrize("ssl_mode", ["allow", "prefer"])
+def test_embedded_v20_repository_rejects_opportunistic_tls(ssl_mode: str) -> None:
+    with pytest.raises(ValueError, match="unsupported"):
         V20DatabaseConfig(
-            ssl_mode="prefer",
+            ssl_mode=ssl_mode,
             connection_profile="legacy_embedded",
         )
+
+
+def test_dedicated_repository_cannot_borrow_another_components_pool() -> None:
+    with pytest.raises(ValueError, match="only embedded V20"):
+        V20Repository(V20DatabaseConfig(), shared_pool=object())
+
+
+@pytest.mark.asyncio
+async def test_borrowed_pool_migration_failure_preserves_pool_for_retry(
+    monkeypatch,
+) -> None:
+    class _BorrowedPool:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    pool = _BorrowedPool()
+    repository = V20Repository(
+        V20DatabaseConfig(
+            ssl_mode="require",
+            connection_profile="legacy_embedded",
+        ),
+        shared_pool=pool,
+    )
+    attempts = 0
+
+    async def migrate() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("migration failed once")
+
+    async def forbidden_create_pool(**_kwargs):
+        raise AssertionError("borrowed repository must not create another pool")
+
+    monkeypatch.setattr(repository, "migrate", migrate)
+    monkeypatch.setattr(
+        "src.data.database.v20_repository.asyncpg.create_pool",
+        forbidden_create_pool,
+    )
+
+    with pytest.raises(RuntimeError, match="failed once"):
+        await repository.connect()
+
+    assert repository.uses_shared_pool is True
+    assert repository._pool is pool
+    assert pool.close_calls == 0
+
+    await repository.connect()
+
+    assert attempts == 2
+    assert repository._connection_ready is True
+
+
+@pytest.mark.asyncio
+async def test_borrowed_pool_close_releases_leader_without_closing_owner_pool() -> None:
+    class _Leader:
+        def __init__(self) -> None:
+            self.unlock_keys: list[int] = []
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def fetchval(self, _sql: str, key: int) -> bool:
+            self.unlock_keys.append(key)
+            return True
+
+    class _BorrowedPool:
+        def __init__(self) -> None:
+            self.released: list[object] = []
+            self.close_calls = 0
+
+        async def release(self, connection: object) -> None:
+            self.released.append(connection)
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    leader = _Leader()
+    pool = _BorrowedPool()
+    repository = V20Repository(
+        V20DatabaseConfig(
+            ssl_mode="require",
+            connection_profile="legacy_embedded",
+        ),
+        shared_pool=pool,
+    )
+    repository._connection_ready = True
+    repository._leader_connection = leader
+    repository._leader_key = 42
+    repository._leader_scope = ("route", "stream", "lineage")
+
+    await repository.close()
+
+    assert leader.unlock_keys == [42]
+    assert pool.released == [leader]
+    assert pool.close_calls == 0
+    assert repository._pool is pool
+    assert repository._connection_ready is False
 
 
 @pytest.mark.asyncio
@@ -1733,6 +1835,8 @@ database:
     assert repository.config.schema == "v20_test"
     assert repository.config.pool_min_size == 2
     assert repository.config.pool_max_size == 7
+    assert repository.config.ssl_mode == "verify-full"
+    assert repository.config.connection_profile == "dedicated"
 
 
 def test_embedded_repository_reuses_db_identity_but_keeps_v20_schema_and_pool(
@@ -1745,7 +1849,6 @@ def test_embedded_repository_reuses_db_identity_but_keeps_v20_schema_and_pool(
         "TEST_DB_NAME": "strategy",
         "TEST_DB_USER": "main-writer",
         "TEST_DB_PASSWORD": "main-secret",
-        "TEST_DB_SSLMODE": "require",
     }.items():
         monkeypatch.setenv(name, value)
     config_path = tmp_path / "database-config.yaml"
@@ -1768,7 +1871,7 @@ database:
     user: "${TEST_DB_USER}"
     password: "${TEST_DB_PASSWORD}"
     schema: "public"
-    ssl_mode: "${TEST_DB_SSLMODE:require}"
+    ssl_mode: "require"
     ssl_root_cert: ""
     ssl_root_cert_sha256: ""
     connect_timeout_seconds: 6
@@ -1786,12 +1889,67 @@ database:
     assert repository.config.password == "main-secret"
     assert repository.config.schema == "v20"
     assert (repository.config.pool_min_size, repository.config.pool_max_size) == (1, 8)
-    assert repository.config.ssl_mode == "require"
+    # The legacy trading/state pools do not pass ``ssl`` to asyncpg.  The
+    # fundamentals section has an independent TLS policy and must not affect
+    # the embedded ledger connection.
+    assert repository.config.ssl_mode == "disable"
+    assert repository.config.connect_timeout_seconds == 5
+    assert repository.config.command_timeout_seconds == 15
     assert repository.config.connection_profile == "legacy_embedded"
 
 
+def test_embedded_repository_prefers_connected_shared_fundamentals_pool(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    for name, value in {
+        "TEST_DB_HOST": "legacy-db.internal",
+        "TEST_DB_PORT": "5544",
+        "TEST_DB_NAME": "strategy",
+        "TEST_DB_USER": "main-writer",
+        "TEST_DB_PASSWORD": "main-secret",
+    }.items():
+        monkeypatch.setenv(name, value)
+    config_path = tmp_path / "database-config.yaml"
+    config_path.write_text(
+        """
+database:
+  trading:
+    host: "${TEST_DB_HOST}"
+    port: "${TEST_DB_PORT}"
+    database: "${TEST_DB_NAME}"
+    user: "${TEST_DB_USER}"
+    password: "${TEST_DB_PASSWORD}"
+    schema: "trading"
+  fundamentals:
+    host: "${TEST_DB_HOST}"
+    port: "${TEST_DB_PORT}"
+    database: "${TEST_DB_NAME}"
+    user: "${TEST_DB_USER}"
+    password: "${TEST_DB_PASSWORD}"
+    schema: "public"
+    connect_timeout_seconds: 6
+    command_timeout_seconds: 16
+""".strip(),
+        encoding="utf-8",
+    )
+    shared_pool = object()
+
+    repository = create_embedded_v20_repository_from_config(
+        config_path,
+        shared_pool=shared_pool,
+    )
+
+    assert repository.uses_shared_pool is True
+    assert repository._pool is shared_pool
+    assert repository.config.schema == "v20"
+    assert repository.config.ssl_mode == "disable"
+    assert repository.config.connect_timeout_seconds == 6
+    assert repository.config.command_timeout_seconds == 16
+
+
 @pytest.mark.asyncio
-async def test_embedded_repository_passes_required_tls_to_asyncpg(monkeypatch) -> None:
+async def test_embedded_repository_passes_disabled_ssl_to_asyncpg(monkeypatch) -> None:
     captured: dict = {}
 
     async def create_pool(**kwargs):
@@ -1800,7 +1958,7 @@ async def test_embedded_repository_passes_required_tls_to_asyncpg(monkeypatch) -
 
     repository = V20Repository(
         V20DatabaseConfig(
-            ssl_mode="require",
+            ssl_mode="disable",
             connection_profile="legacy_embedded",
         )
     )
@@ -1808,7 +1966,7 @@ async def test_embedded_repository_passes_required_tls_to_asyncpg(monkeypatch) -
 
     await repository.connect(migrate=False)
 
-    assert captured["ssl"] == "require"
+    assert captured["ssl"] is False
 
 
 @pytest.mark.asyncio

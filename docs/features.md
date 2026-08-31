@@ -886,8 +886,10 @@ or submits orders.
   Feishu credentials. Runtime schema `v20-runtime/v2` binds reviewed relay origin/app/chat hashes and
   database CA hashes into `config_hash`; the V20-only relay endpoint uses a versioned idempotent
   envelope, server-side entry expiry, and strict delivery-receipt echoes.
-- Require hostname-verifying `verify-full` PostgreSQL TLS for both V20 database roles, a dedicated
-  writer distinct from the fundamentals reader, and explicit CA paths/content hashes. Protect
+- Require explicit hostname-verifying `verify-full` PostgreSQL TLS for both database roles in the
+  dedicated V20 process, a writer distinct from the fundamentals reader, and explicit CA
+  paths/content hashes. The legacy main/V16 fundamentals connection retains its historical
+  `ssl=False` default. Protect
   evidence writes and status reads with two pairwise-distinct API keys; status HTTP serves only a
   bounded background snapshot and never performs a request-time database query.
 - Run formal V20 in the dedicated `scripts/v20_main.py` process/container target. The process may
@@ -895,7 +897,10 @@ or submits orders.
   deployment trigger. It must not load iQuant, broker, order, or account-management routes.
 - Run the deployed main image with an explicit embedded forward-shadow integration by default. It
   reuses the existing `DB_*`, persisted/environment Tushare token, and `FEISHU_*` destination while
-  retaining the V20-only schema, leader, state ledger, outbox, 09:39 cutoff, and exit schedulers.
+  borrowing main's connected fundamentals pool without taking lifecycle ownership, and retaining
+  the V20-only schema, leader, state ledger, outbox, 09:39 cutoff, and exit schedulers. If the shared
+  pool is unavailable, create a V20-owned pool with `database.trading` transport semantics
+  (currently asyncpg `ssl=False`).
   `V20_EMBEDDED_ENABLED=false` is the explicit opt-out; any explicit V20 activation uses the strict
   dedicated loader instead of silently falling back.
 - Deliberately leave `POST /api/v20/trigger-scan` without application-layer authentication for now

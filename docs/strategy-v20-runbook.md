@@ -132,9 +132,14 @@ V20_DB_SSLROOTCERT_SHA256
 使用同库隔离 schema；无论哪种方式，都要独立账号、独立密码和最小权限。
 
 上段是专用 profile 的要求。main 内嵌 profile 有意复用已经承担 `trading` 写入的
-`DB_*` 身份和 fundamentals 的 TLS/超时设置，同时把 schema 固定为 `v20`、连接池固定
-为 1/8；它不会把表写进 `trading` 或 `public`。TLS 最低为 `require`，若现行 DB 配置为
-`verify-full` 则仍校验 CA。若该线上身份没有创建 `v20` schema 的权限，启动会明确失败，
+`DB_*` 身份，同时把 schema 固定为 `v20`；它不会把表写进 `trading` 或 `public`。
+内嵌账本优先借用 main 启动时已经连接的 fundamentals pool。该 pool 的生命周期仍由
+main 所有：V20 关闭或迁移失败时不得关闭它，只释放自己常驻的 advisory-leader 连接。
+配置把共享 pool 上限设为 8（最小仍为 2，连接按需创建），给 leader、账本和原有读取
+保留有界余量。若共享 pool 不可用，V20 才创建 1/8 的自有 pool，并严格沿用
+`database.trading` 的传输语义；现行 trading/state 未启用 SSL，所以 fallback 传入
+`ssl=False`。只有专用 V20 profile 才强制要求显式 `DB_SSLMODE=verify-full` 和经审核 CA。
+若该线上身份没有创建 `v20` schema 的权限，启动会明确失败，
 V16 保持运行，公开 `/api/status` 只显示 `start_error_type` 而不泄露连接异常正文。
 内嵌 V20 会每 15 秒重试一次启动依赖；重试任务单例运行，成功后清除错误并启动唯一
 leader，容器关闭时先取消重试再释放 V20 资源。`/api/status` 的 `retrying=true` 表示正在

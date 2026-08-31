@@ -703,8 +703,8 @@ class V20DatabaseConfig:
             if self.ssl_mode != "verify-full":
                 raise ValueError("V20 database SSL mode must be verify-full")
         elif self.connection_profile == "legacy_embedded":
-            if self.ssl_mode not in {"require", "verify-ca", "verify-full"}:
-                raise ValueError("embedded V20 database SSL mode must require TLS")
+            if self.ssl_mode not in {"disable", "require", "verify-ca", "verify-full"}:
+                raise ValueError("embedded V20 database SSL mode is unsupported")
         else:
             raise ValueError("unsupported V20 database connection profile")
         if not 0 < self.connect_timeout_seconds <= 60:
@@ -1374,10 +1374,19 @@ def migration_sql(schema: str = "v20") -> str:
 
 
 class V20Repository:
-    def __init__(self, config: V20DatabaseConfig) -> None:
+    def __init__(
+        self,
+        config: V20DatabaseConfig,
+        *,
+        shared_pool: Any | None = None,
+    ) -> None:
+        if shared_pool is not None and config.connection_profile != "legacy_embedded":
+            raise ValueError("only embedded V20 may borrow a shared database pool")
         self.config = config
         self.schema = config.schema
-        self._pool: asyncpg.Pool | None = None
+        self._pool: asyncpg.Pool | None = shared_pool
+        self._owns_pool = shared_pool is None
+        self._connection_ready = False
         self._leader_connection: Any | None = None
         self._leader_key: int | None = None
         self._leader_scope: tuple[str, str, str] | None = None
@@ -1389,40 +1398,57 @@ class V20Repository:
             raise V20RepositoryError("V20 repository is not connected")
         return self._pool
 
+    @property
+    def uses_shared_pool(self) -> bool:
+        """Whether pool lifetime belongs to the legacy main runtime."""
+
+        return not self._owns_pool
+
     async def connect(self, *, migrate: bool = True) -> None:
-        if self._pool is not None:
+        if self._connection_ready:
             return
-        if self.config.ssl_mode == "verify-full":
-            ssl_context: str | object = verified_postgres_ssl_context(
-                ssl_mode=self.config.ssl_mode,
-                ssl_root_cert=self.config.ssl_root_cert,
-                expected_sha256=self.config.ssl_root_cert_sha256,
+        created_pool = False
+        if self._pool is None:
+            if self.config.ssl_mode == "verify-full":
+                ssl_context: bool | str | object = verified_postgres_ssl_context(
+                    ssl_mode=self.config.ssl_mode,
+                    ssl_root_cert=self.config.ssl_root_cert,
+                    expected_sha256=self.config.ssl_root_cert_sha256,
+                )
+            elif self.config.ssl_mode == "disable":
+                # The deployed legacy trading/state pools omit asyncpg's
+                # ``ssl`` argument, whose effective value is False.  The
+                # embedded fallback mirrors that connection contract exactly.
+                ssl_context = False
+            else:
+                # This branch is reachable only for the explicit
+                # legacy_embedded profile when trading opts into TLS.
+                ssl_context = self.config.ssl_mode
+            self._pool = await asyncpg.create_pool(
+                host=self.config.host,
+                port=self.config.port,
+                database=self.config.database,
+                user=self.config.user,
+                password=self.config.password,
+                min_size=self.config.pool_min_size,
+                max_size=self.config.pool_max_size,
+                ssl=ssl_context,
+                timeout=self.config.connect_timeout_seconds,
+                command_timeout=self.config.command_timeout_seconds,
+                server_settings={
+                    "lock_timeout": "3000",
+                    "idle_in_transaction_session_timeout": "15000",
+                },
             )
-        else:
-            # This branch is reachable only for the explicit legacy_embedded
-            # profile validated above.  It mirrors the already deployed
-            # fundamentals connection while still requiring PostgreSQL TLS.
-            ssl_context = self.config.ssl_mode
-        self._pool = await asyncpg.create_pool(
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database,
-            user=self.config.user,
-            password=self.config.password,
-            min_size=self.config.pool_min_size,
-            max_size=self.config.pool_max_size,
-            ssl=ssl_context,
-            timeout=self.config.connect_timeout_seconds,
-            command_timeout=self.config.command_timeout_seconds,
-            server_settings={
-                "lock_timeout": "3000",
-                "idle_in_transaction_session_timeout": "15000",
-            },
-        )
-        if migrate:
-            try:
+            created_pool = True
+        try:
+            if migrate:
                 await self.migrate()
-            except BaseException as migration_error:
+        except BaseException as migration_error:
+            # A borrowed pool remains live for main and for a later bounded V20
+            # retry.  Only the pool allocated by this connect attempt belongs
+            # to the repository and may be closed here.
+            if created_pool:
                 pool = self._pool
                 self._pool = None
                 if pool is not None:
@@ -1434,7 +1460,8 @@ class V20Repository:
                         # retaining the cleanup failure as explicit exception
                         # context.  Neither failure is allowed to look successful.
                         raise migration_error from close_error
-                raise
+            raise
+        self._connection_ready = True
 
     async def close(self) -> None:
         pool = self._pool
@@ -1454,10 +1481,12 @@ class V20Repository:
                 finally:
                     await pool.release(leader)
         finally:
-            try:
-                await pool.close()
-            finally:
-                self._pool = None
+            self._connection_ready = False
+            if self._owns_pool:
+                try:
+                    await pool.close()
+                finally:
+                    self._pool = None
 
     async def acquire_runtime_leader(
         self,
@@ -4867,24 +4896,23 @@ def create_v20_repository_from_config(
 
 def create_embedded_v20_repository_from_config(
     config_path: str | Path = "config/database-config.yaml",
+    *,
+    shared_pool: Any | None = None,
 ) -> V20Repository:
     """Create a V20 ledger beside the legacy main runtime.
 
-    The existing main container already has one reviewed ``DB_*`` connection
-    used by both trading state and fundamentals.  Embedded V20 deliberately
-    reuses that endpoint and principal, but owns an isolated ``v20`` schema and
-    its own eight-connection pool.  The dedicated V20 factory above never
-    falls back to this profile.
+    Embedded V20 deliberately mirrors ``database.trading``'s endpoint,
+    principal, and transport semantics for its fallback pool, and always owns
+    an isolated ``v20`` schema.  It may instead borrow main's connected
+    fundamentals pool without taking lifecycle ownership.  The dedicated V20
+    factory above never falls back to this profile.
     """
     from src.common.config import load_config
 
     config = load_config(config_path)
     trading_raw = config.get_dict("database.trading", {})
-    fundamentals_raw = config.get_dict("database.fundamentals", {})
-    if not trading_raw or not fundamentals_raw:
-        raise ValueError(
-            f"embedded V20 requires database.trading and database.fundamentals in {config_path}"
-        )
+    if not trading_raw:
+        raise ValueError(f"embedded V20 requires database.trading in {config_path}")
 
     def resolve_env(value: Any) -> Any:
         if not isinstance(value, str):
@@ -4897,35 +4925,50 @@ def create_embedded_v20_repository_from_config(
         variable, default = match.groups()
         return os.environ.get(variable, default or "")
 
-    identity_fields = ("host", "port", "database", "user", "password")
-    trading_identity = {field: resolve_env(trading_raw.get(field, "")) for field in identity_fields}
-    fundamentals_identity = {
-        field: resolve_env(fundamentals_raw.get(field, "")) for field in identity_fields
-    }
-    if trading_identity != fundamentals_identity:
-        raise ValueError("embedded V20 database identities disagree between config sections")
+    connection_raw = trading_raw
+    if shared_pool is not None:
+        fundamentals_raw = config.get_dict("database.fundamentals", {})
+        if not fundamentals_raw:
+            raise ValueError(f"shared embedded V20 requires database.fundamentals in {config_path}")
+        identity_fields = ("host", "port", "database", "user", "password")
+        trading_identity = {
+            field: resolve_env(trading_raw.get(field, "")) for field in identity_fields
+        }
+        fundamentals_identity = {
+            field: resolve_env(fundamentals_raw.get(field, "")) for field in identity_fields
+        }
+        if trading_identity != fundamentals_identity:
+            raise ValueError("shared embedded V20 database identities disagree")
+        connection_raw = fundamentals_raw
 
     repository_config = V20DatabaseConfig(
-        host=str(trading_identity["host"]),
-        port=int(trading_identity["port"]),
-        database=str(trading_identity["database"]),
-        user=str(trading_identity["user"]),
-        password=str(trading_identity["password"]),
+        host=str(resolve_env(connection_raw.get("host", "localhost"))),
+        port=int(resolve_env(connection_raw.get("port", 5432))),
+        database=str(resolve_env(connection_raw.get("database", "messages"))),
+        user=str(resolve_env(connection_raw.get("user", "reader"))),
+        password=str(resolve_env(connection_raw.get("password", ""))),
         schema="v20",
         pool_min_size=1,
         pool_max_size=8,
-        ssl_mode=str(resolve_env(fundamentals_raw.get("ssl_mode", "require"))),
-        ssl_root_cert=str(resolve_env(fundamentals_raw.get("ssl_root_cert", ""))),
-        ssl_root_cert_sha256=str(resolve_env(fundamentals_raw.get("ssl_root_cert_sha256", ""))),
+        ssl_mode=str(
+            resolve_env(
+                connection_raw.get(
+                    "ssl_mode",
+                    "disable",
+                )
+            )
+        ),
+        ssl_root_cert=str(resolve_env(connection_raw.get("ssl_root_cert", ""))),
+        ssl_root_cert_sha256=str(resolve_env(connection_raw.get("ssl_root_cert_sha256", ""))),
         connect_timeout_seconds=float(
-            resolve_env(fundamentals_raw.get("connect_timeout_seconds", 5))
+            resolve_env(connection_raw.get("connect_timeout_seconds", 5))
         ),
         command_timeout_seconds=float(
-            resolve_env(fundamentals_raw.get("command_timeout_seconds", 15))
+            resolve_env(connection_raw.get("command_timeout_seconds", 15))
         ),
         connection_profile="legacy_embedded",
     )
-    return V20Repository(repository_config)
+    return V20Repository(repository_config, shared_pool=shared_pool)
 
 
 __all__ = [

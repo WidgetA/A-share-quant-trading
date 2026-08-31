@@ -285,8 +285,12 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 
 现行 main 部署使用内嵌 `forward_shadow`：V20 与 V16 同容器运行，复用已经工作的
 `DB_*`、Tushare token 来源和 `FEISHU_*` 机器人配置，但仍使用独立 `v20` schema、
-独立连接池、leader、状态账本和 durable outbox。它只产生决策与推送，不接入下单。
-main 中的 V16 调度继续运行；V20 输入仍严格截止到 09:39 完整 bar。
+leader、状态账本和 durable outbox。它只产生决策与推送，不接入下单。
+内嵌账本优先借用 main 已连接的 fundamentals pool；pool 生命周期仍由 main 所有，V20
+关闭时只释放 advisory leader，不关闭共享 pool。共享 pool 不可用时，才按
+`database.trading` 建立 V20 自有 pool；现行 trading/state 未向 asyncpg 启用 SSL，
+因此该 fallback 明确传入 `ssl=False`。专用 V20 仍必须显式配置 `verify-full`。main 中的
+V16 调度继续运行；V20 输入仍严格截止到 09:39 完整 bar。
 
 显式 `production_push` 仍只允许专用进程 `scripts/v20_main.py`/Docker `v20` 目标。该进程
 只暴露：

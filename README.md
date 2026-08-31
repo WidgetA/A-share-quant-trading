@@ -58,7 +58,10 @@ The normal `main` image starts V20 in an embedded `forward_shadow` profile besid
 V16. This is the production integration used by the existing host: it reuses the
 working `DB_*`, Tushare token resolver, and `FEISHU_*` destination, while keeping
 all V20 decisions and outbox rows in the separate PostgreSQL `v20` schema. The
-input boundary remains the completed 09:39 bar. Set
+embedded ledger first borrows main's already-connected fundamentals pool without
+taking ownership of it. If that pool is unavailable, V20 creates its own pool
+with `database.trading`'s connection transport (currently asyncpg `ssl=False`).
+The input boundary remains the completed 09:39 bar. Set
 `V20_EMBEDDED_ENABLED=false` only to disable this integration explicitly.
 
 The two strategy deployment modes remain:
