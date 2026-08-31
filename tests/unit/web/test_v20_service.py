@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import src.strategy.v20.runtime_config as runtime_config_module
 from src.common.v20_feishu import V20FeishuRoute
 from src.data.clients.tushare_realtime import TushareMinuteBar
 from src.data.database.fundamentals_db import FundamentalsDBConfig
@@ -677,12 +678,16 @@ def _entry_status(config, *, action: str = "BLOCK") -> EntryStatus:
     snapshot = {
         "schema_version": V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
         "v16_snapshot_schema_version": V20_V16_SNAPSHOT_SCHEMA,
+        "state_semantics_hash": config.state_semantics_hash,
         "comparison_pool_codes": ["000001", "000002"],
         "symbols": [{"code": "000001"}],
     }
     semantic = {
         "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": config.strategy_version,
+        "config_hash": config.config_hash,
+        "state_semantics_hash": config.state_semantics_hash,
         "action": action,
     }
     return EntryStatus(
@@ -716,7 +721,10 @@ def test_entry_binding_rejects_legacy_semantic_and_snapshot_contracts(
     service._verify_entry_binding(current)
 
     invalid_semantic = {**current.semantic, "action": "INPUT_INVALID"}
-    invalid_snapshot = {"schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA}
+    invalid_snapshot = {
+        "schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
+        "state_semantics_hash": service.config.state_semantics_hash,
+    }
     service._verify_entry_binding(
         replace(
             current,
@@ -748,6 +756,57 @@ def test_entry_binding_rejects_legacy_semantic_and_snapshot_contracts(
                 current,
                 snapshot=legacy_snapshot,
                 snapshot_hash=sha256_json(legacy_snapshot),
+            )
+        )
+
+
+def test_entry_binding_reattaches_only_proven_historical_terminal_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(monkeypatch, SimpleNamespace())
+    current = _entry_status(service.config)
+    historical_config_hash = "c" * 64
+    historical_state_hash = "d" * 64
+    semantic = {
+        **current.semantic,
+        "config_hash": historical_config_hash,
+        "state_semantics_hash": historical_state_hash,
+    }
+    snapshot = {
+        **current.snapshot,
+        "state_semantics_hash": historical_state_hash,
+    }
+    historical = replace(
+        current,
+        config_id=historical_config_hash[:24],
+        config_hash=historical_config_hash,
+        semantic=semantic,
+        semantic_content_hash=sha256_json(semantic),
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    binding = (
+        historical.config_id,
+        historical.config_hash,
+        historical_state_hash,
+    )
+
+    with pytest.raises(V20ConfigError, match="unproven historical config"):
+        service._verify_entry_binding(historical)
+
+    service._compatible_entry_bindings.add(binding)
+    service._verify_entry_binding(historical)
+
+    with pytest.raises(V20ConfigError, match="unproven historical config"):
+        service._verify_entry_binding(replace(historical, slot_status="OPEN"))
+
+    tampered_semantic = {**semantic, "config_hash": "e" * 64}
+    with pytest.raises(V20ConfigError, match="another config/lineage"):
+        service._verify_entry_binding(
+            replace(
+                historical,
+                semantic=tampered_semantic,
+                semantic_content_hash=sha256_json(tampered_semantic),
             )
         )
 
@@ -1194,7 +1253,10 @@ async def test_manual_trigger_after_cutoff_reports_independent_0939_replay(
         "policy_input_hash": "b" * 64,
         "scheduled_exits_today": [],
     }
-    invalid_snapshot = {"schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA}
+    invalid_snapshot = {
+        "schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
+        "state_semantics_hash": service.config.state_semantics_hash,
+    }
     invalid_status = replace(
         current,
         slot_status="FAILED",
@@ -1601,6 +1663,8 @@ def _late_replay_status_and_state(service: V20Service) -> tuple[EntryStatus, Sta
     semantic = {
         "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": service.config.strategy_version,
+        "config_hash": service.config.config_hash,
         "action": "INPUT_INVALID",
         "state_semantics_hash": service.config.state_semantics_hash,
         "state_before_hash": before_hash,
@@ -2461,6 +2525,33 @@ async def test_recovery_finalizes_each_missed_trade_day_before_today(
     config = _config(monkeypatch)
     repository = _MissedSlotRepository(config)
     service = _service(monkeypatch, repository)
+    historical_config_hash = "c" * 64
+    historical_state_hash = "d" * 64
+    historical_semantic = {
+        **repository.predecessor.semantic,
+        "config_hash": historical_config_hash,
+        "state_semantics_hash": historical_state_hash,
+    }
+    historical_snapshot = {
+        **repository.predecessor.snapshot,
+        "state_semantics_hash": historical_state_hash,
+    }
+    repository.predecessor = replace(
+        repository.predecessor,
+        config_id=historical_config_hash[:24],
+        config_hash=historical_config_hash,
+        semantic=historical_semantic,
+        semantic_content_hash=sha256_json(historical_semantic),
+        snapshot=historical_snapshot,
+        snapshot_hash=sha256_json(historical_snapshot),
+    )
+    service._compatible_entry_bindings.add(
+        (
+            historical_config_hash[:24],
+            historical_config_hash,
+            historical_state_hash,
+        )
+    )
 
     async def expire(context, now):
         return None
@@ -2618,6 +2709,37 @@ def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
     )
 
     assert bootstrap.predecessor_trade_date == as_of
+
+    audited_legacy_hash = "a" * 64
+    monkeypatch.setattr(
+        runtime_config_module,
+        "_AUDITED_LEGACY_STATE_SEMANTICS_HASHES",
+        frozenset({audited_legacy_hash}),
+    )
+    resolved_legacy = {
+        **checkpoint,
+        "source_state_semantics_hash": audited_legacy_hash,
+        "resolved_state_semantics_hash": config.state_semantics_hash,
+    }
+    checkpoint_path.write_text(json.dumps(resolved_legacy), encoding="utf-8")
+    assert (
+        _bootstrap_bundle(
+            checkpoint_config,
+            empty_predecessor_trade_date=date(1999, 1, 1),
+        ).predecessor_trade_date
+        == as_of
+    )
+
+    tampered_resolution = {
+        **resolved_legacy,
+        "source_state_semantics_hash": "b" * 64,
+    }
+    checkpoint_path.write_text(json.dumps(tampered_resolution), encoding="utf-8")
+    with pytest.raises(V20ConfigError, match="state semantics"):
+        _bootstrap_bundle(
+            checkpoint_config,
+            empty_predecessor_trade_date=date(1999, 1, 1),
+        )
 
 
 async def test_checkpoint_as_of_day_is_already_consumed_by_target_lineage(

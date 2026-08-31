@@ -26,7 +26,13 @@ def _isolated_project(tmp_path: Path) -> tuple[Path, dict]:
     for relative in _STRATEGY_DEPENDENCY_FILES:
         dependency = root / relative
         dependency.parent.mkdir(parents=True, exist_ok=True)
-        dependency.write_text(f"test fixture for {relative}\n", encoding="utf-8")
+        if relative in {
+            "src/web/v20_service.py",
+            "src/data/database/v20_repository.py",
+        }:
+            shutil.copy2(PROJECT_ROOT / relative, dependency)
+        else:
+            dependency.write_text(f"test fixture for {relative}\n", encoding="utf-8")
     shutil.copy2(
         PROJECT_ROOT / "config" / "database-config.yaml",
         root / "config" / "database-config.yaml",
@@ -164,7 +170,6 @@ def test_config_hash_binds_database_wiring_without_changing_state_semantics(
         "src/strategy/filters/momentum_quality_filter.py",
         "src/data/clients/ifind_http_client.py",
         "src/common/config.py",
-        "src/common/feishu_bot.py",
     ],
 )
 def test_config_hash_binds_lazy_v16_import_closure(
@@ -183,6 +188,46 @@ def test_config_hash_binds_lazy_v16_import_closure(
 
     assert before.state_semantics_hash != after.state_semantics_hash
     assert before.config_hash != after.config_hash
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["src/common/feishu_bot.py", "src/common/v20_feishu.py"],
+)
+def test_notification_only_bytes_do_not_fork_state_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative: str,
+) -> None:
+    monkeypatch.delenv("V20_ENABLED", raising=False)
+    monkeypatch.delenv("V20_MODE", raising=False)
+    root, raw = _isolated_project(tmp_path)
+    _write_runtime(root, raw)
+    before = load_v20_runtime_config(root)
+
+    (root / relative).write_text("changed notification-only bytes\n", encoding="utf-8")
+    after = load_v20_runtime_config(root)
+
+    assert before.config_hash != after.config_hash
+    assert before.state_semantics_hash == after.state_semantics_hash
+
+
+def test_unreviewed_mixed_service_bytes_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("V20_ENABLED", raising=False)
+    monkeypatch.delenv("V20_MODE", raising=False)
+    root, raw = _isolated_project(tmp_path)
+    _write_runtime(root, raw)
+
+    (root / "src/web/v20_service.py").write_text(
+        "unreviewed state-sensitive service bytes\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(V20ConfigError, match="unreviewed state-sensitive mixed source"):
+        load_v20_runtime_config(root)
 
 
 def test_container_bundled_data_paths_keep_same_logical_hash_keys(tmp_path, monkeypatch) -> None:

@@ -159,6 +159,252 @@ _STRATEGY_DEPENDENCY_FILES = (
     "uv.lock",
 )
 
+# Only these deployed bytes can change a V20 selection, BASE/R7/G input, or
+# official state transition.  Operational wrappers remain covered by the full
+# config hash above, but no longer fork a state lineage merely because a
+# formatter, route, replay, database adapter, or service lifecycle changed.
+#
+# ``V20_STATE_INPUT_ORCHESTRATION_V1`` explicitly versions the state-sensitive
+# orchestration that still lives in ``v20_service.py`` (receipt selection,
+# cutoff handling, policy input assembly, gap maturity, and invalid-state
+# transition ordering).  Any semantic edit there must bump this profile.
+_STATE_SEMANTICS_DEPENDENCY_FILES = (
+    "src/strategy/strategies/v16_scanner.py",
+    "src/strategy/strategies/momentum_sector_scanner.py",
+    "src/strategy/lgbrank_scorer.py",
+    "src/strategy/filters/stock_filter.py",
+    "src/strategy/filters/board_filter.py",
+    "src/strategy/filters/reversal_factor_filter.py",
+    "src/strategy/filters/momentum_quality_filter.py",
+    "src/data/clients/ifind_http_client.py",
+    "src/common/config.py",
+    "src/data/sources/local_concept_mapper.py",
+    "src/data/clients/tushare_realtime.py",
+    "src/data/clients/iquant_historical_adapter.py",
+    "src/data/clients/v20_market_data.py",
+    "src/data/database/fundamentals_db.py",
+    "src/web/v15_scan_service.py",
+    "src/web/v20_scan_pipeline.py",
+    "src/strategy/v20/artifacts.py",
+    "src/strategy/v20/decision_engine.py",
+    "src/strategy/v20/exit_policy.py",
+    "src/strategy/v20/identity.py",
+    "src/strategy/v20/models.py",
+    "src/strategy/v20/policy.py",
+    "src/strategy/v20/shadow_evaluator.py",
+    "models/lgbrank_latest.txt",
+    "models/feature_list.json",
+    "data/sectors.json",
+    "data/board_constituents.json",
+    "pyproject.toml",
+    "uv.lock",
+)
+_STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v2"
+_STATE_INPUT_ORCHESTRATION_PROFILE = "V20_STATE_INPUT_ORCHESTRATION_V1"
+_LEGACY_STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v1"
+_AUDITED_LEGACY_STATE_SEMANTICS_HASHES = frozenset(
+    {
+        # main@4211cd0: the only legacy lineage admitted to the v2 core model.
+        # Its only deployment-byte changes before this migration were the
+        # reviewed V20 late-replay service and Feishu formatter changes.
+        "b2ba54f990cfe6b0e4b8f38c97e096a72205d78e34e484593eacaf5243ac2ce0",
+    }
+)
+_MIXED_STATE_SOURCE_CLASSES = {
+    "src/web/v20_service.py": {
+        "07ac09b4e61f376ec896c893ea5e88ee89562ae573402bccd9d63a0694d52e6e": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
+        "533534faf87d7f1b45bff3af9624d12365f91275f9609f549ea9b3c91d7d2bbb": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
+        "12fd28d7abdcdafca6932cf2b08d2c870a971d2f4c3e38a06e97bdd29921d24e": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
+    },
+    "src/data/database/v20_repository.py": {
+        "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
+            "V20_LEDGER_STATE_CONTRACT_V1"
+        ),
+        "7167e475f3a6dd857673540a8ac0bf812c4a72b9bff4a871e61ea677c22f1209": (
+            "V20_LEDGER_STATE_CONTRACT_V1"
+        ),
+    },
+}
+
+
+def _canonical_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _state_semantics_source(payload: Mapping[str, Any]) -> dict[str, Any]:
+    dependencies = payload.get("strategy_dependency_hashes")
+    if not isinstance(dependencies, Mapping):
+        raise V20ConfigError("frozen config lacks strategy dependency hashes")
+    state_dependencies: dict[str, str] = {}
+    for relative in _STATE_SEMANTICS_DEPENDENCY_FILES:
+        digest = dependencies.get(relative)
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise V20ConfigError(f"frozen config lacks valid state dependency: {relative}")
+        state_dependencies[relative] = digest
+    mixed_source_classes: dict[str, str] = {}
+    for relative, reviewed in _MIXED_STATE_SOURCE_CLASSES.items():
+        digest = dependencies.get(relative)
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise V20ConfigError(f"frozen config lacks valid mixed dependency: {relative}")
+        semantic_class = reviewed.get(digest)
+        if semantic_class is None:
+            raise V20ConfigError(
+                f"unreviewed state-sensitive mixed source bytes: {relative}={digest}"
+            )
+        mixed_source_classes[relative] = semantic_class
+    required_mappings = ("clock", "market_data", "policy")
+    for field in required_mappings:
+        if not isinstance(payload.get(field), Mapping):
+            raise V20ConfigError(f"frozen config lacks valid {field}")
+    for field in (
+        "strategy_version",
+        "timezone",
+        "return_profile_id",
+        "reference_profile_id",
+    ):
+        if not isinstance(payload.get(field), str) or not str(payload[field]):
+            raise V20ConfigError(f"frozen config lacks valid {field}")
+    manifest_hash = payload.get("g_manifest_sha256")
+    if not isinstance(manifest_hash, str) or not _SHA256.fullmatch(manifest_hash):
+        raise V20ConfigError("frozen config lacks valid g_manifest_sha256")
+    return {
+        "schema_version": _STATE_SEMANTICS_SCHEMA,
+        "strategy_version": payload["strategy_version"],
+        "timezone": payload["timezone"],
+        "return_profile_id": payload["return_profile_id"],
+        "reference_profile_id": payload["reference_profile_id"],
+        "clock": dict(cast(Mapping[str, Any], payload["clock"])),
+        "market_data": dict(cast(Mapping[str, Any], payload["market_data"])),
+        "policy": dict(cast(Mapping[str, Any], payload["policy"])),
+        "g_manifest_sha256": manifest_hash,
+        "state_input_orchestration_profile": _STATE_INPUT_ORCHESTRATION_PROFILE,
+        "mixed_state_source_classes": mixed_source_classes,
+        "state_dependency_hashes": state_dependencies,
+    }
+
+
+def state_semantics_hash_from_frozen_payload(payload: Mapping[str, Any]) -> str:
+    """Derive the stable state/core hash from a frozen runtime-config payload."""
+
+    return _canonical_hash(_state_semantics_source(payload))
+
+
+def state_semantics_payload_from_frozen_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _state_semantics_source(payload)
+
+
+def declared_state_semantics_is_authentic(payload: Mapping[str, Any]) -> bool:
+    """Authenticate either the legacy full-byte hash or the current core hash."""
+
+    declared = payload.get("state_semantics_hash")
+    if not isinstance(declared, str) or not _SHA256.fullmatch(declared):
+        return False
+    embedded = payload.get("state_semantics_payload")
+    if embedded is not None:
+        return (
+            isinstance(embedded, Mapping)
+            and dict(embedded) == _state_semantics_source(payload)
+            and _canonical_hash(embedded) == declared
+        )
+    dependencies = payload.get("strategy_dependency_hashes")
+    if not isinstance(dependencies, Mapping):
+        return False
+    legacy = {
+        "schema_version": _LEGACY_STATE_SEMANTICS_SCHEMA,
+        "strategy_version": payload.get("strategy_version"),
+        "timezone": payload.get("timezone"),
+        "return_profile_id": payload.get("return_profile_id"),
+        "reference_profile_id": payload.get("reference_profile_id"),
+        "clock": payload.get("clock"),
+        "market_data": payload.get("market_data"),
+        "policy": payload.get("policy"),
+        "g_manifest_sha256": payload.get("g_manifest_sha256"),
+        "strategy_dependency_hashes": dict(dependencies),
+    }
+    return _canonical_hash(legacy) == declared
+
+
+def legacy_state_semantics_is_compatible_with_current(
+    legacy_payload: Mapping[str, Any],
+    current_payload: Mapping[str, Any],
+) -> bool:
+    """Prove the one reviewed legacy-full-hash to current-core bridge.
+
+    This is intentionally not a generic legacy migration.  Unknown v1 service
+    bytes are rejected even when their obvious policy files happen to match.
+    Once a config carries the v2 payload, ordinary compatibility is exact core
+    hash equality.
+    """
+
+    declared = legacy_payload.get("state_semantics_hash")
+    if declared not in _AUDITED_LEGACY_STATE_SEMANTICS_HASHES:
+        return False
+    if not declared_state_semantics_is_authentic(legacy_payload):
+        return False
+    if not declared_state_semantics_is_authentic(current_payload):
+        return False
+    if current_payload.get("state_semantics_hash") != state_semantics_hash_from_frozen_payload(
+        current_payload
+    ):
+        return False
+    identity_fields = (
+        "strategy_version",
+        "official_stream_id",
+        "state_lineage_id",
+        "timezone",
+        "return_profile_id",
+        "reference_profile_id",
+        "clock",
+        "market_data",
+        "policy",
+        "g_manifest_sha256",
+        "bootstrap_mode",
+        "bootstrap_checkpoint_sha256",
+    )
+    if any(legacy_payload.get(field) != current_payload.get(field) for field in identity_fields):
+        return False
+    legacy_dependencies = legacy_payload.get("strategy_dependency_hashes")
+    current_dependencies = current_payload.get("strategy_dependency_hashes")
+    if not isinstance(legacy_dependencies, Mapping) or not isinstance(
+        current_dependencies, Mapping
+    ):
+        return False
+    if not all(
+        legacy_dependencies.get(relative) == current_dependencies.get(relative)
+        for relative in _STATE_SEMANTICS_DEPENDENCY_FILES
+    ):
+        return False
+    for relative, reviewed in _MIXED_STATE_SOURCE_CLASSES.items():
+        legacy_digest = legacy_dependencies.get(relative)
+        current_digest = current_dependencies.get(relative)
+        if not isinstance(legacy_digest, str) or not isinstance(current_digest, str):
+            return False
+        legacy_class = reviewed.get(legacy_digest)
+        current_class = reviewed.get(current_digest)
+        if legacy_class is None or legacy_class != current_class:
+            return False
+    return True
+
+
+def is_audited_legacy_state_semantics_hash(value: object) -> bool:
+    return isinstance(value, str) and value in _AUDITED_LEGACY_STATE_SEMANTICS_HASHES
+
 
 def _exact_keys(value: dict[str, Any], expected: set[str], field: str) -> None:
     if set(value) != expected:
@@ -508,6 +754,7 @@ class V20RuntimeConfig:
     bootstrap_checkpoint_sha256: str | None
     strategy_dependency_hashes: dict[str, str]
     database_config_sha256: str
+    state_semantics_payload: dict[str, Any]
     state_semantics_hash: str
     frozen_payload: dict[str, Any]
     config_hash: str
@@ -771,27 +1018,20 @@ def load_v20_runtime_config(
     if not database_config_path.is_file():
         raise V20ConfigError("missing database connection configuration")
     database_config_sha256 = _sha256_file(database_config_path)
-    state_semantics_payload = {
-        "schema_version": "v20-state-semantics/v1",
-        "strategy_version": raw["strategy_version"],
-        "timezone": raw["timezone"],
-        "return_profile_id": raw["return_profile_id"],
-        "reference_profile_id": raw["reference_profile_id"],
-        "clock": clock_raw,
-        "market_data": market_raw,
-        "policy": policy_raw,
-        "g_manifest_sha256": actual_manifest_hash,
-        "strategy_dependency_hashes": dependency_hashes,
-    }
-    state_semantics_hash = hashlib.sha256(
-        json.dumps(
-            state_semantics_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+    state_semantics_payload = _state_semantics_source(
+        {
+            "strategy_version": raw["strategy_version"],
+            "timezone": raw["timezone"],
+            "return_profile_id": raw["return_profile_id"],
+            "reference_profile_id": raw["reference_profile_id"],
+            "clock": clock_raw,
+            "market_data": market_raw,
+            "policy": policy_raw,
+            "g_manifest_sha256": actual_manifest_hash,
+            "strategy_dependency_hashes": dependency_hashes,
+        }
+    )
+    state_semantics_hash = _canonical_hash(state_semantics_payload)
     frozen_payload = {
         "schema_version": raw["schema_version"],
         "strategy_version": raw["strategy_version"],
@@ -809,6 +1049,7 @@ def load_v20_runtime_config(
         # Database wiring is operational identity, not strategy/state semantics.
         "database_config_sha256": database_config_sha256,
         "state_semantics_hash": state_semantics_hash,
+        "state_semantics_payload": state_semantics_payload,
         "database_schema": database_raw["schema"],
         "database_tls_ca_sha256": {
             "v20": v20_db_ca_sha256,
@@ -885,6 +1126,7 @@ def load_v20_runtime_config(
         bootstrap_checkpoint_sha256=str(checkpoint_hash) if checkpoint_hash else None,
         strategy_dependency_hashes=dependency_hashes,
         database_config_sha256=database_config_sha256,
+        state_semantics_payload=state_semantics_payload,
         state_semantics_hash=state_semantics_hash,
         frozen_payload=frozen_payload,
         config_hash=config_hash,
@@ -897,7 +1139,12 @@ __all__ = [
     "V20MarketConfig",
     "V20RouteBinding",
     "V20RuntimeConfig",
+    "declared_state_semantics_is_authentic",
+    "is_audited_legacy_state_semantics_hash",
+    "legacy_state_semantics_is_compatible_with_current",
     "load_v20_runtime_config",
+    "state_semantics_hash_from_frozen_payload",
+    "state_semantics_payload_from_frozen_payload",
     "validate_v20_api_keys",
     "validate_v20_database_consumers",
     "validated_v20_tushare_token",

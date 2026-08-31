@@ -28,6 +28,13 @@ import asyncpg
 
 from src.data.clients.tushare_realtime import BEIJING_TZ
 from src.data.database.tls import verified_postgres_ssl_context
+from src.strategy.v20.runtime_config import (
+    V20ConfigError,
+    declared_state_semantics_is_authentic,
+    is_audited_legacy_state_semantics_hash,
+    legacy_state_semantics_is_compatible_with_current,
+    state_semantics_hash_from_frozen_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -722,6 +729,13 @@ class StateRecord:
 
 
 @dataclass(frozen=True)
+class CompatibleEntryBinding:
+    config_id: str
+    config_hash: str
+    state_semantics_hash: str
+
+
+@dataclass(frozen=True)
 class EntryStatus:
     official_stream_id: str
     trade_date: date
@@ -969,6 +983,24 @@ CREATE TABLE IF NOT EXISTS {schema}.state_lineage_registry (
     CHECK (
         (bootstrap_mode='EMPTY_FORWARD_SHADOW' AND bootstrap_checkpoint_hash IS NULL)
         OR (bootstrap_mode='CHECKPOINT' AND bootstrap_checkpoint_hash IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS {schema}.state_semantics_compatibility (
+    lineage_id TEXT NOT NULL REFERENCES {schema}.state_lineage_registry(lineage_id),
+    official_stream_id TEXT NOT NULL,
+    legacy_state_semantics_hash CHAR(64) NOT NULL,
+    core_state_semantics_hash CHAR(64) NOT NULL,
+    evidence_config_id TEXT NOT NULL REFERENCES {schema}.runtime_configs(config_id),
+    evidence_config_hash CHAR(64) NOT NULL,
+    accepted_config_id TEXT NOT NULL REFERENCES {schema}.runtime_configs(config_id),
+    accepted_config_hash CHAR(64) NOT NULL,
+    evidence_json JSONB NOT NULL,
+    evidence_hash CHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (
+        lineage_id, legacy_state_semantics_hash,
+        core_state_semantics_hash, accepted_config_hash
     )
 );
 
@@ -1391,6 +1423,7 @@ class V20Repository:
         self._leader_key: int | None = None
         self._leader_scope: tuple[str, str, str] | None = None
         self._leader_probe_lock = asyncio.Lock()
+        self._compatible_entry_bindings: frozenset[CompatibleEntryBinding] = frozenset()
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -1403,6 +1436,12 @@ class V20Repository:
         """Whether pool lifetime belongs to the legacy main runtime."""
 
         return not self._owns_pool
+
+    @property
+    def compatible_entry_bindings(self) -> frozenset[CompatibleEntryBinding]:
+        """Historical terminal configs proven core-equivalent during startup."""
+
+        return self._compatible_entry_bindings
 
     async def connect(self, *, migrate: bool = True) -> None:
         if self._connection_ready:
@@ -1595,6 +1634,226 @@ class V20Repository:
         ):
             raise V20SemanticConflict(f"config_id {config_id!r} already has different semantics")
 
+    async def _prove_state_semantics_compatibility(
+        self,
+        connection: Any,
+        *,
+        lineage_id: str,
+        official_stream_id: str,
+        legacy_state_semantics_hash: str,
+        core_state_semantics_hash: str,
+        current_config_id: str,
+        current_config_hash: str,
+        current_config_payload: Mapping[str, Any],
+    ) -> frozenset[CompatibleEntryBinding]:
+        """Authenticate and persist a rollback-safe legacy-to-core edge."""
+
+        _require_sha256(current_config_hash, "current_config_hash")
+        if current_config_id != current_config_hash[:24]:
+            raise V20SemanticConflict("current V20 config id/hash binding is invalid")
+        if sha256_json(current_config_payload) != current_config_hash:
+            raise V20SemanticConflict("current V20 frozen config hash is invalid")
+        try:
+            current_is_authentic = declared_state_semantics_is_authentic(current_config_payload)
+            current_core_hash = state_semantics_hash_from_frozen_payload(current_config_payload)
+        except V20ConfigError as exc:
+            raise V20SemanticConflict("current V20 state semantics are malformed") from exc
+        if (
+            not current_is_authentic
+            or current_core_hash != core_state_semantics_hash
+            or current_config_payload.get("state_semantics_hash") != core_state_semantics_hash
+            or current_config_payload.get("strategy_version") is None
+            or current_config_payload.get("official_stream_id") != official_stream_id
+            or current_config_payload.get("state_lineage_id") != lineage_id
+        ):
+            raise V20SemanticConflict("current V20 state semantics are not authentic")
+
+        current_row = await connection.fetchrow(
+            f"""
+            SELECT config_id,config_hash,strategy_version,config_json
+            FROM {self.schema}.runtime_configs
+            WHERE config_id=$1
+            FOR SHARE
+            """,
+            current_config_id,
+        )
+        if (
+            current_row is None
+            or current_row["config_id"] != current_config_id
+            or current_row["config_hash"] != current_config_hash
+            or current_row["strategy_version"] != current_config_payload.get("strategy_version")
+            or _json_value(current_row["config_json"]) != current_config_payload
+        ):
+            raise V20SemanticConflict("current V20 config ledger evidence is invalid")
+
+        rows = await connection.fetch(
+            f"""
+            SELECT slot.config_id AS slot_config_id,
+                   slot.config_hash AS slot_config_hash,
+                   slot.strategy_version AS slot_strategy_version,
+                   slot.slot_status,
+                   config.config_id AS runtime_config_id,
+                   config.config_hash AS runtime_config_hash,
+                   config.strategy_version AS runtime_strategy_version,
+                   config.config_json
+            FROM {self.schema}.decision_slots AS slot
+            JOIN {self.schema}.runtime_configs AS config
+              ON config.config_id=slot.config_id
+            WHERE slot.official_stream_id=$1
+              AND slot.lineage_id=$2
+            ORDER BY slot.trade_date, slot.slot_id
+            """,
+            official_stream_id,
+            lineage_id,
+        )
+        if not rows and legacy_state_semantics_hash != core_state_semantics_hash:
+            raise V20SemanticConflict(
+                "legacy V20 state semantics have no terminal config-ledger evidence"
+            )
+        if not rows:
+            return frozenset()
+
+        compatible: set[CompatibleEntryBinding] = set()
+        legacy_evidence: tuple[str, str, Mapping[str, Any]] | None = None
+        current_strategy_version = current_config_payload["strategy_version"]
+        for row in rows:
+            config_id = row["runtime_config_id"]
+            config_hash = row["runtime_config_hash"]
+            payload = _json_value(row["config_json"])
+            if not isinstance(payload, Mapping):
+                raise V20SemanticConflict("historical V20 frozen config is malformed")
+            if (
+                row["slot_status"] not in {"COMPLETED", "FAILED"}
+                or row["slot_config_id"] != config_id
+                or row["slot_config_hash"] != config_hash
+                or row["slot_strategy_version"] != row["runtime_strategy_version"]
+                or row["runtime_strategy_version"] != current_strategy_version
+                or not isinstance(config_id, str)
+                or not isinstance(config_hash, str)
+                or config_id != config_hash[:24]
+                or sha256_json(payload) != config_hash
+                or payload.get("strategy_version") != current_strategy_version
+                or payload.get("official_stream_id") != official_stream_id
+                or payload.get("state_lineage_id") != lineage_id
+            ):
+                raise V20SemanticConflict("historical V20 config-ledger binding is invalid")
+            try:
+                authentic = declared_state_semantics_is_authentic(payload)
+            except V20ConfigError as exc:
+                raise V20SemanticConflict("historical V20 state semantics are malformed") from exc
+            declared_hash = payload.get("state_semantics_hash")
+            is_legacy_bridge = (
+                declared_hash == legacy_state_semantics_hash
+                and legacy_state_semantics_is_compatible_with_current(
+                    payload,
+                    current_config_payload,
+                )
+            )
+            is_same_core = (
+                authentic
+                and declared_hash == core_state_semantics_hash
+                and payload.get("state_semantics_payload") is not None
+            )
+            if not is_legacy_bridge and not is_same_core:
+                raise V20SemanticConflict(
+                    "historical V20 terminal config changes core state semantics"
+                )
+            compatible.add(
+                CompatibleEntryBinding(
+                    config_id=config_id,
+                    config_hash=config_hash,
+                    state_semantics_hash=str(declared_hash),
+                )
+            )
+            if is_legacy_bridge and legacy_evidence is None:
+                legacy_evidence = (config_id, config_hash, payload)
+
+        if legacy_state_semantics_hash != core_state_semantics_hash and legacy_evidence is None:
+            raise V20SemanticConflict("legacy V20 registry hash lacks an audited terminal config")
+        if legacy_state_semantics_hash == core_state_semantics_hash:
+            return frozenset(compatible)
+        if legacy_evidence is None:  # pragma: no cover - narrowed above
+            raise AssertionError("legacy evidence narrowing failed")
+        evidence_config_id, evidence_config_hash, evidence_payload = legacy_evidence
+        old_dependencies = evidence_payload["strategy_dependency_hashes"]
+        new_dependencies = current_config_payload["strategy_dependency_hashes"]
+        dependency_diff = sorted(
+            relative
+            for relative in set(old_dependencies) | set(new_dependencies)
+            if old_dependencies.get(relative) != new_dependencies.get(relative)
+        )
+        evidence = {
+            "schema_version": "v20-state-semantics-compatibility/v1",
+            "lineage_id": lineage_id,
+            "official_stream_id": official_stream_id,
+            "legacy_state_semantics_hash": legacy_state_semantics_hash,
+            "core_state_semantics_hash": core_state_semantics_hash,
+            "evidence_config_id": evidence_config_id,
+            "evidence_config_hash": evidence_config_hash,
+            "accepted_config_id": current_config_id,
+            "accepted_config_hash": current_config_hash,
+            "dependency_diff": dependency_diff,
+        }
+        evidence_hash = sha256_json(evidence)
+        await connection.execute(
+            f"""
+            INSERT INTO {self.schema}.state_semantics_compatibility
+                (lineage_id,official_stream_id,legacy_state_semantics_hash,
+                 core_state_semantics_hash,evidence_config_id,evidence_config_hash,
+                 accepted_config_id,accepted_config_hash,evidence_json,evidence_hash)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+            ON CONFLICT DO NOTHING
+            """,
+            lineage_id,
+            official_stream_id,
+            legacy_state_semantics_hash,
+            core_state_semantics_hash,
+            evidence_config_id,
+            evidence_config_hash,
+            current_config_id,
+            current_config_hash,
+            canonical_json(evidence),
+            evidence_hash,
+        )
+        persisted = await connection.fetchrow(
+            f"""
+            SELECT official_stream_id,evidence_config_id,evidence_config_hash,
+                   accepted_config_id,accepted_config_hash,evidence_json,evidence_hash
+            FROM {self.schema}.state_semantics_compatibility
+            WHERE lineage_id=$1
+              AND legacy_state_semantics_hash=$2
+              AND core_state_semantics_hash=$3
+              AND accepted_config_hash=$4
+            """,
+            lineage_id,
+            legacy_state_semantics_hash,
+            core_state_semantics_hash,
+            current_config_hash,
+        )
+        expected = (
+            official_stream_id,
+            evidence_config_id,
+            evidence_config_hash,
+            current_config_id,
+            current_config_hash,
+            evidence,
+            evidence_hash,
+        )
+        actual = None
+        if persisted is not None:
+            actual = (
+                persisted["official_stream_id"],
+                persisted["evidence_config_id"],
+                persisted["evidence_config_hash"],
+                persisted["accepted_config_id"],
+                persisted["accepted_config_hash"],
+                _json_value(persisted["evidence_json"]),
+                persisted["evidence_hash"],
+            )
+        if actual != expected:
+            raise V20SemanticConflict("V20 state-semantics compatibility evidence conflicts")
+        return frozenset(compatible)
+
     async def ensure_genesis_state(
         self,
         lineage_id: str,
@@ -1603,6 +1862,9 @@ class V20Repository:
         *,
         official_stream_id: str,
         state_semantics_hash: str,
+        current_config_id: str | None = None,
+        current_config_hash: str | None = None,
+        current_config_payload: Mapping[str, Any] | None = None,
         bootstrap_mode: str,
         bootstrap_checkpoint_hash: str | None,
         bootstrap_predecessor_trade_date: date,
@@ -1631,6 +1893,7 @@ class V20Repository:
         )
         if bootstrap_mode == "CHECKPOINT":
             _validate_checkpoint_state_facts(state, normalized_shadows)
+        compatible_bindings: frozenset[CompatibleEntryBinding] = frozenset()
         async with self.pool.acquire() as connection:
             async with connection.transaction(isolation="serializable"):
                 await connection.execute(
@@ -1691,6 +1954,29 @@ class V20Repository:
                             "state semantics; start a new lineage"
                         )
                     registry_semantics = state_semantics_hash
+                semantics_compatible = registry_semantics == state_semantics_hash
+                supplied_current_config = (
+                    current_config_id is not None
+                    and current_config_hash is not None
+                    and current_config_payload is not None
+                )
+                if supplied_current_config:
+                    assert current_config_id is not None
+                    assert current_config_hash is not None
+                    assert current_config_payload is not None
+                    compatible_bindings = await self._prove_state_semantics_compatibility(
+                        connection,
+                        lineage_id=lineage_id,
+                        official_stream_id=official_stream_id,
+                        legacy_state_semantics_hash=str(registry_semantics),
+                        core_state_semantics_hash=state_semantics_hash,
+                        current_config_id=current_config_id,
+                        current_config_hash=current_config_hash,
+                        current_config_payload=current_config_payload,
+                    )
+                    semantics_compatible = True
+                elif not semantics_compatible:
+                    raise V20SemanticConflict("existing V20 lineage has different state semantics")
                 registry_predecessor = registry["bootstrap_predecessor_trade_date"]
                 expected_predecessor = (
                     registry_predecessor
@@ -1729,7 +2015,6 @@ class V20Repository:
                 expected_registry = (
                     official_stream_id,
                     state_hash,
-                    state_semantics_hash,
                     bootstrap_mode,
                     bootstrap_checkpoint_hash,
                     expected_predecessor,
@@ -1737,12 +2022,11 @@ class V20Repository:
                 actual_registry = (
                     registry["official_stream_id"],
                     registry["genesis_state_hash"],
-                    registry_semantics,
                     registry["bootstrap_mode"],
                     registry["bootstrap_checkpoint_hash"],
                     registry_predecessor,
                 )
-                if actual_registry != expected_registry:
+                if not semantics_compatible or actual_registry != expected_registry:
                     raise V20SemanticConflict(
                         "existing V20 lineage has different bootstrap/stream semantics"
                     )
@@ -1771,6 +2055,10 @@ class V20Repository:
                 stored_payload = _json_value(state_row["state_json"])
                 if sha256_json(stored_payload) != state_row["state_hash"]:
                     raise V20SemanticConflict("persisted official state hash mismatch")
+                if not isinstance(stored_payload, Mapping) or stored_payload.get(
+                    "state_revision"
+                ) != int(state_row["revision"]):
+                    raise V20SemanticConflict("persisted official state revision mismatch")
                 if int(state_row["revision"]) == 0 and (
                     state_row["state_hash"] != state_hash or stored_payload != state
                 ):
@@ -1838,6 +2126,7 @@ class V20Repository:
                         ),
                         shadow["reference_snapshot_hash"],
                     )
+        self._compatible_entry_bindings = compatible_bindings
         return StateRecord(
             lineage_id=lineage_id,
             revision=int(state_row["revision"]),
@@ -1924,6 +2213,7 @@ class V20Repository:
                            terminal_slot.trade_date AS source_terminal_trade_date,
                            terminal_slot.slot_status AS source_terminal_slot_status,
                            config.deployment_mode AS source_deployment_mode,
+                           config.config_id AS source_config_id,
                            config.config_hash AS source_config_hash,
                            config.config_json AS source_config_json,
                            (SELECT COUNT(*)
@@ -1988,6 +2278,77 @@ class V20Repository:
                 ):
                     raise V20StateConflict(
                         "checkpoint source config lacks a valid state_semantics_hash"
+                    )
+                try:
+                    source_semantics_authentic = declared_state_semantics_is_authentic(
+                        source_config
+                    )
+                except V20ConfigError as exc:
+                    raise V20SemanticConflict(
+                        "checkpoint source state semantics are malformed"
+                    ) from exc
+                if not source_semantics_authentic:
+                    raise V20SemanticConflict("checkpoint source state semantics are not authentic")
+                resolved_state_semantics_hash = source_state_semantics_hash
+                if is_audited_legacy_state_semantics_hash(source_state_semantics_hash):
+                    compatibility_rows = await connection.fetch(
+                        f"""
+                        SELECT official_stream_id,legacy_state_semantics_hash,
+                               core_state_semantics_hash,
+                               evidence_config_id,evidence_config_hash,
+                               accepted_config_id,accepted_config_hash,
+                               evidence_json,evidence_hash
+                        FROM {self.schema}.state_semantics_compatibility
+                        WHERE lineage_id=$1
+                          AND official_stream_id=$2
+                          AND legacy_state_semantics_hash=$3
+                        ORDER BY core_state_semantics_hash
+                        """,
+                        source_lineage_id,
+                        source_official_stream_id,
+                        source_state_semantics_hash,
+                    )
+                    resolved_hashes: set[str] = set()
+                    for row in compatibility_rows:
+                        evidence = _json_value(row["evidence_json"])
+                        core_hash = row["core_state_semantics_hash"]
+                        if (
+                            not isinstance(evidence, Mapping)
+                            or not isinstance(core_hash, str)
+                            or re.fullmatch(r"[0-9a-f]{64}", core_hash) is None
+                            or sha256_json(evidence) != row["evidence_hash"]
+                            or evidence.get("schema_version")
+                            != "v20-state-semantics-compatibility/v1"
+                            or row["official_stream_id"] != source_official_stream_id
+                            or row["legacy_state_semantics_hash"] != source_state_semantics_hash
+                            or row["evidence_config_id"] != source["source_config_id"]
+                            or row["evidence_config_hash"] != source["source_config_hash"]
+                            or evidence.get("lineage_id") != source_lineage_id
+                            or evidence.get("official_stream_id") != source_official_stream_id
+                            or evidence.get("legacy_state_semantics_hash")
+                            != source_state_semantics_hash
+                            or evidence.get("core_state_semantics_hash") != core_hash
+                            or evidence.get("evidence_config_id") != row["evidence_config_id"]
+                            or evidence.get("evidence_config_hash") != row["evidence_config_hash"]
+                            or evidence.get("accepted_config_id") != row["accepted_config_id"]
+                            or evidence.get("accepted_config_hash") != row["accepted_config_hash"]
+                        ):
+                            raise V20SemanticConflict(
+                                "checkpoint state-semantics resolution evidence is invalid"
+                            )
+                        resolved_hashes.add(core_hash)
+                    if len(resolved_hashes) != 1:
+                        raise V20SemanticConflict(
+                            "checkpoint legacy semantics lack one resolved core hash"
+                        )
+                    resolved_state_semantics_hash = next(iter(resolved_hashes))
+                elif (
+                    source_config.get("state_semantics_payload") is None
+                    or state_semantics_hash_from_frozen_payload(source_config)
+                    != source_state_semantics_hash
+                ):
+                    raise V20SemanticConflict(
+                        "checkpoint source uses unsupported legacy state semantics"
                     )
                 if int(source["target_lineage_count"]) != 0:
                     raise V20StateConflict("checkpoint target lineage already exists")
@@ -2172,6 +2533,7 @@ class V20Repository:
             "source_state_hash": str(source["state_hash"]),
             "source_config_hash": str(source["source_config_hash"]),
             "source_state_semantics_hash": source_state_semantics_hash,
+            "resolved_state_semantics_hash": resolved_state_semantics_hash,
             "source_bootstrap_mode": str(source["bootstrap_mode"]),
             "source_bootstrap_checkpoint_hash": source["bootstrap_checkpoint_hash"],
             "source_last_terminal_slot_id": source_state["last_terminal_slot_id"],

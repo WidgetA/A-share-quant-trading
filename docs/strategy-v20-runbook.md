@@ -612,6 +612,24 @@ GROUP BY 1,2,3,4,5
 ORDER BY 1,2,3,4,5;
 ```
 
+### 7.1 运行层更新与状态语义兼容
+
+`config_hash` 继续绑定完整部署字节，用于确认实际运行的镜像；
+`state_semantics_hash` 只绑定会改变选股、BASE、滚动 7、G、状态迁移或退出判断的核心语义。
+包含状态敏感逻辑的混合文件必须命中已审核的源码 digest 与语义类别；未知 digest 一律
+fail closed，不能把改动自行解释为“只是运行层更新”。
+
+从 2026-08-31 的 legacy 完整哈希迁移时，系统不会覆盖
+`state_lineage_registry.state_semantics_hash`，而是在
+`v20.state_semantics_compatibility` 中追加经过 config ledger、终局 slot、官方 state 和源码
+依赖共同认证的兼容证据。禁止手工修改该表、删除旧 registry 或重写旧 slot。旧终局只可
+在兼容证据已验证后供当前 runtime 接回；新决策仍必须绑定当前 `config_hash`。
+
+checkpoint 导出必须同时保留来源 legacy 哈希和已验证的 core 哈希，并复核兼容证据；
+没有唯一可信 core 解析时拒绝导出。旧镜像回滚只能视为应急停机手段：一旦新 core runtime
+已经提交新的同日 slot，旧镜像未必能理解该 slot，不能把“registry 原值仍在”误认为可以
+无条件热回滚并继续决策。
+
 ## 8. 回滚
 
 回滚只切换服务所有权，不回写或删除 V20 账本：

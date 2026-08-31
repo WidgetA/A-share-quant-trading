@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import certifi
 import pytest
 
+import src.strategy.v20.runtime_config as runtime_config_module
 from src.data.database.v20_repository import (
     EntryCommit,
     ExitCommit,
@@ -28,8 +29,13 @@ from src.data.database.v20_repository import (
     migration_sql,
     sha256_json,
 )
+from src.strategy.v20.decision_engine import genesis_state
 from src.strategy.v20.models import HealthObservation, deserialize_health_snapshot
 from src.strategy.v20.policy import advance_health_state
+from src.strategy.v20.runtime_config import (
+    load_v20_runtime_config,
+    state_semantics_payload_from_frozen_payload,
+)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 SCOPE = {
@@ -157,10 +163,273 @@ def _checkpoint_source_state() -> dict[str, object]:
 
 
 def _checkpoint_source_config() -> dict[str, object]:
-    return {
-        "schema_version": "v20-frozen-config/v1",
-        "state_semantics_hash": "e" * 64,
+    project_root = Path(__file__).resolve().parents[4]
+    return dict(load_v20_runtime_config(project_root).frozen_payload)
+
+
+def _legacy_runtime_payload(current: dict[str, object]) -> tuple[dict[str, object], str]:
+    legacy = json.loads(canonical_json(current))
+    legacy.pop("state_semantics_payload", None)
+    legacy["route_id"] = "legacy-reviewed-route"
+    legacy_semantics = {
+        "schema_version": "v20-state-semantics/v1",
+        "strategy_version": legacy["strategy_version"],
+        "timezone": legacy["timezone"],
+        "return_profile_id": legacy["return_profile_id"],
+        "reference_profile_id": legacy["reference_profile_id"],
+        "clock": legacy["clock"],
+        "market_data": legacy["market_data"],
+        "policy": legacy["policy"],
+        "g_manifest_sha256": legacy["g_manifest_sha256"],
+        "strategy_dependency_hashes": legacy["strategy_dependency_hashes"],
     }
+    legacy_hash = sha256_json(legacy_semantics)
+    legacy["state_semantics_hash"] = legacy_hash
+    return legacy, legacy_hash
+
+
+def _config_slot_row(
+    payload: dict[str, object],
+    *,
+    slot_status: str = "FAILED",
+) -> dict[str, object]:
+    config_hash = sha256_json(payload)
+    return {
+        "slot_config_id": config_hash[:24],
+        "slot_config_hash": config_hash,
+        "slot_strategy_version": payload["strategy_version"],
+        "slot_status": slot_status,
+        "runtime_config_id": config_hash[:24],
+        "runtime_config_hash": config_hash,
+        "runtime_strategy_version": payload["strategy_version"],
+        "config_json": canonical_json(payload),
+    }
+
+
+def _runtime_config_row(payload: dict[str, object]) -> dict[str, object]:
+    config_hash = sha256_json(payload)
+    return {
+        "config_id": config_hash[:24],
+        "config_hash": config_hash,
+        "strategy_version": payload["strategy_version"],
+        "config_json": canonical_json(payload),
+    }
+
+
+@pytest.mark.asyncio
+async def test_genesis_authenticates_legacy_to_core_without_rewriting_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_v20_runtime_config(project_root)
+    current = json.loads(canonical_json(config.frozen_payload))
+    legacy, legacy_hash = _legacy_runtime_payload(current)
+    monkeypatch.setattr(
+        runtime_config_module,
+        "_AUDITED_LEGACY_STATE_SEMANTICS_HASHES",
+        frozenset({legacy_hash}),
+    )
+    state = genesis_state()
+    state_hash = sha256_json(state)
+    registry = {
+        "official_stream_id": config.official_stream_id,
+        "genesis_state_hash": state_hash,
+        "state_semantics_hash": legacy_hash,
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "bootstrap_checkpoint_hash": None,
+        "bootstrap_predecessor_trade_date": date(2026, 8, 30),
+    }
+    current_hash = sha256_json(current)
+    legacy_config_hash = sha256_json(legacy)
+    evidence = {
+        "schema_version": "v20-state-semantics-compatibility/v1",
+        "lineage_id": config.state_lineage_id,
+        "official_stream_id": config.official_stream_id,
+        "legacy_state_semantics_hash": legacy_hash,
+        "core_state_semantics_hash": config.state_semantics_hash,
+        "evidence_config_id": legacy_config_hash[:24],
+        "evidence_config_hash": legacy_config_hash,
+        "accepted_config_id": current_hash[:24],
+        "accepted_config_hash": current_hash,
+        "dependency_diff": [],
+    }
+    persisted_evidence = {
+        "official_stream_id": config.official_stream_id,
+        "evidence_config_id": legacy_config_hash[:24],
+        "evidence_config_hash": legacy_config_hash,
+        "accepted_config_id": current_hash[:24],
+        "accepted_config_hash": current_hash,
+        "evidence_json": canonical_json(evidence),
+        "evidence_hash": sha256_json(evidence),
+    }
+    advanced_state = {
+        **state,
+        "state_revision": 1,
+        "last_terminal_slot_id": "legacy-terminal-slot",
+        "last_terminal_trade_date": "2026-08-31",
+    }
+    advanced_hash = sha256_json(advanced_state)
+    state_row = {
+        "revision": 1,
+        "state_hash": advanced_hash,
+        "state_json": canonical_json(advanced_state),
+    }
+    connection = _FakeConnection(
+        fetchrows=[
+            registry,
+            _runtime_config_row(current),
+            persisted_evidence,
+            state_row,
+        ],
+        fetches=[[_config_slot_row(legacy)]],
+    )
+    repository = _repository(connection)
+
+    stored = await repository.ensure_genesis_state(
+        config.state_lineage_id,
+        state,
+        state_hash,
+        official_stream_id=config.official_stream_id,
+        state_semantics_hash=config.state_semantics_hash,
+        current_config_id=current_hash[:24],
+        current_config_hash=current_hash,
+        current_config_payload=current,
+        bootstrap_mode="EMPTY_FORWARD_SHADOW",
+        bootstrap_checkpoint_hash=None,
+        bootstrap_predecessor_trade_date=date(2026, 8, 30),
+    )
+
+    assert (stored.revision, stored.state_hash, stored.payload) == (
+        1,
+        advanced_hash,
+        advanced_state,
+    )
+    assert len(repository.compatible_entry_bindings) == 1
+    binding = next(iter(repository.compatible_entry_bindings))
+    assert (binding.config_id, binding.config_hash, binding.state_semantics_hash) == (
+        legacy_config_hash[:24],
+        legacy_config_hash,
+        legacy_hash,
+    )
+    assert any(
+        call[0] == "execute" and "INSERT INTO v20.state_semantics_compatibility" in call[1]
+        for call in connection.calls
+    )
+    assert not any(
+        call[0] == "execute" and "SET state_semantics_hash" in call[1] for call in connection.calls
+    )
+    assert not any(
+        call[0] == "execute" and "UPDATE v20.official_state" in call[1] for call in connection.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_genesis_loads_prior_v2_terminal_binding_when_core_is_unchanged() -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_v20_runtime_config(project_root)
+    current = json.loads(canonical_json(config.frozen_payload))
+    historical = json.loads(canonical_json(current))
+    historical["route_id"] = "historical-notification-route"
+    historical_hash = sha256_json(historical)
+    state = genesis_state()
+    state_hash = sha256_json(state)
+    registry = {
+        "official_stream_id": config.official_stream_id,
+        "genesis_state_hash": state_hash,
+        "state_semantics_hash": config.state_semantics_hash,
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "bootstrap_checkpoint_hash": None,
+        "bootstrap_predecessor_trade_date": date(2026, 8, 30),
+    }
+    state_row = {
+        "revision": 0,
+        "state_hash": state_hash,
+        "state_json": canonical_json(state),
+    }
+    connection = _FakeConnection(
+        fetchrows=[registry, _runtime_config_row(current), state_row],
+        fetches=[[_config_slot_row(historical)]],
+    )
+    repository = _repository(connection)
+    current_hash = sha256_json(current)
+
+    await repository.ensure_genesis_state(
+        config.state_lineage_id,
+        state,
+        state_hash,
+        official_stream_id=config.official_stream_id,
+        state_semantics_hash=config.state_semantics_hash,
+        current_config_id=current_hash[:24],
+        current_config_hash=current_hash,
+        current_config_payload=current,
+        bootstrap_mode="EMPTY_FORWARD_SHADOW",
+        bootstrap_checkpoint_hash=None,
+        bootstrap_predecessor_trade_date=date(2026, 8, 30),
+    )
+
+    binding = next(iter(repository.compatible_entry_bindings))
+    assert (binding.config_id, binding.config_hash) == (
+        historical_hash[:24],
+        historical_hash,
+    )
+    assert not any(
+        call[0] == "execute" and "state_semantics_compatibility" in call[1]
+        for call in connection.calls
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot_status", ["OPEN", "COMPLETED"])
+async def test_genesis_rejects_open_or_core_changed_historical_config(
+    monkeypatch: pytest.MonkeyPatch,
+    slot_status: str,
+) -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_v20_runtime_config(project_root)
+    current = json.loads(canonical_json(config.frozen_payload))
+    legacy, legacy_hash = _legacy_runtime_payload(current)
+    monkeypatch.setattr(
+        runtime_config_module,
+        "_AUDITED_LEGACY_STATE_SEMANTICS_HASHES",
+        frozenset({legacy_hash}),
+    )
+    if slot_status == "COMPLETED":
+        dependencies = dict(current["strategy_dependency_hashes"])
+        dependencies["src/strategy/v20/policy.py"] = "f" * 64
+        current["strategy_dependency_hashes"] = dependencies
+        state_payload = state_semantics_payload_from_frozen_payload(current)
+        current["state_semantics_payload"] = state_payload
+        current["state_semantics_hash"] = sha256_json(state_payload)
+    state = genesis_state()
+    state_hash = sha256_json(state)
+    registry = {
+        "official_stream_id": config.official_stream_id,
+        "genesis_state_hash": state_hash,
+        "state_semantics_hash": legacy_hash,
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "bootstrap_checkpoint_hash": None,
+        "bootstrap_predecessor_trade_date": date(2026, 8, 30),
+    }
+    current_hash = sha256_json(current)
+    connection = _FakeConnection(
+        fetchrows=[registry, _runtime_config_row(current)],
+        fetches=[[_config_slot_row(legacy, slot_status=slot_status)]],
+    )
+
+    with pytest.raises(V20SemanticConflict):
+        await _repository(connection).ensure_genesis_state(
+            config.state_lineage_id,
+            state,
+            state_hash,
+            official_stream_id=config.official_stream_id,
+            state_semantics_hash=str(current["state_semantics_hash"]),
+            current_config_id=current_hash[:24],
+            current_config_hash=current_hash,
+            current_config_payload=current,
+            bootstrap_mode="EMPTY_FORWARD_SHADOW",
+            bootstrap_checkpoint_hash=None,
+            bootstrap_predecessor_trade_date=date(2026, 8, 30),
+        )
 
 
 def _compact_sql(value: str) -> str:
@@ -881,7 +1150,8 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
 
     assert checkpoint["schema_version"] == "v20-bootstrap-checkpoint/v2"
     assert checkpoint["source_config_hash"] == sha256_json(source_config)
-    assert checkpoint["source_state_semantics_hash"] == "e" * 64
+    assert checkpoint["source_state_semantics_hash"] == source_config["state_semantics_hash"]
+    assert checkpoint["resolved_state_semantics_hash"] == source_config["state_semantics_hash"]
     assert checkpoint["official_state_hash"] == sha256_json(checkpoint["official_state"])
     target_state = checkpoint["official_state"]
     assert target_state["state_revision"] == 0
@@ -945,6 +1215,106 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
         canonical_json({"isolation": "serializable", "readonly": True}),
         (),
     )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_export_resolves_audited_legacy_terminal_to_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_v20_runtime_config(project_root)
+    current = json.loads(canonical_json(config.frozen_payload))
+    legacy, legacy_hash = _legacy_runtime_payload(current)
+    monkeypatch.setattr(
+        runtime_config_module,
+        "_AUDITED_LEGACY_STATE_SEMANTICS_HASHES",
+        frozenset({legacy_hash}),
+    )
+    as_of = date(2026, 8, 31)
+    source_state = genesis_state()
+    source_state.update(
+        state_revision=1,
+        last_terminal_slot_id="legacy-terminal-slot",
+        last_terminal_trade_date=as_of.isoformat(),
+    )
+    source_row = {
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "bootstrap_checkpoint_hash": None,
+        "revision": 1,
+        "state_hash": sha256_json(source_state),
+        "state_json": canonical_json(source_state),
+        "source_terminal_slot_id": "legacy-terminal-slot",
+        "source_terminal_trade_date": as_of,
+        "source_terminal_slot_status": "FAILED",
+        "source_deployment_mode": "forward_shadow",
+        "source_config_id": sha256_json(legacy)[:24],
+        "source_config_hash": sha256_json(legacy),
+        "source_config_json": canonical_json(legacy),
+        "target_lineage_count": 0,
+    }
+    rolling_rows = [
+        _checkpoint_shadow_row(
+            f"rolling-{index}",
+            "ROLLING7",
+            date(2026, 8, 1) + timedelta(days=index),
+        )
+        for index in range(7)
+    ]
+    legacy_config_hash = sha256_json(legacy)
+    current_config_hash = sha256_json(current)
+    evidence = {
+        "schema_version": "v20-state-semantics-compatibility/v1",
+        "lineage_id": "shadow-lineage",
+        "official_stream_id": "shadow-stream",
+        "legacy_state_semantics_hash": legacy_hash,
+        "core_state_semantics_hash": config.state_semantics_hash,
+        "evidence_config_id": legacy_config_hash[:24],
+        "evidence_config_hash": legacy_config_hash,
+        "accepted_config_id": current_config_hash[:24],
+        "accepted_config_hash": current_config_hash,
+        "dependency_diff": [],
+    }
+    compatibility_row = {
+        "official_stream_id": "shadow-stream",
+        "legacy_state_semantics_hash": legacy_hash,
+        "core_state_semantics_hash": config.state_semantics_hash,
+        "evidence_config_id": legacy_config_hash[:24],
+        "evidence_config_hash": legacy_config_hash,
+        "accepted_config_id": current_config_hash[:24],
+        "accepted_config_hash": current_config_hash,
+        "evidence_json": canonical_json(evidence),
+        "evidence_hash": sha256_json(evidence),
+    }
+    connection = _FakeConnection(
+        fetchrows=[source_row],
+        fetches=[
+            [compatibility_row],
+            rolling_rows,
+        ],
+    )
+
+    checkpoint = await _repository(connection).export_bootstrap_checkpoint(
+        source_official_stream_id="shadow-stream",
+        source_lineage_id="shadow-lineage",
+        target_official_stream_id="production-stream",
+        target_lineage_id="production-lineage",
+        as_of_trade_date=as_of,
+    )
+
+    assert checkpoint["source_state_semantics_hash"] == legacy_hash
+    assert checkpoint["resolved_state_semantics_hash"] == config.state_semantics_hash
+
+    tampered = {**compatibility_row, "evidence_hash": "0" * 64}
+    with pytest.raises(V20SemanticConflict, match="resolution evidence is invalid"):
+        await _repository(
+            _FakeConnection(fetchrows=[source_row], fetches=[[tampered]])
+        ).export_bootstrap_checkpoint(
+            source_official_stream_id="shadow-stream",
+            source_lineage_id="shadow-lineage",
+            target_official_stream_id="production-stream",
+            target_lineage_id="production-lineage",
+            as_of_trade_date=as_of,
+        )
 
 
 @pytest.mark.asyncio
@@ -1211,7 +1581,7 @@ async def test_empty_genesis_restart_keeps_first_persisted_predecessor_anchor() 
     )
 
     incompatible_registry = {**registry, "state_semantics_hash": "f" * 64}
-    with pytest.raises(V20SemanticConflict, match="different bootstrap/stream semantics"):
+    with pytest.raises(V20SemanticConflict, match="different state semantics"):
         await _repository(_FakeConnection(fetchrows=[incompatible_registry])).ensure_genesis_state(
             "shadow-lineage",
             state,

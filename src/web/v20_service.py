@@ -35,6 +35,7 @@ from src.data.clients.v20_market_data import (
 )
 from src.data.database.v20_repository import (
     ActiveModelLeg,
+    CompatibleEntryBinding,
     EntryStatus,
     ExitCommit,
     OutboxRecord,
@@ -83,6 +84,7 @@ from src.strategy.v20.runtime_config import (
     V20ConfigError,
     V20RouteBinding,
     V20RuntimeConfig,
+    is_audited_legacy_state_semantics_hash,
     load_v20_runtime_config,
     validate_v20_api_keys,
     validate_v20_database_consumers,
@@ -659,7 +661,20 @@ def _bootstrap_bundle(
         raise V20ConfigError("V20 checkpoint target stream does not match active config")
     if checkpoint.get("state_lineage_id") != config.state_lineage_id:
         raise V20ConfigError("V20 checkpoint lineage does not match active config")
-    if checkpoint.get("source_state_semantics_hash") != config.state_semantics_hash:
+    source_state_semantics_hash = checkpoint.get("source_state_semantics_hash")
+    resolved_state_semantics_hash = checkpoint.get("resolved_state_semantics_hash")
+    if resolved_state_semantics_hash is None:
+        resolved_state_semantics_hash = source_state_semantics_hash
+    source_is_current = source_state_semantics_hash == resolved_state_semantics_hash
+    source_is_resolved_legacy = (
+        source_state_semantics_hash != resolved_state_semantics_hash
+        and is_audited_legacy_state_semantics_hash(source_state_semantics_hash)
+    )
+    if (
+        not source_is_current
+        and not source_is_resolved_legacy
+        or resolved_state_semantics_hash != config.state_semantics_hash
+    ):
         raise V20ConfigError(
             "V20 checkpoint state semantics do not match the active strategy bytes/config"
         )
@@ -866,7 +881,7 @@ def _manual_trigger_response(
         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
         "event_id": record.event_id,
         "strategy_version": config.strategy_version,
-        "config_hash": config.config_hash,
+        "state_semantics_hash": config.state_semantics_hash,
         "deployment_mode": config.deployment_mode,
         "official_stream_id": config.official_stream_id,
         "state_lineage_id": config.state_lineage_id,
@@ -884,6 +899,8 @@ def _manual_trigger_response(
         record.event_type != "DATA_ALERT"
         or (record.route_id, record.official_stream_id, record.lineage_id) != expected_record_scope
         or any(semantic.get(key) != value for key, value in expected_bindings.items())
+        or not isinstance(semantic.get("config_hash"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(semantic.get("config_hash"))) is None
     ):
         raise V20SemanticConflict("manual trigger event has incompatible persisted semantics")
     if not isinstance(semantic.get("cycle_result"), str) or not semantic["cycle_result"]:
@@ -1044,6 +1061,13 @@ class V20Service:
         self._status_snapshot: Mapping[str, Any] | None = None
         self._status_snapshot_error: str | None = None
         self._startup_stage = "NOT_STARTED"
+        self._compatible_entry_bindings: set[tuple[str, str, str]] = {
+            (
+                self.config.config_hash[:24],
+                self.config.config_hash,
+                self.config.state_semantics_hash,
+            )
+        }
         self._lane_health = {
             name: _RuntimeLaneHealth()
             for name in (
@@ -1279,10 +1303,28 @@ class V20Service:
                 official_stream_id=self.config.official_stream_id,
                 bootstrap_mode=self.config.bootstrap_mode,
                 state_semantics_hash=self.config.state_semantics_hash,
+                current_config_id=self.config.config_hash[:24],
+                current_config_hash=self.config.config_hash,
+                current_config_payload=self.config.frozen_payload,
                 bootstrap_checkpoint_hash=self.config.bootstrap_checkpoint_sha256,
                 bootstrap_predecessor_trade_date=bootstrap.predecessor_trade_date,
                 bootstrap_shadow_batches=bootstrap.shadow_batches,
             )
+            repository_bindings: Iterable[object] = getattr(
+                self._repository,
+                "compatible_entry_bindings",
+                frozenset(),
+            )
+            for binding in repository_bindings:
+                if not isinstance(binding, CompatibleEntryBinding):
+                    raise V20ConfigError("repository returned an invalid config compatibility")
+                self._compatible_entry_bindings.add(
+                    (
+                        binding.config_id,
+                        binding.config_hash,
+                        binding.state_semantics_hash,
+                    )
+                )
             self._startup_stage = "REFRESHING_STATUS"
             await self._refresh_status_snapshot()
             self._startup_stage = "INITIALIZING_MARKET_RESOURCES"
@@ -1621,7 +1663,7 @@ class V20Service:
                 "route_id": self.config.route_id,
                 "official_stream_id": self.config.official_stream_id,
                 "lineage_id": self.config.state_lineage_id,
-                "config_hash": self.config.config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
                 "manual_request_id": request_id,
             },
         )
@@ -1782,6 +1824,7 @@ class V20Service:
                 "event_id": manual_event_id,
                 "strategy_version": self.config.strategy_version,
                 "config_hash": self.config.config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
                 "deployment_mode": self.config.deployment_mode,
                 "official_stream_id": self.config.official_stream_id,
                 "state_lineage_id": self.config.state_lineage_id,
@@ -2941,7 +2984,7 @@ class V20Service:
                 "route_id": self.config.route_id,
                 "official_stream_id": self.config.official_stream_id,
                 "lineage_id": self.config.state_lineage_id,
-                "config_hash": self.config.config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
                 "trade_date": trade_date.isoformat(),
                 "official_entry_event_id": official_entry_event_id,
             },
@@ -2960,7 +3003,7 @@ class V20Service:
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
             "event_id": record.event_id,
             "strategy_version": self.config.strategy_version,
-            "config_hash": self.config.config_hash,
+            "state_semantics_hash": self.config.state_semantics_hash,
             "deployment_mode": self.config.deployment_mode,
             "official_stream_id": self.config.official_stream_id,
             "state_lineage_id": self.config.state_lineage_id,
@@ -2988,6 +3031,8 @@ class V20Service:
                 self.config.state_lineage_id,
             )
             or any(semantic.get(key) != value for key, value in expected.items())
+            or not isinstance(semantic.get("config_hash"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", str(semantic.get("config_hash"))) is None
         ):
             raise V20SemanticConflict("late 09:39 replay event has incompatible semantics")
         if semantic.get("official_entry_action") != "INPUT_INVALID":
@@ -3179,12 +3224,6 @@ class V20Service:
         self._verify_entry_binding(status)
         if now < _local(context.trade_date, self.config.clock.publish_deadline):
             raise V20StateConflict("late 09:39 replay cannot run before the live cutoff")
-        if (
-            status.snapshot.get("state_semantics_hash") != self.config.state_semantics_hash
-            or status.semantic.get("state_semantics_hash") != self.config.state_semantics_hash
-        ):
-            raise V20SemanticConflict("failed slot state semantics differ from active V20")
-
         state = await self._repository.load_state(self.config.state_lineage_id)
         if state.state_hash != status.semantic.get("state_after_hash"):
             raise V20StateConflict("official state has moved beyond the failed replay slot")
@@ -3329,6 +3368,7 @@ class V20Service:
             "event_id": replay_event_id,
             "strategy_version": self.config.strategy_version,
             "config_hash": self.config.config_hash,
+            "state_semantics_hash": self.config.state_semantics_hash,
             "deployment_mode": self.config.deployment_mode,
             "official_stream_id": self.config.official_stream_id,
             "state_lineage_id": self.config.state_lineage_id,
@@ -5233,20 +5273,41 @@ class V20Service:
         return comparison_codes, symbol_codes
 
     def _verify_entry_binding(self, status: EntryStatus) -> None:
-        expected = (
-            self.config.strategy_version,
-            self.config.config_hash[:24],
-            self.config.config_hash,
-            self.config.state_lineage_id,
-        )
-        actual = (
-            status.strategy_version,
-            status.config_id,
-            status.config_hash,
-            status.lineage_id,
-        )
-        if actual != expected:
+        if (
+            status.official_stream_id != self.config.official_stream_id
+            or status.strategy_version != self.config.strategy_version
+            or status.lineage_id != self.config.state_lineage_id
+            or status.config_id != status.config_hash[:24]
+            or status.semantic.get("strategy_version") != status.strategy_version
+            or status.semantic.get("config_hash") != status.config_hash
+        ):
             raise V20ConfigError("today's terminal V20 slot belongs to another config/lineage")
+        exact_current = (
+            status.config_id == self.config.config_hash[:24]
+            and status.config_hash == self.config.config_hash
+        )
+        semantic_state_hash = status.semantic.get("state_semantics_hash")
+        snapshot_state_hash = status.snapshot.get("state_semantics_hash")
+        if exact_current:
+            if (
+                semantic_state_hash != self.config.state_semantics_hash
+                or snapshot_state_hash != self.config.state_semantics_hash
+            ):
+                raise V20ConfigError("persisted V20 slot state semantics are incompatible")
+        else:
+            compatible_binding = (
+                status.config_id,
+                status.config_hash,
+                semantic_state_hash,
+            )
+            if (
+                status.slot_status not in {"COMPLETED", "FAILED"}
+                or semantic_state_hash != snapshot_state_hash
+                or compatible_binding not in self._compatible_entry_bindings
+            ):
+                raise V20ConfigError(
+                    "today's terminal V20 slot belongs to an unproven historical config"
+                )
         if (
             status.semantic.get("schema_version") != V20_ENTRY_SEMANTIC_SCHEMA
             or status.semantic.get("feishu_formatter_profile") != V20_FEISHU_FORMATTER_PROFILE

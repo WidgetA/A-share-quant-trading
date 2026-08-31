@@ -37,6 +37,24 @@ CREATE TABLE IF NOT EXISTS v20.state_lineage_registry (
     )
 );
 
+CREATE TABLE IF NOT EXISTS v20.state_semantics_compatibility (
+    lineage_id TEXT NOT NULL REFERENCES v20.state_lineage_registry(lineage_id),
+    official_stream_id TEXT NOT NULL,
+    legacy_state_semantics_hash CHAR(64) NOT NULL,
+    core_state_semantics_hash CHAR(64) NOT NULL,
+    evidence_config_id TEXT NOT NULL REFERENCES v20.runtime_configs(config_id),
+    evidence_config_hash CHAR(64) NOT NULL,
+    accepted_config_id TEXT NOT NULL REFERENCES v20.runtime_configs(config_id),
+    accepted_config_hash CHAR(64) NOT NULL,
+    evidence_json JSONB NOT NULL,
+    evidence_hash CHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (
+        lineage_id, legacy_state_semantics_hash,
+        core_state_semantics_hash, accepted_config_hash
+    )
+);
+
 ALTER TABLE v20.state_lineage_registry
     ADD COLUMN IF NOT EXISTS bootstrap_predecessor_trade_date DATE;
 ALTER TABLE v20.state_lineage_registry

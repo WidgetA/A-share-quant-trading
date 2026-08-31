@@ -40,6 +40,7 @@
 | 0.11.1 | 2026-08-31 | - | STR-006: Add an idempotent V20 manual deployment trigger with a durable non-actionable Feishu receipt |
 | 0.11.2 | 2026-08-31 | - | STR-006: Embed V20 forward-shadow in the existing main/V16 runtime, reusing deployed DB, Tushare, and Feishu infrastructure while preserving an isolated ledger/outbox and notification-only boundary |
 | 0.11.3 | 2026-08-31 | - | STR-006: Add a durable, non-actionable exact-09:39 retrospective replay when a late deployment has already failed the official entry slot |
+| 0.11.4 | 2026-08-31 | - | STR-006: Separate deploy-byte identity from V20 state semantics and add an authenticated, append-only legacy-to-core compatibility bridge so notification/replay-only releases can reattach terminal state without rewriting the ledger |
 
 ---
 
