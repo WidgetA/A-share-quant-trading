@@ -101,11 +101,13 @@ cannot recompute or replace the frozen decision with late data. Health, leader,
 timing, and concurrency guards remain mandatory. See the runbook for response
 and delivery verification.
 
-Passing the repository push CI does not deploy this endpoint. The current CI
-build uses the default legacy Docker target, while V20 is disabled by default;
-before triggering, verify `/api/v20/status` reports the expected enabled/running
-service identity, and afterwards verify the durable outbox and the target
-Feishu chat.
+Passing the repository push CI does not deploy this endpoint. CI publishes the
+legacy target as `latest`/the commit SHA and the dedicated V20 target as
+`v20-latest`/`v20-<commit-sha>`, while V20 remains disabled by default. A host
+must explicitly run the V20 image with the reviewed environment and secret
+mounts. Before triggering, verify `/api/v20/status` reports the expected
+enabled/running service identity, and afterwards verify the durable outbox and
+the target Feishu chat.
 
 ## Development
 

@@ -915,8 +915,9 @@ or submits orders.
 - Verify the production Docker target starts only the dedicated V20 entry point and exposes only
   the V20 route surface; shared source bytes needed by the V16 scanner may remain in the image but
   broker, iQuant, account, and order services must never be imported or started by that host.
-- Treat push CI and V20 deployment as separate gates: the current CI builds the default legacy
-  Docker target and checked-in V20 remains disabled. Before a manual trigger, verify status reports
+- Treat push CI and V20 deployment as separate gates: CI publishes both the default legacy image
+  and a dedicated `v20` target, but checked-in V20 remains disabled and no container is deployed.
+  Before a manual trigger, verify status reports
   the expected enabled/running mode and strategy/config/route/stream/lineage identity; after HTTP
   202, verify the event reaches `SENT` in the outbox and appears in only the reviewed Feishu chat.
 - Shadow-compare the same legal input against online V16 for zero stock-selection and formatting

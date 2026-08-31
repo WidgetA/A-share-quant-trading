@@ -24,11 +24,11 @@ bootstrap.mode: EMPTY_FORWARD_SHADOW
 `enabled` 与 `production_activation_guard` 是必须永久保持 `false` 的镜像安全默认；
 loader 会拒绝把它们改成 `true`，启用只能通过本手册列出的显式环境变量完成。
 
-仓库当前 push CI 的 Docker build 没有指定 `target: v20`，因此构建并推送的是 Dockerfile
-默认的 legacy `runtime` target。CI 通过只证明该提交完成了自动检查/默认镜像构建，不
-证明专用 V20 镜像已经构建、部署或启用，也不证明人工触发接口可访问。正式 V20 仍须
-显式构建并部署 Docker `v20` target（或启动 `python scripts/v20_main.py`），并通过环境
-开启。不得把“push CI 变绿”当成 V20 部署验收。
+仓库 push CI 会同时发布两个 target：legacy `runtime` 使用 `latest`/提交 SHA tag，专用
+V20 使用 `v20-latest`/`v20-<commit-sha>` tag。CI 只负责检查、构建和推送 ACR，不会创建
+或更新 V20 容器。正式 V20 必须由部署主机显式运行 `v20` tag，并完成本手册的环境变量、
+密钥、迁移、状态和路由核验后，才允许对人工接口发请求。当前默认配置不会开启。不得把
+“push CI 变绿”当成 V20 部署验收。
 
 运行模式与旧 V16 扫描通知的关系：
 
