@@ -99,6 +99,11 @@ jobs:
         with:
           context: .
           push: true
+          # Alibaba Cloud ACR rejects BuildKit's OCI attestation manifest
+          # (application/vnd.oci.empty.v1+json). The image itself still keeps
+          # the immutable commit/build labels supplied below.
+          provenance: false
+          sbom: false
           tags: |
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:latest
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ github.sha }}
