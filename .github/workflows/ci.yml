@@ -109,10 +109,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run real PostgreSQL V20 outbox and Feishu tests
+      - name: Run real PostgreSQL V20 outbox, state, and Feishu tests
         run: >-
           uv run pytest -q
           tests/integration/data/database/test_v20_outbox_postgres.py
+          tests/integration/data/database/test_v20_state_semantics_postgres.py
           tests/integration/common/test_v20_feishu_postgres.py
           --tb=short
 

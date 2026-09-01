@@ -363,6 +363,25 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "bfcb7d5881e2597bfbc46d3826e9cee45656e4419d2e6dc489fea3c81de4d35e": (
             "V20_LEDGER_STATE_CONTRACT_V2"
         ),
+        # Strict multi-generation receipt chaining and checkpoint resolution.
+        # This validates compatibility evidence without changing ledger transitions.
+        "3bc8af735d9ca07e7e106fda727324c8dfec7a9211230d16eb6c9aedaf6bd643": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
+        # The same reviewed repository bytes in the Windows QA CRLF form.
+        "8a9c6ba5e380f4d362bce690aec863618f59ef597b8e2e488e28871edb35c97e": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
+        # Multi-hop compatibility authentication plus removal of a nonexistent
+        # deployment-mode read and lineage-wide receipt-scope validation.
+        # Git/deployment LF bytes.
+        "d34ba101ec95cd6a3a8c7b0933fbb3b6cee9c29dfca7af9fd316f13bf04b9601": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
+        # The same reviewed repository bytes in Windows QA CRLF form.
+        "535fd459ac0867e7373d3a398f8d4425f5e388cf6a331c65fbd61faefc5255e9": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
     },
 }
 

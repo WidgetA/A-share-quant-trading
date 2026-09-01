@@ -1,0 +1,110 @@
+{
+  "source_commit": "4211cd0f6fa0da8afd7557d2cff8b0821df1dcc5",
+  "expected_config_hash": "06c00866a37aef72e0bda48a58a1a27efec79a38ec241c10312fb0c90a15cfc7",
+  "expected_state_semantics_hash": "b2ba54f990cfe6b0e4b8f38c97e096a72205d78e34e484593eacaf5243ac2ce0",
+  "payload": {
+    "schema_version": "v20-runtime/v2",
+    "strategy_version": "V20_BAD_E50_G_BASE_V1",
+    "official_stream_id": "V20_A_SHARE_FORWARD_SHADOW",
+    "deployment_mode": "forward_shadow",
+    "timezone": "Asia/Shanghai",
+    "return_profile_id": "ZERO_COST_GROSS_PRICE_RETURN_V1",
+    "reference_profile_id": "CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+    "state_lineage_id": "V20_FORWARD_SHADOW_GENESIS_20260831",
+    "clock": {
+      "prewarm": "09:15",
+      "minute_collection_start": "09:31",
+      "decision_bar_label": "09:39",
+      "publish_deadline": "09:40",
+      "decision_finalization_deadline": "09:45",
+      "reference_bar_label": "09:41",
+      "reference_lock_deadline_next_day": "09:30",
+      "mews_cutoff_d1": "09:40",
+      "plan_exit": "14:57",
+      "reminder_check": "09:35"
+    },
+    "market_data": {
+      "minimum_quote_coverage": 0.8,
+      "minimum_breadth_universe": 1000,
+      "minute_poll_seconds": 2,
+      "exit_poll_seconds": 15
+    },
+    "policy": {
+      "health_window": 3,
+      "health_recovery_confirmations": 3,
+      "breadth_wilson_z": 1.645,
+      "breadth_full_upper": 0.5,
+      "breadth_half_upper": 0.6,
+      "rolling_window": 7,
+      "rolling_bad_min_losses": 5,
+      "g_max_component_size": 3,
+      "g_weak_amount_min_metrics": 2,
+      "d1_stop_factor": 0.92,
+      "d2_stop_factor": 0.88,
+      "d2_mews_danger_stop_factor": 0.95
+    },
+    "g_manifest_sha256": "377cf1181539ad7d7b2e0407c27e6529e1c911e06052c7968caf057cb0131d32",
+    "strategy_dependency_hashes": {
+      "src/strategy/strategies/v16_scanner.py": "898fc16de390065419d0c62869de402176ec2ec0ad4aa340b24fbd22634d2b15",
+      "src/strategy/strategies/momentum_sector_scanner.py": "ea064e300278c8ddf995577fd97e75e2ec8e6262c43ee0404453c4ea9609b5b7",
+      "src/strategy/lgbrank_scorer.py": "25293e3309e92400a1ab1f777f9164c577187056c018d21dab64651f61adaac0",
+      "src/strategy/filters/stock_filter.py": "51611cdd28ea051b5e29da844eeba8a15efbb7a41014cb9ac190b87fe0e21b81",
+      "src/strategy/filters/board_filter.py": "68544c9bb535347e5e7f64ba05506f20a0a6fbb847a7f4a369375c7b4f163dab",
+      "src/strategy/filters/reversal_factor_filter.py": "9a63eda1af9bcee6eaf32d9316988f5056b2f1cf1fd076889cf69432d23a9c6a",
+      "src/strategy/filters/momentum_quality_filter.py": "46ce278247dcb83fb8028c196847db4731dd2f17382fe875a2c4d2addf932e26",
+      "src/data/clients/ifind_http_client.py": "2204398d4fb0678378fa91040bb0b58d627c3519e1ebdc3af11ba97c7b7b7e98",
+      "src/common/config.py": "5d729b08139e8cf53db7127964daffe6b9a5162a0f0a5bf91dbf1b47cf2a93d7",
+      "src/data/sources/local_concept_mapper.py": "ff80a1d3ccb0ff5fde0e011a81ea24812f8162c2e8768a607686717ca4f5014b",
+      "src/data/clients/tushare_realtime.py": "03906a2b31f536335b82a6ed69fb13ac1febf8acc5494017b33e402b8760a97e",
+      "src/data/clients/iquant_historical_adapter.py": "02fe5454d05d8b2ec03f938960e38c2fad06873b922b18d67c0efa2a65b346f8",
+      "src/data/clients/v20_market_data.py": "ea9000e56facfa2b7f6ec82d3c45c9aa5201f7799d2241b25f284b712da9b1a0",
+      "src/data/database/fundamentals_db.py": "b3016598b5be3d47900be2338f4707295b3c66e4829ac03a6d4286f797b36847",
+      "src/data/database/tls.py": "2fb8b616da1b6154e336de72537b9a117c65d9c222936836809a08d12a5061b3",
+      "src/data/database/v20_repository.py": "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902",
+      "src/common/feishu_bot.py": "c57452b156702a1958481e0c17627271e18334bc2f23d52692b629f2d539ec45",
+      "src/common/v20_feishu.py": "30f3ce066b7d448bd5bc4bc296569c2f273ef812a792ca6d49d305da2c5d778e",
+      "src/web/v15_scan_service.py": "73bd5ace0935ba235aff4b8a09e61b9ad355dc309378b555dbb3978e3ff508a8",
+      "src/web/v20_scan_pipeline.py": "526fa5aa2dae700c3824dc84576b166dcc1b9b1d3e6f48dffb7eb57efb61865c",
+      "src/web/v20_service.py": "07ac09b4e61f376ec896c893ea5e88ee89562ae573402bccd9d63a0694d52e6e",
+      "src/web/v20_routes.py": "86e858f6dcb63b357caa7ee3320764a7cbcd502281ed9c8926592460c3eb2e3c",
+      "src/strategy/v20/artifacts.py": "daab055ae609de6cd24d25030aece53a9986ed2c0a146c6a6f1f1279ef616ae4",
+      "src/strategy/v20/decision_engine.py": "1105368da348c68b95cd9524d5e8236ab8a12a1a901ecf92053eea7d8eb32747",
+      "src/strategy/v20/exit_policy.py": "44919b2878d24b46708387229bf2810d314937d70cb94596bac2500c1c58b43e",
+      "src/strategy/v20/identity.py": "ee64a0ad1133f33877dae85b03688ebf5b89f9d03a07d1d23ac7953acbd6ce7b",
+      "src/strategy/v20/models.py": "f1a3fb0916b9ad56e99cf003951b845d8e8d26eec3bc96c982a581b08d3fe662",
+      "src/strategy/v20/policy.py": "f255357d49e5e561a34e943c7dcd06eff720fb18ceaba3e6df62282f2c600031",
+      "src/strategy/v20/runtime_config.py": "c9658c114060db81a26c2fe14df5605e581356a4b39dac60ff6ff7c88478bdb3",
+      "src/strategy/v20/shadow_evaluator.py": "1b42b9f76ba6ff91255cf41956124265f06748ce088a77d2b1b8016f71239645",
+      "models/lgbrank_latest.txt": "3aff7cb476cd32aa44d13bffcf435ff37b3c09224e5925ae7af97bdc077a03bc",
+      "models/feature_list.json": "5740d762c2c6fa8691a747039db375e3c0037a99c9b2c9635d74ca83a0569193",
+      "data/sectors.json": "c2a9044e8f85f446c5c3f2baf158a46b887ca97e3bc03ffe60d11171f875c5a7",
+      "data/board_constituents.json": "23f0d8199cd93347124258b9fbf337ece7c4b58a96805ec196e2a364b09a16a1",
+      "pyproject.toml": "b98d44b91a0509ff84f8bda06fdfaf5e7ed5d764465bf56fcd7920b438555ee0",
+      "uv.lock": "40d27881d0d10e836d532f3ce03f4881c75087ec4b85f78d117e6f5b03ee7358"
+    },
+    "database_config_sha256": "3d451967afeac88f73069d433f0abf5f1f9f7bdf8573b1b44e28cd0a993a0954",
+    "state_semantics_hash": "b2ba54f990cfe6b0e4b8f38c97e096a72205d78e34e484593eacaf5243ac2ce0",
+    "database_schema": "v20",
+    "database_tls_ca_sha256": {
+      "v20": "UNCONFIGURED",
+      "fundamentals": "UNCONFIGURED"
+    },
+    "route_id": "V20_SHADOW_FEISHU",
+    "route_bindings": {
+      "forward_shadow": {
+        "route_id": "V20_SHADOW_FEISHU",
+        "expected_bot_origin": "UNCONFIGURED",
+        "expected_app_id_sha256": "UNCONFIGURED",
+        "expected_chat_id_sha256": "UNCONFIGURED"
+      },
+      "production_push": {
+        "route_id": "V20_FORMAL_FEISHU",
+        "expected_bot_origin": "UNCONFIGURED",
+        "expected_app_id_sha256": "UNCONFIGURED",
+        "expected_chat_id_sha256": "UNCONFIGURED"
+      }
+    },
+    "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+    "bootstrap_checkpoint_sha256": null
+  }
+}
