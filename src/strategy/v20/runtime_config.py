@@ -243,7 +243,7 @@ _MIXED_STATE_SOURCE_CLASSES = {
         # Reviewed operational-only change: bound the 11:30 feed-health
         # frontier to vendor publication timing without changing which legal
         # minute bar can create an exit intent or any official state input.
-        "d45331761ac952e6e279eb9e851b13c183491bf38db5dab5d40934eddd13e30d": (
+        "f7b5868e2f0786644cce2bda03e234daeef951144fe8724da75b84785f5e5208": (
             "V20_SERVICE_STATE_ORCHESTRATION_V2"
         ),
     },

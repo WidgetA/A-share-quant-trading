@@ -150,9 +150,7 @@ class V20LiveExitTimeout(TimeoutError):
     def __init__(self, stage: str, timeout_seconds: float) -> None:
         self.stage = stage
         self.timeout_seconds = timeout_seconds
-        super().__init__(
-            f"stage={stage} exceeded timeout_seconds={timeout_seconds:.3f}"
-        )
+        super().__init__(f"stage={stage} exceeded timeout_seconds={timeout_seconds:.3f}")
 
 
 async def _init_v20_scan_resources(scan_state: V15ScanState) -> None:
@@ -4312,9 +4310,7 @@ class V20Service:
                 context.last_phase = "COLLECTING_0939"
             except Exception as exc:
                 context.last_phase = "PREWARM_FAILED"
-                context.last_entry_failure_detail = (
-                    f"PREWARM_FAILED: {type(exc).__name__}: {exc}"
-                )
+                context.last_entry_failure_detail = f"PREWARM_FAILED: {type(exc).__name__}: {exc}"
                 self._record_lane_error(
                     "decision",
                     f"PREWARM_FAILED: {type(exc).__name__}: {exc}",
@@ -5868,9 +5864,7 @@ class V20Service:
         observed_at: datetime | None = None,
         timeout: float | None = None,
     ) -> Mapping[str, TushareMinuteBar]:
-        effective_timeout = (
-            LATEST_MINUTE_POLL_TIMEOUT_SECONDS if timeout is None else timeout
-        )
+        effective_timeout = LATEST_MINUTE_POLL_TIMEOUT_SECONDS if timeout is None else timeout
         rows = await asyncio.wait_for(
             self._scan_state.realtime_client.batch_get_latest_minute_bars(list(codes)),
             timeout=effective_timeout,

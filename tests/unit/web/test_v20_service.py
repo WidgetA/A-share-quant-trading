@@ -146,9 +146,7 @@ async def test_rolling7_uses_v16_market_history_without_runtime_batches(
         date(2026, 8, 26),
         date(2026, 8, 27),
     ]
-    assert sum(row.batch_return for row in window) == pytest.approx(
-        -0.09697359675610706
-    )
+    assert sum(row.batch_return for row in window) == pytest.approx(-0.09697359675610706)
     assert sum(row.batch_return < 0.0 for row in window) == 4
     decision = evaluate_rolling7(
         decision_date=date(2026, 9, 1),
