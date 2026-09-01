@@ -4913,6 +4913,54 @@ class V20Repository:
             raise V20SemanticConflict("MEWS snapshot_id collision")
         return content_hash
 
+    async def mews_snapshot_is_eligible(
+        self,
+        snapshot_id: str,
+        *,
+        source_trade_date: date,
+        cutoff: datetime,
+    ) -> bool:
+        """Verify the database-owned receipt crossed storage before cutoff."""
+
+        _require_aware(cutoff, "MEWS cutoff")
+        async with self.pool.acquire() as connection:
+            value = await connection.fetchval(
+                f"""
+                SELECT EXISTS (
+                    SELECT 1 FROM {self.schema}.mews_snapshots
+                    WHERE snapshot_id=$1 AND source_trade_date=$2
+                      AND generated_at < $3 AND receipt_sealed_at < $3
+                )
+                """,
+                snapshot_id,
+                source_trade_date,
+                cutoff,
+            )
+        return value is True
+
+    async def find_eligible_mews_snapshot(
+        self,
+        *,
+        source_trade_date: date,
+        cutoff: datetime,
+    ) -> str | None:
+        """Recover a qualified daily cache after a V20 process restart."""
+
+        _require_aware(cutoff, "MEWS cutoff")
+        async with self.pool.acquire() as connection:
+            value = await connection.fetchval(
+                f"""
+                SELECT snapshot_id FROM {self.schema}.mews_snapshots
+                WHERE source_trade_date=$1
+                  AND generated_at < $2 AND receipt_sealed_at < $2
+                ORDER BY generated_at DESC,receipt_sealed_at DESC,snapshot_id DESC
+                LIMIT 1
+                """,
+                source_trade_date,
+                cutoff,
+            )
+        return str(value) if value is not None else None
+
     async def select_mews_for_leg(
         self,
         model_leg_id: str,

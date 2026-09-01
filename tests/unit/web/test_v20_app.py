@@ -292,6 +292,7 @@ service = V20Service(
     routes={config.route_id: route},
     initialize_resources=_init_v20_scan_resources,
     cleanup_resources=_cleanup_v20_scan_resources,
+    mews_source=SimpleNamespace(),
 )
 
 with TestClient(create_v20_app(v20_service=service)):

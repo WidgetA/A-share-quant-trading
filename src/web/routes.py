@@ -71,6 +71,10 @@ _V20_PUBLIC_LANE_ERROR_PREFIXES: dict[str, tuple[str, ...]] = {
         "LEADERSHIP_LOST",
         "PUBLISH_FAILED",
     ),
+    "mews_cache": (
+        "LEADERSHIP_LOST",
+        "MEWS_CACHE_FAILED",
+    ),
 }
 
 
@@ -132,6 +136,7 @@ def _empty_v20_public_health(error_code: str) -> dict[str, object]:
         "runtime_lanes": {
             "live_exit": _v20_public_lane("live_exit", None),
             "publisher": _v20_public_lane("publisher", None),
+            "mews_cache": _v20_public_lane("mews_cache", None),
         },
         "outbox": {
             "pending_delivery_n": None,
@@ -165,7 +170,12 @@ async def _v20_public_health(service: object | None) -> dict[str, object]:
         return _empty_v20_public_health("STATUS_SNAPSHOT_INVALID")
     live_exit = lanes.get("live_exit")
     publisher = lanes.get("publisher")
-    if not isinstance(live_exit, Mapping) or not isinstance(publisher, Mapping):
+    mews_cache = lanes.get("mews_cache")
+    if (
+        not isinstance(live_exit, Mapping)
+        or not isinstance(publisher, Mapping)
+        or not isinstance(mews_cache, Mapping)
+    ):
         return _empty_v20_public_health("STATUS_SNAPSHOT_INVALID")
     return {
         "health_summary_available": True,
@@ -175,6 +185,7 @@ async def _v20_public_health(service: object | None) -> dict[str, object]:
         "runtime_lanes": {
             "live_exit": _v20_public_lane("live_exit", live_exit),
             "publisher": _v20_public_lane("publisher", publisher),
+            "mews_cache": _v20_public_lane("mews_cache", mews_cache),
         },
         "outbox": {
             "pending_delivery_n": _v20_public_count(outbox.get("pending_delivery_n")),

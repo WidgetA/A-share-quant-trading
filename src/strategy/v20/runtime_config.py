@@ -129,6 +129,7 @@ _STRATEGY_DEPENDENCY_FILES = (
     "src/strategy/filters/reversal_factor_filter.py",
     "src/strategy/filters/momentum_quality_filter.py",
     "src/data/clients/ifind_http_client.py",
+    "src/data/clients/mews_snapshot.py",
     "src/common/config.py",
     "src/data/sources/local_concept_mapper.py",
     "src/data/clients/tushare_realtime.py",
@@ -246,6 +247,21 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "f7b5868e2f0786644cce2bda03e234daeef951144fe8724da75b84785f5e5208": (
             "V20_SERVICE_STATE_ORCHESTRATION_V2"
         ),
+        # Adds an isolated 09:10 MEWS cache lane. Entry state transitions,
+        # rolling inputs, and reference orchestration are unchanged.
+        "ec8c8065cfd81da6776a91886fa3efd95cee36c3eaa76a9588671dae6d6230b9": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
+        # Adds missing-MEWS recovery through the owning service's production
+        # calculator. Entry, rolling, reference, and exit policy are unchanged.
+        "8223a0c5886010a40854015d507565e7dc9489bf62f32d7c0f67da6bd18851ac": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
+        # Combines the reviewed lunch publication frontier with the isolated
+        # MEWS cache/recovery lane; neither changes official strategy inputs.
+        "662fc3ba7cafe531bda4508bdd4ead0d8234f0342a3a316f686ef30f6d21f61e": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
@@ -255,6 +271,10 @@ _MIXED_STATE_SOURCE_CLASSES = {
             "V20_LEDGER_STATE_CONTRACT_V1"
         ),
         "6f74da33d9b8d632b1357e432117600d73356975d59ea96242a7f2c38d815f9f": (
+            "V20_LEDGER_STATE_CONTRACT_V1"
+        ),
+        # Adds a read-only cutoff receipt verification for cached MEWS.
+        "83bdfa110cd6857407c5ae9fdaf9936f81339c755e9e337a0aed8d47b5c39d24": (
             "V20_LEDGER_STATE_CONTRACT_V1"
         ),
     },

@@ -320,7 +320,7 @@ HTTP 请求本身不会占用 PostgreSQL 连接。快照缺失、刷新失败或
 失败时，旧 V16 不会自动接管，应立即按第 8 节处理。
 
 `runtime_lanes` 当前逐项报告 `decision`、`live_exit`、`stale_exit`、
-`outbox_recovery`、`publisher` 的
+`outbox_recovery`、`publisher`、`mews_cache` 的
 `healthy`、`last_success_at`、`success_age_seconds`、`freshness_limit_seconds`、
 `last_error` 和 `last_error_at`。当前 freshness 判定为：
 
@@ -331,15 +331,27 @@ HTTP 请求本身不会占用 PostgreSQL 连接。快照缺失、刷新失败或
 | `stale_exit` | 65 秒 |
 | `outbox_recovery` | 5 秒 |
 | `publisher` | 7 秒 |
+| `mews_cache` | 65 秒 |
 
 任一上述 lane 未曾成功、超出 freshness 或保留错误时，启用状态下总 `healthy` 都必须为
 `false`。publisher 意外停止会令 `running=false` 并终止其余任务；relay 返回失败、超时
 或租约异常会保留 publisher lane 错误。`outbox.delivery_error_n > 0` 也会直接令 publisher
 及总健康为红，避免指数退避期间一次空租约把故障暂时洗绿。因此探针必须同时要求
-`running=true`、`healthy=true`、五条 lane 新鲜且无错，并检查 outbox 未出现持续增长的
+`running=true`、`healthy=true`、六条 lane 新鲜且无错，并检查 outbox 未出现持续增长的
 未密封、租约重试或投递失败。
 
-### 5.2 写入 MEWS 快照
+### 5.2 MEWS 09:10 自动缓存与人工恢复
+
+生产链路必须配置 `V20_MEWS_SOURCE_URL`，指向已发布的 `mews_v2` 曲线接口，并通过
+`TRADING_API_KEY`（或专用覆盖 `V20_MEWS_API_KEY`）访问。独立 `mews_cache` lane 在交易日
+09:10—09:40 内重试，要求 `latest_valid.date` 等于前一交易日、
+`signal_available_date` 等于当天、`data_status=OK`，且上游生成时间与 PostgreSQL 回执都
+严格早于 09:40。若当天结果缺失、滞后或仍为 `PARTIAL`，V20 会立即调用同一服务的生产
+补算接口，再拉取、校验并落快照；补算仍由 MEWS 服务已有的历史状态和互斥锁完成。刷新
+地址默认由曲线地址推导，非标准路由才需设置 `V20_MEWS_REFRESH_URL`。成功后当天不再拉取；
+选股和退出只读 V20 自己的快照，不允许 V20 配置 MEWS 上游存储。
+
+以下 POST 仅保留为有鉴权的人工灾备写入，不是日常生产链路：
 
 ```bash
 curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/mews-snapshots \
@@ -404,13 +416,13 @@ curl --fail-with-body http://127.0.0.1:8000/api/v20/status \
 - `mode` 是部署单预期的 `forward_shadow` 或 `production_push`；
 - `strategy_version`、完整 `config_hash`、`route_id`、`official_stream_id`、
   `state_lineage_id` 与部署单完全一致；
-- 五条 `runtime_lanes` 新鲜且无错误，outbox 没有异常积压；
+- 六条 `runtime_lanes` 新鲜且无错误，尤其确认 `mews_cache` 无错，outbox 没有异常积压；
 - 当前运行的是预期进程/镜像。CI 通过不能替代本检查。
 
 内嵌 profile 没有配置 status key 时，详细 status 保持 503 是预期鉴权行为；公开
 `/api/status` 仍提供严格脱敏的 `runtime_lanes.live_exit`、
-`runtime_lanes.publisher` 和 outbox 数量。人工触发自身还会检查 repository leader 和
-全部五条 runtime lane，尚未就绪会返回 503，而不是绕过健康门禁。
+`runtime_lanes.publisher`、`runtime_lanes.mews_cache` 和 outbox 数量。人工触发自身还会
+检查 repository leader 和全部六条 runtime lane，尚未就绪会返回 503，而不是绕过健康门禁。
 
 触发命令：
 
