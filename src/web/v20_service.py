@@ -293,12 +293,10 @@ class _DayContext:
     reminders_done: bool = False
     reference_finalized: bool = False
     shadow_reference_finalized: bool = False
-    prewarm_attempted: bool = False
     early_history_attempted: bool = False
     early_stored_history_loaded: bool = False
     entry_scan_attempted: bool = False
     frozen_entry_bundle: FrozenV16ScanBundle | None = None
-    entry_market_attempted: bool = False
     reference_history_attempted: bool = False
     last_reference_history_at: datetime | None = None
     last_reference_poll_at: datetime | None = None
@@ -4268,11 +4266,7 @@ class V20Service:
             or wall >= self.config.clock.decision_finalization_deadline
         ):
             return
-        if context.prewarmed is None and not context.prewarm_attempted:
-            # The Tushare client already owns bounded transport retries.  A
-            # scheduler tick must not restart the whole V16 prewarm (including
-            # its daily/RT dependencies) every second after a terminal failure.
-            context.prewarm_attempted = True
+        if context.prewarmed is None:
             try:
                 context.last_phase = "PREWARMING"
                 budget_clock = self._aware_now()
@@ -4309,17 +4303,17 @@ class V20Service:
                 context.collector_created_at = self._aware_now()
                 context.last_phase = "COLLECTING_0939"
             except Exception as exc:
-                context.last_phase = "PREWARM_FAILED"
-                context.last_entry_failure_detail = f"PREWARM_FAILED: {type(exc).__name__}: {exc}"
+                context.last_phase = "PREWARM_RETRY"
+                context.last_entry_failure_detail = f"PREWARM_RETRY: {type(exc).__name__}: {exc}"
                 self._record_lane_error(
                     "decision",
-                    f"PREWARM_FAILED: {type(exc).__name__}: {exc}",
+                    f"PREWARM_RETRY: {type(exc).__name__}: {exc}",
                     now,
                 )
-                logger.warning("V20 prewarm failed for the daily slot: %s", exc)
+                logger.warning("V20 prewarm will retry: %s", exc)
 
         if (
-            time.fromisoformat(self.config.clock.decision_bar_label)
+            self.config.clock.minute_collection_start
             <= wall
             < self.config.clock.decision_finalization_deadline
         ):
@@ -4403,6 +4397,11 @@ class V20Service:
             )
             return
 
+        # The collection phase is also invoked independently before maturity
+        # and predecessor reconciliation.  Repeating it here is idempotent and
+        # covers direct unit/manual invocations of the decision phase.
+        await self._run_entry_collection_cycle(context, now)
+
         if (
             wall >= time.fromisoformat(self.config.clock.decision_bar_label)
             and wall < self.config.clock.decision_finalization_deadline
@@ -4447,53 +4446,40 @@ class V20Service:
             )
 
     async def _poll_entry_market(self, context: _DayContext, now: datetime) -> None:
+        if context.prewarmed is None or context.collector is None:
+            return
+        target_label = min(
+            now.strftime("%H:%M"),
+            self.config.clock.decision_bar_label,
+        )
+        # Quote completeness is a property of the V16 scan universe.  The
+        # much wider breadth sample is fetched in the same request only for
+        # latency efficiency and must never fill a missing V16 quote slot.
+        captured_n = sum(
+            (context.trade_date, code, target_label) in context.minute_rows
+            for code in context.prewarmed.universe_codes
+        )
         if (
-            context.prewarmed is None
-            or context.collector is None
-            or context.breadth_collector is None
-            or context.entry_market_attempted
+            target_label < self.config.clock.decision_bar_label
+            and captured_n / len(context.prewarmed.universe_codes)
+            >= self.config.market.minimum_quote_coverage
         ):
             return
-        if now.timetz().replace(tzinfo=None) < time.fromisoformat(
-            self.config.clock.decision_bar_label
+        if (
+            context.last_early_poll_at is not None
+            and (now - context.last_early_poll_at).total_seconds()
+            < self.config.market.minute_poll_seconds
         ):
             return
-        # Match V16's market-data boundary: one rt_min_daily batch obtains the
-        # complete current-day minute path for the V16 universe.  Breadth needs
-        # only the terminal 09:39 row, supplied by one market-wide rt_min batch.
-        # Mark before awaiting either call because the client already owns its
-        # bounded transport retries; later scheduler ticks must consume the
-        # frozen result instead of starting another vendor request.
-        context.entry_market_attempted = True
-        context.early_history_attempted = True
+        rows = await self._poll_latest(
+            context,
+            context.prewarmed.required_minute_codes,
+            observed_at=now,
+        )
+        context.collector.ingest(rows.values())
+        if context.breadth_collector is not None:
+            context.breadth_collector.ingest(rows.values())
         context.last_early_poll_at = now
-        history_task = asyncio.create_task(
-            self._scan_state.realtime_client.batch_get_minute_history(
-                list(context.prewarmed.universe_codes)
-            ),
-            name=f"v20-entry-history-{context.trade_date.isoformat()}",
-        )
-        terminal_task = asyncio.create_task(
-            self._poll_latest(
-                context,
-                context.prewarmed.required_minute_codes,
-                observed_at=now,
-            ),
-            name=f"v20-entry-terminal-{context.trade_date.isoformat()}",
-        )
-        try:
-            history, terminal = await asyncio.gather(history_task, terminal_task)
-        except BaseException:
-            for task in (history_task, terminal_task):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(history_task, terminal_task, return_exceptions=True)
-            raise
-        persisted_history = await self._persist_history(context, history, observed_at=now)
-        context.collector.ingest(persisted_history)
-        context.collector.ingest(terminal.values())
-        context.breadth_collector.ingest(persisted_history)
-        context.breadth_collector.ingest(terminal.values())
 
     async def _attempt_entry(self, context: _DayContext, now: datetime) -> None:
         if (

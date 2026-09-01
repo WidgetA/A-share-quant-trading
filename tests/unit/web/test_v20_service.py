@@ -3151,68 +3151,9 @@ async def test_prewarm_near_cutoff_is_skipped_so_0940_can_finalize(
 
     assert not prewarm_started
     assert context.prewarmed is None
-    assert context.last_phase == "PREWARM_FAILED"
+    assert context.last_phase == "PREWARM_RETRY"
     assert context.last_entry_failure_detail is not None
     assert "reserved 09:40 cutoff window" in context.last_entry_failure_detail
-
-
-async def test_failed_prewarm_is_not_restarted_by_later_scheduler_ticks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = _config(monkeypatch)
-    service = _service(monkeypatch, _LateNormalEntryRepository(config))
-    service._clock = lambda: datetime(2026, 8, 31, 9, 20, tzinfo=TZ)
-    prewarm_calls = 0
-
-    async def failed_prewarm(*_args, **_kwargs):
-        nonlocal prewarm_calls
-        prewarm_calls += 1
-        raise RuntimeError("vendor failure after its internal retries")
-
-    service._scan_pipeline = SimpleNamespace(prewarm=failed_prewarm)
-    context = _DayContext(
-        trade_date=date(2026, 8, 31),
-        calendar=(date(2026, 8, 31),),
-    )
-
-    await service._run_entry_collection_cycle(
-        context,
-        datetime(2026, 8, 31, 9, 20, tzinfo=TZ),
-    )
-    await service._run_entry_collection_cycle(
-        context,
-        datetime(2026, 8, 31, 9, 21, tzinfo=TZ),
-    )
-
-    assert prewarm_calls == 1
-    assert context.prewarm_attempted is True
-    assert context.prewarmed is None
-    assert context.last_phase == "PREWARM_FAILED"
-
-
-async def test_entry_cycle_does_not_run_the_outer_collection_phase_twice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = _config(monkeypatch)
-    service = _service(monkeypatch, _LateNormalEntryRepository(config))
-    collection_calls = 0
-
-    async def duplicate_collection(*_args, **_kwargs) -> None:
-        nonlocal collection_calls
-        collection_calls += 1
-
-    monkeypatch.setattr(service, "_run_entry_collection_cycle", duplicate_collection)
-    context = _DayContext(
-        trade_date=date(2026, 8, 31),
-        calendar=(date(2026, 8, 31),),
-    )
-
-    await service._run_entry_cycle(
-        context,
-        datetime(2026, 8, 31, 9, 38, 30, tzinfo=TZ),
-    )
-
-    assert collection_calls == 0
 
 
 async def test_decision_watchdog_preempts_blocked_reconciliation_at_0940(
@@ -3550,27 +3491,19 @@ async def test_0940_cutoff_does_not_wait_for_health_maturity(
     assert entry_times == [cutoff]
 
 
-async def test_entry_market_uses_one_full_day_v16_fetch_and_one_terminal_fetch(
+async def test_entry_poll_coverage_cannot_be_filled_by_breadth_only_codes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def assert_leader() -> None:
         return None
 
-    universe = tuple(f"{index:06d}" for index in range(10))
-    breadth_only = tuple(f"6{index:05d}" for index in range(100))
-    required = tuple(sorted(set(universe).union(breadth_only)))
-    history_calls: list[tuple[str, ...]] = []
-
-    class _Realtime:
-        async def batch_get_minute_history(self, codes):
-            history_calls.append(tuple(codes))
-            return {}
-
     service = _service(
         monkeypatch,
         SimpleNamespace(assert_runtime_leader=assert_leader),
-        _Realtime(),
     )
+    universe = tuple(f"{index:06d}" for index in range(10))
+    breadth_only = tuple(f"6{index:05d}" for index in range(100))
+    required = tuple(sorted(set(universe).union(breadth_only)))
     context = _DayContext(
         trade_date=date(2026, 8, 31),
         calendar=(date(2026, 8, 31),),
@@ -3582,6 +3515,8 @@ async def test_entry_market_uses_one_full_day_v16_fetch_and_one_terminal_fetch(
         collector=SimpleNamespace(ingest=lambda _rows: None),
         breadth_collector=SimpleNamespace(ingest=lambda _rows: None),
     )
+    for code in (*universe[:7], *breadth_only):
+        context.minute_rows[(context.trade_date, code, "09:38")] = None  # type: ignore[assignment]
     polls: list[tuple[str, ...]] = []
 
     async def poll_latest(_context, codes, *, observed_at):
@@ -3594,23 +3529,8 @@ async def test_entry_market_uses_one_full_day_v16_fetch_and_one_terminal_fetch(
         context,
         datetime(2026, 8, 31, 9, 38, 30, tzinfo=TZ),
     )
-    await service._poll_entry_market(
-        context,
-        datetime(2026, 8, 31, 9, 38, 59, tzinfo=TZ),
-    )
-    await service._poll_entry_market(
-        context,
-        datetime(2026, 8, 31, 9, 39, 1, tzinfo=TZ),
-    )
-    await service._poll_entry_market(
-        context,
-        datetime(2026, 8, 31, 9, 39, 30, tzinfo=TZ),
-    )
 
-    assert history_calls == [universe]
     assert polls == [required]
-    assert context.entry_market_attempted is True
-    assert context.early_history_attempted is True
 
 
 class _MaturityClient:

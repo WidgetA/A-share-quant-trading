@@ -73,11 +73,10 @@ def _bar_semantics_sort_key(row: Mapping[str, object]) -> tuple[str, str]:
 class V20EarlyBarCollector:
     """Collect raw morning bars and freeze an exact-label V16 input snapshot.
 
-    At the decision boundary the service seeds this collector once with the
-    V16 universe's full-day ``rt_min_daily`` rows, then appends one market-wide
-    ``rt_min`` batch for terminal breadth.  A second, different row for the
-    same code/label invalidates that code's path; it cannot poison otherwise
-    valid siblings.
+    The service may seed this collector with per-stock ``rt_min_daily`` rows
+    during prewarm and then append the market-wide batch ``rt_min`` rows for
+    the remaining minutes.  A second, different row for the same code/label
+    invalidates that code's path; it cannot poison otherwise valid siblings.
     """
 
     def __init__(self, trade_date: date, required_codes: Iterable[str]) -> None:
