@@ -56,6 +56,12 @@ def test_public_status_exposes_only_sanitized_v20_lane_and_outbox_health() -> No
                     "success_age_seconds": 1,
                     "last_error": None,
                 },
+                "mews_cache": {
+                    "healthy": True,
+                    "last_success_at": "2026-09-01T09:39:50+08:00",
+                    "success_age_seconds": 10,
+                    "last_error": None,
+                },
                 "decision": {"last_error": "secret decision detail"},
             },
             "outbox": {
@@ -86,6 +92,12 @@ def test_public_status_exposes_only_sanitized_v20_lane_and_outbox_health() -> No
             "healthy": True,
             "last_success_at": "2026-09-01T09:39:59+08:00",
             "success_age_seconds": 1.0,
+            "last_error_code": None,
+        },
+        "mews_cache": {
+            "healthy": True,
+            "last_success_at": "2026-09-01T09:39:50+08:00",
+            "success_age_seconds": 10.0,
             "last_error_code": None,
         },
     }
@@ -150,6 +162,7 @@ def test_public_status_does_not_publish_unknown_uppercase_error_tokens() -> None
             "runtime_lanes": {
                 "live_exit": {"last_error": "SUPER_SECRET_TOKEN: credential detail"},
                 "publisher": {"last_error": "LIVE_EXIT_CYCLE_TIMEOUT: wrong lane"},
+                "mews_cache": {},
             },
             "outbox": {},
         }

@@ -28,6 +28,12 @@ from src.common.v20_feishu import (
     load_v20_feishu_routes,
     seal_v20_payload,
 )
+from src.data.clients.mews_snapshot import (
+    MEWS_PUBLISH_TIME,
+    MewsSnapshotNotReady,
+    MewsSnapshotSourceError,
+    PublishedMewsSnapshotClient,
+)
 from src.data.clients.tushare_realtime import TushareDailyBar, TushareMinuteBar
 from src.data.clients.v20_market_data import (
     V20EarlyBarCollector,
@@ -132,7 +138,9 @@ LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS = 180.0
 LATE_0939_REPLAY_RETRY_SECONDS = 900.0
 LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS = 2
 MANUAL_MONITOR_HISTORY_TIMEOUT_SECONDS = 30.0
-V20_RUNTIME_LANE_COUNT = 5
+V20_RUNTIME_LANE_COUNT = 6
+MEWS_CACHE_CUTOFF = time(9, 40)
+MEWS_CACHE_POLL_SECONDS = 30.0
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 
 Clock = Callable[[], datetime]
@@ -1065,6 +1073,7 @@ class V20Service:
         initialize_resources: ResourceInitializer = _init_v20_scan_resources,
         cleanup_resources: ResourceCleanup = _cleanup_v20_scan_resources,
         calendar_provider: CalendarProvider | None = None,
+        mews_source: Any | None = None,
         embedded_legacy: bool = False,
     ) -> None:
         self.config = config
@@ -1078,6 +1087,7 @@ class V20Service:
         self._initialize_resources = initialize_resources
         self._cleanup_resources = cleanup_resources
         self._calendar_provider = calendar_provider
+        self._mews_source = mews_source
         self._embedded_legacy = embedded_legacy
         self._calendar_cache: tuple[date, ...] = ()
         self._calendar_loaded_for: date | None = None
@@ -1089,6 +1099,12 @@ class V20Service:
         self._late_0939_replay_lock = asyncio.Lock()
         self._late_0939_replay_task: asyncio.Task[Any] | None = None
         self._live_exit_lock = asyncio.Lock()
+        self._mews_refresh_lock = asyncio.Lock()
+        self._mews_cached_for: date | None = None
+        self._mews_source_trade_date: date | None = None
+        self._mews_snapshot_id: str | None = None
+        self._mews_last_failure: str | None = None
+        self._mews_alerted_for: date | None = None
         self._exit_context: _DayContext | None = None
         self._stale_exit_context: _DayContext | None = None
         self._started = False
@@ -1116,6 +1132,7 @@ class V20Service:
                 "stale_exit",
                 "outbox_recovery",
                 "publisher",
+                "mews_cache",
             )
         }
 
@@ -1154,6 +1171,7 @@ class V20Service:
             expected_manifest_sha256=config.artifact_manifest_sha256,
         )
         routes = load_v20_feishu_routes()
+        mews_source = PublishedMewsSnapshotClient.from_environment() if config.enabled else None
         if config.enabled:
             active_route = routes.get(config.route_id)
             if (
@@ -1181,6 +1199,7 @@ class V20Service:
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
+            mews_source=mews_source,
         )
 
     @classmethod
@@ -1238,6 +1257,7 @@ class V20Service:
             raise V20ConfigError("legacy main Feishu route is not configured")
         config = _embedded_runtime_config(base_config, route)
         routes = {route.route_id: route}
+        mews_source = PublishedMewsSnapshotClient.from_environment()
         scan_state = V15ScanState(fundamentals_db=fundamentals)
         pipeline = V20ScanPipeline(scan_state, project_root)
         artifacts = load_g_artifacts(
@@ -1261,6 +1281,7 @@ class V20Service:
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
+            mews_source=mews_source,
             initialize_resources=(
                 _init_owned_embedded_v20_scan_resources
                 if owns_fundamentals
@@ -1292,6 +1313,11 @@ class V20Service:
                 raise V20ConfigError(f"V20 Feishu route {self.config.route_id!r} is not configured")
             if route.destination_fingerprint != self.config.route_binding.destination_fingerprint:
                 raise V20ConfigError("active V20 route differs from reviewed destination")
+            if self._mews_source is None:
+                raise V20ConfigError(
+                    "V20_MEWS_SOURCE_URL is required; MEWS cannot be left as an "
+                    "unconnected manual-ingest contract"
+                )
             if (
                 not self._embedded_legacy
                 and os.environ.get("DB_SSLROOTCERT_SHA256") != self.config.fundamentals_db_ca_sha256
@@ -1388,6 +1414,10 @@ class V20Service:
                 asyncio.create_task(
                     self._run_publisher_scheduler(),
                     name="v20-outbox-publisher",
+                ),
+                asyncio.create_task(
+                    self._run_mews_cache_scheduler(),
+                    name="v20-mews-cache-scheduler",
                 ),
             ]
             for task in self._tasks:
@@ -1538,6 +1568,7 @@ class V20Service:
             "stale_exit": STALE_EXIT_TICK_SECONDS * 2.0 + 5.0,
             "outbox_recovery": OUTBOX_RECOVERY_TICK_SECONDS * 2.0 + 1.0,
             "publisher": 7.0,
+            "mews_cache": MEWS_CACHE_POLL_SECONDS * 2.0 + 5.0,
         }
         lane_status: dict[str, Mapping[str, Any]] = {}
         lanes_healthy = True
@@ -1601,6 +1632,18 @@ class V20Service:
             "last_error": self._last_error,
             "last_error_at": self._last_error_at.isoformat() if self._last_error_at else None,
             "runtime_lanes": lane_status,
+            "mews_cache": {
+                "availability_date": (
+                    self._mews_cached_for.isoformat() if self._mews_cached_for else None
+                ),
+                "source_trade_date": (
+                    self._mews_source_trade_date.isoformat()
+                    if self._mews_source_trade_date
+                    else None
+                ),
+                "snapshot_id": self._mews_snapshot_id,
+                "last_failure": self._mews_last_failure,
+            },
             "status_snapshot": {
                 "sampled_at": (
                     snapshot_sampled_at.isoformat()
@@ -2909,6 +2952,162 @@ class V20Service:
             self._record_lane_error("publisher", f"LEADERSHIP_LOST: {exc}", self._aware_now())
             self._stop_event.set()
             raise
+
+    async def _refresh_mews_cache_once(
+        self,
+        now: datetime,
+        calendar: Sequence[date],
+    ) -> bool:
+        """Cache today's published MEWS once; never put its I/O on entry/exit paths."""
+
+        current = self._aware_now(now)
+        wall = current.timetz().replace(tzinfo=None)
+        if self._mews_cached_for == current.date():
+            return False
+        if current.date() not in calendar:
+            return False
+        if wall < MEWS_PUBLISH_TIME or wall >= MEWS_CACHE_CUTOFF:
+            return False
+        predecessors = [day for day in calendar if day < current.date()]
+        if not predecessors:
+            raise V20RepositoryError("MEWS calendar has no preceding trading day")
+        source_trade_date = predecessors[-1]
+        source = self._mews_source
+        if source is None:
+            raise V20ConfigError("V20 MEWS source is not configured")
+
+        async with self._mews_refresh_lock:
+            if self._mews_cached_for == current.date():
+                return False
+            try:
+                published = await source.fetch_snapshot(
+                    source_trade_date=source_trade_date,
+                    availability_date=current.date(),
+                )
+            except MewsSnapshotNotReady:
+                logger.warning(
+                    "V20 found no current MEWS snapshot for %s; requesting production refresh",
+                    current.date(),
+                )
+                await source.refresh_missing_snapshot()
+                published = await source.fetch_snapshot(
+                    source_trade_date=source_trade_date,
+                    availability_date=current.date(),
+                )
+            payload = dict(published)
+            generated_at = datetime.fromisoformat(str(payload.get("generated_at")))
+            if generated_at.tzinfo is None or generated_at.utcoffset() is None:
+                raise MewsSnapshotSourceError("published MEWS generated_at is timezone-naive")
+            cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
+            if generated_at.astimezone(SHANGHAI) >= cutoff:
+                raise MewsSnapshotSourceError("published MEWS missed the 09:40 cutoff")
+            await self._repository.record_mews_snapshot(payload)
+            eligible = await self._repository.mews_snapshot_is_eligible(
+                str(payload["snapshot_id"]),
+                source_trade_date=source_trade_date,
+                cutoff=cutoff,
+            )
+            if not eligible:
+                raise MewsSnapshotSourceError(
+                    "MEWS PostgreSQL receipt was not sealed before the 09:40 cutoff"
+                )
+            self._mews_cached_for = current.date()
+            self._mews_source_trade_date = source_trade_date
+            self._mews_snapshot_id = str(payload["snapshot_id"])
+            self._mews_last_failure = None
+            logger.info(
+                "V20 cached published MEWS %s for %s",
+                self._mews_snapshot_id,
+                current.date(),
+            )
+            return True
+
+    async def _restore_mews_cache_once(
+        self,
+        now: datetime,
+        calendar: Sequence[date],
+    ) -> bool:
+        """Reattach to today's already-sealed cache after a process restart."""
+
+        current = self._aware_now(now)
+        if self._mews_cached_for == current.date() or current.date() not in calendar:
+            return False
+        predecessors = [day for day in calendar if day < current.date()]
+        if not predecessors:
+            raise V20RepositoryError("MEWS calendar has no preceding trading day")
+        source_trade_date = predecessors[-1]
+        snapshot_id = await self._repository.find_eligible_mews_snapshot(
+            source_trade_date=source_trade_date,
+            cutoff=_local(current.date(), MEWS_CACHE_CUTOFF),
+        )
+        if snapshot_id is None:
+            return False
+        self._mews_cached_for = current.date()
+        self._mews_source_trade_date = source_trade_date
+        self._mews_snapshot_id = snapshot_id
+        self._mews_last_failure = None
+        logger.info("V20 restored cached MEWS %s after restart", snapshot_id)
+        return True
+
+    async def _run_mews_cache_scheduler(self) -> None:
+        """Pull after 09:10, retry until 09:40, then consume only PostgreSQL."""
+
+        while not self._stop_event.is_set():
+            now = self._aware_now()
+            try:
+                await self._repository.assert_runtime_leader()
+                wall = now.timetz().replace(tzinfo=None)
+                calendar: Sequence[date] = ()
+                if wall >= MEWS_PUBLISH_TIME:
+                    calendar = await self._load_trade_calendar(now.date())
+                is_trading_day = now.date() in calendar
+                if is_trading_day and self._mews_cached_for != now.date():
+                    await self._restore_mews_cache_once(now, calendar)
+                if is_trading_day and MEWS_PUBLISH_TIME <= wall < MEWS_CACHE_CUTOFF:
+                    await self._refresh_mews_cache_once(now, calendar)
+                elif (
+                    is_trading_day
+                    and wall >= MEWS_CACHE_CUTOFF
+                    and self._mews_cached_for != now.date()
+                ):
+                    if self._mews_alerted_for != now.date():
+                        self._mews_alerted_for = now.date()
+                        await self._safe_alert(
+                            code="MEWS_0910_CACHE_MISSED",
+                            entity_id=now.date().isoformat(),
+                            message=(
+                                "09:10发布后的MEWS未在09:40前写入V20快照；"
+                                "当日D2保护将按常驻-12%兜底"
+                            ),
+                            now=now,
+                        )
+                    raise MewsSnapshotSourceError("MEWS was not cached before today's 09:40 cutoff")
+                self._record_lane_success("mews_cache", now)
+            except asyncio.CancelledError:
+                raise
+            except V20LeadershipLost as exc:
+                self._record_lane_error(
+                    "mews_cache",
+                    f"LEADERSHIP_LOST: {exc}",
+                    now,
+                )
+                self._stop_event.set()
+                raise
+            except Exception as exc:
+                self._mews_last_failure = f"{type(exc).__name__}: {exc}"
+                self._record_lane_error(
+                    "mews_cache",
+                    f"MEWS_CACHE_FAILED: {self._mews_last_failure}",
+                    now,
+                )
+                logger.warning("V20 MEWS cache refresh failed: %s", self._mews_last_failure)
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=MEWS_CACHE_POLL_SECONDS,
+                )
+            except TimeoutError:
+                pass
 
     async def _run_scheduler(self) -> None:
         while not self._stop_event.is_set():

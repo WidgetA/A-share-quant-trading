@@ -10,10 +10,15 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 import src.strategy.v20.runtime_config as runtime_config_module
 from src.common.v20_feishu import V20FeishuRoute
+from src.data.clients.mews_snapshot import (
+    MewsSnapshotSourceError,
+    PublishedMewsSnapshotClient,
+)
 from src.data.clients.tushare_realtime import TushareMinuteBar
 from src.data.database.fundamentals_db import FundamentalsDBConfig
 from src.data.database.v20_repository import (
@@ -70,6 +75,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 TZ = ZoneInfo("Asia/Shanghai")
 
 
+class _UnusedMewsSource:
+    async def fetch_snapshot(self, **_kwargs):
+        raise AssertionError("test did not expect a MEWS fetch")
+
+
 def _config(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
@@ -109,7 +119,226 @@ def _service(monkeypatch: pytest.MonkeyPatch, repository: Any, client: Any = Non
         artifacts=artifacts,
         publisher=SimpleNamespace(),
         routes={},
+        mews_source=_UnusedMewsSource(),
     )
+
+
+async def test_0910_mews_refresh_caches_once_and_opening_paths_use_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repository:
+        def __init__(self) -> None:
+            self.payloads = []
+            self.eligibility_checks = []
+
+        async def record_mews_snapshot(self, payload):
+            self.payloads.append(dict(payload))
+            return "a" * 64
+
+        async def mews_snapshot_is_eligible(
+            self,
+            snapshot_id,
+            *,
+            source_trade_date,
+            cutoff,
+        ):
+            self.eligibility_checks.append((snapshot_id, source_trade_date, cutoff))
+            return True
+
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def fetch_snapshot(self, *, source_trade_date, availability_date):
+            self.calls.append((source_trade_date, availability_date))
+            return {
+                "snapshot_id": "mews-v2-2026-08-31-deadbeef",
+                "source_trade_date": "2026-08-31",
+                "generated_at": "2026-09-01T09:15:00+08:00",
+                "fast_state": "DANGER",
+                "model_version": "mews_v2",
+                "data_version": "d" * 64,
+                "evidence": {"signal_available_date": "2026-09-01"},
+            }
+
+    repository = _Repository()
+    source = _Source()
+    service = _service(monkeypatch, repository)
+    service._mews_source = source
+    calendar = (
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+    )
+    now = datetime(2026, 9, 1, 9, 16, tzinfo=TZ)
+
+    assert await service._refresh_mews_cache_once(now, calendar) is True
+    assert await service._refresh_mews_cache_once(now, calendar) is False
+
+    assert source.calls == [(date(2026, 8, 31), date(2026, 9, 1))]
+    assert len(repository.payloads) == 1
+    assert repository.payloads[0]["fast_state"] == "DANGER"
+    assert repository.eligibility_checks[0][1] == date(2026, 8, 31)
+    assert repository.eligibility_checks[0][2] == datetime(
+        2026,
+        9,
+        1,
+        9,
+        40,
+        tzinfo=TZ,
+    )
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_snapshot_id == "mews-v2-2026-08-31-deadbeef"
+
+
+async def test_mews_missing_at_runtime_is_calculated_then_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repository:
+        def __init__(self) -> None:
+            self.payloads = []
+
+        async def record_mews_snapshot(self, payload):
+            self.payloads.append(dict(payload))
+
+        async def mews_snapshot_is_eligible(self, *_args, **_kwargs):
+            return True
+
+    requests: list[httpx.Request] = []
+
+    def document(source_day: str) -> dict[str, Any]:
+        return {
+            "version": "mews_v2",
+            "latest_valid": {
+                "date": source_day,
+                "signal_available_date": "2026-09-01",
+                "updated_at": 1_788_226_200_000,
+                "risk_state": "NORMAL",
+                "data_status": "OK",
+                "mews": 40.0,
+                "exhaustion_path": 40.0,
+                "persistent_deleveraging_path": 35.0,
+            },
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"success": True, "result": {"status": "OK"}},
+            )
+        get_count = sum(item.method == "GET" for item in requests)
+        return httpx.Response(200, json=document("2026-08-28" if get_count == 1 else "2026-08-31"))
+
+    repository = _Repository()
+    source = PublishedMewsSnapshotClient(
+        "http://mews.internal/api/trading/margin-risk-curve?days=5",
+        api_key="mews-test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    service = _service(monkeypatch, repository)
+    service._mews_source = source
+    calendar = (date(2026, 8, 31), date(2026, 9, 1))
+
+    cached = await service._refresh_mews_cache_once(
+        datetime(2026, 9, 1, 9, 18, tzinfo=TZ),
+        calendar,
+    )
+
+    assert cached is True
+    assert [request.method for request in requests] == ["GET", "POST", "GET"]
+    assert requests[1].url.path == "/api/trading/margin-risk-refresh"
+    assert all(request.headers["X-API-Key"] == "mews-test-key" for request in requests)
+    assert repository.payloads[0]["source_trade_date"] == "2026-08-31"
+
+
+async def test_mews_malformed_source_does_not_trigger_calculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Source:
+        async def fetch_snapshot(self, **_kwargs):
+            raise MewsSnapshotSourceError("published MEWS version is not mews_v2")
+
+        async def refresh_missing_snapshot(self):
+            raise AssertionError("malformed source must not trigger production calculation")
+
+    service = _service(monkeypatch, SimpleNamespace())
+    service._mews_source = _Source()
+
+    with pytest.raises(MewsSnapshotSourceError, match="version"):
+        await service._refresh_mews_cache_once(
+            datetime(2026, 9, 1, 9, 18, tzinfo=TZ),
+            (date(2026, 8, 31), date(2026, 9, 1)),
+        )
+
+
+async def test_mews_refresh_never_calls_upstream_outside_0910_to_0940(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Source:
+        async def fetch_snapshot(self, **_kwargs):
+            raise AssertionError("MEWS must not be pulled outside its cache window")
+
+    service = _service(monkeypatch, SimpleNamespace())
+    service._mews_source = _Source()
+    calendar = (
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+    )
+
+    assert (
+        await service._refresh_mews_cache_once(
+            datetime(2026, 9, 1, 9, 9, 59, tzinfo=TZ),
+            calendar,
+        )
+        is False
+    )
+    assert (
+        await service._refresh_mews_cache_once(
+            datetime(2026, 9, 1, 9, 40, tzinfo=TZ),
+            calendar,
+        )
+        is False
+    )
+
+
+async def test_mews_cache_restart_restores_postgres_snapshot_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repository:
+        async def find_eligible_mews_snapshot(
+            self,
+            *,
+            source_trade_date,
+            cutoff,
+        ):
+            assert source_trade_date == date(2026, 8, 31)
+            assert cutoff == datetime(2026, 9, 1, 9, 40, tzinfo=TZ)
+            return "mews-v2-2026-08-31-restored"
+
+    class _Source:
+        async def fetch_snapshot(self, **_kwargs):
+            raise AssertionError("a restart must reuse the sealed PostgreSQL snapshot")
+
+    service = _service(monkeypatch, _Repository())
+    service._mews_source = _Source()
+    calendar = (
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+    )
+    now = datetime(2026, 9, 1, 9, 25, tzinfo=TZ)
+
+    assert await service._restore_mews_cache_once(now, calendar) is True
+    assert await service._refresh_mews_cache_once(now, calendar) is False
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_source_trade_date == date(2026, 8, 31)
+    assert service._mews_snapshot_id == "mews-v2-2026-08-31-restored"
 
 
 def _set_v20_consumer_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,6 +403,11 @@ def test_embedded_runtime_config_binds_legacy_destination_without_secrets(
 ) -> None:
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
+    monkeypatch.setenv(
+        "V20_MEWS_SOURCE_URL",
+        "http://mews.internal/api/trading/margin-risk-curve?days=5",
+    )
+    monkeypatch.setenv("V20_MEWS_API_KEY", "mews-test-key")
     base = load_v20_runtime_config(PROJECT_ROOT)
     route = V20FeishuRoute(
         route_id=base.route_id,
@@ -206,6 +440,11 @@ def test_legacy_runtime_factory_wires_existing_main_infrastructure(
 
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
+    monkeypatch.setenv(
+        "V20_MEWS_SOURCE_URL",
+        "http://mews.internal/api/trading/margin-risk-curve?days=5",
+    )
+    monkeypatch.setenv("V20_MEWS_API_KEY", "mews-test-key")
     base = load_v20_runtime_config(PROJECT_ROOT)
     repository = SimpleNamespace(
         config=V20DatabaseConfig(
@@ -906,23 +1145,25 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
         routes={config.route_id: route},
         initialize_resources=initialize,
         cleanup_resources=cleanup,
+        mews_source=_UnusedMewsSource(),
     )
 
     await service.start()
     for _ in range(20):
-        if repository.probes_started >= 5:
+        if repository.probes_started >= 6:
             break
         await asyncio.sleep(0)
 
     assert repository.connected is True
     assert resources_started is True
-    assert repository.probes_started == 5
+    assert repository.probes_started == 6
     assert {task.get_name() for task in service._tasks} == {
         "v20-decision-scheduler",
         "v20-live-exit-scheduler",
         "v20-stale-exit-scheduler",
         "v20-outbox-recovery-scheduler",
         "v20-outbox-publisher",
+        "v20-mews-cache-scheduler",
     }
     assert all(not task.done() for task in service._tasks)
     assert service.startup_stage == "RUNNING"
@@ -933,6 +1174,34 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
     assert repository.closed is True
     assert service._tasks == []
     assert service.startup_stage == "STOPPED"
+
+
+async def test_enabled_start_rejects_an_unconnected_mews_contract_before_database_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repository:
+        connect_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+
+    repository = _Repository()
+    service = _service(monkeypatch, repository)
+    service._mews_source = None
+    route = SimpleNamespace(
+        chat_id="shadow-chat",
+        app_id="shadow-app",
+        app_secret="shadow-secret",
+        destination_fingerprint=service.config.route_binding.destination_fingerprint,
+        is_configured=lambda: True,
+    )
+    service._routes = {service.config.route_id: route}
+
+    with pytest.raises(V20ConfigError, match="unconnected manual-ingest contract"):
+        await service.start()
+
+    assert repository.connect_calls == 0
+    assert service.startup_stage == "VALIDATING_RUNTIME"
 
 
 @pytest.mark.parametrize("failure", ["api_key", "destination", "fundamentals_ca"])
@@ -1150,7 +1419,7 @@ def _arm_manual_trigger_runtime(service: V20Service) -> list[asyncio.Task[Any]]:
     service._stop_event.clear()
     blocker = asyncio.Event()
     tasks = [
-        asyncio.create_task(blocker.wait(), name=f"v20-test-lane-{index}") for index in range(5)
+        asyncio.create_task(blocker.wait(), name=f"v20-test-lane-{index}") for index in range(6)
     ]
     service._tasks = tasks
     sampled_at = service._aware_now()

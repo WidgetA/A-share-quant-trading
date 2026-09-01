@@ -2578,6 +2578,46 @@ async def test_mews_selection_sql_uses_strict_cutoff_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_0910_mews_cache_verifies_database_receipt_before_cutoff() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FakeConnection(fetchvals=[True])
+
+    assert await _repository(connection).mews_snapshot_is_eligible(
+        "mews-v2-2026-08-31-deadbeef",
+        source_trade_date=date(2026, 8, 31),
+        cutoff=cutoff,
+    )
+
+    call = connection.calls[0]
+    assert call[0] == "fetchval"
+    assert "generated_at < $3" in call[1]
+    assert "receipt_sealed_at < $3" in call[1]
+    assert call[2] == (
+        "mews-v2-2026-08-31-deadbeef",
+        date(2026, 8, 31),
+        cutoff,
+    )
+
+
+@pytest.mark.asyncio
+async def test_0910_mews_cache_can_be_restored_after_process_restart() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FakeConnection(fetchvals=["mews-v2-2026-08-31-restored"])
+
+    snapshot_id = await _repository(connection).find_eligible_mews_snapshot(
+        source_trade_date=date(2026, 8, 31),
+        cutoff=cutoff,
+    )
+
+    assert snapshot_id == "mews-v2-2026-08-31-restored"
+    call = connection.calls[0]
+    assert "source_trade_date=$1" in call[1]
+    assert "generated_at < $2" in call[1]
+    assert "receipt_sealed_at < $2" in call[1]
+    assert call[2] == (date(2026, 8, 31), cutoff)
+
+
+@pytest.mark.asyncio
 async def test_alert_outbox_is_exactly_idempotent() -> None:
     semantic = {"alert_code": "REFERENCE_UNAVAILABLE", "entity": "leg-1"}
     semantic_hash = sha256_json(semantic)
