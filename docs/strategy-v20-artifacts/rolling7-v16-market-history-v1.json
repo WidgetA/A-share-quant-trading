@@ -1,0 +1,30 @@
+{
+  "schema_version": "v20-rolling7-v16-market-history/v1",
+  "definition": "Equal-weight mean gross price return of the complete V16 recommendation batch from raw 09:41 bar.open on signal day to D2 daily close; independent of orders, fills, positions, cash, and runtime start time.",
+  "return_profile_id": "ZERO_COST_GROSS_PRICE_RETURN_V1",
+  "reference_profile_id": "CALENDAR_0940_OPEN_END_LABEL_0941_V1",
+  "source_evidence": "strategy-research/kangdie/explore/v16_rolling7_true_defense_20260831/entry_label_0941_replay",
+  "batches": [
+    {"batch_id": "v16-market-2026-07-29", "signal_date": "2026-07-29", "t2_date": "2026-07-31", "batch_return": -0.009509036249304426},
+    {"batch_id": "v16-market-2026-07-30", "signal_date": "2026-07-30", "t2_date": "2026-08-03", "batch_return": 0.012794047588700508},
+    {"batch_id": "v16-market-2026-07-31", "signal_date": "2026-07-31", "t2_date": "2026-08-04", "batch_return": 0.061845363658937946},
+    {"batch_id": "v16-market-2026-08-03", "signal_date": "2026-08-03", "t2_date": "2026-08-05", "batch_return": 0.125705875380282},
+    {"batch_id": "v16-market-2026-08-04", "signal_date": "2026-08-04", "t2_date": "2026-08-06", "batch_return": 0.0793321995325335},
+    {"batch_id": "v16-market-2026-08-05", "signal_date": "2026-08-05", "t2_date": "2026-08-07", "batch_return": 0.085127127767222},
+    {"batch_id": "v16-market-2026-08-06", "signal_date": "2026-08-06", "t2_date": "2026-08-10", "batch_return": 0.05918851276670809},
+    {"batch_id": "v16-market-2026-08-07", "signal_date": "2026-08-07", "t2_date": "2026-08-11", "batch_return": 0.03324567103167212},
+    {"batch_id": "v16-market-2026-08-10", "signal_date": "2026-08-10", "t2_date": "2026-08-12", "batch_return": 0.004042614048145721},
+    {"batch_id": "v16-market-2026-08-11", "signal_date": "2026-08-11", "t2_date": "2026-08-13", "batch_return": -0.0012328475141507144},
+    {"batch_id": "v16-market-2026-08-12", "signal_date": "2026-08-12", "t2_date": "2026-08-14", "batch_return": -0.0023765510050957617},
+    {"batch_id": "v16-market-2026-08-13", "signal_date": "2026-08-13", "t2_date": "2026-08-17", "batch_return": 0.01354601387501212},
+    {"batch_id": "v16-market-2026-08-14", "signal_date": "2026-08-14", "t2_date": "2026-08-18", "batch_return": 0.07348776403905374},
+    {"batch_id": "v16-market-2026-08-17", "signal_date": "2026-08-17", "t2_date": "2026-08-19", "batch_return": -0.04925563159753902},
+    {"batch_id": "v16-market-2026-08-18", "signal_date": "2026-08-18", "t2_date": "2026-08-20", "batch_return": -0.09610630484360425},
+    {"batch_id": "v16-market-2026-08-19", "signal_date": "2026-08-19", "t2_date": "2026-08-21", "batch_return": -0.041963620935298415},
+    {"batch_id": "v16-market-2026-08-20", "signal_date": "2026-08-20", "t2_date": "2026-08-24", "batch_return": -0.025905285833275893},
+    {"batch_id": "v16-market-2026-08-24", "signal_date": "2026-08-24", "t2_date": "2026-08-26", "batch_return": 0.024063422807100075},
+    {"batch_id": "v16-market-2026-08-25", "signal_date": "2026-08-25", "t2_date": "2026-08-27", "batch_return": 0.03678681190027866},
+    {"batch_id": "v16-market-2026-08-26", "signal_date": "2026-08-26", "t2_date": "2026-08-28", "batch_return": 0.011883719397409464},
+    {"batch_id": "v16-market-2026-08-27", "signal_date": "2026-08-27", "t2_date": "2026-08-31", "batch_return": -0.0057323392487167}
+  ]
+}

@@ -63,8 +63,6 @@ class V20RouteService(Protocol):
 
     async def trigger_manual_scan(self, request_id: str) -> Any: ...
 
-    async def trigger_morning_selection(self, request_id: str) -> Any: ...
-
     async def enroll_manual_monitor(self, source_event_id: str, request_id: str) -> Any: ...
 
 
@@ -890,17 +888,9 @@ async def _replay_frozen_entry_message(
 
 
 async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
-    """Run the official live lane or replay its exact visible morning output."""
+    """Run the scheduler's official morning lane; no replay/review branch exists."""
 
-    now = service._aware_now()
-    wall = now.timetz().replace(tzinfo=None)
-    clock = service.config.clock
-    if clock.prewarm <= wall < clock.publish_deadline:
-        return await service.trigger_morning_selection(request_id)
-    latest = await _latest_terminal_entry(service, now)
-    if latest is not None and latest.action != "INPUT_INVALID":
-        return await _replay_frozen_entry_message(service, request_id, latest)
-    return await _run_fresh_0939_probe(service, request_id, now)
+    return await service.trigger_manual_scan(request_id)
 
 
 def create_v20_router() -> APIRouter:
@@ -933,7 +923,7 @@ def create_v20_router() -> APIRouter:
         request: Request,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> Any:
-        """Run/replay morning selection with the exact automatic Feishu text."""
+        """Run the official morning selection lane before its hard cutoff."""
 
         async for chunk in request.stream():
             if chunk:

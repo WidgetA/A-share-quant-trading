@@ -685,7 +685,6 @@ def prepare_invalid_entry(
     ]
     health_after = advance_health_state(health_before, observations)
     persisted_gaps = _state_gaps(state.payload)
-    _, d2 = _t_plus_two(trade_date, calendar)
     trade_date_text = trade_date.isoformat()
     slot = official_slot_id(config.official_stream_id, trade_date_text)
     policy_inputs = _policy_input_snapshot(
@@ -707,18 +706,9 @@ def prepare_invalid_entry(
     snapshot_hash = sha256_json(snapshot)
     decision = decision_id(slot, config.config_hash, snapshot_hash, state.state_hash)
     event = event_id("ENTRY_DECISION", decision)
-    gap_id = named_hash(
-        "V20_OFFICIAL_SHADOW_GAP_ID_V1",
-        {"official_stream_id": config.official_stream_id, "trade_date": trade_date_text},
-    )
-    current_failure_gap = ActiveRollingGap(
-        gap_id=gap_id,
-        signal_date=trade_date,
-        maturity_date=d2,
-    )
     gaps = _merge_and_age_gaps(
         persisted=persisted_gaps,
-        additions=(*maturity_gaps, current_failure_gap),
+        additions=maturity_gaps,
         completed_rolling=completed_rolling,
     )
     next_state = {
