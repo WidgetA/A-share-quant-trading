@@ -32,6 +32,7 @@ from src.web.app import create_app
 from src.web.v20_routes import (
     _dispatch_manual_trigger,
     _replay_frozen_entry_message,
+    _wait_for_manual_trigger_ready,
     create_v20_router,
 )
 
@@ -736,6 +737,46 @@ def test_trigger_returns_202_and_passes_idempotency_key_without_api_key() -> Non
         "delivery_status": "PENDING",
         "feishu_delivery_confirmed": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_final_fence_waits_for_transient_lane_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class _Service:
+        async def _require_manual_trigger_ready(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise V20RepositoryError("runtime lane is briefly stale")
+
+    monkeypatch.setattr(
+        "src.web.v20_routes._FRESH_PROBE_HEALTH_RECOVERY_TIMEOUT_SECONDS",
+        1.0,
+    )
+
+    await _wait_for_manual_trigger_ready(_Service())
+
+    assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_final_fence_rejects_persistent_runtime_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Service:
+        async def _require_manual_trigger_ready(self) -> None:
+            raise V20RepositoryError("runtime remains unhealthy")
+
+    monkeypatch.setattr(
+        "src.web.v20_routes._FRESH_PROBE_HEALTH_RECOVERY_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(V20RepositoryError, match="runtime remains unhealthy"):
+        await _wait_for_manual_trigger_ready(_Service())
 
 
 def test_manual_monitor_returns_202_and_passes_only_source_and_idempotency_key() -> None:

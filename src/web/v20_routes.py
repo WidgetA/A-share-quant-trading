@@ -46,6 +46,7 @@ _STATUS_API_KEY_HEADER = APIKeyHeader(name="X-V20-Status-Key", auto_error=False)
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 _FRESH_PROBE_LOOKBACK_SESSIONS = 10
 _FRESH_PROBE_LOCK_TIMEOUT_SECONDS = 180.0
+_FRESH_PROBE_HEALTH_RECOVERY_TIMEOUT_SECONDS = 10.0
 _FRESH_PROBE_ALERT_CODE = "MANUAL_0939_CHAIN_PROBE_RESULT"
 _FRESH_PROBE_PROFILE = "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2"
 _FROZEN_ENTRY_REPLAY_ALERT_CODE = "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
@@ -181,6 +182,21 @@ async def _call_service(operation: Callable[[], Awaitable[Any]]) -> Any:
     except Exception as exc:
         logger.exception("V20 service operation failed")
         raise HTTPException(status_code=503, detail="V20 service operation failed") from exc
+
+
+async def _wait_for_manual_trigger_ready(service: Any) -> None:
+    """Wait briefly for runtime lanes starved by the just-finished probe to tick."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FRESH_PROBE_HEALTH_RECOVERY_TIMEOUT_SECONDS
+    while True:
+        try:
+            await service._require_manual_trigger_ready()
+            return
+        except V20RepositoryError:
+            if loop.time() >= deadline:
+                raise
+            await asyncio.sleep(0.1)
 
 
 def _fresh_probe_event_id(service: Any, request_id: str) -> str:
@@ -620,7 +636,7 @@ async def _run_fresh_0939_probe(
                 official_status=official_status,
             )
 
-        await service._require_manual_trigger_ready()
+        await _wait_for_manual_trigger_ready(service)
         await service._repository.assert_runtime_leader()
         created = await service._repository.enqueue_alert(
             event_id,
@@ -629,7 +645,7 @@ async def _run_fresh_0939_probe(
             sha256_json(semantic),
             **ledger_scope,
         )
-        await service._require_manual_trigger_ready()
+        await _wait_for_manual_trigger_ready(service)
         await service._repository.assert_runtime_leader()
         sealed = await service._repository.seal_event(event_id, seal_v20_payload)
         return _fresh_probe_response(
