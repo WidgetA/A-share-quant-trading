@@ -237,6 +237,9 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "b7c1f8244f34ba6a5a6e518358cc7f40b52d33e487bc7b7ad2577c54b130203c": (
             "V20_SERVICE_STATE_ORCHESTRATION_V2"
         ),
+        "2b7e90e82da0ab65d4db3885648bac3b9ae18edd8c5455c2bf8ec5deb7fe1371": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
