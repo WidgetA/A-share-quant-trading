@@ -526,11 +526,11 @@ async def test_legacy_upgrade_quarantines_ambiguous_and_preserves_clean_rows() -
         }
         assert all(row[-1] == "LEGACY_UNKNOWN" for row in attempts)
         attempt_count_constraints = [
-            row for row in constraints if "attempt_count" in row["expression"]
+            row for row in constraints if re.search(r"\battempt_count\b", row["expression"])
         ]
         assert len(attempt_count_constraints) == 1
         attempt_count_constraint = attempt_count_constraints[0]
-        assert attempt_count_constraint["conname"]
+        assert attempt_count_constraint["conname"] == "outbox_events_attempt_count_check"
         normalized_attempt_expression = re.sub(
             r"::integer|[\s()]", "", attempt_count_constraint["expression"]
         )
