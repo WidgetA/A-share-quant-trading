@@ -227,6 +227,12 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "1c71c2a8ff33f52d0d4f2366a3c7d1316ce24e6a38c9ab75ebbfb7dd982bf0bd": (
             "V20_SERVICE_STATE_ORCHESTRATION_V1"
         ),
+        # Reviewed operational-only change: bound the 11:30 feed-health
+        # frontier to vendor publication timing without changing which legal
+        # minute bar can create an exit intent or any official state input.
+        "c8d41b69c58a5b6b4e6a7cbac909e22214de0aa69308213c7116810468f487bb": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (

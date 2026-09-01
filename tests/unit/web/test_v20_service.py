@@ -4583,7 +4583,10 @@ async def test_lunch_history_originates_outage_after_1130_publication_grace(
     assert context.live_exit_market_data_outage is True
     assert "LIVE_EXIT_MARKET_DATA_UNAVAILABLE" in alerts
     assert service._lane_health["live_exit"].last_error is not None
-    assert "latest=NOT_REQUIRED_DURING_LUNCH" in service._lane_health["live_exit"].last_error
+    assert (
+        "all live exit targets lack persisted legal current-day market evidence"
+        in service._lane_health["live_exit"].last_error
+    )
 
 
 async def test_lunch_uses_1130_as_the_feed_freshness_frontier(
