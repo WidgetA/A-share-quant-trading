@@ -372,7 +372,6 @@ async def test_wrong_same_named_index_definition_fails_closed_without_receipt(
                     f"""
                     CREATE INDEX uq_v20_delivery_attempt_started
                     ON {schema}.delivery_attempts(event_id)
-                    WHERE phase = 'STARTED'
                     """
                 )
             else:
@@ -403,12 +402,14 @@ async def test_wrong_same_named_index_definition_fails_closed_without_receipt(
                 "not-unique": "uq_v20_delivery_attempt_started",
                 "wrong-order": "idx_v20_outbox_ready_v2",
             }[wrong_definition]
-            wrong_index = await connection.fetchval(
+            wrong_index = await connection.fetchrow(
                 """
-                SELECT 1
+                SELECT index_catalog.indisunique
                 FROM pg_class AS index_class
                 JOIN pg_namespace AS index_namespace
                   ON index_namespace.oid = index_class.relnamespace
+                JOIN pg_index AS index_catalog
+                  ON index_catalog.indexrelid = index_class.oid
                 WHERE index_namespace.nspname = $1
                   AND index_class.relname = $2
                 """,
@@ -418,6 +419,8 @@ async def test_wrong_same_named_index_definition_fails_closed_without_receipt(
         assert receipt_table is None
         assert quarantine_table is None
         assert wrong_index is not None
+        if wrong_definition == "not-unique":
+            assert wrong_index["indisunique"] is False
     finally:
         await _drop_schema(pool, schema)
         await pool.close()
@@ -462,17 +465,16 @@ async def test_legacy_upgrade_quarantines_ambiguous_and_preserves_clean_rows() -
         for _ in range(3):
             await instance.migrate()
         async with pool.acquire() as connection:
-            constraint_definitions = [
-                row["definition"]
-                for row in await connection.fetch(
-                    f"""
-                    SELECT pg_get_constraintdef(oid) AS definition
-                    FROM pg_constraint
-                    WHERE conrelid = '{schema}.outbox_events'::regclass
-                      AND contype = 'c'
-                    """
-                )
-            ]
+            constraints = await connection.fetch(
+                f"""
+                SELECT conname,
+                       pg_get_constraintdef(oid) AS definition,
+                       pg_get_expr(conbin, conrelid) AS expression
+                FROM pg_constraint
+                WHERE conrelid = '{schema}.outbox_events'::regclass
+                  AND contype = 'c'
+                """
+            )
             statuses = {
                 row["event_id"]: row["delivery_status"]
                 for row in await connection.fetch(
@@ -523,10 +525,19 @@ async def test_legacy_upgrade_quarantines_ambiguous_and_preserves_clean_rows() -
             ),
         }
         assert all(row[-1] == "LEGACY_UNKNOWN" for row in attempts)
-        assert "CHECK (attempt_count >= 0)" in constraint_definitions
-        assert any("payload_json" in definition for definition in constraint_definitions)
+        attempt_count_constraints = [
+            row for row in constraints if "attempt_count" in row["expression"]
+        ]
+        assert len(attempt_count_constraints) == 1
+        attempt_count_constraint = attempt_count_constraints[0]
+        assert attempt_count_constraint["conname"]
+        normalized_attempt_expression = re.sub(
+            r"::integer|[\s()]", "", attempt_count_constraint["expression"]
+        )
+        assert normalized_attempt_expression == "attempt_count>=0"
+        assert any("payload_json" in row["definition"] for row in constraints)
         delivery_constraints = [
-            definition for definition in constraint_definitions if "delivery_status" in definition
+            row["definition"] for row in constraints if "delivery_status" in row["definition"]
         ]
         assert len(delivery_constraints) == 1
         assert "DELIVERY_UNKNOWN" in delivery_constraints[0]
