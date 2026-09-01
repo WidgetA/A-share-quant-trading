@@ -42,6 +42,7 @@
 | 0.11.3 | 2026-08-31 | - | STR-006: Add a durable, non-actionable exact-09:39 retrospective replay when a late deployment has already failed the official entry slot |
 | 0.11.4 | 2026-08-31 | - | STR-006: Separate deploy-byte identity from V20 state semantics and add an authenticated, append-only legacy-to-core compatibility bridge so notification/replay-only releases can reattach terminal state without rewriting the ledger |
 | 0.11.5 | 2026-09-01 | - | STR-006: Add explicit, idempotent pre-D1 enrollment of a sealed retrospective ticket list into the existing D1/D2 exit-notification ledger without changing official state or creating orders |
+| 0.11.6 | 2026-09-01 | - | STR-006: Make live-exit feed health session-aware at the 11:30 lunch boundary: allow one minute for the closing bar to publish, then require current-day 11:30 history throughout lunch without consuming stale prices |
 
 ---
 
@@ -882,6 +883,11 @@ or submits orders.
 - Track each notified model batch in a PostgreSQL ledger and publish deterministic D1/D2
   protective-stop, final-exit, and reminder events. These are model-lot notifications, not real-account
   position management.
+- At the 11:30 morning-close boundary, continue persisting and evaluating a legal 11:30 bar as soon
+  as it arrives, but accept 11:29 as the minimum feed-health evidence until 11:31 to allow bounded
+  vendor publication latency. From 11:31 until the first afternoon bar is due, current-day history
+  is the authoritative source and must contain legal 11:30 evidence; never substitute an older bar
+  for an exit decision.
 - Use an idempotent transactional outbox, sealed event payloads, route-scoped delivery ordering,
   PostgreSQL leader election, runtime-lane health, and fail-closed startup validation.
 - Keep dedicated shadow and formal Feishu credentials, streams, lineages, and checkpoints isolated.

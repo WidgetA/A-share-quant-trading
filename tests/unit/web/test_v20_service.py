@@ -4718,6 +4718,86 @@ async def test_stale_history_bar_does_not_disguise_a_live_feed_outage(
     assert "LIVE_EXIT_MARKET_DATA_UNAVAILABLE" in alerts
 
 
+async def test_morning_close_publication_grace_keeps_1129_health_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _closed_history_leg()
+    second = _second_live_leg(first)
+    client = _LiveExitDataClient(
+        latest=RuntimeError("11:30 bar is still publishing"),
+        history={
+            leg.code: (_bar(leg.code, "11:29", trade_date=date(2026, 9, 1)),)
+            for leg in (first, second)
+        },
+    )
+
+    service, context, alerts, _evaluations, succeeded = await _run_live_data_probe(
+        monkeypatch,
+        [first, second],
+        client,
+        now=datetime(2026, 9, 1, 11, 30, 15, tzinfo=TZ),
+    )
+
+    assert succeeded is True
+    assert client.latest_calls == 1
+    assert client.history_calls == 1
+    assert context.live_exit_market_data_outage is False
+    assert "LIVE_EXIT_MARKET_DATA_UNAVAILABLE" not in alerts
+    assert service._lane_health["live_exit"].last_error is None
+
+
+async def test_morning_close_publication_grace_accepts_arrived_1130_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _closed_history_leg()
+    second = _second_live_leg(first)
+    latest = {
+        leg.code: _bar(leg.code, "11:30", trade_date=date(2026, 9, 1)) for leg in (first, second)
+    }
+
+    service, context, alerts, evaluations, succeeded = await _run_live_data_probe(
+        monkeypatch,
+        [first, second],
+        _LiveExitDataClient(latest=latest, history={}),
+        now=datetime(2026, 9, 1, 11, 30, 15, tzinfo=TZ),
+    )
+
+    assert succeeded is True
+    assert context.live_exit_market_data_outage is False
+    assert "LIVE_EXIT_MARKET_DATA_UNAVAILABLE" not in alerts
+    assert any(set(codes) == {first.code, second.code} for codes in evaluations)
+    assert service._lane_health["live_exit"].last_error is None
+
+
+async def test_lunch_history_originates_outage_after_1130_publication_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _closed_history_leg()
+    second = _second_live_leg(first)
+    client = _LiveExitDataClient(
+        latest=RuntimeError("latest must not run during lunch"),
+        history={
+            leg.code: (_bar(leg.code, "11:29", trade_date=date(2026, 9, 1)),)
+            for leg in (first, second)
+        },
+    )
+
+    service, context, alerts, _evaluations, succeeded = await _run_live_data_probe(
+        monkeypatch,
+        [first, second],
+        client,
+        now=datetime(2026, 9, 1, 11, 31, tzinfo=TZ),
+    )
+
+    assert succeeded is False
+    assert client.latest_calls == 0
+    assert client.history_calls == 1
+    assert context.live_exit_market_data_outage is True
+    assert "LIVE_EXIT_MARKET_DATA_UNAVAILABLE" in alerts
+    assert service._lane_health["live_exit"].last_error is not None
+    assert "latest=NOT_REQUIRED_DURING_LUNCH" in service._lane_health["live_exit"].last_error
+
+
 async def test_lunch_uses_1130_as_the_feed_freshness_frontier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

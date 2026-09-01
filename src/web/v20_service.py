@@ -124,6 +124,7 @@ LIVE_EXIT_MAX_TICK_SECONDS = 12.0
 LATEST_MINUTE_POLL_TIMEOUT_SECONDS = 8.0
 LIVE_EXIT_LATEST_POLL_TIMEOUT_SECONDS = 4.0
 LIVE_EXIT_HISTORY_RECOVERY_TIMEOUT_SECONDS = 4.0
+LIVE_EXIT_MORNING_CLOSE_PUBLICATION_GRACE_SECONDS = 60.0
 STALE_EXIT_TICK_SECONDS = 30.0
 STALE_EXIT_TICK_TIMEOUT_SECONDS = 3.0
 OUTBOX_RECOVERY_TICK_SECONDS = 2.0
@@ -381,6 +382,35 @@ def _expected_exit_labels(trade_date: date, as_of: datetime) -> tuple[str, ...]:
         for label in FULL_EXIT_LABELS
         if _local(trade_date, time.fromisoformat(label)) < local_as_of
     )
+
+
+def _live_exit_health_labels(
+    trade_date: date,
+    as_of: datetime,
+    expected_labels: Iterable[str],
+) -> tuple[str, ...]:
+    """Return the labels that can prove feed health at this wall-clock instant."""
+
+    labels = frozenset(expected_labels)
+    if not labels:
+        return ()
+    freshest = max(labels)
+    morning_close = _local(trade_date, time(11, 30))
+    publication_deadline = morning_close + timedelta(
+        seconds=LIVE_EXIT_MORNING_CLOSE_PUBLICATION_GRACE_SECONDS
+    )
+    local_as_of = as_of.astimezone(SHANGHAI)
+    if (
+        freshest == "11:30"
+        and "11:29" in labels
+        and morning_close < local_as_of
+        and local_as_of < publication_deadline
+    ):
+        # Keep staging/evaluating 11:30 immediately when it is available, but
+        # do not call a feed outage solely because the vendor is still
+        # publishing that terminal bar during the bounded grace window.
+        return ("11:29", "11:30")
+    return (freshest,)
 
 
 def _exit_window_complete(
@@ -5043,7 +5073,11 @@ class V20Service:
         # Feed health is about the bar that should be current at this tick, not
         # merely any legal bar seen earlier today.  During lunch the expected
         # frontier naturally remains 11:30; before the open it is empty.
-        freshest_expected_labels = (max(expected_labels),) if expected_labels else ()
+        freshest_expected_labels = _live_exit_health_labels(
+            context.trade_date,
+            now,
+            expected_labels,
+        )
         latest_attempted = False
         latest_failed = False
         latest_error_detail: str | None = None
@@ -5176,11 +5210,10 @@ class V20Service:
 
         # A stale bar already present for one symbol must not disguise a total
         # current-feed outage, while one suspended/empty symbol must not turn a
-        # healthy sibling response into a global failure.  Only the freshest
-        # expected label from this process is admitted as pre-existing evidence.
+        # healthy sibling response into a global failure. Only the bounded,
+        # session-aware health labels are admitted as pre-existing evidence.
         context_evidence_codes: set[str] = set()
-        if expected_labels:
-            freshest_label = max(expected_labels)
+        if freshest_expected_labels:
             context_evidence_codes.update(
                 _legal_exit_evidence_codes(
                     (
@@ -5188,50 +5221,69 @@ class V20Service:
                         for (bar_date, code, label), bar in context.minute_rows.items()
                         if bar_date == context.trade_date
                         and code in tick_target_codes
-                        and label == freshest_label
+                        and label in freshest_expected_labels
                     ),
                     trade_date=context.trade_date,
-                    expected_labels=(freshest_label,),
+                    expected_labels=freshest_expected_labels,
                 )
             )
         evidence_codes = (
             latest_evidence_codes | history_evidence_codes | context_evidence_codes
         ) & set(tick_target_codes)
         checked_both_sources = latest_attempted and history_attempted
+        # Once the bounded 11:30 publication grace has elapsed, the live
+        # latest-minute endpoint is intentionally idle for lunch. Current-day
+        # history is then the complete required source set until the first
+        # afternoon bar is due, so it must be able to originate (not merely
+        # preserve) a multi-symbol outage.
+        lunch_history_authoritative = bool(
+            history_attempted and time(11, 31) <= wall <= time(13, 1)
+        )
+        required_sources_checked = checked_both_sources or lunch_history_authoritative
+        required_sources_failed = bool(
+            len(tick_target_codes) > 1
+            or (checked_both_sources and latest_failed and history_failed)
+            or (lunch_history_authoritative and history_failed)
+        )
         global_outage = bool(
             tick_target_codes
             and expected_labels
             and not evidence_codes
             and (
                 context.live_exit_market_data_outage
-                or (
-                    checked_both_sources
-                    and (len(tick_target_codes) > 1 or (latest_failed and history_failed))
-                )
+                or (required_sources_checked and required_sources_failed)
             )
         )
         if global_outage:
             context.live_exit_market_data_outage = True
             target_text = ",".join(sorted(tick_target_codes))
+            checked_source_text = (
+                "current-day history"
+                if lunch_history_authoritative
+                else "latest-minute and current-day history"
+            )
             await self._safe_alert(
                 code="LIVE_EXIT_MARKET_DATA_UNAVAILABLE",
                 entity_id=f"{context.trade_date.isoformat()}:{target_text}",
                 message=(
-                    "latest-minute and current-day history produced no persisted legal "
+                    f"{checked_source_text} produced no persisted legal "
                     f"exit evidence for any live target: {target_text}"
                 ),
                 now=now,
             )
+            latest_detail = latest_error_detail or (
+                "NOT_REQUIRED_DURING_LUNCH" if lunch_history_authoritative else "NO_LEGAL_EVIDENCE"
+            )
             raise V20RepositoryError(
                 "all live exit targets lack persisted legal current-day market evidence; "
-                f"latest={latest_error_detail or 'NO_LEGAL_EVIDENCE'}; "
+                f"latest={latest_detail}; "
                 f"history={history_error_detail or 'NO_LEGAL_EVIDENCE'}"
             )
         if evidence_codes:
             context.live_exit_market_data_outage = False
 
         unavailable_codes = tick_target_codes - evidence_codes
-        if checked_both_sources and unavailable_codes and not global_outage:
+        if required_sources_checked and unavailable_codes and not global_outage:
             # This is deliberately diagnostic only: a single suspended or
             # empty-response name cannot suppress protection for valid siblings.
             missing_text = ",".join(sorted(unavailable_codes))
