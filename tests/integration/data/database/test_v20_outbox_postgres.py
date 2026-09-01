@@ -525,22 +525,18 @@ async def test_legacy_upgrade_quarantines_ambiguous_and_preserves_clean_rows() -
             ),
         }
         assert all(row[-1] == "LEGACY_UNKNOWN" for row in attempts)
-        attempt_count_constraints = [
-            row for row in constraints if re.search(r"\battempt_count\b", row["expression"])
-        ]
-        assert len(attempt_count_constraints) == 1
-        attempt_count_constraint = attempt_count_constraints[0]
-        assert attempt_count_constraint["conname"] == "outbox_events_attempt_count_check"
+        constraints_by_name = {row["conname"]: row for row in constraints}
+        assert len(constraints_by_name) == len(constraints)
+        attempt_count_constraint = constraints_by_name["outbox_events_attempt_count_check"]
         normalized_attempt_expression = re.sub(
             r"::integer|[\s()]", "", attempt_count_constraint["expression"]
         )
         assert normalized_attempt_expression == "attempt_count>=0"
-        assert any("payload_json" in row["definition"] for row in constraints)
-        delivery_constraints = [
-            row["definition"] for row in constraints if "delivery_status" in row["definition"]
+        assert "payload_json" in constraints_by_name["outbox_events_check"]["definition"]
+        delivery_status_definition = constraints_by_name["ck_v20_outbox_delivery_status_v2"][
+            "definition"
         ]
-        assert len(delivery_constraints) == 1
-        assert "DELIVERY_UNKNOWN" in delivery_constraints[0]
+        assert "DELIVERY_UNKNOWN" in delivery_status_definition
     finally:
         await _drop_schema(pool, schema)
         await pool.close()
