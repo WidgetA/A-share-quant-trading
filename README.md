@@ -91,10 +91,13 @@ bundles, separate shadow/formal Feishu destinations, and two pairwise-distinct
 HTTP secrets. The embedded profile intentionally uses the main runtime's
 existing credentials and relay contract; it does not require separate V20 API
 keys merely to run the scheduler or use the manual trigger. The isolated MEWS
-cache lane uses the existing Tushare token after 09:10 to fetch the previous
+cache lane uses the existing Tushare token at 09:10 to fetch the previous
 session's raw `margin`, `margin_detail`, and `daily_basic` material, extends the
 frozen MEWS v2 formula locally, and checkpoints its compact incremental state in
-PostgreSQL. It does not call a computed-MEWS source service. MEWS/ack writes and
+PostgreSQL. If that daily value is still missing, the next selection trigger
+calculates it once regardless of wall-clock time. Receipt time remains separate
+point-in-time evidence and a late calculation is never backdated. The service
+does not call a computed-MEWS source service. MEWS/ack writes and
 the detailed V20 status endpoint remain protected by `V20_INGEST_API_KEY` and
 `V20_STATUS_API_KEY` when those endpoints are used. See
 [`config/v20.env.example`](config/v20.env.example) for the complete variable

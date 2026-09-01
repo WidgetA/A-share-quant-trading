@@ -58,6 +58,7 @@ class StubV20Service:
         self.trigger_request_id: str | None = None
         self.manual_monitor_source_event_id: str | None = None
         self.manual_monitor_request_id: str | None = None
+        self.mews_trigger_times: list[datetime] = []
         self.error: Exception | None = None
 
     def _aware_now(self) -> datetime:
@@ -81,6 +82,10 @@ class StubV20Service:
     async def record_reminder_stop_ack(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.ack_payload = payload
         return await self._result({"ack_id": payload["ack_id"], "accepted": True})
+
+    async def ensure_mews_for_selection_trigger(self, now: datetime) -> bool:
+        self.mews_trigger_times.append(now)
+        return False
 
     async def trigger_manual_scan(self, request_id: str) -> dict[str, Any]:
         self.trigger_request_id = request_id
@@ -714,6 +719,7 @@ def test_trigger_returns_202_and_passes_idempotency_key_without_api_key() -> Non
 
     assert response.status_code == 202
     assert service.trigger_request_id == "deploy-check-20260831"
+    assert service.mews_trigger_times == [service.now]
     assert response.json() == {
         "accepted": True,
         "created": True,

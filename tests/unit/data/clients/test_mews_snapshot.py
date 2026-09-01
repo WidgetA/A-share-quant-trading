@@ -258,6 +258,23 @@ async def test_calculated_state_is_reused_without_any_raw_refetch() -> None:
     assert snapshot["source_trade_date"] == "2026-08-31"
 
 
+async def test_calculation_has_no_wall_clock_gate() -> None:
+    state = _state()
+    state["state_date"] = "2026-08-31"
+    state["market_history"][-1]["trade_date"] = "2026-08-31"
+    state["calculated_at"] = "2026-09-01T08:00:00+08:00"
+    repository = _Repository(state)
+    raw = _RawClient()
+
+    snapshot = await _calculator(repository, raw).fetch_snapshot(
+        source_trade_date=date(2026, 8, 31),
+        availability_date=date(2026, 9, 1),
+    )
+
+    assert raw.calls == []
+    assert snapshot["generated_at"] == "2026-09-01T08:00:00+08:00"
+
+
 async def test_incomplete_raw_exchange_data_never_becomes_a_safe_snapshot() -> None:
     repository = _Repository(_state())
     raw = _RawClient(missing_exchange=True)

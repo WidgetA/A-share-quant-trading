@@ -261,6 +261,11 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "a537782d460f11280f21c87fb9ae6fb4f228a13b549deb4ec37053c8d6a7581a": (
             "V20_SERVICE_STATE_ORCHESTRATION_V1"
         ),
+        # A selection trigger repairs a missing locally calculated MEWS value
+        # without promoting a late receipt into point-in-time strategy input.
+        "8980fac4479611337dbac117b8265829ba20e1ed6c882b2f3f1718d3a9624051": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (

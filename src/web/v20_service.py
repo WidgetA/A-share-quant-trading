@@ -2968,7 +2968,7 @@ class V20Service:
         now: datetime,
         calendar: Sequence[date],
     ) -> bool:
-        """Calculate/cache today's MEWS once; keep its I/O off entry/exit paths."""
+        """Run the scheduled 09:10 MEWS attempt inside its retry window."""
 
         current = self._aware_now(now)
         wall = current.timetz().replace(tzinfo=None)
@@ -2977,6 +2977,26 @@ class V20Service:
         if current.date() not in calendar:
             return False
         if wall < MEWS_PUBLISH_TIME or wall >= MEWS_CACHE_CUTOFF:
+            return False
+        return await self._calculate_mews_once(
+            current,
+            calendar,
+            require_cutoff_eligible=True,
+        )
+
+    async def _calculate_mews_once(
+        self,
+        now: datetime,
+        calendar: Sequence[date],
+        *,
+        require_cutoff_eligible: bool,
+    ) -> bool:
+        """Calculate a missing daily value; time affects eligibility, never calculation."""
+
+        current = self._aware_now(now)
+        if self._mews_cached_for == current.date():
+            return False
+        if current.date() not in calendar:
             return False
         predecessors = [day for day in calendar if day < current.date()]
         if not predecessors:
@@ -2998,7 +3018,7 @@ class V20Service:
             if generated_at.tzinfo is None or generated_at.utcoffset() is None:
                 raise MewsSnapshotSourceError("calculated MEWS generated_at is timezone-naive")
             cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
-            if generated_at.astimezone(SHANGHAI) >= cutoff:
+            if require_cutoff_eligible and generated_at.astimezone(SHANGHAI) >= cutoff:
                 raise MewsSnapshotSourceError("calculated MEWS missed the 09:40 cutoff")
             await self._repository.record_mews_snapshot(payload)
             eligible = await self._repository.mews_snapshot_is_eligible(
@@ -3006,7 +3026,7 @@ class V20Service:
                 source_trade_date=source_trade_date,
                 cutoff=cutoff,
             )
-            if not eligible:
+            if require_cutoff_eligible and not eligible:
                 raise MewsSnapshotSourceError(
                     "MEWS PostgreSQL receipt was not sealed before the 09:40 cutoff"
                 )
@@ -3015,11 +3035,46 @@ class V20Service:
             self._mews_snapshot_id = str(payload["snapshot_id"])
             self._mews_last_failure = None
             logger.info(
-                "V20 cached locally calculated MEWS %s for %s",
+                "V20 cached locally calculated MEWS %s for %s (cutoff_eligible=%s)",
                 self._mews_snapshot_id,
                 current.date(),
+                eligible,
             )
             return True
+
+    async def ensure_mews_for_selection_trigger(
+        self,
+        now: datetime | None = None,
+    ) -> bool:
+        """Fill a missing daily MEWS value before handling a selection trigger."""
+
+        self._require_running()
+        await self._repository.assert_runtime_leader()
+        current = self._aware_now(now)
+        try:
+            calendar = await self._load_trade_calendar(current.date())
+            if current.date() not in calendar:
+                self._record_lane_success("mews_cache", current)
+                return False
+            if self._mews_cached_for != current.date():
+                await self._restore_mews_cache_once(current, calendar)
+            calculated = await self._calculate_mews_once(
+                current,
+                calendar,
+                require_cutoff_eligible=False,
+            )
+            self._record_lane_success("mews_cache", self._aware_now())
+            return calculated
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._mews_last_failure = f"{type(exc).__name__}: {exc}"
+            self._record_lane_error(
+                "mews_cache",
+                f"MEWS_CACHE_FAILED: {self._mews_last_failure}",
+                self._aware_now(),
+            )
+            raise
 
     async def _restore_mews_cache_once(
         self,

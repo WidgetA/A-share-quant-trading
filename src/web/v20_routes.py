@@ -65,6 +65,8 @@ class V20RouteService(Protocol):
 
     async def trigger_morning_selection(self, request_id: str) -> Any: ...
 
+    async def ensure_mews_for_selection_trigger(self, now: datetime) -> bool: ...
+
     async def enroll_manual_monitor(self, source_event_id: str, request_id: str) -> Any: ...
 
 
@@ -892,7 +894,12 @@ async def _replay_frozen_entry_message(
 async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
     """Run the official live lane or replay its exact visible morning output."""
 
+    if _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
+        raise ValueError(
+            "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
+        )
     now = service._aware_now()
+    await service.ensure_mews_for_selection_trigger(now)
     wall = now.timetz().replace(tzinfo=None)
     clock = service.config.clock
     if clock.prewarm <= wall < clock.publish_deadline:

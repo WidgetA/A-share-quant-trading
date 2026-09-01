@@ -282,6 +282,70 @@ async def test_mews_refresh_never_calls_upstream_outside_0910_to_0940(
     )
 
 
+async def test_selection_trigger_calculates_missing_mews_after_cutoff_and_clears_lane_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repository:
+        def __init__(self) -> None:
+            self.payloads = []
+            self.leader_calls = 0
+
+        async def assert_runtime_leader(self):
+            self.leader_calls += 1
+
+        async def find_eligible_mews_snapshot(self, **_kwargs):
+            return None
+
+        async def record_mews_snapshot(self, payload):
+            self.payloads.append(dict(payload))
+
+        async def mews_snapshot_is_eligible(self, *_args, **_kwargs):
+            return False
+
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def fetch_snapshot(self, *, source_trade_date, availability_date):
+            self.calls.append((source_trade_date, availability_date))
+            return {
+                "snapshot_id": "mews-v2-2026-08-31-trigger",
+                "source_trade_date": "2026-08-31",
+                "generated_at": "2026-09-01T13:30:00+08:00",
+                "fast_state": "NORMAL",
+                "model_version": "mews_v2",
+                "data_version": "d" * 64,
+                "evidence": {"profile": "LOCAL_TUSHARE_MEWS_V2_0910_V1"},
+            }
+
+    now = datetime(2026, 9, 1, 13, 30, tzinfo=TZ)
+    repository = _Repository()
+    source = _Source()
+    service = _service(monkeypatch, repository)
+    service._repository_started = True
+    service._clock = lambda: now
+    service._mews_source = source
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(
+            0,
+            result=(date(2026, 8, 31), date(2026, 9, 1)),
+        ),
+    )
+    service._record_lane_error("mews_cache", "MEWS_CACHE_FAILED: missing", now)
+
+    assert await service.ensure_mews_for_selection_trigger(now) is True
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+
+    assert repository.leader_calls == 2
+    assert source.calls == [(date(2026, 8, 31), date(2026, 9, 1))]
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_snapshot_id == "mews-v2-2026-08-31-trigger"
+    assert service._lane_health["mews_cache"].last_error is None
+
+
 async def test_mews_cache_restart_restores_postgres_snapshot_without_refetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

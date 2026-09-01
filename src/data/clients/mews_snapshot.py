@@ -776,11 +776,8 @@ class LocalMewsSnapshotCalculator:
             )
         except ValueError:
             raise MewsSnapshotSourceError("MEWS calculated_at is invalid") from None
-        if (
-            generated_at.date() != availability_date
-            or generated_at.timetz().replace(tzinfo=None) < MEWS_PUBLISH_TIME
-        ):
-            raise MewsSnapshotSourceError("MEWS calculation ran outside its publication boundary")
+        if generated_at.date() != availability_date:
+            raise MewsSnapshotSourceError("MEWS calculation availability date is inconsistent")
         evidence = {
             "profile": "LOCAL_TUSHARE_MEWS_V2_0910_V1",
             "source_trade_date": source_trade_date.isoformat(),
