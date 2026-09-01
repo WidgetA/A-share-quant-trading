@@ -496,11 +496,14 @@ def _sha256_file(path: Path) -> str:
 def _dependency_hashes(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for relative in _STRATEGY_DEPENDENCY_FILES:
-        path = (
-            resolve_concept_data_path(root, Path(relative).name)
-            if relative in {"data/sectors.json", "data/board_constituents.json"}
-            else root / relative
-        )
+        if relative in {"data/sectors.json", "data/board_constituents.json"}:
+            path = resolve_concept_data_path(root, Path(relative).name)
+        elif relative == "data/v20_mews_bootstrap.json.gz":
+            path = root / "bundled_data" / Path(relative).name
+            if not path.is_file():
+                path = root / relative
+        else:
+            path = root / relative
         if not path.is_file():
             raise V20ConfigError(f"missing frozen strategy dependency: {relative}")
         result[relative] = _sha256_file(path)

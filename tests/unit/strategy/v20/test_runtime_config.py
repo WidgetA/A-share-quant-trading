@@ -236,7 +236,11 @@ def test_container_bundled_data_paths_keep_same_logical_hash_keys(tmp_path, monk
     root, raw = _isolated_project(tmp_path)
     bundled = root / "bundled_data"
     bundled.mkdir()
-    for filename in ("sectors.json", "board_constituents.json"):
+    for filename in (
+        "sectors.json",
+        "board_constituents.json",
+        "v20_mews_bootstrap.json.gz",
+    ):
         shutil.move(str(root / "data" / filename), str(bundled / filename))
     _write_runtime(root, raw)
 
@@ -244,6 +248,7 @@ def test_container_bundled_data_paths_keep_same_logical_hash_keys(tmp_path, monk
 
     assert "data/sectors.json" in config.strategy_dependency_hashes
     assert "data/board_constituents.json" in config.strategy_dependency_hashes
+    assert "data/v20_mews_bootstrap.json.gz" in config.strategy_dependency_hashes
 
 
 def test_production_requires_explicit_activation_guard(monkeypatch: pytest.MonkeyPatch) -> None:
