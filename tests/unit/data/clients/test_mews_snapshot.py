@@ -275,6 +275,32 @@ async def test_calculation_has_no_wall_clock_gate() -> None:
     assert snapshot["generated_at"] == "2026-09-01T08:00:00+08:00"
 
 
+async def test_same_source_facts_yield_identical_value_level_and_hash_at_any_wall_clock() -> None:
+    def build(wall: datetime) -> LocalMewsSnapshotCalculator:
+        return LocalMewsSnapshotCalculator(
+            "raw-tushare-token",
+            _Repository(_state()),
+            bootstrap_path=PROJECT_ROOT / "data" / "v20_mews_bootstrap.json.gz",
+            client_factory=lambda: _RawClient(),
+            clock=lambda: wall,
+        )
+
+    early = await build(datetime(2026, 9, 1, 9, 15, tzinfo=TZ)).fetch_snapshot(
+        source_trade_date=date(2026, 8, 31),
+        availability_date=date(2026, 9, 1),
+    )
+    late = await build(datetime(2026, 9, 1, 14, 4, tzinfo=TZ)).fetch_snapshot(
+        source_trade_date=date(2026, 8, 31),
+        availability_date=date(2026, 9, 1),
+    )
+
+    assert early["snapshot_id"] == late["snapshot_id"]
+    assert early["data_version"] == late["data_version"]
+    assert early["fast_state"] == late["fast_state"]
+    assert early["evidence"] == late["evidence"]
+    assert early["generated_at"] != late["generated_at"]
+
+
 async def test_incomplete_raw_exchange_data_never_becomes_a_safe_snapshot() -> None:
     repository = _Repository(_state())
     raw = _RawClient(missing_exchange=True)

@@ -129,7 +129,12 @@ def next_continuous_minute(bar_end_ts: datetime) -> datetime | None:
 def select_mews_snapshot(
     *, leg: ModelLeg, snapshots: Iterable[MewsSnapshot], as_of: datetime
 ) -> MewsSelection:
-    """Select the latest fully qualified MEWS snapshot at the frozen cutoff."""
+    """Select the latest fully qualified MEWS snapshot at the frozen cutoff.
+
+    A snapshot qualifies either on time (generated and first durably received
+    before the D1 09:40 cutoff) or as the leg's late-repaired daily value
+    (availability_date == D1 from a strictly earlier source trade date).
+    """
 
     _require_aware(as_of, "as_of")
     cutoff = _local_datetime(leg.d1, time(9, 40))
@@ -163,13 +168,20 @@ def select_mews_snapshot(
             continue
         # "Before D1 09:40" is deliberately strict.  A record timestamped
         # exactly at the cutoff was not available to the frozen 09:40 choice.
-        if snapshot.generated_at.astimezone(SHANGHAI) >= cutoff:
+        generated_local = snapshot.generated_at.astimezone(SHANGHAI)
+        received_local = snapshot.received_at.astimezone(SHANGHAI)
+        on_time = generated_local < cutoff and received_local < cutoff
+        # The daily MEWS value is a pure function of its source trade date, so
+        # a late local repair generated later on D1 itself (availability_date
+        # == D1) remains point-in-time evidence for D2 judgments.  Anything
+        # without matching availability evidence keeps the strict cutoff so a
+        # stale or empty old source can never be recycled into a daily value.
+        late_same_day = snapshot.availability_date == leg.d1
+        if not (on_time or late_same_day):
             continue
-        if snapshot.received_at.astimezone(SHANGHAI) >= cutoff:
+        if generated_local > visible_as_of:
             continue
-        if snapshot.generated_at.astimezone(SHANGHAI) > visible_as_of:
-            continue
-        if snapshot.received_at.astimezone(SHANGHAI) > visible_as_of:
+        if received_local > visible_as_of:
             continue
         valid.append(snapshot)
     if not valid:

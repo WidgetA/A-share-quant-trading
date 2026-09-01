@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -108,6 +110,24 @@ class TushareMinuteBar:
             and self.high_price >= max(self.open_price, self.close_price)
             and self.low_price <= self.high_price
         )
+
+
+@dataclass(frozen=True)
+class TushareEarlyMarketData:
+    """Frozen snapshot produced from a single rt_min_daily response.
+
+    Holds the aggregated ``TushareQuote`` and the parsed 09:31..09:39 minute
+    bars, plus a stable hash of the *canonical normalized evidence*. The hash
+    covers every selection-relevant early bar (code, Asia/Shanghai bar_end,
+    OHLCV) up to and including 09:39; raw response field order and transport
+    metadata are ignored. For legacy responses without a ``time`` column, the
+    hash falls back to the normalized full-day OHLCV aggregates and the stock
+    code.
+    """
+
+    quote: TushareQuote
+    early_bars: tuple[TushareMinuteBar, ...]
+    source_hash: str
 
 
 @dataclass(frozen=True)
@@ -428,8 +448,15 @@ class TushareRealtimeClient:
     def _parse_minute_history(
         code: str,
         data: dict[str, Any],
+        expected_trade_date: date | None = None,
     ) -> tuple[TushareMinuteBar, ...]:
-        """Parse a single-stock daily response without collapsing its rows."""
+        """Parse a single-stock daily response into sorted, validated, canonical bars.
+
+        When ``expected_trade_date`` is supplied, rows that fall on a different
+        exchange date (including bare HH:MM:SS timestamps) are silently ignored.
+        Identical duplicate rows are folded; conflicting rows for the same timestamp
+        are dropped so the result is independent of raw item order.
+        """
         fields = data.get("data", {}).get("fields", [])
         items = data.get("data", {}).get("items", [])
         if not fields or not items:
@@ -447,6 +474,11 @@ class TushareRealtimeClient:
         for item in items:
             try:
                 bar_end = TushareRealtimeClient._parse_bar_end(str(item[index["time"]]).strip())
+                if (
+                    expected_trade_date is not None
+                    and bar_end.astimezone(BEIJING_TZ).date() != expected_trade_date
+                ):
+                    continue
                 bar = TushareMinuteBar(
                     stock_code=code,
                     bar_end=bar_end,
@@ -569,19 +601,115 @@ class TushareRealtimeClient:
     # rt_min_daily: per-stock full-day bars, aggregated to early snapshot
     # ------------------------------------------------------------------
 
-    async def batch_get_early_quotes(self, stock_codes: list[str]) -> dict[str, TushareQuote]:
+    @staticmethod
+    def _bar_trade_date(raw_time: str) -> date | None:
+        """Extract the Shanghai trade date from a Tushare timestamp if present."""
+        try:
+            bar_end = datetime.fromisoformat(raw_time.strip())
+        except ValueError:
+            return None
+        if bar_end.tzinfo is None:
+            bar_end = bar_end.replace(tzinfo=BEIJING_TZ)
+        else:
+            bar_end = bar_end.astimezone(BEIJING_TZ)
+        return bar_end.date()
+
+    @staticmethod
+    def _canonical_early_source_hash(
+        bare_code: str,
+        bars: tuple[TushareMinuteBar, ...],
+    ) -> str:
+        """Stable SHA-256 over the canonical early-minute evidence.
+
+        Hashes every selection-relevant bar up to and including 09:39 (covers
+        call-auction/09:31前 bars). Each row includes the stock code, the
+        normalized Asia/Shanghai bar_end, and OHLCV. Field order and raw response
+        order are ignored; ISO-T/+08:00/UTC timestamps that denote the same instant
+        produce the same hash. 09:40-or-later bars are excluded. Even when no early
+        bars are present, the stock code and schema are part of the hash so that
+        different symbols never share an empty-row hash.
         """
-        Fetch 9:30-9:40 aggregated snapshot for multiple stocks via rt_min_daily.
+        early_bars = [bar for bar in bars if bar.end_label <= "09:39"]
+        rows: list[dict[str, Any]] = []
+        for bar in early_bars:
+            rows.append(
+                {
+                    "code": bar.stock_code,
+                    "end": bar.bar_end.astimezone(BEIJING_TZ).replace(microsecond=0).isoformat(),
+                    "o": bar.open_price,
+                    "h": bar.high_price,
+                    "l": bar.low_price,
+                    "c": bar.close_price,
+                    "v": bar.volume,
+                    "a": bar.amount,
+                }
+            )
+        rows.sort(key=lambda r: (r["end"], r["o"], r["h"], r["l"], r["c"], r["v"], r["a"]))
+        canonical = {
+            "schema": "tushare-early-v1",
+            "code": bare_code,
+            "rows": rows,
+        }
+        canonical_json = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
-        rt_min_daily returns ALL minute bars for the day (single stock per call).
-        This method aggregates bars with time <= 09:40 to produce stable early data
-        that is identical regardless of when the call is made.
+    @staticmethod
+    def _legacy_source_hash(
+        code: str,
+        items: list[list],
+        index: dict[str, int],
+    ) -> str:
+        """Fallback source hash for legacy responses without a ``time`` field."""
+        try:
+            first_open = _strict_float(items[0][index["open"]])
+            last_close = _strict_float(items[-1][index["close"]])
+            max_high = _strict_float(
+                max(r[index["high"]] for r in items if r[index["high"]] is not None)
+            )
+            min_low = _strict_float(
+                min(r[index["low"]] for r in items if r[index["low"]] is not None)
+            )
+            total_vol = _strict_float(
+                sum(r[index["vol"]] for r in items if r[index["vol"]] is not None)
+            )
+            total_amount = _strict_float(
+                sum(r[index["amount"]] for r in items if r[index["amount"]] is not None)
+            )
+            quote_norm = {
+                "schema": "tushare-legacy-v1",
+                "code": code,
+                "o": first_open,
+                "h": max_high,
+                "l": min_low,
+                "c": last_close,
+                "v": total_vol,
+                "a": total_amount,
+            }
+            canonical = json.dumps(
+                quote_norm, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+        except (IndexError, TypeError, ValueError):
+            canonical = ""
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-        Args:
-            stock_codes: List of bare 6-digit codes
+    async def batch_get_early_market_data(
+        self,
+        stock_codes: list[str],
+        expected_trade_date: date | None = None,
+    ) -> dict[str, TushareEarlyMarketData]:
+        """Fetch one frozen ``TushareEarlyMarketData`` per unique stock via rt_min_daily.
 
-        Returns:
-            Dict: stock_code -> TushareQuote with early_* fields populated
+        * ``stock_codes`` is deduplicated while preserving first occurrence.
+        * Each unique code triggers exactly one physical ``rt_min_daily`` call.
+        * Quote and all selection-relevant early bars (≤09:39 on
+          ``expected_trade_date``) are derived from the same response.
+        * Returned mapping iteration order follows deduplicated input order.
+        * Workers return values; they never mutate shared result containers.
+
+        ``expected_trade_date`` defaults to today in Asia/Shanghai for backwards
+        compatibility with ``batch_get_early_quotes``.
         """
         if not self._client:
             raise TushareRealtimeError("Client not started — call start() first")
@@ -589,10 +717,15 @@ class TushareRealtimeClient:
         if not stock_codes:
             return {}
 
-        all_quotes: dict[str, TushareQuote] = {}
+        if expected_trade_date is None:
+            expected_trade_date = datetime.now(BEIJING_TZ).date()
+
+        unique_codes = list(dict.fromkeys(stock_codes))
         sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
 
-        async def _fetch_one(bare_code: str) -> tuple[str, TushareQuote | None]:
+        async def _fetch_one(
+            bare_code: str,
+        ) -> tuple[str, TushareEarlyMarketData | None]:
             ts_code = self._to_ts_code(bare_code)
             async with sem:
                 data = await self._api_call(
@@ -600,41 +733,116 @@ class TushareRealtimeClient:
                     {"ts_code": ts_code, "freq": "1MIN"},
                     fields="time,open,close,high,low,vol,amount",
                 )
-            quote = self._parse_rt_min_daily(bare_code, data)
-            return bare_code, quote
+            return bare_code, self._parse_early_market_data(
+                bare_code, data, expected_trade_date=expected_trade_date
+            )
 
         results = await asyncio.gather(
-            *[_fetch_one(c) for c in stock_codes], return_exceptions=True
+            *[_fetch_one(c) for c in unique_codes], return_exceptions=True
         )
 
+        all_data: dict[str, TushareEarlyMarketData] = {}
         failed_codes: list[str] = []
-        for result in results:
-            if isinstance(result, TushareRealtimeError):
+        exceptions: list[BaseException] = []
+        for bare_code, result in zip(unique_codes, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, BaseException):
-                raise TushareRealtimeError(f"rt_min_daily failed: {result}") from result
-            bare_code, quote = result
-            if quote is not None:
-                all_quotes[bare_code] = quote
-            else:
                 failed_codes.append(bare_code)
+                exceptions.append(result)
+                continue
+            _code, data = result
+            if data is None:
+                failed_codes.append(bare_code)
+                continue
+            all_data[bare_code] = data
+
+        if not all_data and exceptions and len(failed_codes) == len(unique_codes):
+            first = exceptions[0]
+            if isinstance(first, TushareRealtimeError):
+                raise first
+            raise TushareRealtimeError(f"rt_min_daily failed: {first}") from first
 
         if failed_codes:
             logger.warning(
-                f"rt_min_daily: {len(failed_codes)} stocks returned empty/unparseable data "
-                f"(first 20: {', '.join(failed_codes[:20])})"
+                "rt_min_daily: %d stocks returned empty/unparseable data (first 20: %s)",
+                len(failed_codes),
+                ", ".join(failed_codes[:20]),
             )
-        logger.info(f"rt_min_daily: fetched {len(all_quotes)}/{len(stock_codes)} stocks")
-        return all_quotes
+        logger.info("rt_min_daily: fetched %d/%d stocks", len(all_data), len(unique_codes))
+        return all_data
+
+    async def batch_get_early_quotes(
+        self,
+        stock_codes: list[str],
+        expected_trade_date: date | None = None,
+    ) -> dict[str, TushareQuote]:
+        """Thin compatibility wrapper over ``batch_get_early_market_data``.
+
+        Returns the same ``TushareQuote`` mapping that callers already expect.
+        The optional ``expected_trade_date`` is forwarded for deterministic tests;
+        real-time callers should leave it as ``None`` (defaults to today in Shanghai).
+        """
+        early_data = await self.batch_get_early_market_data(
+            stock_codes, expected_trade_date=expected_trade_date
+        )
+        return {code: data.quote for code, data in early_data.items()}
 
     @staticmethod
-    def _parse_rt_min_daily(bare_code: str, data: dict[str, Any]) -> TushareQuote | None:
-        """
-        Parse rt_min_daily response (all bars for one stock) into TushareQuote.
+    def _aggregate_quote_from_bars(
+        bare_code: str,
+        bars: tuple[TushareMinuteBar, ...],
+    ) -> TushareQuote:
+        """Aggregate a full-day quote and early snapshot from canonical minute bars."""
+        open_price = bars[0].open_price
+        latest_price = bars[-1].close_price
+        high_price = max(bar.high_price for bar in bars)
+        low_price = min(bar.low_price for bar in bars)
+        volume = sum(bar.volume for bar in bars)
+        amount = sum(bar.amount for bar in bars)
 
-        Produces:
-        - Full-day aggregated OHLCV (open/latest/high/low/volume/amount)
-        - 9:30-9:40 early snapshot (early_close/early_high/early_low/early_volume)
+        early_bars = [bar for bar in bars if bar.end_label <= "09:39"]
+        bars_937 = [bar for bar in early_bars if bar.end_label <= "09:37"]
+
+        if early_bars:
+            early_close = early_bars[-1].close_price
+            early_high = max(bar.high_price for bar in early_bars)
+            early_low = min(bar.low_price for bar in early_bars)
+            early_volume = sum(bar.volume for bar in early_bars)
+        else:
+            early_close = latest_price
+            early_high = high_price
+            early_low = low_price
+            early_volume = volume
+
+        volume_937 = sum(bar.volume for bar in bars_937) if bars_937 else early_volume
+
+        return TushareQuote(
+            stock_code=bare_code,
+            open_price=open_price,
+            latest_price=latest_price,
+            high_price=high_price,
+            low_price=low_price,
+            volume=volume,
+            amount=amount,
+            early_close=early_close,
+            early_high=early_high,
+            early_low=early_low,
+            early_volume=early_volume,
+            volume_937=volume_937,
+        )
+
+    @staticmethod
+    def _parse_early_market_data(
+        bare_code: str,
+        data: dict[str, Any],
+        expected_trade_date: date | None = None,
+    ) -> TushareEarlyMarketData | None:
+        """Parse one rt_min_daily response into canonical quote, bars, and source hash.
+
+        All selection-relevant outputs are derived from the same set of canonical
+        minute bars. Legacy responses without a ``time`` field still produce a quote
+        and a stable hash, but no minute bars.
         """
         fields = data.get("data", {}).get("fields", [])
         items = data.get("data", {}).get("items", [])
@@ -649,83 +857,93 @@ class TushareRealtimeClient:
 
         has_time = "time" in idx
 
-        try:
-            if any(isinstance(row[idx[field]], bool) for row in items for field in required):
-                logger.warning("ignored boolean rt_min_daily value for %s", bare_code)
-                return None
-        except (IndexError, TypeError):
-            return None
-
-        # Full-day aggregation
-        try:
-            first_open = items[0][idx["open"]]
-            last_close = items[-1][idx["close"]]
-            if not first_open or not last_close:
-                return None
-
-            max_high = max(r[idx["high"]] for r in items if r[idx["high"]] is not None)
-            min_low = min(r[idx["low"]] for r in items if r[idx["low"]] is not None)
-            total_vol = sum(r[idx["vol"]] for r in items if r[idx["vol"]] is not None)
-            total_amount = sum(r[idx["amount"]] for r in items if r[idx["amount"]] is not None)
-        except (ValueError, TypeError, IndexError) as e:
-            logger.warning(f"Failed to aggregate rt_min_daily for {bare_code}: {e}")
-            return None
-
-        # 9:30-9:39 early snapshot (use 0939 so data is identical whether
-        # the API is called at 09:39 or any time later in the day)
-        early_bars = []
-        bars_937: list[list] = []  # bars ≤09:37 (call auction + first 7min)
         if has_time:
-            for r in items:
-                t = str(r[idx["time"]])
-                # Format: "2026-03-17 09:31:00"
-                if " " in t:
-                    t = t.split(" ")[-1]
-                hhmm = t.replace(":", "")[:4]
-                if hhmm <= "0939":
-                    early_bars.append(r)
-                if hhmm <= "0937":
-                    bars_937.append(r)
+            bars = TushareRealtimeClient._parse_minute_history(
+                bare_code, data, expected_trade_date=expected_trade_date
+            )
+            if not bars:
+                return None
+            quote = TushareRealtimeClient._aggregate_quote_from_bars(bare_code, bars)
+            early_bars = tuple(bar for bar in bars if bar.end_label <= "09:39")
+            source_hash = TushareRealtimeClient._canonical_early_source_hash(bare_code, bars)
+            return TushareEarlyMarketData(
+                quote=quote,
+                early_bars=early_bars,
+                source_hash=source_hash,
+            )
 
-        if early_bars:
-            e_close = _strict_float(early_bars[-1][idx["close"]])
-            e_high = _strict_float(
-                max(r[idx["high"]] for r in early_bars if r[idx["high"]] is not None)
-            )
-            e_low = _strict_float(
-                min(r[idx["low"]] for r in early_bars if r[idx["low"]] is not None)
-            )
-            e_vol = _strict_float(
-                sum(r[idx["vol"]] for r in early_bars if r[idx["vol"]] is not None)
-            )
-        else:
-            # Called before 9:30 or no time field — use whatever we have
-            e_close = _strict_float(last_close)
-            e_high = _strict_float(max_high) if max_high else 0.0
-            e_low = _strict_float(min_low) if min_low else 0.0
-            e_vol = _strict_float(total_vol)
+        # Legacy response without a time column: aggregate the full-day OHLCV rows.
+        # Every selection-relevant field in every row must be a finite, strictly
+        # positive price (or non-negative flow); booleans are rejected so they are
+        # not silently treated as 0/1. Any illegal row rejects the whole symbol.
+        try:
+            validated: list[tuple[float, float, float, float, float, float]] = []
+            for row in items:
+                if len(row) < len(fields):
+                    raise ValueError("short no-time row")
+                open_price = _strict_float(row[idx["open"]])
+                close_price = _strict_float(row[idx["close"]])
+                high_price = _strict_float(row[idx["high"]])
+                low_price = _strict_float(row[idx["low"]])
+                volume = _strict_float(row[idx["vol"]])
+                amount = _strict_float(row[idx["amount"]])
+                if not (
+                    isfinite(open_price)
+                    and open_price > 0
+                    and isfinite(close_price)
+                    and close_price > 0
+                    and isfinite(high_price)
+                    and high_price > 0
+                    and isfinite(low_price)
+                    and low_price > 0
+                    and low_price <= min(open_price, close_price)
+                    and high_price >= max(open_price, close_price)
+                    and isfinite(volume)
+                    and volume >= 0
+                    and isfinite(amount)
+                    and amount >= 0
+                ):
+                    raise ValueError("invalid no-time OHLCV row")
+                validated.append((open_price, close_price, high_price, low_price, volume, amount))
+        except (ValueError, TypeError, IndexError) as e:
+            logger.warning("ignored invalid no-time rt_min_daily row(s) for %s: %s", bare_code, e)
+            return None
 
-        if bars_937:
-            vol_937 = _strict_float(
-                sum(r[idx["vol"]] for r in bars_937 if r[idx["vol"]] is not None)
-            )
-        else:
-            vol_937 = e_vol
+        first_open = validated[0][0]
+        last_close = validated[-1][1]
+        max_high = max(row[2] for row in validated)
+        min_low = min(row[3] for row in validated)
+        total_vol = sum(row[4] for row in validated)
+        total_amount = sum(row[5] for row in validated)
 
-        return TushareQuote(
+        quote = TushareQuote(
             stock_code=bare_code,
-            open_price=_strict_float(first_open),
-            latest_price=_strict_float(last_close),
-            high_price=_strict_float(max_high) if max_high else 0.0,
-            low_price=_strict_float(min_low) if min_low else 0.0,
-            volume=_strict_float(total_vol),
-            amount=_strict_float(total_amount),
-            early_close=e_close,
-            early_high=e_high,
-            early_low=e_low,
-            early_volume=e_vol,
-            volume_937=vol_937,
+            open_price=first_open,
+            latest_price=last_close,
+            high_price=max_high,
+            low_price=min_low,
+            volume=total_vol,
+            amount=total_amount,
+            early_close=last_close,
+            early_high=max_high,
+            early_low=min_low,
+            early_volume=total_vol,
+            volume_937=total_vol,
         )
+        source_hash = TushareRealtimeClient._legacy_source_hash(bare_code, items, idx)
+        return TushareEarlyMarketData(quote=quote, early_bars=(), source_hash=source_hash)
+
+    @staticmethod
+    def _parse_rt_min_daily(
+        bare_code: str,
+        data: dict[str, Any],
+        expected_trade_date: date | None = None,
+    ) -> TushareQuote | None:
+        """Backward-compatible alias that returns only the aggregated quote."""
+        emd = TushareRealtimeClient._parse_early_market_data(
+            bare_code, data, expected_trade_date=expected_trade_date
+        )
+        return emd.quote if emd is not None else None
 
     # ------------------------------------------------------------------
     # iFinD format adapter (used by MomentumSectorScanner)
@@ -1048,7 +1266,13 @@ class TushareRealtimeClient:
 
     @staticmethod
     def _parse_bar_end(raw_time: str) -> datetime:
-        """Parse Tushare's exchange-local timestamp into an aware Beijing time."""
+        """Parse Tushare's exchange-local timestamp into an aware Beijing time.
+
+        The input must contain both a date and a time component. Bare dates or
+        bare times are rejected so they cannot be mis-bound to expected_trade_date.
+        """
+        if " " not in raw_time and "T" not in raw_time:
+            raise ValueError(f"timestamp must contain date and time: {raw_time!r}")
         bar_end = datetime.fromisoformat(raw_time)
         if bar_end.tzinfo is None:
             bar_end = bar_end.replace(tzinfo=BEIJING_TZ)

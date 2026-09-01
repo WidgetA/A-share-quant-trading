@@ -33,7 +33,10 @@ from src.data.clients.mews_snapshot import (
     LocalMewsSnapshotCalculator,
     MewsSnapshotSourceError,
 )
-from src.data.clients.tushare_realtime import TushareDailyBar, TushareMinuteBar
+from src.data.clients.tushare_realtime import (
+    TushareDailyBar,
+    TushareMinuteBar,
+)
 from src.data.clients.v20_market_data import (
     V20EarlyBarCollector,
     exact_reference_prices,
@@ -45,6 +48,7 @@ from src.data.database.v20_repository import (
     ExitCommit,
     ManualMonitorEnrollmentCommit,
     ManualMonitorEnrollmentRecord,
+    MinuteBarRecord,
     ModelBatchWrite,
     ModelLegWrite,
     OutboxRecord,
@@ -104,8 +108,17 @@ from src.strategy.v20.runtime_config import (
     validated_v20_tushare_token,
 )
 from src.strategy.v20.shadow_evaluator import evaluate_shadow_batch
-from src.web.v15_scan_service import V15ScanState
-from src.web.v20_scan_pipeline import V20PrewarmedScan, V20ScanPipeline
+from src.web.v15_scan_service import (
+    CanonicalV16ScanBundle,
+    V15ScanState,
+    _initialize_scan_resources_once,
+    cleanup_scan_resources,
+    get_or_compute_canonical_v16,
+)
+from src.web.v20_scan_pipeline import (
+    FrozenV16ScanBundle,
+    V20PrewarmedScan,
+)
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -119,6 +132,10 @@ ENTRY_CUTOFF_RESERVE_SECONDS = 2.0
 # years into the future is unsafe because exchanges have not published them.
 TRADE_CALENDAR_PAST_DAYS = 730
 TRADE_CALENDAR_FUTURE_DAYS = 45
+# Bounded first-load budget for the 09:40 cutoff watchdog.  It must stay well
+# below the scheduler iteration interval so a blocked Tushare request can
+# never stall the watchdog itself.
+_CALENDAR_CUTOFF_LOAD_BUDGET_SECONDS = 10.0
 MAX_CLOSED_EXIT_RECOVERY_TARGETS_PER_TICK = 4
 CLOSED_EXIT_RECOVERY_TIMEOUT_SECONDS = 3.0
 CLOSED_EXIT_RECOVERY_RETRY_SECONDS = 30.0
@@ -126,6 +143,9 @@ MAX_STALE_EXIT_LEGS_PER_TICK = 20
 OUTBOX_RECOVERY_TICK_TIMEOUT_SECONDS = 3.0
 LIVE_EXIT_MAX_TICK_SECONDS = 12.0
 LATEST_MINUTE_POLL_TIMEOUT_SECONDS = 8.0
+LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS = 14.0
+LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS = 2.0
+LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS = 3.0
 LIVE_EXIT_MORNING_CLOSE_PUBLICATION_GRACE_SECONDS = 60.0
 STALE_EXIT_TICK_SECONDS = 30.0
 STALE_EXIT_TICK_TIMEOUT_SECONDS = 3.0
@@ -150,10 +170,15 @@ CalendarProvider = Callable[[], Awaitable[list[date]]]
 
 async def _init_v20_scan_resources(scan_state: V15ScanState) -> None:
     """Initialize the V16 scanner inputs without legacy scheduler side effects."""
-    await _init_v20_scan_resources_with_token(
+    token = validated_v20_tushare_token()
+    await _initialize_scan_resources_once(
         scan_state,
-        validated_v20_tushare_token(),
-        manage_fundamentals=True,
+        "V20",
+        lambda: _init_v20_scan_resources_with_token(
+            scan_state,
+            token,
+            manage_fundamentals=True,
+        ),
     )
 
 
@@ -161,10 +186,15 @@ async def _init_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
     """Initialize embedded V20 while borrowing main's connected DB pool."""
     from src.common.config import get_tushare_token
 
-    await _init_v20_scan_resources_with_token(
+    token = get_tushare_token()
+    await _initialize_scan_resources_once(
         scan_state,
-        get_tushare_token(),
-        manage_fundamentals=False,
+        "V20",
+        lambda: _init_v20_scan_resources_with_token(
+            scan_state,
+            token,
+            manage_fundamentals=False,
+        ),
     )
 
 
@@ -172,10 +202,15 @@ async def _init_owned_embedded_v20_scan_resources(scan_state: V15ScanState) -> N
     """Initialize embedded V20 when main has no shared fundamentals pool."""
     from src.common.config import get_tushare_token
 
-    await _init_v20_scan_resources_with_token(
+    token = get_tushare_token()
+    await _initialize_scan_resources_once(
         scan_state,
-        get_tushare_token(),
-        manage_fundamentals=True,
+        "V20",
+        lambda: _init_v20_scan_resources_with_token(
+            scan_state,
+            token,
+            manage_fundamentals=True,
+        ),
     )
 
 
@@ -253,24 +288,12 @@ async def _init_v20_scan_resources_with_token(
 
 async def _cleanup_v20_scan_resources(scan_state: V15ScanState) -> None:
     """Close only resources owned by V20; never touch legacy global workers."""
-    try:
-        if scan_state.realtime_client is not None:
-            await scan_state.realtime_client.stop()
-    finally:
-        try:
-            if scan_state.fundamentals_db is not None:
-                await scan_state.fundamentals_db.close()
-        finally:
-            scan_state.initialized = False
+    await cleanup_scan_resources(scan_state, owner="V20", close_fundamentals=True)
 
 
 async def _cleanup_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
     """Close V20's market client while preserving main's shared DB pool."""
-    try:
-        if scan_state.realtime_client is not None:
-            await scan_state.realtime_client.stop()
-    finally:
-        scan_state.initialized = False
+    await cleanup_scan_resources(scan_state, owner="V20", close_fundamentals=False)
 
 
 @dataclass
@@ -279,6 +302,7 @@ class _DayContext:
     calendar: tuple[date, ...]
     entry_status: EntryStatus | None = None
     prewarmed: V20PrewarmedScan | None = None
+    canonical_bundle: FrozenV16ScanBundle | None = None
     collector: V20EarlyBarCollector | None = None
     breadth_collector: V20EarlyBarCollector | None = None
     collector_created_at: datetime | None = None
@@ -294,6 +318,7 @@ class _DayContext:
     last_reference_history_at: datetime | None = None
     last_reference_poll_at: datetime | None = None
     exit_history_last_attempt: dict[tuple[str, date], datetime] = field(default_factory=dict)
+
     exit_history_completed: set[tuple[str, date]] = field(default_factory=set)
     live_exit_market_data_outage: bool = False
     maturity_daily_last_attempt: dict[date, datetime] = field(default_factory=dict)
@@ -305,6 +330,29 @@ class _DayContext:
     late_0939_replay_last_attempt_at: datetime | None = None
     late_0939_replay_automatic_attempts: int = 0
     late_0939_replay_completed: bool = False
+
+
+class V20LiveExitStageTimeout(RuntimeError):
+    """A live-exit stage exceeded its share of the tick's monotonic deadline."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        elapsed_seconds: float,
+        remaining_seconds: float,
+        deadline: float,
+        symbols: tuple[str, ...],
+        provider: str,
+    ) -> None:
+        super().__init__(f"live-exit stage {stage} exceeded its budget")
+        self.stage = stage
+        self.elapsed_seconds = elapsed_seconds
+        self.remaining_seconds = remaining_seconds
+        self.deadline = deadline
+        self.symbols = symbols
+        self.provider = provider
+        self.diagnostic_alert_emitted = False
 
 
 @dataclass
@@ -670,6 +718,11 @@ def _arbitrate_reference_records(
 def _mews_snapshot(record: SelectedMewsRecord | None) -> tuple[MewsSnapshot, ...]:
     if record is None or record.snapshot_id is None:
         return ()
+    availability_date: date | None = None
+    if isinstance(record.payload, Mapping):
+        evidence = record.payload.get("evidence")
+        if isinstance(evidence, Mapping) and evidence.get("signal_available_date") is not None:
+            availability_date = date.fromisoformat(str(evidence["signal_available_date"]))
     return (
         MewsSnapshot(
             source_trade_date=record.source_trade_date,
@@ -679,6 +732,7 @@ def _mews_snapshot(record: SelectedMewsRecord | None) -> tuple[MewsSnapshot, ...
             model_version=record.model_version,
             data_version=record.data_version,
             snapshot_id=record.snapshot_id,
+            availability_date=availability_date,
         ),
     )
 
@@ -1064,7 +1118,6 @@ class V20Service:
         config: V20RuntimeConfig,
         repository: V20Repository,
         scan_state: V15ScanState,
-        scan_pipeline: V20ScanPipeline,
         artifacts: GArtifactBundle,
         publisher: V20OutboxPublisher,
         routes: Mapping[str, V20FeishuRoute],
@@ -1078,7 +1131,6 @@ class V20Service:
         self.config = config
         self._repository = repository
         self._scan_state = scan_state
-        self._scan_pipeline = scan_pipeline
         self._artifacts = artifacts
         self._publisher = publisher
         self._routes = dict(routes)
@@ -1090,6 +1142,7 @@ class V20Service:
         self._embedded_legacy = embedded_legacy
         self._calendar_cache: tuple[date, ...] = ()
         self._calendar_loaded_for: date | None = None
+        self._calendar_tasks: dict[date, asyncio.Task[tuple[date, ...]]] = {}
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
         self._decision_cycle_lock = asyncio.Lock()
@@ -1097,13 +1150,19 @@ class V20Service:
         self._manual_monitor_lock = asyncio.Lock()
         self._late_0939_replay_lock = asyncio.Lock()
         self._late_0939_replay_task: asyncio.Task[Any] | None = None
+        # Trade dates whose canonical 09:31..09:39 raw bars are already durably
+        # persisted by this process; same-process cache reuse never re-runs it.
+        self._canonical_raw_persisted_dates: set[date] = set()
         self._live_exit_lock = asyncio.Lock()
         self._mews_refresh_lock = asyncio.Lock()
+        self._mews_selection_refresh_task: asyncio.Task[bool] | None = None
+        self._mews_selection_refresh_failed_for: date | None = None
         self._mews_cached_for: date | None = None
         self._mews_source_trade_date: date | None = None
         self._mews_snapshot_id: str | None = None
         self._mews_last_failure: str | None = None
         self._mews_alerted_for: date | None = None
+        self._mews_failed_for: date | None = None
         self._exit_context: _DayContext | None = None
         self._stale_exit_context: _DayContext | None = None
         self._started = False
@@ -1135,8 +1194,33 @@ class V20Service:
             )
         }
 
+    def bind_shared_v15_scan_state(self, scan_state: V15ScanState) -> None:
+        """Bind the process-wide V16 state before V20 resources start."""
+
+        if self._resources_started or self._started:
+            raise V20StateConflict("V20 scan resources have already started")
+        for name in (
+            "fundamentals_db",
+            "realtime_client",
+            "historical_adapter",
+            "concept_mapper",
+            "stock_filter",
+            "v15_scan_db",
+            "tushare_cache",
+        ):
+            if getattr(scan_state, name) is None:
+                setattr(scan_state, name, getattr(self._scan_state, name))
+        if scan_state.resource_owner is None:
+            scan_state.resource_owner = self._scan_state.resource_owner
+        scan_state.initialized = scan_state.initialized or self._scan_state.initialized
+        if scan_state.resource_init_task is None:
+            scan_state.resource_init_task = self._scan_state.resource_init_task
+        if scan_state.resource_cleanup_task is None:
+            scan_state.resource_cleanup_task = self._scan_state.resource_cleanup_task
+        self._scan_state = scan_state
+
     @classmethod
-    def from_default_config(cls) -> V20Service:
+    def from_default_config(cls, *, scan_state: V15ScanState | None = None) -> V20Service:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
         project_root = Path(__file__).resolve().parents[2]
@@ -1152,19 +1236,20 @@ class V20Service:
                 "config/v20.yaml database schema/pool settings do not match "
                 "config/database-config.yaml database.v20"
             )
-        fundamentals = None
+        resolved_scan_state = scan_state or V15ScanState()
+        fundamentals = resolved_scan_state.fundamentals_db
         if config.enabled:
             token = validated_v20_tushare_token()
-            fundamentals = create_fundamentals_db_from_config(
-                database_config_path,
-                tushare_token=token,
-            )
+            if fundamentals is None:
+                fundamentals = create_fundamentals_db_from_config(
+                    database_config_path,
+                    tushare_token=token,
+                )
             # Factories resolve YAML literals and ${ENV} expressions. Validate
             # the resulting objects—not merely the environment—before either
             # asyncpg consumer can open a socket.
             validate_v20_database_consumers(repository.config, fundamentals.config)
-        scan_state = V15ScanState(fundamentals_db=fundamentals)
-        pipeline = V20ScanPipeline(scan_state, project_root)
+        resolved_scan_state.fundamentals_db = fundamentals
         artifacts = load_g_artifacts(
             config.artifact_manifest_path.parent,
             expected_manifest_sha256=config.artifact_manifest_sha256,
@@ -1201,8 +1286,7 @@ class V20Service:
         return cls(
             config=config,
             repository=repository,
-            scan_state=scan_state,
-            scan_pipeline=pipeline,
+            scan_state=resolved_scan_state,
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
@@ -1210,7 +1294,12 @@ class V20Service:
         )
 
     @classmethod
-    def from_legacy_runtime(cls, *, fundamentals_db: Any | None = None) -> V20Service:
+    def from_legacy_runtime(
+        cls,
+        *,
+        fundamentals_db: Any | None = None,
+        scan_state: V15ScanState | None = None,
+    ) -> V20Service:
         """Embed forward-shadow V20 in the existing main/V16 container.
 
         Strategy semantics, the ledger, outbox, 09:39 input boundary, and
@@ -1232,8 +1321,13 @@ class V20Service:
 
         database_config_path = project_root / "config" / "database-config.yaml"
         token = get_tushare_token()
-        owns_fundamentals = fundamentals_db is None
+        owns_fundamentals = fundamentals_db is None and (
+            scan_state is None or scan_state.fundamentals_db is None
+        )
         fundamentals = fundamentals_db
+        resolved_scan_state = scan_state or V15ScanState()
+        if fundamentals is None:
+            fundamentals = resolved_scan_state.fundamentals_db
         if fundamentals is None:
             fundamentals = create_fundamentals_db_from_config(
                 database_config_path,
@@ -1269,8 +1363,7 @@ class V20Service:
             repository,
             bootstrap_path=LocalMewsSnapshotCalculator.default_bootstrap_path(project_root),
         )
-        scan_state = V15ScanState(fundamentals_db=fundamentals)
-        pipeline = V20ScanPipeline(scan_state, project_root)
+        resolved_scan_state.fundamentals_db = fundamentals
         artifacts = load_g_artifacts(
             config.artifact_manifest_path.parent,
             expected_manifest_sha256=config.artifact_manifest_sha256,
@@ -1287,8 +1380,7 @@ class V20Service:
         return cls(
             config=config,
             repository=repository,
-            scan_state=scan_state,
-            scan_pipeline=pipeline,
+            scan_state=resolved_scan_state,
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
@@ -1443,7 +1535,15 @@ class V20Service:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             cleanup_labels: list[str] = []
-            cleanup_operations: list[Awaitable[None]] = []
+            cleanup_operations: list[Awaitable[object]] = []
+            mews_task, self._mews_selection_refresh_task = (
+                self._mews_selection_refresh_task,
+                None,
+            )
+            if mews_task is not None and not mews_task.done():
+                mews_task.cancel()
+                cleanup_labels.append("selection-mews")
+                cleanup_operations.append(mews_task)
             if self._resources_started:
                 cleanup_labels.append("resource")
                 cleanup_operations.append(self._cleanup_resources(self._scan_state))
@@ -1489,6 +1589,9 @@ class V20Service:
         late_replay_task, self._late_0939_replay_task = self._late_0939_replay_task, None
         if late_replay_task is not None:
             tasks.append(late_replay_task)
+        mews_task, self._mews_selection_refresh_task = self._mews_selection_refresh_task, None
+        if mews_task is not None:
+            tasks.append(mews_task)
         for task in tasks:
             task.cancel()
         primary_error: BaseException | None = None
@@ -1594,7 +1697,13 @@ class V20Service:
                 if lane_name == "publisher" and outbox is not None
                 else 0
             )
+            unknown_delivery_outcomes = (
+                int(outbox.get("unknown_n", 0))
+                if lane_name == "publisher" and outbox is not None
+                else 0
+            )
             healthy = fresh and lane.last_error is None and durable_delivery_failures == 0
+            healthy = healthy and unknown_delivery_outcomes == 0
             lanes_healthy = lanes_healthy and healthy
             lane_status[lane_name] = {
                 "healthy": healthy,
@@ -1609,6 +1718,7 @@ class V20Service:
                 ),
                 "error_revision": lane.error_revision,
                 "durable_delivery_failures": durable_delivery_failures,
+                "unknown_delivery_outcomes": unknown_delivery_outcomes,
             }
         return {
             "enabled": self.config.enabled,
@@ -1790,7 +1900,7 @@ class V20Service:
                 or semantic.get("orders_changed") is not False
                 or semantic.get("non_actionable") is not True
                 or semantic.get("retrospective_expired") is not True
-                or semantic.get("visible_message_mode") != "AUTOMATIC_ENTRY_RENDER"
+                or semantic.get("visible_message_mode") != "MANUAL_OPERATOR_RENDER"
                 or semantic.get("state_semantics_hash") != self.config.state_semantics_hash
                 or semantic.get("strategy_version") != self.config.strategy_version
             ):
@@ -2780,12 +2890,13 @@ class V20Service:
             self._record_lane_error(lane_name, f"{alert_code}: {detail}", now)
             context.last_phase = alert_code
             logger.exception("V20 isolated phase failed: %s", alert_code)
-            await self._safe_alert(
-                code=alert_code,
-                entity_id=context.trade_date.isoformat(),
-                message=detail,
-                now=now,
-            )
+            if not (isinstance(exc, V20LiveExitStageTimeout) and exc.diagnostic_alert_emitted):
+                await self._safe_alert(
+                    code=alert_code,
+                    entity_id=context.trade_date.isoformat(),
+                    message=detail,
+                    now=now,
+                )
             return False
 
     def _exit_context_for(self, now: datetime, *, stale: bool) -> _DayContext:
@@ -2805,14 +2916,144 @@ class V20Service:
         cadence = float(self.config.market.exit_poll_seconds)
         return max(1.0, min(LIVE_EXIT_MAX_TICK_SECONDS, cadence - 2.0))
 
+    async def _record_live_exit_stage_incident(
+        self,
+        context: _DayContext,
+        now: datetime,
+        exc: V20LiveExitStageTimeout,
+    ) -> None:
+        # Sort defensively: the semantic identity of an incident must not
+        # depend on the caller's symbol ordering.
+        sorted_symbols = sorted(set(exc.symbols))
+        symbols = ",".join(sorted_symbols)
+        incident_id = named_hash(
+            "V20_LIVE_EXIT_STAGE_INCIDENT_ID_V1",
+            {
+                "trade_date": context.trade_date.isoformat(),
+                "stage": exc.stage,
+                "symbols": sorted_symbols,
+                "provider": exc.provider,
+            },
+        )
+        # The absolute monotonic deadline and the per-tick elapsed/remaining
+        # values change every tick, so they stay in the log only; the persisted
+        # semantic must be replay-stable for the fixed
+        # (date, stage, provider, symbols) incident id.
+        logger.warning(
+            "V20 live-exit stage timeout: stage=%s provider=%s symbols=%s "
+            "deadline=%.3f elapsed=%.3f remaining=%.3f",
+            exc.stage,
+            exc.provider,
+            symbols or "all",
+            exc.deadline,
+            exc.elapsed_seconds,
+            exc.remaining_seconds,
+        )
+        await self._safe_alert(
+            code="LIVE_EXIT_STAGE_TIMEOUT",
+            entity_id=f"{context.trade_date.isoformat()}:{symbols or 'all'}:{exc.stage}",
+            message=str(exc),
+            now=now,
+            event_id=incident_id,
+            semantic_extras={
+                "incident_id": incident_id,
+                "error": type(exc).__name__,
+                "stage": exc.stage,
+                "symbol": symbols,
+                "symbols": list(exc.symbols),
+                "provider": exc.provider,
+            },
+        )
+        exc.diagnostic_alert_emitted = True
+
+    async def _run_live_exit_stage(
+        self,
+        operation: Awaitable[Any],
+        *,
+        stage: str,
+        stage_cap: float,
+        deadline: float,
+        tick_started_at: float,
+        symbols: Sequence[str],
+        provider: str,
+    ) -> Any:
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise V20LiveExitStageTimeout(
+                stage=stage,
+                elapsed_seconds=loop.time() - tick_started_at,
+                remaining_seconds=0.0,
+                deadline=deadline,
+                symbols=tuple(sorted(set(symbols))),
+                provider=provider,
+            )
+        budget = min(stage_cap, remaining)
+        if budget == remaining:
+            budget = max(0.0, budget - 0.1)
+        try:
+            return await asyncio.wait_for(operation, timeout=budget)
+        except asyncio.TimeoutError as exc:
+            observed = loop.time()
+            elapsed = (
+                deadline - tick_started_at if stage_cap >= remaining else observed - tick_started_at
+            )
+            raise V20LiveExitStageTimeout(
+                stage=stage,
+                elapsed_seconds=elapsed,
+                remaining_seconds=(
+                    0.0 if stage_cap >= remaining else max(0.0, deadline - observed)
+                ),
+                deadline=deadline,
+                symbols=tuple(sorted(set(symbols))),
+                provider=provider,
+            ) from exc
+
     async def _run_live_exit_tick(self, context: _DayContext, now: datetime) -> None:
         """Run today's D1/D2 protection under a budget shorter than its cadence."""
+        loop = asyncio.get_running_loop()
+        budget = self._live_exit_tick_budget()
+        tick_started_at = loop.time()
+        deadline = tick_started_at + budget
 
-        async def locked_cycle() -> None:
-            async with self._live_exit_lock:
-                await self._run_exit_cycle(context, now, include_stale=False)
+        def lock_timeout() -> V20LiveExitStageTimeout:
+            return V20LiveExitStageTimeout(
+                stage="lock",
+                elapsed_seconds=loop.time() - tick_started_at,
+                remaining_seconds=max(0.0, deadline - loop.time()),
+                deadline=deadline,
+                symbols=(),
+                provider="internal",
+            )
 
-        await asyncio.wait_for(locked_cycle(), timeout=self._live_exit_tick_budget())
+        try:
+            # The shared monotonic deadline is the only budget: no extra
+            # wait_for around the locked cycle.  Only the lock acquisition
+            # itself is bounded, and its timeout becomes a structured
+            # stage="lock" incident like every other stage.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise lock_timeout()
+            try:
+                await asyncio.wait_for(self._live_exit_lock.acquire(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise lock_timeout() from exc
+            try:
+                await self._run_exit_cycle(
+                    context,
+                    now,
+                    include_stale=False,
+                    deadline=deadline,
+                    tick_started_at=tick_started_at,
+                )
+            finally:
+                self._live_exit_lock.release()
+        except V20LiveExitStageTimeout as exc:
+            # latest/db/rules/history stage timeouts all land here; record the
+            # structured incident once, then let the scheduler lane observe it.
+            if not exc.diagnostic_alert_emitted:
+                await self._record_live_exit_stage_incident(context, now, exc)
+            raise
 
     async def _wait_for_runtime_tick(self, started_at: float, cadence: float) -> None:
         remaining = max(0.0, cadence - (asyncio.get_running_loop().time() - started_at))
@@ -2844,7 +3085,10 @@ class V20Service:
                         self._run_live_exit_tick(context, now),
                         lane_name="live_exit",
                     ),
-                    timeout=min(cadence - 0.5, self._live_exit_tick_budget() + 1.0),
+                    timeout=min(
+                        cadence - 0.5,
+                        LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS,
+                    ),
                 )
                 if succeeded:
                     self._record_lane_success("live_exit", now)
@@ -2880,7 +3124,7 @@ class V20Service:
                         context,
                         now,
                         "STALE_EXIT_CYCLE_FAILED",
-                        self._run_stale_exit_cycle(context, now),
+                        self._run_closed_and_stale_exit_cycle(context, now),
                         lane_name="stale_exit",
                     ),
                     timeout=STALE_EXIT_TICK_TIMEOUT_SECONDS,
@@ -3034,6 +3278,7 @@ class V20Service:
             self._mews_source_trade_date = source_trade_date
             self._mews_snapshot_id = str(payload["snapshot_id"])
             self._mews_last_failure = None
+            self._mews_failed_for = None
             logger.info(
                 "V20 cached locally calculated MEWS %s for %s (cutoff_eligible=%s)",
                 self._mews_snapshot_id,
@@ -3046,11 +3291,53 @@ class V20Service:
         self,
         now: datetime | None = None,
     ) -> bool:
-        """Fill a missing daily MEWS value before handling a selection trigger."""
+        """Kick one shielded MEWS refresh; never block this selection trigger."""
+
+        self._require_running()
+        current = self._aware_now(now)
+        if self._mews_cached_for == current.date():
+            return True
+        if self._mews_selection_refresh_failed_for == current.date():
+            return False
+        current_task = self._mews_selection_refresh_task
+        if current_task is not None and not current_task.done():
+            return False
+        self._mews_selection_refresh_task = None
+
+        async def _refresh() -> bool:
+            try:
+                return await self._ensure_mews_for_selection_trigger_awaited(current)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._record_lane_error(
+                    "mews_cache",
+                    f"MEWS_BACKGROUND_RECOVERY_FAILED: {type(exc).__name__}: {exc}",
+                    self._aware_now(),
+                )
+                self._mews_selection_refresh_failed_for = current.date()
+                return False
+
+        def _finished(task: asyncio.Task[bool]) -> None:
+            if self._mews_selection_refresh_task is task:
+                self._mews_selection_refresh_task = None
+
+        self._mews_selection_refresh_task = asyncio.create_task(
+            _refresh(),
+            name=f"v20-mews-selection-{current.date().isoformat()}",
+        )
+        self._mews_selection_refresh_task.add_done_callback(_finished)
+        return False
+
+    async def _ensure_mews_for_selection_trigger_awaited(
+        self,
+        current: datetime,
+    ) -> bool:
+        """Fill a missing daily MEWS value in the background."""
 
         self._require_running()
         await self._repository.assert_runtime_leader()
-        current = self._aware_now(now)
+        calendar: Sequence[date] = ()
         try:
             calendar = await self._load_trade_calendar(current.date())
             if current.date() not in calendar:
@@ -3068,13 +3355,93 @@ class V20Service:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._mews_last_failure = f"{type(exc).__name__}: {exc}"
-            self._record_lane_error(
-                "mews_cache",
-                f"MEWS_CACHE_FAILED: {self._mews_last_failure}",
+            await self._alert_mews_calculation_failure(
+                exc,
                 self._aware_now(),
+                stage="SELECTION_TRIGGER_RECOVERY",
+                calendar=calendar,
             )
             raise
+
+    async def _alert_mews_calculation_failure(
+        self,
+        exc: Exception,
+        now: datetime,
+        *,
+        stage: str,
+        calendar: Sequence[date],
+    ) -> None:
+        """Report one stable, idempotent daily failure with full context.
+
+        A genuine local calculation failure is the only condition that may
+        raise a MEWS alarm; success must never be followed by a missed-cache
+        alarm or a permanent fallback declaration.
+        """
+
+        current = self._aware_now(now)
+        predecessors = [day for day in calendar if day < current.date()]
+        source_trade_date = predecessors[-1].isoformat() if predecessors else "UNKNOWN"
+        self._mews_last_failure = f"{type(exc).__name__}: {exc}"
+        self._record_lane_error(
+            "mews_cache",
+            f"MEWS_CALCULATION_FAILED: {self._mews_last_failure}",
+            current,
+        )
+        if self._mews_alerted_for == current.date():
+            return
+        self._mews_alerted_for = current.date()
+        await self._safe_alert(
+            code="MEWS_CALCULATION_FAILED",
+            entity_id=current.date().isoformat(),
+            message=(
+                f"阶段={stage}; 异常={type(exc).__name__}; "
+                f"availability_date={current.date().isoformat()}; "
+                f"source_trade_date={source_trade_date}; "
+                f"详情: {exc}"
+            ),
+            now=current,
+        )
+
+    async def _recover_mews_after_cutoff_once(
+        self,
+        now: datetime,
+        calendar: Sequence[date],
+    ) -> bool:
+        """Repair a missing daily value after 09:40 with one local calculation.
+
+        The daily MEWS value is a pure function of the source trade date's
+        market facts, so a late calculation is never invalid.  Only a genuine
+        local failure raises the daily idempotent alert and keeps the lane
+        fail-closed for the rest of the day; it never writes a fallback
+        snapshot and never retries in a tight scheduler loop.
+        """
+
+        current = self._aware_now(now)
+        if self._mews_cached_for == current.date() or current.date() not in calendar:
+            return True
+        if self._mews_failed_for == current.date():
+            return False
+        await self._restore_mews_cache_once(current, calendar)
+        if self._mews_cached_for == current.date():
+            return True
+        try:
+            await self._calculate_mews_once(
+                current,
+                calendar,
+                require_cutoff_eligible=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._mews_failed_for = current.date()
+            await self._alert_mews_calculation_failure(
+                exc,
+                current,
+                stage="SCHEDULED_AFTER_CUTOFF_RECOVERY",
+                calendar=calendar,
+            )
+            return False
+        return True
 
     async def _restore_mews_cache_once(
         self,
@@ -3093,6 +3460,7 @@ class V20Service:
         snapshot_id = await self._repository.find_eligible_mews_snapshot(
             source_trade_date=source_trade_date,
             cutoff=_local(current.date(), MEWS_CACHE_CUTOFF),
+            availability_date=current.date(),
         )
         if snapshot_id is None:
             return False
@@ -3104,7 +3472,7 @@ class V20Service:
         return True
 
     async def _run_mews_cache_scheduler(self) -> None:
-        """Pull after 09:10, retry until 09:40, then consume only PostgreSQL."""
+        """Cache at 09:10, retry until 09:40, then repair locally exactly once."""
 
         while not self._stop_event.is_set():
             now = self._aware_now()
@@ -3115,6 +3483,7 @@ class V20Service:
                 if wall >= MEWS_PUBLISH_TIME:
                     calendar = await self._load_trade_calendar(now.date())
                 is_trading_day = now.date() in calendar
+                lane_ok = True
                 if is_trading_day and self._mews_cached_for != now.date():
                     await self._restore_mews_cache_once(now, calendar)
                 if is_trading_day and MEWS_PUBLISH_TIME <= wall < MEWS_CACHE_CUTOFF:
@@ -3124,19 +3493,9 @@ class V20Service:
                     and wall >= MEWS_CACHE_CUTOFF
                     and self._mews_cached_for != now.date()
                 ):
-                    if self._mews_alerted_for != now.date():
-                        self._mews_alerted_for = now.date()
-                        await self._safe_alert(
-                            code="MEWS_0910_CACHE_MISSED",
-                            entity_id=now.date().isoformat(),
-                            message=(
-                                "09:10发布后的MEWS未在09:40前写入V20快照；"
-                                "当日D2保护将按常驻-12%兜底"
-                            ),
-                            now=now,
-                        )
-                    raise MewsSnapshotSourceError("MEWS was not cached before today's 09:40 cutoff")
-                self._record_lane_success("mews_cache", now)
+                    lane_ok = await self._recover_mews_after_cutoff_once(now, calendar)
+                if lane_ok:
+                    self._record_lane_success("mews_cache", now)
             except asyncio.CancelledError:
                 raise
             except V20LeadershipLost as exc:
@@ -3209,7 +3568,7 @@ class V20Service:
         self,
         _sampled_at: datetime,
     ) -> None:
-        """Preempt any decision phase that is still running at the 09:40 cutoff.
+        """Let a pre-cutoff decision compute while retaining the write fence.
 
         ``asyncio.wait`` measures its timeout with the event loop's monotonic
         clock.  The wall clock is sampled again after the timeout, and the
@@ -3251,20 +3610,39 @@ class V20Service:
             ),
             name=f"v20-decision-before-cutoff-{current.date().isoformat()}",
         )
-        remaining = max(0.0, (deadline - current).total_seconds())
-        completed, _pending = await asyncio.wait({operation}, timeout=remaining)
-        if operation in completed:
-            await operation
-            return
-
-        operation.cancel()
-        await asyncio.gather(operation, return_exceptions=True)
-        cutoff_now = self._aware_now()
-        if cutoff_now >= deadline:
-            await self._enforce_or_alert_entry_cutoff(
-                current.date(),
-                now=cutoff_now,
+        deadline_waiter = asyncio.create_task(
+            asyncio.sleep(max(0.0, (deadline - current).total_seconds())),
+            name=f"v20-decision-cutoff-{current.date().isoformat()}",
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {operation, deadline_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if operation in done:
+                # Propagate a completed decision failure before considering a
+                # later cutoff pass.  Its database write fence remains the
+                # final authority when completion races exactly with 09:40.
+                await operation
+            else:
+                # Cancel only this scheduler's decision waiter.  A canonical
+                # V16 computation is owned by the shared coordinator and its
+                # get_or_compute waiter is shielded, so that singleflight
+                # master continues for a later check-only replay.
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+
+            cutoff_now = self._aware_now()
+            if cutoff_now >= deadline:
+                await self._enforce_or_alert_entry_cutoff(
+                    current.date(),
+                    now=cutoff_now,
+                )
+        finally:
+            for task in (operation, deadline_waiter):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(operation, deadline_waiter, return_exceptions=True)
 
     async def _enforce_or_alert_entry_cutoff(
         self,
@@ -3294,13 +3672,28 @@ class V20Service:
             await self._enforce_entry_cutoff(trade_date, now=now)
             return True
         # A date absent from a successfully loaded calendar is a confirmed
-        # exchange closure and must stay quiet.  If no calendar was obtained at
-        # all, a weekday is conservatively treated as an unresolved session.
+        # exchange closure and must stay quiet.
         calendar_known = self._calendar_loaded_for == trade_date
-        if not calendar_known and trade_date.weekday() < 5:
+        if calendar_known or trade_date.weekday() >= 5:
+            return True
+        # Cold start: a weekday with no calendar evidence at the authoritative
+        # cutoff gets exactly one bounded load attempt before failing closed.
+        try:
+            await asyncio.wait_for(
+                self._load_trade_calendar(trade_date),
+                timeout=_CALENDAR_CUTOFF_LOAD_BUDGET_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             self._record_lane_error(
                 "decision",
-                "ENTRY_CALENDAR_UNKNOWN_AT_0940",
+                (
+                    "ENTRY_CALENDAR_UNKNOWN_AT_0940: "
+                    f"phase=calendar_load "
+                    f"budget_seconds={_CALENDAR_CUTOFF_LOAD_BUDGET_SECONDS} "
+                    f"{type(exc).__name__}: {exc}"
+                ),
                 now,
             )
             await self._safe_alert(
@@ -3309,6 +3702,11 @@ class V20Service:
                 message="09:40 仍无法确认交易日历；今天不买，不要追买。",
                 now=now,
             )
+            return True
+        # Re-judge with the freshly loaded evidence: a trading day takes the
+        # normal cutoff path while a confirmed closure stays quiet.
+        if self._known_entry_trade_date(trade_date):
+            await self._enforce_entry_cutoff(trade_date, now=now)
         return True
 
     async def _enforce_entry_cutoff(
@@ -3406,6 +3804,21 @@ class V20Service:
 
         if self._calendar_loaded_for == current_date and self._calendar_cache:
             return self._calendar_cache
+        current_task = self._calendar_tasks.get(current_date)
+        if current_task is None:
+            current_task = asyncio.create_task(
+                self._load_trade_calendar_once(current_date),
+                name=f"v20-calendar-{current_date.isoformat()}",
+            )
+            self._calendar_tasks[current_date] = current_task
+
+            def _remove(task: asyncio.Task[tuple[date, ...]]) -> None:
+                self._calendar_tasks.pop(current_date, None)
+
+            current_task.add_done_callback(_remove)
+        return await asyncio.shield(current_task)
+
+    async def _load_trade_calendar_once(self, current_date: date) -> tuple[date, ...]:
         try:
             if self._calendar_provider is not None:
                 raw = await asyncio.wait_for(
@@ -3452,6 +3865,7 @@ class V20Service:
                 self._calendar_loaded_for = current_date
                 return cached
             raise
+        self._calendar_tasks.pop(current_date, None)
         self._calendar_cache = calendar
         self._calendar_loaded_for = current_date
         return calendar
@@ -3933,14 +4347,14 @@ class V20Service:
             raise V20SemanticConflict("late 09:39 replay symbols are invalid")
 
     @staticmethod
-    def _policy_inputs_from_failed_status(
+    def _policy_inputs_from_terminal_status(
         status: EntryStatus,
     ) -> tuple[list[CompletedHealth], list[CompletedRolling], list[ActiveRollingGap]]:
         raw = status.snapshot.get("policy_inputs")
         if not isinstance(raw, Mapping) or raw.get("schema_version") != (
             "v20-policy-input-snapshot/v1"
         ):
-            raise V20SemanticConflict("failed slot lacks frozen V20 policy inputs")
+            raise V20SemanticConflict("terminal slot lacks frozen V20 policy inputs")
         if set(raw) != {
             "schema_version",
             "completed_health",
@@ -3950,20 +4364,20 @@ class V20Service:
             not isinstance(raw.get(field), list)
             for field in ("completed_health", "completed_rolling", "maturity_gaps")
         ):
-            raise V20SemanticConflict("failed slot policy input field set is malformed")
+            raise V20SemanticConflict("terminal slot policy input field set is malformed")
         frozen_policy_hash = status.snapshot.get("policy_input_hash")
         if (
             not isinstance(frozen_policy_hash, str)
             or sha256_json(raw) != frozen_policy_hash
             or frozen_policy_hash != status.semantic.get("policy_input_hash")
         ):
-            raise V20SemanticConflict("failed slot policy input hash mismatch")
+            raise V20SemanticConflict("terminal slot policy input hash mismatch")
         if status.snapshot.get(
             "trade_date"
         ) != status.trade_date.isoformat() or status.snapshot.get(
             "state_before_hash"
         ) != status.semantic.get("state_before_hash"):
-            raise V20SemanticConflict("failed slot snapshot/semantic binding mismatch")
+            raise V20SemanticConflict("terminal slot snapshot/semantic binding mismatch")
         try:
             health: list[CompletedHealth] = []
             for item in raw["completed_health"]:
@@ -4073,8 +4487,122 @@ class V20Service:
             if len({item.gap_id for item in gaps}) != len(gaps):
                 raise ValueError("duplicate gap")
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            raise V20SemanticConflict("failed slot policy inputs are malformed") from exc
+            raise V20SemanticConflict("terminal slot policy inputs are malformed") from exc
         return health, rolling, gaps
+
+    @staticmethod
+    def _canonical_raw_top10_codes(canonical: CanonicalV16ScanBundle) -> tuple[str, ...]:
+        """Return the theoretical Top10 codes (by rank) of the canonical scan.
+
+        The durable canonical raw evidence (09:31..09:39 minute bars) is scoped
+        to exactly these ten codes — 10 * 9 = 90 rows.  ``canonical.early_bars``
+        covers the whole ~3k ready universe and must never be persisted or
+        cross-checked wholesale; only the Top10 selection is raw evidence.
+        Fail closed unless ``scan_result.recommended`` is itself exactly ten
+        stocks with unique integer ranks covering 1..10 and unique six-digit
+        codes; the result is returned in rank order.
+        """
+
+        try:
+            recommended = list(getattr(canonical.scan_result, "recommended", None) or ())
+            if len(recommended) != 10:
+                raise ValueError("recommended count")
+            ranks = []
+            for stock in recommended:
+                if type(stock.rank) is not int:
+                    raise ValueError("rank type")
+                ranks.append(stock.rank)
+            if sorted(ranks) != list(range(1, 11)):
+                raise ValueError("rank set")
+            codes = tuple(stock.code for stock in sorted(recommended, key=lambda stock: stock.rank))
+            if any(
+                not isinstance(code, str) or len(code) != 6 or not code.isdigit() for code in codes
+            ):
+                raise ValueError("code format")
+            if len(set(codes)) != 10:
+                raise ValueError("code uniqueness")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise V20SemanticConflict(
+                "canonical V16 scan does not yield an exact unique Top10 for raw evidence"
+            ) from exc
+        return codes
+
+    async def _persist_canonical_raw_minute_bars(
+        self,
+        canonical: CanonicalV16ScanBundle,
+    ) -> None:
+        """Durably persist the canonical Top10 09:31..09:39 raw bars, once per process.
+
+        Every entry path (automatic, manual, post-cutoff replay, restart) runs
+        this single helper against the shared canonical bundle, scoped to the
+        theoretical Top10 codes from ``_canonical_raw_top10_codes`` — never the
+        full ready universe in ``canonical.early_bars``.  Only bars with end
+        labels 09:31..09:39 are admitted — a late 09:41 row never enters the
+        canonical raw evidence or its hashes.  Each Top10 code must contribute
+        exactly one valid bar per required label (so 10 codes yield exactly 90
+        rows), flattened through the real ``_bar_payload``.  The repository's
+        returned sealed hashes must cover every payload exactly; any mismatch
+        fails closed.  Same-process cache reuse does not re-run the persistence.
+        """
+
+        trade_date = canonical.trade_date
+        if trade_date in self._canonical_raw_persisted_dates:
+            return
+        required_labels = tuple(f"09:{minute:02d}" for minute in range(31, 40))
+        top10_codes = self._canonical_raw_top10_codes(canonical)
+        if not canonical.early_bars:
+            raise V20RepositoryError("canonical V16 has no early raw bars to persist")
+        payloads: list[dict[str, Any]] = []
+        for code in top10_codes:
+            by_label: dict[str, TushareMinuteBar] = {}
+            for bar in canonical.early_bars.get(code, ()):
+                if bar.end_label not in required_labels:
+                    continue
+                if bar.end_label in by_label:
+                    raise V20SemanticConflict(
+                        f"canonical V16 has duplicate 09:31..09:39 bars for {code}"
+                    )
+                if (
+                    not bar.is_valid
+                    or bar.stock_code != code
+                    or bar.bar_end.astimezone(SHANGHAI).date() != trade_date
+                ):
+                    raise V20SemanticConflict(
+                        f"canonical V16 09:31..09:39 bar is invalid for {code}"
+                    )
+                by_label[bar.end_label] = bar
+            if any(label not in by_label for label in required_labels):
+                raise V20SemanticConflict(
+                    f"canonical V16 09:31..09:39 bars are incomplete for {code}"
+                )
+            payloads.extend(_bar_payload(by_label[label]) for label in required_labels)
+        expected_hashes = frozenset(sha256_json(payload) for payload in payloads)
+        if len(expected_hashes) != len(payloads):
+            raise V20SemanticConflict("canonical V16 09:31..09:39 payloads are not unique")
+        sealed_hashes = await self._repository.record_minute_bars(payloads)
+        if frozenset(sealed_hashes) != expected_hashes:
+            raise V20RepositoryError(
+                "canonical V16 09:31..09:39 raw persistence is incomplete: "
+                f"{len(set(sealed_hashes) & expected_hashes)}/{len(payloads)} sealed"
+            )
+        self._canonical_raw_persisted_dates.add(trade_date)
+
+    async def _compute_canonical_v16_from_persisted_raw(
+        self,
+        context: _DayContext,
+    ) -> CanonicalV16ScanBundle:
+        """Return the single shared canonical V16 and persist its raw 09:39 path.
+
+        There is no second algorithm rebuilt from persisted rows: automatic,
+        manual, post-cutoff, and restart paths all go through the same
+        ``get_or_compute_canonical_v16`` coordinator.  A restart with an empty
+        raw store therefore computes from Tushare exactly once, then durably
+        persists the canonical 09:31..09:39 bars via the shared helper.
+        """
+
+        canonical = await get_or_compute_canonical_v16(self._scan_state, context.trade_date)
+        await self._persist_canonical_raw_minute_bars(canonical)
+        return canonical
 
     async def _build_late_0939_replay_semantic(
         self,
@@ -4085,10 +4613,11 @@ class V20Service:
     ) -> Mapping[str, Any]:
         """Recompute the strategy in memory from a post-cutoff exact-09:39 pull.
 
-        The official failed slot has already advanced the state ledger.  Health
-        observations are watermark-idempotent, and the failed slot's own gap is
-        not active on D0, but this remains a retrospective calculation.  The
-        result deliberately exposes no synthetic decision/model identifiers.
+        The official terminal slot has already advanced the state ledger.  The
+        replay strictly reuses the slot's frozen policy inputs and the real
+        official state (never a zeroed revision/terminal or empty inputs), so
+        this remains a retrospective, check-only calculation.  The result
+        deliberately exposes no synthetic decision/model identifiers.
         """
 
         status = context.entry_status
@@ -4097,98 +4626,196 @@ class V20Service:
                 self.config.official_stream_id,
                 context.trade_date,
             )
-        if status is None or status.action != "INPUT_INVALID":
-            raise V20StateConflict("late 09:39 replay requires today's INPUT_INVALID slot")
+        if status is None or status.action not in {"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"}:
+            raise V20StateConflict("late 09:39 replay requires a terminal V20 slot")
         self._verify_entry_binding(status)
         if now < _local(context.trade_date, self.config.clock.publish_deadline):
             raise V20StateConflict("late 09:39 replay cannot run before the live cutoff")
         state = await self._repository.load_state(self.config.state_lineage_id)
         if state.state_hash != status.semantic.get("state_after_hash"):
-            raise V20StateConflict("official state has moved beyond the failed replay slot")
+            raise V20StateConflict("official state has moved beyond the terminal replay slot")
         health_snapshot = deserialize_health_snapshot(state.payload["health"])
 
-        prewarmed = context.prewarmed
-        if prewarmed is None:
-            prewarmed = await self._scan_pipeline.prewarm(
-                context.trade_date,
-                calendar=context.calendar,
-            )
-        if prewarmed.trade_date != context.trade_date:
-            raise V20SemanticConflict("late replay prewarm belongs to another trade date")
-        self._verify_prewarm_dependencies(prewarmed)
-
+        canonical = await self._compute_canonical_v16_from_persisted_raw(context)
+        context.canonical_bundle = self._project_canonical_v16(
+            canonical,
+            calendar=context.calendar,
+        )
+        bundle = context.canonical_bundle
         breadth_required = health_snapshot.status not in {
             HealthStatus.WARMUP,
             HealthStatus.HEALTHY,
         }
-        desired_codes = (
-            prewarmed.required_minute_codes if breadth_required else prewarmed.universe_codes
-        )
         required_labels = tuple(f"09:{minute:02d}" for minute in range(31, 40))
-
-        async def load_persisted_early() -> tuple[
-            list[Any], V20EarlyBarCollector, V20EarlyBarCollector
-        ]:
-            records = list(
-                await self._repository.list_raw_minute_bar_records(
-                    desired_codes,
-                    trade_date=context.trade_date,
-                    end_labels=required_labels,
-                )
+        # The persisted raw evidence is scoped to the same theoretical Top10
+        # codes the shared helper sealed (10 * 9 = 90 rows); querying or
+        # cross-checking the full universe would necessarily fail after 90 rows.
+        top10_codes = self._canonical_raw_top10_codes(canonical)
+        records = list(
+            await self._repository.list_raw_minute_bar_records(
+                top10_codes,
+                trade_date=context.trade_date,
+                end_labels=required_labels,
             )
-            universe = V20EarlyBarCollector(
-                context.trade_date,
-                prewarmed.universe_codes,
-            )
-            breadth = V20EarlyBarCollector(
-                context.trade_date,
-                prewarmed.breadth_codes,
-            )
-            for record in records:
-                bar = _tushare_minute_from_record(record.payload)
-                if bar.end_label not in required_labels:
-                    raise V20SemanticConflict("persisted late replay row escaped 09:31..09:39")
-                universe.ingest((bar,))
-                if breadth_required and bar.end_label == "09:39":
-                    breadth.ingest((bar,))
-            return records, universe, breadth
-
-        records, universe_collector, breadth_collector = await load_persisted_early()
-        missing_codes = set(universe_collector.incomplete_codes())
-        if breadth_required:
-            missing_codes.update(
-                set(prewarmed.breadth_codes) - set(breadth_collector.codes_with_label("09:39"))
-            )
-        if missing_codes:
-            client = self._scan_state.realtime_client
-            if client is None or not hasattr(client, "batch_get_minute_history"):
-                raise V20RepositoryError("late replay minute-history adapter is unavailable")
-            histories = await client.batch_get_minute_history(sorted(missing_codes))
-            filtered_history = {
-                code: tuple(bar for bar in rows if bar.end_label in required_labels)
-                for code, rows in histories.items()
-            }
-            await self._persist_history(
-                context,
-                filtered_history,
-                observed_at=self._aware_now(),
-            )
-            # Form the replay only from durable rows.  Their database receipt
-            # clock proves they arrived after cutoff instead of pretending the
-            # afternoon vendor response existed at 09:40.
-            records, universe_collector, breadth_collector = await load_persisted_early()
-
-        early = universe_collector.freeze()
-        breadth_early = breadth_collector.freeze_terminal()
-        bundle = await self._scan_pipeline.scan(
-            prewarmed,
-            early,
-            breadth_early=breadth_early,
-            minimum_quote_coverage=self.config.market.minimum_quote_coverage,
         )
+        persisted_by_key: dict[tuple[str, str], MinuteBarRecord] = {}
+        for record in records:
+            key = (str(record.code), str(record.end_label))
+            if key in persisted_by_key:
+                raise V20SemanticConflict("persisted 09:31..09:39 raw rows contain a duplicate")
+            persisted_by_key[key] = record
+        for code in top10_codes:
+            for expected_bar in canonical.early_bars.get(code, ()):
+                if expected_bar.end_label not in required_labels:
+                    continue
+                persisted_record = persisted_by_key.get((code, expected_bar.end_label))
+                if persisted_record is None:
+                    raise V20SemanticConflict(
+                        "persisted 09:31..09:39 raw rows are missing a canonical bar"
+                    )
+                expected_payload = _bar_payload(expected_bar)
+                if (
+                    persisted_record.payload != expected_payload
+                    or persisted_record.source_hash != sha256_json(expected_payload)
+                ):
+                    raise V20SemanticConflict(
+                        "persisted 09:31..09:39 raw row differs from canonical V16"
+                    )
+        canonical_raw_hashes = {
+            code: {
+                "early_source_hash": canonical.early_source_hashes.get(code),
+                "bars": [
+                    {"label": bar.end_label, "payload_hash": sha256_json(_bar_payload(bar))}
+                    for bar in canonical.early_bars.get(code, ())
+                    if bar.end_label in required_labels
+                ],
+            }
+            for code in top10_codes
+        }
+        canonical_raw_hash = sha256_json(canonical_raw_hashes)
+        persisted_raw_hashes = {
+            code: {
+                "early_source_hash": canonical.early_source_hashes.get(code),
+                "bars": [
+                    {"label": record.end_label, "payload_hash": sha256_json(record.payload)}
+                    for _key, record in sorted(persisted_by_key.items())
+                    if record.code == code
+                ],
+            }
+            for code in top10_codes
+        }
+        if persisted_raw_hashes != canonical_raw_hashes:
+            raise V20SemanticConflict(
+                "persisted 09:31..09:39 source evidence differs from canonical V16"
+            )
+        early_source_hash = canonical.input_hash
+        if status.action != "INPUT_INVALID":
+            completed_health, completed_rolling, maturity_gaps = (
+                self._policy_inputs_from_terminal_status(status)
+            )
+            # Check-only replay of a committed terminal slot reuses the real
+            # official state as committed (real revision and last terminal
+            # binding, verified above) together with the slot's frozen policy
+            # inputs.  Zeroing revision/terminal or feeding empty inputs
+            # would silently change BASE/rolling7 under a false identity.
+            replay_state = state
+            prepared = prepare_entry(
+                config=self.config,
+                state=replay_state,
+                bundle=bundle,
+                completed_health=completed_health,
+                completed_rolling=completed_rolling,
+                maturity_gaps=maturity_gaps,
+                artifacts=self._artifacts,
+                calendar=context.calendar,
+                scheduled_exits_today=tuple(status.semantic.get("scheduled_exits_today") or ()),
+            )
+            pure = dict(prepared.commit.semantic)
+            pure["event_id"] = replay_event_id
+            symbols = list(pure["symbols"])
+            computed_at = self._aware_now(now)
+            receipt_times = [
+                item.first_received_at.astimezone(SHANGHAI)
+                for item in records
+                if isinstance(getattr(item, "first_received_at", None), datetime)
+                and item.first_received_at.tzinfo is not None
+                and item.first_received_at.utcoffset() is not None
+            ]
+            if len(receipt_times) != len(records):
+                raise V20SemanticConflict("check-only raw facts lack durable receipt clocks")
+            live_cutoff = _local(context.trade_date, self.config.clock.publish_deadline)
+            entry_render = {
+                "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+                "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+                "deployment_mode": self.config.deployment_mode,
+                **pure,
+                "event_id": replay_event_id,
+                "trade_date": context.trade_date.isoformat(),
+                "scheduled_exits_today": list(status.semantic.get("scheduled_exits_today") or ()),
+            }
+            semantic: dict[str, Any] = {
+                "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+                "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+                "event_id": replay_event_id,
+                "strategy_version": self.config.strategy_version,
+                "config_hash": self.config.config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
+                "deployment_mode": self.config.deployment_mode,
+                "official_stream_id": self.config.official_stream_id,
+                "state_lineage_id": self.config.state_lineage_id,
+                "alert_code": "LATE_0939_REPLAY_RESULT",
+                "delivery_priority_class": "OPERATOR_NOTIFICATION",
+                "event_trade_date": context.trade_date.isoformat(),
+                "replay_kind": "RETROSPECTIVE_POST_CUTOFF",
+                "non_actionable": True,
+                "official_entry_action": status.action,
+                "official_entry_event_id": status.event_id,
+                "replay_action": pure["action"],
+                "final_multiplier": pure["final_multiplier"],
+                "base_multiplier": pure["base_multiplier"],
+                "defense_multiplier": pure["defense_multiplier"],
+                "health_state": pure["health_state"],
+                "rolling7_state": pure["rolling7_state"],
+                "rolling7_r7": pure["rolling7_r7"],
+                "rolling7_l7": pure["rolling7_l7"],
+                "g_state": pure["g_state"],
+                "reason_codes": list(pure["reason_codes"]),
+                "symbols": symbols,
+                "last_complete_bar": self.config.clock.decision_bar_label,
+                "entry_render_semantic": entry_render,
+                "v16_snapshot_hash": bundle.snapshot_hash,
+                "early_market_source_hash": early_source_hash,
+                "policy_input_hash": prepared.commit.snapshot["policy_input_hash"],
+                "canonical_raw_hash": canonical_raw_hash,
+                "persisted_raw_hash": canonical_raw_hash,
+                "requested_at": now.isoformat(),
+                "retrieved_at": computed_at.isoformat(),
+                "computed_at": computed_at.isoformat(),
+                "data_cutoff": "09:39",
+                "data_receipt_timeliness": "POST_CUTOFF",
+                "raw_fact_n": len(records),
+                "raw_first_received_at": (
+                    min(receipt_times).isoformat() if receipt_times else None
+                ),
+                "raw_last_received_at": (max(receipt_times).isoformat() if receipt_times else None),
+                "raw_pre_cutoff_n": sum(item < live_cutoff for item in receipt_times),
+                "raw_post_cutoff_n": sum(item >= live_cutoff for item in receipt_times),
+                "state_replay_profile": "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY",
+                "bootstrap_mode": self.config.bootstrap_mode,
+                "pit_limitations": [
+                    "RAW_MINUTE_ROWS_RECEIVED_OR_REUSED_AFTER_LIVE_CUTOFF",
+                    "CURRENT_FUNDAMENTAL_NAME_AND_ST_METADATA_MAY_REFLECT_LATER_SAME_DAY_STATE",
+                    "MEWS_IS_NOT_A_09:39_ENTRY_INPUT",
+                ],
+            }
+            semantic["message"] = _late_0939_replay_body(
+                official_status=status,
+                replay_semantic=semantic,
+            )
+            return semantic
 
-        completed_health, completed_rolling, maturity_gaps = self._policy_inputs_from_failed_status(
-            status
+        completed_health, completed_rolling, maturity_gaps = (
+            self._policy_inputs_from_terminal_status(status)
         )
         failure_gap_id = named_hash(
             "V20_OFFICIAL_SHADOW_GAP_ID_V1",
@@ -4226,7 +4853,8 @@ class V20Service:
             calendar=context.calendar,
             scheduled_exits_today=tuple(status.semantic.get("scheduled_exits_today") or ()),
         )
-        pure = prepared.commit.semantic
+        pure = dict(prepared.commit.semantic)
+        pure["event_id"] = replay_event_id
         if pure.get("action") == "INPUT_INVALID":
             raise V20SemanticConflict("late replay unexpectedly produced INPUT_INVALID")
         computed_at = self._aware_now()
@@ -4240,7 +4868,7 @@ class V20Service:
         if len(receipt_times) != len(records):
             raise V20SemanticConflict("late replay raw facts lack durable receipt clocks")
         live_cutoff = _local(context.trade_date, self.config.clock.publish_deadline)
-        semantic: dict[str, Any] = {
+        semantic = {
             "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
             "event_id": replay_event_id,
@@ -4277,8 +4905,10 @@ class V20Service:
             # official decision, model batch, leg, holding, or order.
             "entry_render_semantic": dict(pure),
             "v16_snapshot_hash": bundle.snapshot_hash,
-            "early_market_source_hash": early.source_hash,
-            "policy_input_hash": status.semantic["policy_input_hash"],
+            "early_market_source_hash": early_source_hash,
+            "policy_input_hash": prepared.commit.snapshot["policy_input_hash"],
+            "canonical_raw_hash": canonical_raw_hash,
+            "persisted_raw_hash": canonical_raw_hash,
             "requested_at": now.isoformat(),
             "retrieved_at": computed_at.isoformat(),
             "computed_at": computed_at.isoformat(),
@@ -4299,7 +4929,7 @@ class V20Service:
             "state_reconstruction_profile": (
                 "POST_TERMINAL_STATE_MINUS_D0_FAILURE_GAP_WATERMARK_IDEMPOTENT_V1"
             ),
-            "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE",
+            "state_replay_profile": "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY",
             "bootstrap_mode": self.config.bootstrap_mode,
             "pit_limitations": [
                 "RAW_MINUTE_ROWS_RECEIVED_OR_REUSED_AFTER_LIVE_CUTOFF",
@@ -4485,77 +5115,125 @@ class V20Service:
         if context.entry_status is not None:
             return
         wall = now.timetz().replace(tzinfo=None)
-        if (
-            wall < self.config.clock.prewarm
-            or wall >= self.config.clock.decision_finalization_deadline
-        ):
+        if wall < time.fromisoformat(self.config.clock.decision_bar_label):
             return
-        if context.prewarmed is None:
-            try:
-                context.last_phase = "PREWARMING"
-                budget_clock = self._aware_now()
-                seconds_to_cutoff = (
-                    _local(context.trade_date, self.config.clock.publish_deadline) - budget_clock
-                ).total_seconds()
-                prewarm_budget = min(
-                    PREWARM_ATTEMPT_TIMEOUT_SECONDS,
-                    seconds_to_cutoff - ENTRY_CUTOFF_RESERVE_SECONDS,
-                )
-                if prewarm_budget <= 0:
-                    raise TimeoutError(
-                        "prewarm cannot start without crossing the reserved 09:40 cutoff window"
-                    )
-                prewarmed = await asyncio.wait_for(
-                    self._scan_pipeline.prewarm(
-                        context.trade_date,
-                        calendar=context.calendar,
-                    ),
-                    timeout=prewarm_budget,
-                )
-                self._verify_prewarm_dependencies(prewarmed)
-                context.prewarmed = prewarmed
-                context.collector = V20EarlyBarCollector(
-                    context.trade_date,
-                    context.prewarmed.universe_codes,
-                )
-                context.breadth_collector = V20EarlyBarCollector(
-                    context.trade_date,
-                    context.prewarmed.breadth_codes,
-                )
-                # Prewarm can take minutes.  Record the actual collector creation
-                # clock, not the stale scheduler timestamp sampled before prewarm.
-                context.collector_created_at = self._aware_now()
-                context.last_phase = "COLLECTING_0939"
-            except Exception as exc:
-                context.last_phase = "PREWARM_RETRY"
-                context.last_entry_failure_detail = f"PREWARM_RETRY: {type(exc).__name__}: {exc}"
-                self._record_lane_error(
-                    "decision",
-                    f"PREWARM_RETRY: {type(exc).__name__}: {exc}",
-                    now,
-                )
-                logger.warning("V20 prewarm will retry: %s", exc)
+        if wall < self.config.clock.decision_finalization_deadline:
+            canonical = await get_or_compute_canonical_v16(
+                self._scan_state,
+                context.trade_date,
+            )
+            await self._persist_canonical_raw_minute_bars(canonical)
+            context.canonical_bundle = self._project_canonical_v16(
+                canonical,
+                calendar=context.calendar,
+            )
+            context.last_phase = "CANONICAL_0939_READY"
+            return
 
-        if (
-            self.config.clock.minute_collection_start
-            <= wall
-            < self.config.clock.decision_finalization_deadline
-        ):
-            try:
-                await self._poll_entry_market(context, now)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                context.last_phase = "ENTRY_MARKET_RETRY"
-                context.last_entry_failure_detail = (
-                    f"ENTRY_MARKET_RETRY: {type(exc).__name__}: {exc}"
-                )
-                self._record_lane_error(
-                    "decision",
-                    f"ENTRY_MARKET_RETRY: {type(exc).__name__}: {exc}",
-                    now,
-                )
-                logger.warning("V20 entry market collection will retry: %s", exc)
+    def _project_canonical_v16(
+        self,
+        canonical: Any,
+        *,
+        calendar: tuple[date, ...] | None = None,
+    ) -> FrozenV16ScanBundle:
+        result = canonical.scan_result
+        symbols = [
+            {
+                "rank": stock.rank,
+                "code": stock.code,
+                "name": stock.name,
+                "score": float(stock.score),
+                "snapshot_price": float(stock.buy_price),
+                "boards": result.stock_all_boards.get(stock.code),
+                "best_board": result.stock_best_board.get(stock.code),
+                "is_driver": result.stock_is_driver.get(stock.code),
+                "cci": result.stock_cci.get(stock.code),
+                "volume_937": result.stock_early_vol.get(stock.code),
+                "history_hash": sha256_json(dict(canonical.history_raw.get(stock.code, {}))),
+                "early_source_hash": canonical.early_source_hashes.get(stock.code),
+            }
+            for stock in result.recommended
+        ]
+        resolved_calendar = (
+            calendar
+            if calendar is not None
+            else self._calendar_cache
+            if self._calendar_loaded_for == canonical.trade_date
+            else ()
+        )
+        if canonical.trade_date not in resolved_calendar:
+            raise V20RepositoryError("canonical V16 trade date lacks calendar evidence")
+        predecessors = [day for day in resolved_calendar if day < canonical.trade_date]
+        snapshot = {
+            "schema_version": V20_V16_SNAPSHOT_SCHEMA,
+            "trade_date": canonical.trade_date.isoformat(),
+            "last_complete_bar": self.config.clock.decision_bar_label,
+            "early_market_source_hash": canonical.input_hash,
+            "early_market_conflict_codes": [],
+            "breadth_market_source_hash": canonical.input_hash,
+            "breadth_market_missing_codes": [],
+            "breadth_market_conflict_codes": [],
+            "scorer_model_sha256": canonical.model_sha256,
+            "scorer_feature_sha256": canonical.feature_list_sha256,
+            "list_complete": True,
+            "list_n": len(symbols),
+            "symbols": symbols,
+            "scan_input_codes": list(canonical.stock_data),
+            "scan_input_failure_codes": [
+                code for code in canonical.universe if code not in canonical.stock_data
+            ],
+            "scan_input_coverage": len(canonical.stock_data) / len(canonical.universe),
+            "history_profile_id": "CANONICAL_V16_V1",
+            "history_input_hashes": {
+                code: sha256_json(dict(history)) for code, history in canonical.history_raw.items()
+            },
+            "comparison_pool_codes": list(canonical.stock_data),
+            "comparison_pool_hash": sha256_json(list(canonical.stock_data)),
+            "breadth_valid_n": 0,
+            "breadth_down_n": 0,
+            "prior_trade_date": predecessors[-1].isoformat() if predecessors else None,
+            "prior_amount_yuan": {},
+            "funnel": {
+                "step0_universe_count": result.step0_universe_count,
+                "step2_hot_board_count": result.step2_hot_board_count,
+                "step2_filtered_by_avg_gain": result.step2_filtered_by_avg_gain,
+                "step3_count": result.step3_count,
+                "step4_count": result.step4_count,
+                "step5_count": result.step5_count,
+                "step6_count": result.step6_count,
+                "step6_5_count": result.step6_5_count,
+                "step6_6_count": result.step6_6_count,
+                "final_candidates": result.final_candidates,
+            },
+            "stages": {
+                "step0_codes": list(result.step0_codes),
+                "step2_boards_detail": {
+                    board: list(codes) for board, codes in result.step2_boards_detail.items()
+                },
+                "step2_codes": list(result.step2_codes),
+                "st_eligible_codes": list(result.st_eligible_codes),
+                "step3_codes": list(result.step3_codes),
+                "step4_codes": list(result.step4_codes),
+                "step5_codes": list(result.step5_codes),
+                "step6_codes": list(result.step6_codes),
+                "step6_5_codes": list(result.step6_5_codes),
+                "step6_6_codes": list(result.step6_6_codes),
+            },
+            "board_avg_gains": dict(result.step2_board_avg_gains),
+        }
+        return FrozenV16ScanBundle(
+            trade_date=canonical.trade_date,
+            frozen_at=canonical.computed_at,
+            scan_result=result,
+            stock_data=canonical.stock_data,
+            comparison_pool_codes=tuple(canonical.stock_data),
+            breadth_valid_n=0,
+            breadth_down_n=0,
+            prior_trade_date=predecessors[-1] if predecessors else canonical.trade_date,
+            prior_amount_yuan={},
+            snapshot=snapshot,
+            snapshot_hash=sha256_json(snapshot),
+        )
 
     def _verify_prewarm_dependencies(self, prewarmed: V20PrewarmedScan) -> None:
         """Reject in-process model or concept-data drift under a frozen lineage."""
@@ -4706,6 +5384,11 @@ class V20Service:
         context.last_early_poll_at = now
 
     async def _attempt_entry(self, context: _DayContext, now: datetime) -> None:
+        if context.canonical_bundle is None:
+            raise RuntimeError("canonical V16 09:39 result is unavailable")
+        if context.canonical_bundle is not None:
+            await self._commit_entry_from_bundle(context, now, context.canonical_bundle)
+            return
         if (
             context.prewarmed is None
             or context.collector is None
@@ -4777,14 +5460,7 @@ class V20Service:
             context.breadth_collector.ingest(bar for rows in history.values() for bar in rows)
             await self._persist_history(context, history, observed_at=now)
 
-        early = context.collector.freeze()
-        breadth_early = context.breadth_collector.freeze_terminal()
-        bundle = await self._scan_pipeline.scan(
-            context.prewarmed,
-            early,
-            breadth_early=breadth_early,
-            minimum_quote_coverage=self.config.market.minimum_quote_coverage,
-        )
+        bundle = context.canonical_bundle
         if bundle.frozen_at.tzinfo is None or bundle.frozen_at.utcoffset() is None:
             raise V20SemanticConflict("V16 decision formation clock must be timezone-aware")
         formed_at = bundle.frozen_at.astimezone(SHANGHAI)
@@ -4825,6 +5501,73 @@ class V20Service:
             # The database clock is authoritative for the final boundary race.
             # The rejected normal transaction rolled back its state, shadows,
             # and model batch; replace it with the explicit failed-slot fact.
+            rejected_at = self._aware_now()
+            await self._finalize_invalid_entry(
+                context,
+                rejected_at,
+                reason="INPUT_TIME_BOUNDARY_VIOLATION",
+                detail=(
+                    "database clock rejected normal V16 submission at the strict "
+                    f"09:40 boundary: formed_at={formed_at.isoformat()}, "
+                    f"rejected_at={rejected_at.isoformat()}"
+                ),
+                invalid_commit_not_before_ts=normal_deadline,
+            )
+            return
+        status = await self._repository.get_entry_status(
+            self.config.official_stream_id,
+            context.trade_date,
+        )
+        if status is None:
+            raise V20RepositoryError("committed V20 entry is not readable")
+        self._verify_entry_binding(status)
+        context.entry_status = status
+        context.last_phase = "DECISION_COMMITTED"
+        await self._repository.seal_event(prepared.commit.event_id, seal_v20_payload)
+
+    async def _commit_entry_from_bundle(
+        self,
+        context: _DayContext,
+        now: datetime,
+        bundle: FrozenV16ScanBundle,
+    ) -> None:
+        if bundle.frozen_at.tzinfo is None or bundle.frozen_at.utcoffset() is None:
+            raise V20SemanticConflict("V16 decision formation clock must be timezone-aware")
+        formed_at = bundle.frozen_at.astimezone(SHANGHAI)
+        if formed_at.date() != context.trade_date:
+            raise V20SemanticConflict("V16 decision formation date does not match its slot")
+        observed_at = self._aware_now(now)
+        normal_deadline = _local(context.trade_date, self.config.clock.publish_deadline)
+        if formed_at >= normal_deadline or observed_at >= normal_deadline:
+            await self._finalize_invalid_entry(
+                context,
+                observed_at,
+                reason="INPUT_TIME_BOUNDARY_VIOLATION",
+                detail=(
+                    "normal V16 ENTER/BLOCK/NO_SIGNAL missed the strict 09:40 "
+                    f"formation/submission boundary: formed_at={formed_at.isoformat()}, "
+                    f"observed_at={observed_at.isoformat()}"
+                ),
+                invalid_commit_not_before_ts=normal_deadline,
+            )
+            return
+        health, rolling, gaps = await self._policy_inputs(context.trade_date)
+        state = await self._repository.load_state(self.config.state_lineage_id)
+        scheduled = await self._scheduled_exits_today(context.trade_date)
+        prepared = prepare_entry(
+            config=self.config,
+            state=state,
+            bundle=bundle,
+            completed_health=health,
+            completed_rolling=rolling,
+            maturity_gaps=gaps,
+            artifacts=self._artifacts,
+            calendar=context.calendar,
+            scheduled_exits_today=scheduled,
+        )
+        try:
+            await self._repository.commit_entry(prepared.commit)
+        except V20EntryDeadlineExceeded:
             rejected_at = self._aware_now()
             await self._finalize_invalid_entry(
                 context,
@@ -5246,40 +5989,97 @@ class V20Service:
         now: datetime,
         *,
         include_stale: bool = True,
+        deadline: float | None = None,
+        tick_started_at: float | None = None,
     ) -> None:
-        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            tick_started_at = loop.time()
+            deadline = tick_started_at + LIVE_EXIT_MAX_TICK_SECONDS
+        elif tick_started_at is None:
+            tick_started_at = deadline - LIVE_EXIT_MAX_TICK_SECONDS
+
+        async def stage(
+            operation: Awaitable[Any],
+            *,
+            name: str,
+            cap: float,
+            symbols: Sequence[str],
+            provider: str = "postgres",
+        ) -> Any:
+            return await self._run_live_exit_stage(
+                operation,
+                stage=name,
+                stage_cap=cap,
+                deadline=deadline,
+                tick_started_at=tick_started_at or loop.time(),
+                symbols=symbols,
+                provider=provider,
+            )
+
+        active = await stage(
+            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            name="db_list_active_legs",
+            cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+            symbols=(),
+        )
         if not active:
             return
 
-        # Today's D1/D2 legs always run before an arbitrary restart backlog.
-        # Persisted evidence and the unconditional D2 14:57 plan are evaluated
-        # before any vendor recovery call.
         today_legs = self._today_exit_legs(active, context.trade_date)
-        await self._evaluate_active_exits(today_legs, now, context.calendar)
-        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
+        all_codes = tuple(leg.code for leg in today_legs)
+        await stage(
+            self._evaluate_active_exits(today_legs, now, context.calendar),
+            name="rules_initial",
+            cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
+            symbols=all_codes,
+            provider="rules",
+        )
+        active = await stage(
+            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            name="db_list_after_initial_rules",
+            cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+            symbols=(),
+        )
         if not active:
             return
+
         wall = now.timetz().replace(tzinfo=None)
-        # Keep one full wall-clock minute after each terminal raw label so a
-        # 15-second polling phase cannot jump over 11:30 or 14:57.
         session = time(9, 31) < wall < time(11, 31) or time(13, 1) < wall < time(14, 58)
         today_legs = self._today_exit_legs(active, context.trade_date)
         tick_target_codes = frozenset(leg.code for leg in today_legs)
         expected_labels = frozenset(_expected_exit_labels(context.trade_date, now))
-        # Feed health is about the bar that should be current at this tick, not
-        # merely any legal bar seen earlier today.  During lunch the expected
-        # frontier naturally remains 11:30; before the open it is empty.
         freshest_expected_labels = _live_exit_health_labels(
             context.trade_date,
             now,
             expected_labels,
         )
-        latest_attempted = False
+
+        def missing_labels(code: str) -> frozenset[str]:
+            observed_labels = {
+                label
+                for (bar_date, stored_code, label), bar in context.minute_rows.items()
+                if bar_date == context.trade_date
+                and stored_code == code
+                and label in expected_labels
+                and bar.is_valid
+                and bar.volume > 0
+                and bar.amount > 0
+            }
+            return expected_labels - observed_labels
+
+        initial_missing = {code: missing_labels(code) for code in sorted(tick_target_codes)}
+        cold_context = bool(tick_target_codes) and all(
+            len(missing) >= 2 for missing in initial_missing.values()
+        )
+
+        latest_attempted = cold_context
         latest_failed = False
         latest_evidence_codes: set[str] = set()
         if (
             session
             and today_legs
+            and not cold_context
             and (
                 context.last_exit_poll_at is None
                 or (now - context.last_exit_poll_at).total_seconds()
@@ -5292,6 +6092,8 @@ class V20Service:
                     context,
                     sorted(tick_target_codes),
                     observed_at=now,
+                    deadline=deadline,
+                    tick_started_at=tick_started_at,
                 )
                 latest_evidence_codes.update(
                     _legal_exit_evidence_codes(
@@ -5302,56 +6104,67 @@ class V20Service:
                 )
             except asyncio.CancelledError:
                 raise
+            except V20LiveExitStageTimeout:
+                raise
             except Exception:
-                # Current-day history remains an independent fallback.  Only
-                # after both sources have produced no legal evidence do we
-                # classify a global live-exit data outage below.
                 latest_failed = True
                 logger.exception("V20 latest-minute exit poll failed; trying daily history")
             finally:
                 context.last_exit_poll_at = now
 
-        # Evaluate the just-persisted latest bar before attempting a potentially
-        # slow full-day history recovery.
-        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
+        active = await stage(
+            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            name="db_list_after_latest",
+            cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+            symbols=(),
+        )
         today_legs = self._today_exit_legs(active, context.trade_date)
-        await self._evaluate_active_exits(today_legs, now, context.calendar)
-        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
+        await stage(
+            self._evaluate_active_exits(today_legs, now, context.calendar),
+            name="rules_after_latest",
+            cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
+            symbols=tuple(leg.code for leg in today_legs),
+            provider="rules",
+        )
+        active = await stage(
+            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            name="db_list_before_history",
+            cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+            symbols=(),
+        )
         today_legs = self._today_exit_legs(active, context.trade_date)
 
         recovery_codes: list[str] = []
         for code in sorted({leg.code for leg in today_legs}):
-            observed_labels = {
-                label
-                for (bar_date, stored_code, label), bar in context.minute_rows.items()
-                if bar_date == context.trade_date
-                and stored_code == code
-                and label in expected_labels
-                and bar.is_valid
-                and bar.volume > 0
-                and bar.amount > 0
-            }
-            missing = expected_labels - observed_labels
+            missing = missing_labels(code)
+            if len(missing) < 2:
+                continue
             key = (code, context.trade_date)
             last_attempt = context.exit_history_last_attempt.get(key)
             recovery_due = last_attempt is None or (now - last_attempt).total_seconds() >= 60
-            if missing and recovery_due:
-                context.exit_history_last_attempt[key] = now
+            if recovery_due:
                 recovery_codes.append(code)
+
         history_attempted = False
         history_failed = False
         history_evidence_codes: set[str] = set()
         if recovery_codes:
             history_attempted = True
+            requested_keys = {(code, context.trade_date) for code in recovery_codes}
             try:
-                history = await asyncio.wait_for(
+                history = await stage(
                     self._scan_state.realtime_client.batch_get_minute_history(recovery_codes),
-                    timeout=ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
+                    name="history",
+                    cap=ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
+                    symbols=recovery_codes,
+                    provider="tushare_rt",
                 )
                 persisted_history = await self._persist_history(
                     context,
                     history,
                     observed_at=now,
+                    deadline=deadline,
+                    tick_started_at=tick_started_at,
                 )
                 history_evidence_codes.update(
                     _legal_exit_evidence_codes(
@@ -5373,17 +6186,32 @@ class V20Service:
                         continue
                     for leg in today_legs:
                         if leg.code == code:
-                            await self._repository.record_exit_scan_watermark(
-                                leg.model_leg_id,
-                                trade_date=context.trade_date,
-                                scanned_through_label=scanned_through,
-                                source_hash=scan_hash,
-                                **self._ledger_scope,
+                            await stage(
+                                self._repository.record_exit_scan_watermark(
+                                    leg.model_leg_id,
+                                    trade_date=context.trade_date,
+                                    scanned_through_label=scanned_through,
+                                    source_hash=scan_hash,
+                                    **self._ledger_scope,
+                                ),
+                                name="db_exit_scan_watermark",
+                                cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+                                symbols=(code,),
                             )
+                for key in requested_keys:
+                    context.exit_history_last_attempt[key] = now
             except asyncio.CancelledError:
+                raise
+            except V20LiveExitStageTimeout:
+                history_failed = True
+                for key in requested_keys:
+                    context.exit_history_last_attempt[key] = now
+                # The tick boundary records the structured incident uniformly.
                 raise
             except Exception as exc:
                 history_failed = True
+                for key in requested_keys:
+                    context.exit_history_last_attempt[key] = now
                 await self._safe_alert(
                     code="EXIT_HISTORY_RECOVERY_FAILED",
                     entity_id=(f"{','.join(recovery_codes)}:{context.trade_date.isoformat()}"),
@@ -5391,10 +6219,6 @@ class V20Service:
                     now=now,
                 )
 
-        # A stale bar already present for one symbol must not disguise a total
-        # current-feed outage, while one suspended/empty symbol must not turn a
-        # healthy sibling response into a global failure. Only the bounded,
-        # session-aware health labels are admitted as pre-existing evidence.
         context_evidence_codes: set[str] = set()
         if freshest_expected_labels:
             context_evidence_codes.update(
@@ -5414,11 +6238,6 @@ class V20Service:
             latest_evidence_codes | history_evidence_codes | context_evidence_codes
         ) & set(tick_target_codes)
         checked_both_sources = latest_attempted and history_attempted
-        # Once the bounded 11:30 publication grace has elapsed, the live
-        # latest-minute endpoint is intentionally idle for lunch. Current-day
-        # history is then the complete required source set until the first
-        # afternoon bar is due, so it must be able to originate (not merely
-        # preserve) a multi-symbol outage.
         lunch_history_authoritative = bool(
             history_attempted and time(11, 31) <= wall <= time(13, 1)
         )
@@ -5449,8 +6268,8 @@ class V20Service:
                 code="LIVE_EXIT_MARKET_DATA_UNAVAILABLE",
                 entity_id=f"{context.trade_date.isoformat()}:{target_text}",
                 message=(
-                    f"{checked_source_text} produced no persisted legal "
-                    f"exit evidence for any live target: {target_text}"
+                    "no legal current-day exit evidence could be persisted for any "
+                    f"live target from {checked_source_text}: {target_text}"
                 ),
                 now=now,
             )
@@ -5462,8 +6281,6 @@ class V20Service:
 
         unavailable_codes = tick_target_codes - evidence_codes
         if required_sources_checked and unavailable_codes and not global_outage:
-            # This is deliberately diagnostic only: a single suspended or
-            # empty-response name cannot suppress protection for valid siblings.
             missing_text = ",".join(sorted(unavailable_codes))
             await self._safe_alert(
                 code="LIVE_EXIT_SYMBOL_DATA_GAP",
@@ -5475,20 +6292,20 @@ class V20Service:
                 now=now,
             )
 
-        # Re-evaluate after today's bounded history staging and recover the
-        # closed D1 side needed by a live D2 leg.
-        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
+        active = await stage(
+            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            name="db_list_final",
+            cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+            symbols=(),
+        )
         today_legs = self._today_exit_legs(active, context.trade_date)
-        await self._evaluate_active_exits(today_legs, now, context.calendar)
-        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
-        recovery_scope = self._today_exit_legs(active, context.trade_date)
-        if recovery_scope:
-            await self._recover_closed_exit_windows(context, recovery_scope, now)
-            active = await self._repository.list_active_legs(
-                context.trade_date, **self._ledger_scope
-            )
-            final_workset = self._today_exit_legs(active, context.trade_date)
-            await self._evaluate_active_exits(final_workset, now, context.calendar)
+        await stage(
+            self._evaluate_active_exits(today_legs, now, context.calendar),
+            name="rules_final",
+            cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
+            symbols=tuple(leg.code for leg in today_legs),
+            provider="rules",
+        )
         if include_stale:
             await self._run_stale_exit_cycle(context, now)
 
@@ -5514,6 +6331,18 @@ class V20Service:
             self._stale_exit_page(active, context.trade_date),
             now,
             context.calendar,
+        )
+
+    async def _run_closed_and_stale_exit_cycle(
+        self,
+        context: _DayContext,
+        now: datetime,
+    ) -> None:
+        active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
+        today_legs = self._today_exit_legs(active, context.trade_date)
+        await asyncio.gather(
+            self._recover_closed_exit_windows(context, today_legs, now),
+            self._run_stale_exit_cycle(context, now),
         )
 
     @staticmethod
@@ -5562,6 +6391,7 @@ class V20Service:
                     detection_is_trading_day=detection_is_trading_day,
                     detection_calendar_status=detection_calendar_status,
                     next_trade_date=next_trade_date,
+                    calendar=calendar,
                 )
             except asyncio.CancelledError:
                 raise
@@ -5603,8 +6433,6 @@ class V20Service:
         targets = tuple(sorted(due_targets))[:MAX_CLOSED_EXIT_RECOVERY_TARGETS_PER_TICK]
         if not targets:
             return
-        for key in targets:
-            context.exit_history_last_attempt[key] = now
 
         recovery_slots = asyncio.Semaphore(4)
 
@@ -5627,9 +6455,11 @@ class V20Service:
         )
         for target, result in zip(targets, results, strict=True):
             code, trade_date = target
+            terminal_key = (code, trade_date)
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
+                context.exit_history_last_attempt[terminal_key] = now
                 await self._safe_alert(
                     code="D1_EXIT_HISTORY_RECOVERY_FAILED",
                     entity_id=f"{code}:{trade_date.isoformat()}",
@@ -5638,6 +6468,7 @@ class V20Service:
                 )
                 continue
             _code, _trade_date, history = result
+            context.exit_history_last_attempt[terminal_key] = now
             await self._persist_history(context, history, observed_at=now)
             rows = tuple(history.get(code, ()))
             is_d1 = any(leg.code == code and leg.d1 == trade_date for leg in active_legs)
@@ -5679,6 +6510,7 @@ class V20Service:
         detection_is_trading_day: bool = False,
         detection_calendar_status: str = "UNKNOWN",
         next_trade_date: date | None = None,
+        calendar: Sequence[date] = (),
     ) -> None:
         if detection_calendar_status not in {
             "UNKNOWN",
@@ -5715,10 +6547,23 @@ class V20Service:
         if now.date() >= record.d2:
             try:
                 cutoff = _local(record.d1, self.config.clock.mews_cutoff_d1)
+                # The leg's daily value may have been repaired later on D1
+                # itself; offer that exact (predecessor, D1) window so a late
+                # local calculation can serve legs that have not produced a
+                # formal exit intent yet.  Without calendar evidence the
+                # window stays closed and only the strict cutoff applies.
+                late_source_trade_date = None
+                predecessors = [day for day in calendar if day < record.d1]
+                if predecessors:
+                    late_source_trade_date = predecessors[-1]
                 await self._repository.select_mews_for_leg(
                     record.model_leg_id,
                     d1=record.d1,
                     cutoff=cutoff,
+                    late_source_trade_date=late_source_trade_date,
+                    late_availability_date=(
+                        record.d1 if late_source_trade_date is not None else None
+                    ),
                 )
                 selected = await self._repository.load_selected_mews_for_leg(record.model_leg_id)
             except asyncio.CancelledError:
@@ -6044,10 +6889,21 @@ class V20Service:
         codes: Sequence[str],
         *,
         observed_at: datetime | None = None,
+        deadline: float | None = None,
+        tick_started_at: float | None = None,
     ) -> Mapping[str, TushareMinuteBar]:
-        rows = await asyncio.wait_for(
+        if deadline is None or tick_started_at is None:
+            loop = asyncio.get_running_loop()
+            tick_started_at = loop.time()
+            deadline = tick_started_at + LIVE_EXIT_MAX_TICK_SECONDS
+        rows = await self._run_live_exit_stage(
             self._scan_state.realtime_client.batch_get_latest_minute_bars(list(codes)),
-            timeout=LATEST_MINUTE_POLL_TIMEOUT_SECONDS,
+            stage="latest",
+            stage_cap=LATEST_MINUTE_POLL_TIMEOUT_SECONDS,
+            deadline=deadline,
+            tick_started_at=tick_started_at,
+            symbols=tuple(codes),
+            provider="tushare_rt",
         )
         observation = self._aware_now(observed_at)
         complete = {
@@ -6057,7 +6913,15 @@ class V20Service:
         }
         if complete:
             payloads = {code: _bar_payload(bar) for code, bar in complete.items()}
-            sealed_hashes = await self._repository.record_minute_bars(list(payloads.values()))
+            sealed_hashes = await self._run_live_exit_stage(
+                self._repository.record_minute_bars(list(payloads.values())),
+                stage="db_persist_latest",
+                stage_cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+                deadline=deadline,
+                tick_started_at=tick_started_at,
+                symbols=tuple(complete),
+                provider="postgres",
+            )
             complete = {
                 code: bar
                 for code, bar in complete.items()
@@ -6073,7 +6937,13 @@ class V20Service:
         history: Mapping[str, Sequence[TushareMinuteBar]],
         *,
         observed_at: datetime | None = None,
+        deadline: float | None = None,
+        tick_started_at: float | None = None,
     ) -> tuple[TushareMinuteBar, ...]:
+        if deadline is None or tick_started_at is None:
+            loop = asyncio.get_running_loop()
+            tick_started_at = loop.time()
+            deadline = tick_started_at + LIVE_EXIT_MAX_TICK_SECONDS
         observation = self._aware_now(observed_at)
         bars = [
             bar
@@ -6084,8 +6954,14 @@ class V20Service:
         persisted: list[TushareMinuteBar] = []
         if bars:
             payloads = [(_bar_payload(bar), bar) for bar in bars]
-            sealed_hashes = await self._repository.record_minute_bars(
-                [payload for payload, _bar in payloads]
+            sealed_hashes = await self._run_live_exit_stage(
+                self._repository.record_minute_bars([payload for payload, _bar in payloads]),
+                stage="db_persist_history",
+                stage_cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+                deadline=deadline,
+                tick_started_at=tick_started_at,
+                symbols=tuple(sorted({bar.stock_code for bar in bars})),
+                provider="postgres",
             )
             for payload, bar in payloads:
                 if sha256_json(payload) not in sealed_hashes:
@@ -6114,10 +6990,12 @@ class V20Service:
         entity_id: str,
         message: str,
         now: datetime,
+        event_id: str | None = None,
+        semantic_extras: Mapping[str, Any] | None = None,
     ) -> None:
         if not self._repository_started:
             return
-        semantic = {
+        semantic: dict[str, Any] = {
             "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
             "strategy_version": self.config.strategy_version,
@@ -6132,13 +7010,16 @@ class V20Service:
             "reason": message,
             "message": message,
         }
-        alert_id = named_hash(
+        if semantic_extras is not None:
+            semantic.update(semantic_extras)
+        semantic_hash = sha256_json(semantic)
+        alert_id = event_id or named_hash(
             "V20_DATA_ALERT_EVENT_ID_V1",
             {
                 "alert_code": code,
                 "entity_id": entity_id,
                 "event_trade_date": now.date().isoformat(),
-                "semantic_hash": sha256_json(semantic),
+                "semantic_hash": semantic_hash,
             },
         )
 
@@ -6147,7 +7028,7 @@ class V20Service:
                 alert_id,
                 self.config.route_id,
                 semantic,
-                sha256_json(semantic),
+                semantic_hash,
                 **self._ledger_scope,
             )
             await self._repository.seal_event(alert_id, seal_v20_payload)
@@ -6161,7 +7042,11 @@ class V20Service:
             logger.error(
                 "V20 could not persist DATA_ALERT %s",
                 code,
-                exc_info=(type(persist_result), persist_result, persist_result.__traceback__),
+                exc_info=(
+                    type(persist_result),
+                    persist_result,
+                    persist_result.__traceback__,
+                ),
             )
 
     def _reference_code_sets(self, status: EntryStatus) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -6241,7 +7126,7 @@ class V20Service:
             raise V20RepositoryError("V20 service is not running")
 
     async def _require_manual_trigger_ready(self) -> None:
-        """Require the same healthy runtime state exposed by the status API."""
+        """Require the entry-trigger readiness profile, not global health."""
 
         self._require_running()
         if (
@@ -6252,8 +7137,11 @@ class V20Service:
         ):
             raise V20RepositoryError("V20 runtime is not healthy enough for manual trigger")
         runtime_status = await self.status()
-        if runtime_status.get("healthy") is not True:
-            raise V20RepositoryError("V20 runtime is not healthy enough for manual trigger")
+        decision_lane = runtime_status.get("runtime_lanes", {}).get("decision", {})
+        if decision_lane.get("last_error") is not None:
+            raise V20RepositoryError("V20 decision lane is unavailable for manual trigger")
+        if runtime_status.get("status_snapshot", {}).get("stale") is not False:
+            raise V20RepositoryError("V20 database status evidence is unavailable")
 
     @property
     def _ledger_scope(self) -> dict[str, str]:

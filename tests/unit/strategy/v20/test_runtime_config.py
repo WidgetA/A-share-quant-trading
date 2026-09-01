@@ -5,13 +5,18 @@ from pathlib import Path
 import pytest
 import yaml
 
+from src.strategy.v20.runtime_compatibility import is_audited_state_semantics_transition
 from src.strategy.v20.runtime_config import (
+    _MIXED_STATE_SOURCE_CLASSES,
     _STRATEGY_DEPENDENCY_FILES,
     V20ConfigError,
     load_v20_runtime_config,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+_PRE_SELECTION_V2_CORE = "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc"
+_SELECTION_V3_CORE = "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b"
 
 
 def _isolated_project(tmp_path: Path) -> tuple[Path, dict]:
@@ -228,6 +233,42 @@ def test_unreviewed_mixed_service_bytes_fail_closed(
 
     with pytest.raises(V20ConfigError, match="unreviewed state-sensitive mixed source"):
         load_v20_runtime_config(root)
+
+
+def test_selection_v3_source_bytes_and_upgrade_edge_are_exact() -> None:
+    service_classes = _MIXED_STATE_SOURCE_CLASSES["src/web/v20_service.py"]
+    repository_classes = _MIXED_STATE_SOURCE_CLASSES["src/data/database/v20_repository.py"]
+
+    assert (
+        service_classes["985b11a06d4222fbb1ef42da6313bf155522400606e08c205d365ec901a3f7df"]
+        == "V20_SERVICE_STATE_ORCHESTRATION_V3"
+    )
+    assert (
+        service_classes["2aaf4957addc5f09d7eca3aa7e45ed525c87a7fb8e470ad68f0b5b2f94d9d78f"]
+        == "V20_SERVICE_STATE_ORCHESTRATION_V3"
+    )
+    assert "56fe73c25e65309a3fc52cc1a47c0a102c99a07b8370f9d5788c8ef2222921e1" not in (
+        service_classes
+    )
+    assert "568616622cc3fcd7cf21f60773a87db6a9bda9cdbb236eec6d5c960c31b2e998" not in (
+        service_classes
+    )
+    assert (
+        repository_classes["bfcb7d5881e2597bfbc46d3826e9cee45656e4419d2e6dc489fea3c81de4d35e"]
+        == "V20_LEDGER_STATE_CONTRACT_V2"
+    )
+    assert is_audited_state_semantics_transition(
+        _PRE_SELECTION_V2_CORE,
+        _SELECTION_V3_CORE,
+    )
+    assert not is_audited_state_semantics_transition(
+        "0" * 64,
+        _SELECTION_V3_CORE,
+    )
+    assert not is_audited_state_semantics_transition(
+        _PRE_SELECTION_V2_CORE,
+        "f" * 64,
+    )
 
 
 def test_container_bundled_data_paths_keep_same_logical_hash_keys(tmp_path, monkeypatch) -> None:

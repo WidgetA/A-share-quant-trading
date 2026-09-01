@@ -100,6 +100,7 @@ class V16ScanResult:
     step0_codes: list[str] = field(default_factory=list)
     step2_boards_detail: dict[str, list[str]] = field(default_factory=dict)
     step2_codes: list[str] = field(default_factory=list)
+    st_eligible_codes: list[str] = field(default_factory=list)
     step3_codes: list[str] = field(default_factory=list)
     step4_codes: list[str] = field(default_factory=list)
     step5_codes: list[str] = field(default_factory=list)
@@ -292,7 +293,8 @@ class V16Scanner:
         hot_board_codes: set[str] = set()
         for codes in hot_boards.values():
             hot_board_codes.update(codes)
-        result.step2_codes = sorted(hot_board_codes)
+        ordered_hot_board_codes = sorted(hot_board_codes)
+        result.step2_codes = ordered_hot_board_codes
 
         logger.info(
             f"Step 2: {len(hot_boards)} hot boards, "
@@ -313,7 +315,7 @@ class V16Scanner:
         # Per-stock gain_from_open + driver/expanded attribution (see V16ScanResult docstring)
         stock_gain_from_open: dict[str, float] = {}
         stock_is_driver: dict[str, bool] = {}
-        for code in hot_board_codes:
+        for code in ordered_hot_board_codes:
             sd = stock_data.get(code)
             if sd is None or sd.open_price <= 0:
                 continue
@@ -326,13 +328,15 @@ class V16Scanner:
         # Build funnel candidates from hot board stocks
         candidates = [
             _FunnelStock(code=c, name=stock_data[c].name, board_name=stock_best_board.get(c, ""))
-            for c in hot_board_codes
+            for c in ordered_hot_board_codes
             if c in stock_data
         ]
 
         # ── ST filter (after board avg gain, before individual filters) ──
         pre_st = len(candidates)
-        non_st = set(await self._fdb.batch_filter_st([s.code for s in candidates]))
+        st_request_codes = sorted(s.code for s in candidates)
+        non_st = set(await self._fdb.batch_filter_st(st_request_codes))
+        result.st_eligible_codes = sorted(non_st)
         candidates = [s for s in candidates if s.code in non_st]
         st_removed = pre_st - len(candidates)
         logger.info(f"ST filter: {pre_st} → {len(candidates)} (removed {st_removed} ST)")

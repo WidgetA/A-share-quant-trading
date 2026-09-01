@@ -82,6 +82,7 @@ def _mews(
     generated_at: datetime | None = None,
     received_at: datetime | None = None,
     snapshot_id: str | None = "m1",
+    availability_date: date | None = None,
 ) -> MewsSnapshot:
     return MewsSnapshot(
         source_trade_date=source_trade_date,
@@ -91,6 +92,7 @@ def _mews(
         model_version="model-v1",
         data_version="data-v1",
         snapshot_id=snapshot_id,
+        availability_date=availability_date,
     )
 
 
@@ -249,6 +251,69 @@ def test_mews_cutoff_is_strict_and_latest_qualified_selection() -> None:
         leg=_leg(), snapshots=[exactly_at_cutoff], as_of=_dt(D2, 9, 31)
     )
     assert not cutoff_only.available
+
+
+def test_late_same_day_daily_mews_is_available_for_d2_judgment() -> None:
+    late = _mews(
+        generated_at=_dt(D1, 14, 4),
+        received_at=_dt(D1, 14, 5),
+        snapshot_id="late",
+        availability_date=D1,
+    )
+    selected = select_mews_snapshot(
+        leg=_leg(),
+        snapshots=[late, _mews(snapshot_id="on-time")],
+        as_of=_dt(D2, 9, 31),
+    )
+    assert selected.available
+    assert selected.snapshot is late
+
+    # A D2 evaluation before the late snapshot was sealed cannot see it.
+    not_yet_visible = select_mews_snapshot(leg=_leg(), snapshots=[late], as_of=_dt(D1, 14, 3))
+    assert not not_yet_visible.available
+
+    # The late-repaired DANGER value tightens the D2 threshold to -5%.
+    result = evaluate_exit(
+        leg=_leg(),
+        bars=[_bar(D2, 9, 31, 95.0)],
+        as_of=_dt(D2, 9, 31),
+        mews_snapshots=[late],
+        d1_window_complete=True,
+    )
+    assert result.intent is not None
+    assert result.intent.signal_type is ExitSignalType.D2_MEWS_DANGER_ENTRY_05
+
+
+def test_late_mews_without_matching_availability_is_never_promoted() -> None:
+    # A stale source regenerated late on D1 (availability belongs to an older
+    # day) must not be recycled into the D1 daily value.
+    stale_regen = _mews(
+        source_trade_date=date(2026, 8, 26),
+        generated_at=_dt(D1, 14, 4),
+        received_at=_dt(D1, 14, 5),
+        snapshot_id="stale",
+        availability_date=date(2026, 8, 26),
+    )
+    # No availability evidence at all: the strict 09:40 cutoff still applies.
+    no_evidence = _mews(
+        generated_at=_dt(D1, 14, 4),
+        received_at=_dt(D1, 14, 5),
+        snapshot_id="no-evidence",
+    )
+    # Availability after D1 is not the leg's daily value either.
+    future_day = _mews(
+        generated_at=_dt(D1, 14, 4),
+        received_at=_dt(D1, 14, 5),
+        snapshot_id="future-day",
+        availability_date=D2,
+    )
+    selected = select_mews_snapshot(
+        leg=_leg(),
+        snapshots=[stale_regen, no_evidence, future_day],
+        as_of=_dt(D2, 9, 31),
+    )
+    assert not selected.available
+    assert selected.reason == "MEWS_UNAVAILABLE"
 
 
 def test_invalid_mews_uses_default_threshold_and_records_alert_reason() -> None:

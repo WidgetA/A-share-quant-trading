@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
@@ -5,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import src.strategy.v20.runtime_config as runtime_config_module
 from src.data.database.v20_repository import StateRecord, sha256_json
 from src.strategy.lgbrank_scorer import ScoredStock
 from src.strategy.strategies.v16_scanner import V16ScanResult
@@ -27,7 +29,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 TZ = ZoneInfo("Asia/Shanghai")
 
 
-def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams() -> None:
+def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for relative_path, source_classes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
+        current_hash = hashlib.sha256((PROJECT_ROOT / relative_path).read_bytes()).hexdigest()
+        monkeypatch.setitem(source_classes, current_hash, next(iter(source_classes.values())))
     config = load_v20_runtime_config(PROJECT_ROOT)
     artifacts = load_g_artifacts(
         config.artifact_manifest_path.parent,
@@ -43,7 +50,11 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams() -> None:
         )
         for index in range(1, 11)
     ]
-    scan = V16ScanResult(recommended=stocks, final_candidates=10)
+    scan = V16ScanResult(
+        recommended=stocks,
+        final_candidates=10,
+        stock_all_boards={stock.code: ["BOARD"] for stock in stocks},
+    )
     snapshot = {
         "schema_version": V20_V16_SNAPSHOT_SCHEMA,
         "trade_date": "2026-08-31",
@@ -53,7 +64,7 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams() -> None:
             "step2_hot_board_count": 9,
             "final_candidates": 10,
         },
-        "board_avg_gains": {"银行": 1.2},
+        "board_avg_gains": {"BOARD": 1.2},
         "symbols": [
             {
                 "rank": stock.rank,
@@ -61,12 +72,15 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams() -> None:
                 "name": stock.name,
                 "score": stock.score,
                 "snapshot_price": stock.buy_price,
-                "boards": ["银行"],
-                "best_board": "银行",
+                "boards": ["BOARD"],
+                "best_board": "BOARD",
                 "is_driver": True,
-                "cci": 0.0,
-                "volume_937": 100000,
+                "cci": None,
+                "volume_937": None,
                 "history_hash": "a" * 64,
+                "early_source_hash": hashlib.sha256(
+                    f"early-source:{stock.code}".encode()
+                ).hexdigest(),
             }
             for stock in stocks
         ],
@@ -129,7 +143,10 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams() -> None:
     assert prepared.commit.semantic["schema_version"] == V20_ENTRY_SEMANTIC_SCHEMA
     assert prepared.commit.semantic["feishu_formatter_profile"] == V20_FEISHU_FORMATTER_PROFILE
     assert prepared.commit.semantic["v16_funnel"] == snapshot["funnel"]
-    assert prepared.commit.semantic["v16_board_avg_gains"] == {"银行": 1.2}
+    assert prepared.commit.semantic["v16_board_avg_gains"] == {"BOARD": 1.2}
+    assert all(item["boards"] == ["BOARD"] for item in prepared.commit.semantic["symbols"])
+    assert all(item["cci"] is None for item in prepared.commit.semantic["symbols"])
+    assert all(item["volume_937"] is None for item in prepared.commit.semantic["symbols"])
     assert prepared.commit.next_state["state_revision"] == 1
 
     legacy_snapshot = {**snapshot, "schema_version": "v20-v16-snapshot/v1"}
@@ -159,6 +176,47 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams() -> None:
                 bundle,
                 snapshot=partial_snapshot,
                 snapshot_hash=sha256_json(partial_snapshot),
+            ),
+            completed_health=[],
+            completed_rolling=rolling,
+            maturity_gaps=[],
+            artifacts=artifacts,
+            calendar=[date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)],
+        )
+
+    missing_hash_snapshot = dict(snapshot)
+    missing_hash_snapshot["symbols"] = [
+        {key: value for key, value in item.items() if key != "early_source_hash"}
+        for item in snapshot["symbols"]
+    ]
+    with pytest.raises(ValueError, match="formatter evidence is incomplete"):
+        prepare_entry(
+            config=config,
+            state=state,
+            bundle=replace(
+                bundle,
+                snapshot=missing_hash_snapshot,
+                snapshot_hash=sha256_json(missing_hash_snapshot),
+            ),
+            completed_health=[],
+            completed_rolling=rolling,
+            maturity_gaps=[],
+            artifacts=artifacts,
+            calendar=[date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)],
+        )
+
+    invalid_hash_snapshot = dict(snapshot)
+    invalid_hash_snapshot["symbols"] = [
+        {**item, "early_source_hash": "not-a-64-hex-digest"} for item in snapshot["symbols"]
+    ]
+    with pytest.raises(ValueError, match="early_source_hash is invalid"):
+        prepare_entry(
+            config=config,
+            state=state,
+            bundle=replace(
+                bundle,
+                snapshot=invalid_hash_snapshot,
+                snapshot_hash=sha256_json(invalid_hash_snapshot),
             ),
             completed_health=[],
             completed_rolling=rolling,

@@ -1,14 +1,18 @@
 import asyncio
 import hashlib
+import inspect
+from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 from src.common.v20_feishu import (
     V20_RELAY_REQUEST_SCHEMA,
     V20_RELAY_RESPONSE_SCHEMA,
+    V20FeishuRoute,
     V20LegacyRelayClient,
     V20OutboxPublisher,
     V20RelayClient,
@@ -19,7 +23,13 @@ from src.common.v20_feishu import (
     render_exit_message,
     seal_v20_payload,
 )
-from src.data.database.v20_repository import OutboxRecord, V20StateConflict, sha256_json
+from src.data.database.v20_repository import (
+    DeliveryAttempt,
+    OutboxRecord,
+    V20Repository,
+    V20StateConflict,
+    sha256_json,
+)
 from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_ENTRY_SEMANTIC_SCHEMA,
@@ -139,6 +149,7 @@ def test_entry_message_is_explicit_and_keeps_full_v16_style_rows() -> None:
             "cci": 80.0 + rank,
             "volume_937": 100000.0 + rank * 10000,
             "history_hash": "a" * 64,
+            "early_source_hash": "b" * 64,
         }
         for rank in range(1, 11)
     ]
@@ -251,6 +262,7 @@ def test_entry_current_contract_seals_and_legacy_or_partial_contracts_fail_close
                 "cci": 88.0,
                 "volume_937": 120000.0,
                 "history_hash": "a" * 64,
+                "early_source_hash": "b" * 64,
             }
         ],
         "scheduled_exits_today": [],
@@ -273,6 +285,34 @@ def test_entry_current_contract_seals_and_legacy_or_partial_contracts_fail_close
     wrong_profile = {**semantic, "feishu_formatter_profile": "legacy-profile"}
     with pytest.raises(ValueError, match="formatter profile"):
         seal_v20_payload(_outbox_record("ENTRY_DECISION", wrong_profile), generated_at, 4, True)
+
+    optional_evidence = dict(semantic)
+    optional_evidence["symbols"] = [{**semantic["symbols"][0], "cci": None, "volume_937": None}]
+    optional_payload = seal_v20_payload(
+        _outbox_record("ENTRY_DECISION", optional_evidence), generated_at, 5, True
+    )
+    optional_row = str(optional_payload["message"]).splitlines()[4]
+    assert "CCI=" not in optional_row
+    assert "7min=" not in optional_row
+
+    missing_source_hash = dict(semantic)
+    missing_source_hash["symbols"] = [
+        {key: value for key, value in semantic["symbols"][0].items() if key != "early_source_hash"}
+    ]
+    with pytest.raises(ValueError, match="formatter evidence is incomplete"):
+        seal_v20_payload(
+            _outbox_record("ENTRY_DECISION", missing_source_hash), generated_at, 6, True
+        )
+
+    bad_source_hash = dict(semantic)
+    bad_source_hash["symbols"] = [{**semantic["symbols"][0], "early_source_hash": "g" * 64}]
+    with pytest.raises(ValueError, match="early_source_hash is invalid"):
+        seal_v20_payload(_outbox_record("ENTRY_DECISION", bad_source_hash), generated_at, 7, True)
+
+    null_board_gain = dict(semantic)
+    null_board_gain["v16_board_avg_gains"] = {"bank": None}
+    with pytest.raises(ValueError, match="board gains are invalid"):
+        seal_v20_payload(_outbox_record("ENTRY_DECISION", null_board_gain), generated_at, 8, True)
 
 
 def test_input_invalid_current_contract_leads_with_operator_action() -> None:
@@ -478,7 +518,7 @@ def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
         "data_cutoff": "09:39",
         "data_receipt_timeliness": "POST_CUTOFF",
         "computed_at": "2026-08-31T15:30:00+08:00",
-        "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE",
+        "state_replay_profile": "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY",
         "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
         "pit_limitations": ["POST_CUTOFF_REPLAY"],
         "message": "⛔ 已过期不可追买；这不是交易指令。",
@@ -502,6 +542,15 @@ def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
     assert "INPUT_INVALID" not in payload["message"]
     assert "ENTER" not in payload["message"]
     assert "ON_TIME" not in payload["message"]
+
+    incompatible = {**semantic, "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE"}
+    with pytest.raises(ValueError, match="invalid retrospective boundary"):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", incompatible, event_id="late-replay-event"),
+            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+            19,
+            True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -534,7 +583,7 @@ def test_late_0939_replay_translates_non_entry_outcomes(
         "data_cutoff": "09:39",
         "data_receipt_timeliness": "POST_CUTOFF",
         "computed_at": "2026-08-31T15:30:00+08:00",
-        "state_replay_profile": "DEPLOYED_RUNTIME_LINEAGE",
+        "state_replay_profile": "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY",
         "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
         "pit_limitations": ["POST_CUTOFF_REPLAY"],
         "message": "retrospective audit detail",
@@ -569,6 +618,9 @@ def _manual_0939_chain_probe_semantic(
             "cci": 88.0,
             "volume_937": 120000.0,
             "history_hash": "c" * 64,
+            "early_source_hash": hashlib.sha256(
+                b"manual-chain-probe:000001:early-source"
+            ).hexdigest(),
         }
     ]
     entry_render_semantic = {
@@ -631,7 +683,7 @@ def _manual_0939_chain_probe_semantic(
         "orders_changed": False,
         "non_actionable": True,
         "retrospective_expired": True,
-        "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
+        "visible_message_mode": "MANUAL_OPERATOR_RENDER",
         "computed_at": "2026-08-31T15:30:00+08:00",
         "message": "formatter-owned manual full-chain probe detail",
     }
@@ -652,7 +704,7 @@ def _manual_0939_chain_probe_semantic(
     return semantic
 
 
-def test_manual_0939_chain_probe_pass_message_proves_fresh_current_version_run() -> None:
+def test_manual_0939_chain_probe_pass_message_is_check_only_manual_render() -> None:
     semantic = _manual_0939_chain_probe_semantic()
     generated_at = datetime(2026, 8, 31, 15, 30, tzinfo=TZ)
 
@@ -667,15 +719,30 @@ def test_manual_0939_chain_probe_pass_message_proves_fresh_current_version_run()
     assert payload["timeliness_status"] == "ON_TIME"
     assert "actionable_from" not in payload
     assert "expired_delivery_message" not in payload
-    assert payload["message"] == render_entry_message(
-        semantic["entry_render_semantic"],
-        generated_at=generated_at,
-        commit_marker=21,
-        on_time=True,
-    )
-    assert str(payload["message"]).startswith("[V20][SHADOW] 每日决策")
-    assert "当前版本早盘链路重算" not in payload["message"]
-    assert "验收" not in payload["message"]
+    message = str(payload["message"])
+    lines = message.splitlines()
+    # 固定标题，不以“每日决策”开头，不伪装成正式每日决策。
+    assert lines[0] == "[V20][SHADOW] 手工触发结果｜仅核查"
+    assert "每日决策" not in lines[0]
+    # 顶部先给当前动作，再展示策略计算结果。
+    assert lines[2] == "当前操作：不生成新的入场指令，不补买，不追买"
+    assert lines[3] == "原因：手工触发时间已过当日入场时点。"
+    assert message.index("当前操作") < message.index("策略计算结果")
+    # 策略计算结果：倍率、滚动7、G、完整票单仍在。
+    assert "策略计算结果" in message
+    assert "最终倍率 100%" in message
+    assert "滚动7: NON_BAD" in message
+    assert "极端门G: NOT_EVALUATED" in message
+    assert "V16完整推荐（1只）" in message
+    assert "000001 平安银行" in message
+    assert "LGB=0.8123" in message
+    # “正常建立”不得被渲染成当前动作。
+    assert "正常建立" not in message
+    # footer 使用外层人工核查 event_id，不泄露嵌套正式事件 ID。
+    assert f"事件：{semantic['event_id'][:16]}" in lines[-1]
+    assert "hypothetical-entry-event" not in message
+    for banned in ("理论复盘", "当时本应", "复盘已过期"):
+        assert banned not in message
 
 
 def test_manual_0939_chain_probe_can_verify_previous_session_after_midnight() -> None:
@@ -691,12 +758,42 @@ def test_manual_0939_chain_probe_can_verify_previous_session_after_midnight() ->
         True,
     )
 
-    assert payload["message"] == render_entry_message(
-        semantic["entry_render_semantic"],
-        generated_at=datetime(2026, 9, 1, 0, 5, tzinfo=TZ),
-        commit_marker=24,
-        on_time=True,
-    )
+    message = str(payload["message"])
+    assert message.startswith("[V20][SHADOW] 手工触发结果｜仅核查")
+    assert "策略计算结果" in message
+    assert f"事件：{semantic['event_id'][:16]}" in message.splitlines()[-1]
+
+
+def test_manual_0939_chain_probe_rejects_non_hex_early_source_hash() -> None:
+    semantic = _manual_0939_chain_probe_semantic()
+    entry_semantic = dict(semantic["entry_render_semantic"])
+    entry_semantic["symbols"] = [
+        {**entry_semantic["symbols"][0], "early_source_hash": "manual-source"}
+    ]
+    semantic["entry_render_semantic"] = entry_semantic
+
+    with pytest.raises(ValueError, match="early_source_hash is invalid"):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+            26,
+            True,
+        )
+
+
+def test_manual_0939_chain_probe_rejects_null_board_gain() -> None:
+    semantic = _manual_0939_chain_probe_semantic()
+    entry_semantic = dict(semantic["entry_render_semantic"])
+    entry_semantic["v16_board_avg_gains"] = {"银行": None}
+    semantic["entry_render_semantic"] = entry_semantic
+
+    with pytest.raises(ValueError, match="board gains are invalid"):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+            27,
+            True,
+        )
 
 
 def test_manual_0939_chain_probe_discloses_when_exact_coverage_was_not_frozen() -> None:
@@ -713,12 +810,9 @@ def test_manual_0939_chain_probe_discloses_when_exact_coverage_was_not_frozen() 
         True,
     )
 
-    assert payload["message"] == render_entry_message(
-        semantic["entry_render_semantic"],
-        generated_at=datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
-        commit_marker=25,
-        on_time=True,
-    )
+    message = str(payload["message"])
+    assert message.startswith("[V20][SHADOW] 手工触发结果｜仅核查")
+    assert "当前操作：不生成新的入场指令，不补买，不追买" in message
 
 
 def test_manual_0939_chain_probe_failure_message_is_explicit_and_non_actionable() -> None:
@@ -743,7 +837,7 @@ def test_manual_0939_chain_probe_failure_message_is_explicit_and_non_actionable(
     assert "当时本应" not in payload["message"]
 
 
-def test_frozen_official_entry_replay_preserves_message_bytes_exactly() -> None:
+def test_frozen_official_entry_replay_wraps_verbatim_source_under_check_banner() -> None:
     source_message = "[V20] 每日决策 (2026-08-31 09:40)\n逐字原样：空格、换行、✅"
     semantic = {
         "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
@@ -790,8 +884,24 @@ def test_frozen_official_entry_replay_preserves_message_bytes_exactly() -> None:
         True,
     )
 
-    assert payload["message"] == source_message
-    assert payload["message"].encode("utf-8") == source_message.encode("utf-8")
+    message = str(payload["message"])
+    lines = message.splitlines()
+    # 最外层是不可忽略的核查横幅与当前动作说明。
+    assert lines[0] == "[V20] 手工触发结果｜仅核查"
+    assert lines[2] == "当前操作：不生成新的入场指令，不补买，不追买"
+    assert lines[3] == "原因：手工触发时间已过当日入场时点。"
+    assert "以下为早盘封存原文" in message
+    # 封存原文仍可逐字节提取核对。
+    begin = "----- 早盘封存原文开始（逐字节未改动，仅供核查） -----\n"
+    end = "\n----- 早盘封存原文结束 -----"
+    extracted = message.split(begin, 1)[1].split(end, 1)[0]
+    assert extracted == source_message
+    assert extracted.encode("utf-8") == source_message.encode("utf-8")
+    # footer/外层身份使用人工核查事件，不与来源正式事件混淆。
+    assert f"事件：{semantic['event_id'][:16]}" in lines[-1]
+    assert "来源事件：source-entry-eve" in lines[-1]
+    for banned in ("理论复盘", "当时本应", "复盘已过期"):
+        assert banned not in message
 
 
 @pytest.mark.parametrize(
@@ -802,6 +912,7 @@ def test_frozen_official_entry_replay_preserves_message_bytes_exactly() -> None:
         ({"official_state_changed": True}, "state-preserving"),
         ({"orders_changed": True}, "state-preserving"),
         ({"v16_count": 2}, "V16 count"),
+        ({"visible_message_mode": "AUTOMATIC_ENTRY_RENDER"}, "manual check-only renderer"),
     ],
 )
 def test_manual_0939_chain_probe_cannot_masquerade_old_or_stateful_work_as_pass(
@@ -1253,29 +1364,77 @@ class _PublisherRepository:
         self.record = record
         self.completed = None
         self.lease_kwargs = None
+        self.started: list[tuple[str, dict]] = []
 
     async def lease_outbox(self, **kwargs):
         self.lease_kwargs = kwargs
         return [self.record]
 
-    async def complete_delivery(self, event_id, **kwargs):
-        self.completed = (event_id, kwargs)
+    async def defer_before_dispatch(self, event_id, **kwargs):
+        self.deferred = (event_id, kwargs)
+
+    async def begin_delivery_attempt(self, event_id, **kwargs):  # noqa: ARG002
+        self.started.append((event_id, kwargs))
+        expiry = self.record.action_expiry_ts
+        if expiry is None:
+            variant = "PRIMARY"
+        elif kwargs.get("relay_enforced"):
+            variant = "RELAY_ENFORCED"
+        else:
+            variant = (
+                "ACTIONABLE"
+                if self.record.lease_db_ts is not None and self.record.lease_db_ts < expiry
+                else "EXPIRED_NOTICE"
+            )
+        return DeliveryAttempt(
+            attempt_number=self.record.attempt_count + 1,
+            delivery_variant=variant,
+        )
+
+    async def complete_delivery(
+        self,
+        event_id,
+        *,
+        attempt_number,
+        worker_id,
+        route_id,
+        official_stream_id,
+        lineage_id,
+        outcome,
+        error=None,
+        retry_after_seconds=30,
+    ):
+        self.completed = (
+            event_id,
+            {
+                "attempt_number": attempt_number,
+                "worker_id": worker_id,
+                "route_id": route_id,
+                "official_stream_id": official_stream_id,
+                "lineage_id": lineage_id,
+                "outcome": outcome,
+                "error": error,
+                "retry_after_seconds": retry_after_seconds,
+            },
+        )
 
 
 class _CapturingRelay:
     def __init__(self) -> None:
         self.envelopes: list[dict] = []
+        self.variants: list[str] = []
 
     def is_configured(self):
         return True
 
-    async def send_delivery(self, envelope):
+    async def send_delivery(self, envelope, *, delivery_variant="PRIMARY"):  # noqa: ARG002
         self.envelopes.append(dict(envelope))
+        self.variants.append(delivery_variant)
         return True
 
 
 class _FailingRelay(_CapturingRelay):
-    async def send_delivery(self, envelope):
+    async def send_delivery(self, envelope, *, delivery_variant="PRIMARY"):  # noqa: ARG002
         self.envelopes.append(dict(envelope))
         return False
 
@@ -1286,6 +1445,23 @@ def _route(relay, *, transport="v20_relay"):
         destination_fingerprint="d" * 64,
         transport=transport,
         relay=lambda: relay,
+    )
+
+
+def test_repository_finalize_contract_has_no_publisher_only_kwargs() -> None:
+    signature = inspect.signature(V20Repository.complete_delivery)
+    assert "retryable" not in signature.parameters
+    assert "succeeded" not in signature.parameters
+    signature.bind(
+        "repository",
+        "event",
+        attempt_number=1,
+        worker_id="worker",
+        route_id="route",
+        official_stream_id="stream",
+        lineage_id="lineage",
+        outcome="UNKNOWN",
+        error="terminal",
     )
 
 
@@ -1388,10 +1564,10 @@ async def test_embedded_legacy_delivery_is_downgraded_by_database_clock_after_ex
     )
 
     assert await publisher.publish_once() == 1
-    assert relay.envelopes[0]["delivery_class"] == "NON_ACTIONABLE_ENTRY"
-    assert relay.envelopes[0]["action_expiry_ts"] is None
-    assert relay.envelopes[0]["message"] == "do not buy"
-    assert relay.envelopes[0]["expired_delivery_message"] is None
+    assert repository.started[0][1]["action_reserve_seconds"] == 32.0
+    assert relay.variants[0] == "EXPIRED_NOTICE"
+    assert relay.envelopes[0]["message"] == "buy"
+    assert relay.envelopes[0]["expired_delivery_message"] == "do not buy"
 
 
 async def test_publisher_preserves_late_input_invalid_reason_message() -> None:
@@ -1433,10 +1609,74 @@ async def test_publisher_preserves_late_input_invalid_reason_message() -> None:
     )
 
     assert await publisher.publish_once() == 1
-    assert relay.envelopes[0]["delivery_class"] == "NON_ACTIONABLE_ENTRY"
-    assert relay.envelopes[0]["action_expiry_ts"] is None
-    assert relay.envelopes[0]["expired_delivery_message"] is None
+    assert relay.variants[0] == "RELAY_ENFORCED"
     assert "输入异常" in relay.envelopes[0]["message"]
+
+
+@pytest.mark.parametrize("action", ["BLOCK", "NO_SIGNAL", "INPUT_INVALID"])
+async def test_late_embedded_legacy_non_actionable_entry_posts_primary_message(
+    monkeypatch, action
+) -> None:
+    expiry = datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
+    record = OutboxRecord(
+        event_id=f"late-{action.lower()}-event",
+        event_type="ENTRY_DECISION",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+        semantic={"action": action, "final_multiplier": 0.0},
+        semantic_content_hash="a" * 64,
+        payload={
+            "message": f"{action} primary notice",
+            "expired_delivery_message": None,
+        },
+        payload_hash="b" * 64,
+        generated_at=datetime(2026, 8, 31, 9, 39, 28, tzinfo=TZ),
+        commit_marker=1,
+        action_expiry_ts=expiry,
+        delivery_status="PENDING",
+        attempt_count=0,
+        lease_db_ts=datetime(2026, 8, 31, 9, 40, 1, tzinfo=TZ),
+    )
+    repository = _PublisherRepository(record)
+    posts: list[dict] = []
+
+    async def post_once(**kwargs):
+        posts.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr("src.common.v20_feishu.post_message_once", post_once)
+    publisher = V20OutboxPublisher(
+        repository,
+        {
+            "route": V20FeishuRoute(
+                route_id="route",
+                bot_url="https://legacy-relay.example",
+                app_id="app",
+                app_secret="secret",
+                chat_id="chat",
+                transport="legacy_send",
+            )
+        },
+        worker_id="worker",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+    )
+
+    assert await publisher.publish_once() == 1
+
+    assert repository.started[0][1]["action_reserve_seconds"] == 32.0
+    assert posts == [
+        {
+            "bot_url": "https://legacy-relay.example",
+            "app_id": "app",
+            "app_secret": "secret",
+            "chat_id": "chat",
+            "message": f"{action} primary notice",
+        }
+    ]
+    assert repository.completed[1]["outcome"] == "DELIVERED"
 
 
 async def test_manual_trigger_receipt_is_published_only_as_notification() -> None:
@@ -1477,7 +1717,7 @@ async def test_manual_trigger_receipt_is_published_only_as_notification() -> Non
 
     assert await publisher.publish_once() == 1
 
-    assert repository.completed[1]["succeeded"] is True
+    assert repository.completed[1]["outcome"] == "DELIVERED"
     assert relay.envelopes == [
         {
             "schema_version": V20_RELAY_REQUEST_SCHEMA,
@@ -1531,6 +1771,21 @@ async def test_publisher_fails_closed_if_repository_returns_another_scope() -> N
     assert repository.completed is None
 
 
+@pytest.mark.asyncio
+async def test_pre_dispatch_validation_failure_releases_without_attempt() -> None:
+    record = replace(_publisher_record("invalid-event"), payload={"message": ""})
+    repository = _PublisherRepository(record)
+    relay = _CapturingRelay()
+    publisher = _stateful_publisher(repository, relay)
+
+    assert await publisher.publish_once() == 0
+
+    assert relay.envelopes == []
+    assert repository.completed is None
+    assert repository.deferred[0] == "invalid-event"
+    assert "lacks message" in repository.deferred[1]["error"]
+
+
 async def test_publisher_exposes_durable_relay_failure_to_runtime_health() -> None:
     record = OutboxRecord(
         event_id="exit-event",
@@ -1563,7 +1818,7 @@ async def test_publisher_exposes_durable_relay_failure_to_runtime_health() -> No
     assert await publisher.publish_once() == 0
 
     assert publisher.last_cycle_error == "Feishu relay returned failure"
-    assert repository.completed[1]["succeeded"] is False
+    assert repository.completed[1]["outcome"] == "UNKNOWN"
 
 
 async def test_publisher_cycle_guard_fails_before_outbox_lease() -> None:
@@ -1691,18 +1946,18 @@ async def test_v20_relay_uses_versioned_endpoint_and_strict_idempotency_envelope
 
 
 @pytest.mark.parametrize(
-    ("now", "expected_message"),
+    ("delivery_variant", "expected_message"),
     [
-        (datetime(2026, 8, 31, 9, 39, 59, tzinfo=TZ), "buy"),
-        (datetime(2026, 8, 31, 9, 40, tzinfo=TZ), "do not buy"),
+        ("ACTIONABLE", "buy"),
+        ("EXPIRED_NOTICE", "do not buy"),
     ],
 )
-async def test_legacy_embedded_relay_uses_existing_endpoint_and_honors_entry_expiry(
+async def test_legacy_embedded_relay_uses_existing_endpoint_and_db_chosen_variant(
     monkeypatch,
-    now,
+    delivery_variant,
     expected_message,
 ) -> None:
-    monkeypatch.setattr("src.common.v20_feishu.httpx.AsyncClient", _RelayHttpClient)
+    monkeypatch.setattr("src.common.feishu_bot.httpx.AsyncClient", _RelayHttpClient)
     _RelayHttpClient.response_payload = {"code": 0, "msg": "success"}
     client = V20LegacyRelayClient(
         bot_origin="https://legacy-relay.example",
@@ -1710,10 +1965,15 @@ async def test_legacy_embedded_relay_uses_existing_endpoint_and_honors_entry_exp
         app_secret="legacy-secret",
         chat_id="legacy-chat",
         destination_fingerprint="d" * 64,
-        clock=lambda: now,
     )
 
-    assert await client.send_delivery(_relay_envelope()) is True
+    assert (
+        await client.send_delivery(
+            _relay_envelope(),
+            delivery_variant=delivery_variant,
+        )
+        is True
+    )
     assert _RelayHttpClient.request_url == "https://legacy-relay.example/api/send"
     assert _RelayHttpClient.request_json == {
         "app_id": "legacy-app",
@@ -1810,3 +2070,403 @@ async def test_v20_relay_requires_plain_delivery_for_non_actionable_entry(
     )
 
     assert await client.send_delivery(envelope) is True
+
+
+class _StatefulOutboxRepository:
+    """In-memory outbox mimicking lease/complete state transitions."""
+
+    def __init__(self, record: OutboxRecord) -> None:
+        self.record = record
+        self.delivery_status = record.delivery_status
+        self.lease_calls = 0
+        self.completed: list[tuple[str, dict]] = []
+
+    async def lease_outbox(self, **kwargs):
+        self.lease_calls += 1
+        if self.delivery_status != "PENDING":
+            return []
+        self.delivery_status = "LEASED"
+        return [self.record]
+
+    async def begin_delivery_attempt(self, event_id, **kwargs):  # noqa: ARG002
+        self.delivery_status = "DELIVERY_UNKNOWN"
+        return DeliveryAttempt(
+            attempt_number=self.record.attempt_count + 1,
+            delivery_variant="PRIMARY",
+        )
+
+    async def complete_delivery(
+        self,
+        event_id,
+        *,
+        attempt_number,
+        worker_id,
+        route_id,
+        official_stream_id,
+        lineage_id,
+        outcome,
+        error=None,
+        retry_after_seconds=30,
+    ):
+        self.completed.append(
+            (
+                event_id,
+                {
+                    "attempt_number": attempt_number,
+                    "worker_id": worker_id,
+                    "route_id": route_id,
+                    "official_stream_id": official_stream_id,
+                    "lineage_id": lineage_id,
+                    "outcome": outcome,
+                    "error": error,
+                    "retry_after_seconds": retry_after_seconds,
+                },
+            )
+        )
+        if outcome == "DELIVERED":
+            self.delivery_status = "SENT"
+        elif outcome == "SAFE_RETRY":
+            self.delivery_status = "PENDING"
+        else:
+            self.delivery_status = "DELIVERY_UNKNOWN"
+
+
+class _SlowSuccessfulRelay(_CapturingRelay):
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self._delay = delay
+
+    async def send_delivery(self, envelope, *, delivery_variant="PRIMARY"):
+        await super().send_delivery(envelope, delivery_variant=delivery_variant)
+        await asyncio.sleep(self._delay)
+        return True
+
+
+class _HangingRelay(_CapturingRelay):
+    async def send_delivery(self, envelope):
+        self.envelopes.append(dict(envelope))
+        await asyncio.sleep(60)
+        return True
+
+
+def _publisher_record(event_id: str, *, attempt_count: int = 0) -> OutboxRecord:
+    return OutboxRecord(
+        event_id=event_id,
+        event_type="DATA_ALERT",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+        semantic={},
+        semantic_content_hash="a" * 64,
+        payload={"message": "alert"},
+        payload_hash="b" * 64,
+        generated_at=datetime(2026, 8, 31, 10, 0, tzinfo=TZ),
+        commit_marker=1,
+        action_expiry_ts=None,
+        delivery_status="PENDING",
+        attempt_count=attempt_count,
+    )
+
+
+def _stateful_publisher(repository, relay) -> V20OutboxPublisher:
+    return V20OutboxPublisher(
+        repository,
+        {"route": _route(relay)},
+        worker_id="worker",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+    )
+
+
+async def test_slow_but_successful_relay_send_is_not_retried() -> None:
+    # The relay answers in 2.5s: beyond the historical 2s send budget (which
+    # cancelled the awaited send and retried a message the relay had already
+    # accepted) but well within the current budget.
+    repository = _StatefulOutboxRepository(_publisher_record("slow-event"))
+    relay = _SlowSuccessfulRelay(delay=2.5)
+    publisher = _stateful_publisher(repository, relay)
+
+    assert await publisher.publish_once() == 1
+
+    assert len(relay.envelopes) == 1
+    assert len(repository.completed) == 1
+    event_id, completion = repository.completed[0]
+    assert event_id == "slow-event"
+    assert completion["outcome"] == "DELIVERED"
+    assert completion["error"] is None
+    assert repository.delivery_status == "SENT"
+
+    # A SENT event is never leased again, so the relay sees no duplicate.
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 1
+    assert len(repository.completed) == 1
+
+
+async def test_legacy_total_outward_deadline_is_terminal_unknown(monkeypatch) -> None:
+    monkeypatch.setattr("src.common.v20_feishu._LEGACY_OUTWARD_CALL_DEADLINE_SECONDS", 0.02)
+    repository = _StatefulOutboxRepository(_publisher_record("total-deadline-event"))
+    relay = _SlowSuccessfulRelay(delay=0.05)
+    publisher = V20OutboxPublisher(
+        repository,
+        {"route": _route(relay, transport="legacy_send")},
+        worker_id="worker",
+        route_id="route",
+        official_stream_id="formal-stream",
+        lineage_id="formal-lineage",
+    )
+
+    assert await publisher.publish_once() == 0
+
+    assert len(relay.envelopes) == 1
+    assert repository.delivery_status == "DELIVERY_UNKNOWN"
+    assert repository.completed[0][1]["outcome"] == "UNKNOWN"
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 1
+
+
+def test_legacy_action_reserve_covers_total_outward_deadline_plus_safety() -> None:
+    from src.common import v20_feishu
+
+    assert (
+        v20_feishu._LEGACY_ACTION_RESERVE_SECONDS
+        == v20_feishu._LEGACY_OUTWARD_CALL_DEADLINE_SECONDS
+        + v20_feishu._LEGACY_OUTBOUND_DEADLINE_SAFETY_SECONDS
+    )
+
+
+async def test_unprovable_relay_failure_is_terminal_unknown_and_not_retried() -> None:
+    repository = _StatefulOutboxRepository(_publisher_record("retry-event"))
+    relay = _FailingRelay()
+    publisher = _stateful_publisher(repository, relay)
+
+    assert await publisher.publish_once() == 0
+
+    assert len(repository.completed) == 1
+    event_id, completion = repository.completed[0]
+    assert event_id == "retry-event"
+    assert completion["outcome"] == "UNKNOWN"
+    assert completion["error"] == "Feishu relay returned failure"
+    assert completion["retry_after_seconds"] == min(300, 2 ** min(0, 8))
+    assert repository.delivery_status == "DELIVERY_UNKNOWN"
+    assert publisher.last_cycle_error == "Feishu relay returned failure"
+
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 1
+
+
+async def test_publisher_does_not_send_or_complete_when_lease_returns_empty() -> None:
+    # Another worker holds an unexpired lease (FOR UPDATE SKIP LOCKED semantics
+    # are covered by the repository contract tests), so this cycle is a no-op.
+    repository = _StatefulOutboxRepository(_publisher_record("leased-event"))
+    repository.delivery_status = "LEASED"
+    relay = _CapturingRelay()
+    publisher = _stateful_publisher(repository, relay)
+
+    assert await publisher.publish_once() == 0
+
+    assert repository.lease_calls == 1
+    assert relay.envelopes == []
+    assert repository.completed == []
+
+
+class _UnknownAwareRepository(_StatefulOutboxRepository):
+    def __init__(self, record: OutboxRecord) -> None:
+        super().__init__(record)
+        self.started: list[tuple[str, dict]] = []
+        self.finalize_failure: Exception | None = None
+
+    async def begin_delivery_attempt(self, event_id, **kwargs):
+        self.started.append((event_id, kwargs))
+        self.delivery_status = "DELIVERY_UNKNOWN"
+        self.record = replace(self.record, attempt_count=self.record.attempt_count + 1)
+        return DeliveryAttempt(
+            attempt_number=self.record.attempt_count,
+            delivery_variant="PRIMARY",
+        )
+
+    async def complete_delivery(
+        self,
+        event_id,
+        *,
+        attempt_number,
+        worker_id,
+        route_id,
+        official_stream_id,
+        lineage_id,
+        outcome,
+        error=None,
+        retry_after_seconds=30,
+    ):
+        self.completed.append(
+            (
+                event_id,
+                {
+                    "attempt_number": attempt_number,
+                    "worker_id": worker_id,
+                    "route_id": route_id,
+                    "official_stream_id": official_stream_id,
+                    "lineage_id": lineage_id,
+                    "outcome": outcome,
+                    "error": error,
+                    "retry_after_seconds": retry_after_seconds,
+                },
+            )
+        )
+        if self.finalize_failure is not None:
+            raise self.finalize_failure
+        if outcome == "DELIVERED":
+            self.delivery_status = "SENT"
+        elif outcome == "SAFE_RETRY":
+            self.delivery_status = "PENDING"
+        else:
+            self.delivery_status = "DELIVERY_UNKNOWN"
+
+
+class _AcceptedThenExceptionRelay(_CapturingRelay):
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__()
+        self.exc = exc
+
+    async def send_delivery(self, envelope, *, delivery_variant="PRIMARY"):  # noqa: ARG002
+        self.envelopes.append(dict(envelope))
+        raise self.exc
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        httpx.ReadTimeout("accepted then read timeout"),
+        httpx.WriteTimeout("request may be delivered"),
+        httpx.RemoteProtocolError("broken after acceptance"),
+        httpx.HTTPStatusError(
+            "server returned an error",
+            request=httpx.Request("POST", "https://relay.internal/api/send"),
+            response=httpx.Response(500, request=httpx.Request("POST", "https://relay.internal")),
+        ),
+        V20RelayContractError("bad receipt"),
+        RuntimeError("unknown transport failure"),
+    ],
+)
+async def test_remote_or_unknown_failure_is_terminal_unknown_and_never_retried(exception) -> None:
+    repository = _UnknownAwareRepository(_publisher_record("unknown-event"))
+    relay = _AcceptedThenExceptionRelay(exception)
+    publisher = _stateful_publisher(repository, relay)
+
+    assert await publisher.publish_once() == 0
+
+    assert len(repository.started) == 1
+    assert repository.started[0][0] == "unknown-event"
+    assert repository.started[0][1]["worker_id"] == "worker"
+    assert repository.delivery_status == "DELIVERY_UNKNOWN"
+    assert repository.completed[-1][1]["outcome"] == "UNKNOWN"
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 1
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        httpx.ConnectError("connection was never established"),
+        httpx.ConnectTimeout("connection setup timed out"),
+        httpx.PoolTimeout("no connection left the process"),
+    ],
+)
+async def test_pre_flight_connection_failure_is_the_only_safe_retry(exception) -> None:
+    repository = _UnknownAwareRepository(_publisher_record("safe-retry-event"))
+    relay = _AcceptedThenExceptionRelay(exception)
+    publisher = _stateful_publisher(repository, relay)
+
+    assert await publisher.publish_once() == 0
+    assert repository.delivery_status == "PENDING"
+    assert repository.completed[-1][1]["outcome"] == "SAFE_RETRY"
+
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 2
+    assert repository.started[-1][0] == "safe-retry-event"
+
+
+async def test_cancellation_after_acceptance_propagates_and_never_retries() -> None:
+    repository = _UnknownAwareRepository(_publisher_record("cancelled-event"))
+    relay = _AcceptedThenExceptionRelay(asyncio.CancelledError())
+    publisher = _stateful_publisher(repository, relay)
+
+    with pytest.raises(asyncio.CancelledError):
+        await publisher.publish_once()
+
+    assert len(relay.envelopes) == 1
+    assert repository.delivery_status == "DELIVERY_UNKNOWN"
+    assert repository.completed[-1][1]["outcome"] == "UNKNOWN"
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 1
+
+
+async def test_finalize_failure_after_acceptance_does_not_allow_a_second_post() -> None:
+    repository = _UnknownAwareRepository(_publisher_record("finalize-event"))
+    repository.finalize_failure = RuntimeError("database unavailable")
+    relay = _AcceptedThenExceptionRelay(RuntimeError("simulate accepted then failure"))
+    publisher = _stateful_publisher(repository, relay)
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await publisher.publish_once()
+
+    assert len(relay.envelopes) == 1
+    assert repository.delivery_status == "DELIVERY_UNKNOWN"
+    repository.finalize_failure = None
+    assert await publisher.publish_once() == 0
+    assert len(relay.envelopes) == 1
+
+
+async def test_shared_post_primitive_and_v16_outer_retry_are_separate_layers(
+    monkeypatch,
+) -> None:
+    from src.common.feishu_bot import FeishuBot, post_message_once
+
+    calls: list[dict] = []
+
+    async def connection_failure_then_success(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise httpx.ConnectError("first fresh connection failed")
+        return True
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("src.common.feishu_bot.post_message_once", connection_failure_then_success)
+    monkeypatch.setattr("src.common.feishu_bot.asyncio.sleep", no_sleep)
+
+    with pytest.raises(httpx.ConnectError):
+        await post_message_once(
+            bot_url="https://relay.invalid",
+            app_id="app",
+            app_secret="secret",
+            chat_id="chat",
+            message="one",
+        )
+
+    bot = FeishuBot(
+        bot_url="https://relay.invalid",
+        app_id="app",
+        app_secret="secret",
+        chat_id="chat",
+    )
+    assert await bot.send_message("one", max_retries=1) is True
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("invalid_code", [False, 0.0, "0", None])
+async def test_legacy_receipt_requires_exact_integer_zero(monkeypatch, invalid_code) -> None:
+    from src.common.feishu_bot import post_message_once
+
+    monkeypatch.setattr("src.common.feishu_bot.httpx.AsyncClient", _RelayHttpClient)
+    _RelayHttpClient.response_payload = {"code": invalid_code, "msg": "ambiguous"}
+
+    with pytest.raises(RuntimeError, match="Feishu API error"):
+        await post_message_once(
+            bot_url="https://relay.invalid",
+            app_id="app",
+            app_secret="secret",
+            chat_id="chat",
+            message="one",
+        )

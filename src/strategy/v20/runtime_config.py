@@ -17,6 +17,7 @@ import yaml
 
 from src.data.database.tls import sha256_file
 from src.data.sources.local_concept_mapper import resolve_concept_data_path
+from src.strategy.v20.runtime_compatibility import is_audited_state_semantics_transition
 
 
 class V20ConfigError(RuntimeError):
@@ -151,6 +152,7 @@ _STRATEGY_DEPENDENCY_FILES = (
     "src/strategy/v20/models.py",
     "src/strategy/v20/policy.py",
     "src/strategy/v20/runtime_config.py",
+    "src/strategy/v20/runtime_compatibility.py",
     "src/strategy/v20/shadow_evaluator.py",
     "models/lgbrank_latest.txt",
     "models/feature_list.json",
@@ -266,6 +268,52 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "8980fac4479611337dbac117b8265829ba20e1ed6c882b2f3f1718d3a9624051": (
             "V20_SERVICE_STATE_ORCHESTRATION_V1"
         ),
+        # The 09:40 cutoff watchdog performs one bounded cold-start calendar
+        # load before failing closed; entry state transitions and official
+        # state inputs are unchanged.
+        "ad54b0ac5fd688f2cb3e3ad5c3b32f5c7e298e322267f51df2cda7c792a2564d": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
+        # After-cutoff MEWS repair: a missing daily value is recalculated
+        # locally once (scheduler tick or selection trigger) and the leg D2
+        # selection window admits the same-day late repair (availability D1,
+        # correct predecessor source) for legs without a formal exit intent.
+        # This deliberately widens which MEWS value can feed D2 exit
+        # thresholds, so it is NOT orchestration-profile V1.
+        "6c377e7ac0112dcc06100c510ad4aa214bbaa06683d129d764ce4f003226a9d4": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
+        # Manual-monitor source validation now requires the dedicated manual
+        # check-only message mode (MANUAL_OPERATOR_RENDER) instead of the
+        # retired automatic-entry render mode.  Entry, rolling, reference,
+        # exit policy, and official state inputs are unchanged.
+        "baf11cb027e8b46160ed8431977590d314ece9ee479cb9e21048c76faffef1fa": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
+        # Publisher health now reports durable UNKNOWN delivery outcomes.
+        # Entry, rolling, reference, and official state orchestration unchanged.
+        "defaf4786c8b1597fa5f99723ca8f8fc85c39a7a8ce140554f15005f07944224": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V2"
+        ),
+        # V20 now consumes the one canonical V16 morning result for both the
+        # automatic lane and current-code manual checks, validates the frozen
+        # Top-10/raw evidence boundary, and removes the second in-service scan
+        # implementation.  That can change the selected entry legs and hence
+        # official state.  The accompanying MEWS recovery and live-exit
+        # deadline changes share these exact reviewed bytes, so this release
+        # is deliberately a new state-orchestration class rather than being
+        # disguised as V2.
+        # V3 with the reviewed 09:40 decision-waiter race: the scheduler
+        # cancels only its waiter at the deadline while the shielded canonical
+        # singleflight master remains reusable by check-only replay.
+        # Git/deployment LF bytes.
+        "985b11a06d4222fbb1ef42da6313bf155522400606e08c205d365ec901a3f7df": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V3"
+        ),
+        # The same reviewed source in the Windows QA worktree's CRLF form.
+        "2aaf4957addc5f09d7eca3aa7e45ed525c87a7fb8e470ad68f0b5b2f94d9d78f": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V3"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
@@ -285,6 +333,35 @@ _MIXED_STATE_SOURCE_CLASSES = {
         # change entry, rolling-health, or official model state transitions.
         "ef6f26eec1a3ea40ae2fb9937d097307290c558b331f8633d4dde4b10e8f8dd7": (
             "V20_LEDGER_STATE_CONTRACT_V1"
+        ),
+        # Widens the frozen leg MEWS selection to admit the same-day late
+        # repair (availability == d1, predecessor source) alongside the strict
+        # 09:40 cutoff, adds the ELIGIBLE_LATE_SAME_DAY reason, and lets the
+        # restart recovery restore a late-calculated daily snapshot.  Frozen
+        # selections are still never rewritten.  This changes the ledger
+        # selection contract, so it is NOT contract V1.
+        "aa6bc1b48073d5535ae89dcc5dd546eab80a05257d82ec9ab57ab78dbc76c40d": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
+        # Manual-monitor source validation now requires the dedicated manual
+        # check-only message mode (MANUAL_OPERATOR_RENDER) instead of the
+        # retired automatic-entry render mode.  Enrollment writes, entry,
+        # rolling, reference, and official state transitions are unchanged.
+        "e35b40b788c086d51509595a15cf5be5f4a9198d56b90b67493f5a32e6a13a32": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
+        # Adds the durable Feishu outbox dispatch-boundary state and audit
+        # columns. Entry, rolling-health, reference, and official state inputs
+        # remain unchanged.
+        "3be1c8534c2338cbc147225e8dc07a39a8cd89a14caef49b188d6619b7e12315": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
+        ),
+        # Selection-release repository bytes after excluding every Rolling7
+        # table/helper/fact path.  The reviewed delta is limited to F1 outbox
+        # delivery state plus MEWS/raw-canonical evidence and idempotency
+        # auditing; official ledger state transitions remain contract V2.
+        "bfcb7d5881e2597bfbc46d3826e9cee45656e4419d2e6dc489fea3c81de4d35e": (
+            "V20_LEDGER_STATE_CONTRACT_V2"
         ),
     },
 }
@@ -410,7 +487,12 @@ def legacy_state_semantics_is_compatible_with_current(
     """
 
     declared = legacy_payload.get("state_semantics_hash")
-    if declared not in _AUDITED_LEGACY_STATE_SEMANTICS_HASHES:
+    current_declared = current_payload.get("state_semantics_hash")
+    is_exact_release_transition = is_audited_state_semantics_transition(
+        declared,
+        current_declared,
+    )
+    if declared not in _AUDITED_LEGACY_STATE_SEMANTICS_HASHES and not (is_exact_release_transition):
         return False
     if not declared_state_semantics_is_authentic(legacy_payload):
         return False
@@ -436,6 +518,8 @@ def legacy_state_semantics_is_compatible_with_current(
     )
     if any(legacy_payload.get(field) != current_payload.get(field) for field in identity_fields):
         return False
+    if is_exact_release_transition:
+        return True
     legacy_dependencies = legacy_payload.get("strategy_dependency_hashes")
     current_dependencies = current_payload.get("strategy_dependency_hashes")
     if not isinstance(legacy_dependencies, Mapping) or not isinstance(

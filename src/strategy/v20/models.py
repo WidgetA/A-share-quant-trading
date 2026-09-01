@@ -303,6 +303,10 @@ class MewsSnapshot:
     model_version: str | None
     data_version: str | None
     snapshot_id: str | None
+    # The trade date the daily value belongs to (evidence
+    # ``signal_available_date``).  A late same-day repair is a legal D2 input
+    # only when this matches the leg's D1.
+    availability_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -75,7 +75,11 @@ def _v20_start_error_code(exc: BaseException) -> str:
     return "UNCLASSIFIED_STARTUP_FAILURE"
 
 
-def _create_default_v20_service(*, fundamentals_db: object | None = None) -> object:
+def _create_default_v20_service(
+    *,
+    fundamentals_db: object | None = None,
+    scan_state: V15ScanState | None = None,
+) -> object:
     """Create V20 lazily so importing the legacy web app stays side-effect free.
 
     Existing main deployments have no dedicated ``V20_*`` secrets because
@@ -93,8 +97,11 @@ def _create_default_v20_service(*, fundamentals_db: object | None = None) -> obj
     if embedded_value not in {"true", "false"}:
         raise ValueError("V20_EMBEDDED_ENABLED must be true or false")
     if explicit_v20_runtime or embedded_value == "false":
-        return V20Service.from_default_config()
-    return V20Service.from_legacy_runtime(fundamentals_db=fundamentals_db)
+        return V20Service.from_default_config(scan_state=scan_state)
+    return V20Service.from_legacy_runtime(
+        fundamentals_db=fundamentals_db,
+        scan_state=scan_state,
+    )
 
 
 def _default_v20_mode_hint() -> str | None:
@@ -196,8 +203,10 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     if service is None:
         mode_hint = _default_v20_mode_hint()
         try:
+            scan_state = getattr(app.state, "v15_scan_state", None)
             service = _create_default_v20_service(
-                fundamentals_db=getattr(app.state, "fundamentals_db", None)
+                fundamentals_db=getattr(app.state, "fundamentals_db", None),
+                scan_state=scan_state,
             )
             app.state.v20_service = service
         except Exception as exc:
@@ -384,6 +393,8 @@ def create_app(
     # V15 scan state (shared between scan service and trading router)
     scan_state = V15ScanState()
     app.state.v15_scan_state = scan_state
+    if v20_service is not None and hasattr(v20_service, "bind_shared_v15_scan_state"):
+        v20_service.bind_shared_v15_scan_state(scan_state)
     # Inject scan state into trading router
     if hasattr(iquant_router, "_inject_scan_state"):
         iquant_router._inject_scan_state(scan_state)
@@ -483,34 +494,77 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown():
         logger.info("Web UI stopped")
+        shutdown_errors: list[BaseException] = []
         store.stop_cleanup_task()
 
-        await _stop_v20_lifecycle(app)
+        try:
+            await _stop_v20_lifecycle(app)
+        except Exception as exc:
+            logger.error("V20 lifecycle stop failed during shutdown", exc_info=True)
+            shutdown_errors.append(exc)
 
         # Close shared iFinD client
         ifind_client = getattr(app.state, "ifind_client", None)
         if ifind_client:
-            await ifind_client.stop()
-            logger.info("Shared iFinD HTTP client stopped")
+            try:
+                await ifind_client.stop()
+                logger.info("Shared iFinD HTTP client stopped")
+            except Exception as exc:
+                logger.error("Failed to stop shared iFinD HTTP client", exc_info=True)
+                shutdown_errors.append(exc)
 
-        # Close shared fundamentals DB
+        # Close shared fundamentals DB (owned by the app; V15/V20 cleanups must
+        # never close this shared pool a second time). The app and V15 references
+        # are dropped whether or not the close succeeds, so nothing treats the
+        # pool as healthy afterwards, and a close failure never skips the
+        # remaining cleanup steps.
         fundamentals_db = getattr(app.state, "fundamentals_db", None)
-        if fundamentals_db:
-            await fundamentals_db.close()
-            logger.info("Shared fundamentals DB closed")
+        if fundamentals_db is not None:
+            try:
+                await fundamentals_db.close()
+                logger.info("Shared fundamentals DB closed")
+            except Exception as exc:
+                logger.error("Failed to close shared fundamentals DB", exc_info=True)
+                shutdown_errors.append(exc)
+            finally:
+                app.state.fundamentals_db = None
+                v15_ss = getattr(app.state, "v15_scan_state", None)
+                if v15_ss is not None and v15_ss.fundamentals_db is fundamentals_db:
+                    # Drop the stale reference so nothing treats the closed pool
+                    # as healthy; a later initialization reconnects fresh.
+                    v15_ss.fundamentals_db = None
 
         # Cleanup iQuant trading resources
         iquant_rtr = getattr(app.state, "iquant_router", None)
         if iquant_rtr and hasattr(iquant_rtr, "_iquant_cleanup"):
-            await iquant_rtr._iquant_cleanup()
+            try:
+                await iquant_rtr._iquant_cleanup()
+            except Exception as exc:
+                logger.error("iQuant cleanup failed during shutdown", exc_info=True)
+                shutdown_errors.append(exc)
 
         # Cleanup V15 scan resources
         from src.web.v15_scan_service import cleanup_scan_resources
 
         v15_ss = getattr(app.state, "v15_scan_state", None)
         if v15_ss:
-            await cleanup_scan_resources(v15_ss)
-            logger.info("V15 scan resources cleaned up")
+            # The app already closed the shared pool above (exactly once); only
+            # a pool created by the scan service itself remains to close here.
+            scan_owns_pool = (
+                v15_ss.fundamentals_db is not None and v15_ss.fundamentals_db is not fundamentals_db
+            )
+            try:
+                await cleanup_scan_resources(v15_ss, close_fundamentals=scan_owns_pool)
+                logger.info("V15 scan resources cleaned up")
+            except Exception as exc:
+                logger.error("V15 scan resource cleanup failed during shutdown", exc_info=True)
+                shutdown_errors.append(exc)
+
+        if shutdown_errors:
+            raise RuntimeError(
+                "app shutdown cleanup failed: "
+                + "; ".join(f"{type(error).__name__}: {error}" for error in shutdown_errors)
+            )
 
     return app
 

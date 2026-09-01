@@ -37,6 +37,40 @@ logger = logging.getLogger(__name__)
 
 # Beijing timezone for timestamps
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+LEGACY_FEISHU_HTTP_PHASE_TIMEOUT_SECONDS = 30.0
+
+
+async def post_message_once(
+    *,
+    bot_url: str,
+    app_id: str,
+    app_secret: str,
+    chat_id: str,
+    message: str,
+) -> bool:
+    """Issue exactly one POST to the deployed legacy Feishu relay.
+
+    Transport and parsing exception types are deliberately preserved so callers
+    can distinguish safe connection failures from ambiguous outcomes. Business
+    response failures raise ``RuntimeError``.
+    """
+
+    async with httpx.AsyncClient(timeout=LEGACY_FEISHU_HTTP_PHASE_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            f"{bot_url}/api/send",
+            json={
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "chat_id": chat_id,
+                "message": message,
+            },
+        )
+    response.raise_for_status()
+    receipt = response.json()
+    receipt_code = receipt.get("code") if isinstance(receipt, dict) else None
+    if type(receipt_code) is not int or receipt_code != 0:
+        raise RuntimeError(f"Feishu API error: {receipt}")
+    return True
 
 
 class FeishuBot:
@@ -111,34 +145,20 @@ class FeishuBot:
 
         for attempt in range(max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        f"{self.bot_url}/api/send",
-                        json={
-                            "app_id": self.app_id,
-                            "app_secret": self.app_secret,
-                            "chat_id": self.chat_id,
-                            "message": message,
-                        },
+                await post_message_once(
+                    bot_url=self.bot_url,
+                    app_id=self.app_id,
+                    app_secret=self.app_secret,
+                    chat_id=self.chat_id,
+                    message=message,
+                )
+                if attempt > 0:
+                    logger.info(
+                        f"Message sent successfully after {attempt} retries: {message[:50]}..."
                     )
-                    response.raise_for_status()
-                    data = response.json()
-
-                    if data.get("code") == 0:
-                        if attempt > 0:
-                            logger.info(
-                                f"Message sent successfully after {attempt} retries: "
-                                f"{message[:50]}..."
-                            )
-                        else:
-                            logger.debug(f"Message sent successfully: {message[:50]}...")
-                        return True
-                    else:
-                        # API returned error code, treat as failure
-                        last_error = Exception(f"Feishu API error: {data}")
-                        logger.warning(
-                            f"Feishu API error (attempt {attempt + 1}/{max_retries + 1}): {data}"
-                        )
+                else:
+                    logger.debug(f"Message sent successfully: {message[:50]}...")
+                return True
 
             except httpx.HTTPStatusError as e:
                 last_error = e

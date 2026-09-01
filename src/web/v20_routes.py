@@ -260,7 +260,7 @@ def _fresh_probe_response(
     passed = semantic["probe_result"] == "PASS"
     if passed != bool(semantic["current_version_recomputed"]):
         raise V20SemanticConflict("manual 09:39 chain probe result is inconsistent")
-    expected_message_mode = "AUTOMATIC_ENTRY_RENDER" if passed else "FAILURE_ALERT"
+    expected_message_mode = "MANUAL_OPERATOR_RENDER" if passed else "FAILURE_ALERT"
     if semantic.get("visible_message_mode") != expected_message_mode:
         raise V20SemanticConflict("manual 09:39 chain probe message mode is inconsistent")
     if record.payload is None:
@@ -294,8 +294,9 @@ def _fresh_probe_response(
         "failure_reason": semantic.get("failure_reason"),
         "official_state_changed": False,
         "orders_changed": False,
+        "non_actionable": True,
         "retrospective_expired": True,
-        "exact_automatic_message": passed,
+        "exact_automatic_message": False,
         "visible_message_mode": expected_message_mode,
         "manual_notice_actionable": False,
         "feishu_delivery_confirmed": record.delivery_status == "SENT",
@@ -309,16 +310,27 @@ async def _select_fresh_probe_context(service: Any, now: datetime) -> tuple[Any,
     calendar = tuple(await service._load_trade_calendar(now.date()))
     current_state = await service._repository.load_state(config.state_lineage_id)
     sessions = [session for session in calendar if session <= now.date()]
+    wall = now.timetz().replace(tzinfo=None)
+    if (
+        now.date() in sessions
+        and wall >= service.config.clock.publish_deadline
+        and await service._repository.get_entry_status(config.official_stream_id, now.date())
+        is None
+    ):
+        raise V20StateConflict(
+            "current trading day's V20 morning slot is not terminal; refusing prior-day probe"
+        )
     for trade_date in reversed(sessions[-_FRESH_PROBE_LOOKBACK_SESSIONS:]):
         status = await service._repository.get_entry_status(
             config.official_stream_id,
             trade_date,
         )
-        if (
-            status is None
-            or status.action != "INPUT_INVALID"
-            or status.semantic.get("state_after_hash") != current_state.state_hash
-        ):
+        if status is None or status.action not in {
+            "ENTER",
+            "BLOCK",
+            "NO_SIGNAL",
+            "INPUT_INVALID",
+        }:
             continue
         service._verify_entry_binding(status)
         live_context = service._context
@@ -341,7 +353,7 @@ async def _select_fresh_probe_context(service: Any, now: datetime) -> tuple[Any,
             last_phase="DECISION_COMMITTED",
         )
         return context, status, current_state
-    raise V20StateConflict("no recent INPUT_INVALID slot matches the current official V20 state")
+    raise V20StateConflict("no recent terminal V20 slot matches the current official state")
 
 
 def _fresh_probe_failure_semantic(
@@ -463,7 +475,7 @@ def _fresh_probe_pass_semantic(
         "orders_changed": False,
         "non_actionable": True,
         "retrospective_expired": True,
-        "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
+        "visible_message_mode": "MANUAL_OPERATOR_RENDER",
         "entry_render_semantic": dict(entry_render_semantic),
         "stage_results": {
             "persisted_raw_0931_0939": "PASS",
@@ -760,11 +772,13 @@ def _frozen_entry_replay_response(
         "orders_changed": False,
         "non_actionable": True,
     }
+    payload_message = record.payload.get("message") if record.payload is not None else None
     if (
         record.event_type != "DATA_ALERT"
         or any(semantic.get(key) != value for key, value in expected.items())
-        or record.payload is None
-        or record.payload.get("message") != semantic.get("message")
+        or not isinstance(payload_message, str)
+        or "手工触发结果｜仅核查" not in payload_message
+        or str(semantic.get("message")) not in payload_message
     ):
         raise V20SemanticConflict("manual morning message replay has incompatible semantics")
     return {
@@ -782,6 +796,7 @@ def _frozen_entry_replay_response(
         "retrospective_expired": True,
         "official_state_changed": False,
         "orders_changed": False,
+        "non_actionable": True,
         "manual_notice_actionable": False,
         "feishu_delivery_confirmed": record.delivery_status == "SENT",
     }
@@ -792,7 +807,7 @@ async def _replay_frozen_entry_message(
     request_id: str,
     status: Any,
 ) -> Mapping[str, Any]:
-    """Queue the already sealed automatic message without changing one byte."""
+    """Queue a check-only replay embedding the sealed morning message byte-for-byte."""
 
     if _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
         raise ValueError(
@@ -886,8 +901,12 @@ async def _replay_frozen_entry_message(
             "official_state_changed": False,
             "orders_changed": False,
             "non_actionable": True,
-            # The Feishu sealer copies this exact string.  It must not prepend or
-            # append a manual-trigger banner, timestamp, newline, or warning.
+            # The durable semantic keeps the verbatim official bytes so the
+            # message_sha256 binding still authenticates the source.  At seal
+            # time the Feishu formatter embeds this string unchanged inside a
+            # clearly labeled sealed-source region under the manual check-only
+            # banner; the visible payload is therefore banner + verbatim
+            # source, never a bare copy that could read as a new instruction.
             "message": source_message,
         }
         created = await service._repository.enqueue_alert(
@@ -920,9 +939,6 @@ async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
     clock = service.config.clock
     if clock.prewarm <= wall < clock.publish_deadline:
         return await service.trigger_morning_selection(request_id)
-    latest = await _latest_terminal_entry(service, now)
-    if latest is not None and latest.action != "INPUT_INVALID":
-        return await _replay_frozen_entry_message(service, request_id, latest)
     return await _run_fresh_0939_probe(service, request_id, now)
 
 
@@ -935,12 +951,6 @@ def create_v20_router() -> APIRouter:
     async def status(request: Request) -> Any:
         service = _get_service(request)
         return await _call_service(service.status)
-
-    @router.post("/mews-snapshots", dependencies=[Depends(_require_ingest_api_key)])
-    async def ingest_mews_snapshot(request: Request, body: MewsSnapshotRequest) -> Any:
-        service = _get_service(request)
-        payload = body.model_dump(mode="json")
-        return await _call_service(lambda: service.ingest_mews_snapshot(payload))
 
     @router.post("/reminder-stop-acks", dependencies=[Depends(_require_ingest_api_key)])
     async def record_reminder_stop_ack(request: Request, body: ReminderStopAckRequest) -> Any:

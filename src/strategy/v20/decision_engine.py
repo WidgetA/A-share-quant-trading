@@ -277,6 +277,7 @@ def _validate_v16_snapshot_formatter_evidence(snapshot: Mapping[str, Any]) -> No
         "cci",
         "volume_937",
         "history_hash",
+        "early_source_hash",
     }
     for item in symbols:
         if not isinstance(item, Mapping) or not required.issubset(item):
@@ -286,7 +287,6 @@ def _validate_v16_snapshot_formatter_evidence(snapshot: Mapping[str, Any]) -> No
         name = item["name"]
         boards = item["boards"]
         best_board = item["best_board"]
-        history_hash = item["history_hash"]
         if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
             raise ValueError("V16 snapshot symbol rank is invalid")
         if not isinstance(code, str) or len(code) != 6 or not code.isdigit():
@@ -306,17 +306,24 @@ def _validate_v16_snapshot_formatter_evidence(snapshot: Mapping[str, Any]) -> No
             raise ValueError("V16 snapshot symbol board lacks frozen average gain")
         if not isinstance(item["is_driver"], bool):
             raise ValueError("V16 snapshot symbol is_driver is invalid")
-        for field in ("score", "snapshot_price", "cci", "volume_937"):
+        for field in ("score", "snapshot_price"):
             if not _finite_number(item[field]):
                 raise ValueError(f"V16 snapshot symbol {field} is invalid")
-        if float(item["snapshot_price"]) <= 0 or float(item["volume_937"]) <= 0:
-            raise ValueError("V16 snapshot symbol price/volume must be positive")
-        if (
-            not isinstance(history_hash, str)
-            or len(history_hash) != 64
-            or any(character not in "0123456789abcdef" for character in history_hash)
+        for field in ("cci", "volume_937"):
+            if item[field] is not None and not _finite_number(item[field]):
+                raise ValueError(f"V16 snapshot symbol {field} is invalid")
+        if float(item["snapshot_price"]) <= 0 or (
+            item["volume_937"] is not None and float(item["volume_937"]) <= 0
         ):
-            raise ValueError("V16 snapshot symbol history_hash is invalid")
+            raise ValueError("V16 snapshot symbol price/volume must be positive")
+        for field in ("history_hash", "early_source_hash"):
+            value = item[field]
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"V16 snapshot symbol {field} is invalid")
 
 
 def _coalesce_gaps(

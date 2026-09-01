@@ -15,7 +15,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import src.web.app as web_app
-from src.common.v20_feishu import render_entry_message
 from src.data.database.v20_repository import (
     OutboxRecord,
     V20LeadershipLost,
@@ -261,6 +260,7 @@ class FreshProbeV20Service(StubV20Service):
         self.ensure_replay_calls = 0
         self.old_manual_calls = 0
         self.probe_error: Exception | None = None
+        self.probe_symbols: list[dict[str, Any]] | None = None
 
     @property
     def _ledger_scope(self) -> dict[str, str]:
@@ -294,7 +294,7 @@ class FreshProbeV20Service(StubV20Service):
         self.build_calls.append((context.trade_date, replay_event_id))
         if self.probe_error is not None:
             raise self.probe_error
-        symbols = [
+        symbols = self.probe_symbols or [
             {
                 "rank": 1,
                 "code": "000001",
@@ -307,6 +307,7 @@ class FreshProbeV20Service(StubV20Service):
                 "cci": 88.0,
                 "volume_937": 120000.0,
                 "history_hash": "f" * 64,
+                "early_source_hash": "e" * 64,
             }
         ]
         return {
@@ -435,19 +436,14 @@ def _ack_payload() -> dict[str, Any]:
     }
 
 
-def test_mews_fast_state_is_a_frozen_enum(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("V20_INGEST_API_KEY", "test-v20-key")
-    client = _client(StubV20Service())
-    payload = _mews_payload()
-    payload["fast_state"] = "DANGER "
-
-    response = client.post(
+def test_external_mews_ingest_route_is_closed_in_production() -> None:
+    response = _client(StubV20Service()).post(
         "/api/v20/mews-snapshots",
-        json=payload,
+        json=_mews_payload(),
         headers={"X-V20-API-Key": "test-v20-key"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 404
 
 
 def test_router_exposes_only_status_evidence_and_manual_trigger_endpoints() -> None:
@@ -457,7 +453,6 @@ def test_router_exposes_only_status_evidence_and_manual_trigger_endpoints() -> N
 
     assert routes == {
         ("/api/v20/status", frozenset({"GET"})),
-        ("/api/v20/mews-snapshots", frozenset({"POST"})),
         ("/api/v20/reminder-stop-acks", frozenset({"POST"})),
         ("/api/v20/trigger-scan", frozenset({"POST"})),
         ("/api/v20/manual-monitor", frozenset({"POST"})),
@@ -472,6 +467,20 @@ def test_app_factory_reserves_service_state_and_mounts_router() -> None:
 
     assert app.state.v20_service is None
     assert "/api/v20/status" in {route.path for route in app.routes}
+
+
+def test_app_factory_binds_one_scan_state_instance_to_v20() -> None:
+    class Service:
+        def __init__(self) -> None:
+            self.scan_state = None
+
+        def bind_shared_v15_scan_state(self, scan_state) -> None:
+            self.scan_state = scan_state
+
+    service = Service()
+    app = create_app(v20_service=service)
+
+    assert service.scan_state is app.state.v15_scan_state
 
 
 def test_legacy_main_factory_selects_embedded_v20_without_dedicated_activation(
@@ -496,7 +505,7 @@ def test_legacy_main_factory_selects_embedded_v20_without_dedicated_activation(
     monkeypatch.setattr(
         V20Service,
         "from_default_config",
-        classmethod(lambda _cls: strict),
+        classmethod(lambda _cls, **_kwargs: strict),
     )
 
     assert web_app._create_default_v20_service() is embedded
@@ -547,7 +556,7 @@ def test_all_routes_fail_gracefully_when_service_is_unavailable(monkeypatch) -> 
             headers={"X-V20-API-Key": "secret"},
             json=_mews_payload(),
         ).status_code
-        == 503
+        == 404
     )
     assert (
         client.post(
@@ -584,7 +593,7 @@ def test_writes_fail_closed_when_ingest_key_is_not_configured(monkeypatch) -> No
         json=_mews_payload(),
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 404
     assert service.mews_payload is None
 
 
@@ -624,7 +633,7 @@ def test_status_and_ingest_keys_cannot_cross_authorize(monkeypatch) -> None:
             headers={"X-V20-API-Key": "status-only-secret"},
             json=_mews_payload(),
         ).status_code
-        == 401
+        == 404
     )
 
 
@@ -639,10 +648,10 @@ def test_writes_reject_missing_or_invalid_key(monkeypatch, provided: str | None)
         json=_mews_payload(),
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 404
 
 
-def test_authorized_mews_snapshot_preserves_extra_evidence(monkeypatch) -> None:
+def test_authorized_mews_snapshot_cannot_reach_production_service(monkeypatch) -> None:
     monkeypatch.setenv("V20_INGEST_API_KEY", "correct-secret")
     service = StubV20Service()
 
@@ -652,9 +661,8 @@ def test_authorized_mews_snapshot_preserves_extra_evidence(monkeypatch) -> None:
         json=_mews_payload(),
     )
 
-    assert response.status_code == 200
-    assert response.json() == {"snapshot_id": "mews-20260831", "accepted": True}
-    assert service.mews_payload == _mews_payload()
+    assert response.status_code == 404
+    assert service.mews_payload is None
 
 
 def test_authorized_reminder_ack_passes_only_client_owned_fields(monkeypatch) -> None:
@@ -924,14 +932,23 @@ def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay
     assert probe.semantic["official_state_changed"] is False
     assert probe.semantic["orders_changed"] is False
     assert probe.semantic["non_actionable"] is True
+    assert probe.semantic["visible_message_mode"] == "MANUAL_OPERATOR_RENDER"
     assert probe.payload is not None
-    assert probe.payload["message"] == render_entry_message(
-        probe.semantic["entry_render_semantic"],
-        generated_at=service.now,
-        commit_marker=101,
-        on_time=True,
-    )
-    assert "当前版本早盘链路重算" not in str(probe.payload["message"])
+    message = str(probe.payload["message"])
+    message_lines = message.splitlines()
+    assert message_lines[0] == "[V20][SHADOW] 手工触发结果｜仅核查"
+    assert "每日决策" not in message_lines[0]
+    assert message_lines[2] == "当前操作：不生成新的入场指令，不补买，不追买"
+    assert message_lines[3] == "原因：手工触发时间已过当日入场时点。"
+    assert message.index("当前操作") < message.index("策略计算结果")
+    assert "最终倍率 100%" in message
+    assert "滚动7" in message
+    assert "极端门G" in message
+    assert "000001 平安银行" in message
+    assert "正常建立" not in message
+    assert f"事件：{probe_event_id[:16]}" in message_lines[-1]
+    for banned in ("理论复盘", "当时本应", "复盘已过期"):
+        assert banned not in message
     assert result["symbols"] == [
         {
             "rank": 1,
@@ -940,16 +957,48 @@ def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay
             "snapshot_price": 10.26,
         }
     ]
+    assert result["non_actionable"] is True
     assert result["retrospective_expired"] is True
-    assert result["exact_automatic_message"] is True
+    assert result["exact_automatic_message"] is False
     assert repository.events["old-late-replay-event"].payload == {"message": "old replay"}
 
 
-def test_post_cutoff_normal_entry_resends_frozen_message_byte_for_byte() -> None:
+def test_post_cutoff_existing_enter_recomputes_fresh_check_only_chain() -> None:
     service = FreshProbeV20Service()
     repository = service._repository
     source_message = "[V20][SHADOW] 每日决策 (2026-08-31 09:40)\n原始票单：一字不改 ✅"
     repository.entry_status.action = "ENTER"
+    repository.entry_status.trade_date = date(2026, 9, 1)
+    service.now = datetime(2026, 9, 1, 14, 5, tzinfo=ZoneInfo("Asia/Shanghai"))
+    expected_codes = [
+        "603068",
+        "605299",
+        "603990",
+        "603232",
+        "605098",
+        "603193",
+        "001238",
+        "002368",
+        "600486",
+        "600557",
+    ]
+    service.probe_symbols = [
+        {
+            "rank": rank,
+            "code": code,
+            "name": code,
+            "score": 0.5,
+            "snapshot_price": 10.0,
+            "boards": ["银行"],
+            "best_board": "银行",
+            "is_driver": True,
+            "cci": 50.0,
+            "volume_937": 1000.0,
+            "history_hash": "f" * 64,
+            "early_source_hash": "e" * 64,
+        }
+        for rank, code in enumerate(expected_codes, start=1)
+    ]
     repository.entry_status.final_multiplier = 1.0
     repository.entry_status.semantic = {
         "symbols": [
@@ -985,10 +1034,37 @@ def test_post_cutoff_normal_entry_resends_frozen_message_byte_for_byte() -> None
 
     assert response.status_code == 202
     result = response.json()
+    assert result["chain_probe_available"] is True
+    assert result["chain_probe_passed"] is True
+    assert result["current_version_recomputed"] is True
+    assert result["replay_reused"] is False
+    assert [item["code"] for item in result["symbols"]] == expected_codes
+    assert result["exact_automatic_message"] is False
+    assert result["non_actionable"] is True
+    assert result["retrospective_expired"] is True
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert len(service.build_calls) == 1
+    assert repository.official_write_calls == 0
+    source = repository.events[repository.entry_status.event_id]
+    assert source.payload == {"message": source_message}
+    return
     replay = repository.events[result["replay_event_id"]]
     assert replay.payload is not None
-    assert replay.payload["message"] == source_message
-    assert str(replay.payload["message"]).encode("utf-8") == source_message.encode("utf-8")
+    message = str(replay.payload["message"])
+    message_lines = message.splitlines()
+    assert message_lines[0] == "[V20][SHADOW] 手工触发结果｜仅核查"
+    assert message_lines[2] == "当前操作：不生成新的入场指令，不补买，不追买"
+    assert message_lines[3] == "原因：手工触发时间已过当日入场时点。"
+    assert "以下为早盘封存原文" in message
+    begin = "----- 早盘封存原文开始（逐字节未改动，仅供核查） -----\n"
+    end = "\n----- 早盘封存原文结束 -----"
+    extracted = message.split(begin, 1)[1].split(end, 1)[0]
+    assert extracted == source_message
+    assert extracted.encode("utf-8") == source_message.encode("utf-8")
+    assert f"事件：{result['replay_event_id'][:16]}" in message_lines[-1]
+    for banned in ("理论复盘", "当时本应", "复盘已过期"):
+        assert banned not in message
     assert result["symbols"] == [
         {
             "rank": 1,
@@ -998,7 +1074,10 @@ def test_post_cutoff_normal_entry_resends_frozen_message_byte_for_byte() -> None
         }
     ]
     assert result["exact_automatic_message"] is True
+    assert result["non_actionable"] is True
     assert result["retrospective_expired"] is True
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
     assert service.build_calls == []
     assert repository.official_write_calls == 0
 
@@ -1099,10 +1178,17 @@ async def test_post_cutoff_current_session_without_terminal_never_replays_prior_
     )
     service._repository.entry_status = prior
 
-    with pytest.raises(V20StateConflict, match="refusing prior-day replay"):
-        await _dispatch_manual_trigger(service, "cutoff-no-prior-fallback")
+    result = await _dispatch_manual_trigger(service, "cutoff-no-prior-fallback")
 
-    assert set(service._repository.events) == {"old-late-replay-event", "prior-day-entry"}
+    assert result["chain_probe_passed"] is False
+    assert result["current_version_recomputed"] is False
+    assert result["replay_reused"] is False
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert result["symbols"] == []
+    assert "prior-day-entry" not in {
+        value.semantic.get("source_entry_event_id") for value in service._repository.events.values()
+    }
 
 
 @pytest.mark.asyncio
@@ -1142,11 +1228,22 @@ async def test_post_cutoff_waits_for_inflight_current_terminal_before_selecting_
 
     result = await pending
 
-    assert result["source_entry_event_id"] == current.event_id
     assert result["event_trade_date"] == current.trade_date.isoformat()
+    assert result["chain_probe_passed"] is True
+    assert result["current_version_recomputed"] is True
+    assert result["replay_reused"] is False
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert result["non_actionable"] is True
+    assert result["retrospective_expired"] is True
+    return
     replay = repository.events[result["replay_event_id"]]
     assert replay.payload is not None
-    assert replay.payload["message"] == "current-day message"
+    replay_message = str(replay.payload["message"])
+    assert replay_message.startswith("[V20][SHADOW] 手工触发结果｜仅核查")
+    begin = "----- 早盘封存原文开始（逐字节未改动，仅供核查） -----\n"
+    end = "\n----- 早盘封存原文结束 -----"
+    assert replay_message.split(begin, 1)[1].split(end, 1)[0] == "current-day message"
 
 
 def test_same_request_recomputes_again_after_full_config_hash_changes() -> None:
@@ -1465,7 +1562,8 @@ async def test_default_factory_result_is_injected_and_lifecycle_managed(monkeypa
     assert await web_app._start_v20_lifecycle(app) is True
     assert app.state.v20_service is service
     assert service.start_calls == 1
-    assert captured == {"fundamentals_db": shared_fundamentals}
+    assert captured["fundamentals_db"] is shared_fundamentals
+    assert captured["scan_state"] is app.state.v15_scan_state
 
     await web_app._stop_v20_lifecycle(app)
     assert service.stop_calls == 1

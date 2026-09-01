@@ -46,6 +46,36 @@ _ENTRY_FINALIZATION_WALL = time(9, 45)
 _MANUAL_MONITOR_ENROLLMENT_DEADLINE_WALL = time(9, 30)
 _BOOTSTRAP_CHECKPOINT_SCHEMA = "v20-bootstrap-checkpoint/v2"
 _BOOTSTRAP_BATCH_ID_PROFILE = "V20_BOOTSTRAP_TARGET_BATCH_ID_V1"
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_OUTBOX_002_CHECKSUM_DECLARATION = re.compile(r"migration_checksum text := '[^']*';")
+
+
+def _outbox_002_contract_checksum(standalone: str) -> str:
+    canonical_contract = _OUTBOX_002_CHECKSUM_DECLARATION.sub(
+        "migration_checksum text := '__V20_002_CONTRACT_SHA256__';",
+        standalone,
+        count=1,
+    )
+    return hashlib.sha256(canonical_contract.encode("utf-8")).hexdigest()
+
+
+def _render_outbox_at_most_once_migration(schema: str) -> str:
+    standalone = (_PROJECT_ROOT / "migrations" / "v20" / "002_outbox_at_most_once.sql").read_text(
+        encoding="utf-8"
+    )
+    declaration = _OUTBOX_002_CHECKSUM_DECLARATION.search(standalone)
+    if declaration is None:
+        raise RuntimeError("V20 002 migration checksum declaration is missing")
+    declared_checksum = declaration.group(0)
+    contract_checksum = _outbox_002_contract_checksum(standalone)
+    canonical_declaration = f"migration_checksum text := '{contract_checksum}';"
+    if declared_checksum != canonical_declaration:
+        raise RuntimeError("V20 002 migration checksum does not match its canonical contract")
+    if schema == "v20":
+        return standalone
+    return standalone.replace("v20.", f"{schema}.").replace(
+        "table_schema='v20'", f"table_schema='{schema}'"
+    )
 
 
 class V20RepositoryError(RuntimeError):
@@ -971,6 +1001,12 @@ class OutboxRecord:
 
 
 @dataclass(frozen=True)
+class DeliveryAttempt:
+    attempt_number: int
+    delivery_variant: str
+
+
+@dataclass(frozen=True)
 class ActiveModelLeg:
     model_leg_id: str
     model_batch_id: str
@@ -1783,7 +1819,12 @@ def migration_sql(schema: str = "v20") -> str:
     """Render the schema-qualified migration after validating the identifier."""
     if not _IDENTIFIER.fullmatch(schema):
         raise ValueError(f"invalid PostgreSQL schema identifier: {schema!r}")
-    return _MIGRATION_TEMPLATE.format(schema=schema)
+    return (
+        _MIGRATION_TEMPLATE.format(schema=schema)
+        + "\n\n"
+        + _render_outbox_at_most_once_migration(schema)
+        + "\n"
+    )
 
 
 class V20Repository:
@@ -1970,7 +2011,13 @@ class V20Repository:
     async def migrate(self) -> None:
         sql = migration_sql(self.schema)
         async with self.pool.acquire() as connection:
-            await connection.execute(sql)
+            async with connection.transaction():
+                await connection.execute("SET LOCAL lock_timeout = '3s'")
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    f"{self.schema}:002_outbox_at_most_once",
+                )
+                await connection.execute(sql)
 
     async def register_config(
         self,
@@ -3128,7 +3175,7 @@ class V20Repository:
                     or source_semantic.get("probe_result") != "PASS"
                     or source_semantic.get("current_version_recomputed") is not True
                     or source_semantic.get("replay_reused") is not False
-                    or source_semantic.get("visible_message_mode") != "AUTOMATIC_ENTRY_RENDER"
+                    or source_semantic.get("visible_message_mode") != "MANUAL_OPERATOR_RENDER"
                     or source_semantic.get("strategy_version") != commit.strategy_version
                     or source_semantic.get("config_hash") != commit.source_config_hash
                     or source_semantic.get("state_semantics_hash") != commit.state_semantics_hash
@@ -3969,7 +4016,7 @@ class V20Repository:
         official_stream_id: str,
         lineage_id: str,
     ) -> Mapping[str, Any]:
-        """Return non-secret delivery backlog counters for health probes."""
+        """Return non-secret delivery backlog and unknown-outcome counters."""
         _require_outbox_scope(route_id, official_stream_id, lineage_id)
         async with self.pool.acquire() as connection:
             row = await connection.fetchrow(
@@ -3981,11 +4028,51 @@ class V20Repository:
                     ) AS pending_delivery_n,
                     count(*) FILTER (WHERE delivery_status='LEASED') AS leased_n,
                     count(*) FILTER (
+                        WHERE delivery_status='DELIVERY_UNKNOWN'
+                          AND lease_owner IS NOT NULL
+                          AND lease_until >= clock_timestamp()
+                          AND EXISTS (
+                              SELECT 1 FROM {self.schema}.delivery_attempts AS attempt
+                              WHERE attempt.event_id=outbox.event_id
+                                AND attempt.phase='STARTED'
+                                AND attempt.worker_id=outbox.lease_owner
+                          )
+                    ) AS dispatching_n,
+                    count(*) FILTER (
+                        WHERE delivery_status='DELIVERY_UNKNOWN'
+                          AND EXISTS (
+                              SELECT 1 FROM {self.schema}.delivery_attempts AS attempt
+                              WHERE attempt.event_id=outbox.event_id
+                                AND attempt.phase='STARTED'
+                          )
+                          AND NOT (
+                              lease_owner IS NOT NULL
+                              AND lease_until >= clock_timestamp()
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM {self.schema}.delivery_attempts AS attempt
+                                  WHERE attempt.event_id=outbox.event_id
+                                    AND attempt.phase='STARTED'
+                                    AND attempt.worker_id=outbox.lease_owner
+                              )
+                          )
+                    ) AS stale_started_n,
+                    count(*) FILTER (
+                        WHERE delivery_status='DELIVERY_UNKNOWN'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM {self.schema}.delivery_attempts AS attempt
+                              WHERE attempt.event_id=outbox.event_id
+                                AND attempt.phase='STARTED'
+                          )
+                    ) AS terminal_unknown_n,
+                    count(*) FILTER (WHERE delivery_status='DELIVERY_UNKNOWN') AS unknown_n,
+                    count(*) FILTER (
                         WHERE seal_status='PENDING' AND seal_last_error IS NOT NULL
                     ) AS seal_error_n,
                     count(*) FILTER (
-                        WHERE delivery_status <> 'SENT' AND last_error IS NOT NULL
-                    ) AS delivery_error_n,
+                        WHERE delivery_status='PENDING' AND last_error IS NOT NULL
+                    ) AS pending_delivery_error_n,
+                    count(*) FILTER (WHERE delivery_status='DELIVERY_UNKNOWN') AS unknown_error_n,
                     max(seal_attempt_count) FILTER (
                         WHERE seal_status='PENDING'
                     ) AS max_seal_attempt_count,
@@ -3998,8 +4085,19 @@ class V20Repository:
                     min(created_at) FILTER (
                         WHERE delivery_status <> 'SENT'
                     ) AS oldest_unsent_at,
+                    min(
+                        COALESCE(
+                            (
+                                SELECT min(attempt.attempted_at)
+                                FROM {self.schema}.delivery_attempts AS attempt
+                                WHERE attempt.event_id=outbox.event_id
+                                  AND attempt.phase IN ('STARTED','UNKNOWN')
+                            ),
+                            outbox.created_at
+                        )
+                    ) FILTER (WHERE delivery_status='DELIVERY_UNKNOWN') AS oldest_unknown_at,
                     max(delivered_at) AS last_delivered_at
-                FROM {self.schema}.outbox_events
+                FROM {self.schema}.outbox_events AS outbox
                 WHERE route_id=$1 AND official_stream_id=$2 AND lineage_id=$3
                 """,
                 route_id,
@@ -4008,12 +4106,19 @@ class V20Repository:
             )
         if row is None:
             raise V20RepositoryError("cannot read V20 outbox health")
+        delivery_error_n = int(row["pending_delivery_error_n"] or 0) + int(
+            row["unknown_error_n"] or 0
+        )
         return {
             "unsealed_n": int(row["unsealed_n"] or 0),
             "pending_delivery_n": int(row["pending_delivery_n"] or 0),
             "leased_n": int(row["leased_n"] or 0),
+            "dispatching_n": int(row["dispatching_n"] or 0),
+            "stale_started_n": int(row["stale_started_n"] or 0),
+            "terminal_unknown_n": int(row["terminal_unknown_n"] or 0),
+            "unknown_n": int(row["unknown_n"] or 0),
             "seal_error_n": int(row["seal_error_n"] or 0),
-            "delivery_error_n": int(row["delivery_error_n"] or 0),
+            "delivery_error_n": delivery_error_n,
             "max_seal_attempt_count": int(row["max_seal_attempt_count"] or 0),
             "max_delivery_attempt_count": int(row["max_delivery_attempt_count"] or 0),
             "last_seal_attempt_at": (
@@ -4023,6 +4128,11 @@ class V20Repository:
             ),
             "oldest_unsent_at": (
                 row["oldest_unsent_at"].isoformat() if row["oldest_unsent_at"] is not None else None
+            ),
+            "oldest_unknown_at": (
+                row["oldest_unknown_at"].isoformat()
+                if row["oldest_unknown_at"] is not None
+                else None
             ),
             "last_delivered_at": (
                 row["last_delivered_at"].isoformat()
@@ -4056,10 +4166,22 @@ class V20Repository:
                         SELECT clock_timestamp() AS leased_at
                     ), candidates AS (
                         SELECT event_id FROM {self.schema}.outbox_events,lease_clock
-                        WHERE seal_status='SEALED' AND delivery_status <> 'SENT'
+                        WHERE seal_status='SEALED'
                           AND route_id=$1 AND official_stream_id=$2 AND lineage_id=$3
                           AND available_at <= clock_timestamp()
-                          AND (delivery_status='PENDING' OR lease_until < clock_timestamp())
+                          AND (
+                              delivery_status='PENDING'
+                              OR (
+                                  delivery_status='LEASED'
+                                  AND lease_until < clock_timestamp()
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                      FROM {self.schema}.delivery_attempts AS attempt
+                                      WHERE attempt.event_id=outbox_events.event_id
+                                        AND attempt.phase='STARTED'
+                                  )
+                              )
+                          )
                         ORDER BY
                           CASE
                             WHEN event_type='ENTRY_DECISION'
@@ -4136,7 +4258,7 @@ class V20Repository:
         records.sort(key=delivery_priority)
         return records
 
-    async def complete_delivery(
+    async def begin_delivery_attempt(
         self,
         event_id: str,
         *,
@@ -4144,21 +4266,26 @@ class V20Repository:
         route_id: str,
         official_stream_id: str,
         lineage_id: str,
-        succeeded: bool,
-        error: str | None = None,
-        retry_after_seconds: int = 30,
-    ) -> None:
+        action_reserve_seconds: float = 2.0,
+        relay_enforced: bool = False,
+    ) -> DeliveryAttempt:
+        """Atomically cross the outward side-effect boundary before HTTP I/O."""
+
         _require_outbox_scope(route_id, official_stream_id, lineage_id)
         if not worker_id:
             raise ValueError("worker_id cannot be empty")
-        if retry_after_seconds < 0:
-            raise ValueError("retry_after_seconds cannot be negative")
+        if action_reserve_seconds < 0:
+            raise ValueError("action_reserve_seconds cannot be negative")
         async with self.pool.acquire() as connection:
             async with connection.transaction():
                 row = await connection.fetchrow(
-                    f"SELECT attempt_count FROM {self.schema}.outbox_events "
-                    "WHERE event_id=$1 AND delivery_status='LEASED' AND lease_owner=$2 "
-                    "AND route_id=$3 AND official_stream_id=$4 AND lineage_id=$5 FOR UPDATE",
+                    f"""
+                    SELECT attempt_count,action_expiry_ts,clock_timestamp() AS db_now
+                    FROM {self.schema}.outbox_events
+                    WHERE event_id=$1 AND delivery_status='LEASED' AND lease_owner=$2
+                      AND route_id=$3 AND official_stream_id=$4 AND lineage_id=$5
+                    FOR UPDATE
+                    """,
                     event_id,
                     worker_id,
                     route_id,
@@ -4166,46 +4293,217 @@ class V20Repository:
                     lineage_id,
                 )
                 if row is None:
-                    raise V20StateConflict("outbox lease is missing or owned by another worker")
-                attempt = int(row["attempt_count"]) + 1
-                await connection.execute(
+                    raise V20StateConflict("outbox dispatch lease is missing or not owned")
+
+                action_expiry = row["action_expiry_ts"]
+                if action_expiry is None:
+                    delivery_variant = "PRIMARY"
+                elif relay_enforced and row["db_now"] < action_expiry:
+                    delivery_variant = "RELAY_ENFORCED"
+                elif row["db_now"] + timedelta(seconds=action_reserve_seconds) < action_expiry:
+                    delivery_variant = "ACTIONABLE"
+                else:
+                    delivery_variant = "EXPIRED_NOTICE"
+                attempt_number = int(row["attempt_count"]) + 1
+
+                inserted = await connection.fetchrow(
                     f"""
                     INSERT INTO {self.schema}.delivery_attempts
-                        (event_id,attempt_number,succeeded,error_text)
-                    VALUES ($1,$2,$3,$4)
+                        (event_id,attempt_number,phase,worker_id,delivery_variant)
+                    VALUES ($1,$2,'STARTED',$3,$4)
+                    RETURNING attempt_number,delivery_variant
                     """,
                     event_id,
-                    attempt,
-                    succeeded,
-                    error,
+                    attempt_number,
+                    worker_id,
+                    delivery_variant,
                 )
-                if succeeded:
-                    await connection.execute(
-                        f"""
-                        UPDATE {self.schema}.outbox_events
-                        SET delivery_status='SENT',attempt_count=$1,last_error=NULL,
-                            delivered_at=clock_timestamp(),lease_owner=NULL,lease_until=NULL
-                        WHERE event_id=$2
-                        """,
-                        attempt,
-                        event_id,
+                if inserted is None:
+                    raise V20StateConflict("outbox dispatch attempt insert lost")
+
+                updated = await connection.fetchrow(
+                    f"""
+                    UPDATE {self.schema}.outbox_events
+                    SET delivery_status='DELIVERY_UNKNOWN',attempt_count=$1,last_error=NULL
+                    WHERE event_id=$2 AND delivery_status='LEASED' AND lease_owner=$3
+                      AND route_id=$4 AND official_stream_id=$5 AND lineage_id=$6
+                      AND attempt_count=$7
+                    RETURNING event_id
+                    """,
+                    attempt_number,
+                    event_id,
+                    worker_id,
+                    route_id,
+                    official_stream_id,
+                    lineage_id,
+                    int(row["attempt_count"]),
+                )
+                if updated is None:
+                    raise V20StateConflict("outbox dispatch boundary CAS lost")
+                return DeliveryAttempt(
+                    attempt_number=attempt_number,
+                    delivery_variant=delivery_variant,
+                )
+
+    async def defer_before_dispatch(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        route_id: str,
+        official_stream_id: str,
+        lineage_id: str,
+        error: str,
+        retry_after_seconds: int = 30,
+    ) -> None:
+        """Release an un-dispatched lease without creating an attempt."""
+
+        _require_outbox_scope(route_id, official_stream_id, lineage_id)
+        if not worker_id:
+            raise ValueError("worker_id cannot be empty")
+        if retry_after_seconds < 0:
+            raise ValueError("retry_after_seconds cannot be negative")
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                updated = await connection.fetchrow(
+                    f"""
+                    UPDATE {self.schema}.outbox_events
+                    SET delivery_status='PENDING',last_error=$1,
+                        available_at=clock_timestamp()+(
+                            $2::double precision * interval '1 second'
+                        ),
+                        lease_owner=NULL,lease_until=NULL
+                    WHERE event_id=$3 AND delivery_status='LEASED' AND lease_owner=$4
+                      AND route_id=$5 AND official_stream_id=$6 AND lineage_id=$7
+                    RETURNING event_id
+                    """,
+                    error,
+                    retry_after_seconds,
+                    event_id,
+                    worker_id,
+                    route_id,
+                    official_stream_id,
+                    lineage_id,
+                )
+                if updated is None:
+                    raise V20StateConflict("outbox pre-dispatch release CAS lost")
+
+    async def complete_delivery(
+        self,
+        event_id: str,
+        *,
+        attempt_number: int,
+        worker_id: str,
+        route_id: str,
+        official_stream_id: str,
+        lineage_id: str,
+        outcome: Literal["DELIVERED", "SAFE_RETRY", "UNKNOWN"],
+        error: str | None = None,
+        retry_after_seconds: int = 30,
+    ) -> None:
+        """Finalize exactly one STARTED attempt and its DELIVERY_UNKNOWN event."""
+
+        _require_outbox_scope(route_id, official_stream_id, lineage_id)
+        if not worker_id:
+            raise ValueError("worker_id cannot be empty")
+        if attempt_number < 1:
+            raise ValueError("attempt_number must be positive")
+        if retry_after_seconds < 0:
+            raise ValueError("retry_after_seconds cannot be negative")
+        if outcome == "DELIVERED" and error is not None:
+            raise ValueError("DELIVERED attempt cannot carry an error")
+        if outcome in {"SAFE_RETRY", "UNKNOWN"} and not error:
+            raise ValueError("SAFE_RETRY and UNKNOWN attempts require an error")
+        if outcome == "UNKNOWN":
+            error = error or "delivery outcome unknown"
+
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                attempt_updated = await connection.fetchrow(
+                    f"""
+                    UPDATE {self.schema}.delivery_attempts
+                    SET succeeded=$3,error_text=$4,phase=$5,completed_at=clock_timestamp()
+                    WHERE event_id=$1 AND attempt_number=$6 AND worker_id=$2
+                      AND phase='STARTED'
+                    RETURNING event_id
+                    """,
+                    event_id,
+                    worker_id,
+                    True
+                    if outcome == "DELIVERED"
+                    else (False if outcome == "SAFE_RETRY" else None),
+                    error,
+                    outcome,
+                    attempt_number,
+                )
+                if attempt_updated is None:
+                    raise V20StateConflict(
+                        "outbox delivery attempt is missing, stale, or owned by another worker"
                     )
-                else:
-                    await connection.execute(
+
+                if outcome == "DELIVERED":
+                    event_updated = await connection.fetchrow(
                         f"""
                         UPDATE {self.schema}.outbox_events
-                        SET delivery_status='PENDING',attempt_count=$1,last_error=$2,
+                        SET delivery_status='SENT',last_error=NULL,
+                            delivered_at=clock_timestamp(),
+                            lease_owner=NULL,lease_until=NULL
+                        WHERE event_id=$1 AND delivery_status='DELIVERY_UNKNOWN'
+                          AND attempt_count=$2 AND lease_owner=$3
+                          AND route_id=$4 AND official_stream_id=$5 AND lineage_id=$6
+                        RETURNING event_id
+                        """,
+                        event_id,
+                        attempt_number,
+                        worker_id,
+                        route_id,
+                        official_stream_id,
+                        lineage_id,
+                    )
+                elif outcome == "SAFE_RETRY":
+                    event_updated = await connection.fetchrow(
+                        f"""
+                        UPDATE {self.schema}.outbox_events
+                        SET delivery_status='PENDING',last_error=$1,
                             available_at=clock_timestamp()+(
-                                $3::double precision * interval '1 second'
+                                $2::double precision * interval '1 second'
                             ),
                             lease_owner=NULL,lease_until=NULL
-                        WHERE event_id=$4
+                        WHERE event_id=$3 AND delivery_status='DELIVERY_UNKNOWN'
+                          AND attempt_count=$4 AND lease_owner=$5
+                          AND route_id=$6 AND official_stream_id=$7 AND lineage_id=$8
+                        RETURNING event_id
                         """,
-                        attempt,
                         error,
                         retry_after_seconds,
                         event_id,
+                        attempt_number,
+                        worker_id,
+                        route_id,
+                        official_stream_id,
+                        lineage_id,
                     )
+                else:
+                    event_updated = await connection.fetchrow(
+                        f"""
+                        UPDATE {self.schema}.outbox_events
+                        SET delivery_status='DELIVERY_UNKNOWN',last_error=$1,
+                            lease_owner=NULL,lease_until=NULL
+                        WHERE event_id=$2 AND delivery_status='DELIVERY_UNKNOWN'
+                          AND attempt_count=$3 AND lease_owner=$4
+                          AND route_id=$5 AND official_stream_id=$6 AND lineage_id=$7
+                        RETURNING event_id
+                        """,
+                        error,
+                        event_id,
+                        attempt_number,
+                        worker_id,
+                        route_id,
+                        official_stream_id,
+                        lineage_id,
+                    )
+                if event_updated is None:
+                    raise V20StateConflict("outbox delivery finalize CAS lost")
 
     async def list_pending_shadow_batches(
         self,
@@ -5033,21 +5331,33 @@ class V20Repository:
         *,
         source_trade_date: date,
         cutoff: datetime,
+        availability_date: date | None = None,
     ) -> str | None:
-        """Recover a qualified daily cache after a V20 process restart."""
+        """Recover a qualified daily cache after a V20 process restart.
+
+        A snapshot qualifies on time (generated and sealed before the cutoff)
+        or as the same day's late local repair (its evidence availability date
+        matches ``availability_date``); a late repair is never invalid merely
+        because it was calculated after the cutoff.
+        """
 
         _require_aware(cutoff, "MEWS cutoff")
+        availability = availability_date.isoformat() if availability_date is not None else None
         async with self.pool.acquire() as connection:
             value = await connection.fetchval(
                 f"""
                 SELECT snapshot_id FROM {self.schema}.mews_snapshots
                 WHERE source_trade_date=$1
-                  AND generated_at < $2 AND receipt_sealed_at < $2
+                  AND (
+                    (generated_at < $2 AND receipt_sealed_at < $2)
+                    OR (snapshot_json->'evidence'->>'signal_available_date' = $3)
+                  )
                 ORDER BY generated_at DESC,receipt_sealed_at DESC,snapshot_id DESC
                 LIMIT 1
                 """,
                 source_trade_date,
                 cutoff,
+                availability,
             )
         return str(value) if value is not None else None
 
@@ -5057,8 +5367,23 @@ class V20Repository:
         *,
         d1: date,
         cutoff: datetime,
+        late_source_trade_date: date | None = None,
+        late_availability_date: date | None = None,
     ) -> tuple[str | None, str | None, str]:
+        """Freeze the leg's MEWS selection exactly once.
+
+        Candidates qualify on time (generated and sealed before ``cutoff``) or
+        as the leg's late-repaired daily value: generated after the cutoff but
+        with ``late_source_trade_date`` as source (the correct predecessor of
+        ``d1``) and evidence availability equal to ``late_availability_date``
+        (``d1``).  An already frozen selection — including a fallback freeze —
+        is returned unchanged and is never rewritten.
+        """
+
         _require_aware(cutoff, "MEWS cutoff")
+        late_availability = (
+            late_availability_date.isoformat() if late_availability_date is not None else None
+        )
         async with self.pool.acquire() as connection:
             async with connection.transaction(isolation="serializable"):
                 leg = await connection.fetchrow(
@@ -5096,19 +5421,35 @@ class V20Repository:
                     )
                 row = await connection.fetchrow(
                     f"""
-                    SELECT snapshot_id,fast_state FROM {self.schema}.mews_snapshots
-                    WHERE source_trade_date < $1 AND generated_at < $2
-                      AND receipt_sealed_at < $2
+                    SELECT snapshot_id,fast_state,
+                           (generated_at < $2 AND receipt_sealed_at < $2) AS on_time
+                    FROM {self.schema}.mews_snapshots
+                    WHERE source_trade_date < $1
+                      AND (
+                        (generated_at < $2 AND receipt_sealed_at < $2)
+                        OR (
+                          $3::date IS NOT NULL
+                          AND source_trade_date = $3
+                          AND snapshot_json->'evidence'->>'signal_available_date' = $4
+                        )
+                      )
                     ORDER BY source_trade_date DESC,generated_at DESC,
                              receipt_sealed_at DESC,snapshot_id DESC
                     LIMIT 1
                     """,
                     d1,
                     cutoff,
+                    late_source_trade_date,
+                    late_availability,
                 )
                 snapshot_id = row["snapshot_id"] if row else None
                 fast_state = row["fast_state"] if row else None
-                reason = "ELIGIBLE" if row else "MEWS_UNAVAILABLE_FALLBACK_12"
+                if row is None:
+                    reason = "MEWS_UNAVAILABLE_FALLBACK_12"
+                elif row["on_time"]:
+                    reason = "ELIGIBLE"
+                else:
+                    reason = "ELIGIBLE_LATE_SAME_DAY"
                 await connection.execute(
                     f"""
                     INSERT INTO {self.schema}.leg_mews_selection
@@ -5175,11 +5516,15 @@ class V20Repository:
                 raise V20SemanticConflict("selected MEWS fast_state does not match snapshot")
             if sha256_json(payload) != row["content_hash"]:
                 raise V20SemanticConflict("selected MEWS snapshot hash mismatch")
-            if not (
-                row["source_trade_date"] < row["d1"]
-                and row["generated_at"] < row["cutoff_ts"]
-                and row["received_at"] < row["cutoff_ts"]
-            ):
+            on_time = (
+                row["generated_at"] < row["cutoff_ts"] and row["received_at"] < row["cutoff_ts"]
+            )
+            evidence = payload.get("evidence") if isinstance(payload, Mapping) else None
+            availability = (
+                evidence.get("signal_available_date") if isinstance(evidence, Mapping) else None
+            )
+            late_same_day = availability == row["d1"].isoformat()
+            if not (row["source_trade_date"] < row["d1"] and (on_time or late_same_day)):
                 raise V20SemanticConflict("selected MEWS snapshot violates PIT cutoff")
         return SelectedMewsRecord(
             model_leg_id=row["model_leg_id"],
@@ -6305,6 +6650,7 @@ def create_embedded_v20_repository_from_config(
 
 __all__ = [
     "ActiveModelLeg",
+    "DeliveryAttempt",
     "EntryCommit",
     "EntryStatus",
     "ExitCommit",

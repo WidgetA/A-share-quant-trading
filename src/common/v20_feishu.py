@@ -11,12 +11,16 @@ import os
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TypeGuard
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
 
+from src.common.feishu_bot import (
+    LEGACY_FEISHU_HTTP_PHASE_TIMEOUT_SECONDS,
+    post_message_once,
+)
 from src.data.database.v20_repository import OutboxRecord, V20Repository, V20StateConflict
 from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
@@ -27,11 +31,14 @@ from src.strategy.v20.models import (
 )
 
 logger = logging.getLogger(__name__)
-_ENTRY_ACTION_SEND_GUARD_SECONDS = 1.0
-_NON_EXPIRING_SEND_TIMEOUT_SECONDS = 2.0
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 V20_RELAY_REQUEST_SCHEMA = "v20-relay-request/v1"
 V20_RELAY_RESPONSE_SCHEMA = "v20-relay-response/v1"
+_LEGACY_OUTWARD_CALL_DEADLINE_SECONDS = LEGACY_FEISHU_HTTP_PHASE_TIMEOUT_SECONDS + 1.0
+_LEGACY_OUTBOUND_DEADLINE_SAFETY_SECONDS = 1.0
+_LEGACY_ACTION_RESERVE_SECONDS = (
+    _LEGACY_OUTWARD_CALL_DEADLINE_SECONDS + _LEGACY_OUTBOUND_DEADLINE_SAFETY_SECONDS
+)
 _DELIVERY_CLASSES = {
     "ACTIONABLE_ENTRY",
     "NON_ACTIONABLE_ENTRY",
@@ -352,6 +359,128 @@ def _render_manual_0939_chain_probe_for_operator(
         ]
     )
     return "\n".join(lines)
+
+
+_MANUAL_CHECK_CURRENT_ACTION = "当前操作：不生成新的入场指令，不补买，不追买"
+_MANUAL_CHECK_CURRENT_REASON = "原因：手工触发时间已过当日入场时点。"
+_FROZEN_REPLAY_SOURCE_BEGIN = "----- 早盘封存原文开始（逐字节未改动，仅供核查） -----"
+_FROZEN_REPLAY_SOURCE_END = "----- 早盘封存原文结束 -----"
+
+
+def _render_manual_entry_check_for_operator(
+    semantic: Mapping[str, Any],
+    *,
+    title_prefix: str,
+    event_id: str,
+) -> str:
+    """Render a fresh post-cutoff recomputation as check-only, never as a decision.
+
+    The recomputation runs the same formal computation chain as the morning;
+    being past the entry point changes only actionability, not the algorithm
+    or its result.  The visible message therefore leads with the current
+    operator action and shows the computed result in a dedicated section.
+    """
+
+    entry = semantic["entry_render_semantic"]
+    assert isinstance(entry, Mapping)
+    trade_date = str(semantic.get("event_trade_date", "-"))
+    computed_at = datetime.fromisoformat(str(semantic["computed_at"])).astimezone(SHANGHAI)
+    action = str(entry.get("action", semantic.get("v20_action", "-")))
+    multiplier = float(entry.get("final_multiplier", 0.0))
+    lines = [
+        f"{title_prefix} 手工触发结果｜仅核查",
+        "",
+        _MANUAL_CHECK_CURRENT_ACTION,
+        _MANUAL_CHECK_CURRENT_REASON,
+        "",
+        "策略计算结果（与早盘正式计算链相同；时间只影响可操作性，不影响算法与结果）：",
+        f"计算结论：{action}｜最终倍率 {_pct(multiplier, 0)}",
+        (
+            f"BASE: {entry.get('health_state', '-')} / "
+            f"基础倍率 {_pct(entry.get('base_multiplier'), 0)}"
+        ),
+        (
+            f"滚动7: {entry.get('rolling7_state', '-')} | "
+            f"R7={_pct(entry.get('rolling7_r7'))} | "
+            f"亏损批次={entry.get('rolling7_l7', '-')}/7"
+        ),
+        (
+            f"极端门G: {entry.get('g_state', 'NOT_EVALUATED')} | "
+            f"防御倍率 {_pct(entry.get('defense_multiplier'), 0)} | "
+            f"最终 {_pct(multiplier, 0)}"
+        ),
+    ]
+    funnel = entry.get("v16_funnel") or {}
+    if isinstance(funnel, Mapping) and funnel:
+        lines.append(
+            "V16扫描: "
+            f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
+            f"热门板块 {funnel.get('step2_hot_board_count', '-')}个 | "
+            f"最终 {funnel.get('final_candidates', '-')}只"
+        )
+    symbols = entry.get("symbols") or semantic.get("symbols") or []
+    if isinstance(symbols, list) and symbols:
+        lines.extend(["", f"V16完整推荐（{len(symbols)}只）:"])
+        for item in symbols:
+            if not isinstance(item, Mapping):
+                continue
+            parts = [
+                f"{item.get('rank', '-')}. {item.get('code', '-')} {item.get('name', '')}".rstrip()
+            ]
+            score: Any = item.get("score")
+            if _finite_number(score):
+                parts.append(f"LGB={float(score):.4f}")
+            snapshot: Any = item.get("snapshot_price")
+            if _finite_number(snapshot):
+                parts.append(f"09:39快照:{float(snapshot):.2f}")
+            lines.append("  ".join(parts))
+    else:
+        lines.append("票单：无")
+    lines.extend(
+        [
+            "",
+            "边界：本消息不创建模型批次、模型腿、持仓或订单；正式策略状态与早盘正式消息不变。",
+            (
+                f"交易日：{trade_date}｜计算完成：{computed_at.strftime('%H:%M:%S')}｜"
+                f"请求：{semantic.get('manual_request_id', '-')}｜事件：{event_id[:16]}"
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_frozen_entry_check_for_operator(
+    semantic: Mapping[str, Any],
+    *,
+    title_prefix: str,
+    event_id: str,
+) -> str:
+    """Wrap the sealed official bytes in an unmissable check-only banner.
+
+    The verbatim source stays extractable byte-for-byte between the explicit
+    sealed-source markers; the outer banner and footer keep the manual
+    identity so the replay can never be mistaken for a new instruction.
+    """
+
+    source_message = str(semantic["message"])
+    trade_date = str(semantic.get("event_trade_date", "-"))
+    source_event = str(semantic.get("source_entry_event_id", "-"))
+    return "\n".join(
+        [
+            f"{title_prefix} 手工触发结果｜仅核查",
+            "",
+            _MANUAL_CHECK_CURRENT_ACTION,
+            _MANUAL_CHECK_CURRENT_REASON,
+            "",
+            "以下为早盘封存原文（已密封正式消息的逐字节副本，仅供核查，不是新指令）：",
+            _FROZEN_REPLAY_SOURCE_BEGIN,
+            source_message,
+            _FROZEN_REPLAY_SOURCE_END,
+            "",
+            "说明：封存原文只在当日09:40截止前有效；现在不能据此下单、补买或追买。",
+            f"交易日：{trade_date}｜来源事件：{source_event[:16]}｜事件：{event_id[:16]}",
+        ]
+    )
 
 
 def _render_data_alert_for_operator(
@@ -758,7 +887,7 @@ def render_exit_message(
     return "\n".join(lines)
 
 
-def _finite_number(value: object) -> bool:
+def _finite_number(value: object) -> TypeGuard[int | float]:
     return (
         not isinstance(value, bool)
         and isinstance(value, (int, float))
@@ -854,6 +983,7 @@ def _validate_entry_formatter_semantic(
         "cci",
         "volume_937",
         "history_hash",
+        "early_source_hash",
     }
     for item in symbols:
         if not isinstance(item, Mapping) or not required_symbol_fields.issubset(item):
@@ -872,11 +1002,17 @@ def _validate_entry_formatter_semantic(
             raise ValueError("V20 entry symbol board lacks frozen average gain")
         if not isinstance(item["is_driver"], bool):
             raise ValueError("V20 entry symbol is_driver is invalid")
-        for field in ("score", "snapshot_price", "cci", "volume_937"):
+        for field in ("score", "snapshot_price"):
             if not _finite_number(item[field]):
                 raise ValueError(f"V20 entry symbol {field} is invalid")
-        if float(item["snapshot_price"]) <= 0 or float(item["volume_937"]) <= 0:
-            raise ValueError("V20 entry symbol price/volume must be positive")
+        if float(item["snapshot_price"]) <= 0:
+            raise ValueError("V20 entry symbol snapshot_price must be positive")
+        for field in ("cci", "volume_937"):
+            value = item[field]
+            if value is not None and not _finite_number(value):
+                raise ValueError(f"V20 entry symbol {field} is invalid")
+        if item["volume_937"] is not None and float(item["volume_937"]) <= 0:
+            raise ValueError("V20 entry symbol volume_937 must be positive")
         history_hash = item["history_hash"]
         if (
             not isinstance(history_hash, str)
@@ -884,6 +1020,13 @@ def _validate_entry_formatter_semantic(
             or any(character not in "0123456789abcdef" for character in history_hash)
         ):
             raise ValueError("V20 entry symbol history_hash is invalid")
+        early_source_hash = item["early_source_hash"]
+        if (
+            not isinstance(early_source_hash, str)
+            or len(early_source_hash) != 64
+            or any(character not in "0123456789abcdef" for character in early_source_hash)
+        ):
+            raise ValueError("V20 entry symbol early_source_hash is invalid")
 
 
 def _validate_manual_0939_chain_probe(
@@ -1009,8 +1152,8 @@ def _validate_manual_0939_chain_probe(
             raise ValueError("passing V20 chain probe quote coverage is invalid")
         if semantic["raw_fact_n"] <= 0:
             raise ValueError("passing V20 chain probe requires persisted raw facts")
-        if semantic["visible_message_mode"] != "AUTOMATIC_ENTRY_RENDER":
-            raise ValueError("passing V20 chain probe must use the automatic entry renderer")
+        if semantic["visible_message_mode"] != "MANUAL_OPERATOR_RENDER":
+            raise ValueError("passing V20 chain probe must use the manual check-only renderer")
         entry_semantic = semantic.get("entry_render_semantic")
         if not isinstance(entry_semantic, Mapping):
             raise ValueError("passing V20 chain probe lacks entry formatter evidence")
@@ -1020,7 +1163,10 @@ def _validate_manual_0939_chain_probe(
             event_type="ENTRY_DECISION",
             semantic=dict(entry_semantic),
         )
-        _validate_entry_formatter_semantic(entry_record, entry_semantic)
+        _validate_entry_formatter_semantic(
+            entry_record,
+            entry_semantic,
+        )
         if (
             entry_semantic.get("action") != action
             or entry_semantic.get("final_multiplier") != multiplier
@@ -1280,7 +1426,7 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
             if (
                 semantic["data_cutoff"] != "09:39"
                 or semantic["data_receipt_timeliness"] != "POST_CUTOFF"
-                or semantic["state_replay_profile"] != "DEPLOYED_RUNTIME_LINEAGE"
+                or semantic["state_replay_profile"] != "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY"
             ):
                 raise ValueError("V20 late replay has invalid retrospective boundary")
             if semantic["bootstrap_mode"] not in {"EMPTY_FORWARD_SHADOW", "CHECKPOINT"}:
@@ -1359,15 +1505,16 @@ def seal_v20_payload(
         and semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT"
     ):
         if semantic.get("probe_result") == "PASS":
-            # A passing retrospective probe intentionally shows the exact text
-            # that this production renderer would have emitted in the live
-            # morning path.  Expiry/non-actionability remains transport and
-            # HTTP metadata; no wrapper text may alter the visible comparison.
-            message = render_entry_message(
-                semantic["entry_render_semantic"],
-                generated_at=generated_at,
-                commit_marker=commit_marker,
-                on_time=True,
+            # A passing post-cutoff recomputation runs the same formal
+            # computation chain as the morning, but the visible message must
+            # stay a dedicated manual check-only render.  Calling
+            # render_entry_message(..., on_time=True) here would masquerade
+            # as the official daily decision and present "正常建立" as the
+            # current action, which this trigger never is.
+            message = _render_manual_entry_check_for_operator(
+                semantic,
+                title_prefix=title_prefix,
+                event_id=record.event_id,
             )
         else:
             message = _render_manual_0939_chain_probe_for_operator(
@@ -1379,10 +1526,16 @@ def seal_v20_payload(
         record.event_type == "DATA_ALERT"
         and semantic.get("alert_code") == "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
     ):
-        # The source is an already sealed official ENTRY_DECISION payload.  A
-        # string assignment is the only operation here by design: no title,
-        # warning, timestamp, newline, or renderer pass may change one byte.
-        message = str(semantic["message"])
+        # The source is an already sealed official ENTRY_DECISION payload.
+        # Its bytes stay verbatim inside a clearly labeled sealed-source
+        # region under an unmissable check-only banner, so the whole message
+        # can never be read as a new instruction while the original remains
+        # extractable byte-for-byte for audit.
+        message = _render_frozen_entry_check_for_operator(
+            semantic,
+            title_prefix=title_prefix,
+            event_id=record.event_id,
+        )
     elif (
         record.event_type == "DATA_ALERT" and semantic.get("alert_code") == "MANUAL_TRIGGER_RECEIPT"
     ):
@@ -1437,7 +1590,12 @@ class V20RelayClient:
     chat_id: str
     destination_fingerprint: str
 
-    async def send_delivery(self, envelope: Mapping[str, Any]) -> bool:
+    async def send_delivery(
+        self,
+        envelope: Mapping[str, Any],
+        *,
+        delivery_variant: str = "RELAY_ENFORCED",  # noqa: ARG002
+    ) -> bool:
         expected_request_fields = {
             "schema_version",
             "event_id",
@@ -1542,12 +1700,7 @@ class V20RelayClient:
 
 @dataclass(frozen=True)
 class V20LegacyRelayClient:
-    """Adapter for the relay already used by the legacy main container.
-
-    PostgreSQL still owns the V20 outbox lease and retry lifecycle.  This
-    adapter changes only the final HTTP shape from the dedicated
-    ``/api/v20/send`` contract to the deployed ``/api/send`` contract.
-    """
+    """Adapter for the legacy one-shot ``/api/send`` relay contract."""
 
     bot_origin: str
     app_id: str
@@ -1556,7 +1709,12 @@ class V20LegacyRelayClient:
     destination_fingerprint: str
     clock: Callable[[], datetime] = lambda: datetime.now(SHANGHAI)
 
-    async def send_delivery(self, envelope: Mapping[str, Any]) -> bool:
+    async def send_delivery(
+        self,
+        envelope: Mapping[str, Any],
+        *,
+        delivery_variant: str = "PRIMARY",
+    ) -> bool:
         expected_request_fields = {
             "schema_version",
             "event_id",
@@ -1580,9 +1738,13 @@ class V20LegacyRelayClient:
         if delivery_class not in _DELIVERY_CLASSES:
             raise V20RelayContractError("unsupported V20 relay delivery class")
 
-        message = str(envelope["message"])
-        expiry_value = envelope["action_expiry_ts"]
+        message = str(
+            envelope["expired_delivery_message"] or ""
+            if delivery_class == "ACTIONABLE_ENTRY" and delivery_variant == "EXPIRED_NOTICE"
+            else envelope["message"]
+        )
         if delivery_class == "ACTIONABLE_ENTRY":
+            expiry_value = envelope["action_expiry_ts"]
             if not isinstance(expiry_value, str):
                 raise V20RelayContractError("actionable V20 relay entry requires an expiry")
             try:
@@ -1591,31 +1753,23 @@ class V20LegacyRelayClient:
                 raise V20RelayContractError("V20 relay action expiry is invalid") from exc
             if expiry.tzinfo is None or expiry.utcoffset() is None:
                 raise V20RelayContractError("V20 relay action expiry must be timezone-aware")
-            if self.clock().astimezone(SHANGHAI) >= expiry.astimezone(SHANGHAI):
-                message = str(envelope["expired_delivery_message"] or "")
-                if not message:
-                    raise V20RelayContractError("expired V20 entry lacks a safe notice")
-        elif expiry_value is not None:
+        elif envelope["action_expiry_ts"] is not None:
             raise V20RelayContractError("non-actionable V20 delivery cannot have an expiry")
+        if not message:
+            raise V20RelayContractError("legacy Feishu relay message is empty")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.bot_origin}/api/send",
-                json={
-                    "app_id": self.app_id,
-                    "app_secret": self.app_secret,
-                    "chat_id": self.chat_id,
-                    "message": message,
-                },
-            )
-        response.raise_for_status()
         try:
-            receipt = response.json()
+            return await post_message_once(
+                bot_url=self.bot_origin,
+                app_id=self.app_id,
+                app_secret=self.app_secret,
+                chat_id=self.chat_id,
+                message=message,
+            )
         except ValueError as exc:
             raise V20RelayContractError("legacy Feishu relay response is not JSON") from exc
-        if not isinstance(receipt, Mapping) or receipt.get("code") != 0:
-            raise V20RelayContractError("legacy Feishu relay did not return success")
-        return True
+        except RuntimeError as exc:
+            raise V20RelayContractError("legacy Feishu relay did not return success") from exc
 
 
 @dataclass(frozen=True)
@@ -1704,7 +1858,7 @@ def load_legacy_embedded_v20_route() -> V20FeishuRoute:
 
 
 class V20OutboxPublisher:
-    """At-least-once publisher whose retries are controlled by PostgreSQL."""
+    """Durable at-most-once publisher whose dispatch boundary is PostgreSQL."""
 
     def __init__(
         self,
@@ -1738,7 +1892,6 @@ class V20OutboxPublisher:
 
     async def publish_once(self) -> int:
         self._last_cycle_error = None
-        lease_started_monotonic = asyncio.get_running_loop().time()
         records = await self._repository.lease_outbox(
             worker_id=self._worker_id,
             route_id=self._route_id,
@@ -1759,26 +1912,24 @@ class V20OutboxPublisher:
             route = self._routes.get(record.route_id)
             if route is None:
                 self._last_cycle_error = f"unknown route_id {record.route_id}"
-                await self._repository.complete_delivery(
+                await self._repository.defer_before_dispatch(
                     record.event_id,
                     worker_id=self._worker_id,
                     route_id=self._route_id,
                     official_stream_id=self._official_stream_id,
                     lineage_id=self._lineage_id,
-                    succeeded=False,
                     error=f"unknown route_id {record.route_id}",
                     retry_after_seconds=300,
                 )
                 continue
             if not route.is_configured():
                 self._last_cycle_error = f"route {record.route_id} is not configured"
-                await self._repository.complete_delivery(
+                await self._repository.defer_before_dispatch(
                     record.event_id,
                     worker_id=self._worker_id,
                     route_id=self._route_id,
                     official_stream_id=self._official_stream_id,
                     lineage_id=self._lineage_id,
-                    succeeded=False,
                     error=f"route {record.route_id} is not configured",
                     retry_after_seconds=300,
                 )
@@ -1803,9 +1954,18 @@ class V20OutboxPublisher:
                 and normalized_multiplier == 0.0
             )
             if record.event_type == "ENTRY_DECISION" and not (actionable_entry or terminal_no_buy):
-                raise V20StateConflict(
-                    f"entry outbox has ambiguous delivery class for {record.event_id}"
+                error = f"entry outbox has ambiguous delivery class for {record.event_id}"
+                self._last_cycle_error = error
+                await self._repository.defer_before_dispatch(
+                    record.event_id,
+                    worker_id=self._worker_id,
+                    route_id=self._route_id,
+                    official_stream_id=self._official_stream_id,
+                    lineage_id=self._lineage_id,
+                    error=error,
+                    retry_after_seconds=300,
                 )
+                continue
             delivery_class = (
                 "ACTIONABLE_ENTRY"
                 if actionable_entry
@@ -1817,18 +1977,58 @@ class V20OutboxPublisher:
                 str(payload.get("expired_delivery_message", "")) if actionable_entry else None
             )
             if not message:
-                raise V20StateConflict(f"outbox payload lacks message for {record.event_id}")
-            if actionable_entry and not expired_message:
-                raise V20StateConflict(
-                    f"actionable entry lacks expired notice for {record.event_id}"
+                error = f"outbox payload lacks message for {record.event_id}"
+                self._last_cycle_error = error
+                await self._repository.defer_before_dispatch(
+                    record.event_id,
+                    worker_id=self._worker_id,
+                    route_id=self._route_id,
+                    official_stream_id=self._official_stream_id,
+                    lineage_id=self._lineage_id,
+                    error=error,
+                    retry_after_seconds=300,
                 )
+                continue
+            if actionable_entry and not expired_message:
+                error = f"actionable entry lacks expired notice for {record.event_id}"
+                self._last_cycle_error = error
+                await self._repository.defer_before_dispatch(
+                    record.event_id,
+                    worker_id=self._worker_id,
+                    route_id=self._route_id,
+                    official_stream_id=self._official_stream_id,
+                    lineage_id=self._lineage_id,
+                    error=error,
+                    retry_after_seconds=300,
+                )
+                continue
             action_expiry = record.action_expiry_ts
             if actionable_entry and action_expiry is None:
-                raise V20StateConflict(
-                    f"actionable entry lacks action expiry for {record.event_id}"
+                error = f"actionable entry lacks action expiry for {record.event_id}"
+                self._last_cycle_error = error
+                await self._repository.defer_before_dispatch(
+                    record.event_id,
+                    worker_id=self._worker_id,
+                    route_id=self._route_id,
+                    official_stream_id=self._official_stream_id,
+                    lineage_id=self._lineage_id,
+                    error=error,
+                    retry_after_seconds=300,
                 )
+                continue
             if not isinstance(record.payload_hash, str) or len(record.payload_hash) != 64:
-                raise V20StateConflict(f"outbox payload hash is invalid for {record.event_id}")
+                error = f"outbox payload hash is invalid for {record.event_id}"
+                self._last_cycle_error = error
+                await self._repository.defer_before_dispatch(
+                    record.event_id,
+                    worker_id=self._worker_id,
+                    route_id=self._route_id,
+                    official_stream_id=self._official_stream_id,
+                    lineage_id=self._lineage_id,
+                    error=error,
+                    retry_after_seconds=300,
+                )
+                continue
 
             action_expiry_iso: str | None = None
             if actionable_entry:
@@ -1847,60 +2047,77 @@ class V20OutboxPublisher:
                 "expired_delivery_message": expired_message,
                 "destination_fingerprint": route.destination_fingerprint,
             }
-            actionable_timeout: float | None = None
             if actionable_entry:
                 assert action_expiry is not None
-                # PostgreSQL's lease clock, not a potentially skewed app-host
-                # clock, is authoritative.  Bound the in-flight HTTP request by
-                # the remaining monotonic duration as well, so a slow relay
-                # cannot keep an actionable send alive across the cutoff.
-                leased_at = record.lease_db_ts
-                remaining = (
-                    (action_expiry - leased_at).total_seconds() if leased_at is not None else 0.0
-                )
-                remaining -= asyncio.get_running_loop().time() - lease_started_monotonic
-                if remaining > _ENTRY_ACTION_SEND_GUARD_SECONDS:
-                    actionable_timeout = remaining - _ENTRY_ACTION_SEND_GUARD_SECONDS
-                else:
-                    actionable_timeout = 0.0
-                    if getattr(route, "transport", "v20_relay") == "legacy_send":
-                        # The legacy relay cannot enforce V20's server-side
-                        # expiry contract.  PostgreSQL's lease clock already
-                        # proves this suggestion is too late, so downgrade the
-                        # outgoing envelope to a plain non-actionable notice
-                        # before any HTTP request is created.
-                        envelope = {
-                            **envelope,
-                            "delivery_class": "NON_ACTIONABLE_ENTRY",
-                            "action_expiry_ts": None,
-                            "message": expired_message,
-                            "expired_delivery_message": None,
-                        }
-            error: str | None
-            try:
-                send = route.relay().send_delivery(envelope)
-                if actionable_timeout is None or actionable_timeout <= 0.0:
-                    succeeded = await asyncio.wait_for(
-                        send, timeout=_NON_EXPIRING_SEND_TIMEOUT_SECONDS
-                    )
-                else:
-                    succeeded = await asyncio.wait_for(send, timeout=actionable_timeout)
-            except Exception as exc:  # the durable outbox owns every retry
-                logger.warning("V20 Feishu delivery failed", exc_info=True)
-                succeeded = False
-                error = f"{type(exc).__name__}: {exc}"
-            else:
-                error = None if succeeded else "Feishu relay returned failure"
-            if not succeeded:
-                self._last_cycle_error = error or "Feishu relay returned failure"
-            await self._repository.complete_delivery(
+            attempt = await self._repository.begin_delivery_attempt(
                 record.event_id,
                 worker_id=self._worker_id,
                 route_id=self._route_id,
                 official_stream_id=self._official_stream_id,
                 lineage_id=self._lineage_id,
-                succeeded=succeeded,
-                error=error,
+                action_reserve_seconds=(
+                    0.0
+                    if getattr(route, "transport", "v20_relay") == "v20_relay"
+                    else _LEGACY_ACTION_RESERVE_SECONDS
+                ),
+                relay_enforced=getattr(route, "transport", "v20_relay") == "v20_relay",
+            )
+            send_error: str | None
+            send_started_monotonic = asyncio.get_running_loop().time()
+            legacy_transport = getattr(route, "transport", "v20_relay") == "legacy_send"
+            try:
+                if legacy_transport:
+                    async with asyncio.timeout(_LEGACY_OUTWARD_CALL_DEADLINE_SECONDS):
+                        succeeded = await route.relay().send_delivery(
+                            envelope,
+                            delivery_variant=attempt.delivery_variant,
+                        )
+                else:
+                    succeeded = await route.relay().send_delivery(
+                        envelope,
+                        delivery_variant=attempt.delivery_variant,
+                    )
+            except asyncio.CancelledError:
+                try:
+                    await self._repository.complete_delivery(
+                        record.event_id,
+                        attempt_number=attempt.attempt_number,
+                        worker_id=self._worker_id,
+                        route_id=self._route_id,
+                        official_stream_id=self._official_stream_id,
+                        lineage_id=self._lineage_id,
+                        outcome="UNKNOWN",
+                        error="relay_send cancelled after dispatch boundary",
+                        retry_after_seconds=300,
+                    )
+                except Exception:
+                    logger.exception("V20 Feishu cancellation could not finalize unknown state")
+                raise
+            except Exception as exc:  # the durable outbox owns every retry
+                logger.warning("V20 Feishu delivery failed", exc_info=True)
+                succeeded = False
+                send_error = f"{type(exc).__name__}: {exc}"
+                before_total_deadline = (
+                    asyncio.get_running_loop().time() - send_started_monotonic
+                ) < _LEGACY_OUTWARD_CALL_DEADLINE_SECONDS
+                retryable = before_total_deadline and isinstance(
+                    exc,
+                    (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+                )
+            else:
+                send_error = None if succeeded else "Feishu relay returned failure"
+                retryable = False
+            if not succeeded:
+                self._last_cycle_error = send_error or "Feishu relay returned failure"
+            await self._repository.complete_delivery(
+                record.event_id,
+                attempt_number=attempt.attempt_number,
+                worker_id=self._worker_id,
+                route_id=self._route_id,
+                official_stream_id=self._official_stream_id,
+                lineage_id=self._lineage_id,
+                outcome="DELIVERED" if succeeded else ("SAFE_RETRY" if retryable else "UNKNOWN"),
+                error=send_error,
                 retry_after_seconds=min(300, 2 ** min(record.attempt_count, 8)),
             )
             sent += int(succeeded)

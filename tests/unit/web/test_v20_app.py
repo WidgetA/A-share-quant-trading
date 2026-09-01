@@ -29,9 +29,6 @@ class _Service:
     async def status(self):
         return {"enabled": self.config.enabled, "mode": "test"}
 
-    async def ingest_mews_snapshot(self, payload):
-        return payload
-
     async def record_reminder_stop_ack(self, payload):
         return payload
 
@@ -45,14 +42,13 @@ class _Service:
         }
 
 
-def test_dedicated_host_exposes_only_the_five_v20_routes() -> None:
+def test_dedicated_host_exposes_only_the_four_v20_routes() -> None:
     app = create_v20_app(v20_service=_Service(enabled=False))
 
     routes = {(route.path, frozenset(route.methods or ())) for route in app.routes}
 
     assert routes == {
         ("/api/v20/status", frozenset({"GET"})),
-        ("/api/v20/mews-snapshots", frozenset({"POST"})),
         ("/api/v20/reminder-stop-acks", frozenset({"POST"})),
         ("/api/v20/trigger-scan", frozenset({"POST"})),
         ("/api/v20/manual-monitor", frozenset({"POST"})),
@@ -93,9 +89,15 @@ def test_importing_dedicated_host_does_not_import_execution_surface() -> None:
     code = """
 import os
 import sys
+import hashlib
+from pathlib import Path
 os.environ['V20_ENABLED'] = 'false'
 os.environ['V20_MODE'] = 'forward_shadow'
 os.environ['V20_ALLOW_PRODUCTION_PUSH'] = 'false'
+import src.strategy.v20.runtime_config as runtime_config
+project_root = Path.cwd()
+for relative, reviewed_hashes in runtime_config._MIXED_STATE_SOURCE_CLASSES.items():
+    reviewed_hashes[hashlib.sha256((project_root / relative).read_bytes()).hexdigest()] = 'TEST'
 import src.web.v20_app as v20_host
 service = v20_host._create_default_v20_service()
 assert service.config.enabled is False
@@ -141,6 +143,7 @@ os.environ['DB_SSLROOTCERT_SHA256'] = 'c' * 64
 os.environ['TUSHARE_TOKEN'] = 'test-token'
 
 import src.common.config as common_config
+import src.strategy.v20.runtime_config as runtime_config
 import src.data.clients.iquant_historical_adapter as historical_module
 import src.data.clients.tushare_realtime as realtime_module
 import src.data.database.fundamentals_db as fundamentals_module
@@ -153,6 +156,8 @@ from src.web.v20_app import create_v20_app
 from src.web.v20_service import V20Service, _cleanup_v20_scan_resources, _init_v20_scan_resources
 
 project_root = Path.cwd()
+for relative, reviewed_hashes in runtime_config._MIXED_STATE_SOURCE_CLASSES.items():
+    reviewed_hashes[hashlib.sha256((project_root / relative).read_bytes()).hexdigest()] = 'TEST'
 owned = {}
 
 
@@ -286,7 +291,6 @@ service = V20Service(
     config=config,
     repository=repository,
     scan_state=scan_state,
-    scan_pipeline=SimpleNamespace(),
     artifacts=artifacts,
     publisher=FakePublisher(),
     routes={config.route_id: route},

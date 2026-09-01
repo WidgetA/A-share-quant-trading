@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import certifi
 import pytest
 
+import src.data.database.v20_repository as v20_repository_module
 import src.strategy.v20.runtime_config as runtime_config_module
 from src.data.database.v20_repository import (
     EntryCommit,
@@ -44,6 +45,33 @@ BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 SCOPE = {
     "official_stream_id": "official",
     "lineage_id": "lineage-1",
+}
+_PRE_SELECTION_V2_CORE = "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc"
+_SELECTION_V3_CORE = "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b"
+_PRE_SELECTION_V2_DEPENDENCIES = {
+    "pyproject.toml": "b98d44b91a0509ff84f8bda06fdfaf5e7ed5d764465bf56fcd7920b438555ee0",
+    "src/data/clients/tushare_realtime.py": (
+        "03906a2b31f536335b82a6ed69fb13ac1febf8acc5494017b33e402b8760a97e"
+    ),
+    "src/strategy/strategies/v16_scanner.py": (
+        "898fc16de390065419d0c62869de402176ec2ec0ad4aa340b24fbd22634d2b15"
+    ),
+    "src/strategy/v20/decision_engine.py": (
+        "1105368da348c68b95cd9524d5e8236ab8a12a1a901ecf92053eea7d8eb32747"
+    ),
+    "src/strategy/v20/exit_policy.py": (
+        "44919b2878d24b46708387229bf2810d314937d70cb94596bac2500c1c58b43e"
+    ),
+    "src/strategy/v20/models.py": (
+        "f1a3fb0916b9ad56e99cf003951b845d8e8d26eec3bc96c982a581b08d3fe662"
+    ),
+    "src/web/v15_scan_service.py": (
+        "73bd5ace0935ba235aff4b8a09e61b9ad355dc309378b555dbb3978e3ff508a8"
+    ),
+    "src/web/v20_service.py": ("8980fac4479611337dbac117b8265829ba20e1ed6c882b2f3f1718d3a9624051"),
+    "src/data/database/v20_repository.py": (
+        "ef6f26eec1a3ea40ae2fb9937d097307290c558b331f8633d4dde4b10e8f8dd7"
+    ),
 }
 
 
@@ -189,6 +217,18 @@ def _legacy_runtime_payload(current: dict[str, object]) -> tuple[dict[str, objec
     legacy_hash = sha256_json(legacy_semantics)
     legacy["state_semantics_hash"] = legacy_hash
     return legacy, legacy_hash
+
+
+def _pre_selection_v2_runtime_payload(current: dict[str, object]) -> dict[str, object]:
+    historical = json.loads(canonical_json(current))
+    dependencies = historical["strategy_dependency_hashes"]
+    assert isinstance(dependencies, dict)
+    dependencies.update(_PRE_SELECTION_V2_DEPENDENCIES)
+    state_payload = state_semantics_payload_from_frozen_payload(historical)
+    assert sha256_json(state_payload) == _PRE_SELECTION_V2_CORE
+    historical["state_semantics_payload"] = state_payload
+    historical["state_semantics_hash"] = _PRE_SELECTION_V2_CORE
+    return historical
 
 
 def _config_slot_row(
@@ -378,6 +418,92 @@ async def test_genesis_loads_prior_v2_terminal_binding_when_core_is_unchanged() 
     assert not any(
         call[0] == "execute" and "state_semantics_compatibility" in call[1]
         for call in connection.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_genesis_upgrades_exact_pre_selection_v2_core_without_rewriting_state() -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_v20_runtime_config(project_root)
+    assert config.state_semantics_hash == _SELECTION_V3_CORE
+    current = json.loads(canonical_json(config.frozen_payload))
+    historical = _pre_selection_v2_runtime_payload(current)
+    state = {
+        **genesis_state(),
+        "state_revision": 7,
+        "last_terminal_slot_id": "pre-selection-v2-terminal",
+        "last_terminal_trade_date": "2026-09-01",
+    }
+    state_hash = sha256_json(state)
+    registry = {
+        "official_stream_id": config.official_stream_id,
+        "genesis_state_hash": sha256_json(genesis_state()),
+        "state_semantics_hash": _PRE_SELECTION_V2_CORE,
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "bootstrap_checkpoint_hash": None,
+        "bootstrap_predecessor_trade_date": date(2026, 8, 30),
+    }
+    current_hash = sha256_json(current)
+    historical_hash = sha256_json(historical)
+    dependency_diff = sorted(
+        relative
+        for relative in set(historical["strategy_dependency_hashes"])
+        | set(current["strategy_dependency_hashes"])
+        if historical["strategy_dependency_hashes"].get(relative)
+        != current["strategy_dependency_hashes"].get(relative)
+    )
+    evidence = {
+        "schema_version": "v20-state-semantics-compatibility/v1",
+        "lineage_id": config.state_lineage_id,
+        "official_stream_id": config.official_stream_id,
+        "legacy_state_semantics_hash": _PRE_SELECTION_V2_CORE,
+        "core_state_semantics_hash": _SELECTION_V3_CORE,
+        "evidence_config_id": historical_hash[:24],
+        "evidence_config_hash": historical_hash,
+        "accepted_config_id": current_hash[:24],
+        "accepted_config_hash": current_hash,
+        "dependency_diff": dependency_diff,
+    }
+    persisted_evidence = {
+        "official_stream_id": config.official_stream_id,
+        "evidence_config_id": historical_hash[:24],
+        "evidence_config_hash": historical_hash,
+        "accepted_config_id": current_hash[:24],
+        "accepted_config_hash": current_hash,
+        "evidence_json": canonical_json(evidence),
+        "evidence_hash": sha256_json(evidence),
+    }
+    connection = _FakeConnection(
+        fetchrows=[
+            registry,
+            _runtime_config_row(current),
+            persisted_evidence,
+            {"revision": 7, "state_hash": state_hash, "state_json": canonical_json(state)},
+        ],
+        fetches=[[_config_slot_row(historical, slot_status="COMPLETED")]],
+    )
+    repository = _repository(connection)
+
+    stored = await repository.ensure_genesis_state(
+        config.state_lineage_id,
+        genesis_state(),
+        sha256_json(genesis_state()),
+        official_stream_id=config.official_stream_id,
+        state_semantics_hash=config.state_semantics_hash,
+        current_config_id=current_hash[:24],
+        current_config_hash=current_hash,
+        current_config_payload=current,
+        bootstrap_mode="EMPTY_FORWARD_SHADOW",
+        bootstrap_checkpoint_hash=None,
+        bootstrap_predecessor_trade_date=date(2026, 8, 30),
+    )
+
+    assert (stored.revision, stored.state_hash, stored.payload) == (7, state_hash, state)
+    assert not any(
+        call[0] == "execute" and "UPDATE v20.official_state" in call[1] for call in connection.calls
+    )
+    assert not any(
+        call[0] == "execute" and "SET state_semantics_hash" in call[1] for call in connection.calls
     )
 
 
@@ -581,7 +707,7 @@ def test_standalone_migration_is_identical_to_runtime_default_schema() -> None:
     root = Path(__file__).resolve().parents[4]
     standalone = (root / "migrations" / "v20" / "001_v20.sql").read_text(encoding="utf-8")
 
-    assert _compact_sql(standalone) == _compact_sql(migration_sql("v20"))
+    assert _compact_sql(standalone) in _compact_sql(migration_sql("v20"))
     assert "commit_fingerprint CHAR(64) NOT NULL" in standalone
     assert "reference_status='UNAVAILABLE'" in standalone
     assert "uq_v20_shadow_source_mapping" in standalone
@@ -1049,24 +1175,298 @@ async def test_outbox_lease_cannot_consume_another_route_or_lineage_backlog() ->
     assert "route_id=$1 AND official_stream_id=$2 AND lineage_id=$3" in sql
     assert "semantic_json->>'delivery_priority_class'='LIVE_EXIT' THEN 1" in sql
     assert "semantic_json->>'delivery_priority_class'= 'RUNTIME_CRITICAL_ALERT' THEN 2" in sql
+    assert "delivery_status='PENDING'" in sql
+    assert "delivery_status='LEASED'" in sql
+    assert "lease_until < clock_timestamp()" in sql
+    assert "attempt.phase='STARTED'" in sql
+    assert "delivery_status='DELIVERY_UNKNOWN'" not in sql.split("UPDATE")[0]
     assert "WHEN event_type='EXIT_SIGNAL' THEN 4" in sql
     assert "action_expiry_ts NULLS LAST,created_at,event_id" in sql
     assert "AS lease_db_ts" in sql
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "SET delivery_status='LEASED',lease_owner=$5" in sql
     assert call[2][:3] == ("formal-route", "official", "lineage-1")
 
 
+def test_runtime_migration_is_mechanically_identical_to_001_plus_002() -> None:
+    root = Path(__file__).resolve().parents[4]
+    standalone_002 = (root / "migrations" / "v20" / "002_outbox_at_most_once.sql").read_text(
+        encoding="utf-8"
+    )
+    assert migration_sql("v20").endswith("\n\n" + standalone_002 + "\n")
+    declaration_pattern = re.compile(r"migration_checksum text := '([^']*)';")
+    match = declaration_pattern.search(standalone_002)
+    assert match is not None
+    assert match.group(1) == v20_repository_module._outbox_002_contract_checksum(standalone_002)
+    sql = migration_sql("v20")
+    compact = _compact_sql(sql)
+    assert "delivery_status IN ('PENDING','LEASED','DELIVERY_UNKNOWN','SENT')" in _compact_sql(sql)
+    assert "pg_advisory_xact_lock" in sql
+    assert compact.index("PERFORM pg_advisory_xact_lock") < compact.index(
+        "CREATE TABLE IF NOT EXISTS v20.migration_receipts"
+    )
+    assert "CONSTRAINT v20_001_expected_status" in compact
+    assert "CONSTRAINT v20_001_expected_lease" in compact
+    assert "v20_001_expected_attempt_count" in compact
+    assert "clean_status_name IS NULL OR clean_lease_name IS NULL" in compact
+    assert "rejected_status_name IS NULL OR rejected_lease_name IS NULL" in compact
+    assert "DROP CONSTRAINT %I, DROP CONSTRAINT %I" in compact
+    assert "DROP CONSTRAINT clean_status_name" not in compact
+    assert "DROP CONSTRAINT rejected_status_name" not in compact
+    assert "v20_test.outbox_events" in migration_sql("v20_test")
+    assert "_v20_index_reference" in compact
+    assert "pg_my_temp_schema()" in compact
+    assert "reference_keys.key_columns = actual_keys.key_columns" in compact
+    assert "reference_index.indoption = actual_index.indoption" in compact
+    assert "reference_index.indnkeyatts = actual_index.indnkeyatts" in compact
+    assert "reference_class.relam = actual_class.relam" in compact
+    assert "pg_get_expr(reference_index.indexprs" in compact
+    assert "(reference_name,actual_name,actual_table)" in compact
+    assert "nspname = 'pg_temp'" not in compact
+    assert "ck_v20_delivery_attempt_variant_required_v2" in compact
+    assert "ALTER COLUMN delivery_variant SET NOT NULL" not in compact
+    assert compact.count("ON v20.delivery_attempts(event_id)") == 1
+    assert "_v20_reference_started ON _v20_index_reference" in compact
+    assert "trg_v20_delivery_attempt_identity_v2" in compact
+    assert "trg_v20_outbox_attempt_count_v2" in compact
+    assert "_v20_expected_index_pairs" in compact
+    assert "_v20_reference_started" in compact
+    assert "_v20_reference_unknown" in compact
+    assert "reference_index.indclass = actual_index.indclass" in compact
+    assert "reference_index.indcollation = actual_index.indcollation" in compact
+    assert "must contain exactly four entries" in compact
+    assert "uq_v20_delivery_attempt_started" in compact
+    assert "idx_v20_outbox_unknown_v2" in compact
+    assert "LIKE '\\_v20\\_expected\\_%'" not in compact
+    assert "002_outbox_at_most_once" in sql
+    assert "delivery_quarantine" in sql
+    assert "uq_v20_delivery_attempt_started" in sql
+    assert "ILIKE '%delivery_status%'" not in sql
+    assert "DROP INDEX IF EXISTS idx_v20_outbox_ready;" not in sql
+    assert "DROP INDEX IF EXISTS idx_v20_outbox_scope_ready;" not in sql
+
+
+def test_runtime_rejects_drifted_002_checksum(monkeypatch, tmp_path) -> None:
+    root = Path(__file__).resolve().parents[4]
+    target = tmp_path / "migrations" / "v20"
+    target.mkdir(parents=True)
+    source = root / "migrations" / "v20" / "002_outbox_at_most_once.sql"
+    drifted = source.read_text(encoding="utf-8").replace(
+        "migration_checksum text := '",
+        "migration_checksum text := '0",
+        1,
+    )
+    (target / "002_outbox_at_most_once.sql").write_text(drifted, encoding="utf-8")
+    monkeypatch.setattr(v20_repository_module, "_PROJECT_ROOT", tmp_path)
+
+    with pytest.raises(RuntimeError, match="checksum does not match"):
+        migration_sql("v20")
+
+
 @pytest.mark.asyncio
-async def test_outbox_health_reports_only_the_current_delivery_scope() -> None:
+async def test_migration_takes_schema_lock_before_any_migration_sql() -> None:
+    connection = _FakeConnection()
+
+    await _repository(connection).migrate()
+
+    assert [item[0] for item in connection.calls[:4]] == [
+        "transaction",
+        "execute",
+        "execute",
+        "execute",
+    ]
+    assert "SET LOCAL lock_timeout" in connection.calls[1][1]
+    assert "pg_advisory_xact_lock" in connection.calls[2][1]
+    assert "CREATE SCHEMA IF NOT EXISTS" in connection.calls[3][1]
+
+
+@pytest.mark.asyncio
+async def test_begin_delivery_attempt_is_atomic_owned_and_audited() -> None:
+    connection = _FakeConnection(
+        fetchrows=[
+            {
+                "attempt_count": 2,
+                "action_expiry_ts": None,
+                "db_now": datetime(2026, 8, 31, 9, 0),
+            },
+            {"attempt_number": 3, "delivery_variant": "PRIMARY"},
+            {"event_id": "event-1"},
+        ]
+    )
+
+    attempt = await _repository(connection).begin_delivery_attempt(
+        "event-1",
+        worker_id="worker-1",
+        route_id="formal-route",
+        **SCOPE,
+    )
+
+    assert (attempt.attempt_number, attempt.delivery_variant) == (3, "PRIMARY")
+    lock_sql = _compact_sql(connection.calls[1][1])
+    assert "delivery_status='LEASED' AND lease_owner=$2" in lock_sql
+    assert "FOR UPDATE" in lock_sql
+    insert_call = connection.calls[2]
+    insert_sql = _compact_sql(insert_call[1])
+    assert "phase,worker_id,delivery_variant" in insert_sql
+    assert "'STARTED'" in insert_sql
+    assert insert_call[2][-2:] == ("worker-1", "PRIMARY")
+    update_sql = _compact_sql(connection.calls[3][1])
+    assert "delivery_status='DELIVERY_UNKNOWN',attempt_count=$1" in update_sql
+    assert "lease_owner=$3" in update_sql
+    assert "RETURNING event_id" in update_sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("db_now", "expiry", "relay_enforced", "expected_variant"),
+    [
+        (
+            datetime(2026, 8, 31, 9, 39, 57),
+            datetime(2026, 8, 31, 9, 40),
+            False,
+            "ACTIONABLE",
+        ),
+        (
+            datetime(2026, 8, 31, 9, 39, 58),
+            datetime(2026, 8, 31, 9, 40),
+            False,
+            "EXPIRED_NOTICE",
+        ),
+        (
+            datetime(2026, 8, 31, 9, 40),
+            datetime(2026, 8, 31, 9, 40),
+            False,
+            "EXPIRED_NOTICE",
+        ),
+        (
+            datetime(2026, 8, 31, 9, 39, 59),
+            datetime(2026, 8, 31, 9, 40),
+            True,
+            "RELAY_ENFORCED",
+        ),
+    ],
+)
+async def test_begin_delivery_variant_uses_database_clock_and_reserve(
+    db_now, expiry, relay_enforced, expected_variant
+) -> None:
+    connection = _FakeConnection(
+        fetchrows=[
+            {"attempt_count": 0, "action_expiry_ts": expiry, "db_now": db_now},
+            {"attempt_number": 1, "delivery_variant": expected_variant},
+            {"event_id": "event-1"},
+        ]
+    )
+
+    attempt = await _repository(connection).begin_delivery_attempt(
+        "event-1",
+        worker_id="worker-1",
+        route_id="formal-route",
+        action_reserve_seconds=2.0,
+        relay_enforced=relay_enforced,
+        **SCOPE,
+    )
+
+    assert attempt.delivery_variant == expected_variant
+
+
+@pytest.mark.asyncio
+async def test_defer_before_dispatch_does_not_create_attempt_or_increment() -> None:
+    connection = _FakeConnection(fetchrows=[{"event_id": "event-1"}])
+
+    await _repository(connection).defer_before_dispatch(
+        "event-1",
+        worker_id="worker-1",
+        route_id="formal-route",
+        error="pre-dispatch validation failed",
+        retry_after_seconds=17,
+        **SCOPE,
+    )
+
+    sql = _compact_sql(connection.calls[1][1])
+    assert "delivery_status='PENDING'" in sql
+    assert "delivery_attempts" not in sql
+    assert "attempt_count" not in sql
+    assert "delivery_status='LEASED' AND lease_owner=$4" in sql
+    assert connection.calls[1][2][1] == 17
+
+
+@pytest.mark.asyncio
+async def test_complete_delivery_cas_requires_exact_attempt_and_owner() -> None:
+    connection = _FakeConnection(fetchrows=[{"event_id": "event-1"}, {"event_id": "event-1"}])
+
+    await _repository(connection).complete_delivery(
+        "event-1",
+        attempt_number=3,
+        worker_id="worker-1",
+        route_id="formal-route",
+        outcome="DELIVERED",
+        **SCOPE,
+    )
+
+    attempt_sql = _compact_sql(connection.calls[1][1])
+    outbox_sql = _compact_sql(connection.calls[2][1])
+    assert "attempt_number=$6 AND worker_id=$2" in attempt_sql
+    assert "phase='STARTED'" in attempt_sql
+    assert "completed_at=clock_timestamp()" in attempt_sql
+    assert "delivery_status='DELIVERY_UNKNOWN'" in outbox_sql
+    assert "attempt_count=$2 AND lease_owner=$3" in outbox_sql
+    assert "delivery_status='SENT'" in outbox_sql
+    assert "lease_owner=NULL,lease_until=NULL" in outbox_sql
+
+
+@pytest.mark.asyncio
+async def test_complete_delivery_safe_retry_and_unknown_outcomes() -> None:
+    for outcome in ("SAFE_RETRY", "UNKNOWN"):
+        connection = _FakeConnection(fetchrows=[{"event_id": "event-1"}, {"event_id": "event-1"}])
+        await _repository(connection).complete_delivery(
+            "event-1",
+            attempt_number=1,
+            worker_id="worker-1",
+            route_id="formal-route",
+            outcome=outcome,
+            error=f"{outcome} reason",
+            **SCOPE,
+        )
+        assert connection.calls[1][2][4] == outcome
+        assert connection.calls[2][1].count("RETURNING event_id") == 1
+
+
+@pytest.mark.asyncio
+async def test_wrong_worker_or_stale_attempt_conflicts_before_outbox_update() -> None:
+    connection = _FakeConnection(fetchrows=[None])
+
+    with pytest.raises(V20StateConflict, match="missing, stale, or owned"):
+        await _repository(connection).complete_delivery(
+            "event-1",
+            attempt_number=2,
+            worker_id="other-worker",
+            route_id="formal-route",
+            outcome="UNKNOWN",
+            error="wrong worker",
+            **SCOPE,
+        )
+    assert [item[0] for item in connection.calls].count("execute") == 0
+    assert [item[0] for item in connection.calls].count("fetchrow") == 1
+
+
+@pytest.mark.asyncio
+async def test_outbox_health_separates_unknown_and_dispatching_states() -> None:
     row = {
         "unsealed_n": 0,
         "pending_delivery_n": 1,
-        "leased_n": 0,
+        "leased_n": 1,
+        "dispatching_n": 1,
+        "stale_started_n": 2,
+        "terminal_unknown_n": 3,
+        "unknown_n": 6,
         "seal_error_n": 0,
-        "delivery_error_n": 1,
+        "pending_delivery_error_n": 1,
+        "unknown_error_n": 6,
         "max_seal_attempt_count": 0,
         "max_delivery_attempt_count": 3,
         "last_seal_attempt_at": None,
         "oldest_unsent_at": None,
+        "oldest_unknown_at": datetime(2026, 8, 31, 9, 0),
         "last_delivered_at": None,
     }
     connection = _FakeConnection(fetchrows=[row])
@@ -1077,32 +1477,16 @@ async def test_outbox_health_reports_only_the_current_delivery_scope() -> None:
     )
 
     assert health["pending_delivery_n"] == 1
-    assert health["seal_error_n"] == 0
-    assert health["delivery_error_n"] == 1
-    assert health["max_delivery_attempt_count"] == 3
-    call = [item for item in connection.calls if item[0] == "fetchrow"][0]
-    sql = _compact_sql(call[1])
-    assert "WHERE route_id=$1 AND official_stream_id=$2 AND lineage_id=$3" in sql
-    assert "delivery_status <> 'SENT' AND last_error IS NOT NULL" in sql
-
-
-@pytest.mark.asyncio
-async def test_outbox_seal_error_update_is_scoped_and_bounded() -> None:
-    connection = _FakeConnection(executes=["UPDATE 1"])
-
-    updated = await _repository(connection).record_outbox_seal_error(
-        "event-1",
-        "x" * 5_000,
-        route_id="formal-route",
-        **SCOPE,
-    )
-
-    assert updated is True
-    call = [item for item in connection.calls if item[0] == "execute"][0]
-    sql = _compact_sql(call[1])
-    assert "event_id=$2 AND seal_status='PENDING'" in sql
-    assert "route_id=$3 AND official_stream_id=$4 AND lineage_id=$5" in sql
-    assert len(call[2][0]) == 4_000
+    assert health["leased_n"] == 1
+    assert health["dispatching_n"] == 1
+    assert health["stale_started_n"] == 2
+    assert health["terminal_unknown_n"] == 3
+    assert health["unknown_n"] == 6
+    assert health["delivery_error_n"] == 7
+    assert health["oldest_unknown_at"] == "2026-08-31T09:00:00"
+    sql = _compact_sql(connection.calls[0][1])
+    assert "delivery_status='DELIVERY_UNKNOWN'" in sql
+    assert "phase='STARTED'" in sql
 
 
 @pytest.mark.asyncio
@@ -2607,6 +2991,7 @@ async def test_0910_mews_cache_can_be_restored_after_process_restart() -> None:
     snapshot_id = await _repository(connection).find_eligible_mews_snapshot(
         source_trade_date=date(2026, 8, 31),
         cutoff=cutoff,
+        availability_date=date(2026, 9, 1),
     )
 
     assert snapshot_id == "mews-v2-2026-08-31-restored"
@@ -2614,7 +2999,179 @@ async def test_0910_mews_cache_can_be_restored_after_process_restart() -> None:
     assert "source_trade_date=$1" in call[1]
     assert "generated_at < $2" in call[1]
     assert "receipt_sealed_at < $2" in call[1]
-    assert call[2] == (date(2026, 8, 31), cutoff)
+    assert "signal_available_date" in call[1]
+    assert call[2] == (date(2026, 8, 31), cutoff, "2026-09-01")
+
+
+@pytest.mark.asyncio
+async def test_late_same_day_daily_snapshot_is_restorable_after_restart() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FakeConnection(fetchvals=["mews-v2-2026-08-31-late"])
+
+    snapshot_id = await _repository(connection).find_eligible_mews_snapshot(
+        source_trade_date=date(2026, 8, 31),
+        cutoff=cutoff,
+        availability_date=date(2026, 9, 1),
+    )
+
+    assert snapshot_id == "mews-v2-2026-08-31-late"
+    call = connection.calls[0]
+    assert "snapshot_json->'evidence'->>'signal_available_date' = $3" in call[1]
+
+
+@pytest.mark.asyncio
+async def test_mews_selection_accepts_late_same_day_daily_snapshot() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FakeConnection(
+        fetchrows=[
+            {"d1": date(2026, 9, 1)},
+            None,
+            {"snapshot_id": "mews-v2-2026-08-31-late", "fast_state": "DANGER", "on_time": False},
+        ],
+        executes=["OK"],
+    )
+
+    selected = await _repository(connection).select_mews_for_leg(
+        "leg-1",
+        d1=date(2026, 9, 1),
+        cutoff=cutoff,
+        late_source_trade_date=date(2026, 8, 31),
+        late_availability_date=date(2026, 9, 1),
+    )
+
+    assert selected == (
+        "mews-v2-2026-08-31-late",
+        "DANGER",
+        "ELIGIBLE_LATE_SAME_DAY",
+    )
+    candidate = [
+        call
+        for call in connection.calls
+        if call[0] == "fetchrow" and "FROM v20.mews_snapshots" in call[1]
+    ][0]
+    assert "snapshot_json->'evidence'->>'signal_available_date' = $4" in candidate[1]
+    assert candidate[2] == (
+        date(2026, 9, 1),
+        cutoff,
+        date(2026, 8, 31),
+        "2026-09-01",
+    )
+    insert = [call for call in connection.calls if call[0] == "execute"][0]
+    assert insert[2] == (
+        "leg-1",
+        "mews-v2-2026-08-31-late",
+        "DANGER",
+        cutoff,
+        "ELIGIBLE_LATE_SAME_DAY",
+    )
+
+
+@pytest.mark.asyncio
+async def test_frozen_mews_selection_is_never_rewritten_by_the_late_window() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FakeConnection(
+        fetchrows=[
+            {"d1": date(2026, 9, 1)},
+            {
+                "snapshot_id": None,
+                "fast_state": None,
+                "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+                "cutoff_ts": cutoff,
+            },
+        ],
+    )
+
+    selected = await _repository(connection).select_mews_for_leg(
+        "leg-1",
+        d1=date(2026, 9, 1),
+        cutoff=cutoff,
+        late_source_trade_date=date(2026, 8, 31),
+        late_availability_date=date(2026, 9, 1),
+    )
+
+    assert selected == (None, None, "MEWS_UNAVAILABLE_FALLBACK_12")
+    assert not [
+        call
+        for call in connection.calls
+        if call[0] == "execute" and "leg_mews_selection" in call[1]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_selected_mews_accepts_late_same_day_daily_snapshot() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    generated = datetime(2026, 9, 1, 14, 4, tzinfo=BEIJING_TZ)
+    received = datetime(2026, 9, 1, 14, 5, tzinfo=BEIJING_TZ)
+    payload = {
+        "snapshot_id": "mews-late",
+        "source_trade_date": "2026-08-31",
+        "generated_at": generated.isoformat(),
+        "fast_state": "DANGER",
+        "model_version": "mews_v2",
+        "data_version": "d1",
+        "evidence": {"signal_available_date": "2026-09-01"},
+    }
+    row = {
+        "model_leg_id": "leg-1",
+        "d1": date(2026, 9, 1),
+        "cutoff_ts": cutoff,
+        "selection_reason": "ELIGIBLE_LATE_SAME_DAY",
+        "selected_at": received,
+        "snapshot_id": "mews-late",
+        "selected_fast_state": "DANGER",
+        "source_trade_date": date(2026, 8, 31),
+        "generated_at": generated,
+        "received_at": received,
+        "fast_state": "DANGER",
+        "model_version": "mews_v2",
+        "data_version": "d1",
+        "content_hash": sha256_json(payload),
+        "snapshot_json": canonical_json(payload),
+    }
+
+    selected = await _repository(_FakeConnection(fetchrows=[row])).load_selected_mews_for_leg(
+        "leg-1"
+    )
+
+    assert selected is not None
+    assert selected.snapshot_id == "mews-late"
+    assert selected.fast_state == "DANGER"
+
+
+@pytest.mark.asyncio
+async def test_load_selected_mews_rejects_late_snapshot_with_wrong_availability() -> None:
+    cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
+    generated = datetime(2026, 9, 1, 14, 4, tzinfo=BEIJING_TZ)
+    received = datetime(2026, 9, 1, 14, 5, tzinfo=BEIJING_TZ)
+    payload = {
+        "snapshot_id": "mews-stale",
+        "source_trade_date": "2026-08-31",
+        "generated_at": generated.isoformat(),
+        "fast_state": "DANGER",
+        "model_version": "mews_v2",
+        "data_version": "d1",
+        "evidence": {"signal_available_date": "2026-08-31"},
+    }
+    row = {
+        "model_leg_id": "leg-1",
+        "d1": date(2026, 9, 1),
+        "cutoff_ts": cutoff,
+        "selection_reason": "ELIGIBLE",
+        "selected_at": received,
+        "snapshot_id": "mews-stale",
+        "selected_fast_state": "DANGER",
+        "source_trade_date": date(2026, 8, 31),
+        "generated_at": generated,
+        "received_at": received,
+        "fast_state": "DANGER",
+        "model_version": "mews_v2",
+        "data_version": "d1",
+        "content_hash": sha256_json(payload),
+        "snapshot_json": canonical_json(payload),
+    }
+
+    with pytest.raises(V20SemanticConflict, match="violates PIT cutoff"):
+        await _repository(_FakeConnection(fetchrows=[row])).load_selected_mews_for_leg("leg-1")
 
 
 async def test_local_mews_calculation_state_round_trips_with_integrity_check() -> None:
@@ -2890,7 +3447,7 @@ def _manual_monitor_fixture() -> tuple[
         "probe_result": "PASS",
         "current_version_recomputed": True,
         "replay_reused": False,
-        "visible_message_mode": "AUTOMATIC_ENTRY_RENDER",
+        "visible_message_mode": "MANUAL_OPERATOR_RENDER",
         "strategy_version": "V20",
         "config_hash": source_config_hash,
         "state_semantics_hash": state_semantics_hash,
