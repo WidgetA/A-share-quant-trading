@@ -156,6 +156,7 @@ _STRATEGY_DEPENDENCY_FILES = (
     "models/feature_list.json",
     "data/sectors.json",
     "data/board_constituents.json",
+    "data/v20_mews_bootstrap.json.gz",
     "pyproject.toml",
     "uv.lock",
 )
@@ -255,6 +256,11 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "e3e7bf911f80b8ad1e097028fdceda5b69e83fbfce6554ebdc685a6e245a6136": (
             "V20_SERVICE_STATE_ORCHESTRATION_V1"
         ),
+        # Replaces the computed-MEWS HTTP dependency with a local raw-Tushare
+        # calculator. MEWS remains outside entry and official state inputs.
+        "a537782d460f11280f21c87fb9ae6fb4f228a13b549deb4ec37053c8d6a7581a": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V1"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
@@ -268,6 +274,11 @@ _MIXED_STATE_SOURCE_CLASSES = {
         ),
         # Adds a read-only cutoff receipt verification for cached MEWS.
         "83bdfa110cd6857407c5ae9fdaf9936f81339c755e9e337a0aed8d47b5c39d24": (
+            "V20_LEDGER_STATE_CONTRACT_V1"
+        ),
+        # Adds an isolated incremental MEWS calculation checkpoint. It cannot
+        # change entry, rolling-health, or official model state transitions.
+        "ef6f26eec1a3ea40ae2fb9937d097307290c558b331f8633d4dde4b10e8f8dd7": (
             "V20_LEDGER_STATE_CONTRACT_V1"
         ),
     },

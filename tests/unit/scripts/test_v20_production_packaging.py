@@ -27,6 +27,7 @@ def test_docker_build_is_lockfile_strict_and_contains_v20_runtime_inputs() -> No
         "COPY data/sectors.json data/board_constituents.json "
         "data/board_relevance_cache.json ./bundled_data/"
     ) in dockerfile
+    assert "COPY data/v20_mews_bootstrap.json.gz ./bundled_data/" in dockerfile
     for copy_instruction in (
         "COPY scripts/ ./scripts/",
         "COPY config/ ./config/",
@@ -54,6 +55,7 @@ def test_docker_context_excludes_local_secrets_but_keeps_checkpoint_directory() 
     assert not any(
         "v20-checkpoints" in pattern and not pattern.startswith("#") for pattern in patterns
     )
+    assert "!data/v20_mews_bootstrap.json.gz" in patterns
 
 
 def test_push_ci_publishes_one_main_image_for_v16_and_embedded_v20() -> None:

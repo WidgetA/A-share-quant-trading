@@ -67,6 +67,7 @@ COPY docs/strategy-v20-artifacts/ ./docs/strategy-v20-artifacts/
 COPY migrations/ ./migrations/
 # Static data files — placed outside /app/data which is a volume mount
 COPY data/sectors.json data/board_constituents.json data/board_relevance_cache.json ./bundled_data/
+COPY data/v20_mews_bootstrap.json.gz ./bundled_data/
 
 # Copy LGBRank model files
 COPY models/ ./models/

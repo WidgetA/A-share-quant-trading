@@ -1,156 +1,271 @@
 from __future__ import annotations
 
-from datetime import date
+import gzip
+import json
+from copy import deepcopy
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
 
 from src.data.clients.mews_snapshot import (
-    MewsSnapshotNotReady,
+    LocalMewsSnapshotCalculator,
     MewsSnapshotSourceError,
-    PublishedMewsSnapshotClient,
 )
 
+TZ = ZoneInfo("Asia/Shanghai")
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
-def _document(**point_overrides):
-    point = {
-        "date": "2026-08-31",
-        "signal_available_date": "2026-09-01",
-        "updated_at": 1_788_226_200_000,  # 2026-09-01 09:30 Asia/Shanghai
-        "risk_state": "DANGER",
-        "data_status": "OK",
-        "mews": 72.5,
-        "exhaustion_path": 60.0,
-        "persistent_deleveraging_path": 72.5,
+
+class _Repository:
+    def __init__(self, state: dict[str, Any] | None = None) -> None:
+        self.state = state
+        self.saved: list[dict[str, Any]] = []
+
+    async def load_mews_calculation_state(self):
+        return self.state
+
+    async def save_mews_calculation_state(self, state):
+        self.state = json.loads(json.dumps(state))
+        self.saved.append(self.state)
+        return "a" * 64
+
+
+class _RawClient:
+    def __init__(self, *, missing_exchange: bool = False) -> None:
+        self.calls: list[str] = []
+        self.started = False
+        self.missing_exchange = missing_exchange
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.started = False
+
+    async def query(self, api_name, params, fields, *, allow_empty=False):
+        assert self.started
+        self.calls.append(api_name)
+        if api_name == "trade_cal":
+            return [
+                {
+                    "exchange": params["exchange"],
+                    "cal_date": "20260831",
+                    "is_open": "1",
+                    "pretrade_date": "20260828",
+                }
+            ]
+        if api_name == "stock_basic":
+            if params["list_status"] in {"P", "G"}:
+                assert allow_empty
+                return []
+            if params["list_status"] == "D":
+                return [
+                    {
+                        "ts_code": f"900001.{'SH' if params['exchange'] == 'SSE' else 'SZ'}",
+                        "symbol": "900001",
+                        "name": "old",
+                        "market": "\u4e3b\u677f",
+                        "exchange": params["exchange"],
+                        "list_status": "D",
+                        "list_date": "20000101",
+                        "delist_date": "20010101",
+                    }
+                ]
+            if params["exchange"] == "SZSE":
+                return [
+                    {
+                        "ts_code": "000001.SZ",
+                        "symbol": "000001",
+                        "name": "Ping An Bank",
+                        "market": "\u4e3b\u677f",
+                        "exchange": "SZSE",
+                        "list_status": "L",
+                        "list_date": "19910403",
+                        "delist_date": None,
+                    }
+                ]
+            return [
+                {
+                    "ts_code": "600001.SH",
+                    "symbol": "600001",
+                    "name": "SSE sample",
+                    "market": "\u4e3b\u677f",
+                    "exchange": "SSE",
+                    "list_status": "L",
+                    "list_date": "20000101",
+                    "delist_date": None,
+                }
+            ]
+        if api_name == "margin":
+            rows = [
+                {"exchange_id": "SSE", "rzye": 60, "rzmre": 2, "rzche": 3},
+                {"exchange_id": "SZSE", "rzye": 60, "rzmre": 2, "rzche": 3},
+            ]
+            return rows[:1] if self.missing_exchange else rows
+        if api_name == "margin_detail":
+            return [
+                {"ts_code": "000001.SZ", "rzye": 50, "rzmre": 1, "rzche": 3},
+                {"ts_code": "600001.SH", "rzye": 50, "rzmre": 1, "rzche": 3},
+            ]
+        if api_name == "daily_basic":
+            return [
+                {"ts_code": "000001.SZ", "close": 10, "free_share": 100},
+                {"ts_code": "600001.SH", "close": 10, "free_share": 100},
+            ]
+        raise AssertionError(f"unexpected raw API {api_name}")
+
+
+def _state() -> dict[str, Any]:
+    history = []
+    for index in range(550):
+        stock_balance = 95.0 + (index % 17) * 0.5
+        market_balance = stock_balance / (5.0 / 6.0)
+        buy = 3.0 + (index % 9) * 0.1
+        repay = 3.2 + ((index * 7) % 11) * 0.1
+        history.append(
+            {
+                "trade_date": f"2024-01-{(index % 28) + 1:02d}",
+                "market_total_margin_balance": market_balance,
+                "market_total_financing_buy_amount": buy * 1.2,
+                "market_total_financing_repayment_amount": repay * 1.2,
+                "ordinary_a_share_margin_balance": stock_balance,
+                "ordinary_a_share_financing_buy_amount": buy,
+                "ordinary_a_share_financing_repayment_amount": repay,
+                "ordinary_a_share_margin_coverage": 5.0 / 6.0,
+                "ffmv_stock": 20_000_000.0 + index * 10_000,
+                "ffmv_coverage": 1.0,
+                "nib_breadth_v2": 40.0,
+                "nib_magnitude_v2": 30.0,
+                "deleveraging_breadth": 55.0,
+                "data_status": "OK",
+                "mews_v2_score": 50.0 + (index % 13),
+                "exhaustion_path": 48.0,
+                "persistent_deleveraging_path": 45.0,
+                "net_outflow_level_score": 60.0,
+                "risk_state_v2": "WATCH",
+            }
+        )
+    history[-1]["trade_date"] = "2026-08-28"
+    security_state = {
+        "current_balance": 50.0,
+        "ema_fast_state": -0.01,
+        "ema_fast_old_weight": 1.0,
+        "ema_slow_state": -0.005,
+        "ema_slow_old_weight": 1.0,
+        "valid_history": [True] * 25,
+        "net_flow_history": [-1.0] * 4,
+        "impulse_history": [(-0.02 + (index % 7) * 0.002) for index in range(59)],
     }
-    point.update(point_overrides)
     return {
-        "version": "mews_v2",
-        "latest_valid": point,
-        "storage": {
-            "metric_end": "2026-08-31",
-            "latest_ingestion_status": "OK",
+        "schema": "v20-mews-incremental-state/v1",
+        "model_version": "mews_v2",
+        "state_date": "2026-08-28",
+        "market_history": history,
+        "security_states": {
+            "000001.SZ": json.loads(json.dumps(security_state)),
+            "600001.SH": json.loads(json.dumps(security_state)),
         },
+        "risk_state": "WATCH",
+        "clear_streak": 0,
     }
 
 
-def _client(document) -> PublishedMewsSnapshotClient:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=document)
-
-    return PublishedMewsSnapshotClient(
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
-        api_key="test-key",
-        transport=httpx.MockTransport(handler),
+def _calculator(repository, raw):
+    return LocalMewsSnapshotCalculator(
+        "raw-tushare-token",
+        repository,
+        bootstrap_path=PROJECT_ROOT / "data" / "v20_mews_bootstrap.json.gz",
+        client_factory=lambda: raw,
+        clock=lambda: datetime(2026, 9, 1, 9, 15, tzinfo=TZ),
     )
 
 
-def test_mews_source_configuration_is_mandatory(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("V20_MEWS_SOURCE_URL", raising=False)
+def test_frozen_compact_bootstrap_is_packaged_and_valid() -> None:
+    path = PROJECT_ROOT / "data" / "v20_mews_bootstrap.json.gz"
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        state = json.load(handle)
 
-    with pytest.raises(ValueError, match="V20_MEWS_SOURCE_URL is required"):
-        PublishedMewsSnapshotClient.from_environment()
+    assert state["schema"] == "v20-mews-incremental-state/v1"
+    assert state["model_version"] == "mews_v2"
+    assert state["state_date"] == "2026-08-06"
+    assert len(state["market_history"]) == 550
+    assert len(state["security_states"]) > 4_000
 
 
-def test_mews_api_key_is_mandatory(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "V20_MEWS_SOURCE_URL",
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
+def test_local_formula_reproduces_frozen_canonical_latest_metric() -> None:
+    path = PROJECT_ROOT / "data" / "v20_mews_bootstrap.json.gz"
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        state = json.load(handle)
+    expected = deepcopy(state["market_history"][-1])
+
+    LocalMewsSnapshotCalculator._calculate_latest(state)
+
+    actual = state["market_history"][-1]
+    assert actual["exhaustion_path"] == pytest.approx(expected["exhaustion_path"], abs=1e-12)
+    assert actual["persistent_deleveraging_path"] == pytest.approx(
+        expected["persistent_deleveraging_path"], abs=1e-12
     )
-    monkeypatch.delenv("V20_MEWS_API_KEY", raising=False)
-    monkeypatch.delenv("TRADING_API_KEY", raising=False)
+    assert actual["mews_v2_score"] == pytest.approx(expected["mews_v2_score"], abs=1e-12)
+    assert actual["net_outflow_level_score"] == pytest.approx(
+        expected["net_outflow_level_score"], abs=1e-12
+    )
+    assert actual["risk_state_v2"] == expected["risk_state_v2"]
 
-    with pytest.raises(ValueError, match="V20_MEWS_API_KEY"):
-        PublishedMewsSnapshotClient.from_environment()
 
+async def test_missing_mews_is_calculated_from_raw_tushare_and_checkpointed() -> None:
+    repository = _Repository(_state())
+    raw = _RawClient()
 
-async def test_published_mews_is_normalized_to_an_idempotent_v20_snapshot() -> None:
-    client = _client(_document())
-
-    first = await client.fetch_snapshot(
+    snapshot = await _calculator(repository, raw).fetch_snapshot(
         source_trade_date=date(2026, 8, 31),
         availability_date=date(2026, 9, 1),
     )
-    second = await client.fetch_snapshot(
+    retry = await _calculator(repository, raw).fetch_snapshot(
         source_trade_date=date(2026, 8, 31),
         availability_date=date(2026, 9, 1),
     )
 
-    assert first == second
-    assert first["fast_state"] == "DANGER"
-    assert first["model_version"] == "mews_v2"
-    assert first["source_trade_date"] == "2026-08-31"
-    assert first["generated_at"].startswith("2026-09-01T09:30:00")
-    assert len(first["data_version"]) == 64
-    assert first["evidence"]["signal_available_date"] == "2026-09-01"
+    assert raw.calls.count("trade_cal") == 2
+    assert raw.calls.count("margin") == 1
+    assert raw.calls.count("margin_detail") == 1
+    assert raw.calls.count("daily_basic") == 1
+    assert "margin-risk-curve" not in raw.calls
+    assert len(repository.saved) == 1
+    assert repository.saved[0]["state_date"] == "2026-08-31"
+    assert snapshot["model_version"] == "mews_v2"
+    assert snapshot["source_trade_date"] == "2026-08-31"
+    assert snapshot["evidence"]["profile"] == "LOCAL_TUSHARE_MEWS_V2_0910_V1"
+    assert 0 <= snapshot["evidence"]["mews"] <= 100
+    assert retry == snapshot
 
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"date": "2026-08-28"}, "stale"),
-        ({"signal_available_date": "2026-09-02"}, "today's session"),
-        ({"data_status": "PARTIAL"}, "data_status"),
-        ({"risk_state": "UNKNOWN"}, "risk_state"),
-        ({"updated_at": 1_788_224_399_000}, "09:10 release"),
-    ],
-)
-async def test_published_mews_rejects_stale_or_unqualified_material(
-    overrides,
-    message,
-) -> None:
-    client = _client(_document(**overrides))
+async def test_calculated_state_is_reused_without_any_raw_refetch() -> None:
+    state = _state()
+    state["state_date"] = "2026-08-31"
+    state["market_history"][-1]["trade_date"] = "2026-08-31"
+    repository = _Repository(state)
+    raw = _RawClient()
 
-    with pytest.raises(MewsSnapshotSourceError, match=message):
-        await client.fetch_snapshot(
+    snapshot = await _calculator(repository, raw).fetch_snapshot(
+        source_trade_date=date(2026, 8, 31),
+        availability_date=date(2026, 9, 1),
+    )
+
+    assert raw.calls == []
+    assert snapshot["source_trade_date"] == "2026-08-31"
+
+
+async def test_incomplete_raw_exchange_data_never_becomes_a_safe_snapshot() -> None:
+    repository = _Repository(_state())
+    raw = _RawClient(missing_exchange=True)
+
+    with pytest.raises(MewsSnapshotSourceError, match="missing SSE or SZSE"):
+        await _calculator(repository, raw).fetch_snapshot(
             source_trade_date=date(2026, 8, 31),
             availability_date=date(2026, 9, 1),
         )
 
-
-async def test_published_mews_rejects_wrong_model_version() -> None:
-    document = _document()
-    document["version"] = "mews_v1"
-
-    with pytest.raises(MewsSnapshotSourceError, match="version"):
-        await _client(document).fetch_snapshot(
-            source_trade_date=date(2026, 8, 31),
-            availability_date=date(2026, 9, 1),
-        )
-
-
-async def test_refresh_calls_derived_production_endpoint_with_trading_key() -> None:
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json={"success": True, "result": {"status": "OK"}})
-
-    client = PublishedMewsSnapshotClient(
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
-        api_key="refresh-secret",
-        transport=httpx.MockTransport(handler),
-    )
-
-    await client.refresh_missing_snapshot()
-
-    assert len(requests) == 1
-    assert requests[0].method == "POST"
-    assert requests[0].url.path == "/api/trading/margin-risk-refresh"
-    assert requests[0].url.query == b""
-    assert requests[0].headers["X-API-Key"] == "refresh-secret"
-
-
-@pytest.mark.parametrize("status_code", [409, 503])
-async def test_refresh_busy_or_incomplete_remains_retryable(status_code: int) -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, json={"detail": "not ready"})
-
-    client = PublishedMewsSnapshotClient(
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
-        api_key="test-key",
-        transport=httpx.MockTransport(handler),
-    )
-
-    with pytest.raises(MewsSnapshotNotReady, match=f"HTTP {status_code}"):
-        await client.refresh_missing_snapshot()
+    assert repository.saved == []

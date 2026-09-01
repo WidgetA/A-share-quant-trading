@@ -27,9 +27,10 @@ credentials.json
 *.pem
 *.key
 
-# Runtime caches are mounted/provided separately; only the three immutable
-# mappings explicitly copied by Dockerfile are admitted to the build context.
+# Runtime caches are mounted/provided separately; only immutable reviewed
+# inputs explicitly copied by Dockerfile are admitted to the build context.
 data/*
 !data/sectors.json
 !data/board_constituents.json
 !data/board_relevance_cache.json
+!data/v20_mews_bootstrap.json.gz

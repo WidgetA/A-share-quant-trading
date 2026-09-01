@@ -229,6 +229,15 @@ CREATE TABLE IF NOT EXISTS v20.mews_snapshots (
 ALTER TABLE v20.mews_snapshots
     ADD COLUMN IF NOT EXISTS receipt_sealed_at TIMESTAMPTZ;
 
+CREATE TABLE IF NOT EXISTS v20.mews_calculation_state (
+    state_key TEXT PRIMARY KEY CHECK (state_key='mews_v2'),
+    state_date DATE NOT NULL,
+    model_version TEXT NOT NULL,
+    content_hash CHAR(64) NOT NULL,
+    state_json JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE IF NOT EXISTS v20.leg_mews_selection (
     model_leg_id TEXT PRIMARY KEY REFERENCES v20.model_legs(model_leg_id),
     snapshot_id TEXT REFERENCES v20.mews_snapshots(snapshot_id),

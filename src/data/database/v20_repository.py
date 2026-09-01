@@ -1441,6 +1441,15 @@ CREATE TABLE IF NOT EXISTS {schema}.mews_snapshots (
 ALTER TABLE {schema}.mews_snapshots
     ADD COLUMN IF NOT EXISTS receipt_sealed_at TIMESTAMPTZ;
 
+CREATE TABLE IF NOT EXISTS {schema}.mews_calculation_state (
+    state_key TEXT PRIMARY KEY CHECK (state_key='mews_v2'),
+    state_date DATE NOT NULL,
+    model_version TEXT NOT NULL,
+    content_hash CHAR(64) NOT NULL,
+    state_json JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE IF NOT EXISTS {schema}.leg_mews_selection (
     model_leg_id TEXT PRIMARY KEY REFERENCES {schema}.model_legs(model_leg_id),
     snapshot_id TEXT REFERENCES {schema}.mews_snapshots(snapshot_id),
@@ -4851,6 +4860,87 @@ class V20Repository:
                 lineage_id,
             )
         return [_active_model_leg_from_row(row) for row in rows]
+
+    async def load_mews_calculation_state(self) -> dict[str, Any] | None:
+        """Load the compact, source-derived MEWS state used for daily extension."""
+
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                SELECT state_date,model_version,content_hash,state_json
+                FROM {self.schema}.mews_calculation_state
+                WHERE state_key='mews_v2'
+                """
+            )
+        if row is None:
+            return None
+        payload = _json_value(row["state_json"])
+        if not isinstance(payload, dict):
+            raise V20SemanticConflict("MEWS calculation state is not a JSON object")
+        if (
+            str(payload.get("state_date")) != row["state_date"].isoformat()
+            or payload.get("model_version") != row["model_version"]
+            or sha256_json(payload) != row["content_hash"]
+        ):
+            raise V20SemanticConflict("MEWS calculation state integrity check failed")
+        return payload
+
+    async def save_mews_calculation_state(self, state: Mapping[str, Any]) -> str:
+        """Monotonically checkpoint one locally calculated MEWS trading day."""
+
+        if state.get("schema") != "v20-mews-incremental-state/v1":
+            raise ValueError("MEWS calculation state schema is invalid")
+        if state.get("model_version") != "mews_v2":
+            raise ValueError("MEWS calculation state model_version is invalid")
+        try:
+            state_date = date.fromisoformat(str(state["state_date"]))
+        except (KeyError, ValueError) as exc:
+            raise ValueError("MEWS calculation state_date is invalid") from exc
+        payload = dict(state)
+        content_hash = sha256_json(payload)
+        async with self.pool.acquire() as connection:
+            async with connection.transaction(isolation="serializable"):
+                existing = await connection.fetchrow(
+                    f"""
+                    SELECT state_date,content_hash
+                    FROM {self.schema}.mews_calculation_state
+                    WHERE state_key='mews_v2'
+                    FOR UPDATE
+                    """
+                )
+                if existing is None:
+                    await connection.execute(
+                        f"""
+                        INSERT INTO {self.schema}.mews_calculation_state
+                            (state_key,state_date,model_version,content_hash,state_json)
+                        VALUES ('mews_v2',$1,$2,$3,$4::jsonb)
+                        """,
+                        state_date,
+                        "mews_v2",
+                        content_hash,
+                        canonical_json(payload),
+                    )
+                elif existing["state_date"] > state_date:
+                    raise V20SemanticConflict("MEWS calculation state cannot regress")
+                elif existing["state_date"] == state_date:
+                    if existing["content_hash"] != content_hash:
+                        raise V20SemanticConflict(
+                            "MEWS calculation state changed for an already sealed date"
+                        )
+                else:
+                    await connection.execute(
+                        f"""
+                        UPDATE {self.schema}.mews_calculation_state
+                        SET state_date=$1,model_version=$2,content_hash=$3,
+                            state_json=$4::jsonb,updated_at=clock_timestamp()
+                        WHERE state_key='mews_v2'
+                        """,
+                        state_date,
+                        "mews_v2",
+                        content_hash,
+                        canonical_json(payload),
+                    )
+        return content_hash
 
     async def record_mews_snapshot(self, payload: Mapping[str, Any]) -> str:
         required = {

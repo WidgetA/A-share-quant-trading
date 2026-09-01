@@ -341,14 +341,12 @@ HTTP 请求本身不会占用 PostgreSQL 连接。快照缺失、刷新失败或
 
 ### 5.2 MEWS 09:10 自动缓存与人工恢复
 
-生产链路必须配置 `V20_MEWS_SOURCE_URL`，指向已发布的 `mews_v2` 曲线接口，并通过
-`TRADING_API_KEY`（或专用覆盖 `V20_MEWS_API_KEY`）访问。独立 `mews_cache` lane 在交易日
-09:10—09:40 内重试，要求 `latest_valid.date` 等于前一交易日、
-`signal_available_date` 等于当天、`data_status=OK`，且上游生成时间与 PostgreSQL 回执都
-严格早于 09:40。若当天结果缺失、滞后或仍为 `PARTIAL`，V20 会立即调用同一服务的生产
-补算接口，再拉取、校验并落快照；补算仍由 MEWS 服务已有的历史状态和互斥锁完成。刷新
-地址默认由曲线地址推导，非标准路由才需设置 `V20_MEWS_REFRESH_URL`。成功后当天不再拉取；
-选股和退出只读 V20 自己的快照，不允许 V20 配置 MEWS 上游存储。
+独立 `mews_cache` lane 在交易日 09:10—09:40 内使用现有 `TUSHARE_TOKEN` 拉取前一交易日
+的 `margin`、`margin_detail`、`daily_basic` 原始素材，在 V20 内按冻结的 `mews_v2`
+公式计算，并把紧凑增量状态和当天不可变快照写入 V20 PostgreSQL。若进程启动时当天快照
+缺失，会在现场从最近 checkpoint 补齐缺失交易日，而不是调用另一个服务取得已经算好的
+MEWS 值。原始素材质量必须为 `OK`，且计算时间与 PostgreSQL 回执都严格早于 09:40。
+成功后当天不再拉取；选股和退出只读 V20 自己的快照。
 
 以下 POST 仅保留为有鉴权的人工灾备写入，不是日常生产链路：
 

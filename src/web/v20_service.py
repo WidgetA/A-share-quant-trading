@@ -30,9 +30,8 @@ from src.common.v20_feishu import (
 )
 from src.data.clients.mews_snapshot import (
     MEWS_PUBLISH_TIME,
-    MewsSnapshotNotReady,
+    LocalMewsSnapshotCalculator,
     MewsSnapshotSourceError,
-    PublishedMewsSnapshotClient,
 )
 from src.data.clients.tushare_realtime import TushareDailyBar, TushareMinuteBar
 from src.data.clients.v20_market_data import (
@@ -1171,7 +1170,15 @@ class V20Service:
             expected_manifest_sha256=config.artifact_manifest_sha256,
         )
         routes = load_v20_feishu_routes()
-        mews_source = PublishedMewsSnapshotClient.from_environment() if config.enabled else None
+        mews_source = (
+            LocalMewsSnapshotCalculator(
+                token,
+                repository,
+                bootstrap_path=LocalMewsSnapshotCalculator.default_bootstrap_path(project_root),
+            )
+            if config.enabled
+            else None
+        )
         if config.enabled:
             active_route = routes.get(config.route_id)
             if (
@@ -1224,10 +1231,10 @@ class V20Service:
             )
 
         database_config_path = project_root / "config" / "database-config.yaml"
+        token = get_tushare_token()
         owns_fundamentals = fundamentals_db is None
         fundamentals = fundamentals_db
         if fundamentals is None:
-            token = get_tushare_token()
             fundamentals = create_fundamentals_db_from_config(
                 database_config_path,
                 tushare_token=token,
@@ -1257,7 +1264,11 @@ class V20Service:
             raise V20ConfigError("legacy main Feishu route is not configured")
         config = _embedded_runtime_config(base_config, route)
         routes = {route.route_id: route}
-        mews_source = PublishedMewsSnapshotClient.from_environment()
+        mews_source = LocalMewsSnapshotCalculator(
+            token,
+            repository,
+            bootstrap_path=LocalMewsSnapshotCalculator.default_bootstrap_path(project_root),
+        )
         scan_state = V15ScanState(fundamentals_db=fundamentals)
         pipeline = V20ScanPipeline(scan_state, project_root)
         artifacts = load_g_artifacts(
@@ -1315,8 +1326,7 @@ class V20Service:
                 raise V20ConfigError("active V20 route differs from reviewed destination")
             if self._mews_source is None:
                 raise V20ConfigError(
-                    "V20_MEWS_SOURCE_URL is required; MEWS cannot be left as an "
-                    "unconnected manual-ingest contract"
+                    "V20 local MEWS calculator is required when the service is enabled"
                 )
             if (
                 not self._embedded_legacy
@@ -2958,7 +2968,7 @@ class V20Service:
         now: datetime,
         calendar: Sequence[date],
     ) -> bool:
-        """Cache today's published MEWS once; never put its I/O on entry/exit paths."""
+        """Calculate/cache today's MEWS once; keep its I/O off entry/exit paths."""
 
         current = self._aware_now(now)
         wall = current.timetz().replace(tzinfo=None)
@@ -2974,33 +2984,22 @@ class V20Service:
         source_trade_date = predecessors[-1]
         source = self._mews_source
         if source is None:
-            raise V20ConfigError("V20 MEWS source is not configured")
+            raise V20ConfigError("V20 local MEWS calculator is not configured")
 
         async with self._mews_refresh_lock:
             if self._mews_cached_for == current.date():
                 return False
-            try:
-                published = await source.fetch_snapshot(
-                    source_trade_date=source_trade_date,
-                    availability_date=current.date(),
-                )
-            except MewsSnapshotNotReady:
-                logger.warning(
-                    "V20 found no current MEWS snapshot for %s; requesting production refresh",
-                    current.date(),
-                )
-                await source.refresh_missing_snapshot()
-                published = await source.fetch_snapshot(
-                    source_trade_date=source_trade_date,
-                    availability_date=current.date(),
-                )
+            published = await source.fetch_snapshot(
+                source_trade_date=source_trade_date,
+                availability_date=current.date(),
+            )
             payload = dict(published)
             generated_at = datetime.fromisoformat(str(payload.get("generated_at")))
             if generated_at.tzinfo is None or generated_at.utcoffset() is None:
-                raise MewsSnapshotSourceError("published MEWS generated_at is timezone-naive")
+                raise MewsSnapshotSourceError("calculated MEWS generated_at is timezone-naive")
             cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
             if generated_at.astimezone(SHANGHAI) >= cutoff:
-                raise MewsSnapshotSourceError("published MEWS missed the 09:40 cutoff")
+                raise MewsSnapshotSourceError("calculated MEWS missed the 09:40 cutoff")
             await self._repository.record_mews_snapshot(payload)
             eligible = await self._repository.mews_snapshot_is_eligible(
                 str(payload["snapshot_id"]),
@@ -3016,7 +3015,7 @@ class V20Service:
             self._mews_snapshot_id = str(payload["snapshot_id"])
             self._mews_last_failure = None
             logger.info(
-                "V20 cached published MEWS %s for %s",
+                "V20 cached locally calculated MEWS %s for %s",
                 self._mews_snapshot_id,
                 current.date(),
             )

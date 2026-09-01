@@ -10,15 +10,11 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
 
 import src.strategy.v20.runtime_config as runtime_config_module
 from src.common.v20_feishu import V20FeishuRoute
-from src.data.clients.mews_snapshot import (
-    MewsSnapshotSourceError,
-    PublishedMewsSnapshotClient,
-)
+from src.data.clients.mews_snapshot import MewsSnapshotSourceError
 from src.data.clients.tushare_realtime import TushareMinuteBar
 from src.data.database.fundamentals_db import FundamentalsDBConfig
 from src.data.database.v20_repository import (
@@ -205,39 +201,24 @@ async def test_mews_missing_at_runtime_is_calculated_then_cached(
         async def mews_snapshot_is_eligible(self, *_args, **_kwargs):
             return True
 
-    requests: list[httpx.Request] = []
+    class _LocalCalculator:
+        def __init__(self) -> None:
+            self.calls = []
 
-    def document(source_day: str) -> dict[str, Any]:
-        return {
-            "version": "mews_v2",
-            "latest_valid": {
-                "date": source_day,
-                "signal_available_date": "2026-09-01",
-                "updated_at": 1_788_226_200_000,
-                "risk_state": "NORMAL",
-                "data_status": "OK",
-                "mews": 40.0,
-                "exhaustion_path": 40.0,
-                "persistent_deleveraging_path": 35.0,
-            },
-        }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.method == "POST":
-            return httpx.Response(
-                200,
-                json={"success": True, "result": {"status": "OK"}},
-            )
-        get_count = sum(item.method == "GET" for item in requests)
-        return httpx.Response(200, json=document("2026-08-28" if get_count == 1 else "2026-08-31"))
+        async def fetch_snapshot(self, *, source_trade_date, availability_date):
+            self.calls.append((source_trade_date, availability_date))
+            return {
+                "snapshot_id": "mews-v2-2026-08-31-local",
+                "source_trade_date": "2026-08-31",
+                "generated_at": "2026-09-01T09:18:00+08:00",
+                "fast_state": "NORMAL",
+                "model_version": "mews_v2",
+                "data_version": "d" * 64,
+                "evidence": {"profile": "LOCAL_TUSHARE_MEWS_V2_0910_V1"},
+            }
 
     repository = _Repository()
-    source = PublishedMewsSnapshotClient(
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
-        api_key="mews-test-key",
-        transport=httpx.MockTransport(handler),
-    )
+    source = _LocalCalculator()
     service = _service(monkeypatch, repository)
     service._mews_source = source
     calendar = (date(2026, 8, 31), date(2026, 9, 1))
@@ -248,26 +229,21 @@ async def test_mews_missing_at_runtime_is_calculated_then_cached(
     )
 
     assert cached is True
-    assert [request.method for request in requests] == ["GET", "POST", "GET"]
-    assert requests[1].url.path == "/api/trading/margin-risk-refresh"
-    assert all(request.headers["X-API-Key"] == "mews-test-key" for request in requests)
+    assert source.calls == [(date(2026, 8, 31), date(2026, 9, 1))]
     assert repository.payloads[0]["source_trade_date"] == "2026-08-31"
 
 
-async def test_mews_malformed_source_does_not_trigger_calculation(
+async def test_mews_local_calculation_failure_is_not_written_as_a_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Source:
         async def fetch_snapshot(self, **_kwargs):
-            raise MewsSnapshotSourceError("published MEWS version is not mews_v2")
-
-        async def refresh_missing_snapshot(self):
-            raise AssertionError("malformed source must not trigger production calculation")
+            raise MewsSnapshotSourceError("Tushare margin is missing SSE or SZSE")
 
     service = _service(monkeypatch, SimpleNamespace())
     service._mews_source = _Source()
 
-    with pytest.raises(MewsSnapshotSourceError, match="version"):
+    with pytest.raises(MewsSnapshotSourceError, match="missing SSE or SZSE"):
         await service._refresh_mews_cache_once(
             datetime(2026, 9, 1, 9, 18, tzinfo=TZ),
             (date(2026, 8, 31), date(2026, 9, 1)),
@@ -403,11 +379,6 @@ def test_embedded_runtime_config_binds_legacy_destination_without_secrets(
 ) -> None:
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
-    monkeypatch.setenv(
-        "V20_MEWS_SOURCE_URL",
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
-    )
-    monkeypatch.setenv("V20_MEWS_API_KEY", "mews-test-key")
     base = load_v20_runtime_config(PROJECT_ROOT)
     route = V20FeishuRoute(
         route_id=base.route_id,
@@ -440,11 +411,6 @@ def test_legacy_runtime_factory_wires_existing_main_infrastructure(
 
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
-    monkeypatch.setenv(
-        "V20_MEWS_SOURCE_URL",
-        "http://mews.internal/api/trading/margin-risk-curve?days=5",
-    )
-    monkeypatch.setenv("V20_MEWS_API_KEY", "mews-test-key")
     base = load_v20_runtime_config(PROJECT_ROOT)
     repository = SimpleNamespace(
         config=V20DatabaseConfig(
@@ -1176,7 +1142,7 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
     assert service.startup_stage == "STOPPED"
 
 
-async def test_enabled_start_rejects_an_unconnected_mews_contract_before_database_connect(
+async def test_enabled_start_requires_local_mews_calculator_before_database_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Repository:
@@ -1197,7 +1163,7 @@ async def test_enabled_start_rejects_an_unconnected_mews_contract_before_databas
     )
     service._routes = {service.config.route_id: route}
 
-    with pytest.raises(V20ConfigError, match="unconnected manual-ingest contract"):
+    with pytest.raises(V20ConfigError, match="local MEWS calculator is required"):
         await service.start()
 
     assert repository.connect_calls == 0

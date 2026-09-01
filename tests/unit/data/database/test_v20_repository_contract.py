@@ -2617,6 +2617,60 @@ async def test_0910_mews_cache_can_be_restored_after_process_restart() -> None:
     assert call[2] == (date(2026, 8, 31), cutoff)
 
 
+async def test_local_mews_calculation_state_round_trips_with_integrity_check() -> None:
+    state = {
+        "schema": "v20-mews-incremental-state/v1",
+        "model_version": "mews_v2",
+        "state_date": "2026-08-31",
+        "market_history": [],
+        "security_states": {},
+        "risk_state": "NORMAL",
+        "clear_streak": 0,
+    }
+    row = {
+        "state_date": date(2026, 8, 31),
+        "model_version": "mews_v2",
+        "content_hash": sha256_json(state),
+        "state_json": canonical_json(state),
+    }
+
+    loaded = await _repository(_FakeConnection(fetchrows=[row])).load_mews_calculation_state()
+
+    assert loaded == state
+
+
+async def test_local_mews_calculation_state_is_monotonic_and_idempotent() -> None:
+    state = {
+        "schema": "v20-mews-incremental-state/v1",
+        "model_version": "mews_v2",
+        "state_date": "2026-08-31",
+        "market_history": [],
+        "security_states": {},
+        "risk_state": "NORMAL",
+        "clear_streak": 0,
+    }
+    digest = sha256_json(state)
+    insert_connection = _FakeConnection(fetchrows=[None])
+
+    assert await _repository(insert_connection).save_mews_calculation_state(state) == digest
+    assert any(
+        call[0] == "execute" and "INSERT INTO v20.mews_calculation_state" in call[1]
+        for call in insert_connection.calls
+    )
+
+    idempotent_connection = _FakeConnection(
+        fetchrows=[{"state_date": date(2026, 8, 31), "content_hash": digest}]
+    )
+    assert await _repository(idempotent_connection).save_mews_calculation_state(state) == digest
+    assert not any(call[0] == "execute" for call in idempotent_connection.calls)
+
+    regression_connection = _FakeConnection(
+        fetchrows=[{"state_date": date(2026, 9, 1), "content_hash": "b" * 64}]
+    )
+    with pytest.raises(V20SemanticConflict, match="cannot regress"):
+        await _repository(regression_connection).save_mews_calculation_state(state)
+
+
 @pytest.mark.asyncio
 async def test_alert_outbox_is_exactly_idempotent() -> None:
     semantic = {"alert_code": "REFERENCE_UNAVAILABLE", "entity": "leg-1"}
