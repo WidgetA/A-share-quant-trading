@@ -44,11 +44,7 @@ from src.strategy.v20.models import (
     V20_FEISHU_FORMATTER_PROFILE,
     V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
     V20_V16_SNAPSHOT_SCHEMA,
-    Rolling7Status,
-    RollingBatch,
 )
-from src.strategy.v20.policy import evaluate_rolling7
-from src.strategy.v20.rolling7_history import load_rolling7_market_history
 from src.strategy.v20.runtime_config import (
     V20ConfigError,
     V20RouteBinding,
@@ -114,50 +110,6 @@ def _service(monkeypatch: pytest.MonkeyPatch, repository: Any, client: Any = Non
         publisher=SimpleNamespace(),
         routes={},
     )
-
-
-async def test_rolling7_uses_v16_market_history_without_runtime_batches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _Repository:
-        async def load_recent_completed(self, _kind, **_kwargs):
-            return []
-
-        async def list_pending_shadow_batches(self, _trade_date, **_kwargs):
-            return []
-
-    service = _service(monkeypatch, _Repository())
-    service._rolling7_market_history = load_rolling7_market_history(
-        PROJECT_ROOT,
-        expected_return_profile_id=service.config.return_profile_id,
-        expected_reference_profile_id=service.config.reference_profile_id,
-    )
-
-    _health, rolling, gaps = await service._policy_inputs(date(2026, 9, 1))
-    window = rolling[-7:]
-
-    assert gaps == []
-    assert [row.signal_date for row in window] == [
-        date(2026, 8, 18),
-        date(2026, 8, 19),
-        date(2026, 8, 20),
-        date(2026, 8, 24),
-        date(2026, 8, 25),
-        date(2026, 8, 26),
-        date(2026, 8, 27),
-    ]
-    assert sum(row.batch_return for row in window) == pytest.approx(-0.09697359675610706)
-    assert sum(row.batch_return < 0.0 for row in window) == 4
-    decision = evaluate_rolling7(
-        decision_date=date(2026, 9, 1),
-        complete_batches=(
-            RollingBatch(row.batch_id, row.signal_date, row.t2_date, row.batch_return)
-            for row in rolling
-        ),
-    )
-    assert decision.status is Rolling7Status.NON_BAD
-    assert decision.r7 == pytest.approx(-0.09697359675610706)
-    assert decision.l7 == 4
 
 
 def _set_v20_consumer_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1223,7 +1175,7 @@ async def _disarm_manual_trigger_runtime(
     service._tasks = []
 
 
-async def test_manual_trigger_after_cutoff_rejects_even_with_frozen_decision(
+async def test_manual_trigger_after_cutoff_only_copies_frozen_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _ManualTriggerRepository()
@@ -1240,15 +1192,30 @@ async def test_manual_trigger_after_cutoff_rejects_even_with_frozen_decision(
 
     monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", forbidden_late_decision)
     try:
-        with pytest.raises(V20StateConflict, match="outside the pre-09:40 window"):
-            await service.trigger_manual_scan("deploy-20260831-001")
+        first = await service.trigger_manual_scan("deploy-20260831-001")
+        second = await service.trigger_manual_scan("deploy-20260831-001")
     finally:
         await _disarm_manual_trigger_runtime(service, tasks)
 
     assert decision_calls == 0
-    assert repository.enqueue_calls == 0
-    assert repository.seal_calls == 0
-    assert repository.events == {}
+    assert first["accepted"] is True
+    assert first["created"] is True
+    assert first["formal_decision_available"] is True
+    assert first["entry_action"] == "ENTER"
+    assert first["official_state_changed"] is False
+    assert first["manual_notice_actionable"] is False
+    assert first["feishu_delivery_confirmed"] is False
+    assert second == {**first, "created": False}
+    assert repository.enqueue_calls == 1
+    assert repository.seal_calls == 1
+    record = next(iter(repository.events.values()))
+    assert record.action_expiry_ts is None
+    assert record.semantic["delivery_priority_class"] == "OPERATOR_NOTIFICATION"
+    assert "正式冻结 V16 票单（1只）" in str(record.semantic["message"])
+    assert "000001 平安银行" in str(record.semantic["message"])
+    assert "人工触发回执｜非交易指令" in str(record.payload["message"])
+    assert "现在操作：不开仓，不补买，不追买" in str(record.payload["message"])
+    assert "早盘正式记录：曾给出开仓建议，现已过期" in str(record.payload["message"])
 
 
 async def test_manual_trigger_after_cutoff_never_backfills_missing_decision(
@@ -1266,18 +1233,19 @@ async def test_manual_trigger_after_cutoff_never_backfills_missing_decision(
 
     monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", forbidden_late_decision)
     try:
-        with pytest.raises(V20StateConflict, match="outside the pre-09:40 window"):
-            await service.trigger_manual_scan("deploy-20260831-002")
+        result = await service.trigger_manual_scan("deploy-20260831-002")
     finally:
         await _disarm_manual_trigger_runtime(service, tasks)
 
     assert decision_calls == 0
-    assert repository.enqueue_calls == 0
-    assert repository.seal_calls == 0
-    assert repository.events == {}
+    assert result["formal_decision_available"] is False
+    assert result["cycle_result"] == "CUTOFF_WITHOUT_DURABLE_DECISION"
+    record = next(iter(repository.events.values()))
+    assert "exact-09:39 正式结果" in str(record.semantic["message"])
+    assert "不会使用晚到行情补算" in str(record.semantic["message"])
 
 
-async def test_manual_trigger_after_cutoff_does_not_run_selection_again(
+async def test_manual_trigger_after_cutoff_reports_independent_0939_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _ManualTriggerRepository()
@@ -1345,15 +1313,21 @@ async def test_manual_trigger_after_cutoff_does_not_run_selection_again(
     monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", forbidden_late_decision)
     tasks = _arm_manual_trigger_runtime(service)
     try:
-        with pytest.raises(V20StateConflict, match="outside the pre-09:40 window"):
-            await service.trigger_manual_scan("deploy-20260831-replay")
+        result = await service.trigger_manual_scan("deploy-20260831-replay")
     finally:
         await _disarm_manual_trigger_runtime(service, tasks)
 
-    assert replay_calls == 0
+    assert replay_calls == 1
     assert repository.entry_status is invalid_status
-    assert repository.enqueue_calls == 0
-    assert repository.events == {}
+    assert result["cycle_result"] == "LATE_0939_REPLAY_READY"
+    assert result["entry_action"] == "INPUT_INVALID"
+    assert result["official_state_changed"] is False
+    assert result["late_0939_replay_available"] is True
+    assert result["late_0939_replay_event_id"] == "late-replay-event"
+    assert result["late_0939_replay_action"] == "ENTER"
+    assert result["late_0939_replay_multiplier"] == 1.0
+    manual_record = next(iter(repository.events.values()))
+    assert "已过期不可追买" in str(manual_record.semantic["message"])
 
 
 async def test_manual_trigger_inside_window_uses_serialized_official_decision_lane(
@@ -1368,25 +1342,7 @@ async def test_manual_trigger_inside_window_uses_serialized_official_decision_la
     async def commit_official_decision(now: datetime) -> None:
         assert service._decision_cycle_lock.locked()
         decision_calls.append(now)
-        status = _rich_entry_status(service.config)
-        repository.entry_status = status
-        payload = {"message": "the automatic entry message"}
-        repository.events[status.event_id] = OutboxRecord(
-            event_id=status.event_id,
-            event_type="ENTRY_DECISION",
-            route_id=service.config.route_id,
-            official_stream_id=service.config.official_stream_id,
-            lineage_id=service.config.state_lineage_id,
-            semantic=status.semantic,
-            semantic_content_hash=status.semantic_content_hash,
-            payload=payload,
-            payload_hash=sha256_json(payload),
-            generated_at=now,
-            commit_marker=101,
-            action_expiry_ts=datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
-            delivery_status="PENDING",
-            attempt_count=0,
-        )
+        repository.entry_status = _rich_entry_status(service.config)
 
     monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", commit_official_decision)
     try:
@@ -1434,7 +1390,7 @@ async def test_morning_selection_trigger_uses_only_official_entry_message_lane(
 
     monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", commit_official_decision)
     try:
-        result = await service.trigger_manual_scan("deploy-20260831-exact")
+        result = await service.trigger_morning_selection("deploy-20260831-exact")
     finally:
         await _disarm_manual_trigger_runtime(service, tasks)
 
@@ -1453,59 +1409,6 @@ async def test_morning_selection_trigger_uses_only_official_entry_message_lane(
     ]
     assert repository.enqueue_calls == 0
     assert set(repository.events) == {repository.entry_status.event_id}
-
-
-async def test_manual_trigger_and_scheduler_call_the_same_official_iteration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manual_repository = _ManualTriggerRepository()
-    manual_service = _service(monkeypatch, manual_repository)
-    scheduler_service = _service(monkeypatch, SimpleNamespace())
-    now = datetime(2026, 8, 31, 9, 39, 5, tzinfo=TZ)
-    manual_service._clock = lambda: now
-    scheduler_service._clock = lambda: now
-    tasks = _arm_manual_trigger_runtime(manual_service)
-    calls: list[tuple[V20Service, datetime, bool]] = []
-
-    async def official_iteration(self: V20Service, sampled_at: datetime) -> None:
-        calls.append((self, sampled_at, self._decision_cycle_lock.locked()))
-        if self is scheduler_service:
-            self._stop_event.set()
-            return
-        status = _rich_entry_status(self.config)
-        manual_repository.entry_status = status
-        payload = {"message": "one official automatic/manual message"}
-        manual_repository.events[status.event_id] = OutboxRecord(
-            event_id=status.event_id,
-            event_type="ENTRY_DECISION",
-            route_id=self.config.route_id,
-            official_stream_id=self.config.official_stream_id,
-            lineage_id=self.config.state_lineage_id,
-            semantic=status.semantic,
-            semantic_content_hash=status.semantic_content_hash,
-            payload=payload,
-            payload_hash=sha256_json(payload),
-            generated_at=sampled_at,
-            commit_marker=102,
-            action_expiry_ts=datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
-            delivery_status="PENDING",
-            attempt_count=0,
-        )
-
-    monkeypatch.setattr(V20Service, "_run_decision_iteration_with_cutoff", official_iteration)
-    try:
-        manual_result = await manual_service.trigger_manual_scan("deploy-parity-20260831")
-        await scheduler_service._run_scheduler()
-    finally:
-        await _disarm_manual_trigger_runtime(manual_service, tasks)
-
-    assert calls == [
-        (manual_service, now, True),
-        (scheduler_service, now, True),
-    ]
-    assert manual_result["entry_event_id"] == manual_repository.entry_status.event_id
-    assert manual_result["exact_automatic_message"] is True
-    assert manual_repository.enqueue_calls == 0
 
 
 async def test_manual_trigger_rejects_failed_runtime_before_any_side_effect(
@@ -2296,38 +2199,12 @@ async def test_live_exit_tick_timeout_cancels_slow_vendor_and_allows_next_tick(
     monkeypatch.setattr(service, "_run_exit_cycle", exit_cycle)
     monkeypatch.setattr(service, "_live_exit_tick_budget", lambda: 0.01)
 
-    with pytest.raises(TimeoutError, match="stage=cycle exceeded timeout_seconds=0.010"):
+    with pytest.raises(TimeoutError):
         await service._run_live_exit_tick(context, datetime(2026, 8, 31, 10, 0, tzinfo=TZ))
     await asyncio.wait_for(cancelled.wait(), timeout=1.0)
     await service._run_live_exit_tick(context, datetime(2026, 8, 31, 10, 0, 15, tzinfo=TZ))
 
     assert calls == 2
-
-
-async def test_live_exit_tick_uses_stage_budgets_that_fit_the_cycle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import src.web.v20_service as module
-
-    service = _service(monkeypatch, SimpleNamespace())
-    context = _DayContext(trade_date=date(2026, 8, 31), calendar=())
-    captured: dict[str, Any] = {}
-
-    async def exit_cycle(*_args, **kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(service, "_run_exit_cycle", exit_cycle)
-    await service._run_live_exit_tick(
-        context,
-        datetime(2026, 8, 31, 10, 0, tzinfo=TZ),
-    )
-
-    assert captured["include_stale"] is False
-    assert captured["latest_timeout"] == module.LIVE_EXIT_LATEST_POLL_TIMEOUT_SECONDS
-    assert captured["history_timeout"] == module.LIVE_EXIT_HISTORY_RECOVERY_TIMEOUT_SECONDS
-    assert captured["latest_timeout"] + captured["history_timeout"] < (
-        service._live_exit_tick_budget()
-    )
 
 
 async def test_latest_minute_vendor_call_has_its_own_hard_timeout(
@@ -2827,7 +2704,7 @@ async def test_revision_zero_recovery_uses_persisted_genesis_boundary(
     assert recovered.shadow_batches == ()
     assert recovered.model_batch is None
     assert recovered.invalid_commit_not_before_ts == datetime(2026, 8, 31, 9, 45, tzinfo=TZ)
-    assert recovered.next_state["official_rolling_gaps"] == []
+    assert recovered.next_state["official_rolling_gaps"][-1]["signal_date"] == "2026-08-31"
 
 
 def test_empty_forward_shadow_genesis_has_explicit_first_day_anchor(
@@ -2861,7 +2738,14 @@ def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
         "source_last_terminal_trade_date": as_of.isoformat(),
         "official_state": state,
         "official_state_hash": sha256_json(state),
-        "state_shadow_batches": [],
+        "state_shadow_batches": [
+            {
+                "kind": "ROLLING7",
+                "status": "COMPLETE_VALID",
+                "signal_date": date(2026, 8, 3 + index).isoformat(),
+            }
+            for index in range(7)
+        ],
     }
     checkpoint_path = tmp_path / "checkpoint.json"
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
@@ -2886,7 +2770,6 @@ def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
     )
 
     assert bootstrap.predecessor_trade_date == as_of
-    assert bootstrap.shadow_batches == ()
 
     audited_legacy_hash = "a" * 64
     monkeypatch.setattr(
@@ -2989,18 +2872,15 @@ class _LateNormalEntryRepository:
         ),
     ],
 )
-async def test_late_normal_v16_candidate_does_not_manufacture_a_rolling_gap(
+async def test_late_normal_v16_candidate_becomes_gap_without_consumable_batches(
     monkeypatch: pytest.MonkeyPatch,
     formed_at: datetime,
     observed_at: datetime,
 ) -> None:
     config = _config(monkeypatch)
     repository = _LateNormalEntryRepository(config)
-    scan_calls = 0
 
     async def scan(*args, **kwargs):
-        nonlocal scan_calls
-        scan_calls += 1
         return SimpleNamespace(frozen_at=formed_at)
 
     service = _service(monkeypatch, repository)
@@ -3035,16 +2915,6 @@ async def test_late_normal_v16_candidate_does_not_manufacture_a_rolling_gap(
         datetime(2026, 8, 31, 9, 39, 59, tzinfo=TZ),
     )
 
-    async def already_finalized(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_finalize_invalid_entry", already_finalized)
-    await service._attempt_entry(
-        context,
-        datetime(2026, 8, 31, 9, 40, 1, tzinfo=TZ),
-    )
-
-    assert scan_calls == 1
     assert len(repository.commits) == 1
     commit = repository.commits[0]
     assert commit.action == "INPUT_INVALID"
@@ -3052,7 +2922,7 @@ async def test_late_normal_v16_candidate_does_not_manufacture_a_rolling_gap(
     assert commit.shadow_batches == ()
     assert commit.model_batch is None
     assert commit.invalid_commit_not_before_ts == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
-    assert commit.next_state["official_rolling_gaps"] == []
+    assert commit.next_state["official_rolling_gaps"][-1]["signal_date"] == "2026-08-31"
 
 
 async def test_missing_0939_coverage_finalizes_no_buy_at_0940_idempotently(

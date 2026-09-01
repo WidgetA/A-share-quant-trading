@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import src.web.app as web_app
+from src.common.v20_feishu import render_entry_message
 from src.data.database.v20_repository import (
     OutboxRecord,
     V20LeadershipLost,
@@ -104,6 +105,9 @@ class StubV20Service:
                 "feishu_delivery_confirmed": False,
             }
         )
+
+    async def trigger_morning_selection(self, request_id: str) -> dict[str, Any]:
+        return await self.trigger_manual_scan(request_id)
 
     async def enroll_manual_monitor(
         self,
@@ -352,7 +356,7 @@ class FreshProbeV20Service(StubV20Service):
 
     async def trigger_manual_scan(self, _request_id: str) -> dict[str, Any]:
         self.old_manual_calls += 1
-        raise V20StateConflict("live morning selection is outside the pre-09:40 window")
+        raise AssertionError("post-cutoff route must run the fresh chain probe")
 
 
 class LifecycleV20Service:
@@ -816,7 +820,7 @@ def test_manual_monitor_service_failures_use_the_v20_error_boundary(
     assert response.status_code == expected_status
 
 
-def test_post_cutoff_trigger_never_recomputes_selection() -> None:
+def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay() -> None:
     service = FreshProbeV20Service()
     repository = service._repository
     state_before = (repository.state.revision, repository.state.state_hash)
@@ -832,20 +836,69 @@ def test_post_cutoff_trigger_never_recomputes_selection() -> None:
         headers={"Idempotency-Key": "deploy-current-chain-001"},
     )
 
-    assert first.status_code == 409
-    assert repeated.status_code == 409
-    assert "outside the pre-09:40 window" in first.json()["detail"]
-    assert service.build_calls == []
+    assert first.status_code == 202
+    assert repeated.status_code == 202
+    result = first.json()
+    assert result["accepted"] is True
+    assert result["created"] is True
+    assert result["chain_probe_available"] is True
+    assert result["chain_probe_result"] == "PASS"
+    assert result["current_version_recomputed"] is True
+    assert result["replay_reused"] is False
+    assert result["v16_count"] == 1
+    assert result["v20_action"] == "ENTER"
+    assert result["final_multiplier"] == 1.0
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert result["manual_notice_actionable"] is False
+    assert repeated.json() == {**result, "created": False}
+
+    assert len(service.build_calls) == 1
+    probe_event_id = result["chain_probe_event_id"]
+    assert service.build_calls[0] == (date(2026, 8, 31), probe_event_id)
+    assert probe_event_id != "old-late-replay-event"
     assert service.ensure_replay_calls == 0
-    assert service.old_manual_calls == 2
-    assert repository.enqueue_calls == 0
+    assert service.old_manual_calls == 0
+    assert repository.enqueue_calls == 1
     assert repository.official_write_calls == 0
     assert repository.entry_status is entry_before
     assert (repository.state.revision, repository.state.state_hash) == state_before
+
+    probe = repository.events[probe_event_id]
+    assert probe.semantic["alert_code"] == "MANUAL_0939_CHAIN_PROBE_RESULT"
+    assert probe.semantic["manual_request_id"] == "deploy-current-chain-001"
+    assert probe.semantic["config_hash"] == service.config.config_hash
+    assert probe.semantic["probe_result"] == "PASS"
+    assert probe.semantic["current_version_recomputed"] is True
+    assert probe.semantic["replay_reused"] is False
+    assert probe.semantic["data_source"] == "PERSISTED_09:31_09:39"
+    assert probe.semantic["data_window_start"] == "09:31"
+    assert probe.semantic["data_window_end"] == "09:39"
+    assert probe.semantic["official_state_changed"] is False
+    assert probe.semantic["orders_changed"] is False
+    assert probe.semantic["non_actionable"] is True
+    assert probe.payload is not None
+    assert probe.payload["message"] == render_entry_message(
+        probe.semantic["entry_render_semantic"],
+        generated_at=service.now,
+        commit_marker=101,
+        on_time=True,
+    )
+    assert "当前版本早盘链路重算" not in str(probe.payload["message"])
+    assert result["symbols"] == [
+        {
+            "rank": 1,
+            "code": "000001",
+            "name": "平安银行",
+            "snapshot_price": 10.26,
+        }
+    ]
+    assert result["retrospective_expired"] is True
+    assert result["exact_automatic_message"] is True
     assert repository.events["old-late-replay-event"].payload == {"message": "old replay"}
 
 
-def test_post_cutoff_normal_entry_is_not_replayed() -> None:
+def test_post_cutoff_normal_entry_resends_frozen_message_byte_for_byte() -> None:
     service = FreshProbeV20Service()
     repository = service._repository
     source_message = "[V20][SHADOW] 每日决策 (2026-08-31 09:40)\n原始票单：一字不改 ✅"
@@ -883,9 +936,22 @@ def test_post_cutoff_normal_entry_is_not_replayed() -> None:
         headers={"Idempotency-Key": "replay-frozen-entry-001"},
     )
 
-    assert response.status_code == 409
-    assert "outside the pre-09:40 window" in response.json()["detail"]
-    assert set(repository.events) == {"old-late-replay-event", repository.entry_status.event_id}
+    assert response.status_code == 202
+    result = response.json()
+    replay = repository.events[result["replay_event_id"]]
+    assert replay.payload is not None
+    assert replay.payload["message"] == source_message
+    assert str(replay.payload["message"]).encode("utf-8") == source_message.encode("utf-8")
+    assert result["symbols"] == [
+        {
+            "rank": 1,
+            "code": "000001",
+            "name": "平安银行",
+            "snapshot_price": 10.26,
+        }
+    ]
+    assert result["exact_automatic_message"] is True
+    assert result["retrospective_expired"] is True
     assert service.build_calls == []
     assert repository.official_write_calls == 0
 
@@ -986,7 +1052,7 @@ async def test_post_cutoff_current_session_without_terminal_never_replays_prior_
     )
     service._repository.entry_status = prior
 
-    with pytest.raises(V20StateConflict, match="outside the pre-09:40 window"):
+    with pytest.raises(V20StateConflict, match="refusing prior-day replay"):
         await _dispatch_manual_trigger(service, "cutoff-no-prior-fallback")
 
     assert set(service._repository.events) == {"old-late-replay-event", "prior-day-entry"}
@@ -1027,30 +1093,39 @@ async def test_post_cutoff_waits_for_inflight_current_terminal_before_selecting_
     current_visible = True
     service._decision_cycle_lock.release()
 
-    with pytest.raises(V20StateConflict, match="outside the pre-09:40 window"):
-        await pending
-    assert set(repository.events) == {
-        "old-late-replay-event",
-        prior.event_id,
-        current.event_id,
-    }
+    result = await pending
+
+    assert result["source_entry_event_id"] == current.event_id
+    assert result["event_trade_date"] == current.trade_date.isoformat()
+    replay = repository.events[result["replay_event_id"]]
+    assert replay.payload is not None
+    assert replay.payload["message"] == "current-day message"
 
 
-def test_config_change_does_not_enable_post_cutoff_recomputation() -> None:
+def test_same_request_recomputes_again_after_full_config_hash_changes() -> None:
     service = FreshProbeV20Service()
     client = _client(service)
     headers = {"Idempotency-Key": "deploy-current-chain-config"}
 
     first = client.post("/api/v20/trigger-scan", headers=headers)
+    old_event_id = first.json()["chain_probe_event_id"]
     service.config.config_hash = "e" * 64
     second = client.post("/api/v20/trigger-scan", headers=headers)
 
-    assert first.status_code == 409
-    assert second.status_code == 409
-    assert service.build_calls == []
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["created"] is True
+    assert second.json()["current_version_recomputed"] is True
+    assert second.json()["replay_reused"] is False
+    assert second.json()["chain_probe_event_id"] != old_event_id
+    assert len(service.build_calls) == 2
+    assert (
+        service._repository.events[second.json()["chain_probe_event_id"]].semantic["config_hash"]
+        == "e" * 64
+    )
 
 
-def test_post_cutoff_trigger_does_not_even_attempt_a_failing_probe() -> None:
+def test_failed_current_chain_probe_is_durable_and_never_falls_back_to_old_replay() -> None:
     service = FreshProbeV20Service()
     service.probe_error = RuntimeError("exact 09:39 persisted input is incomplete")
 
@@ -1059,12 +1134,25 @@ def test_post_cutoff_trigger_does_not_even_attempt_a_failing_probe() -> None:
         headers={"Idempotency-Key": "deploy-current-chain-fail"},
     )
 
-    assert response.status_code == 409
-    assert "outside the pre-09:40 window" in response.json()["detail"]
-    assert service.build_calls == []
+    assert response.status_code == 202
+    result = response.json()
+    assert result["created"] is True
+    assert result["chain_probe_available"] is False
+    assert result["chain_probe_result"] == "FAIL"
+    assert result["current_version_recomputed"] is False
+    assert result["replay_reused"] is False
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
     assert service.ensure_replay_calls == 0
-    assert service.old_manual_calls == 1
+    assert service.old_manual_calls == 0
     assert service._repository.official_write_calls == 0
+    failed = service._repository.events[result["chain_probe_event_id"]]
+    assert failed.semantic["v20_action"] is None
+    assert failed.semantic["final_multiplier"] is None
+    assert failed.semantic["failure_stage"]
+    assert "exact 09:39 persisted input is incomplete" in failed.semantic["failure_reason"]
+    assert failed.payload is not None
+    assert "当前版本早盘链路重算｜❌ 失败" in str(failed.payload["message"])
 
 
 def test_trigger_rejects_body_instead_of_accepting_force_or_time_overrides() -> None:

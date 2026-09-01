@@ -88,7 +88,6 @@ from src.strategy.v20.models import (
     ReferenceStatus,
     deserialize_health_snapshot,
 )
-from src.strategy.v20.rolling7_history import load_rolling7_market_history
 from src.strategy.v20.runtime_config import (
     V20ConfigError,
     V20RouteBinding,
@@ -101,7 +100,7 @@ from src.strategy.v20.runtime_config import (
 )
 from src.strategy.v20.shadow_evaluator import evaluate_shadow_batch
 from src.web.v15_scan_service import V15ScanState
-from src.web.v20_scan_pipeline import FrozenV16ScanBundle, V20PrewarmedScan, V20ScanPipeline
+from src.web.v20_scan_pipeline import V20PrewarmedScan, V20ScanPipeline
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -122,8 +121,6 @@ MAX_STALE_EXIT_LEGS_PER_TICK = 20
 OUTBOX_RECOVERY_TICK_TIMEOUT_SECONDS = 3.0
 LIVE_EXIT_MAX_TICK_SECONDS = 12.0
 LATEST_MINUTE_POLL_TIMEOUT_SECONDS = 8.0
-LIVE_EXIT_LATEST_POLL_TIMEOUT_SECONDS = 4.0
-LIVE_EXIT_HISTORY_RECOVERY_TIMEOUT_SECONDS = 4.0
 LIVE_EXIT_MORNING_CLOSE_PUBLICATION_GRACE_SECONDS = 60.0
 STALE_EXIT_TICK_SECONDS = 30.0
 STALE_EXIT_TICK_TIMEOUT_SECONDS = 3.0
@@ -142,15 +139,6 @@ Clock = Callable[[], datetime]
 ResourceInitializer = Callable[[V15ScanState], Awaitable[None]]
 ResourceCleanup = Callable[[V15ScanState], Awaitable[None]]
 CalendarProvider = Callable[[], Awaitable[list[date]]]
-
-
-class V20LiveExitTimeout(TimeoutError):
-    """A live-exit tick exceeded its named, bounded execution stage."""
-
-    def __init__(self, stage: str, timeout_seconds: float) -> None:
-        self.stage = stage
-        self.timeout_seconds = timeout_seconds
-        super().__init__(f"stage={stage} exceeded timeout_seconds={timeout_seconds:.3f}")
 
 
 async def _init_v20_scan_resources(scan_state: V15ScanState) -> None:
@@ -295,8 +283,6 @@ class _DayContext:
     shadow_reference_finalized: bool = False
     early_history_attempted: bool = False
     early_stored_history_loaded: bool = False
-    entry_scan_attempted: bool = False
-    frozen_entry_bundle: FrozenV16ScanBundle | None = None
     reference_history_attempted: bool = False
     last_reference_history_at: datetime | None = None
     last_reference_poll_at: datetime | None = None
@@ -757,6 +743,15 @@ def _bootstrap_bundle(
         raise V20ConfigError("V20 checkpoint state_shadow_batches is missing")
     if any(not isinstance(item, Mapping) for item in shadow_batches):
         raise V20ConfigError("V20 checkpoint shadow batch must be an object")
+    valid_rolling_dates = {
+        str(item.get("signal_date"))
+        for item in shadow_batches
+        if isinstance(item, Mapping)
+        and item.get("kind") == "ROLLING7"
+        and item.get("status") == "COMPLETE_VALID"
+    }
+    if len(valid_rolling_dates) < 7:
+        raise V20ConfigError("production checkpoint requires seven completed rolling7 facts")
     return _BootstrapBundle(
         dict(state),
         predecessor_trade_date,
@@ -776,8 +771,6 @@ def _late_0939_replay_body(
 
     r7 = replay_semantic.get("rolling7_r7")
     r7_text = f"{float(r7):.2%}" if isinstance(r7, (int, float)) else "-"
-    l7 = replay_semantic.get("rolling7_l7")
-    l7_text = str(l7) if isinstance(l7, int) and not isinstance(l7, bool) else "-"
     lines = [
         "⛔ 已过期不可追买；这不是交易指令，也不会创建模型持仓、退出信号或订单。",
         "用途: 截止后重拉并截取当日 raw 09:31..09:39，回答策略在该快照上会如何判断。",
@@ -799,7 +792,7 @@ def _late_0939_replay_body(
         ),
         (
             f"滚动7: {replay_semantic.get('rolling7_state', '-')} | "
-            f"R7={r7_text} | 亏损批次={l7_text}"
+            f"R7={r7_text} | 亏损批次={replay_semantic.get('rolling7_l7', '-')}"
         ),
         (
             f"极端门G: {replay_semantic.get('g_state', 'NOT_EVALUATED')} | "
@@ -1072,7 +1065,6 @@ class V20Service:
         initialize_resources: ResourceInitializer = _init_v20_scan_resources,
         cleanup_resources: ResourceCleanup = _cleanup_v20_scan_resources,
         calendar_provider: CalendarProvider | None = None,
-        rolling7_market_history: Sequence[CompletedRolling] = (),
         embedded_legacy: bool = False,
     ) -> None:
         self.config = config
@@ -1086,7 +1078,6 @@ class V20Service:
         self._initialize_resources = initialize_resources
         self._cleanup_resources = cleanup_resources
         self._calendar_provider = calendar_provider
-        self._rolling7_market_history = tuple(rolling7_market_history)
         self._embedded_legacy = embedded_legacy
         self._calendar_cache: tuple[date, ...] = ()
         self._calendar_loaded_for: date | None = None
@@ -1190,11 +1181,6 @@ class V20Service:
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
-            rolling7_market_history=load_rolling7_market_history(
-                project_root,
-                expected_return_profile_id=config.return_profile_id,
-                expected_reference_profile_id=config.reference_profile_id,
-            ),
         )
 
     @classmethod
@@ -1275,11 +1261,6 @@ class V20Service:
             artifacts=artifacts,
             publisher=publisher,
             routes=routes,
-            rolling7_market_history=load_rolling7_market_history(
-                project_root,
-                expected_return_profile_id=config.return_profile_id,
-                expected_reference_profile_id=config.reference_profile_id,
-            ),
             initialize_resources=(
                 _init_owned_embedded_v20_scan_resources
                 if owns_fundamentals
@@ -2156,7 +2137,7 @@ class V20Service:
             "feishu_delivery_confirmed": confirmation.delivery_status == "SENT",
         }
 
-    async def _legacy_manual_trigger_receipt(self, request_id: str) -> Mapping[str, Any]:
+    async def trigger_manual_scan(self, request_id: str) -> Mapping[str, Any]:
         """Accelerate a legal decision cycle and queue a non-actionable receipt.
 
         The caller cannot supply a clock, trade date, or force flag.  Before the
@@ -2280,10 +2261,36 @@ class V20Service:
             context = (
                 self._context if self._context and self._context.trade_date == trade_date else None
             )
-            # A manual request after the cutoff may only report the terminal
-            # daily result. It must never invoke V16 selection a second time.
             late_replay_record: OutboxRecord | None = None
             late_replay_error: str | None = None
+            if (
+                wall >= self.config.clock.publish_deadline
+                and status_after is not None
+                and status_after.action == "INPUT_INVALID"
+            ):
+                try:
+                    replay_context = context
+                    if replay_context is None or trade_date not in replay_context.calendar:
+                        calendar = await self._load_trade_calendar(trade_date)
+                        if trade_date not in calendar:
+                            raise V20RepositoryError(
+                                "late 09:39 replay date is not an exchange session"
+                            )
+                        replay_context = _DayContext(
+                            trade_date=trade_date,
+                            calendar=calendar,
+                            entry_status=status_after,
+                            last_phase="DECISION_COMMITTED",
+                        )
+                    late_replay_record = await self._ensure_late_0939_replay(
+                        replay_context,
+                        current,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    late_replay_error = f"{type(exc).__name__}: {exc}"
+                    logger.exception("V20 manual late 09:39 replay failed")
             if status_after is not None:
                 cycle_result = "DECISION_COMMITTED" if status_before is None else "ALREADY_TERMINAL"
             elif context is not None and context.last_phase == "NON_TRADING_DAY":
@@ -2296,6 +2303,9 @@ class V20Service:
                 cycle_result = context.last_phase if context is not None else "DECISION_PENDING"
             else:
                 cycle_result = "CUTOFF_WITHOUT_DURABLE_DECISION"
+            if late_replay_record is not None:
+                cycle_result = "LATE_0939_REPLAY_READY"
+
             official_state_changed = status_before is None and status_after is not None
             late_replay = late_replay_record.semantic if late_replay_record is not None else None
             message = _manual_trigger_receipt_body(
@@ -2364,14 +2374,15 @@ class V20Service:
                 config=self.config,
             )
 
-    async def trigger_manual_scan(self, request_id: str) -> Mapping[str, Any]:
-        """Run the scheduler's real pre-09:40 decision lane.
+    async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
+        """Run the real pre-09:40 decision lane without a manual wrapper message.
 
         A successful new decision is the ordinary ``ENTRY_DECISION`` written by
         :meth:`_run_decision_iteration_with_cutoff`; consequently model legs and
         the intraday-exit lane are armed exactly as they are under the automatic
         scheduler.  This method never creates a second, formatter-specific
-        receipt: its visible Feishu text is the production entry message.
+        receipt.  The route may therefore promise that the visible Feishu text
+        comes only from the production entry renderer.
         """
 
         await self._require_manual_trigger_ready()
@@ -2681,6 +2692,7 @@ class V20Service:
                 "REFERENCE_LOCK_FAILED",
                 self._run_reference_cycle(context, current),
             )
+            self._schedule_late_0939_replay(context, current)
             await asyncio.gather(*exit_tasks)
         finally:
             for task in exit_tasks:
@@ -2745,23 +2757,9 @@ class V20Service:
 
         async def locked_cycle() -> None:
             async with self._live_exit_lock:
-                await self._run_exit_cycle(
-                    context,
-                    now,
-                    include_stale=False,
-                    latest_timeout=LIVE_EXIT_LATEST_POLL_TIMEOUT_SECONDS,
-                    history_timeout=LIVE_EXIT_HISTORY_RECOVERY_TIMEOUT_SECONDS,
-                )
+                await self._run_exit_cycle(context, now, include_stale=False)
 
-        budget = self._live_exit_tick_budget()
-        try:
-            await asyncio.wait_for(locked_cycle(), timeout=budget)
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError as exc:
-            if isinstance(exc, V20LiveExitTimeout):
-                raise
-            raise V20LiveExitTimeout("cycle", budget) from exc
+        await asyncio.wait_for(locked_cycle(), timeout=self._live_exit_tick_budget())
 
     async def _wait_for_runtime_tick(self, started_at: float, cadence: float) -> None:
         remaining = max(0.0, cadence - (asyncio.get_running_loop().time() - started_at))
@@ -3575,7 +3573,7 @@ class V20Service:
             )
             for row in health_rows
         ]
-        runtime_rolling = [
+        rolling = [
             CompletedRolling(
                 batch_id=row.batch_id,
                 signal_date=row.signal_date,
@@ -3585,36 +3583,10 @@ class V20Service:
             for row in rolling_rows
             if row.status == "COMPLETE_VALID" and row.batch_return is not None
         ]
-        rolling_by_signal_date = {
-            row.signal_date: row
-            for row in self._rolling7_market_history
-            if row.t2_date < trade_date
-        }
-        for row in runtime_rolling:
-            existing = rolling_by_signal_date.get(row.signal_date)
-            if existing is not None and (
-                existing.t2_date != row.t2_date
-                or not math.isclose(
-                    existing.batch_return,
-                    row.batch_return,
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
-                )
-            ):
-                raise V20SemanticConflict(
-                    "rolling7 V16/market fact conflicts for signal_date="
-                    f"{row.signal_date.isoformat()}"
-                )
-            rolling_by_signal_date[row.signal_date] = row
-        rolling = sorted(
-            rolling_by_signal_date.values(),
-            key=lambda row: (row.signal_date, row.batch_id),
-        )
         invalid_or_pending: list[ShadowBatchRecord] = [
             row for row in rolling_rows if row.status == "COMPLETE_INVALID"
         ]
         invalid_or_pending.extend(row for row in pending_rows if row.kind == "ROLLING7")
-        completed_signal_dates = set(rolling_by_signal_date)
         gaps = [
             ActiveRollingGap(
                 gap_id=row.batch_id,
@@ -3622,7 +3594,6 @@ class V20Service:
                 maturity_date=row.t2_date,
             )
             for row in invalid_or_pending
-            if row.signal_date not in completed_signal_dates
         ]
         return health, rolling, gaps
 
@@ -4555,20 +4526,12 @@ class V20Service:
 
         early = context.collector.freeze()
         breadth_early = context.breadth_collector.freeze_terminal()
-        bundle = context.frozen_entry_bundle
-        if bundle is None:
-            if context.entry_scan_attempted:
-                raise V20RepositoryError(
-                    "daily V16 selection already ran and did not produce a frozen result"
-                )
-            context.entry_scan_attempted = True
-            bundle = await self._scan_pipeline.scan(
-                context.prewarmed,
-                early,
-                breadth_early=breadth_early,
-                minimum_quote_coverage=self.config.market.minimum_quote_coverage,
-            )
-            context.frozen_entry_bundle = bundle
+        bundle = await self._scan_pipeline.scan(
+            context.prewarmed,
+            early,
+            breadth_early=breadth_early,
+            minimum_quote_coverage=self.config.market.minimum_quote_coverage,
+        )
         if bundle.frozen_at.tzinfo is None or bundle.frozen_at.utcoffset() is None:
             raise V20SemanticConflict("V16 decision formation clock must be timezone-aware")
         formed_at = bundle.frozen_at.astimezone(SHANGHAI)
@@ -5030,8 +4993,6 @@ class V20Service:
         now: datetime,
         *,
         include_stale: bool = True,
-        latest_timeout: float = LATEST_MINUTE_POLL_TIMEOUT_SECONDS,
-        history_timeout: float = ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
     ) -> None:
         active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
         if not active:
@@ -5062,7 +5023,6 @@ class V20Service:
         )
         latest_attempted = False
         latest_failed = False
-        latest_error_detail: str | None = None
         latest_evidence_codes: set[str] = set()
         if (
             session
@@ -5079,7 +5039,6 @@ class V20Service:
                     context,
                     sorted(tick_target_codes),
                     observed_at=now,
-                    timeout=latest_timeout,
                 )
                 latest_evidence_codes.update(
                     _legal_exit_evidence_codes(
@@ -5090,16 +5049,11 @@ class V20Service:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception:
                 # Current-day history remains an independent fallback.  Only
                 # after both sources have produced no legal evidence do we
                 # classify a global live-exit data outage below.
                 latest_failed = True
-                latest_error_detail = (
-                    str(V20LiveExitTimeout("latest_minute", latest_timeout))
-                    if isinstance(exc, TimeoutError)
-                    else f"{type(exc).__name__}: {exc}"
-                )
                 logger.exception("V20 latest-minute exit poll failed; trying daily history")
             finally:
                 context.last_exit_poll_at = now
@@ -5133,14 +5087,13 @@ class V20Service:
                 recovery_codes.append(code)
         history_attempted = False
         history_failed = False
-        history_error_detail: str | None = None
         history_evidence_codes: set[str] = set()
         if recovery_codes:
             history_attempted = True
             try:
                 history = await asyncio.wait_for(
                     self._scan_state.realtime_client.batch_get_minute_history(recovery_codes),
-                    timeout=history_timeout,
+                    timeout=ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
                 )
                 persisted_history = await self._persist_history(
                     context,
@@ -5178,15 +5131,10 @@ class V20Service:
                 raise
             except Exception as exc:
                 history_failed = True
-                history_error_detail = (
-                    str(V20LiveExitTimeout("current_day_history", history_timeout))
-                    if isinstance(exc, TimeoutError)
-                    else f"{type(exc).__name__}: {exc}"
-                )
                 await self._safe_alert(
                     code="EXIT_HISTORY_RECOVERY_FAILED",
                     entity_id=(f"{','.join(recovery_codes)}:{context.trade_date.isoformat()}"),
-                    message=history_error_detail,
+                    message=f"{type(exc).__name__}: {exc}",
                     now=now,
                 )
 
@@ -5253,13 +5201,8 @@ class V20Service:
                 ),
                 now=now,
             )
-            latest_detail = latest_error_detail or (
-                "NOT_REQUIRED_DURING_LUNCH" if lunch_history_authoritative else "NO_LEGAL_EVIDENCE"
-            )
             raise V20RepositoryError(
-                "all live exit targets lack persisted legal current-day market evidence; "
-                f"latest={latest_detail}; "
-                f"history={history_error_detail or 'NO_LEGAL_EVIDENCE'}"
+                "all live exit targets lack persisted legal current-day market evidence"
             )
         if evidence_codes:
             context.live_exit_market_data_outage = False
@@ -5848,12 +5791,10 @@ class V20Service:
         codes: Sequence[str],
         *,
         observed_at: datetime | None = None,
-        timeout: float | None = None,
     ) -> Mapping[str, TushareMinuteBar]:
-        effective_timeout = LATEST_MINUTE_POLL_TIMEOUT_SECONDS if timeout is None else timeout
         rows = await asyncio.wait_for(
             self._scan_state.realtime_client.batch_get_latest_minute_bars(list(codes)),
-            timeout=effective_timeout,
+            timeout=LATEST_MINUTE_POLL_TIMEOUT_SECONDS,
         )
         observation = self._aware_now(observed_at)
         complete = {

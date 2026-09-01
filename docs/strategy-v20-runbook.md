@@ -377,7 +377,7 @@ ack 只停止该退出事件未来的提醒，不代表订单已提交或成交�
 
 人工接口路径为 `POST /api/v20/trigger-scan`。默认调用不携带任何 header，服务端会生成
 `manual-<uuid>` 作为 `manual_request_id`。每次无 header 调用都会生成新的 ID；盘前若
-尚无终态就推进同一 official decision，09:40 起则直接拒绝，不生成任何复盘或运输事件。
+尚无终态就推进同一 official decision，盘后则创建新的复发/重算运输事件。
 
 `Idempotency-Key` 是可选 header。需要在 curl 超时、连接中断或结果未知时安全重试，
 可在首次调用前生成 `deploy-<git-sha>` 或部署系统的不可重复 run ID；调用方提供的 key
@@ -432,13 +432,24 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/trigger-scan \
 D1/D2 盘中退出监控。若当日正式终态已经存在，接口只返回该终态；原 official outbox
 仍是唯一早盘事件。
 
-09:40 起接口统一返回 HTTP 409。无论当日是否已有正式结果，都不得重拉分钟线、再次调用
-V16、复制或重推早盘消息，也不得生成所谓“09:39 复盘”。
+09:40 起接口对正式策略状态只读，绝不会拿晚到行情替换或新建正式决定。已有正常正式
+结果时，接口从已密封 `ENTRY_DECISION` 复制 `payload.message`，UTF-8 字节必须完全相同，
+不添加任何人工触发包装。若正式结果是 `INPUT_INVALID` 或没有正常消息可复制，服务重拉
+分钟线后只保留 raw 09:31–09:39，按真实接收时间落库，再从持久化证据和失败槽冻结输入
+只读重算，并直接调用生产早盘渲染器。成功正文与早盘格式一致；HTTP 同时返回
+`retrospective_expired=true`、`manual_notice_actionable=false`，正文也保留“仅在 09:40
+前有效、迟到不得追买”。两条盘后路径都不创建模型腿、退出链或订单，official state
+保持不变；重算失败则发送失败报警。
 
-每个交易日最多调用一次 V16 选股。扫描成功后的冻结 bundle 可以用于同一次正式提交重试，
-但数据库或投递重试不能重新选股；扫描失败则按截止规则失败关闭。
+内嵌 forward-shadow 当前从 `EMPTY_FORWARD_SHADOW` 开始。首次上线日的复盘可以恢复 V16
+票单，但 BASE/滚动7展示的是这条已部署 shadow lineage 的暖机状态，不是研究回测中截至
+前一交易日的历史状态。只有经审计 checkpoint 才能初始化后者，禁止把回顾性研究制品
+静默写进已经运行的 lineage。
 
-接口在任何时点都不会创建 `MANUAL_TRIGGER_RECEIPT` 或早盘消息副本。
+09:40 前不会再创建 `MANUAL_TRIGGER_RECEIPT`。09:40 后为完成一次可见验收，接口会创建
+`DATA_ALERT/OPERATOR_NOTIFICATION` 运输事件，但其可见正文只能是：已封存官方正文的
+逐字节副本、生产早盘渲染器的只读重算正文，或重算失败报警。运输事件的非交易属性、
+过期状态和来源绑定保留在 durable semantic 与 HTTP 响应中，不得污染可见早盘正文。
 
 典型首次响应为：
 
@@ -447,17 +458,17 @@ V16、复制或重推早盘消息，也不得生成所谓“09:39 复盘”。
   "accepted": true,
   "created": true,
   "manual_request_id": "manual-550e8400-e29b-41d4-a716-446655440000",
-  "trade_date": "2026-08-31",
-  "cycle_result": "DECISION_COMMITTED",
-  "formal_decision_available": true,
+  "replay_event_id": "FULL_STABLE_EVENT_ID",
+  "event_trade_date": "2026-08-31",
   "entry_action": "ENTER",
-  "entry_event_id": "FORMAL_ENTRY_EVENT_ID",
+  "source_entry_event_id": "FORMAL_ENTRY_EVENT_ID",
+  "final_multiplier": 1.0,
   "symbols": [{"rank": 1, "code": "000001", "name": "示例", "snapshot_price": 10.26}],
+  "visible_message_mode": "FROZEN_OFFICIAL_PAYLOAD",
   "exact_automatic_message": true,
-  "retrospective_expired": false,
-  "official_state_changed": true,
-  "orders_changed": false,
-  "delivery_status": "PENDING",
+  "retrospective_expired": true,
+  "official_state_changed": false,
+  "manual_notice_actionable": false,
   "feishu_delivery_confirmed": false
 }
 ```
@@ -465,7 +476,7 @@ V16、复制或重推早盘消息，也不得生成所谓“09:39 复盘”。
 HTTP 202 只表示对应事件已持久写入并密封、等待 outbox publisher 投递；不表示飞书
 已经接受消息。`accepted=true` 也不是交易确认。只有同请求 ID 重试返回
 `feishu_delivery_confirmed=true`，或数据库/目标飞书的独立核对，才能证明最终投递。
-首次响应后使用完整 `entry_event_id` 查询：
+首次响应后使用完整 `replay_event_id`（盘前则使用 `entry_event_id`）查询：
 
 ```sql
 SELECT event_id, event_type, route_id, official_stream_id, lineage_id,
@@ -479,18 +490,20 @@ WHERE event_id = 'FULL_STABLE_EVENT_ID';
 标准早盘正文或失败报警；影子/正式另一个群不得收到它。仅看到 HTTP 202 不算通过。
 
 若首次请求显式提供了 `Idempotency-Key`，curl 超时、连接中断或返回结果未知时必须用
-原值重试，不能换 key 猜测。相同 route、stream、lineage、config 下，同 key 会读取同一
-正式 `entry_event_id`，`created=false`，不会重复选股或创建第二个运输事件。09:40 起任何
-重试都返回 409。成功收到响应后，可以把返回的 `manual_request_id` 作为后续
-`Idempotency-Key` 重试。任一人工请求仍在处理时，并发请求
+原值重试，不能换 key 猜测。相同 route、stream、lineage、config 下，同 key 会返回同一
+`replay_event_id`，`created=false`，不会重复重算或创建第二个运输事件。
+若首次请求没有 header 且结果未知，调用方无法复用服务端生成但未收到的 ID；盘后再次无
+header 调用会成为新请求并创建新的复发运输事件。成功收到响应后，可以把返回的
+`manual_request_id` 作为后续 `Idempotency-Key` 重试。任一人工请求仍在处理时，并发请求
 （包括尚未完成首次落盘的同 key）可能返回 409；待首个请求结束后按原 key 重试即可读取
 同一结果。失去 leader、任一 status 健康条件为红（含 lane 不新鲜/有错或 outbox 投递
 错误）、runtime lane 停止、服务未启用或持久层不可用返回 503，均不得当作验收成功。
 
 ### 5.5 在 D1 前人工补挂一次卖出监控
 
-`POST /api/v20/trigger-scan` 不再产生盘后重算事件。`manual-monitor` 仅为兼容已存在且已审计
-的历史 `MANUAL_0939_CHAIN_PROBE_RESULT` 保留，不得通过当前接口新生成来源事件：
+`POST /api/v20/trigger-scan` 的盘后重算本身永远不创建模型腿。若操作人明确决定把其中一条
+已密封、重算通过且结论为 `ENTER` 的 `MANUAL_0939_CHAIN_PROBE_RESULT` 票单纳入随后两日
+的卖出监控，使用独立接口：
 
 ```bash
 V20_MONITOR_REQUEST_ID="manual-monitor-REVIEWED-SOURCE"

@@ -438,8 +438,6 @@ def render_entry_message(
     shadow = mode == "forward_shadow"
     title = "[V20][SHADOW] 每日决策" if shadow else "[V20] 每日决策"
     trade_date = str(semantic["trade_date"])
-    rolling7_l7 = semantic.get("rolling7_l7")
-    rolling7_l7_text = "-" if rolling7_l7 is None else str(rolling7_l7)
     action = str(semantic.get("action", "INPUT_INVALID"))
     multiplier = float(semantic.get("final_multiplier", 0.0))
     if action == "INPUT_INVALID":
@@ -494,7 +492,7 @@ def render_entry_message(
             (
                 f"滚动7: {semantic.get('rolling7_state', '-')} | "
                 f"R7={_pct(semantic.get('rolling7_r7'))} | "
-                f"亏损批次={rolling7_l7_text}/7"
+                f"亏损批次={semantic.get('rolling7_l7', '-')}/7"
             ),
             (
                 f"极端门G: {semantic.get('g_state', 'NOT_EVALUATED')} | "

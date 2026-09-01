@@ -149,14 +149,12 @@ _STRATEGY_DEPENDENCY_FILES = (
     "src/strategy/v20/identity.py",
     "src/strategy/v20/models.py",
     "src/strategy/v20/policy.py",
-    "src/strategy/v20/rolling7_history.py",
     "src/strategy/v20/runtime_config.py",
     "src/strategy/v20/shadow_evaluator.py",
     "models/lgbrank_latest.txt",
     "models/feature_list.json",
     "data/sectors.json",
     "data/board_constituents.json",
-    "docs/strategy-v20-artifacts/rolling7-v16-market-history-v1.json",
     "pyproject.toml",
     "uv.lock",
 )
@@ -166,7 +164,7 @@ _STRATEGY_DEPENDENCY_FILES = (
 # config hash above, but no longer fork a state lineage merely because a
 # formatter, route, replay, database adapter, or service lifecycle changed.
 #
-# ``V20_STATE_INPUT_ORCHESTRATION_V2`` explicitly versions the state-sensitive
+# ``V20_STATE_INPUT_ORCHESTRATION_V1`` explicitly versions the state-sensitive
 # orchestration that still lives in ``v20_service.py`` (receipt selection,
 # cutoff handling, policy input assembly, gap maturity, and invalid-state
 # transition ordering).  Any semantic edit there must bump this profile.
@@ -193,18 +191,16 @@ _STATE_SEMANTICS_DEPENDENCY_FILES = (
     "src/strategy/v20/identity.py",
     "src/strategy/v20/models.py",
     "src/strategy/v20/policy.py",
-    "src/strategy/v20/rolling7_history.py",
     "src/strategy/v20/shadow_evaluator.py",
     "models/lgbrank_latest.txt",
     "models/feature_list.json",
     "data/sectors.json",
     "data/board_constituents.json",
-    "docs/strategy-v20-artifacts/rolling7-v16-market-history-v1.json",
     "pyproject.toml",
     "uv.lock",
 )
 _STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v2"
-_STATE_INPUT_ORCHESTRATION_PROFILE = "V20_STATE_INPUT_ORCHESTRATION_V2"
+_STATE_INPUT_ORCHESTRATION_PROFILE = "V20_STATE_INPUT_ORCHESTRATION_V1"
 _LEGACY_STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v1"
 _AUDITED_LEGACY_STATE_SEMANTICS_HASHES = frozenset(
     {
@@ -230,12 +226,6 @@ _MIXED_STATE_SOURCE_CLASSES = {
         ),
         "1c71c2a8ff33f52d0d4f2366a3c7d1316ce24e6a38c9ab75ebbfb7dd982bf0bd": (
             "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        "41e8f48f95b39e93869b076a8e6acb29673371a2e6b7b2e8a0460cd093719a4a": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        "b7c1f8244f34ba6a5a6e518358cc7f40b52d33e487bc7b7ad2577c54b130203c": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
         ),
     },
     "src/data/database/v20_repository.py": {

@@ -261,19 +261,6 @@ def test_entry_current_contract_seals_and_legacy_or_partial_contracts_fail_close
     assert payload["schema_version"] == V20_FEISHU_PAYLOAD_SCHEMA
     assert payload["feishu_formatter_profile"] == V20_FEISHU_FORMATTER_PROFILE
 
-    unknown_rolling = {
-        **semantic,
-        "event_id": "entry-unknown-rolling",
-        "rolling7_state": "UNKNOWN",
-        "rolling7_r7": None,
-        "rolling7_l7": None,
-    }
-    unknown_payload = seal_v20_payload(
-        _outbox_record("ENTRY_DECISION", unknown_rolling), generated_at, 2, True
-    )
-    assert "亏损批次=-/7" in str(unknown_payload["message"])
-    assert "None/7" not in str(unknown_payload["message"])
-
     legacy = {**semantic, "schema_version": "v20-entry-semantic/v1"}
     with pytest.raises(ValueError, match="legacy semantics cannot be upgraded"):
         seal_v20_payload(_outbox_record("ENTRY_DECISION", legacy), generated_at, 2, True)
