@@ -880,3 +880,42 @@ async def test_artifact_hydration_requires_breadth_only_raw_evidence_union(
         match="complete durable raw barrier",
     ):
         await service._hydrate_canonical_artifact_record(record)
+
+
+@pytest.mark.asyncio
+async def test_artifact_hydration_ignores_revision_received_after_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later legal correction cannot invalidate an already published artifact."""
+    service, repository, artifact = _service_and_artifact(monkeypatch)
+    record = artifact.record
+    assert record is not None
+    original_list = repository.list_raw_minute_bar_records
+    original = repository.raw_by_key[(CODES[0], "09:39")]
+    corrected_close = float(original.payload["close"]) + 0.01
+    corrected_payload = {
+        **dict(original.payload),
+        "close": corrected_close,
+        "high": max(float(original.payload["high"]), corrected_close),
+    }
+    later_correction = replace(
+        original,
+        source_hash=sha256_json(corrected_payload),
+        payload=corrected_payload,
+        first_received_at=ARTIFACT_RECEIVED_AT.replace(second=21),
+    )
+
+    async def list_with_later_correction(
+        codes: tuple[str, ...],
+        *,
+        trade_date: date,
+        end_labels: tuple[str, ...],
+    ) -> tuple[MinuteBarRecord, ...]:
+        rows = await original_list(codes, trade_date=trade_date, end_labels=end_labels)
+        return (*rows, later_correction)
+
+    monkeypatch.setattr(repository, "list_raw_minute_bar_records", list_with_later_correction)
+
+    hydrated = await service._hydrate_canonical_artifact_record(record)
+
+    assert hydrated.trade_date == TRADE_DATE

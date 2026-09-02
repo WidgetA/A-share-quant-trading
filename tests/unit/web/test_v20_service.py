@@ -4445,7 +4445,7 @@ def _late_replay_service(
     service._scan_state.historical_adapter = _ReplayHistoricalAdapter()
     service._scan_state.fundamentals_db = _ReplayCurrentNames()
     # Durable morning evidence: the full early raw bars (09:25/09:30 strategy
-    # inputs included) were persisted at 09:39, so the post-cutoff replay
+    # inputs included) were persisted immediately after 09:39, so the post-cutoff replay
     # rehydrates from the database alone.
     replay_labels = ("09:25", "09:30") + tuple(f"09:{minute:02d}" for minute in range(31, 40))
     close_by_label = {"09:25": 10.0, "09:30": 10.0} | {
@@ -4463,7 +4463,7 @@ def _late_replay_service(
                 end_label=label,
                 source_hash=sha256_json(payload),
                 payload=payload,
-                first_received_at=datetime(2026, 8, 31, 9, 39, tzinfo=TZ),
+                first_received_at=datetime(2026, 8, 31, 9, 39, 1, tzinfo=TZ),
             )
     boards = {"board-a": tuple((code, f"name-{code}") for code in _LATE_REPLAY_CODES)}
 
@@ -5168,7 +5168,7 @@ async def test_past_date_replay_rejects_future_trade_date(
 
 
 def test_fold_universe_raw_records_identical_misbound_conflicted_and_missing() -> None:
-    """Identical revisions fold; unequal or misbound revisions conflict a code."""
+    """Same-receipt 09:39 ambiguity and pre-anchor misbinding fail closed."""
 
     def record(code: str, label: str, *, payload=None, bar_end=None) -> MinuteBarRecord:
         payload = payload if payload is not None else _bar_payload(_bar(code, label))
@@ -5188,7 +5188,7 @@ def test_fold_universe_raw_records_identical_misbound_conflicted_and_missing() -
         # 000001: identical duplicate revisions fold into one usable bar.
         record("000001", "09:39"),
         record("000001", "09:39"),
-        # 000002: unequal revisions for one label conflict the whole code.
+        # 000002: different 09:39 payloads at the same anchor are ambiguous.
         record("000002", "09:39"),
         record(
             "000002",
@@ -5313,7 +5313,13 @@ async def test_canonical_raw_persistence_seals_every_ready_code_not_just_top10(
     )
 
 
-def _seed_record(code: str, label: str, *, close: float = 10.0) -> MinuteBarRecord:
+def _seed_record(
+    code: str,
+    label: str,
+    *,
+    close: float = 10.0,
+    received_at: datetime | None = None,
+) -> MinuteBarRecord:
     payload = _bar_payload(_bar(code, label, close=close))
     return MinuteBarRecord(
         code=code,
@@ -5321,8 +5327,139 @@ def _seed_record(code: str, label: str, *, close: float = 10.0) -> MinuteBarReco
         end_label=label,
         source_hash=sha256_json(payload),
         payload=payload,
-        first_received_at=datetime(2026, 9, 1, 15, 30, tzinfo=TZ),
+        first_received_at=received_at or datetime(2026, 9, 1, 15, 30, tzinfo=TZ),
     )
+
+
+def test_fold_raw_records_freezes_first_0939_receipt() -> None:
+    """A later full-day revision cannot rewrite the first durable early snapshot."""
+    code = "000001"
+    first_receipt = datetime(2026, 8, 31, 21, 23, tzinfo=TZ)
+    later_receipt = datetime(2026, 9, 1, 2, 57, tzinfo=TZ)
+    first_batch = [
+        _seed_record(code, label, close=10.0, received_at=first_receipt) for label in _LEGACY_LABELS
+    ]
+    later_full_day_revision = [
+        _seed_record(code, label, close=99.0, received_at=later_receipt)
+        for label in ("09:31", "09:38", "09:39")
+    ]
+
+    usable, missing, conflicted = V20Service._fold_universe_raw_records(
+        [*later_full_day_revision, *first_batch],
+        (code,),
+        _HIST_TRADE_DATE,
+    )
+
+    assert missing == frozenset()
+    assert conflicted == frozenset()
+    assert [bar.end_label for bar in usable[code]] == list(_LEGACY_LABELS)
+    assert all(bar.close_price == 10.0 for bar in usable[code])
+
+
+def test_fold_0939_anchor_blocks_later_early_minute_backfill() -> None:
+    """Minutes arriving after the first 09:39 receipt never enter that snapshot."""
+    code = "000001"
+    anchor_receipt = datetime(2026, 8, 31, 21, 23, tzinfo=TZ)
+    later_receipt = datetime(2026, 9, 1, 2, 57, tzinfo=TZ)
+    records = [
+        _seed_record(code, "09:39", received_at=anchor_receipt),
+        *(
+            _seed_record(code, label, close=99.0, received_at=later_receipt)
+            for label in _LEGACY_LABELS[:-1]
+        ),
+    ]
+
+    usable, missing, conflicted = V20Service._fold_universe_raw_records(
+        records,
+        (code,),
+        _HIST_TRADE_DATE,
+    )
+
+    assert missing == frozenset()
+    assert conflicted == frozenset()
+    assert [bar.end_label for bar in usable[code]] == ["09:39"]
+
+
+def test_fold_0939_anchor_ignores_later_invalid_and_misbound_revisions() -> None:
+    """Post-anchor garbage cannot poison an already frozen market snapshot."""
+    code = "000001"
+    anchor_receipt = datetime(2026, 8, 31, 21, 23, tzinfo=TZ)
+    later_receipt = datetime(2026, 9, 1, 2, 57, tzinfo=TZ)
+    misbound_payload = _bar_payload(_bar("999999", "09:38"))
+    misbound = MinuteBarRecord(
+        code=code,
+        bar_end=datetime.fromisoformat(str(misbound_payload["bar_end"])),
+        end_label="09:38",
+        source_hash=sha256_json(misbound_payload),
+        payload=misbound_payload,
+        first_received_at=later_receipt,
+    )
+    invalid_bar = replace(_bar(code, "09:37"), volume=-1.0)
+    invalid_payload = _bar_payload(invalid_bar)
+    invalid = MinuteBarRecord(
+        code=code,
+        bar_end=invalid_bar.bar_end,
+        end_label="09:37",
+        source_hash=sha256_json(invalid_payload),
+        payload=invalid_payload,
+        first_received_at=later_receipt,
+    )
+
+    usable, missing, conflicted = V20Service._fold_universe_raw_records(
+        [
+            _seed_record(code, "09:39", received_at=anchor_receipt),
+            misbound,
+            invalid,
+        ],
+        (code,),
+        _HIST_TRADE_DATE,
+    )
+
+    assert missing == frozenset()
+    assert conflicted == frozenset()
+    assert [bar.end_label for bar in usable[code]] == ["09:39"]
+
+
+async def test_historical_seed_reuses_first_snapshot_despite_later_full_day_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production seed path reuses the frozen batch without a vendor call."""
+    code = "000001"
+    first_receipt = datetime(2026, 8, 31, 21, 23, tzinfo=TZ)
+    later_receipt = datetime(2026, 9, 1, 2, 57, tzinfo=TZ)
+
+    class _RevisionRepository(_SeedRepository):
+        async def list_raw_minute_bar_records(self, codes, *, trade_date, end_labels):
+            self.list_calls += 1
+            assert tuple(codes) == (code,)
+            assert trade_date == _HIST_TRADE_DATE
+            assert "09:39" in end_labels
+            first_batch = [
+                _seed_record(code, label, close=10.0, received_at=first_receipt)
+                for label in _LEGACY_LABELS
+            ]
+            later_revision = [
+                _seed_record(code, label, close=99.0, received_at=later_receipt)
+                for label in ("09:38", "09:39")
+            ]
+            return [*first_batch, *later_revision]
+
+    repository = _RevisionRepository()
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(
+        monkeypatch,
+        repository,
+        client,
+        universe=(code,),
+    )
+
+    seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert universe == (code,)
+    assert all(bar.close_price == 10.0 for bar in seed[code].early_bars)
+    assert client.calls == []
+    assert repository.list_calls == 1
+    assert repository.persist_calls == []
 
 
 async def test_past_date_bootstrap_empty_first_chunk_continues_to_later_chunks(
@@ -5349,10 +5486,10 @@ async def test_past_date_bootstrap_empty_first_chunk_continues_to_later_chunks(
     assert len(repository.persist_calls[0]) == 72 * len(_ENRICHED_LABELS)
 
 
-async def test_past_date_seed_initial_conflict_outside_top10_blocks_vendor_and_compute(
+async def test_past_date_seed_same_receipt_ambiguity_blocks_vendor_and_compute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Any conflicted universe code (even non-Top10) blocks fetch and compute."""
+    """Different 09:39 payloads at one first receipt remain ambiguous."""
     conflicted_code = "300001"
     universe = tuple(sorted(_LATE_REPLAY_CODES + (conflicted_code,)))
 
@@ -5361,7 +5498,7 @@ async def test_past_date_seed_initial_conflict_outside_top10_blocks_vendor_and_c
             records = await super().list_raw_minute_bar_records(
                 codes, trade_date=trade_date, end_labels=end_labels
             )
-            # Two unequal persisted revisions of the same 09:39 bar.
+            # Two unequal 09:39 payloads share the first receipt.
             return [
                 *records,
                 _seed_record(conflicted_code, "09:39"),
@@ -5393,48 +5530,40 @@ async def test_past_date_seed_initial_conflict_outside_top10_blocks_vendor_and_c
     assert repository.list_calls == 1
 
 
-async def test_past_date_seed_readback_conflict_blocks_compute(
+async def test_past_date_seed_readback_later_revision_keeps_first_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A conflict appearing only in the mandatory readback still blocks compute."""
+    """A legal later revision on mandatory readback cannot replace the first batch."""
 
-    class _ReadbackConflictRepository(_SeedRepository):
+    class _ReadbackRevisionRepository(_SeedRepository):
         async def list_raw_minute_bar_records(self, codes, *, trade_date, end_labels):
             records = await super().list_raw_minute_bar_records(
                 codes, trade_date=trade_date, end_labels=end_labels
             )
             if self.list_calls >= 2:
-                # A second, unequal 09:39 revision surfaces only on readback.
+                # A later unequal 09:39 revision surfaces only on readback.
                 records = [
                     *records,
-                    _seed_record("603068", "09:39", close=99.0),
+                    _seed_record(
+                        "603068",
+                        "09:39",
+                        close=99.0,
+                        received_at=datetime(2026, 9, 1, 15, 30, 2, tzinfo=TZ),
+                    ),
                 ]
             return records
 
-    repository = _ReadbackConflictRepository()
+    repository = _ReadbackRevisionRepository()
     vendor_bars = {
         code: tuple(_bar(code, label) for label in _ENRICHED_LABELS) for code in _LATE_REPLAY_CODES
     }
     client = _HistoricalSeedClient(vendor_bars)
     service = _historical_seed_service(monkeypatch, repository, client)
 
-    compute_calls: list[Any] = []
+    seed, _universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
 
-    async def fake_compute(*_args: Any, **_kwargs: Any) -> Any:
-        compute_calls.append(1)
-        raise AssertionError("compute must never run after a readback conflict")
-
-    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", fake_compute)
-    context = _DayContext(
-        trade_date=_HIST_TRADE_DATE,
-        calendar=(date(2026, 8, 28), _HIST_TRADE_DATE, date(2026, 9, 1)),
-    )
-
-    with pytest.raises(V20SemanticConflict, match="readback fold has 1 conflicted") as exc_info:
-        await service._compute_canonical_v16_from_persisted_raw(context)
-
-    assert "603068" in str(exc_info.value)
-    assert compute_calls == []
+    assert seed["603068"].early_bars[-1].close_price != 99.0
+    assert client.calls == [(tuple(sorted(_LATE_REPLAY_CODES)), _HIST_TRADE_DATE)]
     assert repository.list_calls == 2
 
 

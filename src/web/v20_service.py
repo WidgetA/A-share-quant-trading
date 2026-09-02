@@ -6243,14 +6243,34 @@ class V20Service:
             scan_input_codes
         ).issubset(required_codes):
             raise V20SemanticConflict("canonical V16 artifact raw-evidence universe is invalid")
+        artifact_received_at = getattr(record, "first_received_at", None)
+        if (
+            not isinstance(artifact_received_at, datetime)
+            or artifact_received_at.tzinfo is None
+            or artifact_received_at.utcoffset() is None
+        ):
+            raise V20SemanticConflict("canonical V16 artifact receipt timestamp is invalid")
         try:
-            records = await self._repository.list_raw_minute_bar_records(
+            all_records = await self._repository.list_raw_minute_bar_records(
                 required_codes,
                 trade_date=bundle.trade_date,
                 end_labels=EARLY_RAW_BAR_LABELS,
             )
         except V20MinuteBarIntegrityConflict as exc:
             raise V20SemanticConflict("canonical V16 raw barrier is corrupt") from exc
+        records: list[MinuteBarRecord] = []
+        for raw_record in all_records:
+            received_at = getattr(raw_record, "first_received_at", None)
+            if (
+                not isinstance(received_at, datetime)
+                or received_at.tzinfo is None
+                or received_at.utcoffset() is None
+            ):
+                raise V20SemanticConflict(
+                    "canonical V16 artifact has raw evidence with an invalid receipt"
+                )
+            if received_at <= artifact_received_at:
+                records.append(raw_record)
         _usable, missing, conflicted = self._fold_universe_raw_records(
             records,
             required_codes,
@@ -6260,24 +6280,6 @@ class V20Service:
             raise V20SemanticConflict(
                 "canonical V16 artifact exists without its complete durable raw barrier"
             )
-        artifact_received_at = getattr(record, "first_received_at", None)
-        if (
-            not isinstance(artifact_received_at, datetime)
-            or artifact_received_at.tzinfo is None
-            or artifact_received_at.utcoffset() is None
-        ):
-            raise V20SemanticConflict("canonical V16 artifact receipt timestamp is invalid")
-        for raw_record in records:
-            received_at = getattr(raw_record, "first_received_at", None)
-            if (
-                not isinstance(received_at, datetime)
-                or received_at.tzinfo is None
-                or received_at.utcoffset() is None
-                or received_at > artifact_received_at
-            ):
-                raise V20SemanticConflict(
-                    "canonical V16 artifact predates its durable raw evidence"
-                )
         return bundle
 
     async def _load_canonical_artifact(
@@ -6366,16 +6368,23 @@ class V20Service:
     ) -> tuple[dict[str, tuple[TushareMinuteBar, ...]], frozenset[str], frozenset[str]]:
         """Fold persisted raw revisions into per-code early (<=09:39) evidence.
 
-        Returns ``(usable, missing, conflicted)``.  A usable code's folded
-        evidence contains a valid 09:39 bar on ``trade_date``; every folded bar
-        is legal and there is no fixed-label continuity requirement — 09:25 and
-        09:30 strategy inputs survive alongside whatever continuous-trading
-        minutes were actually persisted.  Every revision must be exactly bound
-        to its payload (code, bar_end, end_label); identical duplicate
-        revisions fold into one bar, while any malformed, misbound, or unequal
-        revision makes the whole code conflicted and unusable.  Conflicted
-        codes are never reported as missing, so they are excluded from any
-        backfill fetch.
+        Returns ``(usable, missing, conflicted)``.  A code's first durable
+        09:39 candidate establishes the receipt anchor and must itself be legal.
+        Only legal labels received no later than that anchor participate, and
+        each label takes its earliest legal revision (source hash breaks an
+        exact receipt tie for nonterminal labels).  Consequently a later
+        full-day/history correction cannot rewrite or backfill the theoretical
+        09:39 market snapshot,
+        while earlier minutes received before the anchor remain available.
+        There is no fixed-label continuity requirement: a legal 09:39 remains
+        the canonical readiness boundary.  Every revision at or before the
+        anchor must still be exactly bound to its row identity, durably
+        received after its bar end, numerically legal, and date-bound.  A
+        malformed, misbound, or illegal pre-anchor revision makes the whole
+        code conflicted; post-anchor revisions do not participate.  Two
+        different 09:39 payloads at the same first receipt are ambiguous and
+        conflict.  Conflicted codes are never reported as missing, so they are
+        excluded from backfill fetches.
         """
         grouped: dict[str, dict[str, list[MinuteBarRecord]]] = {}
         for record in records:
@@ -6386,33 +6395,81 @@ class V20Service:
         usable: dict[str, tuple[TushareMinuteBar, ...]] = {}
         conflicted: set[str] = set()
         for code, by_label in grouped.items():
-            bars: dict[str, TushareMinuteBar] = {}
+            terminal_revisions = by_label.get(EARLY_RAW_LAST_LABEL, [])
+            anchor_received_at: datetime | None = None
+            if terminal_revisions:
+                terminal_receipts: list[datetime] = []
+                for revision in terminal_revisions:
+                    received_at = getattr(revision, "first_received_at", None)
+                    if (
+                        not isinstance(received_at, datetime)
+                        or received_at.tzinfo is None
+                        or received_at.utcoffset() is None
+                    ):
+                        conflicted.add(code)
+                        break
+                    terminal_receipts.append(received_at)
+                if code in conflicted:
+                    continue
+                anchor_received_at = min(terminal_receipts)
+
+            candidates: dict[str, list[tuple[datetime, str, TushareMinuteBar]]] = {}
+            anchor_payload: Mapping[str, Any] | None = None
+            anchor_source_hash: str | None = None
             for label, revisions in by_label.items():
-                first = revisions[0]
-                if any(
-                    not V20Service._record_matches_payload(revision) for revision in revisions
-                ) or any(
-                    revision.payload != first.payload or revision.source_hash != first.source_hash
-                    for revision in revisions[1:]
-                ):
-                    conflicted.add(code)
+                for revision in revisions:
+                    received_at = getattr(revision, "first_received_at", None)
+                    if (
+                        not isinstance(received_at, datetime)
+                        or received_at.tzinfo is None
+                        or received_at.utcoffset() is None
+                    ):
+                        conflicted.add(code)
+                        break
+                    if anchor_received_at is not None and received_at > anchor_received_at:
+                        continue
+                    if received_at <= revision.bar_end or not V20Service._record_matches_payload(
+                        revision
+                    ):
+                        conflicted.add(code)
+                        break
+                    try:
+                        bar = V20Service._bar_from_raw_record(revision)
+                    except V20SemanticConflict:
+                        conflicted.add(code)
+                        break
+                    if (
+                        not bar.is_valid
+                        or bar.stock_code != code
+                        or bar.bar_end.astimezone(SHANGHAI).date() != trade_date
+                    ):
+                        conflicted.add(code)
+                        break
+                    if label == EARLY_RAW_LAST_LABEL and received_at == anchor_received_at:
+                        if anchor_payload is None:
+                            anchor_payload = revision.payload
+                            anchor_source_hash = str(revision.source_hash)
+                        elif (
+                            revision.payload != anchor_payload
+                            or str(revision.source_hash) != anchor_source_hash
+                        ):
+                            conflicted.add(code)
+                            break
+                    candidates.setdefault(label, []).append(
+                        (received_at, str(revision.source_hash), bar)
+                    )
+                if code in conflicted:
                     break
-                try:
-                    bar = V20Service._bar_from_raw_record(first)
-                except V20SemanticConflict:
-                    conflicted.add(code)
-                    break
-                if (
-                    not bar.is_valid
-                    or bar.stock_code != code
-                    or bar.bar_end.astimezone(SHANGHAI).date() != trade_date
-                ):
-                    conflicted.add(code)
-                    break
-                bars[label] = bar
-            else:
-                if EARLY_RAW_LAST_LABEL in bars:
-                    usable[code] = tuple(bars[label] for label in sorted(bars))
+            if code in conflicted or anchor_received_at is None:
+                continue
+            bars = {
+                label: min(
+                    label_candidates,
+                    key=lambda candidate: (candidate[0], candidate[1]),
+                )[2]
+                for label, label_candidates in candidates.items()
+            }
+            usable[code] = tuple(bars[label] for label in sorted(bars))
         missing = frozenset(
             code for code in universe if code not in usable and code not in conflicted
         )
@@ -6443,9 +6500,11 @@ class V20Service:
 
         The exact canonical universe is resolved through the shared V16 universe
         semantics.  Every persisted raw revision for that universe is read with
-        the full set of possible early end labels (00:00..09:39); identical
-        duplicate revisions fold and unequal, malformed, or misbound revisions
-        make the code conflicted/unusable.  Backfill targets are exactly the
+        the full set of possible early end labels (00:00..09:39).  Each code is
+        frozen at its first unambiguous durable 09:39 receipt; later revisions
+        cannot rewrite that point-in-time input, while malformed or misbound
+        evidence visible at the anchor makes the code conflicted/unusable.
+        Backfill targets are exactly the
         missing nonconflicted codes.  An already-persisted legal target-date
         09:39 bar is sufficient under the same canonical V16 readiness rule
         and is never fetched again; the canonical 80% readiness gate only
@@ -6918,9 +6977,9 @@ class V20Service:
         }
         # The shared helper now seals the full ready universe; the replay still
         # binds its cross-check to the theoretical Top10 subset of that
-        # evidence — the same variable early (<=09:39) raw rows, folded with
-        # the shared identical/unequal revision rules, never a fixed
-        # 09:31..09:39 checklist.
+        # evidence — the same variable early (<=09:39) raw rows, frozen by the
+        # shared first-09:39 point-in-time anchor, never a fixed 09:31..09:39
+        # checklist.
         top10_codes = self._canonical_raw_top10_codes(canonical)
         records = list(
             await self._repository.list_raw_minute_bar_records(
@@ -6934,7 +6993,8 @@ class V20Service:
         )
         if top10_conflicted:
             raise V20SemanticConflict(
-                "persisted early raw rows contain unequal or malformed revisions"
+                "persisted early raw rows have an ambiguous first-09:39 receipt "
+                "or malformed anchored evidence"
             )
         if top10_missing:
             raise V20SemanticConflict("persisted early raw rows are missing a canonical bar")
