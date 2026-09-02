@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date
 from zoneinfo import ZoneInfo
 
@@ -66,6 +67,97 @@ async def test_successful_empty_symbol_response_is_not_a_transport_failure(monke
 
     assert await client.batch_get_latest_minute_bars(["000001"]) == {}
     assert await client.batch_get_minute_history(["000001"]) == {"000001": ()}
+
+
+@pytest.mark.asyncio
+async def test_minute_history_deadline_retains_healthy_sibling_and_recycles_hang(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    client.TIMEOUT = 0.01
+    entered_hang = asyncio.Event()
+
+    async def hanging_call(endpoint: str, params: dict[str, str], **_kwargs):
+        code = params["ts_code"].split(".")[0]
+        if code == "000002":
+            entered_hang.set()
+            await asyncio.Event().wait()
+        return {
+            "data": {
+                "fields": ["time", "open", "close", "high", "low", "vol", "amount"],
+                "items": [["2026-08-31 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1010]],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", hanging_call)
+    result = await asyncio.wait_for(
+        client.batch_get_minute_history(["000001", "000002"]), timeout=1
+    )
+
+    assert set(result) == {"000001"}
+    assert result["000001"][0].end_label == "09:39"
+    await asyncio.sleep(0)
+    assert not any(
+        task.get_name().startswith("rt-minute-history-")
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+    )
+
+
+@pytest.mark.asyncio
+async def test_minute_history_partial_failure_retains_successful_symbol(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+
+    async def partial_call(endpoint: str, params: dict[str, str], **_kwargs):
+        code = params["ts_code"].split(".")[0]
+        if code == "000002":
+            raise RuntimeError("single-symbol transport failure")
+        return {
+            "data": {
+                "fields": ["time", "open", "close", "high", "low", "vol", "amount"],
+                "items": [["2026-08-31 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1010]],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", partial_call)
+    result = await asyncio.wait_for(
+        client.batch_get_minute_history(["000001", "000002"]), timeout=1
+    )
+
+    assert set(result) == {"000001"}
+    assert result["000001"][0].is_valid
+
+
+@pytest.mark.asyncio
+async def test_minute_history_caller_cancellation_recycles_all_symbol_tasks(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    entered = asyncio.Event()
+
+    async def hanging_call(*_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_api_call", hanging_call)
+    request = asyncio.create_task(client.batch_get_minute_history(["000001"]))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    request.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(request, timeout=1)
+
+    await asyncio.sleep(0)
+    assert not any(
+        task.get_name().startswith("rt-minute-history-")
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+    )
 
 
 def test_minute_parser_localizes_non_minute_timestamp_and_invalid_ohlc() -> None:
@@ -387,3 +479,76 @@ async def test_closed_history_api_keeps_successful_code_when_a_sibling_fails(
 
     assert set(result) == {"000002"}
     assert result["000002"][0].end_label == "14:57"
+
+
+def test_stk_mins_parser_requires_ts_code_and_trade_time_columns() -> None:
+    parse = TushareRealtimeClient._parse_historical_minute_history
+    row = ["000002.SZ", "2026-08-28 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1000]
+
+    with pytest.raises(TushareRealtimeError, match="missing ts_code"):
+        parse(
+            "000002",
+            date(2026, 8, 28),
+            {
+                "data": {
+                    "fields": ["trade_time", "open", "close", "high", "low", "vol", "amount"],
+                    "items": [row[1:]],
+                }
+            },
+        )
+    with pytest.raises(TushareRealtimeError, match="missing trade_time"):
+        parse(
+            "000002",
+            date(2026, 8, 28),
+            {
+                "data": {
+                    "fields": ["ts_code", "open", "close", "high", "low", "vol", "amount"],
+                    "items": [[row[0], *row[2:]]],
+                }
+            },
+        )
+
+
+def test_stk_mins_parser_fails_closed_on_wrong_or_mixed_instrument() -> None:
+    parse = TushareRealtimeClient._parse_historical_minute_history
+    fields = ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"]
+    good = ["000002.SZ", "2026-08-28 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1000]
+
+    with pytest.raises(TushareRealtimeError, match="does not match requested"):
+        parse(
+            "000002",
+            date(2026, 8, 28),
+            {"data": {"fields": fields, "items": [["000001.SZ", *good[1:]]]}},
+        )
+
+    mixed = [good, ["600000.SH", "2026-08-28 09:38:00", 10, 10.1, 10.2, 9.9, 100, 1000]]
+    with pytest.raises(TushareRealtimeError, match="does not match requested"):
+        parse("000002", date(2026, 8, 28), {"data": {"fields": fields, "items": mixed}})
+
+
+def test_stk_mins_parser_normalizes_ts_code_case_and_suffix() -> None:
+    parse = TushareRealtimeClient._parse_historical_minute_history
+    fields = ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"]
+    rows = [
+        [" 000002.sz ", "2026-08-28 09:38:00", 10, 10.1, 10.2, 9.9, 100, 1000],
+        ["000002.SZ", "2026-08-28 09:39:00", 10, 10.2, 10.3, 9.9, 100, 1000],
+    ]
+
+    bars = parse("000002", date(2026, 8, 28), {"data": {"fields": fields, "items": rows}})
+
+    assert [bar.end_label for bar in bars] == ["09:38", "09:39"]
+    assert all(bar.stock_code == "000002" for bar in bars)
+
+
+def test_stk_mins_parser_empty_response_is_confirmed_empty_not_an_error() -> None:
+    parse = TushareRealtimeClient._parse_historical_minute_history
+
+    assert parse("000002", date(2026, 8, 28), {"data": {"fields": [], "items": []}}) == ()
+    assert (
+        parse(
+            "000002",
+            date(2026, 8, 28),
+            {"data": {"fields": ["ts_code", "trade_time"], "items": []}},
+        )
+        == ()
+    )

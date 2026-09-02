@@ -19,9 +19,11 @@ from fastapi.testclient import TestClient
 
 from src.data.clients.tushare_realtime import (
     BEIJING_TZ,
+    TushareDailyBar,
     TushareEarlyMarketData,
     TushareMinuteBar,
     TushareQuote,
+    tushare_minute_bars_to_early_market_data,
 )
 from src.data.database.v20_repository import (
     EntryStatus,
@@ -39,11 +41,11 @@ from src.strategy.v20.decision_engine import (
 )
 from src.strategy.v20.identity import named_hash
 from src.strategy.v20.models import (
-    V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
     V20_ENTRY_SEMANTIC_SCHEMA,
     V20_FEISHU_FORMATTER_PROFILE,
     V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
+    V20_V16_SNAPSHOT_SCHEMA,
     HealthObservation,
     HealthSnapshot,
     HealthStatus,
@@ -64,6 +66,7 @@ from src.web.v20_service import (
     _DayContext,
     _init_embedded_v20_scan_resources,
 )
+from src.web.v20_v16_canonical_artifact import encode as encode_v16_canonical_artifact
 
 TZ = ZoneInfo("Asia/Shanghai")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -142,6 +145,7 @@ class FakeV16Scanner:
             stock_cci={code: 50.0 for code in FRESH_CODES},
             stock_early_vol={code: 1000.0 for code in FRESH_CODES},
             step0_codes=list(FRESH_CODES),
+            step2_boards_detail={"board-a": list(FRESH_CODES)},
             step2_codes=list(FRESH_CODES),
             st_eligible_codes=list(FRESH_CODES),
             step3_codes=list(FRESH_CODES),
@@ -151,7 +155,13 @@ class FakeV16Scanner:
             step6_5_codes=list(FRESH_CODES),
             step6_6_codes=list(FRESH_CODES),
             step0_universe_count=len(FRESH_CODES),
-            step2_hot_board_count=2,
+            step2_hot_board_count=1,
+            step3_count=len(FRESH_CODES),
+            step4_count=len(FRESH_CODES),
+            step5_count=len(FRESH_CODES),
+            step6_count=len(FRESH_CODES),
+            step6_5_count=len(FRESH_CODES),
+            step6_6_count=len(FRESH_CODES),
             step2_board_avg_gains={"board-a": 1.25},
             final_candidates=len(FRESH_CODES),
         )
@@ -172,6 +182,8 @@ class FakeRealtimeClient:
         result: dict[str, TushareEarlyMarketData] = {}
         for code in codes:
             trade_date = datetime.now(BEIJING_TZ).date()
+            # early_bars mirrors the real normalizer contract: only target-date
+            # rows at or before 09:39 — a late 09:40+ row never appears here.
             bars = []
             for minute in range(31, 40):
                 bars.append(
@@ -187,19 +199,6 @@ class FakeRealtimeClient:
                         amount=24000.0,
                     )
                 )
-            bars.append(
-                TushareMinuteBar(
-                    stock_code=code,
-                    bar_end=datetime.combine(trade_date, time(9, 41), TZ),
-                    end_label="09:41",
-                    open_price=999.0,
-                    close_price=999.0,
-                    high_price=999.1,
-                    low_price=998.9,
-                    volume=99_000.0,
-                    amount=999_000.0,
-                )
-            )
             result[code] = TushareEarlyMarketData(
                 quote=TushareQuote(
                     stock_code=code,
@@ -252,6 +251,17 @@ class FakeRealtimeClient:
     async def fetch_prev_closes(self, trade_date: str) -> dict[str, float]:
         return {code: 10.5 for code in FRESH_CODES}
 
+    async def fetch_daily_bars(self, trade_date: str) -> dict[str, TushareDailyBar]:
+        return {
+            code: TushareDailyBar(
+                stock_code=code,
+                trade_date=trade_date,
+                close_price=10.5,
+                amount_yuan=1_000_000.0,
+            )
+            for code in FRESH_CODES
+        }
+
 
 class FakeFundamentalsDB:
     async def batch_get_fundamentals(self, codes: list[str]) -> dict[str, Any]:
@@ -277,7 +287,7 @@ class FakeHistoryAdapter:
     ) -> dict[str, Any]:
         type(self).history_calls += 1
         today = datetime.now(BEIJING_TZ).date()
-        dates = [(today - timedelta(days=41 - index)).isoformat() for index in range(40)]
+        dates = [(today - timedelta(days=40 - index)).isoformat() for index in range(40)]
         return {
             "tables": [
                 {
@@ -334,7 +344,12 @@ def _canonical_fixture(monkeypatch: pytest.MonkeyPatch) -> V15ScanState:
 
     async def fake_calendar() -> list[date]:
         today = datetime.now(BEIJING_TZ).date()
-        return [today - timedelta(days=1), today]
+        return [
+            *(today - timedelta(days=offset) for offset in range(37, 0, -1)),
+            today,
+            today + timedelta(days=1),
+            today + timedelta(days=2),
+        ]
 
     monkeypatch.setattr(v15_scan_service, "get_trade_calendar", fake_calendar)
 
@@ -404,6 +419,328 @@ def _stable_hash(value: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+class _StrictPortableArtifactStore:
+    """Small immutable trade-date artifact store used by check-only acceptance tests."""
+
+    def __init__(
+        self,
+        official_stream_id: str,
+        first_received_at: datetime,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.official_stream_id = official_stream_id
+        self.first_received_at = first_received_at
+        self.record: Any | None = None
+        self.load_calls = 0
+        self.save_calls = 0
+        if payload is not None:
+            self._install(payload, first_received_at.date())
+
+    def _install(self, payload: Mapping[str, Any], trade_date: date) -> Any:
+        portable = dict(payload)
+        record = SimpleNamespace(
+            payload=portable,
+            snapshot_hash=sha256_json(portable),
+            trade_date=trade_date,
+            first_received_at=self.first_received_at,
+        )
+        if self.record is None:
+            self.record = record
+        else:
+            assert self.record.payload == portable
+            assert self.record.trade_date == trade_date
+        return self.record
+
+    async def save_once(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        official_stream_id: str,
+        trade_date: date,
+        event: str,
+    ) -> Any:
+        assert official_stream_id == self.official_stream_id
+        assert event == "V16_CANONICAL_MASTER_V1"
+        self.save_calls += 1
+        return self._install(payload, trade_date)
+
+    async def load(
+        self,
+        *,
+        official_stream_id: str,
+        trade_date: date,
+        event: str,
+    ) -> Any | None:
+        assert official_stream_id == self.official_stream_id
+        assert event == "V16_CANONICAL_MASTER_V1"
+        self.load_calls += 1
+        if self.record is not None:
+            assert self.record.trade_date == trade_date
+        return self.record
+
+
+def _portable_canonical(
+    service: V20Service,
+    trade_date: date,
+    *,
+    codes: tuple[str, ...] = FRESH_CODES,
+    name_prefix: str = "current",
+) -> CanonicalV16ScanBundle:
+    prior = trade_date - timedelta(days=1)
+    history_dates = tuple(trade_date - timedelta(days=offset) for offset in range(37, 0, -1))
+    history_raw = {
+        code: {
+            "time": [day.isoformat() for day in history_dates],
+            "open": [10.0] * len(history_dates),
+            "high": [10.5] * len(history_dates),
+            "low": [9.5] * len(history_dates),
+            "close": [10.0 + index * 0.01 for index in range(len(history_dates))],
+            "volume": [1_000.0] * len(history_dates),
+        }
+        for code in codes
+    }
+    labels = ("09:25", "09:30", *(f"09:{minute:02d}" for minute in range(31, 40)))
+    early_bars = {
+        code: tuple(
+            TushareMinuteBar(
+                stock_code=code,
+                bar_end=datetime.combine(
+                    trade_date,
+                    time(int(label[:2]), int(label[3:])),
+                    TZ,
+                ),
+                end_label=label,
+                open_price=10.0,
+                close_price=10.1,
+                high_price=10.2,
+                low_price=9.9,
+                volume=1_000.0,
+                amount=10_000.0,
+            )
+            for label in labels
+        )
+        for code in codes
+    }
+    scored = [
+        ScoredStock(
+            code=code,
+            name=f"{name_prefix}-{code}",
+            score=0.9 - index * 0.01,
+            rank=index + 1,
+            buy_price=10.0 + index,
+        )
+        for index, code in enumerate(codes)
+    ]
+    board = f"{name_prefix}-board"
+    result = V16ScanResult(
+        recommended=scored,
+        all_scored=scored,
+        step0_universe_count=len(codes),
+        step2_hot_board_count=1,
+        step3_count=len(codes),
+        step4_count=len(codes),
+        step5_count=len(codes),
+        step6_count=len(codes),
+        step6_5_count=len(codes),
+        step6_6_count=len(codes),
+        final_candidates=len(codes),
+        step0_codes=list(codes),
+        step2_boards_detail={board: list(codes)},
+        step2_codes=list(codes),
+        st_eligible_codes=list(codes),
+        step3_codes=list(codes),
+        step4_codes=list(codes),
+        step5_codes=list(codes),
+        step6_codes=list(codes),
+        step6_5_codes=list(codes),
+        step6_6_codes=list(codes),
+        stock_best_board={code: board for code in codes},
+        stock_all_boards={code: [board] for code in codes},
+        stock_is_driver={code: True for code in codes},
+        stock_cci={code: 50.0 for code in codes},
+        stock_early_vol={code: 1_000.0 for code in codes},
+        step2_board_avg_gains={board: 1.0},
+    )
+    stock_data = {
+        code: V16StockData(
+            code=code,
+            name=f"{name_prefix}-{code}",
+            open_price=10.0,
+            prev_close=9.9,
+            price_940=10.0 + index,
+            high_940=10.2,
+            low_940=9.9,
+            volume_940=1_000.0,
+            volume_937=1_000.0,
+            avg_daily_volume=1_000.0,
+            trend_5d=0.01,
+            trend_10d=0.02,
+            avg_daily_return_20d=0.001,
+            volatility_20d=0.02,
+            consecutive_up_days=1,
+            history_df=pd.DataFrame(history_raw[code]),
+        )
+        for index, code in enumerate(codes)
+    }
+    quotes = {
+        code: TushareQuote(
+            stock_code=code,
+            open_price=10.0,
+            latest_price=10.1,
+            high_price=10.2,
+            low_price=9.9,
+            volume=1_000.0,
+            amount=10_000.0,
+            early_close=10.1,
+            early_high=10.2,
+            early_low=9.9,
+            early_volume=1_000.0,
+            volume_937=1_000.0,
+        )
+        for code in codes
+    }
+    early_source_hashes = {
+        code: sha256_json([_bar_payload(bar) for bar in early_bars[code]]) for code in codes
+    }
+    base = CanonicalV16ScanBundle(
+        trade_date=trade_date,
+        computation_calendar=(
+            *history_dates,
+            trade_date,
+            trade_date + timedelta(days=1),
+            trade_date + timedelta(days=2),
+        ),
+        prior_trade_date=prior,
+        scan_result=result,
+        stock_data=stock_data,
+        clean_boards={board: [(code, f"{name_prefix}-{code}") for code in codes]},
+        universe=codes,
+        quotes=quotes,
+        prev_closes={code: 9.9 for code in codes},
+        history_raw=history_raw,
+        early_bars=early_bars,
+        early_source_hashes=early_source_hashes,
+        failed_no_prev_close=(),
+        failed_no_history=(),
+        failed_build=(),
+        skipped_new_listings=(),
+        model_sha256="1" * 64,
+        feature_list_sha256="2" * 64,
+        computed_at=datetime.combine(trade_date, time(9, 39, 20), TZ),
+        input_hash=sha256_json({"trade_date": trade_date.isoformat(), "codes": codes}),
+        _integrity_hash="",
+        prior_amount_yuan={code: 1_000_000.0 for code in codes},
+        breadth_valid_n=len(codes),
+        breadth_down_n=0,
+        breadth_market_source_hash="3" * 64,
+        history_date_valid_counts={day.isoformat(): len(codes) for day in history_dates},
+        history_min_date_coverage=1.0,
+    )
+    return dataclasses_replace(base, _integrity_hash=v15_scan_service._bundle_fingerprint(base))
+
+
+def _portable_payload(
+    service: V20Service,
+    canonical: CanonicalV16ScanBundle,
+) -> tuple[Any, dict[str, Any]]:
+    bundle = service._project_canonical_v16(
+        canonical,
+        calendar=canonical.computation_calendar,
+    )
+    payload = encode_v16_canonical_artifact(
+        bundle,
+        calendar=canonical.computation_calendar,
+        canonical_integrity_hash=canonical._integrity_hash,
+    )
+    return bundle, payload
+
+
+def _portable_raw_records(
+    canonical: CanonicalV16ScanBundle,
+    *,
+    first_received_at: datetime,
+) -> tuple[Any, ...]:
+    records = []
+    for code, bars in canonical.early_bars.items():
+        for bar in bars:
+            payload = _bar_payload(bar)
+            records.append(
+                SimpleNamespace(
+                    code=code,
+                    bar_end=bar.bar_end,
+                    end_label=bar.end_label,
+                    source_hash=sha256_json(payload),
+                    payload=payload,
+                    first_received_at=first_received_at,
+                )
+            )
+    return tuple(records)
+
+
+def _terminal_status(
+    service: V20Service,
+    trade_date: date,
+    state: StateRecord,
+    *,
+    v16_snapshot_hash: str,
+    event_id: str = "old-terminal-enter",
+) -> EntryStatus:
+    policy_inputs = {
+        "schema_version": "v20-policy-input-snapshot/v1",
+        "completed_health": [],
+        "completed_rolling": [],
+        "maturity_gaps": [],
+    }
+    policy_hash = sha256_json(policy_inputs)
+    snapshot = {
+        "schema_version": V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
+        "v16_snapshot_schema_version": V20_V16_SNAPSHOT_SCHEMA,
+        "trade_date": trade_date.isoformat(),
+        "state_semantics_hash": service.config.state_semantics_hash,
+        "state_before_hash": state.state_hash,
+        "policy_input_hash": policy_hash,
+        "policy_inputs": policy_inputs,
+        "v16_snapshot_hash": v16_snapshot_hash,
+        "comparison_pool_codes": [],
+        "symbols": [],
+    }
+    semantic = {
+        "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": service.config.strategy_version,
+        "config_hash": service.config.config_hash,
+        "state_semantics_hash": service.config.state_semantics_hash,
+        "action": "ENTER",
+        "state_before_hash": state.state_hash,
+        "state_after_hash": state.state_hash,
+        "policy_input_hash": policy_hash,
+        "scheduled_exits_today": [],
+        "v16_snapshot_hash": v16_snapshot_hash,
+        "symbols": [],
+    }
+    return EntryStatus(
+        official_stream_id=service.config.official_stream_id,
+        trade_date=trade_date,
+        slot_id=f"slot-{trade_date.isoformat()}",
+        slot_status="COMPLETED",
+        slot_revision=1,
+        strategy_version=service.config.strategy_version,
+        config_id=service.config.config_hash[:24],
+        config_hash=service.config.config_hash,
+        lineage_id=service.config.state_lineage_id,
+        decision_id=f"decision-{trade_date.isoformat()}",
+        event_id=event_id,
+        action="ENTER",
+        final_multiplier=1.0,
+        semantic_content_hash=sha256_json(semantic),
+        semantic=semantic,
+        snapshot_id=f"snapshot-{trade_date.isoformat()}",
+        snapshot_hash=sha256_json(snapshot),
+        snapshot=snapshot,
+        action_expiry_ts=datetime.combine(trade_date, time(9, 40), TZ),
+    )
 
 
 async def _no_op_stop() -> None:
@@ -804,6 +1141,14 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
     repository = Repository()
     service = _v20_service(monkeypatch, scan_state=state)
     service._repository = repository
+    artifact_store = _StrictPortableArtifactStore(
+        service.config.official_stream_id,
+        datetime.combine(today, time(9, 39, 35), TZ),
+    )
+    service._canonical_artifact_store = artifact_store
+    service._canonical_callbacks_open = True
+    service._canonical_sink_callback = service._persist_canonical_artifact_barrier
+    state.canonical_sink = service._canonical_sink_callback
     service._started = True
     service._repository_started = True
     service._clock = lambda: pre_cutoff
@@ -947,6 +1292,62 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
 
     monkeypatch.setattr(FakeV16Scanner, "scan", gated_scan)
 
+    from src.web import v20_service as _service_module
+
+    # The post-cutoff check-only replay attests V16 DayGate evidence after
+    # recompute; the evidence store is outside this fixture, so stub PASS.
+    monkeypatch.setattr(
+        _service_module,
+        "attest_post_cutoff_v16_day_gate",
+        lambda *_args, **_kwargs: {
+            "status": "PASS",
+            "schema_version": "v16-day-gate-attestation/v1",
+            "trade_date": today.isoformat(),
+        },
+        raising=False,
+    )
+    # The morning persist seals every actual early bar, including the 09:25 and
+    # 09:30 strategy inputs, so the post-cutoff replay can rehydrate the seed
+    # from durable evidence alone (no rt_min_daily, no current bars).  The live
+    # pull here is normalized through the real shared normalizer, exactly like
+    # production, so the replay's persisted-evidence recomputation reproduces
+    # the morning identity bit-for-bit.
+    realtime = state.realtime_client
+    enriched_labels = ("09:25", "09:30", *(f"09:{minute:02d}" for minute in range(31, 40)))
+    raw_by_code = {
+        code: tuple(
+            TushareMinuteBar(
+                stock_code=code,
+                bar_end=datetime.combine(today, time(9, int(label[3:])), TZ),
+                end_label=label,
+                open_price=11.0,
+                close_price=12.3 if label >= "09:31" else 11.1,
+                high_price=12.4 if label >= "09:31" else 11.2,
+                low_price=10.9,
+                volume=2000.0 if label >= "09:31" else 500.0,
+                amount=24000.0 if label >= "09:31" else 5500.0,
+            )
+            for label in enriched_labels
+        )
+        for code in FRESH_CODES
+    }
+
+    async def enriched_early(
+        codes: list[str], expected_trade_date: date | None = None
+    ) -> dict[str, TushareEarlyMarketData]:
+        type(realtime).early_calls += 1
+        return {
+            code: tushare_minute_bars_to_early_market_data(code, raw_by_code[code], today)
+            for code in codes
+        }
+
+    realtime.batch_get_early_market_data = enriched_early
+
+    async def empty_stk_mins(codes: list[str], trade_date: date) -> dict[str, tuple]:
+        raise AssertionError("seed must be complete from persisted evidence; no stk_mins")
+
+    realtime.batch_get_minute_history_for_date = empty_stk_mins
+
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz: Any = None) -> datetime:
@@ -1018,28 +1419,34 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
         FRESH_CODES
     )
     assert [item["code"] for item in check_only_result["symbols"]] == list(FRESH_CODES)
+    # The morning ran one canonical scan.  Post-cutoff hydrates the immutable
+    # durable artifact and its raw barrier; it never starts a second scanner,
+    # realtime pull, or history fetch.
     assert FakeV16Scanner.scan_calls == 1
     assert FakeRealtimeClient.early_calls == 1
     assert FakeHistoryAdapter.history_calls == 1
+    assert artifact_store.save_calls == 1
+    assert artifact_store.load_calls >= 3
     assert len(repository.persist_calls) == 1
     persisted_payloads = repository.persist_calls[0]
-    assert len(persisted_payloads) == len(FRESH_CODES) * 9
+    assert len(persisted_payloads) == len(FRESH_CODES) * 11
     assert {(str(bar["stock_code"]), str(bar["end_label"])) for bar in persisted_payloads} == {
-        (code, f"09:{minute:02d}") for code in FRESH_CODES for minute in range(31, 40)
+        (code, label)
+        for code in FRESH_CODES
+        for label in ("09:25", "09:30", *(f"09:{minute:02d}" for minute in range(31, 40)))
     }
     assert all("09:41" != bar["end_label"] for bar in persisted_payloads)
     assert all(item["payload"]["open"] != 999.0 for item in repository.raw_by_key.values())
     expected_selection_sources = {
-        code: sha256_json(
-            [
-                _bar_payload(next(bar for bar in bars if bar.end_label == f"09:{minute:02d}"))
-                for minute in range(31, 40)
-            ]
-        )
-        for code, bars in master.early_bars.items()
+        code: tushare_minute_bars_to_early_market_data(code, bars, today).source_hash
+        for code, bars in raw_by_code.items()
     }
     assert master.early_source_hashes == expected_selection_sources
     assert all(item["snapshot_price"] != 999.0 for item in check_only_result["symbols"])
+    assert check_only_result["current_v16_snapshot_hash"] == (
+        automatic_result.canonical_bundle.snapshot_hash
+    )
+    assert check_only_result["official_v16_snapshot_hash"] is None
     assert state.canonical_coordinator.inflight == {}
     assert all(
         result.snapshot_hash == automatic_result.canonical_bundle.snapshot_hash
@@ -1206,6 +1613,15 @@ async def test_canonical_v20_snapshot_is_lossless_and_stable(
     }
     canonical = CanonicalV16ScanBundle(
         trade_date=trade_date,
+        computation_calendar=tuple(
+            [trade_date - timedelta(days=offset) for offset in range(37, 0, -1)]
+            + [
+                trade_date,
+                trade_date + timedelta(days=1),
+                trade_date + timedelta(days=2),
+            ]
+        ),
+        prior_trade_date=trade_date - timedelta(days=1),
         scan_result=scan_result,
         stock_data={
             "603068": V16StockData(
@@ -1269,7 +1685,8 @@ async def test_canonical_v20_snapshot_is_lossless_and_stable(
         _integrity_hash="c" * 64,
     )
 
-    bundle = service._project_canonical_v16(canonical, calendar=(date(2026, 8, 31), trade_date))
+    computation_calendar = canonical.computation_calendar
+    bundle = service._project_canonical_v16(canonical, calendar=computation_calendar)
     symbols = bundle.snapshot["symbols"]
     assert [(item["rank"], item["code"], item["name"]) for item in symbols] == [
         (1, "603068", "酒钢宏兴"),
@@ -1320,7 +1737,7 @@ async def test_canonical_v20_snapshot_is_lossless_and_stable(
     assert bundle.snapshot["scan_input_failure_codes"] == ["000001"]
     assert bundle.snapshot_hash == _stable_hash(bundle.snapshot)
 
-    rerun = service._project_canonical_v16(canonical, calendar=(date(2026, 8, 31), trade_date))
+    rerun = service._project_canonical_v16(canonical, calendar=computation_calendar)
     assert rerun.snapshot == bundle.snapshot
     assert rerun.snapshot_hash == bundle.snapshot_hash
 
@@ -1340,7 +1757,7 @@ async def test_canonical_v20_snapshot_is_lossless_and_stable(
         completed_rolling=(),
         maturity_gaps=(),
         artifacts=service._artifacts,
-        calendar=(date(2026, 8, 31), trade_date, date(2026, 9, 2), date(2026, 9, 3)),
+        calendar=computation_calendar,
     )
     assert prepared.commit.semantic["symbols"] == bundle.snapshot["symbols"]
     second_prepared = prepared.commit.semantic["symbols"][1]
@@ -1388,18 +1805,9 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     today = date(2026, 9, 1)
     now = datetime(2026, 9, 1, 9, 40, 1, tzinfo=TZ)
     state_payload = genesis_state()
-    state = StateRecord(
-        lineage_id="lineage",
-        revision=0,
-        state_hash=sha256_json(state_payload),
-        payload=state_payload,
-    )
-    terminal = SimpleNamespace(
-        action="INPUT_INVALID",
-        trade_date=today,
-        event_id="failed-entry-event",
-        semantic={"state_after_hash": state.state_hash},
-    )
+    state: StateRecord | None = None
+    terminal: EntryStatus | None = None
+    artifact_raw: tuple[Any, ...] = ()
 
     class Repository:
         def __init__(self) -> None:
@@ -1409,10 +1817,26 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
             return None
 
         async def load_state(self, lineage_id: str) -> StateRecord:
+            assert state is not None
             return state
 
         async def get_entry_status(self, _stream: str, trade_date: date) -> Any:
             return terminal if trade_date == today else None
+
+        async def list_raw_minute_bar_records(
+            self,
+            codes: Any,
+            *,
+            trade_date: date,
+            end_labels: Any,
+        ) -> list[Any]:
+            allowed_codes = set(codes)
+            allowed_labels = set(end_labels)
+            return [
+                record
+                for record in artifact_raw
+                if record.code in allowed_codes and record.end_label in allowed_labels
+            ]
 
         async def get_outbox_event(self, event_id: str, **_kwargs: Any) -> Any:
             return self.events.get(event_id)
@@ -1493,6 +1917,31 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     service._repository_started = True
     service._started = True
     service._clock = lambda: now
+    state = StateRecord(
+        lineage_id=service.config.state_lineage_id,
+        revision=0,
+        state_hash=sha256_json(state_payload),
+        payload=state_payload,
+    )
+    canonical = _portable_canonical(service, today, codes=("603068",))
+    current_bundle, artifact_payload = _portable_payload(service, canonical)
+    artifact_receipt = datetime(2026, 9, 1, 9, 39, 30, tzinfo=TZ)
+    artifact_raw = _portable_raw_records(
+        canonical,
+        first_received_at=artifact_receipt - timedelta(seconds=1),
+    )
+    service._canonical_artifact_store = _StrictPortableArtifactStore(
+        service.config.official_stream_id,
+        artifact_receipt,
+        artifact_payload,
+    )
+    terminal = _terminal_status(
+        service,
+        today,
+        state,
+        v16_snapshot_hash=current_bundle.snapshot_hash,
+        event_id="failed-entry-event",
+    )
 
     async def calendar() -> list[date]:
         return [date(2026, 8, 31), today, date(2026, 9, 2), date(2026, 9, 3)]
@@ -1500,140 +1949,78 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     async def ready() -> None:
         return None
 
-    symbols = [
-        {
-            "rank": 1,
-            "code": "603068",
-            "name": "fresh-name",
-            "score": 0.9,
-            "snapshot_price": 10.0,
-            "boards": ["fresh-board"],
-            "best_board": "fresh-board",
-            "is_driver": True,
-            "cci": 50.0,
-            "volume_937": 1000.0,
-            "history_hash": "0" * 64,
-            "early_source_hash": "1" * 64,
-        }
-    ]
-    entry_render = {
-        "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
-        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
-        "event_id": "hypothetical-entry-event",
-        "deployment_mode": service.config.deployment_mode,
-        "trade_date": today.isoformat(),
-        "action": "ENTER",
-        "final_multiplier": 1.0,
-        "base_multiplier": 1.0,
-        "defense_multiplier": 1.0,
-        "health_state": "WARMUP",
-        "rolling7_state": "NON_BAD",
-        "rolling7_r7": 0.0,
-        "rolling7_l7": 0,
-        "g_state": "NOT_EVALUATED",
-        "reason_codes": [],
-        "last_complete_bar": "09:39",
-        "v16_funnel": {
-            "step0_universe_count": 1,
-            "step2_hot_board_count": 1,
-            "final_candidates": 1,
-        },
-        "v16_board_avg_gains": {"fresh-board": 1.0},
-        "symbols": symbols,
-        "scheduled_exits_today": [],
-    }
-
-    async def fresh_selection_result(
-        context: Any,
-        current: datetime,
-        *,
-        replay_event_id: str,
-    ) -> Mapping[str, Any]:
-        return {
-            "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
-            "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
-            "event_id": replay_event_id,
-            "strategy_version": service.config.strategy_version,
-            "config_hash": service.config.config_hash,
-            "state_semantics_hash": service.config.state_semantics_hash,
-            "deployment_mode": service.config.deployment_mode,
-            "official_stream_id": service.config.official_stream_id,
-            "state_lineage_id": service.config.state_lineage_id,
-            "event_trade_date": context.trade_date.isoformat(),
-            "official_entry_action": context.entry_status.action,
-            "official_entry_event_id": context.entry_status.event_id,
-            "replay_action": "ENTER",
-            "final_multiplier": 1.0,
-            "symbols": symbols,
-            "entry_render_semantic": entry_render,
-            "raw_fact_n": 9,
-            "quote_coverage": 1.0,
-            "computed_at": current.isoformat(),
-        }
-
     service._calendar_provider = calendar
     monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
-    monkeypatch.setattr(service, "_verify_entry_binding", lambda _status: None)
-    monkeypatch.setattr(
-        service,
-        "_build_late_0939_replay_semantic",
-        fresh_selection_result,
-    )
 
+    # No artificial outer budget cuts the attempt off: the hanging source is
+    # released into a genuine failure, which settles the daily idempotent
+    # MEWS_CALCULATION_FAILED before the independent manual entry continues.
     selection_source = HangingMewsSource()
     service._mews_source = selection_source
-    result = await asyncio.wait_for(
-        _dispatch_manual_trigger(service, "mews-budget-selection"),
-        timeout=0.25,
-    )
+    dispatch = asyncio.create_task(_dispatch_manual_trigger(service, "mews-budget-selection"))
+    await asyncio.wait_for(selection_source.entered.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    # The manual trigger is genuinely awaiting the shared MEWS attempt.
+    assert not dispatch.done()
+    release.set()
+    result = await asyncio.wait_for(dispatch, timeout=5.0)
     assert result["accepted"] is True
     assert result["current_version_recomputed"] is True
     assert result["replay_reused"] is False
-    selection_task = service._mews_selection_refresh_task
-    assert selection_task is not None
-    assert not selection_task.done()
-    await asyncio.wait_for(selection_source.entered.wait(), timeout=0.25)
-
-    await service.stop()
-    assert selection_task.cancelled()
-    assert service._mews_selection_refresh_task is None
+    assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
+    assert result["official_v16_snapshot_hash"] == current_bundle.snapshot_hash
+    assert [item["code"] for item in result["symbols"]] == ["603068"]
     assert selection_source.calls == 1
+    assert service._mews_singleflight_task is None
+    mews_alerts = [
+        event
+        for event in repository.events.values()
+        if event.semantic.get("alert_code") == "MEWS_CALCULATION_FAILED"
+    ]
+    assert len(mews_alerts) == 1
 
+    # A failed startup rollback cancels an in-flight singleflight attempt and
+    # the joined trigger settles instead of leaking an orphan background task.
+    release.clear()
     service._started = True
     service._repository_started = True
     service._stop_event.clear()
-    service._mews_selection_refresh_failed_for = None
     startup_source = HangingMewsSource()
     service._mews_source = startup_source
-    startup_calls_before = startup_source.calls
-    assert await service.ensure_mews_for_selection_trigger(now) is False
-    startup_task = service._mews_selection_refresh_task
-    assert startup_task is not None
-    await asyncio.wait_for(startup_source.entered.wait(), timeout=0.25)
+    waiter = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    await asyncio.wait_for(startup_source.entered.wait(), timeout=1.0)
+    startup_task = service._mews_singleflight_task
+    assert startup_task is not None and not startup_task.done()
     service._started = False
     with pytest.raises(RuntimeError, match="V20 Feishu route .* is not configured"):
         await service.start()
     assert startup_task.cancelled()
-    assert service._mews_selection_refresh_task is None
-    assert startup_source.calls - startup_calls_before == 1
+    assert service._mews_singleflight_task is None
+    assert startup_source.calls == 1
+    assert await asyncio.wait_for(waiter, timeout=1.0) is False
 
+    # A genuine failure fails the trigger closed with the daily alert already
+    # settled (idempotent: still the single event from the first phase), and a
+    # later distinct trigger retries — there is no permanent daily skip.
     service._started = True
     service._repository_started = True
     service._stop_event.clear()
-    service._mews_selection_refresh_failed_for = None
+    release.set()
     failure_source = HangingMewsSource()
     service._mews_source = failure_source
-    failure_calls_before = failure_source.calls
     assert await service.ensure_mews_for_selection_trigger(now) is False
-    failure_task = service._mews_selection_refresh_task
-    assert failure_task is not None
-    await asyncio.wait_for(failure_source.entered.wait(), timeout=0.25)
-    release.set()
-    assert await failure_task is False
-    assert service._mews_selection_refresh_failed_for == today
-    assert failure_source.calls - failure_calls_before == 1
+    assert failure_source.calls == 1
+    assert service._mews_singleflight_task is None
     assert service._lane_health["mews_cache"].last_error is not None
     assert service._lane_health["decision"].last_error is None
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+    assert failure_source.calls == 2
+    mews_alerts = [
+        event
+        for event in repository.events.values()
+        if event.semantic.get("alert_code") == "MEWS_CALCULATION_FAILED"
+    ]
+    assert len(mews_alerts) == 1
 
     readiness_tasks = [asyncio.create_task(asyncio.Event().wait()) for _ in range(6)]
     service._tasks = readiness_tasks
@@ -2047,7 +2434,7 @@ async def test_cancelling_v20_owner_waiter_preserves_shielded_resource_owner(
 
 
 @pytest.mark.asyncio
-async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
+async def _legacy_post_cutoff_terminal_enter_persisted_raw_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     today = date(2026, 9, 1)
@@ -2190,11 +2577,11 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
             assert tuple(end_labels)[-1] == "09:39"
             records = []
             for code in codes:
-                for minute in range(31, 40):
-                    label = f"09:{minute:02d}"
+                for label in ("09:25", "09:30", *(f"09:{m:02d}" for m in range(31, 40))):
+                    hour, minute = int(label[:2]), int(label[3:])
                     bar = TushareMinuteBar(
                         stock_code=code,
-                        bar_end=datetime(2026, 9, 1, 9, minute, tzinfo=TZ),
+                        bar_end=datetime(2026, 9, 1, hour, minute, tzinfo=TZ),
                         end_label=label,
                         open_price=10.0,
                         close_price=10.1,
@@ -2427,7 +2814,7 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
                 volume=1000.0,
                 amount=10000.0,
             )
-            for minute in range(31, 40)
+            for minute in (25, 30, *range(31, 40))
         )
         for item in recommended
     }
@@ -2474,6 +2861,11 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
     }
     canonical_pre = CanonicalV16ScanBundle(
         trade_date=today,
+        computation_calendar=tuple(
+            [today - timedelta(days=offset) for offset in range(37, 0, -1)]
+            + [today, today + timedelta(days=1), today + timedelta(days=2)]
+        ),
+        prior_trade_date=today - timedelta(days=1),
         scan_result=scan_result,
         stock_data={
             item.code: V16StockData(
@@ -2517,22 +2909,77 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
         canonical_pre,
         _integrity_hash=v15_scan_service._bundle_fingerprint(canonical_pre),
     )
+    # The committed ENTER slot froze the morning canonical identity; bind the
+    # fixture terminal to exactly those values so the recomputation check sees
+    # an honest match.
+    frozen_projection = service._project_canonical_v16(
+        canonical,
+        calendar=canonical.computation_calendar,
+    )
+    old_terminal.semantic["v16_snapshot_hash"] = frozen_projection.snapshot_hash
+    old_terminal.semantic_content_hash = sha256_json(old_terminal.semantic)
+    old_terminal.snapshot["early_market_source_hash"] = canonical.input_hash
+    old_terminal.snapshot["scorer_model_sha256"] = canonical.model_sha256
+    old_terminal.snapshot["scorer_feature_sha256"] = canonical.feature_list_sha256
+    old_terminal.snapshot["v16_snapshot_hash"] = frozen_projection.snapshot_hash
+    old_terminal.snapshot_hash = sha256_json(old_terminal.snapshot)
+    repository.old_semantic = dict(old_terminal.semantic)
+    repository.events["old-terminal-enter"] = dataclasses_replace(
+        repository.events["old-terminal-enter"],
+        semantic=old_terminal.semantic,
+        semantic_content_hash=old_terminal.semantic_content_hash,
+    )
     service._scan_state.initialized = True
-    service._scan_state.canonical_coordinator = SimpleNamespace(
-        cache={today: canonical},
-        inflight={},
-        publish={},
-        published=set(),
-        data_errors_sent=set(),
-        fatal_errors_sent=set(),
-        not_ready_alert_sent=set(),
-        partial={},
-        lock=asyncio.Lock(),
+    from src.web import v20_service as service_module
+
+    # The post-cutoff replay must never touch the live coordinator or any
+    # current-day bars endpoint: it seeds from the persisted early (<=09:39)
+    # raw evidence and calls the real compute entry point directly.
+    class _BombRealtime:
+        def __getattr__(self, name: str) -> Any:
+            async def _bomb(*_args: Any, **_kwargs: Any) -> Any:
+                raise AssertionError(f"post-cutoff replay touched live endpoint {name}")
+
+            return _bomb
+
+    service._scan_state.realtime_client = _BombRealtime()
+
+    compute_calls: list[Mapping[str, Any]] = []
+
+    async def compute_from_seed(
+        state: Any,
+        requested_date: date,
+        partial: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        assert state is service._scan_state
+        assert requested_date == today
+        assert partial is None
+        assert kwargs["allow_realtime_fetch"] is False
+        assert kwargs["universe_override"] == tuple(sorted(fresh_codes))
+        seed = kwargs["early_data_seed"]
+        assert sorted(seed) == sorted(fresh_codes)
+        compute_calls.append(kwargs)
+        return canonical
+
+    async def coordinator_bomb(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("post-cutoff replay must bypass the canonical coordinator")
+
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", compute_from_seed)
+    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", coordinator_bomb)
+    monkeypatch.setattr(
+        service_module,
+        "derive_canonical_v16_universe",
+        lambda _state: (
+            None,
+            None,
+            {"fresh-board": tuple((item.code, item.name) for item in recommended)},
+            tuple(sorted(fresh_codes)),
+        ),
     )
 
     fresh_builder_inputs: list[Any] = []
     original_builder = service._build_late_0939_replay_semantic
-    from src.web import v20_service as service_module
 
     prepare_entry_calls: list[Mapping[str, Any]] = []
     prepare_entry_results: list[Any] = []
@@ -2545,6 +2992,16 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
         return result
 
     monkeypatch.setattr(service_module, "prepare_entry", spied_prepare_entry)
+    monkeypatch.setattr(
+        service_module,
+        "attest_post_cutoff_v16_day_gate",
+        lambda *_args, **_kwargs: {
+            "status": "PASS",
+            "schema_version": "v16-day-gate-attestation/v1",
+            "trade_date": today.isoformat(),
+        },
+        raising=False,
+    )
 
     async def spied_builder(
         context: Any,
@@ -2610,8 +3067,9 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
     assert repository.raw_reads
     assert all(len(codes) == len(fresh_codes) for codes, _trade_date in repository.raw_reads)
     assert repository.alerts
+    assert compute_calls and compute_calls[0]["allow_realtime_fetch"] is False
     assert len(repository.persist_calls) == 1
-    assert len(repository.persist_calls[0]) == len(fresh_codes) * 9
+    assert len(repository.persist_calls[0]) == len(fresh_codes) * 11
     alert_semantic = repository.alerts[0]
     # The fresh check-only replay must reuse the terminal slot's frozen policy
     # hash and the real official state revision/terminal binding (CAS-checked
@@ -2623,13 +3081,206 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
     assert alert_semantic["official_state_hash_after"] == repository.state.state_hash
     assert alert_semantic["official_entry_event_id_before"] == "old-terminal-enter"
     assert alert_semantic["official_entry_event_id_after"] == "old-terminal-enter"
-    assert alert_semantic["raw_fact_n"] == len(fresh_codes) * 9
-    assert alert_semantic["raw_pre_cutoff_n"] == len(fresh_codes) * 9
+    assert alert_semantic["raw_fact_n"] == len(fresh_codes) * 11
+    assert alert_semantic["raw_pre_cutoff_n"] == len(fresh_codes) * 11
     assert alert_semantic["raw_post_cutoff_n"] == 0
 
 
 @pytest.mark.asyncio
-async def test_deployment_probe_rejects_incompatible_cache_without_second_algorithm(
+async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 6, tzinfo=TZ)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.events: dict[str, OutboxRecord] = {}
+            self.state: StateRecord | None = None
+            self.status: EntryStatus | None = None
+            self.raw_records: tuple[Any, ...] = ()
+            self.official_write_calls = 0
+            self.state_write_calls = 0
+            self.model_batches: list[Any] = ["existing-model-batch"]
+            self.orders: list[Any] = ["existing-order"]
+            self.raw_reads = 0
+
+        async def assert_runtime_leader(self) -> None:
+            return None
+
+        async def load_state(self, _lineage_id: str) -> StateRecord:
+            assert self.state is not None
+            return self.state
+
+        async def get_entry_status(self, _stream: str, trade_date: date) -> EntryStatus | None:
+            return self.status if trade_date == today else None
+
+        async def get_outbox_event(self, event_id: str, **_scope: Any) -> OutboxRecord | None:
+            return self.events.get(event_id)
+
+        async def list_raw_minute_bar_records(
+            self,
+            codes: Any,
+            *,
+            trade_date: date,
+            end_labels: Any,
+        ) -> list[Any]:
+            self.raw_reads += 1
+            assert trade_date == today
+            allowed_codes = set(codes)
+            allowed_labels = set(end_labels)
+            return [
+                record
+                for record in self.raw_records
+                if record.code in allowed_codes and record.end_label in allowed_labels
+            ]
+
+        async def enqueue_alert(
+            self,
+            event_id: str,
+            route_id: str,
+            semantic: Mapping[str, Any],
+            semantic_hash: str,
+            **scope: Any,
+        ) -> bool:
+            assert route_id == service.config.route_id
+            assert scope == {
+                "official_stream_id": service.config.official_stream_id,
+                "lineage_id": service.config.state_lineage_id,
+            }
+            assert semantic_hash == sha256_json(semantic)
+            existing = self.events.get(event_id)
+            if existing is not None:
+                assert existing.semantic == semantic
+                return False
+            self.events[event_id] = OutboxRecord(
+                event_id=event_id,
+                event_type="DATA_ALERT",
+                route_id=route_id,
+                official_stream_id=scope["official_stream_id"],
+                lineage_id=scope["lineage_id"],
+                semantic=dict(semantic),
+                semantic_content_hash=semantic_hash,
+                payload=None,
+                payload_hash=None,
+                generated_at=None,
+                commit_marker=None,
+                action_expiry_ts=None,
+                delivery_status="PENDING",
+                attempt_count=0,
+            )
+            return True
+
+        async def seal_event(self, event_id: str, formatter: Any) -> OutboxRecord:
+            current = self.events[event_id]
+            if current.payload is not None:
+                return current
+            payload = dict(formatter(current, now, 100, True))
+            sealed = dataclasses_replace(
+                current,
+                payload=payload,
+                payload_hash=sha256_json(payload),
+                generated_at=now,
+                commit_marker=100,
+            )
+            self.events[event_id] = sealed
+            return sealed
+
+        async def commit_entry(self, *_args: Any, **_kwargs: Any) -> None:
+            self.official_write_calls += 1
+            raise AssertionError("check-only must not commit formal entry/model/order state")
+
+        async def commit_exit(self, *_args: Any, **_kwargs: Any) -> None:
+            self.official_write_calls += 1
+            raise AssertionError("check-only must not commit an exit")
+
+    repository = Repository()
+    service = _v20_service(monkeypatch, repository=repository)
+    service.config = dataclasses_replace(service.config, enabled=True)
+    service._started = True
+    service._repository_started = True
+    service._clock = lambda: now
+    service._mews_cached_for = today
+    service._scan_state.realtime_client = Bomb()
+    service._scan_state.historical_adapter = Bomb()
+    service._scan_state.canonical_coordinator = Bomb()
+
+    state_payload = {**genesis_state(), "state_revision": 7}
+    repository.state = StateRecord(
+        lineage_id=service.config.state_lineage_id,
+        revision=7,
+        state_hash=sha256_json(state_payload),
+        payload=state_payload,
+    )
+    canonical = _portable_canonical(service, today)
+    current_bundle, artifact_payload = _portable_payload(service, canonical)
+    artifact_receipt = datetime(2026, 9, 1, 9, 39, 30, tzinfo=TZ)
+    repository.raw_records = _portable_raw_records(
+        canonical,
+        first_received_at=artifact_receipt - timedelta(seconds=1),
+    )
+    artifact_store = _StrictPortableArtifactStore(
+        service.config.official_stream_id,
+        artifact_receipt,
+        artifact_payload,
+    )
+    service._canonical_artifact_store = artifact_store
+
+    old_official_hash = "f" * 64
+    assert old_official_hash != current_bundle.snapshot_hash
+    repository.status = _terminal_status(
+        service,
+        today,
+        repository.state,
+        v16_snapshot_hash=old_official_hash,
+    )
+    state_before = repository.state
+    status_before = repository.status
+    state_hash_before = sha256_json(dict(state_before.payload))
+    status_fingerprint_before = service._entry_status_readonly_fingerprint(status_before)
+    models_before = list(repository.model_batches)
+    orders_before = list(repository.orders)
+
+    async def ready() -> None:
+        return None
+
+    monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
+    result = await _dispatch_manual_trigger(service, "terminal-current-artifact-001")
+
+    assert result["accepted"] is True
+    assert result["current_version_recomputed"] is True
+    assert result["replay_reused"] is False
+    assert result["formal_decision_available"] is True
+    assert result["official_entry_action"] == "ENTER"
+    assert result["official_entry_event_id"] == status_before.event_id
+    assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
+    assert result["official_v16_snapshot_hash"] == old_official_hash
+    assert result["current_v16_snapshot_hash"] != result["official_v16_snapshot_hash"]
+    assert [item["code"] for item in result["symbols"]] == list(FRESH_CODES)
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+
+    operator_event = repository.events[result["operator_event_id"]]
+    assert operator_event.semantic["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
+    assert operator_event.semantic["official_v16_snapshot_hash"] == old_official_hash
+    assert operator_event.semantic["current_version_recomputed"] is True
+    assert repository.state is state_before
+    assert sha256_json(dict(repository.state.payload)) == state_hash_before
+    assert repository.status is status_before
+    assert service._entry_status_readonly_fingerprint(repository.status) == (
+        status_fingerprint_before
+    )
+    assert repository.model_batches == models_before
+    assert repository.orders == orders_before
+    assert repository.official_write_calls == 0
+    assert repository.state_write_calls == 0
+    assert artifact_store.save_calls == 0
+    assert artifact_store.load_calls == 1
+    assert repository.raw_reads >= 2
+
+
+@pytest.mark.asyncio
+async def _legacy_deployment_probe_persisted_raw_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.web import v20_service as service_module
@@ -2703,6 +3354,11 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
     )
     old_pre = CanonicalV16ScanBundle(
         trade_date=today,
+        computation_calendar=tuple(
+            [today - timedelta(days=offset) for offset in range(37, 0, -1)]
+            + [today, today + timedelta(days=1), today + timedelta(days=2)]
+        ),
+        prior_trade_date=today - timedelta(days=1),
         scan_result=old_result,
         stock_data={old_code: old_stock},
         clean_boards={"old-board": [(old_code, old_top.name)]},
@@ -2729,11 +3385,12 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
 
     raw_records = []
     for code in FRESH_CODES:
-        for minute in range(31, 40):
+        for label in ("09:25", "09:30", *(f"09:{m:02d}" for m in range(31, 40))):
+            hour, minute = int(label[:2]), int(label[3:])
             bar = TushareMinuteBar(
                 stock_code=code,
-                bar_end=datetime(2026, 9, 1, 9, minute, tzinfo=TZ),
-                end_label=f"09:{minute:02d}",
+                bar_end=datetime(2026, 9, 1, hour, minute, tzinfo=TZ),
+                end_label=label,
                 open_price=10.0,
                 close_price=10.1,
                 high_price=10.2,
@@ -2853,8 +3510,12 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
     service._repository_started = True
     service._clock = lambda: now
     service._scan_state.realtime_client = Bomb()
+    # A stale coordinator cache entry must be irrelevant: the post-cutoff
+    # replay always recomputes from the persisted early-raw seed through the
+    # real compute entry point, never from the live coordinator.
+    marker_cache = SimpleNamespace(marker="stale-coordinator-cache-entry")
     service._scan_state.canonical_coordinator = SimpleNamespace(
-        cache={today: old_canonical},
+        cache={today: marker_cache},
         inflight={},
         publish={},
         published=set(),
@@ -2864,7 +3525,50 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
         partial={},
         lock=asyncio.Lock(),
     )
-    monkeypatch.setattr("src.data.clients.tushare_realtime.TushareRealtimeClient", Bomb)
+
+    async def incompatible_compute(
+        state: Any,
+        requested_date: date,
+        partial: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        assert state is service._scan_state
+        assert requested_date == today
+        assert partial is None
+        assert kwargs["allow_realtime_fetch"] is False
+        seed = kwargs["early_data_seed"]
+        # The seed is hydrated from the persisted enriched early evidence.
+        assert sorted(seed) == sorted(FRESH_CODES)
+        return old_canonical
+
+    async def coordinator_bomb(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("post-cutoff replay must bypass the canonical coordinator")
+
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", incompatible_compute)
+    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", coordinator_bomb)
+    monkeypatch.setattr(
+        service_module,
+        "attest_post_cutoff_v16_day_gate",
+        lambda *_args, **_kwargs: {
+            "status": "PASS",
+            "schema_version": "v16-day-gate-attestation/v1",
+            "trade_date": today.isoformat(),
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "derive_canonical_v16_universe",
+        lambda _state: (
+            None,
+            None,
+            {"old-board": tuple((code, f"name-{code}") for code in FRESH_CODES)},
+            tuple(sorted(FRESH_CODES)),
+        ),
+    )
+    # NB: the TushareRealtimeClient class itself must stay intact — the shared
+    # early-bar normalizer uses its static aggregation helpers.  The scan
+    # state's realtime client is already a Bomb above.
     monkeypatch.setattr("src.data.clients.iquant_historical_adapter.IQuantHistoricalAdapter", Bomb)
     monkeypatch.setattr(service, "_verify_entry_binding", lambda _status: None)
     monkeypatch.setattr(service, "_require_manual_trigger_ready", _no_op_start)
@@ -2905,8 +3609,168 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
     assert prepare_calls == []
     assert prepare_results == []
     assert projection_calls == []
-    assert service._scan_state.canonical_coordinator.cache[today] is old_canonical
-    assert repository.raw_calls == []
+    # The stale coordinator cache was never read or mutated; the rejection was
+    # derived from the persisted raw evidence the seed actually read.
+    assert service._scan_state.canonical_coordinator.cache[today] is marker_cache
+    assert repository.raw_calls == [tuple(sorted(FRESH_CODES))]
+
+
+@pytest.mark.asyncio
+async def test_deployment_probe_rejects_incompatible_cache_without_second_algorithm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.web import v20_service as service_module
+
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 8, tzinfo=TZ)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.events: dict[str, OutboxRecord] = {}
+            self.raw_records: tuple[Any, ...] = ()
+            self.state: StateRecord | None = None
+            self.official_writes = 0
+
+        async def assert_runtime_leader(self) -> None:
+            return None
+
+        async def get_entry_status(self, _stream: str, _trade_date: date) -> None:
+            return None
+
+        async def load_state(self, _lineage: str) -> StateRecord:
+            assert self.state is not None
+            return self.state
+
+        async def get_outbox_event(self, event_id: str, **_scope: Any) -> OutboxRecord | None:
+            return self.events.get(event_id)
+
+        async def list_raw_minute_bar_records(
+            self,
+            codes: Any,
+            *,
+            trade_date: date,
+            end_labels: Any,
+        ) -> list[Any]:
+            allowed_codes = set(codes)
+            allowed_labels = set(end_labels)
+            return [
+                record
+                for record in self.raw_records
+                if record.code in allowed_codes and record.end_label in allowed_labels
+            ]
+
+        async def enqueue_alert(
+            self,
+            event_id: str,
+            route_id: str,
+            semantic: Mapping[str, Any],
+            semantic_hash: str,
+            **scope: Any,
+        ) -> bool:
+            assert semantic_hash == sha256_json(semantic)
+            self.events[event_id] = OutboxRecord(
+                event_id=event_id,
+                event_type="DATA_ALERT",
+                route_id=route_id,
+                official_stream_id=scope["official_stream_id"],
+                lineage_id=scope["lineage_id"],
+                semantic=dict(semantic),
+                semantic_content_hash=semantic_hash,
+                payload=None,
+                payload_hash=None,
+                generated_at=None,
+                commit_marker=None,
+                action_expiry_ts=None,
+                delivery_status="PENDING",
+                attempt_count=0,
+            )
+            return True
+
+        async def seal_event(self, event_id: str, formatter: Any) -> OutboxRecord:
+            current = self.events[event_id]
+            payload = dict(formatter(current, now, 101, True))
+            sealed = dataclasses_replace(
+                current,
+                payload=payload,
+                payload_hash=sha256_json(payload),
+                generated_at=now,
+                commit_marker=101,
+            )
+            self.events[event_id] = sealed
+            return sealed
+
+        async def commit_entry(self, *_args: Any, **_kwargs: Any) -> None:
+            self.official_writes += 1
+            raise AssertionError("artifact check-only must not commit entry/model/order state")
+
+    repository = Repository()
+    service = _v20_service(monkeypatch, repository=repository)
+    service.config = dataclasses_replace(service.config, enabled=True)
+    service._started = True
+    service._repository_started = True
+    service._clock = lambda: now
+    service._mews_cached_for = today
+    state_payload = genesis_state()
+    repository.state = StateRecord(
+        lineage_id=service.config.state_lineage_id,
+        revision=0,
+        state_hash=sha256_json(state_payload),
+        payload=state_payload,
+    )
+    canonical = _portable_canonical(
+        service,
+        today,
+        codes=("603068",),
+        name_prefix="deployed",
+    )
+    current_bundle, artifact_payload = _portable_payload(service, canonical)
+    artifact_receipt = datetime(2026, 9, 1, 9, 39, 30, tzinfo=TZ)
+    repository.raw_records = _portable_raw_records(
+        canonical,
+        first_received_at=artifact_receipt - timedelta(seconds=1),
+    )
+    artifact_store = _StrictPortableArtifactStore(
+        service.config.official_stream_id,
+        artifact_receipt,
+        artifact_payload,
+    )
+    service._canonical_artifact_store = artifact_store
+
+    marker = SimpleNamespace(marker="incompatible-live-coordinator-cache")
+    service._scan_state.canonical_coordinator = SimpleNamespace(cache={today: marker})
+    service._scan_state.realtime_client = Bomb()
+    service._scan_state.historical_adapter = Bomb()
+
+    async def coordinator_bomb(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("artifact hit must not join or recompute the live canonical master")
+
+    async def ready() -> None:
+        return None
+
+    async def policy_inputs(_trade_date: date) -> tuple[list[Any], list[Any], list[Any]]:
+        return [], [], []
+
+    async def scheduled(_trade_date: date) -> tuple[Any, ...]:
+        return ()
+
+    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", coordinator_bomb)
+    monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
+    monkeypatch.setattr(service, "_policy_inputs", policy_inputs)
+    monkeypatch.setattr(service, "_scheduled_exits_today", scheduled)
+
+    result = await _dispatch_manual_trigger(service, "durable-artifact-current-001")
+
+    assert result["accepted"] is True
+    assert result["current_version_recomputed"] is True
+    assert result["replay_reused"] is False
+    assert result["formal_decision_available"] is False
+    assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
+    assert result["official_v16_snapshot_hash"] is None
+    assert [item["code"] for item in result["symbols"]] == ["603068"]
+    assert service._scan_state.canonical_coordinator.cache[today] is marker
+    assert repository.official_writes == 0
+    assert artifact_store.save_calls == 0
+    assert artifact_store.load_calls == 1
 
 
 def test_external_mews_snapshots_cannot_become_production_fact(

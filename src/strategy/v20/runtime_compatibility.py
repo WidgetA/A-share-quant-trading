@@ -21,6 +21,16 @@ _AUDITED_STATE_SEMANTICS_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
             "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc",
             "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b",
         ),
+        # origin/main@498f868 is the deployed selection-critical V3 runtime.
+        # The intermediate 0f5f... candidate was never deployed, so production
+        # cannot authenticate a config or terminal receipt for it.  Upgrade the
+        # real persisted tail directly to the final type-clean V4 candidate.
+        # V2 must still traverse its already-audited V3 receipt; there is no
+        # direct V2-to-V4 bypass.
+        (
+            "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b",
+            "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41",
+        ),
     }
 )
 

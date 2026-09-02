@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import pickle
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -17,7 +18,10 @@ import src.web.v15_scan_service as v15_scan_service
 import src.web.v20_service as service_module
 from src.common.v20_feishu import V20FeishuRoute
 from src.data.clients.mews_snapshot import MewsSnapshotSourceError
-from src.data.clients.tushare_realtime import TushareMinuteBar
+from src.data.clients.tushare_realtime import (
+    TushareMinuteBar,
+    tushare_minute_bars_to_early_market_data,
+)
 from src.data.database.fundamentals_db import FundamentalsDBConfig
 from src.data.database.v20_repository import (
     ActiveModelLeg,
@@ -77,6 +81,10 @@ from src.web.v20_service import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 TZ = ZoneInfo("Asia/Shanghai")
+_TEST_MIXED_STATE_CLASSES = {
+    "src/web/v20_service.py": "V20_SERVICE_STATE_ORCHESTRATION_V4",
+    "src/data/database/v20_repository.py": "V20_LEDGER_STATE_CONTRACT_V2",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +93,11 @@ def _review_current_mixed_sources(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for relative, reviewed_hashes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
         source_hash = hashlib.sha256((PROJECT_ROOT / relative).read_bytes()).hexdigest()
-        monkeypatch.setitem(reviewed_hashes, source_hash, "V20_TEST_ISOLATION_DYNAMIC_SOURCE")
+        monkeypatch.setitem(
+            reviewed_hashes,
+            source_hash,
+            _TEST_MIXED_STATE_CLASSES[relative],
+        )
 
 
 class _UnusedMewsSource:
@@ -99,7 +111,7 @@ def _config(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setitem(
             reviewed_hashes,
             source_hash,
-            "V20_TEST_ISOLATION_DYNAMIC_SOURCE",
+            _TEST_MIXED_STATE_CLASSES[relative],
         )
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
@@ -150,6 +162,12 @@ async def test_0910_mews_refresh_caches_once_and_opening_paths_use_postgres(
             self.payloads = []
             self.eligibility_checks = []
 
+        async def assert_runtime_leader(self):
+            return None
+
+        async def find_eligible_mews_snapshot(self, **_kwargs):
+            return None
+
         async def record_mews_snapshot(self, payload):
             self.payloads.append(dict(payload))
             return "a" * 64
@@ -183,12 +201,19 @@ async def test_0910_mews_refresh_caches_once_and_opening_paths_use_postgres(
     repository = _Repository()
     source = _Source()
     service = _service(monkeypatch, repository)
+    service._repository_started = True
     service._mews_source = source
     calendar = (
         date(2026, 8, 31),
         date(2026, 9, 1),
         date(2026, 9, 2),
         date(2026, 9, 3),
+        date(2026, 9, 4),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=calendar),
     )
     now = datetime(2026, 9, 1, 9, 16, tzinfo=TZ)
 
@@ -218,6 +243,12 @@ async def test_mews_missing_at_runtime_is_calculated_then_cached(
         def __init__(self) -> None:
             self.payloads = []
 
+        async def assert_runtime_leader(self):
+            return None
+
+        async def find_eligible_mews_snapshot(self, **_kwargs):
+            return None
+
         async def record_mews_snapshot(self, payload):
             self.payloads.append(dict(payload))
 
@@ -243,8 +274,14 @@ async def test_mews_missing_at_runtime_is_calculated_then_cached(
     repository = _Repository()
     source = _LocalCalculator()
     service = _service(monkeypatch, repository)
+    service._repository_started = True
     service._mews_source = source
     calendar = (date(2026, 8, 31), date(2026, 9, 1))
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=calendar),
+    )
 
     cached = await service._refresh_mews_cache_once(
         datetime(2026, 9, 1, 9, 18, tzinfo=TZ),
@@ -260,17 +297,66 @@ async def test_mews_local_calculation_failure_is_not_written_as_a_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Source:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
             raise MewsSnapshotSourceError("Tushare margin is missing SSE or SZSE")
 
-    service = _service(monkeypatch, SimpleNamespace())
-    service._mews_source = _Source()
+    class _Repository:
+        def __init__(self) -> None:
+            self.payloads = []
 
-    with pytest.raises(MewsSnapshotSourceError, match="missing SSE or SZSE"):
+        async def assert_runtime_leader(self):
+            return None
+
+        async def find_eligible_mews_snapshot(self, **_kwargs):
+            return None
+
+        async def record_mews_snapshot(self, payload):
+            self.payloads.append(dict(payload))
+
+    repository = _Repository()
+    source = _Source()
+    service = _service(monkeypatch, repository)
+    service._repository_started = True
+    service._mews_source = source
+    alerts = _alert_recorder(monkeypatch, service)
+    calendar = (date(2026, 8, 31), date(2026, 9, 1))
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=calendar),
+    )
+
+    # A genuine calculation failure settles one daily idempotent alert and the
+    # scheduled refresh returns False instead of raising; nothing is written.
+    assert (
         await service._refresh_mews_cache_once(
             datetime(2026, 9, 1, 9, 18, tzinfo=TZ),
-            (date(2026, 8, 31), date(2026, 9, 1)),
+            calendar,
         )
+        is False
+    )
+    assert repository.payloads == []
+    assert source.calls == 1
+    assert len(alerts) == 1
+    assert alerts[0]["code"] == "MEWS_CALCULATION_FAILED"
+    assert "SCHEDULED_0910" in alerts[0]["message"]
+
+    # The finished task was cleared, so the next in-window tick retries the
+    # attempt without doubling the daily alert.
+    assert service._mews_singleflight_task is None
+    assert (
+        await service._refresh_mews_cache_once(
+            datetime(2026, 9, 1, 9, 19, tzinfo=TZ),
+            calendar,
+        )
+        is False
+    )
+    assert source.calls == 2
+    assert len(alerts) == 1
 
 
 async def test_mews_refresh_never_calls_upstream_outside_0910_to_0940(
@@ -358,11 +444,8 @@ async def test_selection_trigger_calculates_missing_mews_after_cutoff_and_clears
     )
     service._record_lane_error("mews_cache", "MEWS_CACHE_FAILED: missing", now)
 
-    assert await service.ensure_mews_for_selection_trigger(now) is False
-    task = service._mews_selection_refresh_task
-    assert task is not None
-    assert await task is True
     assert await service.ensure_mews_for_selection_trigger(now) is True
+    assert service._mews_singleflight_task is None
 
     assert repository.leader_calls == 1
     assert source.calls == [(date(2026, 8, 31), date(2026, 9, 1))]
@@ -370,6 +453,10 @@ async def test_selection_trigger_calculates_missing_mews_after_cutoff_and_clears
     assert service._mews_cached_for == date(2026, 9, 1)
     assert service._mews_snapshot_id == "mews-v2-2026-08-31-trigger"
     assert service._lane_health["mews_cache"].last_error is None
+
+    # A cached day never re-attempts.
+    assert await service.ensure_mews_for_selection_trigger(now) is True
+    assert len(source.calls) == 1
 
 
 async def test_mews_cache_restart_restores_postgres_snapshot_without_refetch(
@@ -387,6 +474,18 @@ async def test_mews_cache_restart_restores_postgres_snapshot_without_refetch(
             assert cutoff == datetime(2026, 9, 1, 9, 40, tzinfo=TZ)
             assert availability_date == date(2026, 9, 1)
             return "mews-v2-2026-08-31-restored"
+
+        async def mews_snapshot_is_eligible(
+            self,
+            snapshot_id,
+            *,
+            source_trade_date,
+            cutoff,
+        ) -> bool:
+            assert snapshot_id == "mews-v2-2026-08-31-restored"
+            assert source_trade_date == date(2026, 8, 31)
+            assert cutoff == datetime(2026, 9, 1, 9, 40, tzinfo=TZ)
+            return True
 
     class _Source:
         async def fetch_snapshot(self, **_kwargs):
@@ -429,6 +528,9 @@ class _AfterCutoffMewsRepository:
     async def mews_snapshot_is_eligible(self, *_args, **_kwargs):
         return False
 
+    async def close(self) -> None:
+        return None
+
 
 def _late_mews_payload() -> dict[str, Any]:
     return {
@@ -450,6 +552,7 @@ def _alert_recorder(monkeypatch: pytest.MonkeyPatch, service: V20Service) -> lis
 
     async def _record(**kwargs):
         alerts.append(kwargs)
+        return True
 
     monkeypatch.setattr(service, "_safe_alert", _record)
     return alerts
@@ -469,9 +572,20 @@ async def test_mews_after_cutoff_first_tick_calculates_caches_and_never_alerts_m
     repository = _AfterCutoffMewsRepository()
     source = _Source()
     service = _service(monkeypatch, repository)
+    service._repository_started = True
     service._mews_source = source
     alerts = _alert_recorder(monkeypatch, service)
-    calendar = (date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2))
+    calendar = (
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=calendar),
+    )
     now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
 
     assert await service._recover_mews_after_cutoff_once(now, calendar) is True
@@ -516,12 +630,12 @@ async def test_concurrent_selection_triggers_calculate_missing_mews_exactly_once
         service.ensure_mews_for_selection_trigger(now),
     )
 
-    assert (first, second) == (False, False)
-    task = service._mews_selection_refresh_task
-    assert task is not None
-    assert await task is True
+    # Both triggers joined the same per-date singleflight task and awaited it:
+    # exactly one overlapping raw attempt, and both see the persisted success.
+    assert (first, second) == (True, True)
     assert len(source.calls) == 1
     assert len(repository.payloads) == 1
+    assert service._mews_singleflight_task is None
 
     assert await service.ensure_mews_for_selection_trigger(now) is True
     assert len(source.calls) == 1
@@ -550,7 +664,12 @@ async def test_after_cutoff_recovery_failure_alerts_once_and_stays_fail_closed(
         "_load_trade_calendar",
         lambda _day: asyncio.sleep(0, result=(date(2026, 8, 31), date(2026, 9, 1))),
     )
-    calendar = (date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2))
+    calendar = (
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+    )
     now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
     service._clock = lambda: now
 
@@ -573,12 +692,16 @@ async def test_after_cutoff_recovery_failure_alerts_once_and_stays_fail_closed(
     assert len(alerts) == 1
 
     # A selection trigger discovers the same gap, retries once, fails closed,
-    # and never doubles the daily alert.
+    # and never doubles the daily alert.  The trigger awaits the attempt, so
+    # the failure is already settled when it returns.
     assert await service.ensure_mews_for_selection_trigger(now) is False
-    task = service._mews_selection_refresh_task
-    assert task is not None
-    assert await task is False
     assert source.calls == 2
+    assert len(alerts) == 1
+    assert service._mews_singleflight_task is None
+
+    # No permanent daily trigger skip: a later distinct trigger retries again.
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+    assert source.calls == 3
     assert len(alerts) == 1
 
 
@@ -591,9 +714,31 @@ async def test_restart_recovers_late_calculated_snapshot_without_recalculation(
 
     repository = _AfterCutoffMewsRepository(restored_id="mews-v2-2026-08-31-late")
     service = _service(monkeypatch, repository)
+    service._repository_started = True
     service._mews_source = _Source()
     alerts = _alert_recorder(monkeypatch, service)
     calendar = (date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2))
+
+    async def not_on_time(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    class SealedLateGuard:
+        async def is_eligible(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+    repository.mews_snapshot_is_eligible = not_on_time
+    repository.schema = "v20"
+    repository.pool = object()
+    monkeypatch.setattr(
+        service_module,
+        "V20MewsReceiptGuard",
+        lambda _repository: SealedLateGuard(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=calendar),
+    )
     now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
 
     assert await service._recover_mews_after_cutoff_once(now, calendar) is True
@@ -773,6 +918,103 @@ def test_legacy_runtime_factory_wires_existing_main_infrastructure(
     assert shared_service._initialize_resources is _init_embedded_v20_scan_resources
     assert shared_service._cleanup_resources is _cleanup_embedded_v20_scan_resources
     assert repository_pools == [None, shared_pool]
+
+
+async def test_embedded_runtime_reuses_shared_v16_trade_calendar_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold 14:04 trigger after V16 ran must not fail on an empty V20 calendar."""
+    from src.common import config as common_config
+    from src.data.database import fundamentals_db as fundamentals_module
+    from src.web import v15_scan_service
+    from src.web import v20_service as service_module
+
+    monkeypatch.delenv("V20_ENABLED", raising=False)
+    monkeypatch.setenv("V20_MODE", "forward_shadow")
+    base = load_v20_runtime_config(PROJECT_ROOT)
+    repository = SimpleNamespace(
+        config=V20DatabaseConfig(
+            schema="v20",
+            pool_min_size=1,
+            pool_max_size=8,
+            ssl_mode="require",
+            connection_profile="legacy_embedded",
+        )
+    )
+    fundamentals = SimpleNamespace()
+    route = V20FeishuRoute(
+        route_id=base.route_id,
+        bot_url="https://legacy-relay.example",
+        app_id="legacy-app",
+        app_secret="legacy-secret",
+        chat_id="legacy-chat",
+        transport="legacy_send",
+    )
+    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: base)
+    monkeypatch.setattr(
+        service_module,
+        "create_embedded_v20_repository_from_config",
+        lambda _path, *, shared_pool=None: repository,
+    )
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "persisted-token")
+    monkeypatch.setattr(
+        fundamentals_module,
+        "create_fundamentals_db_from_config",
+        lambda _path, *, tushare_token: fundamentals,
+    )
+    monkeypatch.setattr(service_module, "load_legacy_embedded_v20_route", lambda: route)
+    monkeypatch.setattr(service_module, "load_g_artifacts", lambda *_args, **_kwargs: object())
+
+    service = V20Service.from_legacy_runtime()
+
+    # The embedded service is wired to the exact shared V16 provider — not a
+    # separate Tushare calendar adapter (the scan state has no client yet).
+    assert service._calendar_provider is v15_scan_service.get_trade_calendar
+    assert service._scan_state.realtime_client is None
+    assert service._calendar_cache == ()
+
+    calendar_days = [date(2026, 9, 1) - timedelta(days=offset) for offset in range(9, -1, -1)]
+    monkeypatch.setattr(
+        v15_scan_service,
+        "_trade_calendar_cache",
+        sorted(calendar_days + [date(2026, 9, 2), date(2026, 9, 3)]),
+    )
+    loaded = await service._load_trade_calendar(date(2026, 9, 1))
+    assert date(2026, 9, 1) in loaded
+    assert service._calendar_loaded_for == date(2026, 9, 1)
+
+    # Concurrent cold callers share one provider call through the V20
+    # singleflight wrapper around the shared provider.
+    provider_calls = 0
+    real_shared_provider = service._calendar_provider
+
+    async def counted_provider() -> list[date]:
+        nonlocal provider_calls
+        provider_calls += 1
+        await asyncio.sleep(0.05)
+        return sorted(calendar_days + [date(2026, 9, 2), date(2026, 9, 3)])
+
+    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", counted_provider)
+    second_service = V20Service.from_legacy_runtime()
+    assert second_service._calendar_provider is counted_provider
+    assert real_shared_provider is not counted_provider
+    first, second = await asyncio.gather(
+        second_service._load_trade_calendar(date(2026, 9, 1)),
+        second_service._load_trade_calendar(date(2026, 9, 1)),
+    )
+    assert first == second
+    assert provider_calls == 1
+
+    # Genuinely invalid shared calendar data still fails closed.
+    async def invalid_provider() -> list[date]:
+        return [date(2026, 9, 1), date(2026, 9, 1)]
+
+    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", invalid_provider)
+    third_service = V20Service.from_legacy_runtime()
+    assert third_service._calendar_provider is invalid_provider
+    with pytest.raises(V20RepositoryError, match="unsorted, or duplicated"):
+        await third_service._load_trade_calendar(date(2026, 9, 1))
+    assert third_service._calendar_cache == ()
 
 
 @pytest.mark.parametrize(
@@ -1463,6 +1705,7 @@ async def test_cleanup_runs_when_initialized_false_and_tasks_remain() -> None:
     state.canonical_coordinator = SimpleNamespace(
         inflight={"scan": canonical_task},
         publish={},
+        pending_persist={},
     )
     await asyncio.wait_for(scheduler_started.wait(), timeout=1.0)
     await asyncio.wait_for(canonical_started.wait(), timeout=1.0)
@@ -1498,6 +1741,12 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
     histories = {
         "603068": {"time": ["2026-08-31"], "close": [2.3]},
         "605299": {"time": ["2026-08-31"], "close": [12.5]},
+    }
+    early_bars = {
+        code: (_bar(code, "09:39", trade_date=date(2026, 9, 1)),) for code in ("603068", "605299")
+    }
+    early_source_hashes = {
+        code: sha256_json([_bar_payload(bar) for bar in bars]) for code, bars in early_bars.items()
     }
     result = V16ScanResult(
         recommended=[first, second],
@@ -1541,11 +1790,8 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
         quotes={},
         prev_closes={},
         history_raw=histories,
-        early_bars={},
-        early_source_hashes={
-            "603068": "early-source-603068",
-            "605299": "early-source-605299",
-        },
+        early_bars=early_bars,
+        early_source_hashes=early_source_hashes,
         failed_no_prev_close=("000001",),
         failed_no_history=(),
         failed_build=(),
@@ -1555,6 +1801,13 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
         computed_at=datetime(2026, 9, 1, 9, 39, 59, tzinfo=TZ),
         input_hash="i" * 64,
         _integrity_hash="c" * 64,
+        computation_calendar=(
+            date(2026, 8, 31),
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        ),
+        prior_trade_date=date(2026, 8, 31),
     )
     service = V20Service.__new__(V20Service)
     service.config = SimpleNamespace(clock=SimpleNamespace(decision_bar_label="09:39"))
@@ -1565,7 +1818,12 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
 
     projected = service._project_canonical_v16(
         canonical,
-        calendar=(date(2026, 8, 31), date(2026, 9, 1)),
+        calendar=(
+            date(2026, 8, 31),
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        ),
     )
 
     symbols = projected.snapshot["symbols"]
@@ -1577,8 +1835,8 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
         sha256_json(histories["605299"]),
     ]
     assert [item["early_source_hash"] for item in symbols] == [
-        "early-source-603068",
-        "early-source-605299",
+        early_source_hashes["603068"],
+        early_source_hashes["605299"],
     ]
     assert symbols[0]["cci"] == 88.5
     assert symbols[0]["volume_937"] == 12345.0
@@ -1595,6 +1853,201 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
     assert projected.snapshot["stages"]["step2_codes"] == ["603068", "605299"]
     assert projected.snapshot["scan_input_failure_codes"] == ["000001"]
     assert projected.snapshot_hash == sha256_json(projected.snapshot)
+
+
+class _StrictTestArtifactStore:
+    def __init__(self, timeline: list[str], official_stream_id: str) -> None:
+        self.timeline = timeline
+        self.official_stream_id = official_stream_id
+        self.record: Any | None = None
+
+    async def save_once(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        official_stream_id: str,
+        trade_date: date,
+        event: str,
+    ) -> Any:
+        assert official_stream_id == self.official_stream_id
+        assert event == "V16_CANONICAL_MASTER_V1"
+        self.timeline.append("artifact-save")
+        portable = dict(payload)
+        record = SimpleNamespace(
+            payload=portable,
+            snapshot_hash=sha256_json(portable),
+            trade_date=trade_date,
+            first_received_at=datetime.combine(trade_date, time(9, 39, 20), tzinfo=TZ),
+        )
+        if self.record is None:
+            self.record = record
+        else:
+            assert self.record.payload == record.payload
+        return self.record
+
+    async def load(
+        self,
+        *,
+        official_stream_id: str,
+        trade_date: date,
+        event: str,
+    ) -> Any | None:
+        assert official_stream_id == self.official_stream_id
+        assert event == "V16_CANONICAL_MASTER_V1"
+        self.timeline.append(
+            "artifact-load-hit" if self.record is not None else "artifact-load-miss"
+        )
+        return self.record
+
+
+def _strict_barrier_canonical(trade_date: date) -> CanonicalV16ScanBundle:
+    predecessor = date(2026, 8, 28)
+    successors = (date(2026, 9, 1), date(2026, 9, 2))
+    codes = sorted(_LATE_REPLAY_CODES)
+    scan_result = _late_replay_scan_result()
+    (board_name,) = scan_result.step2_board_avg_gains
+    scan_result = replace(
+        scan_result,
+        step0_codes=codes,
+        step2_boards_detail={board_name: codes},
+        step2_codes=codes,
+        st_eligible_codes=codes,
+        step3_codes=codes,
+        step4_codes=codes,
+        step5_codes=codes,
+        step6_codes=codes,
+        step6_5_codes=codes,
+        step6_6_codes=codes,
+        step3_count=len(codes),
+        step4_count=len(codes),
+        step5_count=len(codes),
+        step6_count=len(codes),
+        step6_5_count=len(codes),
+        step6_6_count=len(codes),
+    )
+    history_dates = tuple(predecessor - timedelta(days=offset) for offset in range(36, -1, -1))
+    history_raw = {
+        code: {
+            "time": [day.isoformat() for day in history_dates],
+            "open": [10.0] * len(history_dates),
+            "high": [10.2] * len(history_dates),
+            "low": [9.8] * len(history_dates),
+            "close": [10.0] * len(history_dates),
+            "volume": [1_000.0] * len(history_dates),
+        }
+        for code in _LATE_REPLAY_CODES
+    }
+    stock_data = {
+        code: SimpleNamespace(
+            code=code,
+            name=f"name-{code}",
+            open_price=10.0,
+            prev_close=10.0,
+            price_940=10.1,
+            high_940=10.2,
+            low_940=9.9,
+            volume_940=1_000.0,
+            volume_937=900.0,
+            avg_daily_volume=800.0,
+            trend_5d=0.01,
+            trend_10d=0.02,
+            avg_daily_return_20d=0.001,
+            volatility_20d=0.01,
+            consecutive_up_days=1,
+            history_df=None,
+        )
+        for code in _LATE_REPLAY_CODES
+    }
+    base = replace(
+        _entry_cycle_bundle(trade_date),
+        scan_result=scan_result,
+        stock_data=stock_data,
+        history_raw=history_raw,
+        computed_at=datetime.combine(trade_date, time(9, 39, 10), tzinfo=TZ),
+        computation_calendar=(predecessor, trade_date, *successors),
+        prior_trade_date=predecessor,
+        prior_amount_yuan={code: 1_000_000.0 for code in _LATE_REPLAY_CODES},
+        breadth_valid_n=len(_LATE_REPLAY_CODES),
+        breadth_down_n=1,
+        breadth_market_source_hash="b" * 64,
+        history_date_valid_counts={
+            day.isoformat(): len(_LATE_REPLAY_CODES) for day in history_dates
+        },
+        history_min_date_coverage=1.0,
+        _integrity_hash="",
+    )
+    return replace(base, _integrity_hash=_bundle_fingerprint(base))
+
+
+def _install_strict_durable_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    service: V20Service,
+    repository: Any,
+    timeline: list[str],
+) -> _StrictTestArtifactStore:
+    store = _StrictTestArtifactStore(timeline, service.config.official_stream_id)
+    service._canonical_artifact_store = store
+    service._canonical_callbacks_open = True
+    service._canonical_artifact_lock = asyncio.Lock()
+    service._canonical_raw_persisted_dates = set()
+    service._canonical_barrier_completed_at = {}
+    raw_records: dict[tuple[str, str], MinuteBarRecord] = {}
+
+    async def record_minute_bars(rows: Sequence[Mapping[str, Any]]) -> frozenset[str]:
+        timeline.append("durable-raw")
+        hashes: set[str] = set()
+        for item in rows:
+            payload = dict(item)
+            code = str(payload["stock_code"])
+            label = str(payload["end_label"])
+            digest = sha256_json(payload)
+            hashes.add(digest)
+            raw_records[(code, label)] = MinuteBarRecord(
+                code=code,
+                bar_end=datetime.fromisoformat(str(payload["bar_end"])),
+                end_label=label,
+                source_hash=digest,
+                payload=payload,
+                first_received_at=datetime.combine(
+                    date.fromisoformat(str(payload["bar_end"])[:10]),
+                    time(9, 39, 15),
+                    tzinfo=TZ,
+                ),
+            )
+        return frozenset(hashes)
+
+    async def list_raw_minute_bar_records(
+        codes: Sequence[str],
+        *,
+        trade_date: date,
+        end_labels: Sequence[str],
+    ) -> tuple[MinuteBarRecord, ...]:
+        allowed_codes = set(codes)
+        allowed_labels = set(end_labels)
+        return tuple(
+            record
+            for (code, label), record in sorted(raw_records.items())
+            if code in allowed_codes
+            and label in allowed_labels
+            and record.bar_end.astimezone(TZ).date() == trade_date
+        )
+
+    monkeypatch.setattr(repository, "record_minute_bars", record_minute_bars, raising=False)
+    monkeypatch.setattr(
+        repository,
+        "list_raw_minute_bar_records",
+        list_raw_minute_bar_records,
+        raising=False,
+    )
+    production_hydrate = service._hydrate_canonical_artifact_record
+
+    async def observed_hydrate(record: Any) -> Any:
+        timeline.append("artifact-hydrate")
+        return await production_hydrate(record)
+
+    monkeypatch.setattr(service, "_hydrate_canonical_artifact_record", observed_hydrate)
+    service._scan_state.canonical_sink = service._persist_canonical_artifact_barrier
+    return store
 
 
 @pytest.mark.asyncio
@@ -1633,12 +2086,13 @@ async def test_entry_collection_never_touches_old_scan_pipeline_or_vendor(
         raise AssertionError("old V20 scan path must not run")
 
     trade_date = date(2026, 8, 31)
-    canonical = SimpleNamespace(trade_date=trade_date, marker="canonical")
-    projected = SimpleNamespace(marker="projected")
+    canonical = _strict_barrier_canonical(trade_date)
 
     async def canonical_once(state, requested_date):
         assert state is service._scan_state
         assert requested_date is trade_date
+        assert state.canonical_sink is not None
+        await state.canonical_sink(canonical)
         return canonical
 
     monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", canonical_once)
@@ -1650,33 +2104,47 @@ async def test_entry_collection_never_touches_old_scan_pipeline_or_vendor(
     async def get_entry_status(*_args: object, **_kwargs: object) -> None:
         return None
 
-    service._repository = SimpleNamespace(get_entry_status=get_entry_status)
+    repository = SimpleNamespace(get_entry_status=get_entry_status)
+    service._repository = repository
+    # Today's MEWS cache is already present, so the cycle skips the join.
+    service._mews_cached_for = trade_date
+    service._clock = lambda: datetime(2026, 8, 31, 9, 39, 30, tzinfo=TZ)
     service.config = SimpleNamespace(
         official_stream_id="stream",
         clock=SimpleNamespace(
             decision_bar_label="09:39",
+            publish_deadline=time(9, 40),
             decision_finalization_deadline=time(9, 45),
         ),
     )
-    context = _DayContext(trade_date=trade_date, calendar=(trade_date,))
-    persisted: list[object] = []
-
-    async def persist(value: object) -> None:
-        persisted.append(value)
-
-    monkeypatch.setattr(service, "_persist_canonical_raw_minute_bars", persist)
-    monkeypatch.setattr(
-        service,
-        "_project_canonical_v16",
-        lambda value, **_kwargs: projected if value is canonical else bomb(),
+    context = _DayContext(
+        trade_date=trade_date,
+        calendar=(
+            date(2026, 8, 28),
+            trade_date,
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+        ),
     )
+    timeline: list[str] = []
+    store = _install_strict_durable_barrier(monkeypatch, service, repository, timeline)
 
     await service._run_entry_collection_cycle(context, datetime(2026, 8, 31, 9, 31, tzinfo=TZ))
     assert context.canonical_bundle is None
 
     await service._run_entry_collection_cycle(context, datetime(2026, 8, 31, 9, 39, tzinfo=TZ))
-    assert context.canonical_bundle is projected
-    assert persisted == [canonical]
+    assert context.canonical_bundle is not None
+    assert context.canonical_bundle.snapshot_hash == store.record.payload["v20_snapshot_hash"]
+    assert timeline == [
+        "artifact-load-miss",
+        "durable-raw",
+        "artifact-load-miss",
+        "artifact-save",
+        "artifact-load-hit",
+        "artifact-hydrate",
+        "artifact-load-hit",
+        "artifact-hydrate",
+    ]
 
 
 def test_bind_preserves_already_owned_scan_resources() -> None:
@@ -1710,98 +2178,816 @@ def test_bind_preserves_already_owned_scan_resources() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slow_selection_mews_does_not_block_and_stop_cancels_it(
+async def test_slow_but_finite_selection_mews_completes_and_stop_cancels_managed_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """No artificial outer budget: a slow-but-finite attempt is never cut off."""
+    # The singleflight await carries no wall-clock cap at all.
+    assert not hasattr(service_module, "MEWS_SINGLEFLIGHT_ATTEMPT_TIMEOUT_SECONDS")
     released = asyncio.Event()
 
-    async def slow_recovery(_current: datetime) -> bool:
-        await released.wait()
-        return True
+    class _HangingSource:
+        def __init__(self) -> None:
+            self.calls = 0
 
-    async def no_leader() -> None:
-        return None
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            await released.wait()
+            raise AssertionError("a cancelled attempt must never complete")
 
-    service = V20Service.__new__(V20Service)
-    service.config = SimpleNamespace(enabled=True)
+    # Phase 1: a legitimately slow attempt (many bounded provider calls and
+    # retries would look like this) runs to completion and persists.
+    class _SlowSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            await asyncio.sleep(0.2)
+            return _late_mews_payload()
+
+    repository = _AfterCutoffMewsRepository()
+    slow_source = _SlowSource()
+    service = _service(monkeypatch, repository)
     service._repository_started = True
-    service._repository = SimpleNamespace(assert_runtime_leader=no_leader)
-    service._stop_event = asyncio.Event()
-    service._mews_cached_for = None
-    service._mews_selection_refresh_task = None
-    service._mews_selection_refresh_failed_for = None
+    service._mews_source = slow_source
+    alerts = _alert_recorder(monkeypatch, service)
+    now = datetime(2026, 9, 1, 9, 39, tzinfo=TZ)
+    service._clock = lambda: now
     monkeypatch.setattr(
         service,
-        "_ensure_mews_for_selection_trigger_awaited",
-        slow_recovery,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=(date(2026, 8, 31), date(2026, 9, 1))),
     )
 
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    result = await asyncio.wait_for(
-        service.ensure_mews_for_selection_trigger(datetime(2026, 8, 31, 9, 39, tzinfo=TZ)),
-        timeout=0.1,
-    )
-    assert result is False
-    assert loop.time() - started < 0.1
-    assert service._mews_selection_refresh_task is not None
-    task = service._mews_selection_refresh_task
+    assert await service.ensure_mews_for_selection_trigger(now) is True
+    assert slow_source.calls == 1
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert alerts == []
+    assert service._mews_singleflight_task is None
 
-    service._tasks = []
-    service._late_0939_replay_task = None
-    service._resources_started = False
+    # Phase 2: a wedged attempt is still a managed task — stop() cancels and
+    # awaits it, and the joined caller settles without an orphan.
+    hanging_source = _HangingSource()
+    service._mews_source = hanging_source
+    service._mews_cached_for = None
+    waiter = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    for _ in range(200):
+        if hanging_source.calls == 1:
+            break
+        await asyncio.sleep(0.005)
+    assert hanging_source.calls == 1
+    task = service._mews_singleflight_task
+    assert task is not None and not task.done()
     service._repository_started = False
     await service.stop()
-    await asyncio.sleep(0)
     assert task.cancelled() is True
-    assert service._mews_selection_refresh_task is None
+    assert await waiter is False
+    assert service._mews_singleflight_task is None
+    released.set()
 
 
 @pytest.mark.asyncio
-async def test_failed_selection_mews_background_refresh_is_not_restarted(
+async def test_failed_selection_mews_attempt_is_retried_by_a_later_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = 0
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = 0
 
-    async def no_leader() -> None:
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            raise MewsSnapshotSourceError("mews unavailable")
+
+    repository = _AfterCutoffMewsRepository()
+    source = _Source()
+    service = _service(monkeypatch, repository)
+    service._repository_started = True
+    service._mews_source = source
+    alerts = _alert_recorder(monkeypatch, service)
+    now = datetime(2026, 9, 1, 9, 39, tzinfo=TZ)
+    service._clock = lambda: now
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=(date(2026, 8, 31), date(2026, 9, 1))),
+    )
+
+    # The trigger awaits the attempt; the failure settles one daily idempotent
+    # alert before the independent entry path continues.
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+    assert source.calls == 1
+    assert repository.payloads == []
+    assert len(alerts) == 1
+    assert alerts[0]["code"] == "MEWS_CALCULATION_FAILED"
+    assert "SELECTION_TRIGGER" in alerts[0]["message"]
+    assert service._lane_health["mews_cache"].last_error is not None
+    assert service._mews_singleflight_task is None
+
+    # The finished task was cleared: a later distinct trigger retries instead
+    # of hitting a permanent daily failure skip, and never doubles the alert.
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+    assert source.calls == 2
+    assert len(alerts) == 1
+    assert repository.payloads == []
+
+
+async def test_mews_failure_alert_stays_bound_to_attempt_date_not_ambient_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Source:
+        async def fetch_snapshot(self, **_kwargs):
+            raise MewsSnapshotSourceError("target-date outage")
+
+    service = _service(monkeypatch, _AfterCutoffMewsRepository())
+    service._repository_started = True
+    service._mews_source = _Source()
+    alerts = _alert_recorder(monkeypatch, service)
+    target_now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
+    ambient_now = datetime(2026, 9, 2, 9, 10, tzinfo=TZ)
+    service._clock = lambda: ambient_now
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(
+            0, result=(date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2))
+        ),
+    )
+
+    assert await service.ensure_mews_for_selection_trigger(target_now) is False
+    assert len(alerts) == 1
+    assert alerts[0]["entity_id"] == "2026-09-01"
+    assert alerts[0]["now"] == target_now
+    assert alerts[0]["event_id"] == named_hash(
+        "V20_MEWS_CALCULATION_FAILED_EVENT_ID_V1",
+        {
+            "alert_code": "MEWS_CALCULATION_FAILED",
+            "entity_id": "2026-09-01",
+            "route_id": service.config.route_id,
+            "official_stream_id": service.config.official_stream_id,
+            "state_lineage_id": service.config.state_lineage_id,
+            "trade_date": "2026-09-01",
+        },
+    )
+    assert service._mews_alerted_for == date(2026, 9, 1)
+
+
+async def test_stop_cancels_and_awaits_hanging_calendar_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _AfterCutoffMewsRepository()
+    service = _service(monkeypatch, repository)
+    service._repository_started = True
+    started = asyncio.Event()
+    cancel_entered = asyncio.Event()
+
+    async def provider() -> list[date]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancel_entered.set()
+            raise
+
+    service._calendar_provider = provider
+    waiter = asyncio.create_task(service._load_trade_calendar(date(2026, 9, 1)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await asyncio.wait_for(service.stop(), timeout=1)
+    await asyncio.wait_for(cancel_entered.wait(), timeout=1)
+    assert waiter.cancelled() is True
+    assert service._calendar_tasks == {}
+    assert not any(
+        task.get_name().startswith("v20-calendar-")
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+    )
+
+
+async def test_calendar_date_rollover_cancels_old_master_and_stop_rejects_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _AfterCutoffMewsRepository()
+    service = _service(monkeypatch, repository)
+    service._repository_started = True
+    old_started = asyncio.Event()
+    old_cancel_entered = asyncio.Event()
+    calendar = (
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+    )
+
+    async def provider() -> list[date]:
+        if not old_started.is_set():
+            old_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                old_cancel_entered.set()
+                raise
+        return list(calendar)
+
+    service._calendar_provider = provider
+    old_waiter = asyncio.create_task(service._load_trade_calendar(date(2026, 9, 1)))
+    await asyncio.wait_for(old_started.wait(), timeout=1)
+
+    assert await service._load_trade_calendar(date(2026, 9, 2)) == calendar
+    await asyncio.wait_for(old_cancel_entered.wait(), timeout=1)
+    assert old_waiter.cancelled() is True
+    await service.stop()
+    service._calendar_cache = ()
+    service._calendar_loaded_for = None
+    with pytest.raises(V20RepositoryError, match="trade-calendar task lane is stopped"):
+        await service._load_trade_calendar(date(2026, 9, 2))
+
+
+class _GatedMewsSource:
+    def __init__(self, gate: asyncio.Event) -> None:
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self._gate = gate
+
+    async def fetch_snapshot(self, *, source_trade_date, availability_date):
+        self.calls += 1
+        self.entered.set()
+        await self._gate.wait()
+        return _late_mews_payload()
+
+
+def _singleflight_service(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Any,
+    source: Any,
+    now: datetime,
+) -> V20Service:
+    service = _service(monkeypatch, repository)
+    service._repository_started = True
+    service._mews_source = source
+    service._clock = lambda: now
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        lambda _day: asyncio.sleep(0, result=(date(2026, 8, 31), date(2026, 9, 1))),
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_selection_trigger_awaits_attempt_and_persists_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    repository = _AfterCutoffMewsRepository()
+    source = _GatedMewsSource(gate)
+    now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+
+    waiter = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    await asyncio.wait_for(source.entered.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    # The selection path blocks on the attempt: no result, nothing persisted.
+    assert not waiter.done()
+    assert repository.payloads == []
+
+    gate.set()
+    assert await asyncio.wait_for(waiter, timeout=1.0) is True
+    # Success persisted before the trigger returned.
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_singleflight_task is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_and_triggers_share_one_singleflight_attempt_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    repository = _AfterCutoffMewsRepository()
+    source = _GatedMewsSource(gate)
+    now = datetime(2026, 9, 1, 9, 10, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+    calendar = (date(2026, 8, 31), date(2026, 9, 1))
+
+    scheduled = asyncio.create_task(service._refresh_mews_cache_once(now, calendar))
+    first = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    second = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    await asyncio.wait_for(source.entered.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    # The 09:10 scheduler and both triggers joined one overlapping raw attempt.
+    assert source.calls == 1
+
+    gate.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(scheduled, first, second),
+        timeout=1.0,
+    )
+    assert results == [True, True, True]
+    assert source.calls == 1
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_singleflight_task is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_and_triggers_share_one_singleflight_attempt_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            raise MewsSnapshotSourceError("Tushare margin is missing SSE or SZSE")
+
+    repository = _AfterCutoffMewsRepository()
+    source = _FailingSource()
+    now = datetime(2026, 9, 1, 9, 10, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+    alerts = _alert_recorder(monkeypatch, service)
+    calendar = (date(2026, 8, 31), date(2026, 9, 1))
+
+    results = await asyncio.gather(
+        service._refresh_mews_cache_once(now, calendar),
+        service.ensure_mews_for_selection_trigger(now),
+        service.ensure_mews_for_selection_trigger(now),
+    )
+
+    # One overlapping raw attempt, one shared failure, one daily alert.
+    assert results == [False, False, False]
+    assert source.calls == 1
+    assert repository.payloads == []
+    assert len(alerts) == 1
+    assert alerts[0]["code"] == "MEWS_CALCULATION_FAILED"
+    assert service._lane_health["mews_cache"].last_error is not None
+    assert service._mews_singleflight_task is None
+
+    # The cleared task lets a later distinct trigger retry while cache is missing.
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+    assert source.calls == 2
+    assert len(alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_after_cutoff_recovery_and_triggers_share_one_singleflight_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The after-cutoff scheduler tick joins the same per-date task as triggers."""
+    gate = asyncio.Event()
+    repository = _AfterCutoffMewsRepository()
+    source = _GatedMewsSource(gate)
+    now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+    calendar = (date(2026, 8, 31), date(2026, 9, 1))
+
+    recovery = asyncio.create_task(service._recover_mews_after_cutoff_once(now, calendar))
+    first = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    second = asyncio.create_task(service.ensure_mews_for_selection_trigger(now))
+    await asyncio.wait_for(source.entered.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    # Exactly one overlapping raw attempt across the scheduler tick and both
+    # triggers.
+    assert source.calls == 1
+
+    gate.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(recovery, first, second),
+        timeout=1.0,
+    )
+    assert results == [True, True, True]
+    assert source.calls == 1
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_failed_for is None
+    assert service._mews_singleflight_task is None
+
+
+@pytest.mark.asyncio
+async def test_after_cutoff_recovery_and_triggers_share_one_singleflight_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            raise MewsSnapshotSourceError("Tushare margin is missing SSE or SZSE")
+
+    repository = _AfterCutoffMewsRepository()
+    source = _FailingSource()
+    now = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+    alerts = _alert_recorder(monkeypatch, service)
+    calendar = (date(2026, 8, 31), date(2026, 9, 1))
+
+    results = await asyncio.gather(
+        service._recover_mews_after_cutoff_once(now, calendar),
+        service.ensure_mews_for_selection_trigger(now),
+        service.ensure_mews_for_selection_trigger(now),
+    )
+
+    # One overlapping raw attempt, one shared failure, one daily idempotent
+    # alert; the scheduler lane latches against a tight retry loop.
+    assert results == [False, False, False]
+    assert source.calls == 1
+    assert repository.payloads == []
+    assert len(alerts) == 1
+    assert alerts[0]["code"] == "MEWS_CALCULATION_FAILED"
+    assert service._mews_failed_for == date(2026, 9, 1)
+    assert service._mews_singleflight_task is None
+
+    # The latch only stops scheduler looping; it must not gate a manual
+    # trigger, which retries a fresh attempt without doubling the alert.
+    assert await service._recover_mews_after_cutoff_once(now, calendar) is False
+    assert source.calls == 1
+    assert await service.ensure_mews_for_selection_trigger(now) is False
+    assert source.calls == 2
+    assert len(alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_0910_scheduler_entry_calculates_and_caches_through_singleflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def fetch_snapshot(self, *, source_trade_date, availability_date):
+            self.calls.append((source_trade_date, availability_date))
+            return _late_mews_payload()
+
+    repository = _AfterCutoffMewsRepository()
+    source = _Source()
+    now = datetime(2026, 9, 1, 9, 10, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+    alerts = _alert_recorder(monkeypatch, service)
+    service._calendar_provider = lambda: asyncio.sleep(
+        0, result=[date(2026, 8, 31), date(2026, 9, 1)]
+    )
+
+    scheduler = asyncio.create_task(service._run_mews_cache_scheduler())
+    for _ in range(200):
+        if repository.payloads:
+            break
+        await asyncio.sleep(0.005)
+    service._stop_event.set()
+    await asyncio.wait_for(scheduler, timeout=2.0)
+
+    assert source.calls == [(date(2026, 8, 31), date(2026, 9, 1))]
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_snapshot_id == "mews-v2-2026-08-31-late"
+    assert service._lane_health["mews_cache"].last_error is None
+    assert alerts == []
+    assert service._mews_singleflight_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wall", [time(9, 5), time(9, 39), time(14, 4)])
+async def test_selection_trigger_calculates_without_cutoff_eligibility_at_any_wall_time(
+    monkeypatch: pytest.MonkeyPatch,
+    wall: time,
+) -> None:
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            return _late_mews_payload()
+
+    repository = _AfterCutoffMewsRepository()
+    source = _Source()
+    now = datetime.combine(date(2026, 9, 1), wall, tzinfo=TZ)
+    service = _singleflight_service(monkeypatch, repository, source, now)
+
+    # 09:05, 09:39 and 14:04 all share the same awaited singleflight behavior;
+    # the repository's eligibility probe returns False here, and the trigger
+    # calculation deliberately does not use cutoff eligibility.
+    assert await service.ensure_mews_for_selection_trigger(now) is True
+    assert source.calls == 1
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == date(2026, 9, 1)
+    assert service._mews_singleflight_task is None
+
+
+_ENTRY_CYCLE_DATE = date(2026, 9, 1)
+_ENTRY_CYCLE_NOW = datetime(2026, 9, 1, 9, 39, 30, tzinfo=TZ)
+
+
+def _entry_cycle_bundle(trade_date: date) -> CanonicalV16ScanBundle:
+    labels = ("09:25", "09:30", *(f"09:{minute:02d}" for minute in range(31, 40)))
+    early_bars = {
+        code: tuple(_bar(code, label, trade_date=trade_date) for label in labels)
+        for code in _LATE_REPLAY_CODES
+    }
+    return CanonicalV16ScanBundle(
+        trade_date=trade_date,
+        scan_result=_late_replay_scan_result(),
+        stock_data={code: SimpleNamespace(volume_937=900.0) for code in _LATE_REPLAY_CODES},
+        clean_boards={},
+        universe=tuple(sorted(_LATE_REPLAY_CODES)),
+        quotes={},
+        prev_closes={code: 10.0 for code in _LATE_REPLAY_CODES},
+        history_raw={},
+        early_bars=early_bars,
+        early_source_hashes={
+            code: sha256_json([_bar_payload(bar) for bar in bars])
+            for code, bars in early_bars.items()
+        },
+        failed_no_prev_close=(),
+        failed_no_history=(),
+        failed_build=(),
+        skipped_new_listings=(),
+        model_sha256="a" * 64,
+        feature_list_sha256="b" * 64,
+        computed_at=datetime(2026, 9, 1, 9, 39, 30, tzinfo=TZ),
+        input_hash="c" * 64,
+        _integrity_hash="",
+        computation_calendar=(
+            date(2026, 8, 31),
+            trade_date,
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        ),
+        prior_trade_date=date(2026, 8, 31),
+    )
+
+
+class _EntryCycleRepository(_AfterCutoffMewsRepository):
+    async def get_entry_status(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def failed_recovery(_current: datetime) -> bool:
-        nonlocal calls
-        calls += 1
-        raise RuntimeError("mews unavailable")
+    async def record_minute_bars(self, rows):
+        return frozenset(sha256_json(dict(row)) for row in rows)
 
+
+def _entry_cycle_service(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Any,
+    source: Any,
+    order: list[str],
+) -> V20Service:
+    service = _singleflight_service(monkeypatch, repository, source, _ENTRY_CYCLE_NOW)
+
+    async def recorded_compute(*_args: Any, **_kwargs: Any) -> CanonicalV16ScanBundle:
+        order.append("canonical-compute")
+        return _entry_cycle_bundle(_ENTRY_CYCLE_DATE)
+
+    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", recorded_compute)
+    return service
+
+
+@pytest.mark.asyncio
+async def test_entry_collection_kicks_mews_without_blocking_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    order: list[str] = []
+
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.entered = asyncio.Event()
+
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            order.append("mews-fetch")
+            self.entered.set()
+            await gate.wait()
+            return _late_mews_payload()
+
+    repository = _EntryCycleRepository()
+
+    original_record = repository.record_mews_snapshot
+
+    async def recorded_persist(payload: Mapping[str, Any]) -> None:
+        order.append("mews-persist")
+        await original_record(payload)
+
+    repository.record_mews_snapshot = recorded_persist  # type: ignore[method-assign]
+    source = _Source()
+    service = _entry_cycle_service(monkeypatch, repository, source, order)
+    context = _DayContext(
+        trade_date=_ENTRY_CYCLE_DATE,
+        calendar=(
+            date(2026, 8, 31),
+            _ENTRY_CYCLE_DATE,
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        ),
+    )
+
+    # Entry must finish while the independently managed MEWS provider is still
+    # blocked.  This is the production trigger path, not a fake direct compute.
+    await asyncio.wait_for(
+        service._run_entry_collection_cycle(context, _ENTRY_CYCLE_NOW),
+        timeout=1.0,
+    )
+    await asyncio.wait_for(source.entered.wait(), timeout=1.0)
+
+    assert context.canonical_bundle is not None
+    assert context.last_phase == "CANONICAL_0939_READY"
+    assert service._lane_health["decision"].last_error is None
+    assert order.count("canonical-compute") == 1
+    assert source.calls == 1
+    assert repository.payloads == []
+    master = service._mews_singleflight_task
+    assert master is not None and not master.done()
+    trigger_tasks = tuple(service._mews_trigger_tasks)
+    assert len(trigger_tasks) == 1
+    assert all(not task.done() for task in trigger_tasks)
+
+    # Releasing the provider settles the owned task, persists exactly once,
+    # and leaves neither a singleflight master nor a trigger-task orphan.
+    gate.set()
+    assert await asyncio.wait_for(
+        asyncio.gather(*trigger_tasks),
+        timeout=1.0,
+    ) == [True]
+    await asyncio.sleep(0)
+    assert order[-1] == "mews-persist"
+    assert len(repository.payloads) == 1
+    assert service._mews_cached_for == _ENTRY_CYCLE_DATE
+    assert service._mews_singleflight_task is None
+    assert service._mews_trigger_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_entry_collection_continues_after_genuine_mews_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    order: list[str] = []
+
+    class _Source:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.entered = asyncio.Event()
+
+        async def fetch_snapshot(self, **_kwargs):
+            self.calls += 1
+            self.entered.set()
+            await gate.wait()
+            raise MewsSnapshotSourceError("Tushare margin is missing SSE or SZSE")
+
+    repository = _EntryCycleRepository()
+    source = _Source()
+    service = _entry_cycle_service(monkeypatch, repository, source, order)
+    alerts = _alert_recorder(monkeypatch, service)
+    context = _DayContext(
+        trade_date=_ENTRY_CYCLE_DATE,
+        calendar=(
+            date(2026, 8, 31),
+            _ENTRY_CYCLE_DATE,
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+        ),
+    )
+
+    # A genuine MEWS failure settles one idempotent daily alert and the
+    # independent entry computation continues — never ENTRY_COLLECTION_FAILED.
+    await asyncio.wait_for(
+        service._run_entry_collection_cycle(context, _ENTRY_CYCLE_NOW),
+        timeout=1.0,
+    )
+    await asyncio.wait_for(source.entered.wait(), timeout=1.0)
+    assert order == ["canonical-compute"]
+    assert source.calls == 1
+    assert repository.payloads == []
+    assert alerts == []
+    assert context.canonical_bundle is not None
+    assert context.last_phase == "CANONICAL_0939_READY"
+    assert service._lane_health["decision"].last_error is None
+    trigger_tasks = tuple(service._mews_trigger_tasks)
+    assert len(trigger_tasks) == 1
+    assert service._mews_singleflight_task is not None
+
+    gate.set()
+    assert await asyncio.wait_for(
+        asyncio.gather(*trigger_tasks),
+        timeout=1.0,
+    ) == [False]
+    await asyncio.sleep(0)
+    assert len(alerts) == 1
+    assert alerts[0]["code"] == "MEWS_CALCULATION_FAILED"
+    assert alerts[0]["entity_id"] == _ENTRY_CYCLE_DATE.isoformat()
+    assert "SELECTION_TRIGGER" in alerts[0]["message"]
+    assert "MewsSnapshotSourceError" in alerts[0]["message"]
+    assert not any(alert["code"] == "ENTRY_COLLECTION_FAILED" for alert in alerts)
+    assert service._mews_singleflight_task is None
+    assert service._mews_trigger_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_entry_collection_cycles_share_one_mews_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    order: list[str] = []
+    repository = _EntryCycleRepository()
+    source = _GatedMewsSource(gate)
+    service = _entry_cycle_service(monkeypatch, repository, source, order)
+
+    def new_context() -> _DayContext:
+        return _DayContext(
+            trade_date=_ENTRY_CYCLE_DATE,
+            calendar=(
+                date(2026, 8, 31),
+                _ENTRY_CYCLE_DATE,
+                date(2026, 9, 2),
+                date(2026, 9, 3),
+            ),
+        )
+
+    first_context = new_context()
+    second_context = new_context()
+    first = asyncio.create_task(
+        service._run_entry_collection_cycle(first_context, _ENTRY_CYCLE_NOW)
+    )
+    second = asyncio.create_task(
+        service._run_entry_collection_cycle(second_context, _ENTRY_CYCLE_NOW)
+    )
+    await asyncio.wait_for(source.entered.wait(), timeout=1.0)
+    # Both entry cycles finish canonical work without waiting for the one shared
+    # raw MEWS attempt.
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0)
+    assert source.calls == 1
+    assert first_context.canonical_bundle is not None
+    assert second_context.canonical_bundle is not None
+    assert repository.payloads == []
+    trigger_tasks = tuple(service._mews_trigger_tasks)
+    assert len(trigger_tasks) == 2
+    assert service._mews_singleflight_task is not None
+
+    gate.set()
+    assert await asyncio.wait_for(
+        asyncio.gather(*trigger_tasks),
+        timeout=1.0,
+    ) == [True, True]
+    await asyncio.sleep(0)
+    # Exactly one overlapping raw MEWS attempt fed both entry cycles.
+    assert source.calls == 1
+    assert len(repository.payloads) == 1
+    assert order == ["canonical-compute", "canonical-compute"]
+    assert service._mews_cached_for == _ENTRY_CYCLE_DATE
+    assert service._mews_singleflight_task is None
+    assert service._mews_trigger_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_live_exit_stage_with_expired_deadline_never_invokes_the_factory() -> None:
+    """An exhausted tick deadline raises before any DB/provider coroutine exists."""
     service = V20Service.__new__(V20Service)
-    service.config = SimpleNamespace(enabled=True)
-    service._repository_started = True
-    service._repository = SimpleNamespace(assert_runtime_leader=no_leader)
-    service._stop_event = asyncio.Event()
-    service._mews_cached_for = None
-    service._mews_selection_refresh_task = None
-    service._mews_selection_refresh_failed_for = None
-    service._lane_health = {"mews_cache": type("Lane", (), {"last_success_at": None})()}
-    monkeypatch.setattr(
-        service,
-        "_ensure_mews_for_selection_trigger_awaited",
-        failed_recovery,
-    )
-    monkeypatch.setattr(service, "_record_lane_error", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        service,
-        "_aware_now",
-        lambda *_args: datetime(2026, 8, 31, 9, 39, tzinfo=TZ),
-    )
+    loop = asyncio.get_running_loop()
+    tick_started_at = loop.time() - 5.0
+    factory_calls = 0
 
-    assert await service.ensure_mews_for_selection_trigger() is False
-    task = service._mews_selection_refresh_task
-    assert task is not None
-    await task
-    assert service._mews_selection_refresh_task is None
-    assert service._mews_selection_refresh_failed_for == date(2026, 8, 31)
+    def provider_factory() -> Any:
+        nonlocal factory_calls
+        factory_calls += 1
 
-    assert await service.ensure_mews_for_selection_trigger() is False
-    assert service._mews_selection_refresh_task is None
-    assert calls == 1
+        async def _operation() -> None:
+            return None
+
+        return _operation()
+
+    with pytest.raises(V20LiveExitStageTimeout) as exc_info:
+        await service._run_live_exit_stage(
+            provider_factory,
+            stage="latest",
+            stage_cap=2.0,
+            deadline=loop.time() - 0.001,
+            tick_started_at=tick_started_at,
+            symbols=("600000",),
+            provider="tushare_rt",
+        )
+    assert exc_info.value.stage == "latest"
+    assert exc_info.value.provider == "tushare_rt"
+    # The provider was never called and no coroutine/orphan was created.
+    assert factory_calls == 0
+
+    # A live deadline still runs the stage exactly once and returns its value.
+    async def _answer() -> str:
+        return "rows"
+
+    result = await service._run_live_exit_stage(
+        lambda: _answer(),
+        stage="latest",
+        stage_cap=2.0,
+        deadline=loop.time() + 5.0,
+        tick_started_at=tick_started_at,
+        symbols=("600000",),
+        provider="tushare_rt",
+    )
+    assert result == "rows"
+    assert factory_calls == 0
 
 
 @pytest.mark.asyncio
@@ -2966,7 +4152,12 @@ class _LateReplayRepository(_ManualTriggerRepository):
 class _LateReplayClient:
     def __init__(self, *, missing_label: str | None = None) -> None:
         self.missing_label = missing_label
+        # Current-day live endpoints (rt_min_daily & friends); a post-cutoff
+        # replay must never touch them.
         self.calls: list[tuple[str, ...]] = []
+        # Bounded historical stk_mins backfill — the only vendor path a replay
+        # may use, and only for codes without qualified persisted evidence.
+        self.stk_mins_calls: list[tuple[tuple[str, ...], date]] = []
 
     async def batch_get_minute_history(self, codes):
         self.calls.append(tuple(codes))
@@ -2975,6 +4166,22 @@ class _LateReplayClient:
             code: tuple(
                 _bar(code, label, close=10.0 + index / 100)
                 for index, label in enumerate(labels, start=1)
+                if label != self.missing_label
+            )
+            for code in codes
+        }
+
+    async def batch_get_minute_history_for_date(self, codes, trade_date):
+        self.stk_mins_calls.append((tuple(codes), trade_date))
+        labels = ["09:25", "09:30"] + [f"09:{minute:02d}" for minute in range(31, 40)]
+        # The vendor restates the same facts the morning persisted.
+        close_by_label = {"09:25": 10.0, "09:30": 10.0} | {
+            f"09:{minute:02d}": 10.0 + (minute - 30) / 100 for minute in range(31, 40)
+        }
+        return {
+            code: tuple(
+                _bar(code, label, close=close_by_label[label], trade_date=trade_date)
+                for label in labels
                 if label != self.missing_label
             )
             for code in codes
@@ -3024,32 +4231,33 @@ def _install_late_replay_canonical(
     monkeypatch: pytest.MonkeyPatch,
     service: V20Service,
     trade_date: date,
-    *,
-    missing_label: str | None = None,
 ) -> tuple[list[date], dict[str, Any]]:
-    """Bind replay to the one shared canonical V16 Top10 contract."""
+    """Bind replay to the seeded canonical V16 contract; coordinator is a bomb.
+
+    The post-cutoff replay never uses the live coordinator: it seeds from
+    persisted early (<=09:39) raw evidence and calls the real
+    ``compute_canonical_v16_scan`` entry point directly with realtime fetches
+    forbidden.  This double records the call and derives its bundle from the
+    seed it was given, so outputs stay a function of the persisted raw bars.
+    """
     compute_calls: list[date] = []
     observed: dict[str, Any] = {}
 
     async def compute(
         state: V15ScanState,
         requested_date: date,
+        partial: Any = None,
+        **kwargs: Any,
     ) -> CanonicalV16ScanBundle:
         assert state is service._scan_state
+        assert requested_date == trade_date
+        assert partial is None
+        assert kwargs["allow_realtime_fetch"] is False
+        assert kwargs["universe_override"] == tuple(sorted(_LATE_REPLAY_CODES))
+        seed = kwargs["early_data_seed"]
+        assert set(seed) <= set(_LATE_REPLAY_CODES)
         compute_calls.append(requested_date)
-        early_bars = {
-            code: tuple(
-                _bar(
-                    code,
-                    f"09:{minute:02d}",
-                    close=10.0 + (minute - 30) / 100,
-                    trade_date=requested_date,
-                )
-                for minute in range(31, 40)
-                if f"09:{minute:02d}" != missing_label
-            )
-            for code in _LATE_REPLAY_CODES
-        }
+        early_bars = {code: seed[code].early_bars for code in seed}
         observed["early_volume"] = sum(bar.volume for bar in early_bars["603068"])
         observed["early_close"] = early_bars["603068"][-1].close_price
         return CanonicalV16ScanBundle(
@@ -3057,7 +4265,7 @@ def _install_late_replay_canonical(
             scan_result=_late_replay_scan_result(),
             stock_data={code: SimpleNamespace(volume_937=900.0) for code in _LATE_REPLAY_CODES},
             clean_boards={},
-            universe=_LATE_REPLAY_CODES,
+            universe=tuple(sorted(_LATE_REPLAY_CODES)),
             quotes={},
             prev_closes={code: 10.0 for code in _LATE_REPLAY_CODES},
             history_raw={},
@@ -3075,9 +4283,21 @@ def _install_late_replay_canonical(
             computed_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
             input_hash="c" * 64,
             _integrity_hash="",
+            computation_calendar=(
+                date(2026, 8, 28),
+                requested_date,
+                date(2026, 9, 1),
+                date(2026, 9, 2),
+            ),
+            prior_trade_date=date(2026, 8, 28),
         )
 
-    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", compute)
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", compute)
+
+    async def coordinator_bomb(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("post-cutoff replay must bypass the canonical coordinator")
+
+    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", coordinator_bomb)
     return compute_calls, observed
 
 
@@ -3182,18 +4402,61 @@ def _late_replay_service(
     seed = _service(monkeypatch, SimpleNamespace())
     status, state = _late_replay_status_and_state(seed)
     repository = _LateReplayRepository(status, state)
-    client = _LateReplayClient()
+    client = _LateReplayClient(missing_label=missing_label)
     service = _service(monkeypatch, repository, client)
     service._clock = lambda: datetime(2026, 8, 31, 15, 30, 3, tzinfo=TZ)
+    # Durable morning evidence: the full early raw bars (09:25/09:30 strategy
+    # inputs included) were persisted at 09:39, so the post-cutoff replay
+    # rehydrates from the database alone.
+    replay_labels = ("09:25", "09:30") + tuple(f"09:{minute:02d}" for minute in range(31, 40))
+    close_by_label = {"09:25": 10.0, "09:30": 10.0} | {
+        f"09:{minute:02d}": 10.0 + (minute - 30) / 100 for minute in range(31, 40)
+    }
+    for code in _LATE_REPLAY_CODES:
+        for label in replay_labels:
+            if label == missing_label:
+                continue
+            bar = _bar(code, label, close=close_by_label[label])
+            payload = _bar_payload(bar)
+            repository.raw[(code, label)] = SimpleNamespace(
+                code=code,
+                bar_end=bar.bar_end,
+                end_label=label,
+                source_hash=sha256_json(payload),
+                payload=payload,
+                first_received_at=datetime(2026, 8, 31, 9, 39, tzinfo=TZ),
+            )
+    boards = {"board-a": tuple((code, f"name-{code}") for code in _LATE_REPLAY_CODES)}
+    monkeypatch.setattr(
+        service_module,
+        "derive_canonical_v16_universe",
+        lambda _state: (None, None, boards, tuple(sorted(_LATE_REPLAY_CODES))),
+    )
+    # The post-cutoff replay attests V16 DayGate evidence after recompute; the
+    # evidence store is outside these fixtures, so stub a PASS attestation.
+    monkeypatch.setattr(
+        service_module,
+        "attest_post_cutoff_v16_day_gate",
+        lambda *_args, **_kwargs: {
+            "status": "PASS",
+            "schema_version": "v16-day-gate-attestation/v1",
+            "trade_date": status.trade_date.isoformat(),
+        },
+        raising=False,
+    )
     compute_calls, observed = _install_late_replay_canonical(
         monkeypatch,
         service,
         status.trade_date,
-        missing_label=missing_label,
     )
     context = _DayContext(
         trade_date=status.trade_date,
-        calendar=(status.trade_date, date(2026, 9, 1), date(2026, 9, 2)),
+        calendar=(
+            date(2026, 8, 28),
+            status.trade_date,
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+        ),
         entry_status=status,
     )
     return service, repository, client, compute_calls, observed, context
@@ -3219,9 +4482,12 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     assert first.semantic["health_state"] == "WARMUP"
     assert first.semantic["rolling7_state"] == "UNKNOWN"
     assert first.semantic["breadth_replay_mode"] == ("SKIPPED_NOT_USED_BY_BASE_WARMUP_OR_HEALTHY")
-    assert first.semantic["raw_fact_n"] == 90
-    assert first.semantic["raw_post_cutoff_n"] == 90
-    assert first.semantic["pit_limitations"][-1] == "MEWS_IS_NOT_A_09:39_ENTRY_INPUT"
+    assert first.semantic["raw_fact_n"] == 110
+    assert first.semantic["raw_post_cutoff_n"] == 110
+    assert first.semantic["pit_limitations"][-1] == (
+        "OFFICIAL_INPUT_INVALID_SLOT_HAS_NO_FROZEN_MORNING_CANONICAL_IDENTITY"
+    )
+    assert "MEWS_IS_NOT_A_09:39_ENTRY_INPUT" in first.semantic["pit_limitations"]
     assert first.semantic["state_replay_profile"] == "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY"
     assert first.semantic["bootstrap_mode"] == "EMPTY_FORWARD_SHADOW"
     assert "decision_id" not in first.semantic
@@ -3232,12 +4498,15 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     # The replay lane never pulls from the vendor; it recomputes once from
     # durable raw facts through the shared canonical V16 contract.
     assert client.calls == []
+    assert client.stk_mins_calls == []
     assert compute_calls == [context.trade_date]
-    assert observed["early_volume"] == 900.0
+    assert observed["early_volume"] == 1100.0
     assert observed["early_close"] == pytest.approx(10.09)
-    assert len(repository.raw) == 90
+    assert len(repository.raw) == 110
     assert {label for _code, label in repository.raw} == {
-        f"09:{minute:02d}" for minute in range(31, 40)
+        "09:25",
+        "09:30",
+        *{f"09:{minute:02d}" for minute in range(31, 40)},
     }
     assert repository.enqueue_calls == 1
     assert repository.seal_calls == 1
@@ -3283,28 +4552,64 @@ async def test_late_0939_replay_can_recover_entirely_from_durable_raw_facts(
         datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
     )
 
-    assert record.semantic["raw_fact_n"] == 90
+    assert record.semantic["raw_fact_n"] == 110
     assert client.calls == []
+    assert client.stk_mins_calls == []
     assert compute_calls == [context.trade_date]
     assert repository.official_write_calls == 0
 
 
-async def test_late_0939_replay_missing_early_bar_fails_without_replay_or_official_write(
+async def test_late_0939_replay_missing_nonterminal_early_bar_still_replays(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A missing non-terminal label (09:38) is not a fixed-nine failure."""
     service, repository, client, compute_calls, _observed, context = _late_replay_service(
         monkeypatch,
         missing_label="09:38",
     )
 
-    with pytest.raises(RuntimeError, match="incomplete"):
+    record = await service._ensure_late_0939_replay(
+        context,
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+    )
+
+    assert record.semantic["replay_action"] == "ENTER"
+    assert record.semantic["raw_fact_n"] == 100
+    assert client.calls == []
+    assert client.stk_mins_calls == []
+    assert compute_calls == [context.trade_date]
+    assert len(repository.raw) == 100
+    assert {label for _code, label in repository.raw} == {
+        "09:25",
+        "09:30",
+        *{f"09:{minute:02d}" for minute in range(31, 40) if minute != 38},
+    }
+    assert repository.official_write_calls == 0
+
+
+async def test_late_0939_replay_missing_terminal_0939_bar_fails_without_official_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical readiness owns 09:39: a ready code without it fails closed.
+
+    The persisted evidence and one bounded stk_mins backfill both lack the
+    09:39 bar, so the replay fails before compute — and never touches a
+    current-day live endpoint.
+    """
+    service, repository, client, compute_calls, _observed, context = _late_replay_service(
+        monkeypatch,
+        missing_label="09:39",
+    )
+
+    with pytest.raises(V20RepositoryError, match="backfill is incomplete"):
         await service._ensure_late_0939_replay(
             context,
             datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
         )
 
     assert client.calls == []
-    assert compute_calls == [context.trade_date]
+    assert client.stk_mins_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
+    assert compute_calls == []
     assert repository.events == {}
     assert repository.official_write_calls == 0
 
@@ -3336,6 +4641,722 @@ async def test_automatic_late_replay_task_is_not_a_formal_runtime_lane(
     replay_task.cancel()
     await asyncio.gather(replay_task, return_exceptions=True)
     service._late_0939_replay_task = None
+
+
+class _SeedRepository:
+    """Minimal raw minute-bar store for historical seed tests."""
+
+    def __init__(self) -> None:
+        self.raw: dict[tuple[str, str], Any] = {}
+        self.list_calls = 0
+        self.persist_calls: list[tuple[Mapping[str, Any], ...]] = []
+
+    async def list_raw_minute_bar_records(self, codes, *, trade_date, end_labels):
+        self.list_calls += 1
+        allowed_codes = set(codes)
+        allowed_labels = set(end_labels)
+        return [
+            record
+            for (code, label), record in sorted(self.raw.items())
+            if code in allowed_codes
+            and label in allowed_labels
+            and record.bar_end.astimezone(TZ).date() == trade_date
+        ]
+
+    async def record_minute_bars(self, rows):
+        self.persist_calls.append(tuple(dict(payload) for payload in rows))
+        hashes: set[str] = set()
+        for payload in rows:
+            payload = dict(payload)
+            key = (str(payload["stock_code"]), str(payload["end_label"]))
+            source_hash = sha256_json(payload)
+            current = self.raw.get(key)
+            if current is not None and current.source_hash != source_hash:
+                raise V20SemanticConflict("conflicting replay minute fact")
+            self.raw[key] = SimpleNamespace(
+                code=key[0],
+                bar_end=datetime.fromisoformat(str(payload["bar_end"])),
+                end_label=key[1],
+                source_hash=source_hash,
+                payload=payload,
+                first_received_at=datetime(2026, 9, 1, 15, 30, 1, tzinfo=TZ),
+            )
+            hashes.add(source_hash)
+        return frozenset(hashes)
+
+
+class _HistoricalSeedClient:
+    """Past-date evidence may only come from stk_mins; every live path bombs."""
+
+    def __init__(self, bars_by_code: Mapping[str, tuple[TushareMinuteBar, ...]] | None = None):
+        self.bars_by_code = dict(bars_by_code or {})
+        self.calls: list[tuple[tuple[str, ...], date]] = []
+
+    async def batch_get_minute_history_for_date(self, codes, trade_date):
+        self.calls.append((tuple(codes), trade_date))
+        return {code: self.bars_by_code.get(code, ()) for code in codes}
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"past-date replay touched a live/vendor boundary: {name}")
+
+
+def _historical_seed_service(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Any,
+    client: Any,
+    universe: Sequence[str] = _LATE_REPLAY_CODES,
+) -> V20Service:
+    service = _service(monkeypatch, repository, client)
+    boards = {"board-a": tuple((code, f"name-{code}") for code in universe)}
+    monkeypatch.setattr(
+        service_module,
+        "derive_canonical_v16_universe",
+        lambda _state: (None, None, boards, tuple(sorted(universe))),
+    )
+    service._clock = lambda: datetime(2026, 9, 1, 15, 30, 3, tzinfo=TZ)
+    return service
+
+
+_ENRICHED_LABELS = ("09:25", "09:30") + tuple(f"09:{minute:02d}" for minute in range(31, 40))
+_LEGACY_LABELS = tuple(f"09:{minute:02d}" for minute in range(31, 40))
+_HIST_TRADE_DATE = date(2026, 8, 31)
+
+
+async def test_historical_seed_preserves_0925_and_0930_through_persist_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 09:25/09:30 strategy inputs survive persistence, fold and hydration."""
+    repository = _SeedRepository()
+    for code in _LATE_REPLAY_CODES:
+        await repository.record_minute_bars(
+            [_bar_payload(_bar(code, label)) for label in _ENRICHED_LABELS]
+        )
+    repository.persist_calls.clear()
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    seed, universe, _clean_boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    # Full usable coverage: a single database read, no vendor call, no readback.
+    assert client.calls == []
+    assert repository.list_calls == 1
+    assert set(seed) == set(universe)
+    for code in universe:
+        expected = tushare_minute_bars_to_early_market_data(
+            code,
+            tuple(_bar(code, label) for label in _ENRICHED_LABELS),
+            _HIST_TRADE_DATE,
+        )
+        assert seed[code] == expected
+        assert [bar.end_label for bar in seed[code].early_bars] == list(_ENRICHED_LABELS)
+
+
+async def test_past_date_replay_reruns_scanner_directly_and_never_touches_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two past-date replays rerun the scanner twice; the D0 cache is untouched."""
+    today = date(2026, 9, 1)
+    repository = _SeedRepository()
+    for code in _LATE_REPLAY_CODES:
+        await repository.record_minute_bars(
+            [_bar_payload(_bar(code, label)) for label in _ENRICHED_LABELS]
+        )
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    d0_bundle = SimpleNamespace(marker="d0-canonical-cache-entry")
+    service._scan_state.canonical_coordinator = SimpleNamespace(
+        cache={today: d0_bundle},
+        inflight={},
+        partial={},
+    )
+    coordinator_cache = service._scan_state.canonical_coordinator.cache
+    d0_cache_bytes = pickle.dumps(coordinator_cache)
+
+    compute_calls: list[dict[str, Any]] = []
+
+    async def fake_compute(state, requested_date, partial=None, **kwargs):
+        assert state is service._scan_state
+        assert requested_date == _HIST_TRADE_DATE
+        assert partial is None
+        assert kwargs["allow_realtime_fetch"] is False
+        assert kwargs["universe_override"] == tuple(sorted(_LATE_REPLAY_CODES))
+        assert "board-a" in kwargs["clean_boards_override"]
+        seed = kwargs["early_data_seed"]
+        assert set(seed) == set(_LATE_REPLAY_CODES)
+        assert [bar.end_label for bar in seed["603068"].early_bars] == list(_ENRICHED_LABELS)
+        compute_calls.append(kwargs)
+        early_bars = {
+            code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
+            for code in _LATE_REPLAY_CODES
+        }
+        return CanonicalV16ScanBundle(
+            trade_date=requested_date,
+            scan_result=_late_replay_scan_result(),
+            stock_data={code: SimpleNamespace(volume_937=900.0) for code in _LATE_REPLAY_CODES},
+            clean_boards={},
+            universe=tuple(sorted(_LATE_REPLAY_CODES)),
+            quotes={},
+            prev_closes={code: 10.0 for code in _LATE_REPLAY_CODES},
+            history_raw={},
+            early_bars=early_bars,
+            early_source_hashes={
+                code: sha256_json([_bar_payload(bar) for bar in bars])
+                for code, bars in early_bars.items()
+            },
+            failed_no_prev_close=(),
+            failed_no_history=(),
+            failed_build=(),
+            skipped_new_listings=(),
+            model_sha256="a" * 64,
+            feature_list_sha256="b" * 64,
+            computed_at=datetime(2026, 9, 1, 15, 30, 2, tzinfo=TZ),
+            input_hash="c" * 64,
+            _integrity_hash="",
+            computation_calendar=(
+                date(2026, 8, 28),
+                requested_date,
+                date(2026, 9, 1),
+                date(2026, 9, 2),
+            ),
+            prior_trade_date=date(2026, 8, 28),
+        )
+
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", fake_compute)
+
+    async def coordinator_bomb(*_args, **_kwargs):
+        raise AssertionError("historical replay must bypass the canonical coordinator")
+
+    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", coordinator_bomb)
+
+    context = _DayContext(
+        trade_date=_HIST_TRADE_DATE,
+        calendar=(date(2026, 8, 28), _HIST_TRADE_DATE, today),
+    )
+    first = await service._compute_canonical_v16_from_persisted_raw(context)
+    second = await service._compute_canonical_v16_from_persisted_raw(context)
+
+    assert first.trade_date == second.trade_date == _HIST_TRADE_DATE
+    assert len(compute_calls) == 2
+    assert client.calls == []
+    assert pickle.dumps(coordinator_cache) == d0_cache_bytes
+    assert service._scan_state.canonical_coordinator.cache[today] is d0_bundle
+
+
+async def test_past_date_bootstrap_covers_missing_and_legacy_codes_once_with_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sub-80% coverage bootstraps missing + legacy fixed-nine codes via stk_mins."""
+    repository = _SeedRepository()
+    legacy_codes = _LATE_REPLAY_CODES[:2]
+    for code in legacy_codes:
+        await repository.record_minute_bars(
+            [_bar_payload(_bar(code, label)) for label in _LEGACY_LABELS]
+        )
+    suspended = "600557"
+    vendor_bars: dict[str, tuple[TushareMinuteBar, ...]] = {}
+    for code in _LATE_REPLAY_CODES:
+        if code == suspended:
+            continue
+        bars = [_bar(code, label) for label in _ENRICHED_LABELS]
+        if code == "603068":
+            # Late and wrong-date vendor rows must be truncated away BEFORE
+            # the normalizer and persistence.
+            bars += [
+                _bar(code, "09:40"),
+                _bar(code, "09:39", trade_date=date(2026, 8, 28)),
+            ]
+        vendor_bars[code] = tuple(bars)
+    client = _HistoricalSeedClient(vendor_bars)
+    service = _historical_seed_service(monkeypatch, repository, client)
+    repository.persist_calls.clear()
+
+    seed, universe, _clean_boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    # One deterministic chunk covering every missing code plus the two legacy
+    # fixed-nine codes, then a mandatory database readback.  Legacy codes only
+    # gain the labels they never had; their stored nine revisions are never
+    # rewritten, so no conflict can appear.
+    assert client.calls == [(tuple(sorted(universe)), _HIST_TRADE_DATE)]
+    assert repository.list_calls == 2
+    assert len(repository.persist_calls) == 1
+    persisted_now = repository.persist_calls[0]
+    for code in legacy_codes:
+        assert sorted(
+            str(payload["end_label"])
+            for payload in persisted_now
+            if str(payload["stock_code"]) == code
+        ) == ["09:25", "09:30"]
+    assert suspended not in seed
+    assert set(seed) == set(universe) - {suspended}
+    for code in seed:
+        assert [bar.end_label for bar in seed[code].early_bars] == list(_ENRICHED_LABELS)
+    persisted_labels = {label for _code, label in repository.raw}
+    assert "09:40" not in persisted_labels
+    assert all(
+        record.bar_end.astimezone(TZ).date() == _HIST_TRADE_DATE
+        for record in repository.raw.values()
+    )
+
+    # The 80% gate never stops evidence fetching: the second seed build
+    # re-requests only the still-missing suspended code, and its explicitly
+    # empty response completes the round without an error.
+    seed_again, _universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+    assert set(seed_again) == set(seed)
+    assert client.calls == [
+        (tuple(sorted(universe)), _HIST_TRADE_DATE),
+        ((suspended,), _HIST_TRADE_DATE),
+    ]
+    assert repository.list_calls == 4
+
+
+async def test_past_date_seed_reads_back_even_when_bootstrap_seals_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The database readback is mandatory after a stk_mins attempt, even empty."""
+    repository = _SeedRepository()
+    client = _HistoricalSeedClient()  # vendor has no bars at all
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    seed, universe, _clean_boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert seed == {}
+    assert client.calls == [(tuple(sorted(universe)), _HIST_TRADE_DATE)]
+    assert repository.persist_calls == []
+    assert repository.list_calls == 2
+
+
+async def test_past_date_bootstrap_chunk_cancellation_resumes_from_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled chunk keeps completed chunks; the next call fetches the rest."""
+    codes = tuple(f"{index:06d}" for index in range(200))
+    repository = _SeedRepository()
+
+    class _CancellingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        async def batch_get_minute_history_for_date(self, requested, trade_date):
+            self.calls.append(tuple(requested))
+            if len(self.calls) == 2:
+                raise asyncio.CancelledError()
+            return {
+                code: tuple(_bar(code, label, trade_date=trade_date) for label in _ENRICHED_LABELS)
+                for code in requested
+            }
+
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(f"past-date replay touched a live/vendor boundary: {name}")
+
+    client = _CancellingClient()
+    service = _historical_seed_service(monkeypatch, repository, client, universe=codes)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    # The first 128-code chunk completed and is durable; the second chunk was
+    # cancelled before producing anything.
+    assert [len(call) for call in client.calls] == [128, 72]
+    assert len(repository.raw) == 128 * len(_ENRICHED_LABELS)
+
+    seed, _universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    # The resume re-derives pending from the database: only the 72 unfinished
+    # codes are requested again.
+    assert set(seed) == set(codes)
+    assert [len(call) for call in client.calls] == [128, 72, 72]
+
+
+async def test_past_date_bootstrap_failed_code_raises_instead_of_fake_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target with a failed (keyless) response fails closed; no scan runs."""
+    dropped = "600557"
+    vendor_bars = {
+        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
+        for code in _LATE_REPLAY_CODES
+        if code != dropped
+    }
+    repository = _SeedRepository()
+
+    class _FlakyClient(_HistoricalSeedClient):
+        async def batch_get_minute_history_for_date(self, codes, trade_date):
+            self.calls.append((tuple(codes), trade_date))
+            # A missing key means the per-code API call failed.
+            return {code: self.bars_by_code[code] for code in codes if code != dropped}
+
+    client = _FlakyClient(vendor_bars)
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    with pytest.raises(V20RepositoryError, match="backfill is incomplete"):
+        await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert client.calls == [(tuple(sorted(_LATE_REPLAY_CODES)), _HIST_TRADE_DATE)]
+    # The successful chunk rows are still durable, and the mandatory readback ran.
+    assert repository.list_calls == 2
+    assert len(repository.raw) == 9 * len(_ENRICHED_LABELS)
+
+
+async def test_past_date_replay_rejects_future_trade_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _SeedRepository()
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(monkeypatch, repository, client)
+    future = date(2026, 9, 2)
+    context = _DayContext(
+        trade_date=future,
+        calendar=(_HIST_TRADE_DATE, date(2026, 9, 1), future),
+    )
+
+    with pytest.raises(V20StateConflict, match="future trade date"):
+        await service._compute_canonical_v16_from_persisted_raw(context)
+
+    assert client.calls == []
+    assert repository.list_calls == 0
+
+
+def test_fold_universe_raw_records_identical_misbound_conflicted_and_missing() -> None:
+    """Identical revisions fold; unequal or misbound revisions conflict a code."""
+
+    def record(code: str, label: str, *, payload=None, bar_end=None) -> MinuteBarRecord:
+        payload = payload if payload is not None else _bar_payload(_bar(code, label))
+        return MinuteBarRecord(
+            code=code,
+            bar_end=(
+                bar_end if bar_end is not None else datetime.fromisoformat(str(payload["bar_end"]))
+            ),
+            end_label=label,
+            source_hash=sha256_json(payload),
+            payload=payload,
+            first_received_at=datetime(2026, 9, 1, 15, 30, tzinfo=TZ),
+        )
+
+    universe = ("000001", "000002", "000003", "000004", "000005")
+    records = [
+        # 000001: identical duplicate revisions fold into one usable bar.
+        record("000001", "09:39"),
+        record("000001", "09:39"),
+        # 000002: unequal revisions for one label conflict the whole code.
+        record("000002", "09:39"),
+        record(
+            "000002",
+            "09:39",
+            payload=_bar_payload(_bar("000002", "09:39", close=11.0)),
+        ),
+        # 000003: record label disagrees with the payload label (misbound).
+        record("000003", "09:38", payload=_bar_payload(_bar("000003", "09:39"))),
+        # 000004: record bar_end is not the label's Shanghai HH:MM instant.
+        record(
+            "000004",
+            "09:39",
+            bar_end=datetime(2026, 8, 31, 9, 38, tzinfo=TZ),
+        ),
+        # 000005: no rows at all.
+    ]
+
+    usable, missing, conflicted = V20Service._fold_universe_raw_records(
+        records, universe, _HIST_TRADE_DATE
+    )
+
+    assert [bar.end_label for bar in usable["000001"]] == ["09:39"]
+    assert conflicted == frozenset({"000002", "000003", "000004"})
+    assert missing == frozenset({"000005"})
+
+
+async def test_canonical_raw_persistence_seals_every_ready_code_not_just_top10(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistence is scoped to the full ready universe, never only the Top10."""
+    extra_codes = ("300001", "300002")
+    all_codes = tuple(sorted(_LATE_REPLAY_CODES + extra_codes))
+    early_bars = {
+        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS) for code in all_codes
+    }
+    canonical = CanonicalV16ScanBundle(
+        trade_date=_HIST_TRADE_DATE,
+        scan_result=_late_replay_scan_result(),
+        stock_data={code: SimpleNamespace(volume_937=900.0) for code in all_codes},
+        clean_boards={},
+        universe=all_codes,
+        quotes={},
+        prev_closes={code: 10.0 for code in all_codes},
+        history_raw={},
+        early_bars=early_bars,
+        early_source_hashes={
+            code: sha256_json([_bar_payload(bar) for bar in bars])
+            for code, bars in early_bars.items()
+        },
+        failed_no_prev_close=(),
+        failed_no_history=(),
+        failed_build=(),
+        skipped_new_listings=(),
+        model_sha256="a" * 64,
+        feature_list_sha256="b" * 64,
+        computed_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
+        input_hash="c" * 64,
+        _integrity_hash="",
+        computation_calendar=(
+            date(2026, 8, 28),
+            _HIST_TRADE_DATE,
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+        ),
+        prior_trade_date=date(2026, 8, 28),
+    )
+    repository = _SeedRepository()
+    service = _service(monkeypatch, repository)
+
+    await service._persist_canonical_raw_minute_bars(canonical)
+
+    assert len(repository.persist_calls) == 1
+    persisted = repository.persist_calls[0]
+    assert len(persisted) == len(all_codes) * len(_ENRICHED_LABELS)
+    assert {str(payload["stock_code"]) for payload in persisted} == set(all_codes)
+    for code in all_codes:
+        assert {
+            str(payload["end_label"]) for payload in persisted if str(payload["stock_code"]) == code
+        } == set(_ENRICHED_LABELS)
+
+    # A late 09:40+ row inside the canonical evidence fails closed.
+    tainted = CanonicalV16ScanBundle(
+        trade_date=date(2026, 9, 2),
+        scan_result=canonical.scan_result,
+        stock_data=canonical.stock_data,
+        clean_boards=canonical.clean_boards,
+        universe=canonical.universe,
+        quotes=canonical.quotes,
+        prev_closes=canonical.prev_closes,
+        history_raw=canonical.history_raw,
+        early_bars={
+            code: tuple(
+                _bar(code, label, trade_date=date(2026, 9, 2)) for label in _ENRICHED_LABELS
+            )
+            + (_bar(code, "09:40", trade_date=date(2026, 9, 2)),)
+            for code in all_codes
+        },
+        early_source_hashes=canonical.early_source_hashes,
+        failed_no_prev_close=(),
+        failed_no_history=(),
+        failed_build=(),
+        skipped_new_listings=(),
+        model_sha256="a" * 64,
+        feature_list_sha256="b" * 64,
+        computed_at=datetime(2026, 9, 2, 15, 30, 2, tzinfo=TZ),
+        input_hash="d" * 64,
+        _integrity_hash="",
+        computation_calendar=(
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+            date(2026, 9, 3),
+            date(2026, 9, 4),
+        ),
+        prior_trade_date=date(2026, 9, 1),
+    )
+    with pytest.raises(V20SemanticConflict, match="early raw bar is invalid"):
+        await service._persist_canonical_raw_minute_bars(tainted)
+    assert all(
+        str(payload["end_label"]) != "09:40"
+        for call in repository.persist_calls
+        for payload in call
+    )
+
+
+def _seed_record(code: str, label: str, *, close: float = 10.0) -> MinuteBarRecord:
+    payload = _bar_payload(_bar(code, label, close=close))
+    return MinuteBarRecord(
+        code=code,
+        bar_end=datetime.fromisoformat(str(payload["bar_end"])),
+        end_label=label,
+        source_hash=sha256_json(payload),
+        payload=payload,
+        first_received_at=datetime(2026, 9, 1, 15, 30, tzinfo=TZ),
+    )
+
+
+async def test_past_date_bootstrap_empty_first_chunk_continues_to_later_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful all-empty chunk never breaks; later chunks are still fetched."""
+    codes = tuple(f"{index:06d}" for index in range(200))
+    populated = codes[128:]
+    vendor_bars = {
+        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS) for code in populated
+    }
+    repository = _SeedRepository()
+    # Keys are present for every requested code; the first chunk answers with
+    # explicit empty tuples (a successful "no bars" response, not a failure).
+    client = _HistoricalSeedClient(vendor_bars)
+    service = _historical_seed_service(monkeypatch, repository, client, universe=codes)
+
+    seed, _universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert [len(call) for call, _day in client.calls] == [128, 72]
+    assert set(seed) == set(populated)
+    assert repository.list_calls == 2
+    assert len(repository.persist_calls) == 1
+    assert len(repository.persist_calls[0]) == 72 * len(_ENRICHED_LABELS)
+
+
+async def test_past_date_seed_initial_conflict_outside_top10_blocks_vendor_and_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any conflicted universe code (even non-Top10) blocks fetch and compute."""
+    conflicted_code = "300001"
+    universe = tuple(sorted(_LATE_REPLAY_CODES + (conflicted_code,)))
+
+    class _InitialConflictRepository(_SeedRepository):
+        async def list_raw_minute_bar_records(self, codes, *, trade_date, end_labels):
+            records = await super().list_raw_minute_bar_records(
+                codes, trade_date=trade_date, end_labels=end_labels
+            )
+            # Two unequal persisted revisions of the same 09:39 bar.
+            return [
+                *records,
+                _seed_record(conflicted_code, "09:39"),
+                _seed_record(conflicted_code, "09:39", close=11.0),
+            ]
+
+    repository = _InitialConflictRepository()
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(monkeypatch, repository, client, universe=universe)
+
+    compute_calls: list[Any] = []
+
+    async def fake_compute(*_args: Any, **_kwargs: Any) -> Any:
+        compute_calls.append(1)
+        raise AssertionError("compute must never run after a seed conflict")
+
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", fake_compute)
+    context = _DayContext(
+        trade_date=_HIST_TRADE_DATE,
+        calendar=(date(2026, 8, 28), _HIST_TRADE_DATE, date(2026, 9, 1)),
+    )
+
+    with pytest.raises(V20SemanticConflict, match="initial fold has 1 conflicted") as exc_info:
+        await service._compute_canonical_v16_from_persisted_raw(context)
+
+    assert conflicted_code in str(exc_info.value)
+    assert client.calls == []
+    assert compute_calls == []
+    assert repository.list_calls == 1
+
+
+async def test_past_date_seed_readback_conflict_blocks_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conflict appearing only in the mandatory readback still blocks compute."""
+
+    class _ReadbackConflictRepository(_SeedRepository):
+        async def list_raw_minute_bar_records(self, codes, *, trade_date, end_labels):
+            records = await super().list_raw_minute_bar_records(
+                codes, trade_date=trade_date, end_labels=end_labels
+            )
+            if self.list_calls >= 2:
+                # A second, unequal 09:39 revision surfaces only on readback.
+                records = [
+                    *records,
+                    _seed_record("603068", "09:39", close=99.0),
+                ]
+            return records
+
+    repository = _ReadbackConflictRepository()
+    vendor_bars = {
+        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS) for code in _LATE_REPLAY_CODES
+    }
+    client = _HistoricalSeedClient(vendor_bars)
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    compute_calls: list[Any] = []
+
+    async def fake_compute(*_args: Any, **_kwargs: Any) -> Any:
+        compute_calls.append(1)
+        raise AssertionError("compute must never run after a readback conflict")
+
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", fake_compute)
+    context = _DayContext(
+        trade_date=_HIST_TRADE_DATE,
+        calendar=(date(2026, 8, 28), _HIST_TRADE_DATE, date(2026, 9, 1)),
+    )
+
+    with pytest.raises(V20SemanticConflict, match="readback fold has 1 conflicted") as exc_info:
+        await service._compute_canonical_v16_from_persisted_raw(context)
+
+    assert "603068" in str(exc_info.value)
+    assert compute_calls == []
+    assert repository.list_calls == 2
+
+
+async def test_past_date_bootstrap_legacy_empty_response_stays_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty tuple never confirms 'no data' for a legacy fixed-nine code."""
+    repository = _SeedRepository()
+    legacy_codes = _LATE_REPLAY_CODES[:2]
+    for code in legacy_codes:
+        await repository.record_minute_bars(
+            [_bar_payload(_bar(code, label)) for label in _LEGACY_LABELS]
+        )
+    repository.persist_calls.clear()
+    vendor_bars = {
+        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
+        for code in _LATE_REPLAY_CODES[2:]
+    }
+    # The legacy codes answer with an explicit empty tuple; that response must
+    # not resolve them — only an authoritative non-legacy label can.
+    client = _HistoricalSeedClient(vendor_bars)
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    with pytest.raises(V20RepositoryError, match="backfill is incomplete: 2/10"):
+        await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert len(client.calls) == 1
+    assert repository.list_calls == 2
+    # The legacy nines were never rewritten and no legacy payload was persisted.
+    assert all(
+        str(payload["stock_code"]) not in legacy_codes
+        for call in repository.persist_calls
+        for payload in call
+    )
+    for code in legacy_codes:
+        assert sorted(
+            label for persisted_code, label in repository.raw if persisted_code == code
+        ) == sorted(_LEGACY_LABELS)
+
+
+async def test_past_date_bootstrap_legacy_no_new_labels_stays_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy response carrying only the old nine labels adds nothing."""
+    repository = _SeedRepository()
+    legacy_codes = _LATE_REPLAY_CODES[:2]
+    for code in legacy_codes:
+        await repository.record_minute_bars(
+            [_bar_payload(_bar(code, label)) for label in _LEGACY_LABELS]
+        )
+    repository.persist_calls.clear()
+    vendor_bars = {
+        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
+        for code in _LATE_REPLAY_CODES[2:]
+    }
+    # The vendor restates exactly the already-stored nine labels for the legacy
+    # codes — no new label is ever persisted, so they stay unresolved.
+    for code in legacy_codes:
+        vendor_bars[code] = tuple(_bar(code, label) for label in _LEGACY_LABELS)
+    client = _HistoricalSeedClient(vendor_bars)
+    service = _historical_seed_service(monkeypatch, repository, client)
+
+    with pytest.raises(V20RepositoryError, match="backfill is incomplete: 2/10"):
+        await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert len(client.calls) == 1
+    assert repository.list_calls == 2
+    assert all(
+        str(payload["stock_code"]) not in legacy_codes
+        for call in repository.persist_calls
+        for payload in call
+    )
 
 
 class _SealRepository:
@@ -3560,7 +5581,7 @@ async def test_live_exit_lane_keeps_ticking_while_decision_lane_is_blocked(
     async def immediate_tick(_started_at, _cadence):
         await asyncio.sleep(0)
 
-    monkeypatch.setattr(service, "run_once", blocked_decision)
+    monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", blocked_decision)
     monkeypatch.setattr(service, "_run_live_exit_tick", live_tick)
     monkeypatch.setattr(service, "_wait_for_runtime_tick", immediate_tick)
     decision_task = asyncio.create_task(service._run_scheduler())
@@ -3597,7 +5618,7 @@ async def test_live_exit_tick_timeout_cancels_slow_vendor_and_allows_next_tick(
                     raise
 
             await service._run_live_exit_stage(
-                slow_vendor(),
+                slow_vendor,
                 stage="latest",
                 stage_cap=1.0,
                 deadline=deadline,
@@ -3777,11 +5798,15 @@ async def test_decision_retry_error_is_not_cleared_at_end_of_same_scheduler_cycl
     async def database_cutoff_reached(_cutoff: datetime) -> bool:
         return True
 
+    async def get_entry_status(_stream_id: str, _trade_date: date) -> None:
+        return None
+
     service = _service(
         monkeypatch,
         SimpleNamespace(
             assert_runtime_leader=assert_leader,
             database_cutoff_reached=database_cutoff_reached,
+            get_entry_status=get_entry_status,
         ),
     )
     now = service._aware_now()
@@ -4431,30 +6456,34 @@ async def test_entry_collection_computes_canonical_only_at_or_after_0939(
     # The iteration timestamp is deliberately stale.  Any cutoff-sensitive
     # budget must be derived from a fresh clock sample, not this value.
     service._clock = lambda: datetime(2026, 8, 31, 9, 39, 59, tzinfo=TZ)
+    # Today's MEWS cache is already present, so the cycle skips the join.
+    service._mews_cached_for = date(2026, 8, 31)
     context = _DayContext(
         trade_date=date(2026, 8, 31),
-        calendar=(date(2026, 8, 31),),
+        calendar=(
+            date(2026, 8, 28),
+            date(2026, 8, 31),
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+        ),
     )
     compute_calls: list[date] = []
-    canonical = SimpleNamespace(marker="canonical")
+    canonical = _strict_barrier_canonical(context.trade_date)
 
     async def compute(state: V15ScanState, requested_date: date):
         assert state is service._scan_state
         compute_calls.append(requested_date)
+        assert state.canonical_sink is not None
+        await state.canonical_sink(canonical)
         return canonical
 
-    persisted: list[object] = []
-
-    async def persist(value: object) -> None:
-        persisted.append(value)
-
-    projected = SimpleNamespace(marker="projected")
     monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", compute)
-    monkeypatch.setattr(service, "_persist_canonical_raw_minute_bars", persist)
-    monkeypatch.setattr(
+    timeline: list[str] = []
+    store = _install_strict_durable_barrier(
+        monkeypatch,
         service,
-        "_project_canonical_v16",
-        lambda _canonical, **_kwargs: projected,
+        service._repository,
+        timeline,
     )
 
     await service._run_entry_collection_cycle(
@@ -4469,8 +6498,18 @@ async def test_entry_collection_computes_canonical_only_at_or_after_0939(
         datetime(2026, 8, 31, 9, 39, 30, tzinfo=TZ),
     )
     assert compute_calls == [context.trade_date]
-    assert persisted == [canonical]
-    assert context.canonical_bundle is projected
+    assert context.canonical_bundle is not None
+    assert context.canonical_bundle.snapshot_hash == store.record.payload["v20_snapshot_hash"]
+    assert timeline == [
+        "artifact-load-miss",
+        "durable-raw",
+        "artifact-load-miss",
+        "artifact-save",
+        "artifact-load-hit",
+        "artifact-hydrate",
+        "artifact-load-hit",
+        "artifact-hydrate",
+    ]
     assert context.last_phase == "CANONICAL_0939_READY"
 
 
@@ -4483,11 +6522,15 @@ async def test_decision_watchdog_preempts_blocked_reconciliation_at_0940(
     async def database_cutoff_reached(_cutoff: datetime) -> bool:
         return True
 
+    async def repository_status(_stream_id: str, _trade_date: date) -> None:
+        return None
+
     service = _service(
         monkeypatch,
         SimpleNamespace(
             assert_runtime_leader=assert_leader,
             database_cutoff_reached=database_cutoff_reached,
+            get_entry_status=repository_status,
         ),
     )
     service._repository_started = True
@@ -4575,6 +6618,13 @@ async def test_decision_watchdog_cancels_only_canonical_waiter_and_master_is_reu
         computed_at=cutoff,
         input_hash="c" * 64,
         _integrity_hash="",
+        computation_calendar=(
+            date(2026, 8, 28),
+            trade_date,
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+        ),
+        prior_trade_date=date(2026, 8, 28),
     )
     canonical = replace(base, _integrity_hash=_bundle_fingerprint(base))
 
@@ -4714,11 +6764,15 @@ async def test_decision_watchdog_fails_closed_when_first_calendar_load_crosses_c
     async def database_cutoff_reached(_cutoff: datetime) -> bool:
         return True
 
+    async def get_entry_status(_stream_id: str, _trade_date: date) -> None:
+        return None
+
     service = _service(
         monkeypatch,
         SimpleNamespace(
             assert_runtime_leader=assert_leader,
             database_cutoff_reached=database_cutoff_reached,
+            get_entry_status=get_entry_status,
         ),
     )
     service._repository_started = True
@@ -4758,7 +6812,7 @@ async def test_decision_watchdog_fails_closed_when_first_calendar_load_crosses_c
     assert calendar_cancelled is True
     assert len(alerts) == expected_alerts
     if alerts:
-        assert alerts[0]["code"] == "ENTRY_CALENDAR_UNKNOWN_NO_BUY"
+        assert alerts[0]["code"] == "ENTRY_CUTOFF_NO_BUY"
         assert alerts[0]["entity_id"] == trade_date.isoformat()
         assert "今天不买，不要追买" in alerts[0]["message"]
         assert service._lane_health["decision"].error_revision == error_revision_before + 1
@@ -4777,6 +6831,9 @@ class _CutoffAlertRepository:
 
     async def database_cutoff_reached(self, _cutoff: datetime) -> bool:
         return True
+
+    async def get_entry_status(self, _stream_id: str, _trade_date: date) -> None:
+        return None
 
     async def enqueue_alert(
         self,
@@ -4861,7 +6918,7 @@ async def test_entry_cutoff_cold_start_failure_alerts_once_with_cause(
 
     assert len(repository.alert_rows) == 1
     semantic = next(iter(repository.alert_rows.values()))
-    assert semantic["alert_code"] == "ENTRY_CALENDAR_UNKNOWN_NO_BUY"
+    assert semantic["alert_code"] == "ENTRY_CUTOFF_NO_BUY"
     assert semantic["entity_id"] == trade_date.isoformat()
     assert "今天不买，不要追买" in semantic["message"]
     last_error = service._lane_health["decision"].last_error or ""
@@ -4903,7 +6960,7 @@ async def test_entry_cutoff_cold_start_timeout_alerts_once_and_returns(
     assert cutoff_reached is True
     assert len(repository.alert_rows) == 1
     semantic = next(iter(repository.alert_rows.values()))
-    assert semantic["alert_code"] == "ENTRY_CALENDAR_UNKNOWN_NO_BUY"
+    assert semantic["alert_code"] == "ENTRY_CUTOFF_NO_BUY"
     last_error = service._lane_health["decision"].last_error or ""
     assert "ENTRY_CALENDAR_UNKNOWN_AT_0940" in last_error
     assert "TimeoutError" in last_error
@@ -6162,6 +8219,7 @@ async def _run_live_data_probe(
     *,
     now: datetime | None = None,
     preexisting_outage: bool = False,
+    alert_payloads: list[dict[str, Any]] | None = None,
 ) -> tuple[V20Service, _DayContext, list[str], list[tuple[str, ...]], bool]:
     repository = _LiveExitDataRepository(legs)
     service = _service(monkeypatch, repository, client)
@@ -6173,6 +8231,8 @@ async def _run_live_data_probe(
 
     async def capture_alert(**kwargs):
         alerts.append(str(kwargs["code"]))
+        if alert_payloads is not None:
+            alert_payloads.append(dict(kwargs))
 
     async def evaluate(active, _now, _calendar=()):
         evaluations.append(tuple(item.code for item in active))
@@ -6234,21 +8294,57 @@ async def test_partial_cold_history_keeps_sibling_evaluation_without_global_outa
     assert service._lane_health["live_exit"].last_error is None
 
 
+async def test_symbol_data_gap_names_missing_001306_and_healthy_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    healthy = _closed_history_leg()
+    missing = replace(
+        _second_live_leg(healthy),
+        code="001306",
+        stock_name="test-missing",
+    )
+    history = {healthy.code: (_bar(healthy.code, "10:00", trade_date=date(2026, 9, 1)),)}
+    alert_payloads: list[dict[str, Any]] = []
+
+    _service_value, _context, _alerts, _evaluations, succeeded = await _run_live_data_probe(
+        monkeypatch,
+        [healthy, missing],
+        _LiveExitDataClient(latest={}, history=history),
+        alert_payloads=alert_payloads,
+    )
+
+    assert succeeded is True
+    payload = next(item for item in alert_payloads if item["code"] == "LIVE_EXIT_SYMBOL_DATA_GAP")
+    assert payload["message"].endswith(f"missing symbols=001306; healthy siblings={healthy.code}")
+    assert payload["semantic_extras"] == {
+        "missing_symbols": ["001306"],
+        "healthy_siblings": [healthy.code],
+    }
+
+
 async def test_single_empty_symbol_is_diagnostic_not_global_feed_outage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     leg = _closed_history_leg()
 
+    alert_payloads: list[dict[str, Any]] = []
     _service_value, context, alerts, _evaluations, succeeded = await _run_live_data_probe(
         monkeypatch,
         [leg],
         _LiveExitDataClient(latest={}, history={leg.code: ()}),
+        alert_payloads=alert_payloads,
     )
 
     assert succeeded is True
     assert context.live_exit_market_data_outage is False
     assert "LIVE_EXIT_SYMBOL_DATA_GAP" in alerts
     assert "LIVE_EXIT_MARKET_DATA_UNAVAILABLE" not in alerts
+    payload = next(item for item in alert_payloads if item["code"] == "LIVE_EXIT_SYMBOL_DATA_GAP")
+    assert payload["message"].endswith(f"missing symbols={leg.code}; healthy siblings=none")
+    assert payload["semantic_extras"] == {
+        "missing_symbols": [leg.code],
+        "healthy_siblings": [],
+    }
 
 
 async def test_single_symbol_lunch_history_failure_is_global_outage(

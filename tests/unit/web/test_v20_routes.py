@@ -27,10 +27,12 @@ from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_FEISHU_FORMATTER_PROFILE,
 )
+from src.web import v20_routes as v20_routes_module
 from src.web.app import create_app
 from src.web.v20_routes import (
     _dispatch_manual_trigger,
     _replay_frozen_entry_message,
+    _run_fresh_0939_probe,
     _wait_for_manual_trigger_ready,
     create_v20_router,
 )
@@ -59,6 +61,7 @@ class StubV20Service:
         self.manual_monitor_source_event_id: str | None = None
         self.manual_monitor_request_id: str | None = None
         self.mews_trigger_times: list[datetime] = []
+        self.mews_kick_tasks: list[asyncio.Task[bool]] = []
         self.error: Exception | None = None
 
     def _aware_now(self) -> datetime:
@@ -86,6 +89,12 @@ class StubV20Service:
     async def ensure_mews_for_selection_trigger(self, now: datetime) -> bool:
         self.mews_trigger_times.append(now)
         return False
+
+    def kick_mews_for_selection_trigger(self, now: datetime) -> asyncio.Task[bool]:
+        task = asyncio.create_task(self.ensure_mews_for_selection_trigger(now))
+        task.add_done_callback(lambda finished: finished.exception())
+        self.mews_kick_tasks.append(task)
+        return task
 
     async def trigger_manual_scan(self, request_id: str) -> dict[str, Any]:
         self.trigger_request_id = request_id
@@ -360,6 +369,13 @@ class FreshProbeV20Service(StubV20Service):
     async def _ensure_late_0939_replay(self, *_args, **_kwargs):
         self.ensure_replay_calls += 1
         raise AssertionError("fresh chain probe must not reuse the old replay event")
+
+    async def trigger_canonical_selection_check_only(
+        self,
+        request_id: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        return await _run_fresh_0939_probe(self, request_id, now)
 
     async def trigger_manual_scan(self, _request_id: str) -> dict[str, Any]:
         self.old_manual_calls += 1
@@ -926,8 +942,8 @@ def test_post_cutoff_trigger_recomputes_current_chain_without_reusing_old_replay
     assert probe.semantic["probe_result"] == "PASS"
     assert probe.semantic["current_version_recomputed"] is True
     assert probe.semantic["replay_reused"] is False
-    assert probe.semantic["data_source"] == "PERSISTED_09:31_09:39"
-    assert probe.semantic["data_window_start"] == "09:31"
+    assert probe.semantic["data_source"] == "PERSISTED_CANONICAL_EARLY_THROUGH_09:39"
+    assert probe.semantic["data_window_start"] == "00:00"
     assert probe.semantic["data_window_end"] == "09:39"
     assert probe.semantic["official_state_changed"] is False
     assert probe.semantic["orders_changed"] is False
@@ -1034,51 +1050,31 @@ def test_post_cutoff_existing_enter_recomputes_fresh_check_only_chain() -> None:
 
     assert response.status_code == 202
     result = response.json()
-    assert result["chain_probe_available"] is True
-    assert result["chain_probe_passed"] is True
+    source = repository.events[repository.entry_status.event_id]
+    assert source.payload == {"message": source_message}
+    probe = repository.events[result["chain_probe_event_id"]]
+    assert probe.payload is not None
+    message = str(probe.payload["message"])
+    message_lines = message.splitlines()
+    assert message_lines[0] == "[V20][SHADOW] 手工触发结果｜仅核查"
+    assert message_lines[2] == "当前操作：不生成新的入场指令，不补买，不追买"
+    assert message_lines[3] == "原因：手工触发时间已过当日入场时点。"
+    assert source_message not in message
+    event_suffix = result["chain_probe_event_id"][:16]
+    assert f"事件：{event_suffix}" in message_lines[-1]
+    for banned in ("理论复盘", "当时本应", "复盘已过期"):
+        assert banned not in message
+    assert [item["code"] for item in result["symbols"]] == expected_codes
     assert result["current_version_recomputed"] is True
     assert result["replay_reused"] is False
-    assert [item["code"] for item in result["symbols"]] == expected_codes
     assert result["exact_automatic_message"] is False
     assert result["non_actionable"] is True
     assert result["retrospective_expired"] is True
     assert result["official_state_changed"] is False
     assert result["orders_changed"] is False
-    assert len(service.build_calls) == 1
-    assert repository.official_write_calls == 0
-    source = repository.events[repository.entry_status.event_id]
-    assert source.payload == {"message": source_message}
-    return
-    replay = repository.events[result["replay_event_id"]]
-    assert replay.payload is not None
-    message = str(replay.payload["message"])
-    message_lines = message.splitlines()
-    assert message_lines[0] == "[V20][SHADOW] 手工触发结果｜仅核查"
-    assert message_lines[2] == "当前操作：不生成新的入场指令，不补买，不追买"
-    assert message_lines[3] == "原因：手工触发时间已过当日入场时点。"
-    assert "以下为早盘封存原文" in message
-    begin = "----- 早盘封存原文开始（逐字节未改动，仅供核查） -----\n"
-    end = "\n----- 早盘封存原文结束 -----"
-    extracted = message.split(begin, 1)[1].split(end, 1)[0]
-    assert extracted == source_message
-    assert extracted.encode("utf-8") == source_message.encode("utf-8")
-    assert f"事件：{result['replay_event_id'][:16]}" in message_lines[-1]
-    for banned in ("理论复盘", "当时本应", "复盘已过期"):
-        assert banned not in message
-    assert result["symbols"] == [
-        {
-            "rank": 1,
-            "code": "000001",
-            "name": "平安银行",
-            "snapshot_price": 10.26,
-        }
-    ]
-    assert result["exact_automatic_message"] is True
-    assert result["non_actionable"] is True
-    assert result["retrospective_expired"] is True
-    assert result["official_state_changed"] is False
-    assert result["orders_changed"] is False
-    assert service.build_calls == []
+    assert probe.semantic["official_entry_action"] == "ENTER"
+    assert probe.semantic["official_entry_event_id"] == repository.entry_status.event_id
+    assert service.build_calls == [(date(2026, 9, 1), result["chain_probe_event_id"])]
     assert repository.official_write_calls == 0
 
 
@@ -1229,21 +1225,22 @@ async def test_post_cutoff_waits_for_inflight_current_terminal_before_selecting_
     result = await pending
 
     assert result["event_trade_date"] == current.trade_date.isoformat()
-    assert result["chain_probe_passed"] is True
     assert result["current_version_recomputed"] is True
     assert result["replay_reused"] is False
+    assert result["exact_automatic_message"] is False
     assert result["official_state_changed"] is False
     assert result["orders_changed"] is False
     assert result["non_actionable"] is True
     assert result["retrospective_expired"] is True
-    return
-    replay = repository.events[result["replay_event_id"]]
-    assert replay.payload is not None
-    replay_message = str(replay.payload["message"])
-    assert replay_message.startswith("[V20][SHADOW] 手工触发结果｜仅核查")
-    begin = "----- 早盘封存原文开始（逐字节未改动，仅供核查） -----\n"
-    end = "\n----- 早盘封存原文结束 -----"
-    assert replay_message.split(begin, 1)[1].split(end, 1)[0] == "current-day message"
+    assert service.build_calls == [(current.trade_date, result["chain_probe_event_id"])]
+    probe = repository.events[result["chain_probe_event_id"]]
+    assert probe.semantic["official_entry_event_id"] == current.event_id
+    assert probe.semantic["official_entry_action"] == current.action
+    assert prior.event_id not in str(probe.semantic)
+    assert probe.payload is not None
+    probe_message = str(probe.payload["message"])
+    assert probe_message.startswith("[V20][SHADOW] 手工触发结果｜仅核查")
+    assert "current-day message" not in probe_message
 
 
 def test_same_request_recomputes_again_after_full_config_hash_changes() -> None:
@@ -1618,3 +1615,117 @@ async def test_invalid_injected_service_config_fails_closed() -> None:
     assert service.start_calls == 0
     assert app.state.v20_deployment_mode is None
     assert "deployment_mode is invalid" in app.state.v20_start_error
+
+
+@pytest.mark.asyncio
+async def test_fresh_probe_budget_exhaustion_raises_timeout_without_any_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FreshProbeV20Service()
+    monkeypatch.setattr(v20_routes_module, "_FRESH_PROBE_BUDGET_SECONDS", 0.0)
+
+    with pytest.raises(TimeoutError, match="budget exhausted"):
+        await _run_fresh_0939_probe(service, "budget-exhausted-001", service.now)
+
+    assert service.build_calls == []
+    assert service._repository.enqueue_calls == 0
+    assert service._repository.seal_calls == 0
+    assert set(service._repository.events) == {"old-late-replay-event"}
+
+
+@pytest.mark.asyncio
+async def test_fresh_probe_slow_recompute_timeout_leaves_no_rescue_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FreshProbeV20Service()
+    monkeypatch.setattr(v20_routes_module, "_FRESH_PROBE_BUDGET_SECONDS", 0.01)
+    builder_started = asyncio.Event()
+
+    async def slow_builder(context: Any, now: datetime, *, replay_event_id: str) -> Any:
+        service.build_calls.append((context.trade_date, replay_event_id))
+        builder_started.set()
+        await asyncio.Event().wait()
+
+    service._build_late_0939_replay_semantic = slow_builder
+    probe = asyncio.create_task(_run_fresh_0939_probe(service, "budget-slow-002", service.now))
+    try:
+        await builder_started.wait()
+        with pytest.raises(TimeoutError):
+            await probe
+    finally:
+        if not probe.done():
+            probe.cancel()
+        await asyncio.gather(probe, return_exceptions=True)
+
+    assert len(service.build_calls) == 1
+    assert service._repository.enqueue_calls == 0
+    assert service._repository.seal_calls == 0
+    assert set(service._repository.events) == {"old-late-replay-event"}
+
+
+@pytest.mark.asyncio
+async def test_fresh_probe_waits_for_manual_lock_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FreshProbeV20Service()
+    monkeypatch.setattr(v20_routes_module, "_FRESH_PROBE_BUDGET_SECONDS", 0.05)
+    await service._manual_trigger_lock.acquire()
+    probe = asyncio.create_task(_run_fresh_0939_probe(service, "budget-lock-003", service.now))
+    try:
+        await asyncio.sleep(0.01)
+        assert not probe.done()
+        assert service._manual_trigger_lock.locked()
+    finally:
+        probe.cancel()
+        await asyncio.gather(probe, return_exceptions=True)
+        service._manual_trigger_lock.release()
+
+    assert service.build_calls == []
+    assert service._repository.enqueue_calls == 0
+    assert service._repository.seal_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_probe_releases_manual_lock_after_existing_event_lookup() -> None:
+    service = FreshProbeV20Service()
+    first = await _run_fresh_0939_probe(service, "budget-existing-004", service.now)
+    event_id = first["chain_probe_event_id"]
+    enqueue_calls = service._repository.enqueue_calls
+    seal_calls = service._repository.seal_calls
+    lookup_calls = 0
+
+    async def lookup(event_id: str, **_kwargs: Any) -> Any:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        if lookup_calls == 1:
+            return None
+        return service._repository.events[event_id]
+
+    service._repository.get_outbox_event = lookup
+    repeated = await _run_fresh_0939_probe(service, "budget-existing-004", service.now)
+
+    assert repeated["created"] is False
+    assert repeated["chain_probe_event_id"] == event_id
+    assert not service._manual_trigger_lock.locked()
+    assert service._repository.enqueue_calls == enqueue_calls
+    assert service._repository.seal_calls == seal_calls
+
+
+@pytest.mark.asyncio
+async def test_fresh_probe_non_timeout_failure_is_persisted_once_within_budget() -> None:
+    service = FreshProbeV20Service()
+    service.probe_error = V20SemanticConflict("recompute boom")
+
+    result = await _run_fresh_0939_probe(service, "budget-failure-005", service.now)
+
+    assert result["probe_result"] == "FAIL"
+    assert service._repository.enqueue_calls == 1
+    assert service._repository.seal_calls == 1
+    new_events = [
+        event
+        for event_id, event in service._repository.events.items()
+        if event_id != "old-late-replay-event"
+    ]
+    assert len(new_events) == 1
+    assert new_events[0].semantic["probe_result"] == "FAIL"
+    assert new_events[0].semantic["failure_stage"] == "RAW_V16_V20_RECOMPUTE"

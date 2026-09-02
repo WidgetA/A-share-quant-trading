@@ -122,6 +122,11 @@ _ROUTE_BINDING_KEYS = {
 # branch name: two hosts cannot claim the same V20 config while running a
 # different V16 scanner, model, feature list, board universe, or V20 rule.
 _STRATEGY_DEPENDENCY_FILES = (
+    "src/data/database/v16_canonical_artifact_store.py",
+    "src/data/database/v20_mews_guard_store.py",
+    "src/data/database/v20_mews_receipt_guard.py",
+    "src/web/v20_v16_canonical_artifact.py",
+    "src/web/v20_v16_daygate_attestation.py",
     "src/strategy/strategies/v16_scanner.py",
     "src/strategy/strategies/momentum_sector_scanner.py",
     "src/strategy/lgbrank_scorer.py",
@@ -168,10 +173,13 @@ _STRATEGY_DEPENDENCY_FILES = (
 # config hash above, but no longer fork a state lineage merely because a
 # formatter, route, replay, database adapter, or service lifecycle changed.
 #
-# ``V20_STATE_INPUT_ORCHESTRATION_V1`` explicitly versions the state-sensitive
+# ``V20_STATE_INPUT_ORCHESTRATION_V3`` explicitly versions the state-sensitive
 # orchestration that still lives in ``v20_service.py`` (receipt selection,
 # cutoff handling, policy input assembly, gap maturity, and invalid-state
-# transition ordering).  Any semantic edit there must bump this profile.
+# transition ordering).  V3 binds actionability to the completed canonical
+# durable barrier and isolates live-exit evidence deadlines per leg.  Any later
+# semantic edit there must bump this profile again.  The retired V2 marker is
+# intentionally not reused: it identified a reverted historical candidate.
 _STATE_SEMANTICS_DEPENDENCY_FILES = (
     "src/strategy/strategies/v16_scanner.py",
     "src/strategy/strategies/momentum_sector_scanner.py",
@@ -203,8 +211,43 @@ _STATE_SEMANTICS_DEPENDENCY_FILES = (
     "pyproject.toml",
     "uv.lock",
 )
+_V4_STATE_SEMANTICS_ADDITIONAL_FILES = (
+    # The durable receipt time and collision/readback rules decide whether the
+    # canonical V16 input is actionable before the entry cutoff.
+    "src/data/database/v16_canonical_artifact_store.py",
+    # Candidate discovery plus the atomic per-leg freeze decides which MEWS
+    # value feeds the official D2 exit threshold.
+    "src/data/database/v20_mews_guard_store.py",
+    # The compatibility receipt path is unreachable for a healthy connected
+    # V20Repository, but the service can still consume it if strict-store
+    # construction fails.  Bind it rather than leave that failover unreviewed.
+    "src/data/database/v20_mews_receipt_guard.py",
+    # Portable encode/hydrate validation defines the exact canonical entry
+    # input, including the complete breadth-only raw-evidence boundary.
+    "src/web/v20_v16_canonical_artifact.py",
+)
+# ``v20_v16_daygate_attestation.py`` remains full-config-only: it is consumed
+# exclusively by the explicit post-cutoff operator replay and the production
+# scheduler has no automatic replay entry.  It cannot create or replace an
+# official decision.  Every MEWS receipt module is intentionally included
+# above because the service retains a guarded strict-store construction
+# fallback even though a healthy connected V20Repository never enters it.
 _STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v2"
-_STATE_INPUT_ORCHESTRATION_PROFILE = "V20_STATE_INPUT_ORCHESTRATION_V1"
+_STATE_INPUT_ORCHESTRATION_PROFILE = "V20_STATE_INPUT_ORCHESTRATION_V3"
+_STATE_INPUT_ORCHESTRATION_PROFILE_BY_SERVICE_CLASS = {
+    "V20_SERVICE_STATE_ORCHESTRATION_V1": "V20_STATE_INPUT_ORCHESTRATION_V1",
+    "V20_SERVICE_STATE_ORCHESTRATION_V2": "V20_STATE_INPUT_ORCHESTRATION_V1",
+    "V20_SERVICE_STATE_ORCHESTRATION_V3": "V20_STATE_INPUT_ORCHESTRATION_V1",
+    "V20_SERVICE_STATE_ORCHESTRATION_V4": _STATE_INPUT_ORCHESTRATION_PROFILE,
+}
+_STATE_SEMANTICS_DEPENDENCY_FILES_BY_SERVICE_CLASS = {
+    "V20_SERVICE_STATE_ORCHESTRATION_V1": _STATE_SEMANTICS_DEPENDENCY_FILES,
+    "V20_SERVICE_STATE_ORCHESTRATION_V2": _STATE_SEMANTICS_DEPENDENCY_FILES,
+    "V20_SERVICE_STATE_ORCHESTRATION_V3": _STATE_SEMANTICS_DEPENDENCY_FILES,
+    "V20_SERVICE_STATE_ORCHESTRATION_V4": (
+        _STATE_SEMANTICS_DEPENDENCY_FILES + _V4_STATE_SEMANTICS_ADDITIONAL_FILES
+    ),
+}
 _LEGACY_STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v1"
 _AUDITED_LEGACY_STATE_SEMANTICS_HASHES = frozenset(
     {
@@ -314,6 +357,52 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "2aaf4957addc5f09d7eca3aa7e45ed525c87a7fb8e470ad68f0b5b2f94d9d78f": (
             "V20_SERVICE_STATE_ORCHESTRATION_V3"
         ),
+        # Final canonical-artifact release: actionability is bound to the
+        # complete raw -> portable -> readback -> hydrate barrier, automatic
+        # post-cutoff rescans are forbidden, and live exits isolate each leg's
+        # evidence deadline.  These can change official entry/exit outcomes,
+        # so the bytes are deliberately V4 rather than an alias for V3.
+        # Git/deployment LF bytes.
+        "aa5268d53a9337c84c1a4ef9f25e78b1e657dbe81e72de989a36ea370dcc4f24": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # The exact same reviewed V4 source in Windows QA CRLF form.
+        "a33c99d74fe3cdbc220b5806ddb071fd551eb6ae15505a0b0e57d02707ca445e": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # Explicit operator triggers now consume the same durable canonical
+        # artifact even when today's official slot is already terminal.  The
+        # probe remains read-only and therefore stays inside the reviewed V4
+        # state-orchestration class.  Git/deployment LF bytes.
+        "ba7e69ab519186e8ac77441423ef67a034778cb770f71fe65028f22b69ceff62": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # The exact same terminal check-only source in Windows QA CRLF form.
+        "616059227bf2e79802ba17fb0936102143f9e3c73bb63fbe8215491d64d092a8": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # Static typing only: narrows the scheduled-exit sequence and replaces
+        # an untyped async lambda with an equivalent named coroutine.  Runtime
+        # ordering, persistence, deadlines, and state transitions are unchanged.
+        # Git/deployment LF bytes.
+        "d1135bbf20c3beecaa114ad918fa49b6a6b279b62d3fb1d455a4d3e7122d97f1": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # The exact same type-only V4 source in Windows QA CRLF form.
+        "e514292401bde5930b503fc640393cd90f7a241a2ff93059cff1bc230902e5e0": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # Diagnostic-only correction: LIVE_EXIT_SYMBOL_DATA_GAP now labels
+        # missing symbols separately from siblings that have persisted legal
+        # evidence.  Exit rules, deadlines, and state transitions are unchanged.
+        # Git/deployment LF bytes.
+        "a7170343fdac66b177bb1ca50c4680308f2ce4e83d77ec00aabb69204b71b0ac": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
+        # The exact same diagnostic-only V4 source in Windows QA CRLF form.
+        "149c36817be6665c12e2bbfeceb5527fd6382d2865cbbf95b16a86ee118b0d17": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
@@ -402,12 +491,6 @@ def _state_semantics_source(payload: Mapping[str, Any]) -> dict[str, Any]:
     dependencies = payload.get("strategy_dependency_hashes")
     if not isinstance(dependencies, Mapping):
         raise V20ConfigError("frozen config lacks strategy dependency hashes")
-    state_dependencies: dict[str, str] = {}
-    for relative in _STATE_SEMANTICS_DEPENDENCY_FILES:
-        digest = dependencies.get(relative)
-        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
-            raise V20ConfigError(f"frozen config lacks valid state dependency: {relative}")
-        state_dependencies[relative] = digest
     mixed_source_classes: dict[str, str] = {}
     for relative, reviewed in _MIXED_STATE_SOURCE_CLASSES.items():
         digest = dependencies.get(relative)
@@ -419,6 +502,23 @@ def _state_semantics_source(payload: Mapping[str, Any]) -> dict[str, Any]:
                 f"unreviewed state-sensitive mixed source bytes: {relative}={digest}"
             )
         mixed_source_classes[relative] = semantic_class
+    service_class = mixed_source_classes.get("src/web/v20_service.py")
+    orchestration_profile = _STATE_INPUT_ORCHESTRATION_PROFILE_BY_SERVICE_CLASS.get(
+        service_class or ""
+    )
+    if orchestration_profile is None:
+        raise V20ConfigError("reviewed V20 service class lacks an orchestration profile")
+    state_dependency_files = _STATE_SEMANTICS_DEPENDENCY_FILES_BY_SERVICE_CLASS.get(
+        service_class or ""
+    )
+    if state_dependency_files is None:
+        raise V20ConfigError("reviewed V20 service class lacks a state dependency profile")
+    state_dependencies: dict[str, str] = {}
+    for relative in state_dependency_files:
+        digest = dependencies.get(relative)
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise V20ConfigError(f"frozen config lacks valid state dependency: {relative}")
+        state_dependencies[relative] = digest
     required_mappings = ("clock", "market_data", "policy")
     for field in required_mappings:
         if not isinstance(payload.get(field), Mapping):
@@ -444,7 +544,7 @@ def _state_semantics_source(payload: Mapping[str, Any]) -> dict[str, Any]:
         "market_data": dict(cast(Mapping[str, Any], payload["market_data"])),
         "policy": dict(cast(Mapping[str, Any], payload["policy"])),
         "g_manifest_sha256": manifest_hash,
-        "state_input_orchestration_profile": _STATE_INPUT_ORCHESTRATION_PROFILE,
+        "state_input_orchestration_profile": orchestration_profile,
         "mixed_state_source_classes": mixed_source_classes,
         "state_dependency_hashes": state_dependencies,
     }

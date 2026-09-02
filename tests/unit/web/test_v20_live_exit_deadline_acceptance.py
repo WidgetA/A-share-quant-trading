@@ -226,13 +226,39 @@ def _prepare(
     project_root = Path(__file__).resolve().parents[3]
     for relative, reviewed_hashes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
         source_hash = hashlib.sha256((project_root / relative).read_bytes()).hexdigest()
-        monkeypatch.setitem(
-            reviewed_hashes,
-            source_hash,
-            "V20_TEST_ISOLATION_DYNAMIC_SOURCE",
+        source_class = (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+            if relative == "src/web/v20_service.py"
+            else (
+                "V20_LEDGER_STATE_CONTRACT_V2"
+                if relative == "src/data/database/v20_repository.py"
+                else reviewed_hashes[source_hash]
+            )
         )
+        monkeypatch.setitem(reviewed_hashes, source_hash, source_class)
     service = _service(monkeypatch, repository, client)
     return service, _DayContext(trade_date=TRADE_DATE, calendar=(TRADE_DATE,))
+
+
+def _stage_incident_id(
+    service: Any,
+    *,
+    stage: str,
+    symbols: tuple[str, ...],
+    provider: str,
+) -> str:
+    return named_hash(
+        "V20_LIVE_EXIT_STAGE_INCIDENT_ID_V2",
+        {
+            "route_id": service.config.route_id,
+            "official_stream_id": service.config.official_stream_id,
+            "state_lineage_id": service.config.state_lineage_id,
+            "trade_date": TRADE_DATE.isoformat(),
+            "stage": stage,
+            "symbols": tuple(sorted(set(symbols))),
+            "provider": provider,
+        },
+    )
 
 
 async def _advance_until(clock: _VirtualClock, target: float, limit: float) -> None:
@@ -378,6 +404,47 @@ async def test_cold_missing_history_bypasses_latest_and_warm_polls_latest(
     assert client.history_calls == []
 
 
+async def test_exact_0937_cold_tick_uses_complete_history_before_sibling_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _leg("000001")
+    second = _leg("001306")
+    labels = tuple(f"09:{minute:02d}" for minute in range(31, 38))
+    history = {
+        leg.code: tuple(_bar(leg.code, label, trade_date=TRADE_DATE) for label in labels)
+        for leg in (first, second)
+    }
+    repository = _DeadlineRepository([first, second])
+    client = _DeadlineClient(latest={}, history=history)
+    service, context = _prepare(monkeypatch, repository, client)
+    evaluations: list[tuple[str, ...]] = []
+
+    async def evaluate(legs: list[ActiveModelLeg], *_args: Any, **_kwargs: Any) -> None:
+        evaluations.append(tuple(leg.code for leg in legs))
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_evaluate_active_exits", evaluate)
+    monkeypatch.setattr(service, "_recover_closed_exit_windows", no_recovery)
+
+    await service._run_live_exit_tick(
+        context,
+        datetime(2026, 9, 1, 9, 37, 0, 1, tzinfo=TZ),
+    )
+
+    assert client.latest_calls == []
+    assert client.history_calls == [[first.code, second.code]]
+    expected_rows = {(leg.code, label) for leg in (first, second) for label in labels}
+    persisted_rows = {
+        (str(row["stock_code"]), str(row["end_label"])) for row in repository.persisted_rows
+    }
+    assert persisted_rows == expected_rows
+    assert {(code, label) for (_trade_date, code, label) in context.minute_rows} == expected_rows
+    assert context.live_exit_market_data_outage is False
+    assert evaluations[-1] == (first.code, second.code)
+
+
 async def test_pg_rejected_hash_cannot_stop_healthy_sibling_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -490,6 +557,66 @@ async def test_scheduler_watchdog_is_fourteen_seconds_and_normal_tick_survives_t
     assert 13.0 not in spy.timeouts
 
 
+async def test_outer_watchdog_cancellation_waits_for_provider_and_does_not_duplicate_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    client = _DeadlineClient(latest={}, history={leg.code: ()})
+    service, context = _prepare(monkeypatch, repository, client)
+    clock = _bind_virtual_clock()
+    spy = _TimeoutSpy(clock)
+    spy.install(monkeypatch)
+    started = clock.time()
+    blocked = asyncio.Event()
+    provider_started = asyncio.Event()
+    provider_finished = asyncio.Event()
+    provider_task: asyncio.Task[dict[str, tuple[TushareMinuteBar, ...]]] | None = None
+    cancellation_observed = False
+
+    monkeypatch.setattr(service, "_live_exit_tick_budget", lambda: 20.0)
+    monkeypatch.setattr(service, "_exit_context_for", lambda *_args, **_kwargs: context)
+    monkeypatch.setattr(
+        service,
+        "_aware_now",
+        lambda *_args, **_kwargs: datetime(2026, 9, 1, 9, 37, tzinfo=TZ),
+    )
+
+    async def hanging_history(
+        codes: list[str],
+    ) -> dict[str, tuple[TushareMinuteBar, ...]]:
+        nonlocal provider_task
+        assert provider_task is None
+        provider_task = asyncio.current_task()
+        provider_started.set()
+        try:
+            return {code: () for code in codes} if await blocked.wait() else {}
+        except asyncio.CancelledError:
+            nonlocal cancellation_observed
+            cancellation_observed = True
+            service._stop_event.set()
+            blocked.set()
+            await asyncio.sleep(0)
+            provider_finished.set()
+            raise
+
+    monkeypatch.setattr(client, "batch_get_minute_history", hanging_history)
+    task = asyncio.create_task(service._run_live_exit_scheduler())
+    await _wait_until(provider_started.is_set)
+    await _advance_until(clock, started + 14.0, started + 15.0)
+    await _wait_until(task.done)
+
+    assert provider_task is not None
+    assert provider_task.done()
+    assert provider_task.cancelled()
+    assert cancellation_observed
+    assert provider_finished.is_set()
+    assert service._lane_health["live_exit"].last_error == "LIVE_EXIT_CYCLE_TIMEOUT"
+    assert repository.alerts == []
+    assert repository.enqueue_alert_calls == []
+    assert spy.cancel_boundaries == [pytest.approx(started + 13.5, abs=1.0)]
+
+
 async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -528,14 +655,11 @@ async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
 
     incident_id, semantic = repository.alerts[-1]
     # The incident id is a pure function of the stable incident identity.
-    assert incident_id == named_hash(
-        "V20_LIVE_EXIT_STAGE_INCIDENT_ID_V1",
-        {
-            "trade_date": TRADE_DATE.isoformat(),
-            "stage": "history",
-            "symbols": (leg.code,),
-            "provider": "tushare_rt",
-        },
+    assert incident_id == _stage_incident_id(
+        service,
+        stage="history",
+        symbols=(leg.code,),
+        provider="tushare_rt",
     )
     # The immutable semantic carries only replay-stable diagnostics.
     assert semantic["error"] == "V20LiveExitStageTimeout"
@@ -543,6 +667,9 @@ async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
     assert semantic["symbol"] == leg.code
     assert semantic["symbols"] == [leg.code]
     assert semantic["provider"] == "tushare_rt"
+    assert semantic["route_id"] == service.config.route_id
+    assert semantic["official_stream_id"] == service.config.official_stream_id
+    assert semantic["state_lineage_id"] == service.config.state_lineage_id
     assert semantic["incident_id"] == incident_id
     assert semantic["message"] == "live-exit stage history exceeded its budget"
     # No absolute monotonic deadline and no per-tick elapsed/remaining may
@@ -581,6 +708,47 @@ async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
     assert attempts[0][1] == attempts[1][1] == semantic
     assert repository.alert_ids.count(incident_id) == 1
     assert repository.alert_ids[-1] == incident_id
+
+
+async def test_provider_bare_timeout_is_one_stable_stage_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    client = _DeadlineClient(latest={}, history=TimeoutError())
+    service, context = _prepare(monkeypatch, repository, client)
+    service._repository_started = True
+
+    async def evaluate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_evaluate_active_exits", evaluate)
+    monkeypatch.setattr(service, "_recover_closed_exit_windows", no_recovery)
+    now = datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ)
+    with pytest.raises(V20LiveExitStageTimeout, match="stage history exceeded its budget"):
+        await service._run_live_exit_tick(context, now)
+
+    assert client.latest_calls == []
+    assert client.history_calls == [[leg.code]]
+    assert len(repository.alert_attempts) == 1
+    incident_id, semantic = repository.alerts[0]
+    assert incident_id == _stage_incident_id(
+        service,
+        stage="history",
+        symbols=(leg.code,),
+        provider="tushare_rt",
+    )
+    assert semantic["error"] == "V20LiveExitStageTimeout"
+    assert semantic["stage"] == "history"
+    assert semantic["provider"] == "tushare_rt"
+    assert semantic["symbol"] == leg.code
+    assert semantic["symbols"] == [leg.code]
+    assert semantic["route_id"] == service.config.route_id
+    assert semantic["official_stream_id"] == service.config.official_stream_id
+    assert semantic["state_lineage_id"] == service.config.state_lineage_id
 
 
 @pytest.mark.parametrize(
@@ -627,20 +795,20 @@ async def test_every_stage_timeout_incident_is_structured_and_replay_stable(
 
     assert len(repository.alerts) == 1
     incident_id, semantic = repository.alerts[0]
-    assert incident_id == named_hash(
-        "V20_LIVE_EXIT_STAGE_INCIDENT_ID_V1",
-        {
-            "trade_date": TRADE_DATE.isoformat(),
-            "stage": stage,
-            "symbols": tuple(sorted(set(symbols))),
-            "provider": provider,
-        },
+    assert incident_id == _stage_incident_id(
+        service,
+        stage=stage,
+        symbols=symbols,
+        provider=provider,
     )
     assert semantic["error"] == "V20LiveExitStageTimeout"
     assert semantic["stage"] == stage
     assert semantic["provider"] == provider
-    assert semantic["symbol"] == ",".join(symbols)
-    assert semantic["symbols"] == list(symbols)
+    assert semantic["symbol"] == ",".join(sorted(set(symbols)))
+    assert semantic["symbols"] == sorted(set(symbols))
+    assert semantic["route_id"] == service.config.route_id
+    assert semantic["official_stream_id"] == service.config.official_stream_id
+    assert semantic["state_lineage_id"] == service.config.state_lineage_id
     assert semantic["incident_id"] == incident_id
     assert "deadline" not in semantic
     assert "elapsed_seconds" not in semantic

@@ -38,6 +38,7 @@ from src.strategy.v20.decision_engine import genesis_state
 from src.strategy.v20.models import HealthObservation, deserialize_health_snapshot
 from src.strategy.v20.policy import advance_health_state
 from src.strategy.v20.runtime_config import (
+    declared_state_semantics_is_authentic,
     load_v20_runtime_config,
     state_semantics_payload_from_frozen_payload,
 )
@@ -49,6 +50,8 @@ SCOPE = {
 }
 _PRE_SELECTION_V2_CORE = "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc"
 _SELECTION_V3_CORE = "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b"
+_SELECTION_V3_CONFIG_HASH = "3659caae539d63ac0cf03d6d8d0ed20c9458a9401bca4df965efc96c363f5140"
+_TYPE_CLEAN_CORE = "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41"
 _PRE_SELECTION_V2_DEPENDENCIES = {
     "pyproject.toml": "b98d44b91a0509ff84f8bda06fdfaf5e7ed5d764465bf56fcd7920b438555ee0",
     "src/data/clients/tushare_realtime.py": (
@@ -232,6 +235,23 @@ def _pre_selection_v2_runtime_payload(current: dict[str, object]) -> dict[str, o
     assert sha256_json(state_payload) == _PRE_SELECTION_V2_CORE
     historical["state_semantics_payload"] = state_payload
     historical["state_semantics_hash"] = _PRE_SELECTION_V2_CORE
+    return historical
+
+
+def _selection_v3_runtime_payload(_current: dict[str, object]) -> dict[str, object]:
+    fixture_path = (
+        Path(__file__).resolve().parents[4]
+        / "tests/fixtures/v20/runtime_config_498f868_94464f2.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert fixture["source_commit"] == "498f868faa6b89b8c6639c3e506c6401e854410b"
+    assert fixture["expected_config_hash"] == _SELECTION_V3_CONFIG_HASH
+    assert fixture["expected_state_semantics_hash"] == _SELECTION_V3_CORE
+    historical = fixture["payload"]
+    assert isinstance(historical, dict)
+    assert sha256_json(historical) == _SELECTION_V3_CONFIG_HASH
+    assert historical["state_semantics_hash"] == _SELECTION_V3_CORE
+    assert declared_state_semantics_is_authentic(historical)
     return historical
 
 
@@ -562,29 +582,39 @@ async def test_genesis_deduplicates_real_multi_generation_semantic_edges() -> No
     }
     current_hash = sha256_json(current)
     terminal_intermediate = intermediates[-1]
+    selection_v3 = _selection_v3_runtime_payload(current)
     terminal_slots = [
         _config_slot_row(legacy, slot_status="FAILED"),
         _config_slot_row(terminal_intermediate, slot_status="FAILED"),
+        _config_slot_row(selection_v3, slot_status="FAILED"),
     ]
-    terminal_receipt = _compatibility_receipt_row(
+    selection_v3_receipt = _compatibility_receipt_row(
         terminal_intermediate,
+        selection_v3,
+        lineage_id=config.state_lineage_id,
+        official_stream_id=config.official_stream_id,
+    )
+    terminal_receipt = _compatibility_receipt_row(
+        selection_v3,
         current,
         lineage_id=config.state_lineage_id,
         official_stream_id=config.official_stream_id,
     )
-    all_payloads = [legacy, *intermediates, current]
-    all_receipts = [*duplicate_receipts, terminal_receipt]
+    all_payloads = [legacy, *intermediates, selection_v3, current]
+    persisted_receipts = [*duplicate_receipts, selection_v3_receipt]
+    all_receipts = [*persisted_receipts, terminal_receipt]
     connection = _FakeConnection(
         fetchrows=[
             registry,
             _runtime_config_row(current),
             _runtime_config_row(legacy),
             _runtime_config_row(terminal_intermediate),
-            *_runtime_config_rows_for_receipts(duplicate_receipts, all_payloads),
+            _runtime_config_row(selection_v3),
+            *_runtime_config_rows_for_receipts(persisted_receipts, all_payloads),
             *_runtime_config_rows_for_receipts(all_receipts, all_payloads),
             state_row,
         ],
-        fetches=[terminal_slots, duplicate_receipts, all_receipts],
+        fetches=[terminal_slots, persisted_receipts, all_receipts],
     )
     repository = _repository(connection)
 
@@ -616,18 +646,18 @@ async def test_genesis_deduplicates_real_multi_generation_semantic_edges() -> No
     assert compatibility_inserts[0][2] == (
         config.state_lineage_id,
         config.official_stream_id,
-        _PRE_SELECTION_V2_CORE,
         _SELECTION_V3_CORE,
-        sha256_json(terminal_intermediate)[:24],
-        sha256_json(terminal_intermediate),
+        _TYPE_CLEAN_CORE,
+        sha256_json(selection_v3)[:24],
+        sha256_json(selection_v3),
         current_hash[:24],
         current_hash,
         terminal_receipt["evidence_json"],
         terminal_receipt["evidence_hash"],
     )
     assert (compatibility_inserts[0][2][2], compatibility_inserts[0][2][3]) == (
-        _PRE_SELECTION_V2_CORE,
         _SELECTION_V3_CORE,
+        _TYPE_CLEAN_CORE,
     )
     legacy_config_hash = sha256_json(legacy)
     expected_bindings = {
@@ -636,6 +666,11 @@ async def test_genesis_deduplicates_real_multi_generation_semantic_edges() -> No
             sha256_json(terminal_intermediate)[:24],
             sha256_json(terminal_intermediate),
             _PRE_SELECTION_V2_CORE,
+        ),
+        (
+            sha256_json(selection_v3)[:24],
+            sha256_json(selection_v3),
+            _SELECTION_V3_CORE,
         ),
     }
     assert {
@@ -655,6 +690,7 @@ async def test_genesis_deduplicates_real_multi_generation_semantic_edges() -> No
             _runtime_config_row(current),
             _runtime_config_row(legacy),
             _runtime_config_row(terminal_intermediate),
+            _runtime_config_row(selection_v3),
             *_runtime_config_rows_for_receipts(all_receipts, all_payloads),
             state_row,
         ],
@@ -815,23 +851,30 @@ async def test_genesis_loads_prior_v2_terminal_binding_when_core_is_unchanged() 
 
 
 @pytest.mark.asyncio
-async def test_genesis_upgrades_exact_pre_selection_v2_core_without_rewriting_state() -> None:
+@pytest.mark.parametrize("operational_route_variant", [False, True])
+async def test_genesis_upgrades_deployed_selection_v3_directly_without_v4_evidence(
+    operational_route_variant: bool,
+) -> None:
     project_root = Path(__file__).resolve().parents[4]
     config = load_v20_runtime_config(project_root)
-    assert config.state_semantics_hash == _SELECTION_V3_CORE
+    assert config.state_semantics_hash == _TYPE_CLEAN_CORE
     current = json.loads(canonical_json(config.frozen_payload))
-    historical = _pre_selection_v2_runtime_payload(current)
+    historical = _selection_v3_runtime_payload(current)
+    if operational_route_variant:
+        historical["route_id"] = "V20_SHADOW_FEISHU_OPERATIONAL_VARIANT"
+        assert historical["state_semantics_hash"] == _SELECTION_V3_CORE
+        assert declared_state_semantics_is_authentic(historical)
     state = {
         **genesis_state(),
         "state_revision": 7,
-        "last_terminal_slot_id": "pre-selection-v2-terminal",
+        "last_terminal_slot_id": "selection-v3-terminal",
         "last_terminal_trade_date": "2026-09-01",
     }
     state_hash = sha256_json(state)
     registry = {
         "official_stream_id": config.official_stream_id,
         "genesis_state_hash": sha256_json(genesis_state()),
-        "state_semantics_hash": _PRE_SELECTION_V2_CORE,
+        "state_semantics_hash": _SELECTION_V3_CORE,
         "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
         "bootstrap_checkpoint_hash": None,
         "bootstrap_predecessor_trade_date": date(2026, 8, 30),
@@ -892,8 +935,8 @@ async def test_genesis_upgrades_exact_pre_selection_v2_core_without_rewriting_st
     assert insert_call[2] == (
         config.state_lineage_id,
         config.official_stream_id,
-        _PRE_SELECTION_V2_CORE,
         _SELECTION_V3_CORE,
+        _TYPE_CLEAN_CORE,
         historical_hash[:24],
         historical_hash,
         current_hash[:24],
@@ -903,13 +946,71 @@ async def test_genesis_upgrades_exact_pre_selection_v2_core_without_rewriting_st
     )
     assert len(repository.compatible_entry_bindings) == 1
     assert next(iter(repository.compatible_entry_bindings)).state_semantics_hash == (
-        _PRE_SELECTION_V2_CORE
+        _SELECTION_V3_CORE
     )
     assert not any(
         call[0] == "execute" and "UPDATE v20.official_state" in call[1] for call in connection.calls
     )
     assert not any(
         call[0] == "execute" and "SET state_semantics_hash" in call[1] for call in connection.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_genesis_rejects_pre_selection_v2_direct_bypass_to_type_clean_current() -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_v20_runtime_config(project_root)
+    assert config.state_semantics_hash == _TYPE_CLEAN_CORE
+    current = json.loads(canonical_json(config.frozen_payload))
+    fixture = json.loads(
+        (project_root / "tests/fixtures/v20/runtime_config_4211cd0_b2ba54f.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    historical = _pre_selection_v2_runtime_payload(fixture["payload"])
+    state = genesis_state()
+    state_hash = sha256_json(state)
+    registry = {
+        "official_stream_id": config.official_stream_id,
+        "genesis_state_hash": state_hash,
+        "state_semantics_hash": historical["state_semantics_hash"],
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "bootstrap_checkpoint_hash": None,
+        "bootstrap_predecessor_trade_date": date(2026, 8, 30),
+    }
+    current_hash = sha256_json(current)
+    connection = _FakeConnection(
+        fetchrows=[
+            registry,
+            _runtime_config_row(current),
+            _runtime_config_row(historical),
+        ],
+        fetches=[[_config_slot_row(historical, slot_status="COMPLETED")], []],
+    )
+
+    with pytest.raises(V20SemanticConflict, match="tail-to-current transition is unsupported"):
+        await _repository(connection).ensure_genesis_state(
+            config.state_lineage_id,
+            state,
+            state_hash,
+            official_stream_id=config.official_stream_id,
+            state_semantics_hash=config.state_semantics_hash,
+            current_config_id=current_hash[:24],
+            current_config_hash=current_hash,
+            current_config_payload=current,
+            bootstrap_mode="EMPTY_FORWARD_SHADOW",
+            bootstrap_checkpoint_hash=None,
+            bootstrap_predecessor_trade_date=date(2026, 8, 30),
+        )
+
+    assert not any(
+        call[0] == "execute" and "INSERT INTO v20.state_semantics_compatibility" in call[1]
+        for call in connection.calls
+    )
+    assert not any(
+        call[0] == "execute"
+        and ("SET state_semantics_hash" in call[1] or "UPDATE v20.official_state" in call[1])
+        for call in connection.calls
     )
 
 

@@ -553,6 +553,96 @@ def test_late_0939_replay_has_dedicated_expired_non_actionable_title() -> None:
         )
 
 
+def _late_replay_result_semantic(official_entry_action: str) -> dict:
+    return {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "event_id": f"late-official-{official_entry_action.lower()}",
+        "strategy_version": "V20",
+        "config_hash": "a" * 64,
+        "deployment_mode": "forward_shadow",
+        "official_stream_id": "formal-stream",
+        "state_lineage_id": "formal-lineage",
+        "alert_code": "LATE_0939_REPLAY_RESULT",
+        "delivery_priority_class": "OPERATOR_NOTIFICATION",
+        "event_trade_date": "2026-08-31",
+        "replay_kind": "RETROSPECTIVE_POST_CUTOFF",
+        "non_actionable": True,
+        "official_entry_action": official_entry_action,
+        "official_entry_event_id": f"official-{official_entry_action.lower()}",
+        "replay_action": "BLOCK",
+        "final_multiplier": 0.0,
+        "symbols": [],
+        "data_cutoff": "09:39",
+        "data_receipt_timeliness": "POST_CUTOFF",
+        "computed_at": "2026-08-31T15:30:00+08:00",
+        "state_replay_profile": "CURRENT_CODE_CANONICAL_V16_CHECK_ONLY",
+        "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
+        "pit_limitations": ["POST_CUTOFF_REPLAY"],
+        "message": "retrospective audit detail",
+    }
+
+
+@pytest.mark.parametrize(
+    ("official_entry_action", "expected_official_text"),
+    [
+        ("ENTER", "\u5f00\u4ed3\uff08\u4ed3\u4f4d\u89c1\u6bcf\u65e5\u51b3\u7b56\u6d88\u606f\uff09"),
+        ("BLOCK", "\u4e0d\u5f00\u4ed3\uff08\u98ce\u63a7\u62e6\u622a\uff09"),
+        ("NO_SIGNAL", "\u4e0d\u5f00\u4ed3\uff08\u6ca1\u6709\u5408\u683c\u5019\u9009\u7968\uff09"),
+        (
+            "INPUT_INVALID",
+            "\u672a\u5f62\u6210\u6309\u65f6\u6709\u6548\u7684\u5165\u573a\u51b3\u7b56",
+        ),
+    ],
+)
+def test_late_0939_replay_seals_and_renders_every_official_terminal_action(
+    official_entry_action: str,
+    expected_official_text: str,
+) -> None:
+    semantic = _late_replay_result_semantic(official_entry_action)
+
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+        20,
+        True,
+    )
+
+    assert payload["event_type"] == "DATA_ALERT"
+    assert payload["timeliness_status"] == "ON_TIME"
+    assert "actionable_from" not in payload
+    assert expected_official_text in payload["message"]
+    assert official_entry_action not in payload["message"]
+
+
+def test_late_0939_replay_rejects_unknown_official_action() -> None:
+    semantic = _late_replay_result_semantic("UNKNOWN")
+
+    with pytest.raises(
+        ValueError,
+        match="V20 late replay must remain retrospective and non-actionable",
+    ):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+            datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+            20,
+            True,
+        )
+
+
+def test_late_0939_replay_rejects_input_invalid_replay_action() -> None:
+    semantic = _late_replay_result_semantic("INPUT_INVALID")
+    semantic["replay_action"] = "INPUT_INVALID"
+
+    with pytest.raises(ValueError, match="V20 late replay action is invalid"):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+            datetime(2026, 8, 31, 15, 31, tzinfo=TZ),
+            20,
+            True,
+        )
+
+
 @pytest.mark.parametrize(
     ("replay_action", "expected"),
     [
@@ -667,8 +757,8 @@ def _manual_0939_chain_probe_semantic(
         "probe_result": probe_result,
         "current_version_recomputed": True,
         "replay_reused": False,
-        "data_source": "PERSISTED_09:31_09:39",
-        "data_window_start": "09:31",
+        "data_source": "PERSISTED_CANONICAL_EARLY_THROUGH_09:39",
+        "data_window_start": "00:00",
         "data_window_end": "09:39",
         "quote_coverage": 1.0,
         "raw_fact_n": 18,
@@ -907,7 +997,7 @@ def test_frozen_official_entry_replay_wraps_verbatim_source_under_check_banner()
 @pytest.mark.parametrize(
     ("updates", "error"),
     [
-        ({"replay_reused": True}, "exact persisted 09:39 window"),
+        ({"replay_reused": True}, "persisted canonical early window"),
         ({"current_version_recomputed": False}, "current version"),
         ({"official_state_changed": True}, "state-preserving"),
         ({"orders_changed": True}, "state-preserving"),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -16,9 +16,11 @@ import pytest
 
 from src.data.clients.tushare_realtime import (
     BEIJING_TZ,
+    TushareDailyBar,
     TushareEarlyMarketData,
     TushareMinuteBar,
     TushareQuote,
+    tushare_minute_bars_to_early_market_data,
 )
 from src.strategy.strategies.v16_scanner import V16Scanner as RealV16Scanner
 from src.web import v15_scan_service
@@ -95,6 +97,7 @@ def fakes(monkeypatch):
     class FakeRTClient:
         def __init__(self):
             self.early_pull_calls = 0
+            self.daily_pull_calls = 0
 
         async def stop(self):
             pass
@@ -126,6 +129,19 @@ def fakes(monkeypatch):
 
         async def fetch_prev_closes(self, ts_date: str):
             return {"600000": 10.5}
+
+        async def fetch_daily_bars(self, trade_date: str):
+            self.daily_pull_calls += 1
+            closes = await self.fetch_prev_closes(trade_date)
+            return {
+                code: TushareDailyBar(
+                    stock_code=code,
+                    trade_date=trade_date,
+                    close_price=close,
+                    amount_yuan=1_234_567.0,
+                )
+                for code, close in closes.items()
+            }
 
     class FakeFDB:
         async def batch_get_fundamentals(self, codes):
@@ -187,7 +203,14 @@ def fakes(monkeypatch):
     monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", FakeScanner)
 
     async def fake_calendar():
-        return [prev_date, trade_date]
+        return sorted(
+            {
+                *(trade_date - timedelta(days=offset) for offset in range(1, 46)),
+                trade_date,
+                trade_date + timedelta(days=1),
+                trade_date + timedelta(days=2),
+            }
+        )
 
     monkeypatch.setattr(v15_scan_service, "get_trade_calendar", fake_calendar)
     monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", record_top10)
@@ -219,6 +242,7 @@ def fakes(monkeypatch):
         rt=rt,
         trade_date=trade_date,
         scanner=FakeScanner,
+        fake_rt_class=FakeRTClient,
         top10_calls=top10_calls,
         error_calls=error_calls,
         daygate_calls=daygate_calls,
@@ -239,7 +263,45 @@ async def test_concurrent_canonical_calls_fetch_and_scan_once(fakes, callers: in
 
     assert fakes.rt.early_pull_calls == 1
     assert fakes.scanner.scan_calls == 1
+    assert fakes.rt.daily_pull_calls == 1
+    assert b1.input_hash == b2.input_hash
+    assert b1._integrity_hash == b2._integrity_hash
+    assert all(bundle is not b1 for bundle in bundles[1:])
+
+
+@pytest.mark.asyncio
+async def test_36_concurrent_callers_use_one_breadth_union_and_one_daily(fakes):
+    requested_early: list[list[str]] = []
+
+    class UnionRT(fakes.fake_rt_class):
+        async def fetch_prev_closes(self, _ts_date: str):
+            return {"600000": 10.5, "000001": 9.5}
+
+        async def batch_get_early_market_data(self, codes, expected_trade_date=None):
+            requested_early.append(list(codes))
+            return await super().batch_get_early_market_data(
+                codes, expected_trade_date=expected_trade_date
+            )
+
+    rt = UnionRT()
+    fakes.state.realtime_client = rt
+    fakes.scanner.scan_calls = 0
+
+    bundles = await asyncio.gather(
+        *(
+            v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+            for _ in range(36)
+        )
+    )
+
+    assert requested_early == [["000001", "600000"]]
+    assert rt.daily_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+    assert len(bundles) == 36
+    assert {bundle.breadth_valid_n for bundle in bundles} == {2}
     # Consumers receive isolated artifacts, not the master bundle.
+    b1 = bundles[0]
+    b2 = bundles[-1]
     assert all(bundle is not b1 for bundle in bundles[1:])
     master = fakes.state.canonical_coordinator.cache[fakes.trade_date]
     assert master is not b1
@@ -248,13 +310,586 @@ async def test_concurrent_canonical_calls_fetch_and_scan_once(fakes, callers: in
     assert b1.trade_date == fakes.trade_date
     assert b1.universe == ("600000",)
     assert b1.quotes["600000"].open_price == pytest.approx(11.0)
-    assert b1.prev_closes == {"600000": 10.5}
+    assert b1.prev_closes == {"600000": 10.5, "000001": 9.5}
     assert "600000" in b1.stock_data
-    assert b1.early_source_hashes == {"600000": "h-600000"}
+    assert b1.early_source_hashes == {
+        "000001": "h-000001",
+        "600000": "h-600000",
+    }
     assert b1.model_sha256 == "m" * 64
     assert b1.feature_list_sha256 == "f" * 64
     assert len(b1.input_hash) == 64
     assert b1.computed_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_cross_date_singleflight_keeps_running_master_and_shares_waiters(
+    fakes,
+    monkeypatch,
+):
+    """A newer date must not evict or duplicate an older still-running master."""
+
+    date_a = fakes.trade_date
+    date_b = date_a + timedelta(days=1)
+    scanner_entered = asyncio.Event()
+    release_a = asyncio.Event()
+    scanner_calls: list[date] = []
+    compute_calls: dict[date, int] = {}
+    rt_calls: dict[date, int] = {}
+
+    class SequenceGatedScanner:
+        def __init__(self, **_kwargs):  # noqa: ARG002
+            pass
+
+        def get_universe(self):
+            return ({"board-a": _clean_board("600000")}, {"600000"})
+
+        async def scan(self, stock_data, clean_boards):  # noqa: ARG002
+            call_date = (date_a, date_b, date_a)[len(scanner_calls)]
+            scanner_calls.append(call_date)
+            if len(scanner_calls) == 1:
+                scanner_entered.set()
+                await asyncio.wait_for(release_a.wait(), timeout=1)
+            await asyncio.sleep(0)
+            top1 = SimpleNamespace(
+                code="600000",
+                name="cached-name",
+                buy_price=12.345678,
+                score=0.123456789,
+            )
+            return SimpleNamespace(
+                recommended=[top1],
+                all_scored=[top1],
+                stock_best_board={"600000": "board-a"},
+                stock_all_boards={"600000": ["board-a"]},
+                step2_hot_board_count=3,
+                final_candidates=5,
+            )
+
+    class TradeDateRTClient:
+        async def stop(self):
+            return None
+
+        async def batch_get_early_market_data(self, codes, expected_trade_date=None):
+            trade_date = expected_trade_date or date_a
+            rt_calls[trade_date] = rt_calls.get(trade_date, 0) + 1
+            await asyncio.sleep(0)
+            return {
+                code: TushareEarlyMarketData(
+                    quote=TushareQuote(
+                        stock_code=code,
+                        open_price=11.0,
+                        latest_price=12.0,
+                        high_price=12.5,
+                        low_price=10.9,
+                        volume=5000.0,
+                        amount=60000.0,
+                        early_close=12.3,
+                        early_high=12.4,
+                        early_low=11.5,
+                        early_volume=3000.0,
+                        volume_937=2000.0,
+                    ),
+                    early_bars=(
+                        TushareMinuteBar(
+                            stock_code=code,
+                            bar_end=datetime.combine(trade_date, time(9, 39), tzinfo=BEIJING_TZ),
+                            end_label="09:39",
+                            open_price=11.0,
+                            close_price=12.3,
+                            high_price=12.4,
+                            low_price=10.9,
+                            volume=2000.0,
+                            amount=24000.0,
+                        ),
+                    ),
+                    source_hash=f"h-{code}-{trade_date.isoformat()}",
+                )
+                for code in codes
+            }
+
+        async def fetch_prev_closes(self, _ts_date):
+            return {"600000": 10.5}
+
+        async def fetch_daily_bars(self, trade_date: str):
+            return {
+                "600000": TushareDailyBar(
+                    stock_code="600000",
+                    trade_date=trade_date,
+                    close_price=10.5,
+                    amount_yuan=1_000_000.0,
+                )
+            }
+
+    class TradeDateHistAdapter:
+        async def history_quotes(
+            self,
+            *,
+            codes: str,
+            indicators: str,  # noqa: ARG002
+            start_date: str,  # noqa: ARG002
+            end_date: str,
+        ):
+            requested = [code.split(".")[0] for code in codes.split(",")]
+            final_day = datetime.strptime(end_date, "%Y-%m-%d").date()
+            times = [(final_day - timedelta(days=39 - index)).isoformat() for index in range(40)]
+            tables = []
+            for code in requested:
+                tables.append(
+                    {
+                        "thscode": f"{code}.SH",
+                        "table": {
+                            "time": times,
+                            "open": [10.0] * 40,
+                            "high": [10.5] * 40,
+                            "low": [9.5] * 40,
+                            "close": [10.0 + index * 0.01 for index in range(40)],
+                            "volume": [1000.0] * 40,
+                        },
+                    }
+                )
+            return {"tables": tables}
+
+    state = v15_scan_service.V15ScanState(
+        initialized=True,
+        realtime_client=TradeDateRTClient(),
+        fundamentals_db=fakes.state.fundamentals_db,
+        historical_adapter=TradeDateHistAdapter(),
+        concept_mapper=object(),
+        stock_filter=object(),
+        tushare_cache=None,
+    )
+
+    async def calendar_with_both_dates():
+        return sorted(
+            {
+                *(date_a - timedelta(days=offset) for offset in range(1, 46)),
+                date_a,
+                date_b,
+                date_b + timedelta(days=1),
+                date_b + timedelta(days=2),
+            }
+        )
+
+    real_compute = v15_scan_service.compute_canonical_v16_scan
+
+    async def counting_compute(scan_state, trade_date, **kwargs):
+        compute_calls[trade_date] = compute_calls.get(trade_date, 0) + 1
+        return await real_compute(scan_state, trade_date, **kwargs)
+
+    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", calendar_with_both_dates)
+    monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", SequenceGatedScanner)
+    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", counting_compute)
+
+    first_a_waiter = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(state, date_a)
+    )
+    await asyncio.wait_for(scanner_entered.wait(), timeout=1)
+    coordinator = state.canonical_coordinator
+    assert coordinator is not None
+    master_a = coordinator.inflight[date_a]
+
+    bundle_b = await asyncio.wait_for(
+        v15_scan_service.get_or_compute_canonical_v16(state, date_b), timeout=1
+    )
+    contract_failures: list[str] = []
+    if coordinator.inflight.get(date_a) is not master_a:
+        contract_failures.append("date-B eviction removed or replaced running date-A master")
+
+    second_a_waiter = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(state, date_a)
+    )
+    await asyncio.sleep(0)
+    joined_a_master = coordinator.inflight.get(date_a)
+    if joined_a_master is not master_a:
+        contract_failures.append("second date-A waiter did not join the original master")
+
+    release_a.set()
+    first_a_bundle, second_a_bundle = await asyncio.wait_for(
+        asyncio.gather(first_a_waiter, second_a_waiter), timeout=1
+    )
+
+    if compute_calls != {date_a: 1, date_b: 1}:
+        contract_failures.append(f"compute calls {compute_calls!r}")
+    if rt_calls != {date_a: 1, date_b: 1}:
+        contract_failures.append(f"realtime calls {rt_calls!r}")
+    if scanner_calls != [date_a, date_b]:
+        contract_failures.append(f"scanner calls {scanner_calls!r}")
+    if first_a_bundle.input_hash != second_a_bundle.input_hash:
+        contract_failures.append("date-A waiters received different input hashes")
+    if first_a_bundle._integrity_hash != second_a_bundle._integrity_hash:
+        contract_failures.append("date-A waiters received different integrity hashes")
+    if coordinator.inflight:
+        contract_failures.append(f"coordinator left inflight orphans {coordinator.inflight!r}")
+    if set(coordinator.cache) != {date_a}:
+        contract_failures.append(f"coordinator cache keys {set(coordinator.cache)!r}")
+    if any(task.get_name().startswith("v20-") for task in asyncio.all_tasks()):
+        contract_failures.append("canonical computation left a live scheduler task")
+
+    assert not contract_failures, "\n".join(contract_failures)
+    assert bundle_b.trade_date == date_b
+    assert first_a_bundle.trade_date == date_a
+
+
+@pytest.mark.asyncio
+async def test_blocked_durable_sink_holds_cache_return_and_publish(fakes):
+    sink_entered = asyncio.Event()
+    release_sink = asyncio.Event()
+    sink_calls = 0
+
+    async def blocked_sink(_bundle):
+        nonlocal sink_calls
+        sink_calls += 1
+        sink_entered.set()
+        await asyncio.wait_for(release_sink.wait(), timeout=1)
+
+    fakes.state.canonical_sink = blocked_sink
+    caller = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    )
+    await asyncio.wait_for(sink_entered.wait(), timeout=1)
+    coordinator = fakes.state.canonical_coordinator
+
+    assert sink_calls == 1
+    assert caller.done() is False
+    assert fakes.trade_date in coordinator.pending_persist
+    assert fakes.trade_date in coordinator.inflight
+    assert fakes.trade_date not in coordinator.cache
+    cached = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+    assert cached.status is v15_scan_service.CachedCanonicalV16Status.PERSISTENCE_PENDING
+    assert fakes.top10_calls == []
+    assert fakes.daygate_calls == []
+
+    release_sink.set()
+    bundle = await asyncio.wait_for(caller, timeout=1)
+    assert bundle.trade_date == fakes.trade_date
+    assert fakes.trade_date in coordinator.cache
+    assert fakes.trade_date not in coordinator.pending_persist
+    cached = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+    assert cached.status is v15_scan_service.CachedCanonicalV16Status.AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_thirty_six_callers_compute_persist_and_publish_once(fakes):
+    sink_calls = 0
+
+    async def counting_sink(_bundle):
+        nonlocal sink_calls
+        sink_calls += 1
+
+    fakes.state.canonical_sink = counting_sink
+    recommendations = await asyncio.wait_for(
+        asyncio.gather(*(v15_scan_service.run_v16_scan(fakes.state) for _ in range(36))),
+        timeout=1,
+    )
+
+    assert len(recommendations) == 36
+    assert all(item == recommendations[0] for item in recommendations[1:])
+    assert sink_calls == 1
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+    assert len(fakes.top10_calls) == 1
+    assert len(fakes.daygate_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_waiter_cancellation_does_not_cancel_master_or_sink(fakes):
+    sink_entered = asyncio.Event()
+    release_sink = asyncio.Event()
+
+    async def shielded_sink(_bundle):
+        sink_entered.set()
+        await asyncio.wait_for(release_sink.wait(), timeout=1)
+
+    fakes.state.canonical_sink = shielded_sink
+    first = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    )
+    second = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    )
+    await asyncio.wait_for(sink_entered.wait(), timeout=1)
+    master = fakes.state.canonical_coordinator.inflight[fakes.trade_date]
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert master.cancelled() is False
+    release_sink.set()
+    bundle = await asyncio.wait_for(second, timeout=1)
+    assert bundle.trade_date == fakes.trade_date
+    assert master.done() is True
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_sink_retries_without_vendor_or_scanner(fakes):
+    sink_calls = 0
+
+    async def failing_once_sink(_bundle):
+        nonlocal sink_calls
+        sink_calls += 1
+        if sink_calls == 1:
+            raise RuntimeError("durable store temporarily unavailable")
+
+    fakes.state.canonical_sink = failing_once_sink
+    with pytest.raises(v15_scan_service.CanonicalV16PersistencePendingError):
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+
+    coordinator = fakes.state.canonical_coordinator
+    assert sink_calls == 1
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+    assert fakes.trade_date in coordinator.pending_persist
+    assert fakes.trade_date not in coordinator.cache
+    cached = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+    assert cached.status is v15_scan_service.CachedCanonicalV16Status.PERSISTENCE_PENDING
+
+    bundle = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    assert bundle.trade_date == fakes.trade_date
+    assert sink_calls == 2
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+    assert fakes.trade_date not in coordinator.pending_persist
+    assert fakes.trade_date in coordinator.cache
+
+
+@pytest.mark.asyncio
+async def test_cross_date_pending_is_retained_and_reused(fakes, monkeypatch):
+    sink_calls: list[date] = []
+
+    async def date_sink(_bundle):
+        sink_calls.append(_bundle.trade_date)
+        if _bundle.trade_date == fakes.trade_date and len(sink_calls) == 1:
+            raise RuntimeError("date-A store unavailable")
+
+    fakes.state.canonical_sink = date_sink
+    with pytest.raises(v15_scan_service.CanonicalV16PersistencePendingError):
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+
+    coordinator = fakes.state.canonical_coordinator
+    pending_a = coordinator.pending_persist[fakes.trade_date]
+    date_b = fakes.trade_date + timedelta(days=1)
+    pending_b = replace(pending_a, trade_date=date_b, _integrity_hash="")
+    pending_b = replace(
+        pending_b,
+        _integrity_hash=v15_scan_service._bundle_fingerprint(pending_b),
+    )
+    computed_dates: list[date] = []
+
+    async def compute_date_b(_state, trade_date, **_kwargs):
+        computed_dates.append(trade_date)
+        return pending_b
+
+    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", compute_date_b)
+    assert await v15_scan_service.get_or_compute_canonical_v16(fakes.state, date_b)
+    assert computed_dates == [date_b]
+    assert date_b in coordinator.cache
+    assert fakes.trade_date in coordinator.pending_persist
+
+    monkeypatch.undo()
+    bundle_a = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    assert bundle_a.trade_date == fakes.trade_date
+    assert computed_dates == [date_b]
+    assert sink_calls == [fakes.trade_date, date_b, fakes.trade_date]
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+    assert fakes.trade_date in coordinator.cache
+    assert fakes.trade_date not in coordinator.pending_persist
+
+
+@pytest.mark.asyncio
+async def test_sink_cannot_silently_tamper_the_pending_master(fakes):
+    sink_calls = 0
+
+    async def tampering_once_sink(bundle):
+        nonlocal sink_calls
+        sink_calls += 1
+        if sink_calls == 1:
+            bundle.scan_result.recommended[0].name = "tampered-by-sink"
+
+    fakes.state.canonical_sink = tampering_once_sink
+    with pytest.raises(v15_scan_service.CanonicalV16PersistencePendingError):
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+
+    pending = fakes.state.canonical_coordinator.pending_persist[fakes.trade_date]
+    assert pending.scan_result.recommended[0].name == "cached-name"
+    bundle = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    assert bundle.scan_result.recommended[0].name == "cached-name"
+    assert sink_calls == 2
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancels_durable_master_and_clears_pending(fakes):
+    sink_entered = asyncio.Event()
+
+    async def blocked_sink(_bundle):
+        sink_entered.set()
+        await asyncio.Event().wait()
+
+    fakes.state.canonical_sink = blocked_sink
+    caller = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    )
+    await asyncio.wait_for(sink_entered.wait(), timeout=1)
+    coordinator = fakes.state.canonical_coordinator
+    master = coordinator.inflight[fakes.trade_date]
+
+    await asyncio.wait_for(v15_scan_service.cleanup_scan_resources(fakes.state), timeout=1)
+
+    assert master.cancelled() is True
+    assert coordinator.pending_persist == {}
+    assert fakes.state.canonical_coordinator is None
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_retries_pending_durable_sink_without_computing_again(
+    fakes,
+    monkeypatch,
+):
+    sink_calls = 0
+
+    async def failing_once_sink(_bundle):
+        nonlocal sink_calls
+        sink_calls += 1
+        if sink_calls == 1:
+            raise RuntimeError("scheduler durable store unavailable")
+
+    fakes.state.canonical_sink = failing_once_sink
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.combine(fakes.trade_date, time(9, 39), tzinfo=BEIJING_TZ)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_delay):
+        await real_sleep(0)
+
+    async def no_signal(_signal):
+        return None
+
+    monkeypatch.setattr(v15_scan_service, "datetime", FixedDateTime)
+    monkeypatch.setattr(v15_scan_service.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(v15_scan_service, "_notify_feishu_signal", no_signal)
+    scheduler = asyncio.create_task(v15_scan_service._scan_scheduler(fakes.state))
+
+    async def recommendation_set():
+        while fakes.state.today_recommendation is None:
+            await real_sleep(0)
+
+    await asyncio.wait_for(recommendation_set(), timeout=1)
+    scheduler.cancel()
+    await asyncio.wait_for(scheduler, timeout=1)
+
+    assert sink_calls == 2
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+    assert fakes.state.scan_done_date == fakes.trade_date.isoformat()
+    assert fakes.state.scan_error is None
+
+
+@pytest.mark.asyncio
+async def test_cached_canonical_accessor_returns_isolated_verified_master(fakes, monkeypatch):
+    master = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    cached_master = fakes.state.canonical_coordinator.cache[fakes.trade_date]
+
+    async def compute_must_not_start(*_args, **_kwargs):
+        raise AssertionError("cached-only accessor must not start computation")
+
+    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", compute_must_not_start)
+    result = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+
+    assert result.status is v15_scan_service.CachedCanonicalV16Status.AVAILABLE
+    assert result.available is True
+    assert result.bundle is not cached_master
+    assert result.bundle is not master
+    assert result.bundle._integrity_hash == cached_master._integrity_hash
+    assert result.bundle.trade_date == fakes.trade_date
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_canonical_accessor_reports_missing_and_inflight_without_cold_start(
+    fakes, monkeypatch
+):
+    empty_state = v15_scan_service.V15ScanState()
+    missing = await v15_scan_service.get_cached_canonical_v16(empty_state, fakes.trade_date)
+    assert missing.status is v15_scan_service.CachedCanonicalV16Status.NOT_CACHED
+    assert missing.available is False
+    assert missing.bundle is None
+    assert empty_state.canonical_coordinator is None
+
+    gate = asyncio.Event()
+    fakes.scanner.gate = gate
+    inflight = asyncio.create_task(
+        v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    )
+    for _ in range(100):
+        if fakes.rt.early_pull_calls == 1:
+            break
+        await asyncio.sleep(0)
+    for _ in range(100):
+        if fakes.scanner.scan_calls == 1:
+            break
+        await asyncio.sleep(0)
+
+    async def compute_must_not_start(*_args, **_kwargs):
+        raise AssertionError("cached-only accessor must not join or start computation")
+
+    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", compute_must_not_start)
+    running = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+    assert running.status is v15_scan_service.CachedCanonicalV16Status.IN_FLIGHT
+    assert running.available is False
+    assert running.bundle is None
+    assert fakes.rt.early_pull_calls == 1
+    assert fakes.scanner.scan_calls == 1
+
+    gate.set()
+    await inflight
+
+
+@pytest.mark.asyncio
+async def test_cached_canonical_accessor_reports_prior_failure_without_retry(fakes, monkeypatch):
+    fakes.scanner.fail_times = 1
+    with pytest.raises(RuntimeError, match="scan boom"):
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+
+    async def compute_must_not_start(*_args, **_kwargs):
+        raise AssertionError("cached-only accessor must not retry a failed computation")
+
+    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", compute_must_not_start)
+    failed = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+
+    assert failed.status is v15_scan_service.CachedCanonicalV16Status.FAILED
+    assert failed.available is False
+    assert failed.bundle is None
+    assert failed.detail == "RuntimeError: scan boom"
+    assert fakes.scanner.scan_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_canonical_accessor_rejects_date_mismatch_and_bad_fingerprint(fakes):
+    master = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    coord = fakes.state.canonical_coordinator
+    coord.cache[fakes.trade_date] = replace(master, trade_date=fakes.trade_date + timedelta(days=1))
+    mismatched = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+    assert mismatched.status is v15_scan_service.CachedCanonicalV16Status.TRADE_DATE_MISMATCH
+    assert mismatched.available is False
+    assert mismatched.bundle is None
+
+    coord.cache[fakes.trade_date] = replace(master, universe=())
+    invalid = await v15_scan_service.get_cached_canonical_v16(fakes.state, fakes.trade_date)
+    assert invalid.status is v15_scan_service.CachedCanonicalV16Status.INTEGRITY_INVALID
+    assert invalid.available is False
+    assert invalid.bundle is None
 
 
 @pytest.mark.asyncio
@@ -900,10 +1535,18 @@ async def test_compute_only_admits_ready_codes_to_scanner(fakes, monkeypatch):
 
     monkeypatch.setattr(fakes.scanner, "scan", recording_scan)
 
-    async def prev_for_codes(ts_date):  # noqa: ARG001
-        return {code: 10.5 for code in codes}
+    async def daily_for_codes(trade_date: str):
+        return {
+            code: TushareDailyBar(
+                stock_code=code,
+                trade_date=trade_date,
+                close_price=10.5,
+                amount_yuan=1_000_000.0,
+            )
+            for code in codes
+        }
 
-    fakes.state.realtime_client.fetch_prev_closes = prev_for_codes
+    fakes.state.realtime_client.fetch_daily_bars = daily_for_codes
 
     def make_bars(trade_date, ready: bool):
         if not ready:
@@ -960,7 +1603,7 @@ async def test_compute_only_admits_ready_codes_to_scanner(fakes, monkeypatch):
 @pytest.mark.asyncio
 async def test_partial_evidence_via_coordinator(fakes, monkeypatch):
     """Coordinator retains partial evidence and retry pulls only unresolved codes."""
-    codes = ["000001", "000002", "000003", "000004", "000005"]
+    codes = ["000001", "000002", "000003", "000004", "600000"]
     monkeypatch.setattr(
         fakes.scanner,
         "get_universe",
@@ -1018,10 +1661,21 @@ async def test_partial_evidence_via_coordinator(fakes, monkeypatch):
             for code in codes
         }
 
-    async def prev_for_codes(ts_date):  # noqa: ARG001
-        return {code: 10.5 for code in codes}
+    daily_calls: list[str] = []
 
-    fakes.state.realtime_client.fetch_prev_closes = prev_for_codes
+    async def partial_daily_for_codes(trade_date: str):
+        daily_calls.append(trade_date)
+        return {
+            code: TushareDailyBar(
+                stock_code=code,
+                trade_date=trade_date,
+                close_price=10.5,
+                amount_yuan=1_000_000.0,
+            )
+            for code in codes
+        }
+
+    fakes.state.realtime_client.fetch_daily_bars = partial_daily_for_codes
     fakes.state.realtime_client.batch_get_early_market_data = staged_early
 
     with pytest.raises(v15_scan_service.CanonicalV16NotReadyError):
@@ -1032,7 +1686,8 @@ async def test_partial_evidence_via_coordinator(fakes, monkeypatch):
     bundle = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
     assert bundle is not None
     assert len(call_log) == 2
-    assert set(call_log[1]) == {"000003", "000004", "000005"}
+    assert set(call_log[1]) == {"000003", "000004", "600000"}
+    assert daily_calls == [(fakes.trade_date - timedelta(days=1)).strftime("%Y%m%d")]
 
 
 @pytest.mark.asyncio
@@ -1180,36 +1835,43 @@ async def test_cancellation_of_waiter_does_not_duplicate_fatal_alert(fakes, monk
 
 @pytest.mark.asyncio
 async def test_coordinator_state_is_bound_to_most_recent_trade_date():
-    """Only the current/most recent trade date's coordinator state is retained."""
+    """Completed stale state is dropped while registered masters are retained."""
 
     coord = v15_scan_service._CanonicalV16Coordinator()
+    d0 = date(2025, 12, 31)
     d1 = date(2026, 1, 1)
     d2 = date(2026, 1, 2)
 
+    coord.cache[d0] = object()  # type: ignore[arg-type]
     coord.cache[d1] = object()  # type: ignore[arg-type]
     coord.cache[d2] = object()  # type: ignore[arg-type]
     coord.inflight[d1] = object()  # type: ignore[arg-type]
     coord.publish[d1] = object()  # type: ignore[arg-type]
+    coord.publish[d0] = object()  # type: ignore[arg-type]
+    coord.partial[d0] = {}
     coord.partial[d1] = {}
     coord.partial[d2] = {}
-    coord.published.update({d1, d2})
-    coord.data_errors_sent.update({d1, d2})
-    coord.not_ready_alert_sent.update({d1, d2})
+    coord.published.update({d0, d1, d2})
+    coord.data_errors_sent.update({d0, d1, d2})
+    coord.not_ready_alert_sent.update({d0, d1, d2})
+    coord.fatal_errors_sent.add((d0, "t0", "h0"))
     coord.fatal_errors_sent.add((d1, "t1", "h1"))
     coord.fatal_errors_sent.add((d2, "t2", "h2"))
 
     v15_scan_service._evict_stale_dates(coord, d2)
 
-    assert d1 not in coord.cache
+    assert d0 not in coord.cache
+    assert d0 not in coord.publish
+    assert d0 not in coord.partial
     assert d2 in coord.cache
-    assert d1 not in coord.inflight
-    assert d1 not in coord.publish
-    assert d1 not in coord.partial
+    assert d1 in coord.inflight
+    assert d1 in coord.publish
+    assert d1 in coord.partial
     assert d2 in coord.partial
-    assert coord.published == {d2}
-    assert coord.data_errors_sent == {d2}
-    assert coord.not_ready_alert_sent == {d2}
-    assert coord.fatal_errors_sent == {(d2, "t2", "h2")}
+    assert coord.published == {d1, d2}
+    assert coord.data_errors_sent == {d1, d2}
+    assert coord.not_ready_alert_sent == {d1, d2}
+    assert coord.fatal_errors_sent == {(d1, "t1", "h1"), (d2, "t2", "h2")}
 
 
 # --- Phase 1 regression tests: deterministic scanner inputs and hashes --------
@@ -1582,9 +2244,9 @@ async def test_history_normalization_before_scanner(fakes, monkeypatch):
     prev_date = fakes.trade_date - timedelta(days=1)
 
     def make_history(numeric_factory, time_factory):
-        days = 38
+        days = 40
         return {
-            "time": [time_factory(prev_date - timedelta(days=days - i)) for i in range(days)],
+            "time": [time_factory(prev_date - timedelta(days=days - i - 1)) for i in range(days)],
             "open": [numeric_factory(10.0)] * days,
             "high": [numeric_factory(10.5)] * days,
             "low": [numeric_factory(9.5)] * days,
@@ -2474,15 +3136,15 @@ async def test_origin_low_row_history_still_builds_scanner_input(fakes, monkeypa
 
     class LowRowHistAdapter:
         async def history_quotes(self, *, codes, indicators, start_date, end_date):  # noqa: ARG002
+            times = [
+                (first_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(valid_rows - 1)
+            ] + [(fakes.trade_date - timedelta(days=1)).isoformat()]
             return {
                 "tables": [
                     {
                         "thscode": "600000.SH",
                         "table": {
-                            "time": [
-                                (first_date + timedelta(days=i)).strftime("%Y-%m-%d")
-                                for i in range(valid_rows)
-                            ],
+                            "time": times,
                             "open": [10.0] * valid_rows,
                             "high": [10.5] * valid_rows,
                             "low": [9.5] * valid_rows,
@@ -2581,3 +3243,338 @@ async def test_origin_low_row_history_still_builds_scanner_input(fakes, monkeypa
     else:
         assert set(bundle.scan_result.stock_cci) == {"600000"}
         assert np.isfinite(bundle.scan_result.stock_cci["600000"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ready_n", [79, 80])
+async def test_readiness_boundary_79_of_100_not_ready_80_of_100_scans(
+    fakes, monkeypatch, ready_n: int
+):
+    """The canonical 09:39 readiness gate is exactly 80%: 79/100 fails, 80/100 scans."""
+    codes = [f"60{index:04d}" for index in range(100)]
+    ready_codes = set(codes[:ready_n])
+    monkeypatch.setattr(
+        fakes.scanner,
+        "get_universe",
+        lambda self: ({"board-a": _clean_board(*codes)}, set(codes)),
+    )
+
+    async def prev_for_codes(ts_date):  # noqa: ARG001
+        return {code: 10.5 for code in codes}
+
+    fakes.state.realtime_client.fetch_prev_closes = prev_for_codes
+
+    def make_bars(code: str, ready: bool):
+        if not ready:
+            return ()
+        bar_end = datetime.combine(fakes.trade_date, datetime.min.time()).replace(
+            hour=9, minute=39, tzinfo=BEIJING_TZ
+        )
+        return (
+            TushareMinuteBar(
+                stock_code=code,
+                bar_end=bar_end,
+                end_label="09:39",
+                open_price=11.0,
+                close_price=12.3,
+                high_price=12.4,
+                low_price=10.9,
+                volume=2000.0,
+                amount=24000.0,
+            ),
+        )
+
+    async def boundary_early(requested: list[str], expected_trade_date=None):
+        return {
+            code: TushareEarlyMarketData(
+                quote=TushareQuote(
+                    stock_code=code,
+                    open_price=11.0,
+                    latest_price=12.0,
+                    high_price=12.5,
+                    low_price=10.9,
+                    volume=5000.0,
+                    amount=60000.0,
+                    early_close=12.3,
+                    early_high=12.4,
+                    early_low=11.5,
+                    early_volume=3000.0,
+                    volume_937=2000.0,
+                ),
+                early_bars=make_bars(code, code in ready_codes),
+                source_hash=f"h-{code}",
+            )
+            for code in requested
+        }
+
+    fakes.state.realtime_client.batch_get_early_market_data = boundary_early
+    fakes.scanner.scan_calls = 0
+
+    if ready_n < 80:
+        with pytest.raises(v15_scan_service.CanonicalV16NotReadyError) as exc_info:
+            await v15_scan_service.compute_canonical_v16_scan(fakes.state, fakes.trade_date)
+        assert "79/100" in str(exc_info.value)
+        assert fakes.scanner.scan_calls == 0
+    else:
+        bundle = await v15_scan_service.compute_canonical_v16_scan(fakes.state, fakes.trade_date)
+        assert fakes.scanner.scan_calls == 1
+        assert sorted(bundle.stock_data) == sorted(ready_codes)
+
+
+_REAL_SEED_TRADE_DATE = date(2026, 8, 31)
+_REAL_SEED_LABELS = ("09:25", "09:30", *(f"09:{minute:02d}" for minute in range(31, 40)))
+
+
+def _real_seed_raw_bars(code: str, index: int, *, bump_939: float = 0.0):
+    """Deterministic raw 09:25/09:30/09:31..09:39 minute bars for one code."""
+    base = 12.0 + index * 0.05
+    bars = []
+    for label in _REAL_SEED_LABELS:
+        if label == "09:25":
+            open_price = close = base
+        elif label == "09:30":
+            open_price, close = base, base + 0.02
+        else:
+            open_price = base + 0.02 + (int(label[3:]) - 31) * 0.01
+            close = open_price + 0.01
+        if label == "09:39":
+            close += bump_939
+        hour, minute = int(label[:2]), int(label[3:])
+        volume = 1000.0 + index * 100.0 + minute
+        bars.append(
+            TushareMinuteBar(
+                stock_code=code,
+                bar_end=datetime.combine(
+                    _REAL_SEED_TRADE_DATE, time(hour, minute), tzinfo=BEIJING_TZ
+                ),
+                end_label=label,
+                open_price=open_price,
+                close_price=close,
+                high_price=max(open_price, close) + 0.01,
+                low_price=min(open_price, close) - 0.01,
+                volume=volume,
+                amount=volume * close,
+            )
+        )
+    return tuple(bars)
+
+
+class _RealSeedFundamentals:
+    async def batch_filter_st(self, codes):
+        return list(codes)
+
+    async def batch_get_fundamentals(self, codes):  # noqa: ARG002
+        return {}
+
+    async def close(self):
+        pass
+
+
+class _RealSeedBombRT:
+    """Every realtime method is a bomb; any touch is recorded and fails."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str):
+        async def _bomb(*_args, **_kwargs):
+            self.calls.append(name)
+            raise AssertionError(f"seeded compute touched realtime method {name}")
+
+        return _bomb
+
+
+@pytest.mark.asyncio
+async def test_seeded_historical_compute_reproduces_live_normalized_canonical_scan(monkeypatch):
+    """A persisted-raw seed reproduces the live-normalized canonical scan exactly.
+
+    The real ``compute_canonical_v16_scan`` runs the real V16Scanner with the
+    real LGBRank model twice over the same raw 09:25/09:30/09:31..09:39 bars:
+    once with the live client normalizing them on the fly, once hydrated from a
+    repository/historical seed with every realtime method bombed.  Static inputs
+    (universe, boards, prev closes, history, names, calendar) are pinned by
+    overrides so only the early evidence path differs.
+    """
+    codes = tuple(f"6000{index:02d}" for index in range(10))
+    universe = tuple(sorted(codes))
+    names = {code: f"name-{code}" for code in codes}
+    clean_boards = {"board-a": tuple((code, names[code]) for code in universe)}
+    prev_closes = {code: 12.0 for code in codes}
+    calendar = tuple(
+        sorted(
+            {
+                *(date(2026, 8, 28) - timedelta(days=offset) for offset in range(45)),
+                _REAL_SEED_TRADE_DATE,
+                date(2026, 9, 1),
+                date(2026, 9, 2),
+            }
+        )
+    )
+    history_days = [
+        (date(2026, 8, 28) - timedelta(days=39 - offset)).isoformat() for offset in range(40)
+    ]
+    history_raw = {
+        code: {
+            "time": history_days,
+            "open": [11.5] * 40,
+            "high": [11.6] * 40,
+            "low": [11.4] * 40,
+            "close": [11.5 + offset * 0.01 for offset in range(40)],
+            "volume": [1_000_000.0] * 40,
+        }
+        for code in codes
+    }
+
+    def normalized(bump_code: str | None = None) -> dict[str, TushareEarlyMarketData]:
+        return {
+            code: tushare_minute_bars_to_early_market_data(
+                code,
+                _real_seed_raw_bars(code, index, bump_939=0.5 if code == bump_code else 0.0),
+                _REAL_SEED_TRADE_DATE,
+            )
+            for index, code in enumerate(codes)
+        }
+
+    class _LiveNormalizedRT(_RealSeedBombRT):
+        def __init__(self, early: dict[str, TushareEarlyMarketData]) -> None:
+            super().__init__()
+            self._early = early
+
+        async def batch_get_early_market_data(self, requested, expected_trade_date=None):
+            assert expected_trade_date == _REAL_SEED_TRADE_DATE
+            self.calls.append("batch_get_early_market_data")
+            return {code: self._early[code] for code in requested}
+
+    # Board plumbing and orthogonal tail filters are pinned, but the scanner
+    # genuinely builds stock_data from the normalized raw bars, applies the ST /
+    # gain / price filters, and scores with the real LGBRank model.
+    def pinned_hot_boards(self, boards_arg, stock_data):  # noqa: ARG001
+        return (
+            {
+                board: sorted(code for code, _name in members)
+                for board, members in boards_arg.items()
+            },
+            {code: ["board-a"] for code in universe},
+            0,
+            {"board-a": 1.0},
+            {"board-a": 1.0},
+        )
+
+    monkeypatch.setattr(RealV16Scanner, "_step2_hot_boards", pinned_hot_boards)
+    monkeypatch.setattr(
+        RealV16Scanner, "_step5_volume_filter", lambda self, candidates, stock_data: candidates
+    )
+
+    async def keep_candidates(self, candidates, stock_data):  # noqa: ARG001
+        return candidates
+
+    monkeypatch.setattr(RealV16Scanner, "_step6_reversal_filter", keep_candidates)
+    monkeypatch.setattr(
+        RealV16Scanner, "_step6_5_limit_up_filter", lambda self, candidates, stock_data: candidates
+    )
+    monkeypatch.setattr(
+        RealV16Scanner,
+        "_step6_6_upper_shadow_filter",
+        lambda self, candidates, stock_data: candidates,
+    )
+
+    async def no_name_refresh(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(v15_scan_service, "_refresh_top10_names", no_name_refresh)
+
+    def make_state(rt_client) -> v15_scan_service.V15ScanState:
+        return v15_scan_service.V15ScanState(
+            initialized=True,
+            realtime_client=rt_client,
+            fundamentals_db=_RealSeedFundamentals(),
+            historical_adapter=object(),
+            concept_mapper=object(),
+            stock_filter=object(),
+            tushare_cache=None,
+        )
+
+    static_inputs = {
+        "universe_override": universe,
+        "clean_boards_override": clean_boards,
+        "prev_closes_override": prev_closes,
+        "prior_daily_override": {
+            code: TushareDailyBar(
+                stock_code=code,
+                trade_date=date(2026, 8, 28).strftime("%Y%m%d"),
+                close_price=prev_closes[code],
+                amount_yuan=1_000_000.0,
+            )
+            for code in codes
+        },
+        "st_eligible_codes_override": universe,
+        "history_raw_override": history_raw,
+        "names_override": names,
+        "calendar_override": calendar,
+    }
+
+    # Baseline: the live client normalizes the raw bars on the fly.
+    live_rt = _LiveNormalizedRT(normalized())
+    baseline = await v15_scan_service.compute_canonical_v16_scan(
+        make_state(live_rt), _REAL_SEED_TRADE_DATE, **static_inputs
+    )
+    assert live_rt.calls == ["batch_get_early_market_data"]
+
+    # Seeded: the same raw bars arrive through the repository/historical seed
+    # path (the same shared normalizer) with realtime fetches forbidden.
+    bomb_rt = _RealSeedBombRT()
+    seeded = await v15_scan_service.compute_canonical_v16_scan(
+        make_state(bomb_rt),
+        _REAL_SEED_TRADE_DATE,
+        early_data_seed=normalized(),
+        allow_realtime_fetch=False,
+        **static_inputs,
+    )
+    assert bomb_rt.calls == []
+
+    assert seeded.input_hash == baseline.input_hash
+    assert seeded.early_source_hashes == baseline.early_source_hashes
+
+    def critical_stock_fields(bundle):
+        return {
+            code: (
+                sd.open_price,
+                sd.prev_close,
+                sd.price_940,
+                sd.high_940,
+                sd.low_940,
+                sd.volume_937,
+                sd.volume_940,
+                sd.avg_daily_volume,
+                len(sd.history_df),
+            )
+            for code, sd in bundle.stock_data.items()
+        }
+
+    assert critical_stock_fields(seeded) == critical_stock_fields(baseline)
+
+    def ordered_top10(bundle):
+        return [
+            (
+                rank,
+                stock.code,
+                stock.score,
+                stock.buy_price,
+                tuple(bundle.scan_result.stock_all_boards.get(stock.code, ())),
+            )
+            for rank, stock in enumerate(bundle.scan_result.recommended, start=1)
+        ]
+
+    baseline_top10 = ordered_top10(baseline)
+    assert len(baseline_top10) == 10
+    # The real model genuinely ranks: scores are finite and not all identical.
+    assert len({entry[2] for entry in baseline_top10}) > 1
+    assert ordered_top10(seeded) == baseline_top10
+
+    # The outputs are a function of the raw bars, not fixed: perturbing one
+    # raw 09:39 close changes the canonical input hash.
+    perturbed_rt = _LiveNormalizedRT(normalized(bump_code=codes[0]))
+    perturbed = await v15_scan_service.compute_canonical_v16_scan(
+        make_state(perturbed_rt), _REAL_SEED_TRADE_DATE, **static_inputs
+    )
+    assert perturbed.input_hash != baseline.input_hash

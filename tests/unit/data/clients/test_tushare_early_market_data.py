@@ -16,6 +16,7 @@ from src.data.clients.tushare_realtime import (
     TushareQuote,
     TushareRealtimeClient,
     TushareRealtimeError,
+    tushare_minute_bars_to_early_market_data,
 )
 
 _FIELDS = ["time", "open", "close", "high", "low", "vol", "amount"]
@@ -46,6 +47,23 @@ def _daily_payload(closes: dict[str, float]) -> dict[str, object]:
 def _full_day_payload(base: float = 10.0) -> dict[str, object]:
     labels = [f"09:{minute:02d}" for minute in range(31, 41)]  # 09:31..09:40
     return _daily_payload({label: base + i * 0.1 for i, label in enumerate(labels)})
+
+
+def _minute_bar(label: str, **overrides: object) -> TushareMinuteBar:
+    fields = {
+        "stock_code": "000001",
+        "bar_end": datetime.fromisoformat(f"{TRADE_DATE.isoformat()} {label}:00").replace(
+            tzinfo=BEIJING_TZ
+        ),
+        "end_label": label,
+        "open_price": 10.0,
+        "close_price": 10.1,
+        "high_price": 10.2,
+        "low_price": 9.9,
+        "volume": 100.0,
+        "amount": 1000.0,
+    }
+    return TushareMinuteBar(**{**fields, **overrides})
 
 
 def _payload(
@@ -101,7 +119,7 @@ async def test_one_api_call_per_code_yields_quote_and_bars_from_same_response(
     # Aggregated quote semantics (same as _parse_rt_min_daily):
     assert data.quote.stock_code == "000001"
     assert data.quote.open_price == pytest.approx(9.95)  # first bar open
-    assert data.quote.latest_price == pytest.approx(10.9)  # 09:40 close
+    assert data.quote.latest_price == pytest.approx(10.8)  # 09:39 close
     assert data.quote.early_close == pytest.approx(10.8)  # 09:39 close
     # Minute-parse semantics: exactly the 09:31..09:39 labels, in order.
     assert [bar.end_label for bar in data.early_bars] == [
@@ -113,6 +131,23 @@ async def test_one_api_call_per_code_yields_quote_and_bars_from_same_response(
 
     assert result["600000"].quote.open_price == pytest.approx(19.95)
     assert len(result["600000"].early_bars) == 9
+
+
+@pytest.mark.asyncio
+async def test_rt_min_daily_mixed_instrument_response_fails_closed(monkeypatch) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    fields = ["ts_code", *_FIELDS]
+    good = ["000001.SZ", *_row("09:38", 10.0)]
+    wrong = ["600000.SH", *_row("09:39", 10.1)]
+
+    async def mixed_api_call(*_args, **_kwargs):
+        return {"data": {"fields": fields, "items": [good, wrong]}}
+
+    monkeypatch.setattr(client, "_api_call", mixed_api_call)
+
+    with pytest.raises(TushareRealtimeError, match="does not match requested"):
+        await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
 
 
 @pytest.mark.asyncio
@@ -264,6 +299,108 @@ async def test_source_hash_ignores_0940_and_later_rows(monkeypatch) -> None:
     assert hash_a == hash_b
 
 
+def test_helper_matches_live_parser_with_early_and_later_bars() -> None:
+    closes = {
+        "09:25": 10.0,
+        "09:30": 10.1,
+        "09:39": 10.2,
+        "09:40": 10.3,
+    }
+    payload = _daily_payload(closes)
+
+    live = TushareRealtimeClient._parse_early_market_data(
+        "000001", payload, expected_trade_date=TRADE_DATE
+    )
+    bars = TushareRealtimeClient._parse_minute_history(
+        "000001", payload, expected_trade_date=TRADE_DATE
+    )
+    direct = tushare_minute_bars_to_early_market_data("000001", bars, TRADE_DATE)
+
+    assert direct == live
+    assert direct is not None
+    assert [bar.end_label for bar in direct.early_bars] == ["09:25", "09:30", "09:39"]
+    assert direct.quote.latest_price == pytest.approx(10.2)
+    assert direct.quote.early_close == pytest.approx(10.2)
+
+
+def test_helper_ignores_later_bars_in_early_evidence() -> None:
+    closes = {
+        "09:25": 10.0,
+        "09:30": 10.1,
+        "09:39": 10.2,
+        "09:40": 10.3,
+    }
+    payload = _daily_payload(closes)
+    bars = TushareRealtimeClient._parse_minute_history(
+        "000001", payload, expected_trade_date=TRADE_DATE
+    )
+    truncated_bars = tuple(bar for bar in bars if bar.end_label <= "09:39")
+
+    full = tushare_minute_bars_to_early_market_data("000001", bars, TRADE_DATE)
+    truncated = tushare_minute_bars_to_early_market_data("000001", truncated_bars, TRADE_DATE)
+
+    assert full is not None
+    assert truncated is not None
+    assert full.early_bars == truncated.early_bars
+    assert full.source_hash == truncated.source_hash
+    assert full == truncated
+    assert full.quote.latest_price == pytest.approx(10.2)
+    assert full.quote.high_price == pytest.approx(10.3)
+    assert full.quote.low_price == pytest.approx(9.9)
+    assert full.quote.volume == pytest.approx(sum(bar.volume for bar in truncated_bars))
+    assert full.quote.amount == pytest.approx(sum(bar.amount for bar in truncated_bars))
+
+
+def test_helper_quote_and_hash_ignore_extreme_later_bars() -> None:
+    early_bars = (
+        _minute_bar("09:25"),
+        _minute_bar("09:31"),
+        _minute_bar("09:39"),
+    )
+    later_bars = (
+        _minute_bar(
+            "09:40",
+            open_price=20.0,
+            close_price=30.0,
+            high_price=40.0,
+            low_price=1.0,
+            volume=10_000.0,
+            amount=100_000.0,
+        ),
+        _minute_bar(
+            "10:00",
+            open_price=50.0,
+            close_price=60.0,
+            high_price=70.0,
+            low_price=0.5,
+            volume=20_000.0,
+            amount=200_000.0,
+        ),
+    )
+
+    early_only = tushare_minute_bars_to_early_market_data("000001", early_bars, TRADE_DATE)
+    with_later = tushare_minute_bars_to_early_market_data(
+        "000001", early_bars + later_bars, TRADE_DATE
+    )
+
+    assert early_only is not None
+    assert with_later is not None
+    assert with_later == early_only
+    assert with_later.quote.latest_price == pytest.approx(10.1)
+    assert with_later.quote.high_price == pytest.approx(10.2)
+    assert with_later.quote.low_price == pytest.approx(9.9)
+    assert with_later.quote.volume == pytest.approx(300.0)
+    assert with_later.quote.amount == pytest.approx(3000.0)
+
+
+def test_helper_returns_none_for_only_late_bars() -> None:
+    result = tushare_minute_bars_to_early_market_data(
+        "000001", (_minute_bar("09:40"), _minute_bar("10:00")), TRADE_DATE
+    )
+
+    assert result is None
+
+
 @pytest.mark.asyncio
 async def test_wrong_trade_date_is_dropped(monkeypatch) -> None:
     """A response whose bars are for a different date must not yield ready evidence."""
@@ -321,7 +458,7 @@ async def test_early_quotes_wrapper_returns_same_quotes(monkeypatch) -> None:
 
     assert set(quotes) == {"000001", "600000"}
     assert quotes["000001"].early_close == pytest.approx(10.8)
-    assert quotes["600000"].latest_price == pytest.approx(20.9)
+    assert quotes["600000"].latest_price == pytest.approx(20.8)
     # Wrapper still performs exactly one API call per code.
     assert sorted(calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
 
@@ -627,8 +764,8 @@ async def test_timezone_equivalence_full_three_piece(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_wrong_date_mixed_with_valid_equals_baseline(monkeypatch) -> None:
-    """Wrong-date malformed/boolean rows must not affect the valid-baseline output."""
+async def test_wrong_date_mixed_with_valid_invalidates_the_symbol(monkeypatch) -> None:
+    """A mixed-date per-symbol response cannot be bound to the requested day."""
     wrong_date = date(2026, 8, 30)
     baseline = _daily_payload(_valid_early_closes())
 
@@ -645,17 +782,13 @@ async def test_wrong_date_mixed_with_valid_equals_baseline(monkeypatch) -> None:
         }
     }
 
-    client_base, _ = _make_client(monkeypatch, {"000001": baseline})
     client_mixed, _ = _make_client(monkeypatch, {"000001": mixed})
 
-    base_data = (
-        await client_base.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-    )["000001"]
-    mixed_data = (
-        await client_mixed.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-    )["000001"]
+    result = await client_mixed.batch_get_early_market_data(
+        ["000001"], expected_trade_date=TRADE_DATE
+    )
 
-    _assert_same_three_piece(base_data, mixed_data)
+    assert "000001" not in result
 
 
 @pytest.mark.asyncio
@@ -1001,27 +1134,28 @@ async def test_no_time_invalid_value_at_row_ends_rejects_symbol(
 
 
 @pytest.mark.asyncio
-async def test_source_hash_includes_code_when_early_bars_empty(monkeypatch) -> None:
-    """Only 09:40+ rows => empty early_bars, but source_hash must still differ per code."""
+async def test_only_late_rows_are_dropped(monkeypatch) -> None:
+    """Only 09:40+ rows provide no early-market result."""
     payload_a = _daily_payload({"09:40": 10.0})
     payload_b = _daily_payload({"09:40": 10.0})
 
     client_a, _ = _make_client(monkeypatch, {"000001": payload_a})
     client_b, _ = _make_client(monkeypatch, {"000002": payload_b})
 
-    hash_a = (
-        await client_a.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-    )["000001"].source_hash
-    hash_b = (
-        await client_b.batch_get_early_market_data(["000002"], expected_trade_date=TRADE_DATE)
-    )["000002"].source_hash
+    result_a = await client_a.batch_get_early_market_data(
+        ["000001"], expected_trade_date=TRADE_DATE
+    )
+    result_b = await client_b.batch_get_early_market_data(
+        ["000002"], expected_trade_date=TRADE_DATE
+    )
 
-    assert hash_a != hash_b
+    assert result_a == {}
+    assert result_b == {}
 
 
 @pytest.mark.asyncio
-async def test_source_hash_empty_ignores_field_order_and_metadata(monkeypatch) -> None:
-    """Empty-early hash must be stable under response field order and transport envelope."""
+async def test_only_late_rows_ignore_field_order_and_metadata(monkeypatch) -> None:
+    """Only-late responses remain absent regardless of transport shape."""
     rows = [dict(zip(_FIELDS, _row("09:40", 10.0)))]
 
     def build(fields_order: list[str], **envelope: object) -> dict[str, object]:
@@ -1039,14 +1173,14 @@ async def test_source_hash_empty_ignores_field_order_and_metadata(monkeypatch) -
     client_a, _ = _make_client(monkeypatch, {"000001": build(order_a, request_id="a")})
     client_b, _ = _make_client(monkeypatch, {"000001": build(order_b, request_id="b")})
 
-    hash_a = (
-        await client_a.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-    )["000001"].source_hash
-    hash_b = (
-        await client_b.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-    )["000001"].source_hash
+    result_a = await client_a.batch_get_early_market_data(
+        ["000001"], expected_trade_date=TRADE_DATE
+    )
+    result_b = await client_b.batch_get_early_market_data(
+        ["000001"], expected_trade_date=TRADE_DATE
+    )
 
-    assert hash_a == hash_b
+    assert result_a == result_b == {}
 
 
 @pytest.mark.asyncio

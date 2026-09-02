@@ -35,12 +35,22 @@ from src.data.clients.mews_snapshot import (
 )
 from src.data.clients.tushare_realtime import (
     TushareDailyBar,
+    TushareEarlyMarketData,
     TushareMinuteBar,
+    tushare_minute_bars_to_early_market_data,
 )
 from src.data.clients.v20_market_data import (
     V20EarlyBarCollector,
     exact_reference_prices,
 )
+from src.data.database.v16_canonical_artifact_store import (
+    SNAPSHOT_TYPE as V16_CANONICAL_ARTIFACT_EVENT,
+)
+from src.data.database.v16_canonical_artifact_store import (
+    V16CanonicalArtifactStore,
+)
+from src.data.database.v20_mews_guard_store import V20MewsGuardStore
+from src.data.database.v20_mews_receipt_guard import V20MewsReceiptGuard
 from src.data.database.v20_repository import (
     ActiveModelLeg,
     CompatibleEntryBinding,
@@ -113,15 +123,58 @@ from src.web.v15_scan_service import (
     V15ScanState,
     _initialize_scan_resources_once,
     cleanup_scan_resources,
+    compute_canonical_v16_scan,
+    derive_canonical_v16_universe,
     get_or_compute_canonical_v16,
 )
 from src.web.v20_scan_pipeline import (
     FrozenV16ScanBundle,
     V20PrewarmedScan,
 )
+from src.web.v20_v16_canonical_artifact import (
+    encode as encode_v16_canonical_artifact,
+)
+from src.web.v20_v16_canonical_artifact import (
+    hydrate as hydrate_v16_canonical_artifact,
+)
+from src.web.v20_v16_daygate_attestation import (
+    V16DayGateAttestationError,
+    attest_post_cutoff_v16_day_gate,
+)
 
 logger = logging.getLogger(__name__)
+_LATE_0939_REPLAY_ACTIONS = (
+    "ENTER",
+    "BLOCK",
+    "NO_SIGNAL",
+    "INPUT_INVALID",
+)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+# Every end label a canonical early (<=09:39) raw bar can possibly carry:
+# each minute-aligned label from 00:00 through the 09:39 decision bar.  The
+# 09:25/09:30 strategy inputs are inside this set.  Database reads for
+# persisted early evidence must cover this whole set, and every early-evidence
+# filter must test membership in it — never a bare string comparison.
+EARLY_RAW_BAR_LABELS: tuple[str, ...] = tuple(
+    f"{hour:02d}:{minute:02d}"
+    for hour in range(10)
+    for minute in range(60)
+    if (hour, minute) <= (9, 39)
+)
+EARLY_RAW_LAST_LABEL = "09:39"
+# The legacy fixed-nine evidence shape: days persisted before the early window
+# was widened carry exactly 09:31..09:39 and lack the 09:25/09:30 strategy
+# inputs, so a historical bootstrap must refetch exactly these usable codes.
+LEGACY_FIXED_NINE_LABELS: frozenset[str] = frozenset(f"09:{minute:02d}" for minute in range(31, 40))
+HISTORICAL_REQUIRED_SPECIAL_LABELS: frozenset[str] = frozenset({"09:25", "09:30"})
+# Deterministic chunk size for historical stk_mins backfill.  Each completed
+# chunk is normalized and persisted immediately, so a cancellation or failure
+# never loses finished work and the next attempt re-derives pending from the
+# database instead of re-requesting it.
+HISTORICAL_SEED_BACKFILL_CHUNK = 128
+# Bounded sample of conflicted universe codes included in a seed conflict
+# error; the full sorted set stays available in the fold result for callers.
+HISTORICAL_SEED_CONFLICT_SAMPLE = 10
 MAX_ENTRY_HISTORY_RECOVERY_CODES = 50
 ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS = 15.0
 TRADE_CALENDAR_TIMEOUT_SECONDS = 15.0
@@ -132,10 +185,10 @@ ENTRY_CUTOFF_RESERVE_SECONDS = 2.0
 # years into the future is unsafe because exchanges have not published them.
 TRADE_CALENDAR_PAST_DAYS = 730
 TRADE_CALENDAR_FUTURE_DAYS = 45
-# Bounded first-load budget for the 09:40 cutoff watchdog.  It must stay well
-# below the scheduler iteration interval so a blocked Tushare request can
-# never stall the watchdog itself.
-_CALENDAR_CUTOFF_LOAD_BUDGET_SECONDS = 10.0
+# Bounded first-load budget for the 09:40 cutoff watchdog.  It must cover one
+# full provider timeout plus the cutoff reserve so a preexisting calendar
+# master always fits inside the outer budget.
+_CALENDAR_CUTOFF_LOAD_BUDGET_SECONDS = TRADE_CALENDAR_TIMEOUT_SECONDS + ENTRY_CUTOFF_RESERVE_SECONDS
 MAX_CLOSED_EXIT_RECOVERY_TARGETS_PER_TICK = 4
 CLOSED_EXIT_RECOVERY_TIMEOUT_SECONDS = 3.0
 CLOSED_EXIT_RECOVERY_RETRY_SECONDS = 30.0
@@ -303,6 +356,9 @@ class _DayContext:
     entry_status: EntryStatus | None = None
     prewarmed: V20PrewarmedScan | None = None
     canonical_bundle: FrozenV16ScanBundle | None = None
+    canonical_first_received_at: datetime | None = None
+    canonical_entry_mode: str | None = None
+    canonical_entry_action: str | None = None
     collector: V20EarlyBarCollector | None = None
     breadth_collector: V20EarlyBarCollector | None = None
     collector_created_at: datetime | None = None
@@ -352,7 +408,20 @@ class V20LiveExitStageTimeout(RuntimeError):
         self.deadline = deadline
         self.symbols = symbols
         self.provider = provider
-        self.diagnostic_alert_emitted = False
+        self.diagnostic_alert_emitted: bool | None = False
+
+
+class V20LiveExitIncidentError(V20RepositoryError):
+    """A live-exit failure whose more specific durable alert was attempted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostic_alert_emitted: bool | None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostic_alert_emitted = diagnostic_alert_emitted
 
 
 @dataclass
@@ -834,7 +903,7 @@ def _late_0939_replay_body(
     r7_text = f"{float(r7):.2%}" if isinstance(r7, (int, float)) else "-"
     lines = [
         "⛔ 已过期不可追买；这不是交易指令，也不会创建模型持仓、退出信号或订单。",
-        "用途: 截止后重拉并截取当日 raw 09:31..09:39，回答策略在该快照上会如何判断。",
+        "用途: 截止后重拉并截取当日 raw 早盘(≤09:39)证据，回答策略在该快照上会如何判断。",
         "口径: RETROSPECTIVE（数据在截止后取得，不宣称当时已按时形成或送达）。",
         "提示: 消息投递ON_TIME只表示复盘通知及时送达，不表示09:39决策曾按时生成。",
         (
@@ -1143,6 +1212,7 @@ class V20Service:
         self._calendar_cache: tuple[date, ...] = ()
         self._calendar_loaded_for: date | None = None
         self._calendar_tasks: dict[date, asyncio.Task[tuple[date, ...]]] = {}
+        self._calendar_tasks_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
         self._decision_cycle_lock = asyncio.Lock()
@@ -1150,13 +1220,37 @@ class V20Service:
         self._manual_monitor_lock = asyncio.Lock()
         self._late_0939_replay_lock = asyncio.Lock()
         self._late_0939_replay_task: asyncio.Task[Any] | None = None
-        # Trade dates whose canonical 09:31..09:39 raw bars are already durably
+        self._canonical_artifact_store: Any | None = None
+        self._canonical_sink_callback: (
+            Callable[[CanonicalV16ScanBundle], Awaitable[None]] | None
+        ) = None
+        self._canonical_callbacks_open = False
+        self._canonical_artifact_lock = asyncio.Lock()
+        self._canonical_barrier_completed_at: dict[date, datetime] = {}
+        # Trade dates whose canonical early (<=09:39) raw bars are already durably
         # persisted by this process; same-process cache reuse never re-runs it.
         self._canonical_raw_persisted_dates: set[date] = set()
         self._live_exit_lock = asyncio.Lock()
         self._mews_refresh_lock = asyncio.Lock()
-        self._mews_selection_refresh_task: asyncio.Task[bool] | None = None
-        self._mews_selection_refresh_failed_for: date | None = None
+        self._mews_singleflight_lock = asyncio.Lock()
+        # One shared per-date MEWS attempt joined by the 09:10 scheduler and by
+        # every missing-cache selection trigger; cleared once finished so a
+        # later trigger retries while the cache is still missing.
+        self._mews_singleflight_task: asyncio.Task[bool] | None = None
+        self._mews_singleflight_date: date | None = None
+        self._mews_trigger_tasks: set[asyncio.Task[bool]] = set()
+        try:
+            self._mews_guard_store: V20MewsGuardStore | None = (
+                V20MewsGuardStore(repository)
+                if self._supports_strict_mews_guard(repository)
+                else None
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            # A real V20 repository exposes its pool only after ``connect``;
+            # lightweight unit repositories deliberately do not expose the
+            # PostgreSQL surface at all.  Startup retries construction after
+            # the writer connection is established.
+            self._mews_guard_store = None
         self._mews_cached_for: date | None = None
         self._mews_source_trade_date: date | None = None
         self._mews_snapshot_id: str | None = None
@@ -1309,6 +1403,7 @@ class V20Service:
         """
         from src.common.config import get_tushare_token
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
+        from src.web import v15_scan_service
 
         project_root = Path(__file__).resolve().parents[2]
         base_config = load_v20_runtime_config(project_root)
@@ -1385,6 +1480,12 @@ class V20Service:
             publisher=publisher,
             routes=routes,
             mews_source=mews_source,
+            # Embedded main reuses the exact shared V16 trade-calendar
+            # infrastructure, so a cold 14:04 manual trigger after V16 already
+            # ran never fails merely because V20's own Tushare calendar
+            # adapter/cache is empty.  The dedicated strict V20 host keeps its
+            # validated provider (None here means the runtime default).
+            calendar_provider=v15_scan_service.get_trade_calendar,
             initialize_resources=(
                 _init_owned_embedded_v20_scan_resources
                 if owns_fundamentals
@@ -1397,6 +1498,94 @@ class V20Service:
             ),
             embedded_legacy=True,
         )
+
+    @staticmethod
+    def _supports_strict_mews_guard(repository: Any) -> bool:
+        """Distinguish the real writer from legacy repository test doubles."""
+
+        if isinstance(repository, V20Repository):
+            return True
+        # Strict acceptance repositories expose their underlying connection;
+        # old receipt-guard fakes expose only ``fetchrow`` and intentionally
+        # cannot model the SERIALIZABLE selection transaction.
+        connection = getattr(getattr(repository, "pool", None), "connection", None)
+        return callable(getattr(connection, "transaction", None))
+
+    def _initialize_mews_guard_store(self) -> None:
+        """Bind the strict PostgreSQL MEWS boundary once the pool is live."""
+
+        if self._mews_guard_store is not None:
+            return
+        if not self._supports_strict_mews_guard(self._repository):
+            return
+        try:
+            self._mews_guard_store = V20MewsGuardStore(self._repository)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            # Compatibility repositories used by isolated tests do not own a
+            # PostgreSQL pool.  They retain the legacy in-memory contract;
+            # every connected production V20Repository constructs the strict
+            # store here and never enters those compatibility branches.
+            self._mews_guard_store = None
+
+    async def _initialize_canonical_artifact_boundary(self) -> None:
+        """Attach the durable V16 master sink before any V20 lane can run."""
+
+        try:
+            store: Any = V16CanonicalArtifactStore(self._repository)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            # Minimal repositories that cannot persist input_snapshots are
+            # allowed only for isolated compatibility tests.  A real writer
+            # always exposes ``schema`` and a connected ``pool``.
+            self._canonical_artifact_store = None
+            return
+
+        existing_sink = self._scan_state.canonical_sink
+        if existing_sink is not None and existing_sink is not self._canonical_sink_callback:
+            raise V20StateConflict("canonical V16 durable sink is already owned")
+        self._canonical_artifact_store = store
+        self._canonical_callbacks_open = True
+        callback = self._persist_canonical_artifact_barrier
+        self._canonical_sink_callback = callback
+        self._scan_state.canonical_sink = callback
+        await self._reconcile_canonical_artifact_boundary()
+
+    async def _reconcile_canonical_artifact_boundary(self) -> None:
+        """Persist masters completed before the V20 sink was attached.
+
+        An in-flight V16 runner reads ``canonical_sink`` immediately before its
+        persistence phase, so attaching the callback is sufficient for live
+        tasks.  Cached and persistence-pending masters predate that read and
+        are settled explicitly here before runtime lanes start.
+        """
+
+        coordinator = self._scan_state.canonical_coordinator
+        if coordinator is None:
+            return
+        async with coordinator.lock:
+            candidates = {
+                **coordinator.cache,
+                **coordinator.pending_persist,
+            }
+        for trade_date, canonical in sorted(candidates.items()):
+            await self._persist_canonical_artifact_barrier(canonical)
+            async with coordinator.lock:
+                if coordinator.pending_persist.get(trade_date) is canonical:
+                    coordinator.cache[trade_date] = canonical
+                    coordinator.pending_persist.pop(trade_date, None)
+                    coordinator.failures.pop(trade_date, None)
+
+    def _detach_canonical_artifact_boundary(self) -> None:
+        """Reject new callbacks and detach exactly the sink owned by V20."""
+
+        self._canonical_callbacks_open = False
+        callback = self._canonical_sink_callback
+        if callback is not None and self._scan_state.canonical_sink is callback:
+            self._scan_state.canonical_sink = None
+        elif callback is None and self._scan_state.resource_owner == "V20":
+            # A partially-started V20 owns the whole scan state.  This branch
+            # also covers shutdown tests that install a pending sink directly.
+            self._scan_state.canonical_sink = None
+        self._canonical_sink_callback = None
 
     async def start(self) -> None:
         if self._started:
@@ -1444,6 +1633,7 @@ class V20Service:
             self._startup_stage = "CONNECTING_LEDGER"
             await self._repository.connect()
             self._repository_started = True
+            self._initialize_mews_guard_store()
             self._startup_stage = "ACQUIRING_LEADER"
             await self._repository.acquire_runtime_leader(
                 route_id=self.config.route_id,
@@ -1478,6 +1668,8 @@ class V20Service:
                 bootstrap_predecessor_trade_date=bootstrap.predecessor_trade_date,
                 bootstrap_shadow_batches=bootstrap.shadow_batches,
             )
+            self._startup_stage = "ATTACHING_CANONICAL_ARTIFACT"
+            await self._initialize_canonical_artifact_boundary()
             repository_bindings: Iterable[object] = getattr(
                 self._repository,
                 "compatible_entry_bindings",
@@ -1529,6 +1721,13 @@ class V20Service:
         except BaseException as startup_error:
             self._record_error("STARTUP_FAILED")
             self._stop_event.set()
+            self._detach_canonical_artifact_boundary()
+            async with self._mews_singleflight_lock:
+                mews_task, self._mews_singleflight_task = (
+                    self._mews_singleflight_task,
+                    None,
+                )
+                self._mews_singleflight_date = None
             tasks, self._tasks = self._tasks, []
             for task in tasks:
                 task.cancel()
@@ -1536,10 +1735,14 @@ class V20Service:
                 await asyncio.gather(*tasks, return_exceptions=True)
             cleanup_labels: list[str] = []
             cleanup_operations: list[Awaitable[object]] = []
-            mews_task, self._mews_selection_refresh_task = (
-                self._mews_selection_refresh_task,
-                None,
-            )
+            async with self._calendar_tasks_lock:
+                calendar_tasks = list(self._calendar_tasks.values())
+                self._calendar_tasks = {}
+            for calendar_task in calendar_tasks:
+                calendar_task.cancel()
+            if calendar_tasks:
+                cleanup_labels.append("trade-calendar")
+                cleanup_operations.append(asyncio.gather(*calendar_tasks, return_exceptions=True))
             if mews_task is not None and not mews_task.done():
                 mews_task.cancel()
                 cleanup_labels.append("selection-mews")
@@ -1585,13 +1788,28 @@ class V20Service:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        # No durable callback may begin once shutdown starts.  Detach before
+        # cancelling/draining coordinator masters and before the repository is
+        # closed, so a late V16 completion cannot write into a dead pool.
+        self._detach_canonical_artifact_boundary()
+        async with self._mews_singleflight_lock:
+            mews_task, self._mews_singleflight_task = (
+                self._mews_singleflight_task,
+                None,
+            )
+            self._mews_singleflight_date = None
+        async with self._calendar_tasks_lock:
+            calendar_tasks = list(self._calendar_tasks.values())
+            self._calendar_tasks = {}
         tasks, self._tasks = self._tasks, []
         late_replay_task, self._late_0939_replay_task = self._late_0939_replay_task, None
         if late_replay_task is not None:
             tasks.append(late_replay_task)
-        mews_task, self._mews_selection_refresh_task = self._mews_selection_refresh_task, None
         if mews_task is not None:
             tasks.append(mews_task)
+        tasks.extend(self._mews_trigger_tasks)
+        self._mews_trigger_tasks = set()
+        tasks.extend(calendar_tasks)
         for task in tasks:
             task.cancel()
         primary_error: BaseException | None = None
@@ -2665,6 +2883,368 @@ class V20Service:
                 "feishu_delivery_confirmed": entry_record.delivery_status == "SENT",
             }
 
+    async def trigger_canonical_selection_check_only(
+        self,
+        request_id: str,
+        now: datetime | None = None,
+    ) -> Mapping[str, Any]:
+        """Hydrate today's canonical master and prepare V20 without official writes.
+
+        This is the post-cutoff operator path whether or not today's official
+        slot is already terminal.  It reads the durable canonical artifact
+        first and joins the one shared V16 master only when the ticket is
+        absent.  The prepared strategy result is persisted solely as an
+        operator notification: no entry commit, model batch, model leg, exit
+        intent, holding, or order is created or changed.
+        """
+
+        await self._require_manual_trigger_ready()
+        if not isinstance(request_id, str) or _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
+            raise ValueError(
+                "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
+            )
+        current = self._aware_now(now)
+        trade_date = current.date()
+        if current < _local(trade_date, self.config.clock.publish_deadline):
+            raise V20StateConflict("canonical selection check-only is post-cutoff only")
+        event_id_value = named_hash(
+            "V20_CANONICAL_SELECTION_CHECK_ONLY_EVENT_ID_V1",
+            {
+                "route_id": self.config.route_id,
+                "official_stream_id": self.config.official_stream_id,
+                "state_lineage_id": self.config.state_lineage_id,
+                "config_hash": self.config.config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
+                "trade_date": trade_date.isoformat(),
+                "manual_request_id": request_id,
+            },
+        )
+
+        def _response(record: OutboxRecord, *, created: bool) -> Mapping[str, Any]:
+            semantic = record.semantic
+            expected = {
+                "event_id": event_id_value,
+                "alert_code": "MANUAL_0939_CHAIN_PROBE_RESULT",
+                "manual_request_id": request_id,
+                "event_trade_date": trade_date.isoformat(),
+                "current_version_recomputed": True,
+                "replay_reused": False,
+                "official_state_changed": False,
+                "orders_changed": False,
+                "non_actionable": True,
+                "retrospective_expired": True,
+            }
+            if any(semantic.get(key) != value for key, value in expected.items()):
+                raise V20SemanticConflict(
+                    "canonical selection check-only event has incompatible semantics"
+                )
+            return {
+                "accepted": True,
+                "created": created,
+                "manual_request_id": request_id,
+                "operator_event_id": record.event_id,
+                "manual_event_id": record.event_id,
+                "event_trade_date": trade_date.isoformat(),
+                "trade_date": trade_date.isoformat(),
+                "cycle_result": "CANONICAL_CHECK_ONLY_READY",
+                "formal_decision_available": semantic.get("official_entry_event_id") is not None,
+                "entry_action": semantic.get("v20_action"),
+                "v20_action": semantic.get("v20_action"),
+                "final_multiplier": semantic.get("final_multiplier"),
+                "current_version_recomputed": True,
+                "replay_reused": False,
+                "official_entry_action": semantic.get("official_entry_action"),
+                "official_entry_event_id": semantic.get("official_entry_event_id"),
+                "current_v16_snapshot_hash": semantic.get("current_v16_snapshot_hash"),
+                "official_v16_snapshot_hash": semantic.get("official_v16_snapshot_hash"),
+                "symbols": list(semantic.get("symbols") or ()),
+                "official_state_changed": False,
+                "orders_changed": False,
+                "non_actionable": True,
+                "retrospective_expired": True,
+                "exact_automatic_message": False,
+                "visible_message_mode": semantic.get("visible_message_mode"),
+                "delivery_status": record.delivery_status,
+                "feishu_delivery_confirmed": record.delivery_status == "SENT",
+            }
+
+        await self._repository.assert_runtime_leader()
+        existing = await self._repository.get_outbox_event(
+            event_id_value,
+            route_id=self.config.route_id,
+            **self._ledger_scope,
+        )
+        if existing is not None:
+            if existing.payload is None:
+                _response(existing, created=False)
+                await self._require_manual_trigger_ready()
+                await self._repository.assert_runtime_leader()
+                existing = await self._repository.seal_event(
+                    event_id_value,
+                    seal_v20_payload,
+                )
+            return _response(existing, created=False)
+
+        async with self._manual_trigger_lock:
+            await self._require_manual_trigger_ready()
+            await self._repository.assert_runtime_leader()
+            existing = await self._repository.get_outbox_event(
+                event_id_value,
+                route_id=self.config.route_id,
+                **self._ledger_scope,
+            )
+            if existing is not None:
+                if existing.payload is None:
+                    existing = await self._repository.seal_event(
+                        event_id_value,
+                        seal_v20_payload,
+                    )
+                return _response(existing, created=False)
+
+            await self._decision_cycle_lock.acquire()
+            try:
+                status_before = await self._repository.get_entry_status(
+                    self.config.official_stream_id,
+                    trade_date,
+                )
+                if status_before is not None:
+                    self._verify_entry_binding(status_before)
+                status_before_fingerprint = self._entry_status_readonly_fingerprint(status_before)
+                state_before = await self._repository.load_state(self.config.state_lineage_id)
+                state_before_payload_hash = sha256_json(dict(state_before.payload))
+                if state_before_payload_hash != state_before.state_hash:
+                    raise V20SemanticConflict(
+                        "official V20 state payload hash differs before check-only preparation"
+                    )
+
+                loaded = await self._load_canonical_artifact(trade_date)
+                if loaded is None:
+                    await get_or_compute_canonical_v16(self._scan_state, trade_date)
+                    loaded = await self._load_canonical_artifact(trade_date)
+                    if loaded is None:
+                        raise V20RepositoryError(
+                            "canonical V16 master completed without a durable artifact"
+                        )
+                hydrated, first_received_at = loaded
+                if isinstance(hydrated, CanonicalV16ScanBundle):
+                    calendar = await self._load_trade_calendar(trade_date)
+                    bundle = self._project_canonical_v16(
+                        hydrated,
+                        calendar=calendar,
+                    )
+                elif isinstance(hydrated, FrozenV16ScanBundle):
+                    bundle = hydrated
+                    if (
+                        self._calendar_loaded_for == trade_date
+                        and trade_date in self._calendar_cache
+                    ):
+                        calendar = self._calendar_cache
+                    else:
+                        calendar = tuple(
+                            sorted(
+                                {
+                                    bundle.prior_trade_date,
+                                    *bundle.computation_calendar,
+                                }
+                            )
+                        )
+                else:
+                    raise V20SemanticConflict("canonical V16 artifact hydration is invalid")
+                if trade_date not in calendar:
+                    raise V20SemanticConflict("canonical V16 artifact lacks its trade calendar")
+                official_v16_snapshot_hash: str | None = None
+                if status_before is not None and status_before.action != "INPUT_INVALID":
+                    official_semantic_v16_hash = status_before.semantic.get("v16_snapshot_hash")
+                    official_snapshot_v16_hash = status_before.snapshot.get("v16_snapshot_hash")
+                    if (
+                        not isinstance(official_semantic_v16_hash, str)
+                        or len(official_semantic_v16_hash) != 64
+                        or official_semantic_v16_hash != official_snapshot_v16_hash
+                    ):
+                        raise V20SemanticConflict(
+                            "official terminal canonical V16 identity is inconsistent"
+                        )
+                    official_v16_snapshot_hash = official_semantic_v16_hash
+
+                scheduled: Sequence[Mapping[str, Any]]
+                if status_before is None:
+                    completed_health, completed_rolling, maturity_gaps = await self._policy_inputs(
+                        trade_date
+                    )
+                    scheduled = await self._scheduled_exits_today(trade_date)
+                    prepare_state = state_before
+                else:
+                    completed_health, completed_rolling, maturity_gaps = (
+                        self._policy_inputs_from_terminal_status(status_before)
+                    )
+                    scheduled = tuple(status_before.semantic.get("scheduled_exits_today") or ())
+                    prepare_state = state_before
+                    if status_before.action == "INPUT_INVALID":
+                        failure_gap_id = named_hash(
+                            "V20_OFFICIAL_SHADOW_GAP_ID_V1",
+                            {
+                                "official_stream_id": self.config.official_stream_id,
+                                "trade_date": trade_date.isoformat(),
+                            },
+                        )
+                        raw_gaps = state_before.payload.get("official_rolling_gaps")
+                        if not isinstance(raw_gaps, list) or any(
+                            not isinstance(item, Mapping) for item in raw_gaps
+                        ):
+                            raise V20SemanticConflict("official state rolling gaps are malformed")
+                        if sum(item.get("gap_id") == failure_gap_id for item in raw_gaps) != 1:
+                            raise V20SemanticConflict(
+                                "failed slot replay gap is missing or duplicated"
+                            )
+                        replay_payload = {
+                            **dict(state_before.payload),
+                            "official_rolling_gaps": [
+                                dict(item)
+                                for item in raw_gaps
+                                if item.get("gap_id") != failure_gap_id
+                            ],
+                        }
+                        prepare_state = StateRecord(
+                            lineage_id=state_before.lineage_id,
+                            revision=state_before.revision,
+                            state_hash=sha256_json(replay_payload),
+                            payload=replay_payload,
+                        )
+                prepared = prepare_entry(
+                    config=self.config,
+                    state=prepare_state,
+                    bundle=bundle,
+                    completed_health=completed_health,
+                    completed_rolling=completed_rolling,
+                    maturity_gaps=maturity_gaps,
+                    artifacts=self._artifacts,
+                    calendar=calendar,
+                    scheduled_exits_today=scheduled,
+                )
+                pure = dict(prepared.commit.semantic)
+                if pure.get("action") not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
+                    raise V20SemanticConflict(
+                        "canonical V20 check-only preparation did not produce a legal result"
+                    )
+                entry_render_semantic = {
+                    **pure,
+                    "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+                    "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+                    "event_id": event_id_value,
+                    "deployment_mode": self.config.deployment_mode,
+                    "trade_date": trade_date.isoformat(),
+                    "scheduled_exits_today": list(scheduled),
+                }
+                symbols = list(pure.get("symbols") or ())
+                raw_codes = tuple(bundle.snapshot["scan_input_codes"])
+                raw_records = await self._repository.list_raw_minute_bar_records(
+                    raw_codes,
+                    trade_date=trade_date,
+                    end_labels=EARLY_RAW_BAR_LABELS,
+                )
+                state_after = await self._repository.load_state(self.config.state_lineage_id)
+                status_after = await self._repository.get_entry_status(
+                    self.config.official_stream_id,
+                    trade_date,
+                )
+                if (
+                    state_after.revision != state_before.revision
+                    or state_after.state_hash != state_before.state_hash
+                    or sha256_json(dict(state_after.payload)) != state_before_payload_hash
+                    or self._entry_status_readonly_fingerprint(status_after)
+                    != status_before_fingerprint
+                ):
+                    raise V20StateConflict(
+                        "official V20 state changed during canonical check-only preparation"
+                    )
+            finally:
+                self._decision_cycle_lock.release()
+
+            semantic = {
+                "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+                "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+                "event_id": event_id_value,
+                "strategy_version": self.config.strategy_version,
+                "config_hash": self.config.config_hash,
+                "state_semantics_hash": self.config.state_semantics_hash,
+                "deployment_mode": self.config.deployment_mode,
+                "official_stream_id": self.config.official_stream_id,
+                "state_lineage_id": self.config.state_lineage_id,
+                "alert_code": "MANUAL_0939_CHAIN_PROBE_RESULT",
+                "delivery_priority_class": "OPERATOR_NOTIFICATION",
+                "manual_request_id": request_id,
+                "event_trade_date": trade_date.isoformat(),
+                "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2",
+                "probe_result": "PASS",
+                "current_version_recomputed": True,
+                "replay_reused": False,
+                "data_source": "PERSISTED_CANONICAL_EARLY_THROUGH_09:39",
+                "data_window_start": "00:00",
+                "data_window_end": "09:39",
+                "v16_count": len(symbols),
+                "v20_action": pure["action"],
+                "final_multiplier": pure["final_multiplier"],
+                "symbols": symbols,
+                "raw_fact_n": len(raw_records),
+                "quote_coverage": bundle.snapshot.get("scan_input_coverage"),
+                "computed_at": current.isoformat(),
+                "canonical_first_received_at": first_received_at.isoformat(),
+                "current_v16_snapshot_hash": bundle.snapshot_hash,
+                "official_v16_snapshot_hash": official_v16_snapshot_hash,
+                "official_entry_action": (
+                    status_before.action if status_before is not None else "MISSING"
+                ),
+                "official_entry_event_id": (
+                    status_before.event_id if status_before is not None else None
+                ),
+                "official_entry_present": status_before is not None,
+                "official_state_changed": False,
+                "orders_changed": False,
+                "non_actionable": True,
+                "retrospective_expired": True,
+                "visible_message_mode": "MANUAL_OPERATOR_RENDER",
+                "entry_render_semantic": entry_render_semantic,
+                "message": (
+                    "当前部署版本已从持久化 canonical 09:39 事实完成一次只读策略核查；"
+                    "未修改正式决策、模型批次、模型腿、持仓或订单。"
+                ),
+            }
+            await self._decision_cycle_lock.acquire()
+            try:
+                await self._require_manual_trigger_ready()
+                await self._repository.assert_runtime_leader()
+                final_state = await self._repository.load_state(self.config.state_lineage_id)
+                final_status = await self._repository.get_entry_status(
+                    self.config.official_stream_id,
+                    trade_date,
+                )
+                if (
+                    final_state.revision != state_before.revision
+                    or final_state.state_hash != state_before.state_hash
+                    or sha256_json(dict(final_state.payload)) != state_before_payload_hash
+                    or self._entry_status_readonly_fingerprint(final_status)
+                    != status_before_fingerprint
+                ):
+                    raise V20StateConflict(
+                        "official V20 state changed before canonical check-only persistence"
+                    )
+                created = await self._repository.enqueue_alert(
+                    event_id_value,
+                    self.config.route_id,
+                    semantic,
+                    sha256_json(semantic),
+                    **self._ledger_scope,
+                )
+                await self._require_manual_trigger_ready()
+                await self._repository.assert_runtime_leader()
+                sealed = await self._repository.seal_event(
+                    event_id_value,
+                    seal_v20_payload,
+                )
+            finally:
+                self._decision_cycle_lock.release()
+            return _response(sealed, created=created)
+
     async def run_once(
         self,
         now: datetime | None = None,
@@ -2855,7 +3435,10 @@ class V20Service:
                 "REFERENCE_LOCK_FAILED",
                 self._run_reference_cycle(context, current),
             )
-            self._schedule_late_0939_replay(context, current)
+            # A terminal entry slot is final for the production scheduler.
+            # Late 09:39 replay remains an explicit operator diagnostic only;
+            # automatically scheduling it here would run a second selection
+            # after cutoff and publish a misleading "expired review" message.
             await asyncio.gather(*exit_tasks)
         finally:
             for task in exit_tasks:
@@ -2890,7 +3473,11 @@ class V20Service:
             self._record_lane_error(lane_name, f"{alert_code}: {detail}", now)
             context.last_phase = alert_code
             logger.exception("V20 isolated phase failed: %s", alert_code)
-            if not (isinstance(exc, V20LiveExitStageTimeout) and exc.diagnostic_alert_emitted):
+            # A live-exit phase can already have settled a narrower durable
+            # incident (stage timeout, market outage, or one failed leg).  Only
+            # an explicit ``True`` suppresses the umbrella; False/None means
+            # persistence was not proven and the generic alert is the fallback.
+            if getattr(exc, "diagnostic_alert_emitted", False) is not True:
                 await self._safe_alert(
                     code=alert_code,
                     entity_id=context.trade_date.isoformat(),
@@ -2914,7 +3501,11 @@ class V20Service:
 
     def _live_exit_tick_budget(self) -> float:
         cadence = float(self.config.market.exit_poll_seconds)
-        return max(1.0, min(LIVE_EXIT_MAX_TICK_SECONDS, cadence - 2.0))
+        return min(LIVE_EXIT_MAX_TICK_SECONDS, cadence * 12.0 / 15.0)
+
+    def _live_exit_scheduler_budget(self) -> float:
+        cadence = float(self.config.market.exit_poll_seconds)
+        return min(LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS, cadence * 14.0 / 15.0)
 
     async def _record_live_exit_stage_incident(
         self,
@@ -2927,11 +3518,14 @@ class V20Service:
         sorted_symbols = sorted(set(exc.symbols))
         symbols = ",".join(sorted_symbols)
         incident_id = named_hash(
-            "V20_LIVE_EXIT_STAGE_INCIDENT_ID_V1",
+            "V20_LIVE_EXIT_STAGE_INCIDENT_ID_V2",
             {
+                "route_id": self.config.route_id,
+                "official_stream_id": self.config.official_stream_id,
+                "state_lineage_id": self.config.state_lineage_id,
                 "trade_date": context.trade_date.isoformat(),
                 "stage": exc.stage,
-                "symbols": sorted_symbols,
+                "symbols": tuple(sorted_symbols),
                 "provider": exc.provider,
             },
         )
@@ -2949,7 +3543,7 @@ class V20Service:
             exc.elapsed_seconds,
             exc.remaining_seconds,
         )
-        await self._safe_alert(
+        alert_result = await self._safe_alert(
             code="LIVE_EXIT_STAGE_TIMEOUT",
             entity_id=f"{context.trade_date.isoformat()}:{symbols or 'all'}:{exc.stage}",
             message=str(exc),
@@ -2958,17 +3552,20 @@ class V20Service:
             semantic_extras={
                 "incident_id": incident_id,
                 "error": type(exc).__name__,
+                "route_id": self.config.route_id,
+                "official_stream_id": self.config.official_stream_id,
+                "state_lineage_id": self.config.state_lineage_id,
                 "stage": exc.stage,
                 "symbol": symbols,
-                "symbols": list(exc.symbols),
+                "symbols": sorted_symbols,
                 "provider": exc.provider,
             },
         )
-        exc.diagnostic_alert_emitted = True
+        exc.diagnostic_alert_emitted = alert_result
 
     async def _run_live_exit_stage(
         self,
-        operation: Awaitable[Any],
+        operation_factory: Callable[[], Awaitable[Any]],
         *,
         stage: str,
         stage_cap: float,
@@ -2977,6 +3574,13 @@ class V20Service:
         symbols: Sequence[str],
         provider: str,
     ) -> Any:
+        """Run one budgeted stage; the operation is created only after the budget check.
+
+        Callers pass a factory, never an already-created coroutine: when the
+        tick deadline is already exhausted the stage raises without invoking
+        the factory, so no DB/provider call is made and no coroutine or orphan
+        task is created.
+        """
         loop = asyncio.get_running_loop()
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -2992,7 +3596,7 @@ class V20Service:
         if budget == remaining:
             budget = max(0.0, budget - 0.1)
         try:
-            return await asyncio.wait_for(operation, timeout=budget)
+            return await asyncio.wait_for(operation_factory(), timeout=budget)
         except asyncio.TimeoutError as exc:
             observed = loop.time()
             elapsed = (
@@ -3085,10 +3689,7 @@ class V20Service:
                         self._run_live_exit_tick(context, now),
                         lane_name="live_exit",
                     ),
-                    timeout=min(
-                        cadence - 0.5,
-                        LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS,
-                    ),
+                    timeout=self._live_exit_scheduler_budget(),
                 )
                 if succeeded:
                     self._record_lane_success("live_exit", now)
@@ -3212,7 +3813,12 @@ class V20Service:
         now: datetime,
         calendar: Sequence[date],
     ) -> bool:
-        """Run the scheduled 09:10 MEWS attempt inside its retry window."""
+        """Run the scheduled 09:10 MEWS attempt through the shared singleflight.
+
+        The scheduler and any missing-cache selection trigger join one per-date
+        task — including its failure — so an overlapping window never starts a
+        second raw attempt.
+        """
 
         current = self._aware_now(now)
         wall = current.timetz().replace(tzinfo=None)
@@ -3222,18 +3828,13 @@ class V20Service:
             return False
         if wall < MEWS_PUBLISH_TIME or wall >= MEWS_CACHE_CUTOFF:
             return False
-        return await self._calculate_mews_once(
-            current,
-            calendar,
-            require_cutoff_eligible=True,
-        )
+        task = await self._mews_singleflight_join(current, stage="SCHEDULED_0910")
+        return await self._await_mews_singleflight(task)
 
     async def _calculate_mews_once(
         self,
         now: datetime,
         calendar: Sequence[date],
-        *,
-        require_cutoff_eligible: bool,
     ) -> bool:
         """Calculate a missing daily value; time affects eligibility, never calculation."""
 
@@ -3261,19 +3862,42 @@ class V20Service:
             generated_at = datetime.fromisoformat(str(payload.get("generated_at")))
             if generated_at.tzinfo is None or generated_at.utcoffset() is None:
                 raise MewsSnapshotSourceError("calculated MEWS generated_at is timezone-naive")
-            cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
-            if require_cutoff_eligible and generated_at.astimezone(SHANGHAI) >= cutoff:
-                raise MewsSnapshotSourceError("calculated MEWS missed the 09:40 cutoff")
             await self._repository.record_mews_snapshot(payload)
-            eligible = await self._repository.mews_snapshot_is_eligible(
-                str(payload["snapshot_id"]),
-                source_trade_date=source_trade_date,
-                cutoff=cutoff,
-            )
-            if require_cutoff_eligible and not eligible:
-                raise MewsSnapshotSourceError(
-                    "MEWS PostgreSQL receipt was not sealed before the 09:40 cutoff"
+            cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
+            if self._mews_guard_store is not None:
+                selected_snapshot_id = await self._mews_guard_store.find_eligible_snapshot(
+                    source_trade_date=source_trade_date,
+                    cutoff=cutoff,
+                    availability_date=current.date(),
                 )
+                eligible = selected_snapshot_id == str(payload["snapshot_id"])
+                if not eligible:
+                    raise MewsSnapshotSourceError(
+                        "locally calculated MEWS did not pass the sealed receipt guard"
+                    )
+            else:
+                # Compatibility-only repositories retain their historical
+                # test surface.  Connected PostgreSQL services always own the
+                # strict guard store and never call these repository methods.
+                eligible = await self._repository.mews_snapshot_is_eligible(
+                    str(payload["snapshot_id"]),
+                    source_trade_date=source_trade_date,
+                    cutoff=cutoff,
+                )
+                if not eligible and self._has_mews_receipt_guard():
+                    try:
+                        eligible = await V20MewsReceiptGuard(self._repository).is_eligible(
+                            str(payload["snapshot_id"]),
+                            source_trade_date=source_trade_date,
+                            cutoff=cutoff,
+                            availability_date=current.date(),
+                        )
+                    except Exception as exc:
+                        raise V20RepositoryError("MEWS same-day receipt guard failed") from exc
+                    if not eligible:
+                        raise MewsSnapshotSourceError(
+                            "MEWS same-day repair receipt is not sealed for the availability date"
+                        )
             self._mews_cached_for = current.date()
             self._mews_source_trade_date = source_trade_date
             self._mews_snapshot_id = str(payload["snapshot_id"])
@@ -3287,53 +3911,132 @@ class V20Service:
             )
             return True
 
+    def kick_mews_for_selection_trigger(
+        self,
+        now: datetime | None = None,
+    ) -> asyncio.Task[bool]:
+        """Start/join the managed MEWS task without blocking D0 selection."""
+
+        self._require_running()
+        current = self._aware_now(now)
+
+        async def _kick() -> bool:
+            return await self.ensure_mews_for_selection_trigger(current)
+
+        task = asyncio.create_task(
+            _kick(),
+            name=f"v20-mews-trigger-{current.date().isoformat()}",
+        )
+        self._mews_trigger_tasks.add(task)
+
+        def _finished(finished: asyncio.Task[bool]) -> None:
+            self._mews_trigger_tasks.discard(finished)
+            try:
+                finished.exception()
+            except asyncio.CancelledError:
+                pass
+
+        task.add_done_callback(_finished)
+        return task
+
     async def ensure_mews_for_selection_trigger(
         self,
         now: datetime | None = None,
     ) -> bool:
-        """Kick one shielded MEWS refresh; never block this selection trigger."""
+        """Join the per-date MEWS singleflight and await it before continuing.
+
+        The trigger blocks until the shared attempt settles: success means the
+        snapshot is already persisted, while a genuine failure settles one
+        daily idempotent ``MEWS_CALCULATION_FAILED`` before the independent
+        entry path continues.  A finished task is cleared, so a later distinct
+        trigger retries while the cache is still missing — there is no
+        permanent daily failure skip and no orphan background task.
+        """
 
         self._require_running()
         current = self._aware_now(now)
         if self._mews_cached_for == current.date():
             return True
-        if self._mews_selection_refresh_failed_for == current.date():
-            return False
-        current_task = self._mews_selection_refresh_task
-        if current_task is not None and not current_task.done():
-            return False
-        self._mews_selection_refresh_task = None
+        task = await self._mews_singleflight_join(current, stage="SELECTION_TRIGGER")
+        return await self._await_mews_singleflight(task)
 
-        async def _refresh() -> bool:
-            try:
-                return await self._ensure_mews_for_selection_trigger_awaited(current)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._record_lane_error(
-                    "mews_cache",
-                    f"MEWS_BACKGROUND_RECOVERY_FAILED: {type(exc).__name__}: {exc}",
-                    self._aware_now(),
-                )
-                self._mews_selection_refresh_failed_for = current.date()
-                return False
-
-        def _finished(task: asyncio.Task[bool]) -> None:
-            if self._mews_selection_refresh_task is task:
-                self._mews_selection_refresh_task = None
-
-        self._mews_selection_refresh_task = asyncio.create_task(
-            _refresh(),
-            name=f"v20-mews-selection-{current.date().isoformat()}",
-        )
-        self._mews_selection_refresh_task.add_done_callback(_finished)
-        return False
-
-    async def _ensure_mews_for_selection_trigger_awaited(
+    async def _mews_singleflight_join(
         self,
         current: datetime,
+        *,
+        stage: str,
+    ) -> asyncio.Task[bool]:
+        """Return the live per-date shared attempt, creating it exactly once."""
+
+        async with self._mews_singleflight_lock:
+            if self._stop_event.is_set():
+                raise V20RepositoryError("V20 MEWS singleflight is stopped")
+            self._require_running()
+            task = self._mews_singleflight_task
+            if task is not None and not task.done():
+                if self._mews_singleflight_date == current.date():
+                    return task
+                task.cancel()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            if self._mews_singleflight_task is task:
+                self._mews_singleflight_task = None
+                self._mews_singleflight_date = None
+            if self._stop_event.is_set():
+                raise V20RepositoryError("V20 MEWS singleflight is stopped")
+            self._require_running()
+            task = asyncio.create_task(
+                self._mews_singleflight_attempt(current, stage=stage),
+                name=f"v20-mews-singleflight-{current.date().isoformat()}",
+            )
+            self._mews_singleflight_task = task
+            self._mews_singleflight_date = current.date()
+            return task
+
+    async def _await_mews_singleflight(
+        self,
+        task: asyncio.Task[bool],
     ) -> bool:
-        """Fill a missing daily MEWS value in the background."""
+        """Await the managed per-date attempt; there is no artificial outer budget.
+
+        The attempt is finitely bounded by its own per-call provider and
+        PostgreSQL timeouts, so callers simply await the shared task: an outer
+        wall-clock cap would be a structural budget inversion that could abort
+        a legitimate multi-call catch-up.  The shield keeps the managed task
+        alive for peer joiners when this caller is cancelled; ``stop`` still
+        cancels and awaits the managed task, so no orphan survives.
+        """
+
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Our own cancellation must propagate; a stop/peer cancellation of
+            # the managed task surfaces through the shield as attempt failure.
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            return False
+        except V20LeadershipLost:
+            raise
+        except Exception:
+            # The attempt body already settled the daily idempotent alert
+            # before raising; every joiner shares that same failure.
+            return False
+        finally:
+            async with self._mews_singleflight_lock:
+                if self._mews_singleflight_task is task and task.done():
+                    # Clear the finished task so a later distinct trigger retries
+                    # the attempt while the cache is still missing.
+                    self._mews_singleflight_task = None
+                    self._mews_singleflight_date = None
+
+    async def _mews_singleflight_attempt(
+        self,
+        current: datetime,
+        *,
+        stage: str,
+    ) -> bool:
+        """Fill a missing daily MEWS value as the shared per-date attempt."""
 
         self._require_running()
         await self._repository.assert_runtime_leader()
@@ -3343,22 +4046,25 @@ class V20Service:
             if current.date() not in calendar:
                 self._record_lane_success("mews_cache", current)
                 return False
-            if self._mews_cached_for != current.date():
+            # The long-running scheduler performs its own restart restore
+            # before the scheduled 09:10 calculation.  A post-cutoff recovery
+            # may be invoked directly, so it owns the same restore here.  A
+            # selection-trigger miss deliberately calculates locally instead
+            # of depending on a stale external/computed source.
+            if (
+                stage == "SCHEDULED_AFTER_CUTOFF_RECOVERY" or self._mews_guard_store is None
+            ) and self._mews_cached_for != current.date():
                 await self._restore_mews_cache_once(current, calendar)
-            calculated = await self._calculate_mews_once(
-                current,
-                calendar,
-                require_cutoff_eligible=False,
-            )
+            await self._calculate_mews_once(current, calendar)
             self._record_lane_success("mews_cache", self._aware_now())
-            return calculated
+            return self._mews_cached_for == current.date()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await self._alert_mews_calculation_failure(
                 exc,
-                self._aware_now(),
-                stage="SELECTION_TRIGGER_RECOVERY",
+                current,
+                stage=stage,
                 calendar=calendar,
             )
             raise
@@ -3370,7 +4076,7 @@ class V20Service:
         *,
         stage: str,
         calendar: Sequence[date],
-    ) -> None:
+    ) -> bool:
         """Report one stable, idempotent daily failure with full context.
 
         A genuine local calculation failure is the only condition that may
@@ -3388,9 +4094,8 @@ class V20Service:
             current,
         )
         if self._mews_alerted_for == current.date():
-            return
-        self._mews_alerted_for = current.date()
-        await self._safe_alert(
+            return True
+        alert_persisted = await self._safe_alert(
             code="MEWS_CALCULATION_FAILED",
             entity_id=current.date().isoformat(),
             message=(
@@ -3400,20 +4105,39 @@ class V20Service:
                 f"详情: {exc}"
             ),
             now=current,
+            event_id=named_hash(
+                "V20_MEWS_CALCULATION_FAILED_EVENT_ID_V1",
+                {
+                    "alert_code": "MEWS_CALCULATION_FAILED",
+                    "entity_id": current.date().isoformat(),
+                    "route_id": self.config.route_id,
+                    "official_stream_id": self.config.official_stream_id,
+                    "state_lineage_id": self.config.state_lineage_id,
+                    "trade_date": current.date().isoformat(),
+                },
+            ),
         )
+        if alert_persisted is True:
+            self._mews_alerted_for = current.date()
+            return True
+        return False
 
     async def _recover_mews_after_cutoff_once(
         self,
         now: datetime,
         calendar: Sequence[date],
     ) -> bool:
-        """Repair a missing daily value after 09:40 with one local calculation.
+        """Repair a missing daily value after 09:40 through the shared singleflight.
 
         The daily MEWS value is a pure function of the source trade date's
-        market facts, so a late calculation is never invalid.  Only a genuine
-        local failure raises the daily idempotent alert and keeps the lane
-        fail-closed for the rest of the day; it never writes a fallback
-        snapshot and never retries in a tight scheduler loop.
+        market facts, so a late calculation is never invalid.  The scheduler
+        tick joins and awaits the exact same per-date singleflight task as the
+        09:10 refresh and every missing-cache selection trigger — including
+        its failure — so overlapping callers never start a second raw attempt.
+        Only a genuine local failure raises the daily idempotent alert (inside
+        the shared attempt) and latches ``_mews_failed_for`` purely to prevent
+        a tight scheduler retry loop; a later manual trigger ignores that
+        latch and joins a fresh attempt.  No fallback snapshot is ever written.
         """
 
         current = self._aware_now(now)
@@ -3421,27 +4145,16 @@ class V20Service:
             return True
         if self._mews_failed_for == current.date():
             return False
-        await self._restore_mews_cache_once(current, calendar)
-        if self._mews_cached_for == current.date():
+        task = await self._mews_singleflight_join(
+            current,
+            stage="SCHEDULED_AFTER_CUTOFF_RECOVERY",
+        )
+        recovered = await self._await_mews_singleflight(task)
+        if recovered or self._mews_cached_for == current.date():
             return True
-        try:
-            await self._calculate_mews_once(
-                current,
-                calendar,
-                require_cutoff_eligible=False,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
+        if self._mews_alerted_for == current.date():
             self._mews_failed_for = current.date()
-            await self._alert_mews_calculation_failure(
-                exc,
-                current,
-                stage="SCHEDULED_AFTER_CUTOFF_RECOVERY",
-                calendar=calendar,
-            )
-            return False
-        return True
+        return False
 
     async def _restore_mews_cache_once(
         self,
@@ -3457,19 +4170,51 @@ class V20Service:
         if not predecessors:
             raise V20RepositoryError("MEWS calendar has no preceding trading day")
         source_trade_date = predecessors[-1]
-        snapshot_id = await self._repository.find_eligible_mews_snapshot(
-            source_trade_date=source_trade_date,
-            cutoff=_local(current.date(), MEWS_CACHE_CUTOFF),
-            availability_date=current.date(),
-        )
-        if snapshot_id is None:
-            return False
+        cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
+        if self._mews_guard_store is not None:
+            snapshot_id = await self._mews_guard_store.find_eligible_snapshot(
+                source_trade_date=source_trade_date,
+                cutoff=cutoff,
+                availability_date=current.date(),
+            )
+            if snapshot_id is None:
+                return False
+        else:
+            snapshot_id = await self._repository.find_eligible_mews_snapshot(
+                source_trade_date=source_trade_date,
+                cutoff=cutoff,
+                availability_date=current.date(),
+            )
+            if snapshot_id is None:
+                return False
+            eligible = await self._repository.mews_snapshot_is_eligible(
+                snapshot_id,
+                source_trade_date=source_trade_date,
+                cutoff=cutoff,
+            )
+            if not eligible and self._has_mews_receipt_guard():
+                try:
+                    eligible = await V20MewsReceiptGuard(self._repository).is_eligible(
+                        snapshot_id,
+                        source_trade_date=source_trade_date,
+                        cutoff=cutoff,
+                        availability_date=current.date(),
+                    )
+                except Exception as exc:
+                    raise V20RepositoryError("MEWS same-day receipt guard failed") from exc
+            if not eligible:
+                return False
         self._mews_cached_for = current.date()
         self._mews_source_trade_date = source_trade_date
         self._mews_snapshot_id = snapshot_id
         self._mews_last_failure = None
         logger.info("V20 restored cached MEWS %s after restart", snapshot_id)
         return True
+
+    def _has_mews_receipt_guard(self) -> bool:
+        return getattr(self._repository, "pool", None) is not None and isinstance(
+            getattr(self._repository, "schema", None), str
+        )
 
     async def _run_mews_cache_scheduler(self) -> None:
         """Cache at 09:10, retry until 09:40, then repair locally exactly once."""
@@ -3488,6 +4233,10 @@ class V20Service:
                     await self._restore_mews_cache_once(now, calendar)
                 if is_trading_day and MEWS_PUBLISH_TIME <= wall < MEWS_CACHE_CUTOFF:
                     await self._refresh_mews_cache_once(now, calendar)
+                    # A failed attempt already recorded its lane error through
+                    # the daily idempotent alert; only a filled cache is a
+                    # lane success — never let an empty cache wash it green.
+                    lane_ok = self._mews_cached_for == now.date()
                 elif (
                     is_trading_day
                     and wall >= MEWS_CACHE_CUTOFF
@@ -3668,13 +4417,18 @@ class V20Service:
         if not await self._repository.database_cutoff_reached(deadline):
             return False
 
-        if self._known_entry_trade_date(trade_date):
-            await self._enforce_entry_cutoff(trade_date, now=now)
-            return True
         # A date absent from a successfully loaded calendar is a confirmed
         # exchange closure and must stay quiet.
         calendar_known = self._calendar_loaded_for == trade_date
-        if calendar_known or trade_date.weekday() >= 5:
+        if trade_date.weekday() >= 5 or (
+            calendar_known and not self._known_entry_trade_date(trade_date)
+        ):
+            return True
+        terminal_status = await self._get_verified_cutoff_entry_status(trade_date)
+        if terminal_status is not None:
+            return True
+        if calendar_known:
+            await self._enforce_entry_cutoff(trade_date, now=now)
             return True
         # Cold start: a weekday with no calendar evidence at the authoritative
         # cutoff gets exactly one bounded load attempt before failing closed.
@@ -3696,12 +4450,10 @@ class V20Service:
                 ),
                 now,
             )
-            await self._safe_alert(
-                code="ENTRY_CALENDAR_UNKNOWN_NO_BUY",
-                entity_id=trade_date.isoformat(),
-                message="09:40 仍无法确认交易日历；今天不买，不要追买。",
-                now=now,
-            )
+            terminal_status = await self._get_verified_cutoff_entry_status(trade_date)
+            if terminal_status is not None:
+                return True
+            await self._alert_entry_cutoff_no_buy(trade_date, now=now)
             return True
         # Re-judge with the freshly loaded evidence: a trading day takes the
         # normal cutoff path while a confirmed closure stays quiet.
@@ -3759,11 +4511,45 @@ class V20Service:
                 )
                 logger.exception("V20 could not finalize the 09:40 entry slot")
 
+        await self._alert_entry_cutoff_no_buy(trade_date, now=current)
+
+    async def _get_verified_cutoff_entry_status(
+        self,
+        trade_date: date,
+    ) -> EntryStatus | None:
+        status = await self._repository.get_entry_status(
+            self.config.official_stream_id,
+            trade_date,
+        )
+        if status is None:
+            return None
+        self._verify_entry_binding(status)
+        if status.action not in _LATE_0939_REPLAY_ACTIONS:
+            raise V20SemanticConflict("cutoff terminal entry action is invalid")
+        return status
+
+    async def _alert_entry_cutoff_no_buy(
+        self,
+        trade_date: date,
+        *,
+        now: datetime,
+    ) -> None:
         await self._safe_alert(
             code="ENTRY_CUTOFF_NO_BUY",
             entity_id=trade_date.isoformat(),
-            message=("09:40 截止仍没有 durable 正常入场决定；今天不买，不要追买。"),
-            now=current,
+            message="09:40 截止仍没有 durable 正常入场决定；今天不买，不要追买。",
+            now=now,
+            event_id=named_hash(
+                "V20_ENTRY_CUTOFF_NO_BUY_EVENT_ID_V1",
+                {
+                    "alert_code": "ENTRY_CUTOFF_NO_BUY",
+                    "entity_id": trade_date.isoformat(),
+                    "route_id": self.config.route_id,
+                    "official_stream_id": self.config.official_stream_id,
+                    "state_lineage_id": self.config.state_lineage_id,
+                    "trade_date": trade_date.isoformat(),
+                },
+            ),
         )
 
     async def _ensure_context(self, now: datetime, calendar: tuple[date, ...]) -> _DayContext:
@@ -3804,18 +4590,36 @@ class V20Service:
 
         if self._calendar_loaded_for == current_date and self._calendar_cache:
             return self._calendar_cache
-        current_task = self._calendar_tasks.get(current_date)
-        if current_task is None:
-            current_task = asyncio.create_task(
-                self._load_trade_calendar_once(current_date),
-                name=f"v20-calendar-{current_date.isoformat()}",
-            )
-            self._calendar_tasks[current_date] = current_task
+        async with self._calendar_tasks_lock:
+            if self._stop_event.is_set():
+                raise V20RepositoryError("V20 trade-calendar task lane is stopped")
+            stale_tasks = [
+                task
+                for task_date, task in self._calendar_tasks.items()
+                if task_date != current_date and not task.done()
+            ]
+            for task_date, task in list(self._calendar_tasks.items()):
+                if task_date != current_date and self._calendar_tasks.get(task_date) is task:
+                    self._calendar_tasks.pop(task_date, None)
+            for task in stale_tasks:
+                task.cancel()
+            if stale_tasks:
+                await asyncio.gather(*stale_tasks, return_exceptions=True)
+            if self._stop_event.is_set():
+                raise V20RepositoryError("V20 trade-calendar task lane is stopped")
+            current_task = self._calendar_tasks.get(current_date)
+            if current_task is None:
+                current_task = asyncio.create_task(
+                    self._load_trade_calendar_once(current_date),
+                    name=f"v20-calendar-{current_date.isoformat()}",
+                )
+                self._calendar_tasks[current_date] = current_task
 
-            def _remove(task: asyncio.Task[tuple[date, ...]]) -> None:
-                self._calendar_tasks.pop(current_date, None)
+                def _remove(task: asyncio.Task[tuple[date, ...]]) -> None:
+                    if self._calendar_tasks.get(current_date) is task:
+                        self._calendar_tasks.pop(current_date, None)
 
-            current_task.add_done_callback(_remove)
+                current_task.add_done_callback(_remove)
         return await asyncio.shield(current_task)
 
     async def _load_trade_calendar_once(self, current_date: date) -> tuple[date, ...]:
@@ -3865,7 +4669,6 @@ class V20Service:
                 self._calendar_loaded_for = current_date
                 return cached
             raise
-        self._calendar_tasks.pop(current_date, None)
         self._calendar_cache = calendar
         self._calendar_loaded_for = current_date
         return calendar
@@ -4288,6 +5091,7 @@ class V20Service:
         *,
         trade_date: date,
         official_entry_event_id: str,
+        official_entry_action: str,
     ) -> None:
         semantic = record.semantic
         expected = {
@@ -4327,10 +5131,12 @@ class V20Service:
             or re.fullmatch(r"[0-9a-f]{64}", str(semantic.get("config_hash"))) is None
         ):
             raise V20SemanticConflict("late 09:39 replay event has incompatible semantics")
-        if semantic.get("official_entry_action") != "INPUT_INVALID":
-            raise V20SemanticConflict("late 09:39 replay is not bound to a failed live slot")
         if semantic.get("official_entry_event_id") != official_entry_event_id:
             raise V20SemanticConflict("late 09:39 replay official event binding is invalid")
+        if official_entry_action not in _LATE_0939_REPLAY_ACTIONS:
+            raise V20SemanticConflict("late 09:39 replay official entry action is invalid")
+        if semantic.get("official_entry_action") != official_entry_action:
+            raise V20SemanticConflict("late 09:39 replay official entry action is mismatched")
         action = semantic.get("replay_action")
         multiplier = semantic.get("final_multiplier")
         if action not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
@@ -4494,13 +5300,13 @@ class V20Service:
     def _canonical_raw_top10_codes(canonical: CanonicalV16ScanBundle) -> tuple[str, ...]:
         """Return the theoretical Top10 codes (by rank) of the canonical scan.
 
-        The durable canonical raw evidence (09:31..09:39 minute bars) is scoped
-        to exactly these ten codes — 10 * 9 = 90 rows.  ``canonical.early_bars``
-        covers the whole ~3k ready universe and must never be persisted or
-        cross-checked wholesale; only the Top10 selection is raw evidence.
-        Fail closed unless ``scan_result.recommended`` is itself exactly ten
-        stocks with unique integer ranks covering 1..10 and unique six-digit
-        codes; the result is returned in rank order.
+        The post-cutoff replay cross-checks its persisted raw evidence against
+        exactly these ten codes.  ``canonical.early_bars`` covers the whole
+        ~3k ready universe and is persisted in full by the shared helper; the
+        Top10 remains the subset the replay semantic binds to.  Fail closed
+        unless ``scan_result.recommended`` is itself exactly ten stocks with
+        unique integer ranks covering 1..10 and unique six-digit codes; the
+        result is returned in rank order.
         """
 
         try:
@@ -4527,80 +5333,597 @@ class V20Service:
             ) from exc
         return codes
 
+    @staticmethod
+    def _canonical_recommendation_codes(
+        canonical: CanonicalV16ScanBundle,
+    ) -> tuple[str, ...]:
+        """Validate the legal V16 recommendation cardinality (zero through ten)."""
+
+        try:
+            recommended = list(getattr(canonical.scan_result, "recommended", None) or ())
+            if not 0 <= len(recommended) <= 10:
+                raise ValueError("recommended count")
+            ranks = [stock.rank for stock in recommended]
+            if any(type(rank) is not int for rank in ranks):
+                raise ValueError("rank type")
+            if sorted(ranks) != list(range(1, len(recommended) + 1)):
+                raise ValueError("rank set")
+            codes = tuple(stock.code for stock in sorted(recommended, key=lambda stock: stock.rank))
+            if any(
+                not isinstance(code, str) or len(code) != 6 or not code.isdigit() for code in codes
+            ):
+                raise ValueError("code format")
+            if len(set(codes)) != len(codes):
+                raise ValueError("code uniqueness")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise V20SemanticConflict(
+                "canonical V16 scan has an invalid zero-to-ten recommendation list"
+            ) from exc
+        return codes
+
     async def _persist_canonical_raw_minute_bars(
         self,
         canonical: CanonicalV16ScanBundle,
     ) -> None:
-        """Durably persist the canonical Top10 09:31..09:39 raw bars, once per process.
+        """Durably persist every ready universe code's actual early raw bars.
 
         Every entry path (automatic, manual, post-cutoff replay, restart) runs
-        this single helper against the shared canonical bundle, scoped to the
-        theoretical Top10 codes from ``_canonical_raw_top10_codes`` — never the
-        full ready universe in ``canonical.early_bars``.  Only bars with end
-        labels 09:31..09:39 are admitted — a late 09:41 row never enters the
-        canonical raw evidence or its hashes.  Each Top10 code must contribute
-        exactly one valid bar per required label (so 10 codes yield exactly 90
-        rows), flattened through the real ``_bar_payload``.  The repository's
-        returned sealed hashes must cover every payload exactly; any mismatch
-        fails closed.  Same-process cache reuse does not re-run the persistence.
+        this single helper against the shared canonical bundle, scoped to every
+        code in ``canonical.early_bars`` — the full ready universe, never just
+        the Top10 — so a later restart can rehydrate the canonical scan from
+        persisted evidence alone.  Every actual normalized early bar (any end
+        label at or before 09:39, including the 09:25/09:30 strategy inputs)
+        is persisted as-is; a row whose end label is outside the early label
+        set (00:00..09:39) never enters the canonical raw evidence or its
+        hashes.  There is no fixed-label checklist: each row must simply be
+        valid, bound to its code and the trade date, carry a known early end
+        label, and be unique per code/label, flattened through the real
+        ``_bar_payload``; each ready code must contribute a valid target-date
+        09:39 bar.  The repository's returned sealed
+        hashes must cover every payload exactly; any mismatch fails closed.
+        Same-process cache reuse does not re-run the persistence.
         """
 
         trade_date = canonical.trade_date
         if trade_date in self._canonical_raw_persisted_dates:
             return
-        required_labels = tuple(f"09:{minute:02d}" for minute in range(31, 40))
-        top10_codes = self._canonical_raw_top10_codes(canonical)
+        # Selection may legally yield NO_SIGNAL or fewer than ten candidates.
+        # Raw durability belongs to the full ready universe and must not be
+        # conditional on the recommendation count.  Historical replay paths
+        # that explicitly require an exact Top10 retain their stricter helper.
+        self._canonical_recommendation_codes(canonical)
         if not canonical.early_bars:
             raise V20RepositoryError("canonical V16 has no early raw bars to persist")
         payloads: list[dict[str, Any]] = []
-        for code in top10_codes:
-            by_label: dict[str, TushareMinuteBar] = {}
+        for code in sorted(canonical.early_bars):
+            seen_labels: set[str] = set()
             for bar in canonical.early_bars.get(code, ()):
-                if bar.end_label not in required_labels:
-                    continue
-                if bar.end_label in by_label:
+                if bar.end_label in seen_labels:
                     raise V20SemanticConflict(
-                        f"canonical V16 has duplicate 09:31..09:39 bars for {code}"
+                        f"canonical V16 has duplicate early raw bars for {code}"
                     )
                 if (
                     not bar.is_valid
                     or bar.stock_code != code
                     or bar.bar_end.astimezone(SHANGHAI).date() != trade_date
+                    or bar.end_label not in EARLY_RAW_BAR_LABELS
                 ):
-                    raise V20SemanticConflict(
-                        f"canonical V16 09:31..09:39 bar is invalid for {code}"
-                    )
-                by_label[bar.end_label] = bar
-            if any(label not in by_label for label in required_labels):
+                    raise V20SemanticConflict(f"canonical V16 early raw bar is invalid for {code}")
+                seen_labels.add(bar.end_label)
+                payloads.append(_bar_payload(bar))
+            # Canonical readiness owns the 09:39 policy: a ready code must
+            # contribute a valid target-date 09:39 bar, however many or few
+            # earlier labels (09:25/09:30 included) it actually has.
+            if EARLY_RAW_LAST_LABEL not in seen_labels:
                 raise V20SemanticConflict(
-                    f"canonical V16 09:31..09:39 bars are incomplete for {code}"
+                    f"canonical V16 early raw bars lack a valid 09:39 bar for {code}"
                 )
-            payloads.extend(_bar_payload(by_label[label]) for label in required_labels)
         expected_hashes = frozenset(sha256_json(payload) for payload in payloads)
         if len(expected_hashes) != len(payloads):
-            raise V20SemanticConflict("canonical V16 09:31..09:39 payloads are not unique")
+            raise V20SemanticConflict("canonical V16 early raw payloads are not unique")
         sealed_hashes = await self._repository.record_minute_bars(payloads)
         if frozenset(sealed_hashes) != expected_hashes:
             raise V20RepositoryError(
-                "canonical V16 09:31..09:39 raw persistence is incomplete: "
+                "canonical V16 early raw persistence is incomplete: "
                 f"{len(set(sealed_hashes) & expected_hashes)}/{len(payloads)} sealed"
             )
         self._canonical_raw_persisted_dates.add(trade_date)
+
+    async def _persist_canonical_artifact_barrier(
+        self,
+        canonical: CanonicalV16ScanBundle,
+    ) -> None:
+        """Settle raw durability, portable artifact, readback, and hydration.
+
+        Returning from the shared V16 sink is the durable completion boundary.
+        The portable row is deliberately written only after every canonical raw
+        minute row has been sealed; it is then read and hydrated through the
+        same path used by a cold restart.  Consequently an artifact ticket can
+        never be interpreted as a replacement for its raw evidence.
+        """
+
+        if not self._canonical_callbacks_open:
+            raise V20StateConflict("canonical V16 durable sink is stopped")
+        store = self._canonical_artifact_store
+        if store is None:
+            raise V20RepositoryError("canonical V16 artifact store is unavailable")
+        if not isinstance(canonical, CanonicalV16ScanBundle):
+            raise V20SemanticConflict("canonical V16 sink received an invalid master")
+
+        async with self._canonical_artifact_lock:
+            if not self._canonical_callbacks_open:
+                raise V20StateConflict("canonical V16 durable sink is stopped")
+            await self._persist_canonical_raw_minute_bars(canonical)
+
+            # Acceptance fakes expose a hydrate method so they can model the
+            # raw barrier without implementing PostgreSQL.  The production
+            # store persists only the strict portable projection.
+            store_hydrate = getattr(store, "hydrate", None)
+            if callable(store_hydrate):
+                durable_payload: Any = canonical
+            else:
+                existing = await store.load(
+                    official_stream_id=self.config.official_stream_id,
+                    trade_date=canonical.trade_date,
+                    event=V16_CANONICAL_ARTIFACT_EVENT,
+                )
+                if existing is not None:
+                    hydrated_existing = await self._hydrate_canonical_artifact_record(existing)
+                    existing_integrity = existing.payload.get("canonical_integrity_hash")
+                    if existing_integrity == canonical._integrity_hash:
+                        if hydrated_existing.trade_date != canonical.trade_date:
+                            raise V20SemanticConflict("canonical V16 artifact reuse date differs")
+                        # ``computed_at`` is deliberately outside canonical
+                        # semantic identity.  Preserve the first durable
+                        # artifact/receipt instead of colliding merely because
+                        # an equivalent retry finished one second later.
+                        return
+                canonical_calendar = tuple(canonical.computation_calendar)
+                projected = self._project_canonical_v16(
+                    canonical,
+                    calendar=canonical_calendar,
+                )
+                durable_payload = encode_v16_canonical_artifact(
+                    projected,
+                    calendar=canonical_calendar,
+                    canonical_integrity_hash=canonical._integrity_hash,
+                )
+            await store.save_once(
+                durable_payload,
+                official_stream_id=self.config.official_stream_id,
+                trade_date=canonical.trade_date,
+                event=V16_CANONICAL_ARTIFACT_EVENT,
+            )
+            record = await store.load(
+                official_stream_id=self.config.official_stream_id,
+                trade_date=canonical.trade_date,
+                event=V16_CANONICAL_ARTIFACT_EVENT,
+            )
+            if record is None:
+                raise V20RepositoryError("canonical V16 artifact readback is missing")
+            hydrated = await self._hydrate_canonical_artifact_record(record)
+            hydrated_trade_date = getattr(hydrated, "trade_date", None)
+            if hydrated_trade_date != canonical.trade_date:
+                raise V20SemanticConflict("canonical V16 artifact readback date differs")
+            completed_at = self._aware_now()
+            if completed_at.date() == canonical.trade_date:
+                self._canonical_barrier_completed_at[canonical.trade_date] = completed_at
+
+    async def _hydrate_canonical_artifact_record(self, record: Any) -> Any:
+        """Hydrate one durable ticket and prove its raw barrier still exists."""
+
+        store = self._canonical_artifact_store
+        if store is None:
+            raise V20RepositoryError("canonical V16 artifact store is unavailable")
+        custom_hydrate = getattr(store, "hydrate", None)
+        if callable(custom_hydrate):
+            # Test stores use this hook to enforce the same raw-before-artifact
+            # invariant without pretending to be asyncpg.
+            return await custom_hydrate(record)
+
+        payload = record.payload
+        hashable_payload = dict(payload) if isinstance(payload, Mapping) else payload
+        actual_snapshot_hash = sha256_json(hashable_payload)
+        stored_snapshot_hash = getattr(record, "snapshot_hash", None)
+        if stored_snapshot_hash is None:
+            stored_snapshot_hash = actual_snapshot_hash
+        hydrated = hydrate_v16_canonical_artifact(payload)
+        bundle = hydrated.bundle
+        if getattr(record, "trade_date", bundle.trade_date) != bundle.trade_date:
+            raise V20SemanticConflict("canonical V16 artifact row date differs")
+        if stored_snapshot_hash != actual_snapshot_hash:
+            raise V20SemanticConflict("canonical V16 artifact row hash differs")
+
+        required_codes = tuple(bundle.snapshot["raw_evidence_codes"])
+        if not required_codes:
+            raise V20SemanticConflict("canonical V16 artifact has no raw-evidence universe")
+        scan_input_codes = tuple(bundle.snapshot["scan_input_codes"])
+        if required_codes != tuple(sorted(set(required_codes))) or not set(
+            scan_input_codes
+        ).issubset(required_codes):
+            raise V20SemanticConflict("canonical V16 artifact raw-evidence universe is invalid")
+        try:
+            records = await self._repository.list_raw_minute_bar_records(
+                required_codes,
+                trade_date=bundle.trade_date,
+                end_labels=EARLY_RAW_BAR_LABELS,
+            )
+        except V20MinuteBarIntegrityConflict as exc:
+            raise V20SemanticConflict("canonical V16 raw barrier is corrupt") from exc
+        _usable, missing, conflicted = self._fold_universe_raw_records(
+            records,
+            required_codes,
+            bundle.trade_date,
+        )
+        if missing or conflicted:
+            raise V20SemanticConflict(
+                "canonical V16 artifact exists without its complete durable raw barrier"
+            )
+        artifact_received_at = getattr(record, "first_received_at", None)
+        if (
+            not isinstance(artifact_received_at, datetime)
+            or artifact_received_at.tzinfo is None
+            or artifact_received_at.utcoffset() is None
+        ):
+            raise V20SemanticConflict("canonical V16 artifact receipt timestamp is invalid")
+        for raw_record in records:
+            received_at = getattr(raw_record, "first_received_at", None)
+            if (
+                not isinstance(received_at, datetime)
+                or received_at.tzinfo is None
+                or received_at.utcoffset() is None
+                or received_at > artifact_received_at
+            ):
+                raise V20SemanticConflict(
+                    "canonical V16 artifact predates its durable raw evidence"
+                )
+        return bundle
+
+    async def _load_canonical_artifact(
+        self,
+        trade_date: date,
+    ) -> tuple[Any, datetime] | None:
+        """Load and hydrate the only canonical input legal for V20 consumers."""
+
+        store = self._canonical_artifact_store
+        if store is None:
+            raise V20RepositoryError("canonical V16 artifact store is unavailable")
+        record = await store.load(
+            official_stream_id=self.config.official_stream_id,
+            trade_date=trade_date,
+            event=V16_CANONICAL_ARTIFACT_EVENT,
+        )
+        if record is None:
+            return None
+        first_received_at = getattr(record, "first_received_at", None)
+        if (
+            not isinstance(first_received_at, datetime)
+            or first_received_at.tzinfo is None
+            or first_received_at.utcoffset() is None
+        ):
+            raise V20SemanticConflict("canonical V16 artifact receipt timestamp is invalid")
+        # Capture the immutable database receipt before invoking a compatibility
+        # hydrator.  Production records are frozen; a test adapter may annotate
+        # its mutable stand-in while proving the raw barrier.
+        first_received_at = first_received_at.astimezone(SHANGHAI)
+        hydrated = await self._hydrate_canonical_artifact_record(record)
+        barrier_completed_at = self._canonical_barrier_completed_at.get(trade_date)
+        if barrier_completed_at is not None and barrier_completed_at > first_received_at:
+            first_received_at = barrier_completed_at
+        return hydrated, first_received_at
+
+    @staticmethod
+    def _record_matches_payload(record: MinuteBarRecord) -> bool:
+        """Check the durable row key is exactly bound to its payload."""
+        payload = record.payload
+        try:
+            if str(payload["stock_code"]) != str(record.code):
+                return False
+            if str(payload["end_label"]) != str(record.end_label):
+                return False
+            bar_end = datetime.fromisoformat(str(payload["bar_end"]))
+            if bar_end.tzinfo is None or bar_end.utcoffset() is None:
+                return False
+            if bar_end != record.bar_end:
+                return False
+            # The row label must be the bar_end's own Shanghai HH:MM.
+            return str(record.end_label) == record.bar_end.astimezone(SHANGHAI).strftime("%H:%M")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _bar_from_raw_record(record: MinuteBarRecord) -> TushareMinuteBar:
+        """Rebuild one minute bar from a persisted raw record, failing closed."""
+        payload = record.payload
+        if not V20Service._record_matches_payload(record):
+            raise V20SemanticConflict(
+                "persisted canonical raw minute-bar row is not bound to its payload"
+            )
+        try:
+            bar = TushareMinuteBar(
+                stock_code=str(payload["stock_code"]),
+                bar_end=record.bar_end,
+                end_label=str(record.end_label),
+                open_price=float(payload["open"]),
+                close_price=float(payload["close"]),
+                high_price=float(payload["high"]),
+                low_price=float(payload["low"]),
+                volume=float(payload["volume"]),
+                amount=float(payload["amount"]),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise V20SemanticConflict(
+                "persisted canonical raw minute-bar payload is malformed"
+            ) from exc
+        return bar
+
+    @staticmethod
+    def _fold_universe_raw_records(
+        records: Sequence[MinuteBarRecord],
+        universe: Sequence[str],
+        trade_date: date,
+    ) -> tuple[dict[str, tuple[TushareMinuteBar, ...]], frozenset[str], frozenset[str]]:
+        """Fold persisted raw revisions into per-code early (<=09:39) evidence.
+
+        Returns ``(usable, missing, conflicted)``.  A usable code's folded
+        evidence contains a valid 09:39 bar on ``trade_date``; every folded bar
+        is legal and there is no fixed-label continuity requirement — 09:25 and
+        09:30 strategy inputs survive alongside whatever continuous-trading
+        minutes were actually persisted.  Every revision must be exactly bound
+        to its payload (code, bar_end, end_label); identical duplicate
+        revisions fold into one bar, while any malformed, misbound, or unequal
+        revision makes the whole code conflicted and unusable.  Conflicted
+        codes are never reported as missing, so they are excluded from any
+        backfill fetch.
+        """
+        grouped: dict[str, dict[str, list[MinuteBarRecord]]] = {}
+        for record in records:
+            label = str(record.end_label)
+            if label not in EARLY_RAW_BAR_LABELS:
+                continue
+            grouped.setdefault(str(record.code), {}).setdefault(label, []).append(record)
+        usable: dict[str, tuple[TushareMinuteBar, ...]] = {}
+        conflicted: set[str] = set()
+        for code, by_label in grouped.items():
+            bars: dict[str, TushareMinuteBar] = {}
+            for label, revisions in by_label.items():
+                first = revisions[0]
+                if any(
+                    not V20Service._record_matches_payload(revision) for revision in revisions
+                ) or any(
+                    revision.payload != first.payload or revision.source_hash != first.source_hash
+                    for revision in revisions[1:]
+                ):
+                    conflicted.add(code)
+                    break
+                try:
+                    bar = V20Service._bar_from_raw_record(first)
+                except V20SemanticConflict:
+                    conflicted.add(code)
+                    break
+                if (
+                    not bar.is_valid
+                    or bar.stock_code != code
+                    or bar.bar_end.astimezone(SHANGHAI).date() != trade_date
+                ):
+                    conflicted.add(code)
+                    break
+                bars[label] = bar
+            else:
+                if EARLY_RAW_LAST_LABEL in bars:
+                    usable[code] = tuple(bars[label] for label in sorted(bars))
+        missing = frozenset(
+            code for code in universe if code not in usable and code not in conflicted
+        )
+        return usable, missing, frozenset(conflicted)
+
+    @staticmethod
+    def _raise_historical_seed_conflict(conflicted: frozenset[str], *, phase: str) -> None:
+        """Fail closed on any conflicted universe code, with a bounded sample."""
+        sample = ", ".join(sorted(conflicted)[:HISTORICAL_SEED_CONFLICT_SAMPLE])
+        raise V20SemanticConflict(
+            f"canonical V16 historical seed {phase} fold has "
+            f"{len(conflicted)} conflicted universe codes (sample: {sample})"
+        )
+
+    async def _historical_early_evidence_seed(
+        self,
+        trade_date: date,
+    ) -> tuple[
+        dict[str, TushareEarlyMarketData],
+        tuple[str, ...],
+        Mapping[str, tuple[tuple[str, str], ...]],
+    ]:
+        """Rebuild the canonical early-data seed for a past Shanghai trade date.
+
+        The exact canonical universe is resolved through the shared V16 universe
+        semantics.  Every persisted raw revision for that universe is read with
+        the full set of possible early end labels (00:00..09:39); identical
+        duplicate revisions fold and unequal, malformed, or misbound revisions
+        make the code conflicted/unusable.  Backfill targets are always every
+        missing nonconflicted code plus the legacy fixed-nine usable codes
+        (they lack the 09:25/09:30 strategy inputs); the canonical 80%
+        readiness gate only decides scan readiness and never stops fetching.
+        A present response key is a successful per-code answer — an empty
+        tuple explicitly confirms no bars — while a missing key is a failure.
+        The live ``rt_min_daily`` early path is never touched for a past date.
+        Backfilled bars are truncated to the exact target date and known early
+        end labels *before* they enter the single shared normalizer
+        (``tushare_minute_bars_to_early_market_data``), persisted per completed
+        128-code chunk with ``record_minute_bars`` (legacy codes only gain
+        labels they never had), and the database is then always read back so
+        the seed is hydrated exclusively from persisted evidence through the
+        same normalizer.  Any conflicted universe code — in the initial fold
+        or in the mandatory readback fold — raises ``V20SemanticConflict``
+        with the total and a bounded sorted sample before any vendor fetch or
+        V16 compute.  An empty tuple confirms "no data" only for a truly
+        missing code, never for a legacy fixed-nine code; a legacy code
+        resolves only when the readback shows at least one authoritative
+        non-legacy label, and an empty/no-new-labels response leaves it
+        unresolved even though the old nine stays usable.  Any unresolved
+        initial target after the readback fails before the actual compute;
+        a cancelled attempt simply keeps its completed chunks and re-derives
+        the pending set from the database on the next call.  Hash corruption
+        stays fatal inside the repository.
+        """
+        _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(self._scan_state)
+        records = await self._repository.list_raw_minute_bar_records(
+            universe,
+            trade_date=trade_date,
+            end_labels=EARLY_RAW_BAR_LABELS,
+        )
+        usable, missing, conflicted = self._fold_universe_raw_records(records, universe, trade_date)
+        if conflicted:
+            self._raise_historical_seed_conflict(conflicted, phase="initial")
+        # Targets are always every missing nonconflicted code plus the legacy
+        # usable codes still holding the old fixed nine 09:31..09:39 bars (they
+        # lack the 09:25/09:30 strategy inputs).  The canonical 80% readiness
+        # gate only decides scan readiness — it never stops evidence fetching.
+        enrichment = {
+            code
+            for code, bars in usable.items()
+            if not HISTORICAL_REQUIRED_SPECIAL_LABELS.issubset({bar.end_label for bar in bars})
+        }
+        targets = sorted(set(missing) | enrichment)
+        if targets:
+            client = self._scan_state.realtime_client
+            if client is None or not hasattr(client, "batch_get_minute_history_for_date"):
+                raise V20RepositoryError(
+                    "canonical V16 historical replay minute-history adapter is unavailable"
+                )
+            # Deterministic 128-code chunks; each finished chunk is normalized
+            # and persisted immediately.  Cancellation propagates naturally,
+            # completed chunks stay durable, and the next attempt re-derives
+            # pending codes from the database rather than re-requesting them.
+            # Response contract: a present key means the API call succeeded for
+            # that code — an empty tuple is an explicit "no bars" (e.g.
+            # suspended) for a truly missing code, never for a legacy code —
+            # while a missing key means failure/incomplete.
+            confirmed_empty: set[str] = set()
+            for start in range(0, len(targets), HISTORICAL_SEED_BACKFILL_CHUNK):
+                chunk = targets[start : start + HISTORICAL_SEED_BACKFILL_CHUNK]
+                history = await client.batch_get_minute_history_for_date(chunk, trade_date)
+                payloads: list[dict[str, Any]] = []
+                for code in chunk:
+                    if code not in history:
+                        continue
+                    rows = history[code]
+                    if not rows:
+                        if code not in enrichment:
+                            confirmed_empty.add(code)
+                        continue
+                    # Truncate to the exact target date and known early end
+                    # labels (<=09:39) BEFORE the normalizer and persistence,
+                    # so a vendor response can never leak later or wrong-date
+                    # rows into the evidence.
+                    truncated = tuple(
+                        bar
+                        for bar in rows
+                        if bar.bar_end.astimezone(SHANGHAI).date() == trade_date
+                        and bar.end_label in EARLY_RAW_BAR_LABELS
+                    )
+                    early = tushare_minute_bars_to_early_market_data(code, truncated, trade_date)
+                    if early is None:
+                        continue
+                    new_bars = early.early_bars
+                    if code in enrichment:
+                        # A legacy code only persists the labels it never had;
+                        # its already-stored nine revisions are never rewritten,
+                        # so a restated vendor row cannot become a conflict.
+                        existing_labels = {bar.end_label for bar in usable[code]}
+                        new_bars = tuple(
+                            bar for bar in new_bars if bar.end_label not in existing_labels
+                        )
+                    if new_bars:
+                        payloads.extend(_bar_payload(bar) for bar in new_bars)
+                if payloads:
+                    sealed_hashes = await self._repository.record_minute_bars(payloads)
+                    expected_hashes = frozenset(sha256_json(payload) for payload in payloads)
+                    if frozenset(sealed_hashes) != expected_hashes:
+                        raise V20RepositoryError(
+                            "canonical V16 replay minute-history persistence is incomplete: "
+                            f"{len(set(sealed_hashes) & expected_hashes)}/{len(payloads)} sealed"
+                        )
+                if not any(code in history for code in chunk):
+                    # Only a chunk whose response lacks every requested key is
+                    # a wholesale vendor failure worth stopping for; a chunk
+                    # that answered each code (even all-empty) is a successful
+                    # response and later chunks must still be fetched.  The
+                    # mandatory readback and the completeness check below still
+                    # run, so this fails closed instead of pretending PASS.
+                    break
+            # The seed must be hydrated from persisted evidence, never from the
+            # vendor response that was just written — the database readback is
+            # mandatory after any stk_mins attempt, even if nothing was sealed.
+            records = await self._repository.list_raw_minute_bar_records(
+                universe,
+                trade_date=trade_date,
+                end_labels=EARLY_RAW_BAR_LABELS,
+            )
+            usable, missing, readback_conflicted = self._fold_universe_raw_records(
+                records, universe, trade_date
+            )
+            if readback_conflicted:
+                self._raise_historical_seed_conflict(readback_conflicted, phase="readback")
+            unrecovered = []
+            for code in targets:
+                if code in enrichment:
+                    # A legacy code resolves only when the mandatory readback
+                    # shows both authoritative strategy labels; either label
+                    # alone leaves the code targeted for another backfill.
+                    labels = {bar.end_label for bar in usable.get(code, ())}
+                    enriched = HISTORICAL_REQUIRED_SPECIAL_LABELS.issubset(labels)
+                    if not enriched:
+                        unrecovered.append(code)
+                elif code not in usable and code not in confirmed_empty:
+                    unrecovered.append(code)
+            if unrecovered:
+                raise V20RepositoryError(
+                    "canonical V16 historical backfill is incomplete: "
+                    f"{len(unrecovered)}/{len(targets)} targets lack qualified "
+                    "persisted evidence or an explicitly empty vendor response"
+                )
+        seed: dict[str, TushareEarlyMarketData] = {}
+        for code, bars in usable.items():
+            early = tushare_minute_bars_to_early_market_data(code, bars, trade_date)
+            if early is not None:
+                seed[code] = early
+        return seed, universe, clean_boards
 
     async def _compute_canonical_v16_from_persisted_raw(
         self,
         context: _DayContext,
     ) -> CanonicalV16ScanBundle:
-        """Return the single shared canonical V16 and persist its raw 09:39 path.
+        """Recompute the canonical V16 for the post-cutoff replay from durable evidence.
 
-        There is no second algorithm rebuilt from persisted rows: automatic,
-        manual, post-cutoff, and restart paths all go through the same
-        ``get_or_compute_canonical_v16`` coordinator.  A restart with an empty
-        raw store therefore computes from Tushare exactly once, then durably
-        persists the canonical 09:31..09:39 bars via the shared helper.
+        There is no second algorithm rebuilt from persisted rows: the same
+        ``compute_canonical_v16_scan`` serves every path, and this replay
+        context is always post-cutoff.  Same-day or past, the seed is rebuilt
+        from persisted early (<=09:39) raw evidence with a bounded ``stk_mins``
+        backfill for missing nonconflicted codes, and
+        ``compute_canonical_v16_scan`` is called directly with realtime early
+        fetches forbidden, so the canonical 80% readiness gate stays
+        authoritative.  The canonical coordinator and its cache are never
+        inspected or mutated here, and ``batch_get_early_market_data``
+        (``rt_min_daily``) or any other current-day bars endpoint is never
+        cold-started for a replay — a post-cutoff replay must stand on
+        persisted/``stk_mins`` evidence alone.  A future trade date is
+        rejected outright.
         """
 
-        canonical = await get_or_compute_canonical_v16(self._scan_state, context.trade_date)
+        trade_date = context.trade_date
+        today = self._aware_now().date()
+        if trade_date > today:
+            raise V20StateConflict("canonical V16 replay cannot target a future trade date")
+        seed, universe, clean_boards = await self._historical_early_evidence_seed(trade_date)
+        canonical = await compute_canonical_v16_scan(
+            self._scan_state,
+            trade_date,
+            early_data_seed=seed,
+            universe_override=universe,
+            clean_boards_override=clean_boards,
+            allow_realtime_fetch=False,
+        )
         await self._persist_canonical_raw_minute_bars(canonical)
         return canonical
 
@@ -4637,6 +5960,18 @@ class V20Service:
         health_snapshot = deserialize_health_snapshot(state.payload["health"])
 
         canonical = await self._compute_canonical_v16_from_persisted_raw(context)
+        try:
+            day_gate_attestation = dict(
+                await asyncio.to_thread(
+                    attest_post_cutoff_v16_day_gate,
+                    self.config.project_root,
+                    canonical,
+                    context.trade_date,
+                    now.astimezone(SHANGHAI).date(),
+                )
+            )
+        except V16DayGateAttestationError as exc:
+            raise V20SemanticConflict(str(exc)) from exc
         context.canonical_bundle = self._project_canonical_v16(
             canonical,
             calendar=context.calendar,
@@ -4646,48 +5981,43 @@ class V20Service:
             HealthStatus.WARMUP,
             HealthStatus.HEALTHY,
         }
-        required_labels = tuple(f"09:{minute:02d}" for minute in range(31, 40))
-        # The persisted raw evidence is scoped to the same theoretical Top10
-        # codes the shared helper sealed (10 * 9 = 90 rows); querying or
-        # cross-checking the full universe would necessarily fail after 90 rows.
+        # The shared helper now seals the full ready universe; the replay still
+        # binds its cross-check to the theoretical Top10 subset of that
+        # evidence — the same variable early (<=09:39) raw rows, folded with
+        # the shared identical/unequal revision rules, never a fixed
+        # 09:31..09:39 checklist.
         top10_codes = self._canonical_raw_top10_codes(canonical)
         records = list(
             await self._repository.list_raw_minute_bar_records(
                 top10_codes,
                 trade_date=context.trade_date,
-                end_labels=required_labels,
+                end_labels=EARLY_RAW_BAR_LABELS,
             )
         )
-        persisted_by_key: dict[tuple[str, str], MinuteBarRecord] = {}
-        for record in records:
-            key = (str(record.code), str(record.end_label))
-            if key in persisted_by_key:
-                raise V20SemanticConflict("persisted 09:31..09:39 raw rows contain a duplicate")
-            persisted_by_key[key] = record
+        folded, top10_missing, top10_conflicted = self._fold_universe_raw_records(
+            records, top10_codes, context.trade_date
+        )
+        if top10_conflicted:
+            raise V20SemanticConflict(
+                "persisted early raw rows contain unequal or malformed revisions"
+            )
+        if top10_missing:
+            raise V20SemanticConflict("persisted early raw rows are missing a canonical bar")
         for code in top10_codes:
-            for expected_bar in canonical.early_bars.get(code, ()):
-                if expected_bar.end_label not in required_labels:
-                    continue
-                persisted_record = persisted_by_key.get((code, expected_bar.end_label))
-                if persisted_record is None:
-                    raise V20SemanticConflict(
-                        "persisted 09:31..09:39 raw rows are missing a canonical bar"
-                    )
-                expected_payload = _bar_payload(expected_bar)
-                if (
-                    persisted_record.payload != expected_payload
-                    or persisted_record.source_hash != sha256_json(expected_payload)
-                ):
-                    raise V20SemanticConflict(
-                        "persisted 09:31..09:39 raw row differs from canonical V16"
-                    )
+            expected_bars = tuple(
+                bar
+                for bar in canonical.early_bars.get(code, ())
+                if bar.end_label in EARLY_RAW_BAR_LABELS
+            )
+            if folded[code] != expected_bars:
+                raise V20SemanticConflict("persisted early raw evidence differs from canonical V16")
         canonical_raw_hashes = {
             code: {
                 "early_source_hash": canonical.early_source_hashes.get(code),
                 "bars": [
                     {"label": bar.end_label, "payload_hash": sha256_json(_bar_payload(bar))}
                     for bar in canonical.early_bars.get(code, ())
-                    if bar.end_label in required_labels
+                    if bar.end_label in EARLY_RAW_BAR_LABELS
                 ],
             }
             for code in top10_codes
@@ -4697,17 +6027,35 @@ class V20Service:
             code: {
                 "early_source_hash": canonical.early_source_hashes.get(code),
                 "bars": [
-                    {"label": record.end_label, "payload_hash": sha256_json(record.payload)}
-                    for _key, record in sorted(persisted_by_key.items())
-                    if record.code == code
+                    {"label": bar.end_label, "payload_hash": sha256_json(_bar_payload(bar))}
+                    for bar in folded[code]
                 ],
             }
             for code in top10_codes
         }
         if persisted_raw_hashes != canonical_raw_hashes:
             raise V20SemanticConflict(
-                "persisted 09:31..09:39 source evidence differs from canonical V16"
+                "persisted early raw source evidence differs from canonical V16"
             )
+        if status.action != "INPUT_INVALID":
+            # The official terminal slot froze the morning canonical identity
+            # in its persisted decision snapshot/semantic.  Fail closed unless
+            # this recomputation reproduces exactly those hashes, so a later
+            # universe or static-input drift is never silently called exact.
+            # A legacy INPUT_INVALID slot has no morning canonical snapshot, so
+            # it keeps its explicit PIT limitation instead of this check.
+            frozen_snapshot = status.snapshot
+            if (
+                not isinstance(frozen_snapshot, Mapping)
+                or frozen_snapshot.get("early_market_source_hash") != canonical.input_hash
+                or frozen_snapshot.get("scorer_model_sha256") != canonical.model_sha256
+                or frozen_snapshot.get("scorer_feature_sha256") != canonical.feature_list_sha256
+                or frozen_snapshot.get("v16_snapshot_hash") != bundle.snapshot_hash
+                or status.semantic.get("v16_snapshot_hash") != bundle.snapshot_hash
+            ):
+                raise V20SemanticConflict(
+                    "recomputed canonical V16 identity differs from the frozen official slot"
+                )
         early_source_hash = canonical.input_hash
         if status.action != "INPUT_INVALID":
             completed_health, completed_rolling, maturity_gaps = (
@@ -4793,6 +6141,7 @@ class V20Service:
                 "computed_at": computed_at.isoformat(),
                 "data_cutoff": "09:39",
                 "data_receipt_timeliness": "POST_CUTOFF",
+                "v16_day_gate_attestation": day_gate_attestation,
                 "raw_fact_n": len(records),
                 "raw_first_received_at": (
                     min(receipt_times).isoformat() if receipt_times else None
@@ -4914,6 +6263,7 @@ class V20Service:
             "computed_at": computed_at.isoformat(),
             "data_cutoff": "09:39",
             "data_receipt_timeliness": "POST_CUTOFF",
+            "v16_day_gate_attestation": day_gate_attestation,
             "raw_fact_n": len(records),
             "raw_first_received_at": (min(receipt_times).isoformat() if receipt_times else None),
             "raw_last_received_at": (max(receipt_times).isoformat() if receipt_times else None),
@@ -4935,6 +6285,10 @@ class V20Service:
                 "RAW_MINUTE_ROWS_RECEIVED_OR_REUSED_AFTER_LIVE_CUTOFF",
                 "CURRENT_FUNDAMENTAL_NAME_AND_ST_METADATA_MAY_REFLECT_LATER_SAME_DAY_STATE",
                 "MEWS_IS_NOT_A_09:39_ENTRY_INPUT",
+                # A legacy INPUT_INVALID slot never froze a morning canonical
+                # identity, so the recomputation cannot be hash-bound to one;
+                # the recovered computation is explicitly allowed here.
+                "OFFICIAL_INPUT_INVALID_SLOT_HAS_NO_FROZEN_MORNING_CANONICAL_IDENTITY",
             ],
         }
         semantic["message"] = _late_0939_replay_body(
@@ -4954,8 +6308,8 @@ class V20Service:
                 self.config.official_stream_id,
                 context.trade_date,
             )
-        if status is None or status.action != "INPUT_INVALID":
-            raise V20StateConflict("late 09:39 replay requires today's INPUT_INVALID slot")
+        if status is None or status.action not in _LATE_0939_REPLAY_ACTIONS:
+            raise V20StateConflict("late 09:39 replay requires today's terminal official slot")
         self._verify_entry_binding(status)
         replay_event_id = self._late_0939_replay_event_id(
             context.trade_date,
@@ -4971,6 +6325,7 @@ class V20Service:
                 existing,
                 trade_date=context.trade_date,
                 official_entry_event_id=status.event_id,
+                official_entry_action=status.action,
             )
             if existing.payload is None:
                 await self._repository.assert_runtime_leader()
@@ -4999,6 +6354,7 @@ class V20Service:
                     existing,
                     trade_date=context.trade_date,
                     official_entry_event_id=status.event_id,
+                    official_entry_action=status.action,
                 )
                 if existing.payload is None:
                     await self._repository.assert_runtime_leader()
@@ -5035,6 +6391,7 @@ class V20Service:
                 sealed,
                 trade_date=context.trade_date,
                 official_entry_event_id=status.event_id,
+                official_entry_action=status.action,
             )
             context.late_0939_replay_completed = True
             return sealed
@@ -5050,7 +6407,7 @@ class V20Service:
         if (
             now.timetz().replace(tzinfo=None) < self.config.clock.publish_deadline
             or status is None
-            or status.action != "INPUT_INVALID"
+            or status.action not in _LATE_0939_REPLAY_ACTIONS
             or context.late_0939_replay_completed
         ):
             return
@@ -5085,7 +6442,7 @@ class V20Service:
         if (
             now.timetz().replace(tzinfo=None) < self.config.clock.publish_deadline
             or context.entry_status is None
-            or context.entry_status.action != "INPUT_INVALID"
+            or context.entry_status.action not in _LATE_0939_REPLAY_ACTIONS
             or context.late_0939_replay_completed
             or context.late_0939_replay_automatic_attempts
             >= LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS
@@ -5109,25 +6466,95 @@ class V20Service:
         context: _DayContext,
         now: datetime,
     ) -> None:
-        """Prewarm and persist 09:31..09:39 facts without consuming state."""
+        """Prewarm and persist early (<=09:39) facts without consuming state."""
 
-        await self._refresh_entry_status(context)
+        if callable(getattr(self._repository, "get_entry_status", None)):
+            await self._refresh_entry_status(context)
         if context.entry_status is not None:
             return
         wall = now.timetz().replace(tzinfo=None)
         if wall < time.fromisoformat(self.config.clock.decision_bar_label):
             return
         if wall < self.config.clock.decision_finalization_deadline:
-            canonical = await get_or_compute_canonical_v16(
-                self._scan_state,
-                context.trade_date,
+            # MEWS is not a 09:39 entry input, but the day must own its daily
+            # value before the entry pipeline proceeds: join and await the
+            # shared per-date attempt while the cache is absent.  A genuine
+            # failure has already settled one idempotent MEWS_CALCULATION_FAILED
+            # inside the attempt and returns False here — the independent
+            # entry computation continues regardless and never reports
+            # ENTRY_COLLECTION_FAILED for a MEWS cause.  The pure daily
+            # calculation is wall-clock independent; a late repair stays
+            # usable through the availability-date semantics.
+            if self._mews_cached_for != context.trade_date:
+                self.kick_mews_for_selection_trigger(now)
+
+            if getattr(self, "_canonical_artifact_store", None) is None:
+                # Compatibility-only repositories cannot model the durable
+                # input_snapshots table.  Production always constructs the
+                # store during startup and therefore never consumes this
+                # direct projection branch.
+                canonical = await get_or_compute_canonical_v16(
+                    self._scan_state,
+                    context.trade_date,
+                )
+                context.canonical_bundle = self._project_canonical_v16(
+                    canonical,
+                    calendar=context.calendar,
+                )
+                compatibility_received_at = getattr(canonical, "computed_at", now)
+                context.canonical_first_received_at = compatibility_received_at
+                context.canonical_entry_mode = (
+                    "ACTIONABLE"
+                    if compatibility_received_at
+                    < _local(context.trade_date, self.config.clock.publish_deadline)
+                    else "CHECK_ONLY"
+                )
+                recommended = getattr(getattr(canonical, "scan_result", None), "recommended", None)
+                context.canonical_entry_action = (
+                    "NO_SIGNAL" if recommended is not None and len(recommended) == 0 else None
+                )
+                context.last_phase = "CANONICAL_0939_READY"
+                return
+
+            loaded = await self._load_canonical_artifact(context.trade_date)
+            if loaded is None:
+                # The coordinator owns and shields the shared master.  Its
+                # sink must complete raw + artifact + readback before this
+                # waiter can consume anything.
+                await get_or_compute_canonical_v16(
+                    self._scan_state,
+                    context.trade_date,
+                )
+                loaded = await self._load_canonical_artifact(context.trade_date)
+                if loaded is None:
+                    raise V20RepositoryError(
+                        "canonical V16 master completed without a durable artifact"
+                    )
+
+            hydrated, first_received_at = loaded
+            if isinstance(hydrated, CanonicalV16ScanBundle):
+                projected = self._project_canonical_v16(
+                    hydrated,
+                    calendar=context.calendar,
+                )
+            elif isinstance(hydrated, FrozenV16ScanBundle):
+                projected = hydrated
+            else:
+                raise V20SemanticConflict("canonical V16 artifact hydration is invalid")
+            cutoff = _local(context.trade_date, self.config.clock.publish_deadline)
+            context.canonical_bundle = projected
+            context.canonical_first_received_at = first_received_at
+            context.canonical_entry_mode = (
+                "ACTIONABLE" if first_received_at < cutoff else "CHECK_ONLY"
             )
-            await self._persist_canonical_raw_minute_bars(canonical)
-            context.canonical_bundle = self._project_canonical_v16(
-                canonical,
-                calendar=context.calendar,
+            context.canonical_entry_action = (
+                "NO_SIGNAL" if len(hydrated.scan_result.recommended) == 0 else "CANDIDATES_READY"
             )
-            context.last_phase = "CANONICAL_0939_READY"
+            context.last_phase = (
+                "CANONICAL_0939_READY"
+                if context.canonical_entry_mode == "ACTIONABLE"
+                else "CANONICAL_0939_CHECK_ONLY"
+            )
             return
 
     def _project_canonical_v16(
@@ -5137,6 +6564,22 @@ class V20Service:
         calendar: tuple[date, ...] | None = None,
     ) -> FrozenV16ScanBundle:
         result = canonical.scan_result
+        try:
+            raw_evidence_codes = sorted(canonical.early_bars)
+            early_source_codes = sorted(canonical.early_source_hashes)
+            scan_input_codes = sorted(canonical.stock_data)
+        except (AttributeError, TypeError) as exc:
+            raise V20SemanticConflict("canonical V16 raw evidence universe is invalid") from exc
+        if (
+            not raw_evidence_codes
+            or raw_evidence_codes != early_source_codes
+            or any(
+                not isinstance(code, str) or len(code) != 6 or not code.isdigit()
+                for code in raw_evidence_codes
+            )
+            or not set(scan_input_codes).issubset(raw_evidence_codes)
+        ):
+            raise V20SemanticConflict("canonical V16 raw evidence universe is invalid")
         symbols = [
             {
                 "rank": stock.rank,
@@ -5163,36 +6606,60 @@ class V20Service:
         )
         if canonical.trade_date not in resolved_calendar:
             raise V20RepositoryError("canonical V16 trade date lacks calendar evidence")
-        predecessors = [day for day in resolved_calendar if day < canonical.trade_date]
+        canonical_calendar = tuple(getattr(canonical, "computation_calendar", ()))
+        canonical_predecessors = [day for day in canonical_calendar if day < canonical.trade_date]
+        canonical_successors = [day for day in canonical_calendar if day > canonical.trade_date]
+        if (
+            not canonical_predecessors
+            or len(canonical_successors) < 2
+            or canonical.prior_trade_date != canonical_predecessors[-1]
+            or any(
+                day not in resolved_calendar
+                for day in (
+                    canonical.prior_trade_date,
+                    canonical.trade_date,
+                    *canonical_successors[:2],
+                )
+            )
+        ):
+            raise V20RepositoryError("canonical V16 computation calendar is incompatible")
         snapshot = {
             "schema_version": V20_V16_SNAPSHOT_SCHEMA,
             "trade_date": canonical.trade_date.isoformat(),
             "last_complete_bar": self.config.clock.decision_bar_label,
             "early_market_source_hash": canonical.input_hash,
             "early_market_conflict_codes": [],
-            "breadth_market_source_hash": canonical.input_hash,
-            "breadth_market_missing_codes": [],
-            "breadth_market_conflict_codes": [],
+            "breadth_market_source_hash": canonical.breadth_market_source_hash,
+            "breadth_market_missing_codes": list(canonical.breadth_market_missing_codes),
+            "breadth_market_conflict_codes": list(canonical.breadth_market_conflict_codes),
             "scorer_model_sha256": canonical.model_sha256,
             "scorer_feature_sha256": canonical.feature_list_sha256,
             "list_complete": True,
             "list_n": len(symbols),
             "symbols": symbols,
-            "scan_input_codes": list(canonical.stock_data),
+            "scan_input_codes": scan_input_codes,
+            "raw_evidence_codes": raw_evidence_codes,
             "scan_input_failure_codes": [
                 code for code in canonical.universe if code not in canonical.stock_data
             ],
             "scan_input_coverage": len(canonical.stock_data) / len(canonical.universe),
             "history_profile_id": "CANONICAL_V16_V1",
             "history_input_hashes": {
-                code: sha256_json(dict(history)) for code, history in canonical.history_raw.items()
+                code: sha256_json(dict(history))
+                for code, history in sorted(canonical.history_raw.items())
             },
-            "comparison_pool_codes": list(canonical.stock_data),
-            "comparison_pool_hash": sha256_json(list(canonical.stock_data)),
-            "breadth_valid_n": 0,
-            "breadth_down_n": 0,
-            "prior_trade_date": predecessors[-1].isoformat() if predecessors else None,
-            "prior_amount_yuan": {},
+            "history_date_valid_counts": dict(canonical.history_date_valid_counts),
+            "history_min_date_coverage": canonical.history_min_date_coverage,
+            "comparison_pool_codes": sorted(canonical.universe),
+            "comparison_pool_hash": sha256_json(sorted(canonical.universe)),
+            "breadth_valid_n": canonical.breadth_valid_n,
+            "breadth_down_n": canonical.breadth_down_n,
+            "prior_trade_date": (
+                canonical.prior_trade_date.isoformat()
+                if canonical.prior_trade_date is not None
+                else None
+            ),
+            "prior_amount_yuan": dict(canonical.prior_amount_yuan),
             "funnel": {
                 "step0_universe_count": result.step0_universe_count,
                 "step2_hot_board_count": result.step2_hot_board_count,
@@ -5206,33 +6673,39 @@ class V20Service:
                 "final_candidates": result.final_candidates,
             },
             "stages": {
-                "step0_codes": list(result.step0_codes),
+                "step0_codes": sorted(result.step0_codes),
                 "step2_boards_detail": {
-                    board: list(codes) for board, codes in result.step2_boards_detail.items()
+                    board: sorted(codes)
+                    for board, codes in sorted(result.step2_boards_detail.items())
                 },
-                "step2_codes": list(result.step2_codes),
-                "st_eligible_codes": list(result.st_eligible_codes),
-                "step3_codes": list(result.step3_codes),
-                "step4_codes": list(result.step4_codes),
-                "step5_codes": list(result.step5_codes),
-                "step6_codes": list(result.step6_codes),
-                "step6_5_codes": list(result.step6_5_codes),
-                "step6_6_codes": list(result.step6_6_codes),
+                "step2_codes": sorted(result.step2_codes),
+                "st_eligible_codes": sorted(result.st_eligible_codes),
+                "step3_codes": sorted(result.step3_codes),
+                "step4_codes": sorted(result.step4_codes),
+                "step5_codes": sorted(result.step5_codes),
+                "step6_codes": sorted(result.step6_codes),
+                "step6_5_codes": sorted(result.step6_5_codes),
+                "step6_6_codes": sorted(result.step6_6_codes),
             },
-            "board_avg_gains": dict(result.step2_board_avg_gains),
+            "board_avg_gains": dict(sorted(result.step2_board_avg_gains.items())),
         }
         return FrozenV16ScanBundle(
             trade_date=canonical.trade_date,
             frozen_at=canonical.computed_at,
             scan_result=result,
             stock_data=canonical.stock_data,
-            comparison_pool_codes=tuple(canonical.stock_data),
-            breadth_valid_n=0,
-            breadth_down_n=0,
-            prior_trade_date=predecessors[-1] if predecessors else canonical.trade_date,
-            prior_amount_yuan={},
+            comparison_pool_codes=tuple(sorted(canonical.universe)),
+            breadth_valid_n=canonical.breadth_valid_n,
+            breadth_down_n=canonical.breadth_down_n,
+            prior_trade_date=(
+                canonical.prior_trade_date
+                if canonical.prior_trade_date is not None
+                else canonical.trade_date
+            ),
+            prior_amount_yuan=dict(canonical.prior_amount_yuan),
             snapshot=snapshot,
             snapshot_hash=sha256_json(snapshot),
+            computation_calendar=canonical_calendar,
         )
 
     def _verify_prewarm_dependencies(self, prewarmed: V20PrewarmedScan) -> None:
@@ -5386,6 +6859,10 @@ class V20Service:
     async def _attempt_entry(self, context: _DayContext, now: datetime) -> None:
         if context.canonical_bundle is None:
             raise RuntimeError("canonical V16 09:39 result is unavailable")
+        if context.canonical_entry_mode == "CHECK_ONLY":
+            raise V20StateConflict(
+                "canonical V16 artifact completed at or after 09:40 and is check-only"
+            )
         if context.canonical_bundle is not None:
             await self._commit_entry_from_bundle(context, now, context.canonical_bundle)
             return
@@ -5531,6 +7008,8 @@ class V20Service:
         now: datetime,
         bundle: FrozenV16ScanBundle,
     ) -> None:
+        if context.canonical_entry_mode not in (None, "ACTIONABLE"):
+            raise V20StateConflict("non-actionable canonical V16 artifact cannot commit entry")
         if bundle.frozen_at.tzinfo is None or bundle.frozen_at.utcoffset() is None:
             raise V20SemanticConflict("V16 decision formation clock must be timezone-aware")
         formed_at = bundle.frozen_at.astimezone(SHANGHAI)
@@ -5993,14 +7472,15 @@ class V20Service:
         tick_started_at: float | None = None,
     ) -> None:
         loop = asyncio.get_running_loop()
+        tick_budget = self._live_exit_tick_budget()
         if deadline is None:
             tick_started_at = loop.time()
-            deadline = tick_started_at + LIVE_EXIT_MAX_TICK_SECONDS
+            deadline = tick_started_at + tick_budget
         elif tick_started_at is None:
-            tick_started_at = deadline - LIVE_EXIT_MAX_TICK_SECONDS
+            tick_started_at = deadline - tick_budget
 
         async def stage(
-            operation: Awaitable[Any],
+            operation_factory: Callable[[], Awaitable[Any]],
             *,
             name: str,
             cap: float,
@@ -6008,7 +7488,7 @@ class V20Service:
             provider: str = "postgres",
         ) -> Any:
             return await self._run_live_exit_stage(
-                operation,
+                operation_factory,
                 stage=name,
                 stage_cap=cap,
                 deadline=deadline,
@@ -6018,7 +7498,7 @@ class V20Service:
             )
 
         active = await stage(
-            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            lambda: self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
             name="db_list_active_legs",
             cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
             symbols=(),
@@ -6028,20 +7508,22 @@ class V20Service:
 
         today_legs = self._today_exit_legs(active, context.trade_date)
         all_codes = tuple(leg.code for leg in today_legs)
-        await stage(
-            self._evaluate_active_exits(today_legs, now, context.calendar),
+        deferred_rule_timeout = await stage(
+            lambda: self._evaluate_active_exits(today_legs, now, context.calendar),
             name="rules_initial",
             cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
             symbols=all_codes,
             provider="rules",
         )
         active = await stage(
-            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            lambda: self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
             name="db_list_after_initial_rules",
             cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
             symbols=(),
         )
         if not active:
+            if isinstance(deferred_rule_timeout, V20LiveExitStageTimeout):
+                raise deferred_rule_timeout
             return
 
         wall = now.timetz().replace(tzinfo=None)
@@ -6113,21 +7595,23 @@ class V20Service:
                 context.last_exit_poll_at = now
 
         active = await stage(
-            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            lambda: self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
             name="db_list_after_latest",
             cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
             symbols=(),
         )
         today_legs = self._today_exit_legs(active, context.trade_date)
-        await stage(
-            self._evaluate_active_exits(today_legs, now, context.calendar),
+        rule_timeout = await stage(
+            lambda: self._evaluate_active_exits(today_legs, now, context.calendar),
             name="rules_after_latest",
             cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
             symbols=tuple(leg.code for leg in today_legs),
             provider="rules",
         )
+        if isinstance(rule_timeout, V20LiveExitStageTimeout):
+            deferred_rule_timeout = rule_timeout
         active = await stage(
-            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            lambda: self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
             name="db_list_before_history",
             cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
             symbols=(),
@@ -6153,7 +7637,9 @@ class V20Service:
             requested_keys = {(code, context.trade_date) for code in recovery_codes}
             try:
                 history = await stage(
-                    self._scan_state.realtime_client.batch_get_minute_history(recovery_codes),
+                    lambda: self._scan_state.realtime_client.batch_get_minute_history(
+                        recovery_codes
+                    ),
                     name="history",
                     cap=ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
                     symbols=recovery_codes,
@@ -6186,14 +7672,22 @@ class V20Service:
                         continue
                     for leg in today_legs:
                         if leg.code == code:
-                            await stage(
-                                self._repository.record_exit_scan_watermark(
-                                    leg.model_leg_id,
+
+                            async def record_scan_watermark(
+                                *,
+                                model_leg_id: str = leg.model_leg_id,
+                                source_hash: str = scan_hash,
+                            ) -> bool:
+                                return await self._repository.record_exit_scan_watermark(
+                                    model_leg_id,
                                     trade_date=context.trade_date,
                                     scanned_through_label=scanned_through,
-                                    source_hash=scan_hash,
+                                    source_hash=source_hash,
                                     **self._ledger_scope,
-                                ),
+                                )
+
+                            await stage(
+                                record_scan_watermark,
                                 name="db_exit_scan_watermark",
                                 cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
                                 symbols=(code,),
@@ -6264,7 +7758,7 @@ class V20Service:
                 if lunch_history_authoritative
                 else "latest-minute and current-day history"
             )
-            await self._safe_alert(
+            diagnostic_alert_emitted = await self._safe_alert(
                 code="LIVE_EXIT_MARKET_DATA_UNAVAILABLE",
                 entity_id=f"{context.trade_date.isoformat()}:{target_text}",
                 message=(
@@ -6273,39 +7767,51 @@ class V20Service:
                 ),
                 now=now,
             )
-            raise V20RepositoryError(
-                "all live exit targets lack persisted legal current-day market evidence"
+            raise V20LiveExitIncidentError(
+                "all live exit targets lack persisted legal current-day market evidence",
+                diagnostic_alert_emitted=diagnostic_alert_emitted,
             )
         if evidence_codes:
             context.live_exit_market_data_outage = False
 
         unavailable_codes = tick_target_codes - evidence_codes
         if required_sources_checked and unavailable_codes and not global_outage:
-            missing_text = ",".join(sorted(unavailable_codes))
+            missing_symbols = sorted(unavailable_codes)
+            healthy_siblings = sorted(tick_target_codes & evidence_codes)
+            missing_text = ",".join(missing_symbols)
+            healthy_text = ",".join(healthy_siblings) or "none"
             await self._safe_alert(
                 code="LIVE_EXIT_SYMBOL_DATA_GAP",
                 entity_id=f"{context.trade_date.isoformat()}:{missing_text}",
                 message=(
-                    "individual live-exit symbols returned no persisted legal evidence; "
-                    f"healthy siblings remain active: {missing_text}"
+                    "individual live-exit symbols returned no persisted legal evidence: "
+                    f"missing symbols={missing_text}; healthy siblings={healthy_text}"
                 ),
                 now=now,
+                semantic_extras={
+                    "missing_symbols": missing_symbols,
+                    "healthy_siblings": healthy_siblings,
+                },
             )
 
         active = await stage(
-            self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
+            lambda: self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
             name="db_list_final",
             cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
             symbols=(),
         )
         today_legs = self._today_exit_legs(active, context.trade_date)
-        await stage(
-            self._evaluate_active_exits(today_legs, now, context.calendar),
+        rule_timeout = await stage(
+            lambda: self._evaluate_active_exits(today_legs, now, context.calendar),
             name="rules_final",
             cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
             symbols=tuple(leg.code for leg in today_legs),
             provider="rules",
         )
+        if isinstance(rule_timeout, V20LiveExitStageTimeout):
+            deferred_rule_timeout = rule_timeout
+        if isinstance(deferred_rule_timeout, V20LiveExitStageTimeout):
+            raise deferred_rule_timeout
         if include_stale:
             await self._run_stale_exit_cycle(context, now)
 
@@ -6366,47 +7872,123 @@ class V20Service:
         active: Sequence[ActiveModelLeg],
         now: datetime,
         calendar: Sequence[date] = (),
-    ) -> None:
-        failures: list[str] = []
-        for record in active:
-            try:
-                detection_is_trading_day = now.date() in calendar or now.date() in {
-                    record.d1,
-                    record.d2,
-                }
-                detection_calendar_status = (
-                    "CONFIRMED_TRADING"
-                    if detection_is_trading_day
-                    else "CONFIRMED_NON_TRADING"
-                    if calendar
-                    else "UNKNOWN"
-                )
-                next_trade_date = next(
-                    (item for item in calendar if item > now.date()),
-                    None,
-                )
-                await self._evaluate_one_exit(
+    ) -> V20LiveExitStageTimeout | None:
+        """Evaluate each leg in an independently cancellable timeout boundary.
+
+        A stuck rule for one symbol must not serialize or cancel its healthy
+        siblings.  Timeout children are explicitly cancelled and drained; a
+        structured timeout is returned to the tick only after every sibling has
+        had its chance to commit.  Ordinary leg failures settle their stable
+        symbol alert and do not fail the batch when that alert is durable.
+        """
+
+        if not active:
+            return None
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        symbol_budget = max(0.001, LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS * 0.5)
+
+        async def evaluate_one(
+            record: ActiveModelLeg,
+        ) -> tuple[ActiveModelLeg, BaseException | None]:
+            child = asyncio.create_task(
+                self._evaluate_one_exit(
                     record,
                     now,
-                    detection_is_trading_day=detection_is_trading_day,
-                    detection_calendar_status=detection_calendar_status,
-                    next_trade_date=next_trade_date,
+                    detection_is_trading_day=(
+                        now.date() in calendar or now.date() in {record.d1, record.d2}
+                    ),
+                    detection_calendar_status=(
+                        "CONFIRMED_TRADING"
+                        if now.date() in calendar or now.date() in {record.d1, record.d2}
+                        else "CONFIRMED_NON_TRADING"
+                        if calendar
+                        else "UNKNOWN"
+                    ),
+                    next_trade_date=next(
+                        (item for item in calendar if item > now.date()),
+                        None,
+                    ),
                     calendar=calendar,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                failures.append(f"{record.model_leg_id}:{type(exc).__name__}")
-                await self._safe_alert(
-                    code="EXIT_LEG_EVALUATION_FAILED",
-                    entity_id=record.model_leg_id,
-                    message=f"{record.code}: {type(exc).__name__}: {exc}",
-                    now=now,
-                )
-        if failures:
-            raise V20RepositoryError(
-                "one or more active exit legs could not be evaluated: " + ",".join(failures[:20])
+                ),
+                name=f"v20-exit-leg-{record.model_leg_id}",
             )
+            timeout_scope = asyncio.timeout(symbol_budget)
+            try:
+                async with timeout_scope:
+                    await asyncio.shield(child)
+                return record, None
+            except TimeoutError as exc:
+                if timeout_scope.expired():
+                    return record, V20LiveExitStageTimeout(
+                        stage="rules_symbol",
+                        elapsed_seconds=max(0.0, loop.time() - started_at),
+                        remaining_seconds=0.0,
+                        deadline=started_at + symbol_budget,
+                        symbols=(record.code,),
+                        provider="rules",
+                    )
+                return record, exc
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                return record, RuntimeError("exit leg evaluation task was cancelled")
+            except Exception as exc:
+                return record, exc
+            finally:
+                if not child.done():
+                    child.cancel()
+                await asyncio.gather(child, return_exceptions=True)
+
+        tasks = [
+            asyncio.create_task(
+                evaluate_one(record),
+                name=f"v20-exit-leg-boundary-{record.model_leg_id}",
+            )
+            for record in active
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        timeout_codes: set[str] = set()
+        undurable_failures: list[str] = []
+        for record, failure in results:
+            if failure is None:
+                continue
+            if isinstance(failure, V20LiveExitStageTimeout):
+                timeout_codes.add(record.code)
+                continue
+            diagnostic_alert_emitted = await self._safe_alert(
+                code="EXIT_LEG_EVALUATION_FAILED",
+                entity_id=record.model_leg_id,
+                message=f"{record.code}: {type(failure).__name__}: {failure}",
+                now=now,
+            )
+            if diagnostic_alert_emitted is not True:
+                undurable_failures.append(f"{record.model_leg_id}:{type(failure).__name__}")
+
+        if undurable_failures:
+            raise V20LiveExitIncidentError(
+                "one or more active exit legs could not be evaluated and their "
+                "diagnostics were not durable: " + ",".join(undurable_failures[:20]),
+                diagnostic_alert_emitted=False,
+            )
+        if timeout_codes:
+            return V20LiveExitStageTimeout(
+                stage="rules_symbol",
+                elapsed_seconds=max(0.0, loop.time() - started_at),
+                remaining_seconds=0.0,
+                deadline=started_at + symbol_budget,
+                symbols=tuple(sorted(timeout_codes)),
+                provider="rules",
+            )
+        return None
 
     async def _recover_closed_exit_windows(
         self,
@@ -6556,26 +8138,43 @@ class V20Service:
                 predecessors = [day for day in calendar if day < record.d1]
                 if predecessors:
                     late_source_trade_date = predecessors[-1]
-                await self._repository.select_mews_for_leg(
-                    record.model_leg_id,
-                    d1=record.d1,
-                    cutoff=cutoff,
-                    late_source_trade_date=late_source_trade_date,
-                    late_availability_date=(
-                        record.d1 if late_source_trade_date is not None else None
-                    ),
-                )
-                selected = await self._repository.load_selected_mews_for_leg(record.model_leg_id)
+                if self._mews_guard_store is not None:
+                    selected = await self._mews_guard_store.select_freeze_and_load(
+                        record.model_leg_id,
+                        d1=record.d1,
+                        cutoff=cutoff,
+                        late_source_trade_date=late_source_trade_date,
+                        late_availability_date=(
+                            record.d1 if late_source_trade_date is not None else None
+                        ),
+                    )
+                else:
+                    # Compatibility-only repositories.  A connected production
+                    # PostgreSQL service always takes the atomic strict-store
+                    # transaction above and never splits selection from load.
+                    await self._repository.select_mews_for_leg(
+                        record.model_leg_id,
+                        d1=record.d1,
+                        cutoff=cutoff,
+                        late_source_trade_date=late_source_trade_date,
+                        late_availability_date=(
+                            record.d1 if late_source_trade_date is not None else None
+                        ),
+                    )
+                    selected = await self._repository.load_selected_mews_for_leg(
+                        record.model_leg_id
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 auxiliary_reasons.append("MEWS_INPUT_UNAVAILABLE")
-                await self._safe_alert(
-                    code="MEWS_INPUT_UNAVAILABLE",
-                    entity_id=record.model_leg_id,
-                    message=f"{record.code}: {type(exc).__name__}: {exc}",
-                    now=now,
-                )
+                if self._mews_guard_store is None:
+                    await self._safe_alert(
+                        code="MEWS_INPUT_UNAVAILABLE",
+                        entity_id=record.model_leg_id,
+                        message=f"{record.code}: {type(exc).__name__}: {exc}",
+                        now=now,
+                    )
 
         stored: list[Any] = []
         try:
@@ -6897,7 +8496,7 @@ class V20Service:
             tick_started_at = loop.time()
             deadline = tick_started_at + LIVE_EXIT_MAX_TICK_SECONDS
         rows = await self._run_live_exit_stage(
-            self._scan_state.realtime_client.batch_get_latest_minute_bars(list(codes)),
+            lambda: self._scan_state.realtime_client.batch_get_latest_minute_bars(list(codes)),
             stage="latest",
             stage_cap=LATEST_MINUTE_POLL_TIMEOUT_SECONDS,
             deadline=deadline,
@@ -6914,7 +8513,7 @@ class V20Service:
         if complete:
             payloads = {code: _bar_payload(bar) for code, bar in complete.items()}
             sealed_hashes = await self._run_live_exit_stage(
-                self._repository.record_minute_bars(list(payloads.values())),
+                lambda: self._repository.record_minute_bars(list(payloads.values())),
                 stage="db_persist_latest",
                 stage_cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
                 deadline=deadline,
@@ -6955,7 +8554,9 @@ class V20Service:
         if bars:
             payloads = [(_bar_payload(bar), bar) for bar in bars]
             sealed_hashes = await self._run_live_exit_stage(
-                self._repository.record_minute_bars([payload for payload, _bar in payloads]),
+                lambda: self._repository.record_minute_bars(
+                    [payload for payload, _bar in payloads]
+                ),
                 stage="db_persist_history",
                 stage_cap=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
                 deadline=deadline,
@@ -6992,9 +8593,9 @@ class V20Service:
         now: datetime,
         event_id: str | None = None,
         semantic_extras: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         if not self._repository_started:
-            return
+            return False
         semantic: dict[str, Any] = {
             "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
@@ -7023,15 +8624,55 @@ class V20Service:
             },
         )
 
-        async def persist_alert() -> None:
-            await self._repository.enqueue_alert(
-                alert_id,
-                self.config.route_id,
-                semantic,
-                semantic_hash,
-                **self._ledger_scope,
-            )
+        async def persist_alert() -> bool:
+            if event_id is not None:
+                get_event = getattr(self._repository, "get_outbox_event", None)
+                if get_event is not None:
+                    existing = await get_event(
+                        alert_id,
+                        route_id=self.config.route_id,
+                        official_stream_id=self.config.official_stream_id,
+                        lineage_id=self.config.state_lineage_id,
+                    )
+                    existing_semantic = existing.semantic if existing is not None else {}
+                    if existing is not None and (
+                        existing_semantic.get("alert_code") != code
+                        or existing_semantic.get("entity_id") != entity_id
+                        or existing_semantic.get("event_trade_date") != now.date().isoformat()
+                    ):
+                        raise V20SemanticConflict("stable alert event has incompatible semantics")
+                    if existing is not None and existing.payload is not None:
+                        return True
+            try:
+                await self._repository.enqueue_alert(
+                    alert_id,
+                    self.config.route_id,
+                    semantic,
+                    semantic_hash,
+                    **self._ledger_scope,
+                )
+            except V20SemanticConflict:
+                if event_id is None:
+                    raise
+                get_event = getattr(self._repository, "get_outbox_event", None)
+                if get_event is None:
+                    raise
+                existing = await get_event(
+                    alert_id,
+                    route_id=self.config.route_id,
+                    official_stream_id=self.config.official_stream_id,
+                    lineage_id=self.config.state_lineage_id,
+                )
+                existing_semantic = existing.semantic if existing is not None else {}
+                if (
+                    existing is None
+                    or existing_semantic.get("alert_code") != code
+                    or existing_semantic.get("entity_id") != entity_id
+                    or existing_semantic.get("event_trade_date") != now.date().isoformat()
+                ):
+                    raise
             await self._repository.seal_event(alert_id, seal_v20_payload)
+            return True
 
         persist_result = (await asyncio.gather(persist_alert(), return_exceptions=True))[0]
         if isinstance(persist_result, asyncio.CancelledError):
@@ -7048,6 +8689,8 @@ class V20Service:
                     persist_result.__traceback__,
                 ),
             )
+            return False
+        return True
 
     def _reference_code_sets(self, status: EntryStatus) -> tuple[tuple[str, ...], tuple[str, ...]]:
         comparison = status.snapshot.get("comparison_pool_codes") or []
@@ -7114,6 +8757,39 @@ class V20Service:
             )
         if not compatible_snapshot:
             raise V20ConfigError("persisted V20 entry snapshot contract is incompatible")
+
+    @staticmethod
+    def _entry_status_readonly_fingerprint(status: EntryStatus | None) -> tuple[Any, ...] | None:
+        """Freeze every terminal field used by a check-only operator probe."""
+
+        if status is None:
+            return None
+        expiry = status.action_expiry_ts
+        semantic_hash = sha256_json(dict(status.semantic))
+        snapshot_hash = sha256_json(dict(status.snapshot))
+        if semantic_hash != status.semantic_content_hash or snapshot_hash != status.snapshot_hash:
+            raise V20SemanticConflict("official entry status content hash differs")
+        return (
+            status.official_stream_id,
+            status.trade_date,
+            status.slot_id,
+            status.slot_status,
+            status.slot_revision,
+            status.strategy_version,
+            status.config_id,
+            status.config_hash,
+            status.lineage_id,
+            status.decision_id,
+            status.event_id,
+            status.action,
+            status.final_multiplier,
+            status.semantic_content_hash,
+            semantic_hash,
+            status.snapshot_id,
+            status.snapshot_hash,
+            snapshot_hash,
+            expiry.isoformat() if expiry is not None else None,
+        )
 
     def _aware_now(self, supplied: datetime | None = None) -> datetime:
         value = supplied if supplied is not None else self._clock()

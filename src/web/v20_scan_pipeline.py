@@ -177,6 +177,7 @@ class FrozenV16ScanBundle:
     prior_amount_yuan: Mapping[str, float]
     snapshot: Mapping[str, Any]
     snapshot_hash: str
+    computation_calendar: tuple[date, ...] = ()
 
 
 class V20ScanPipeline:

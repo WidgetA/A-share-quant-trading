@@ -425,10 +425,73 @@ def _plain_factory(created: list[DeterministicRawClient]) -> Callable[[], Any]:
     return factory
 
 
-async def _await_selection_task(service: V20Service) -> bool:
-    task = service._mews_selection_refresh_task
-    assert task is not None, "trigger must kick exactly one background MEWS refresh"
-    return await asyncio.wait_for(asyncio.shield(task), timeout=STEP_TIMEOUT)
+class _GuardAsyncContext:
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    async def __aenter__(self) -> Any:
+        return self.connection
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class _GuardConnection:
+    def __init__(self, row: Mapping[str, Any] | None) -> None:
+        self.row = row
+        self.calls = 0
+
+    async def fetchrow(self, *_args: Any) -> Any:
+        self.calls += 1
+        return self.row
+
+
+class _AsyncpgLikeRow:
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        self._values = dict(values)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._values.get(key, default)
+
+
+class _GuardPool:
+    def __init__(self, connection: _GuardConnection) -> None:
+        self.connection = connection
+
+    def acquire(self) -> _GuardAsyncContext:
+        return _GuardAsyncContext(self.connection)
+
+
+class _GuardedCandidateRepository(FakeMewsRepository):
+    def __init__(
+        self,
+        *,
+        connection: _GuardConnection,
+        repository_eligible: bool,
+    ) -> None:
+        super().__init__(_deterministic_state(), sealed_clock=lambda: T_1404)
+        self.schema = "v20"
+        self.pool = _GuardPool(connection)
+        self.repository_eligible = repository_eligible
+        self.eligibility_calls = 0
+
+    async def find_eligible_mews_snapshot(self, **_kwargs: Any) -> str:
+        return "guarded-candidate"
+
+    async def mews_snapshot_is_eligible(
+        self,
+        _snapshot_id: str,
+        *,
+        source_trade_date: date,
+        cutoff: datetime,
+    ) -> bool:
+        self.eligibility_calls += 1
+        assert source_trade_date == SOURCE_DATE
+        assert cutoff == CUTOFF_0940
+        return self.repository_eligible
 
 
 async def test_scheduled_0910_computes_mews_locally_and_persists(
@@ -528,9 +591,7 @@ async def test_first_deploy_1404_trigger_recomputes_identical_snapshot(
         now=T_1404,
     )
     kicked = await late_service.ensure_mews_for_selection_trigger(T_1404)
-    assert kicked is False, "an uncached trigger kicks the recomputation"
-    calculated = await _await_selection_task(late_service)
-    assert calculated is True, "late trigger must recompute, not declare cache-missed"
+    assert kicked is True, "late trigger awaits the recomputation, no cache-missed"
 
     assert late_service._mews_cached_for == TODAY
     assert late_service._mews_source_trade_date == SOURCE_DATE
@@ -586,10 +647,7 @@ async def test_concurrent_triggers_and_scheduler_singleflight(
         now=T_1404,
     )
 
-    first = await service.ensure_mews_for_selection_trigger(T_1404)
-    assert first is False
-    task = service._mews_selection_refresh_task
-    assert task is not None
+    first = asyncio.create_task(service.ensure_mews_for_selection_trigger(T_1404))
 
     # Wait until the single computation holds the refresh lock inside the raw
     # query, then unleash the competitors while it is still in flight.
@@ -600,10 +658,7 @@ async def test_concurrent_triggers_and_scheduler_singleflight(
     else:
         raise AssertionError("MEWS computation never reached the raw source")
 
-    second = await service.ensure_mews_for_selection_trigger(T_1404)
-    assert second is False, "concurrent trigger must join, not recompute"
-    assert service._mews_selection_refresh_task is task
-
+    second = asyncio.create_task(service.ensure_mews_for_selection_trigger(T_1404))
     recovery = asyncio.create_task(
         service._recover_mews_after_cutoff_once(T_1404, CALENDAR),
         name="v20-mews-scheduler-recovery",
@@ -611,11 +666,14 @@ async def test_concurrent_triggers_and_scheduler_singleflight(
     await asyncio.sleep(0)
     created[0].release.set()
 
-    calculated, recovered = await asyncio.wait_for(
-        asyncio.gather(task, recovery), timeout=STEP_TIMEOUT
+    first_result, second_result, recovered = await asyncio.wait_for(
+        asyncio.gather(first, second, recovery), timeout=STEP_TIMEOUT
     )
-    assert calculated is True
+    # Both triggers joined the same per-date singleflight task and awaited it.
+    assert first_result is True
+    assert second_result is True
     assert recovered is True
+    assert service._mews_singleflight_task is None
 
     # Singleflight: exactly one raw computation, one checkpoint, one snapshot.
     assert len(created) == 1
@@ -668,9 +726,8 @@ async def test_valid_persisted_cache_is_restored_without_recompute(
         now=T_1404,
     )
     assert consumer._mews_cached_for is None
-    kicked = await consumer.ensure_mews_for_selection_trigger(T_1404)
-    assert kicked is False
-    await _await_selection_task(consumer)
+    # The awaited trigger restores the sealed same-day snapshot on the spot.
+    assert await consumer.ensure_mews_for_selection_trigger(T_1404) is True
 
     assert consumer._mews_cached_for == TODAY
     assert consumer._mews_source_trade_date == SOURCE_DATE
@@ -682,6 +739,135 @@ async def test_valid_persisted_cache_is_restored_without_recompute(
     assert len(repository.snapshots) == 1
     assert repository.snapshots[original_snapshot_id]["payload"] == persisted_payload
     assert await consumer.ensure_mews_for_selection_trigger(T_1404) is True
+
+
+async def test_on_time_candidate_uses_repository_eligibility_without_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _GuardConnection(None)
+    repository = _GuardedCandidateRepository(
+        connection=connection,
+        repository_eligible=True,
+    )
+    service = _build_service(
+        monkeypatch,
+        repository=repository,
+        raw_factory=_plain_factory([]),
+        now=T_1404,
+    )
+
+    assert await service._restore_mews_cache_once(T_1404, CALENDAR) is True
+    assert repository.eligibility_calls == 1
+    assert connection.calls == 0
+    assert service._mews_snapshot_id == "guarded-candidate"
+
+
+async def test_late_sealed_same_day_candidate_uses_receipt_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _GuardConnection(
+        _AsyncpgLikeRow(
+            {
+                "source_trade_date": SOURCE_DATE,
+                "generated_at": T_1404,
+                "receipt_sealed_at": T_1404,
+                "signal_available_date": TODAY.isoformat(),
+            }
+        )
+    )
+    repository = _GuardedCandidateRepository(
+        connection=connection,
+        repository_eligible=False,
+    )
+    service = _build_service(
+        monkeypatch,
+        repository=repository,
+        raw_factory=_plain_factory([]),
+        now=T_1404,
+    )
+
+    assert await service._restore_mews_cache_once(T_1404, CALENDAR) is True
+    assert repository.eligibility_calls == 1
+    assert connection.calls == 1
+    assert service._mews_snapshot_id == "guarded-candidate"
+
+
+async def test_late_unsealed_same_day_candidate_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _GuardConnection(
+        _AsyncpgLikeRow(
+            {
+                "source_trade_date": SOURCE_DATE,
+                "generated_at": T_1404,
+                "receipt_sealed_at": None,
+                "signal_available_date": TODAY.isoformat(),
+            }
+        )
+    )
+    repository = _GuardedCandidateRepository(
+        connection=connection,
+        repository_eligible=False,
+    )
+    service = _build_service(
+        monkeypatch,
+        repository=repository,
+        raw_factory=_plain_factory([]),
+        now=T_1404,
+    )
+
+    assert await service._restore_mews_cache_once(T_1404, CALENDAR) is False
+    assert service._mews_cached_for is None
+    assert service._mews_snapshot_id is None
+
+
+async def test_candidate_without_real_pool_does_not_invoke_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _GuardedCandidateRepository(
+        connection=_GuardConnection(None),
+        repository_eligible=False,
+    )
+    repository.schema = None
+    repository.pool = None
+    service = _build_service(
+        monkeypatch,
+        repository=repository,
+        raw_factory=_plain_factory([]),
+        now=T_1404,
+    )
+
+    assert await service._restore_mews_cache_once(T_1404, CALENDAR) is False
+    assert repository.eligibility_calls == 1
+    assert service._mews_cached_for is None
+
+
+async def test_receipt_guard_query_failure_fails_closed_and_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingConnection(_GuardConnection):
+        async def fetchrow(self, *_args: Any) -> Any:
+            await super().fetchrow(*_args)
+            raise RuntimeError("receipt storage unavailable")
+
+    repository = _GuardedCandidateRepository(
+        connection=FailingConnection(None),
+        repository_eligible=False,
+    )
+    created: list[DeterministicRawClient] = []
+    service = _build_service(
+        monkeypatch,
+        repository=repository,
+        raw_factory=_plain_factory(created),
+        now=T_1404,
+    )
+
+    assert await service.ensure_mews_for_selection_trigger(T_1404) is False
+    assert created == []
+    assert service._mews_cached_for is None
+    assert service._mews_snapshot_id is None
+    assert len(repository.alerts) == 1
+    assert "MEWS same-day receipt guard failed" in service._mews_last_failure
 
 
 def _corrupt_content(state: dict[str, Any]) -> None:
@@ -725,8 +911,6 @@ async def test_invalid_persisted_state_fails_closed(
 
     kicked = await service.ensure_mews_for_selection_trigger(T_1404)
     assert kicked is False
-    calculated = await _await_selection_task(service)
-    assert calculated is False
 
     # Fail closed: no snapshot, no cache, no silent reuse of the bad source.
     assert service._mews_cached_for is None
@@ -745,10 +929,199 @@ async def test_invalid_persisted_state_fails_closed(
     assert semantic["alert_code"] == "MEWS_CALCULATION_FAILED"
     assert expected_error in str(semantic["message"])
 
-    # The rest of the day stays fail closed: triggers neither retry the same
-    # bad source nor raise another alert.
+    # A later distinct trigger retries the attempt (no permanent daily skip);
+    # the corrupt state fails validation again before reaching the raw source,
+    # and the daily alert stays idempotent.
     assert await service.ensure_mews_for_selection_trigger(T_1404) is False
-    assert service._mews_selection_refresh_task is None
+    assert service._mews_singleflight_task is None
     assert created == []
     assert len(repository.alerts) == 1
     assert repository.snapshots == {}
+
+
+async def test_unsealed_same_day_repair_candidate_is_rejected_and_locally_resealed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsealed_snapshot_id = "unsealed-same-day-repair"
+
+    class StrictUnsealedCandidateRepository(FakeMewsRepository):
+        def __init__(self) -> None:
+            super().__init__(_deterministic_state(), sealed_clock=lambda: T_1404)
+            self.find_calls: list[dict[str, Any]] = []
+            self.eligibility_calls: list[dict[str, Any]] = []
+            self.snapshots[unsealed_snapshot_id] = {
+                "payload": {
+                    "snapshot_id": unsealed_snapshot_id,
+                    "source_trade_date": SOURCE_DATE.isoformat(),
+                    "generated_at": T_0915.isoformat(),
+                    "evidence": {"signal_available_date": TODAY.isoformat()},
+                },
+                "content_hash": "unsealed" * 8,
+                "source_trade_date": SOURCE_DATE,
+                "generated_at": T_0915,
+                "receipt_sealed_at": None,
+            }
+
+        async def find_eligible_mews_snapshot(
+            self,
+            *,
+            source_trade_date: date,
+            cutoff: datetime,
+            availability_date: date | None = None,
+        ) -> str | None:
+            self.find_calls.append(
+                {
+                    "source_trade_date": source_trade_date,
+                    "cutoff": cutoff,
+                    "availability_date": availability_date,
+                }
+            )
+            return unsealed_snapshot_id
+
+        async def mews_snapshot_is_eligible(
+            self,
+            snapshot_id: str,
+            *,
+            source_trade_date: date,
+            cutoff: datetime,
+        ) -> bool:
+            self.eligibility_calls.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "source_trade_date": source_trade_date,
+                    "cutoff": cutoff,
+                }
+            )
+            record = self.snapshots.get(snapshot_id)
+            return bool(
+                record is not None
+                and record["receipt_sealed_at"] is not None
+                and record["source_trade_date"] == source_trade_date
+            )
+
+    repository = StrictUnsealedCandidateRepository()
+    created: list[DeterministicRawClient] = []
+    service = _build_service(
+        monkeypatch,
+        repository=repository,
+        raw_factory=_plain_factory(created),
+        now=T_1404,
+    )
+    source = service._mews_source
+    assert isinstance(source, LocalMewsSnapshotCalculator)
+    source_fetch = source.fetch_snapshot
+    source_calls: list[dict[str, date]] = []
+
+    async def tracked_fetch_snapshot(
+        *, source_trade_date: date, availability_date: date
+    ) -> Mapping[str, Any]:
+        source_calls.append(
+            {
+                "source_trade_date": source_trade_date,
+                "availability_date": availability_date,
+            }
+        )
+        return await source_fetch(
+            source_trade_date=source_trade_date,
+            availability_date=availability_date,
+        )
+
+    monkeypatch.setattr(source, "fetch_snapshot", tracked_fetch_snapshot)
+
+    repaired = await asyncio.wait_for(
+        service.ensure_mews_for_selection_trigger(T_1404), timeout=STEP_TIMEOUT
+    )
+    assert repaired is True
+
+    expected_find = {
+        "source_trade_date": SOURCE_DATE,
+        "cutoff": CUTOFF_0940,
+        "availability_date": TODAY,
+    }
+    assert repository.find_calls == [expected_find]
+    assert repository.eligibility_calls[0] == {
+        "snapshot_id": unsealed_snapshot_id,
+        "source_trade_date": SOURCE_DATE,
+        "cutoff": CUTOFF_0940,
+    }
+    assert service._mews_snapshot_id != unsealed_snapshot_id
+    assert service._mews_cached_for == TODAY
+    assert service._mews_source_trade_date == SOURCE_DATE
+    assert source_calls == [{"source_trade_date": SOURCE_DATE, "availability_date": TODAY}]
+    assert len(created) == 1
+    assert len(repository.record_calls) == 1
+    assert repository.eligibility_calls[-1]["snapshot_id"] == service._mews_snapshot_id
+    sealed_record = repository.snapshots[service._mews_snapshot_id]
+    assert sealed_record["receipt_sealed_at"] is not None
+    assert repository.snapshots[unsealed_snapshot_id]["receipt_sealed_at"] is None
+    assert repository.alerts == {}
+
+    class RepositorySnapshotConnection(_GuardConnection):
+        def __init__(self, snapshot_repository: FakeMewsRepository) -> None:
+            super().__init__(None)
+            self.snapshot_repository = snapshot_repository
+
+        async def fetchrow(self, snapshot_id: str, *_args: Any) -> Any:
+            record = self.snapshot_repository.snapshots.get(snapshot_id)
+            if record is None:
+                return None
+            return _AsyncpgLikeRow(
+                {
+                    "source_trade_date": record["source_trade_date"],
+                    "generated_at": record["generated_at"],
+                    "receipt_sealed_at": record["receipt_sealed_at"],
+                    "signal_available_date": record["payload"]
+                    .get("evidence", {})
+                    .get("signal_available_date"),
+                }
+            )
+
+    class NeverSealingRepository(StrictUnsealedCandidateRepository):
+        async def record_mews_snapshot(self, payload: Mapping[str, Any]) -> str:
+            content_hash = await super().record_mews_snapshot(payload)
+            self.snapshots[str(payload["snapshot_id"])]["receipt_sealed_at"] = None
+            return content_hash
+
+        async def mews_snapshot_is_eligible(
+            self,
+            snapshot_id: str,
+            *,
+            source_trade_date: date,
+            cutoff: datetime,
+        ) -> bool:
+            await super().mews_snapshot_is_eligible(
+                snapshot_id,
+                source_trade_date=source_trade_date,
+                cutoff=cutoff,
+            )
+            return False
+
+    never_sealing_repository = NeverSealingRepository()
+    never_sealing_repository.schema = "v20"
+    never_sealing_repository.pool = _GuardPool(
+        RepositorySnapshotConnection(never_sealing_repository)
+    )
+    failing_created: list[DeterministicRawClient] = []
+    never_sealing_service = _build_service(
+        monkeypatch,
+        repository=never_sealing_repository,
+        raw_factory=_plain_factory(failing_created),
+        now=T_1404,
+    )
+    unprovable = await asyncio.wait_for(
+        never_sealing_service.ensure_mews_for_selection_trigger(T_1404),
+        timeout=STEP_TIMEOUT,
+    )
+    assert unprovable is False
+    assert never_sealing_service._mews_cached_for is None
+    assert never_sealing_service._mews_snapshot_id is None
+    assert len(failing_created) == 1
+    assert len(never_sealing_repository.record_calls) == 1
+    assert never_sealing_repository.record_calls[0]["snapshot_id"] != unsealed_snapshot_id
+    assert never_sealing_repository.snapshots[unsealed_snapshot_id]["receipt_sealed_at"] is None
+    assert len(never_sealing_repository.alerts) == 1
+
+    assert service._mews_singleflight_task is None
+    assert never_sealing_service._mews_singleflight_task is None
+    current = asyncio.current_task()
+    assert [task for task in asyncio.all_tasks() if task is not current and not task.done()] == []

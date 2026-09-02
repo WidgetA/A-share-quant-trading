@@ -46,11 +46,19 @@ _STATUS_API_KEY_HEADER = APIKeyHeader(name="X-V20-Status-Key", auto_error=False)
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 _FRESH_PROBE_LOOKBACK_SESSIONS = 10
 _FRESH_PROBE_LOCK_TIMEOUT_SECONDS = 180.0
+# One absolute monotonic budget for the whole fresh probe: both lane locks,
+# the recompute, the official read-only postcheck, every health/leader probe,
+# and the enqueue/seal writes all draw from it.  Once it is exhausted the
+# probe raises TimeoutError directly and no rescue write is attempted.
+_FRESH_PROBE_BUDGET_SECONDS = 180.0
 _FRESH_PROBE_HEALTH_RECOVERY_TIMEOUT_SECONDS = 10.0
 _FRESH_PROBE_ALERT_CODE = "MANUAL_0939_CHAIN_PROBE_RESULT"
 _FRESH_PROBE_PROFILE = "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2"
 _FROZEN_ENTRY_REPLAY_ALERT_CODE = "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
 _FROZEN_ENTRY_REPLAY_PROFILE = "FROZEN_OFFICIAL_ENTRY_MESSAGE_V1"
+
+
+_POST_CUTOFF_TERMINAL_ACTIONS = frozenset({"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"})
 
 
 class V20RouteService(Protocol):
@@ -66,7 +74,13 @@ class V20RouteService(Protocol):
 
     async def trigger_morning_selection(self, request_id: str) -> Any: ...
 
-    async def ensure_mews_for_selection_trigger(self, now: datetime) -> bool: ...
+    async def trigger_canonical_selection_check_only(
+        self,
+        request_id: str,
+        now: datetime,
+    ) -> Any: ...
+
+    def kick_mews_for_selection_trigger(self, now: datetime) -> Any: ...
 
     async def enroll_manual_monitor(self, source_event_id: str, request_id: str) -> Any: ...
 
@@ -387,8 +401,8 @@ def _fresh_probe_failure_semantic(
         "probe_result": "FAIL",
         "current_version_recomputed": False,
         "replay_reused": False,
-        "data_source": "PERSISTED_09:31_09:39",
-        "data_window_start": "09:31",
+        "data_source": "PERSISTED_CANONICAL_EARLY_THROUGH_09:39",
+        "data_window_start": "00:00",
         "data_window_end": "09:39",
         "quote_coverage": None,
         "raw_fact_n": 0,
@@ -409,7 +423,7 @@ def _fresh_probe_failure_semantic(
         "failure_stage": failure_stage,
         "failure_reason": reason,
         "message": (
-            "当前部署版本未能完成09:31-09:39原始数据到V16、V20的重新计算；"
+            "当前部署版本未能完成持久化canonical早盘(截至09:39)原始数据到V16、V20的重新计算；"
             f"失败阶段={failure_stage}；原因={reason}。"
             "本次没有复用旧结果，也没有修改正式决策、持仓或订单。"
         ),
@@ -458,8 +472,8 @@ def _fresh_probe_pass_semantic(
         "probe_result": "PASS",
         "current_version_recomputed": True,
         "replay_reused": False,
-        "data_source": "PERSISTED_09:31_09:39",
-        "data_window_start": "09:31",
+        "data_source": "PERSISTED_CANONICAL_EARLY_THROUGH_09:39",
+        "data_window_start": "00:00",
         "data_window_end": "09:39",
         # The existing replay helper returns the decision but not the bundle's
         # measured coverage.  Keep this unknown rather than inventing 100%.
@@ -478,12 +492,12 @@ def _fresh_probe_pass_semantic(
         "visible_message_mode": "MANUAL_OPERATOR_RENDER",
         "entry_render_semantic": dict(entry_render_semantic),
         "stage_results": {
-            "persisted_raw_0931_0939": "PASS",
+            "persisted_canonical_early_bars": "PASS",
             "v16_scan": "PASS",
             "v20_prepare": "PASS",
         },
         "message": (
-            "当前部署版本已从持久化的09:31-09:39原始数据重新完成V16到V20计算；"
+            "当前部署版本已从持久化的canonical早盘(截至09:39)原始数据重新完成V16到V20计算；"
             "没有复用旧复盘，也没有修改正式决策、持仓或订单。"
         ),
     }
@@ -500,8 +514,26 @@ async def _run_fresh_0939_probe(
         raise ValueError(
             "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
         )
-    await service._require_manual_trigger_ready()
-    await service._repository.assert_runtime_leader()
+    # One absolute monotonic budget covers the whole probe: both lane locks,
+    # the recompute, the read-only postcheck, every health/leader probe, and
+    # the enqueue/seal writes.  An exhausted budget raises TimeoutError before
+    # any rescue write; a non-timeout failure is persisted at most once and
+    # only while budget remains.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FRESH_PROBE_BUDGET_SECONDS
+
+    def _remaining() -> float:
+        left = deadline - loop.time()
+        if left <= 0:
+            raise TimeoutError("V20 fresh 09:39 probe budget exhausted")
+        return left
+
+    async def _bounded(awaitable_factory: Callable[[], Awaitable[Any]]) -> Any:
+        timeout = _remaining()
+        return await asyncio.wait_for(awaitable_factory(), timeout=timeout)
+
+    await _bounded(service._require_manual_trigger_ready)
+    await _bounded(service._repository.assert_runtime_leader)
     event_id = _fresh_probe_event_id(service, request_id)
     config = service.config
     ledger_scope = {
@@ -509,16 +541,20 @@ async def _run_fresh_0939_probe(
         "lineage_id": config.state_lineage_id,
     }
 
-    existing = await service._repository.get_outbox_event(
-        event_id,
-        route_id=config.route_id,
-        **ledger_scope,
+    existing = await _bounded(
+        lambda: service._repository.get_outbox_event(
+            event_id,
+            route_id=config.route_id,
+            **ledger_scope,
+        )
     )
     if existing is not None:
         if existing.payload is None:
-            await service._require_manual_trigger_ready()
-            await service._repository.assert_runtime_leader()
-            existing = await service._repository.seal_event(event_id, seal_v20_payload)
+            await _bounded(service._require_manual_trigger_ready)
+            await _bounded(service._repository.assert_runtime_leader)
+            existing = await _bounded(
+                lambda: service._repository.seal_event(event_id, seal_v20_payload)
+            )
         return _fresh_probe_response(
             service,
             existing,
@@ -526,19 +562,24 @@ async def _run_fresh_0939_probe(
             created=False,
         )
 
-    if service._manual_trigger_lock.locked():
-        raise V20StateConflict("another V20 manual trigger is already running")
-    async with service._manual_trigger_lock:
-        await service._require_manual_trigger_ready()
-        await service._repository.assert_runtime_leader()
-        existing = await service._repository.get_outbox_event(
-            event_id,
-            route_id=config.route_id,
-            **ledger_scope,
+    manual_trigger_acquired = False
+    try:
+        await _bounded(service._manual_trigger_lock.acquire)
+        manual_trigger_acquired = True
+        await _bounded(service._require_manual_trigger_ready)
+        await _bounded(service._repository.assert_runtime_leader)
+        existing = await _bounded(
+            lambda: service._repository.get_outbox_event(
+                event_id,
+                route_id=config.route_id,
+                **ledger_scope,
+            )
         )
         if existing is not None:
             if existing.payload is None:
-                existing = await service._repository.seal_event(event_id, seal_v20_payload)
+                existing = await _bounded(
+                    lambda: service._repository.seal_event(event_id, seal_v20_payload)
+                )
             return _fresh_probe_response(
                 service,
                 existing,
@@ -555,17 +596,13 @@ async def _run_fresh_0939_probe(
                 # Real V20Service always exposes this lock.  The local fallback
                 # keeps narrow route doubles usable without weakening runtime.
                 decision_lock = asyncio.Lock()
+            await _bounded(decision_lock.acquire)
             try:
-                await asyncio.wait_for(
-                    decision_lock.acquire(),
-                    timeout=_FRESH_PROBE_LOCK_TIMEOUT_SECONDS,
-                )
-            except TimeoutError as exc:
-                raise V20StateConflict("V20 decision lane is busy") from exc
-            try:
-                context, official_status, state_before = await _select_fresh_probe_context(
-                    service,
-                    now,
+                context, official_status, state_before = await _bounded(
+                    lambda: _select_fresh_probe_context(
+                        service,
+                        now,
+                    )
                 )
                 probe_trade_date = context.trade_date
                 status_before = (
@@ -575,30 +612,27 @@ async def _run_fresh_0939_probe(
                     getattr(official_status, "semantic_content_hash", None),
                 )
                 failure_stage = "RAW_V16_V20_RECOMPUTE"
+                await _bounded(service._late_0939_replay_lock.acquire)
                 try:
-                    await asyncio.wait_for(
-                        service._late_0939_replay_lock.acquire(),
-                        timeout=_FRESH_PROBE_LOCK_TIMEOUT_SECONDS,
-                    )
-                except TimeoutError as exc:
-                    raise V20StateConflict("fresh 09:39 probe lane is busy") from exc
-                try:
-                    replay_semantic = await asyncio.wait_for(
-                        service._build_late_0939_replay_semantic(
+                    replay_semantic = await _bounded(
+                        lambda: service._build_late_0939_replay_semantic(
                             context,
                             now,
                             replay_event_id=event_id,
-                        ),
-                        timeout=_FRESH_PROBE_LOCK_TIMEOUT_SECONDS,
+                        )
                     )
                 finally:
                     service._late_0939_replay_lock.release()
 
                 failure_stage = "OFFICIAL_READ_ONLY_POSTCHECK"
-                state_after = await service._repository.load_state(config.state_lineage_id)
-                status_after = await service._repository.get_entry_status(
-                    config.official_stream_id,
-                    probe_trade_date,
+                state_after = await _bounded(
+                    lambda: service._repository.load_state(config.state_lineage_id)
+                )
+                status_after = await _bounded(
+                    lambda: service._repository.get_entry_status(
+                        config.official_stream_id,
+                        probe_trade_date,
+                    )
                 )
                 if status_after is None:
                     raise V20StateConflict("probe target entry disappeared during recomputation")
@@ -635,6 +669,9 @@ async def _run_fresh_0939_probe(
             )
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            # An exhausted outer budget is never rescued with a late write.
+            raise
         except Exception as exc:
             logger.exception("V20 fresh 09:39 deployment probe failed")
             semantic = _fresh_probe_failure_semantic(
@@ -648,24 +685,29 @@ async def _run_fresh_0939_probe(
                 official_status=official_status,
             )
 
-        await _wait_for_manual_trigger_ready(service)
-        await service._repository.assert_runtime_leader()
-        created = await service._repository.enqueue_alert(
-            event_id,
-            config.route_id,
-            semantic,
-            sha256_json(semantic),
-            **ledger_scope,
+        await _bounded(lambda: _wait_for_manual_trigger_ready(service))
+        await _bounded(service._repository.assert_runtime_leader)
+        created = await _bounded(
+            lambda: service._repository.enqueue_alert(
+                event_id,
+                config.route_id,
+                semantic,
+                sha256_json(semantic),
+                **ledger_scope,
+            )
         )
-        await _wait_for_manual_trigger_ready(service)
-        await service._repository.assert_runtime_leader()
-        sealed = await service._repository.seal_event(event_id, seal_v20_payload)
-        return _fresh_probe_response(
-            service,
-            sealed,
-            request_id=request_id,
-            created=created,
-        )
+        await _bounded(lambda: _wait_for_manual_trigger_ready(service))
+        await _bounded(service._repository.assert_runtime_leader)
+        sealed = await _bounded(lambda: service._repository.seal_event(event_id, seal_v20_payload))
+    finally:
+        if manual_trigger_acquired:
+            service._manual_trigger_lock.release()
+    return _fresh_probe_response(
+        service,
+        sealed,
+        request_id=request_id,
+        created=created,
+    )
 
 
 async def _latest_terminal_entry(service: Any, now: datetime) -> Any | None:
@@ -926,20 +968,84 @@ async def _replay_frozen_entry_message(
         )
 
 
+async def _today_terminal_entry(service: Any, now: datetime) -> Any | None:
+    repository = service._repository
+    config = service.config
+    status = await repository.get_entry_status(
+        config.official_stream_id,
+        now.date(),
+    )
+    if status is not None:
+        if status.action not in _POST_CUTOFF_TERMINAL_ACTIONS:
+            raise V20StateConflict("current V20 morning slot is not terminal")
+        service._verify_entry_binding(status)
+        return status
+
+    decision_lock = getattr(service, "_decision_cycle_lock", None)
+    if decision_lock is None:
+        raise V20StateConflict("V20 decision lane lock is unavailable")
+    try:
+        await asyncio.wait_for(
+            decision_lock.acquire(),
+            timeout=_FRESH_PROBE_LOCK_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise V20StateConflict("V20 decision lane is busy") from exc
+    try:
+        status = await repository.get_entry_status(
+            config.official_stream_id,
+            now.date(),
+        )
+    finally:
+        decision_lock.release()
+    if status is not None:
+        if status.action not in _POST_CUTOFF_TERMINAL_ACTIONS:
+            raise V20StateConflict("current V20 morning slot is not terminal")
+        service._verify_entry_binding(status)
+    return status
+
+
+def _kick_mews_for_selection_trigger(service: Any, now: datetime) -> Any:
+    kick = getattr(service, "kick_mews_for_selection_trigger", None)
+    if kick is None:
+        raise V20StateConflict("V20 MEWS trigger kick is unavailable")
+    return kick(now)
+
+
 async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
-    """Run the official live lane or replay its exact visible morning output."""
+    """Run the live lane or a post-cutoff durable-artifact check-only probe."""
 
     if _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
         raise ValueError(
             "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
         )
     now = service._aware_now()
-    await service.ensure_mews_for_selection_trigger(now)
     wall = now.timetz().replace(tzinfo=None)
     clock = service.config.clock
-    if clock.prewarm <= wall < clock.publish_deadline:
-        return await service.trigger_morning_selection(request_id)
-    return await _run_fresh_0939_probe(service, request_id, now)
+    if wall < clock.publish_deadline:
+        if clock.prewarm <= wall:
+            _kick_mews_for_selection_trigger(service, now)
+            return await service.trigger_morning_selection(request_id)
+        _kick_mews_for_selection_trigger(service, now)
+        return await _run_fresh_0939_probe(service, request_id, now)
+    canonical_trigger = getattr(
+        service,
+        "trigger_canonical_selection_check_only",
+        None,
+    )
+    if canonical_trigger is None:
+        raise V20StateConflict("canonical V20 check-only selection adapter is unavailable")
+    mews_attempt = _kick_mews_for_selection_trigger(service, now)
+    try:
+        return await canonical_trigger(request_id, now)
+    finally:
+        # A post-cutoff operator probe is allowed to wait for the independently
+        # managed MEWS singleflight to settle.  Its success/failure never changes
+        # the canonical selection result, while awaiting it here guarantees that
+        # a genuine failure has finished its idempotent alert before the request
+        # returns.  Narrow route doubles may expose a synchronous no-op kick.
+        if isinstance(mews_attempt, Awaitable):
+            await asyncio.gather(mews_attempt, return_exceptions=True)
 
 
 def create_v20_router() -> APIRouter:

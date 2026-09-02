@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from enum import Enum
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
@@ -33,7 +34,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from src.data.clients.tushare_realtime import TushareEarlyMarketData
+from src.data.clients.tushare_realtime import TushareDailyBar, TushareEarlyMarketData
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ class V15ScanState:
 
     # Lazy single-flight coordinator for canonical V16 scan results.
     canonical_coordinator: "_CanonicalV16Coordinator | None" = None
+    canonical_sink: Callable[[CanonicalV16ScanBundle], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -92,6 +94,11 @@ class _CanonicalV16Coordinator:
 
     cache: dict[date, "CanonicalV16ScanBundle"] = field(default_factory=dict)
     inflight: dict[date, asyncio.Task] = field(default_factory=dict)
+    pending_persist: dict[date, "CanonicalV16ScanBundle"] = field(default_factory=dict)
+    failures: dict[date, str] = field(default_factory=dict)
+    daily_bars: dict[date, Mapping[str, TushareDailyBar]] = field(default_factory=dict)
+    daily_tasks: dict[date, asyncio.Task[dict[str, TushareDailyBar]]] = field(default_factory=dict)
+    daily_owners: dict[date, date] = field(default_factory=dict)
     publish: dict[date, asyncio.Task] = field(default_factory=dict)
     published: set[date] = field(default_factory=set)
     data_errors_sent: set[date] = field(default_factory=set)
@@ -137,7 +144,40 @@ class CanonicalV16ScanBundle:
     computed_at: datetime
     input_hash: str
     _integrity_hash: str
+    computation_calendar: tuple[date, ...] = ()
     data_error_notification: tuple[str, str] | None = None
+    prior_trade_date: date | None = None
+    prior_amount_yuan: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
+    breadth_valid_n: int = 0
+    breadth_down_n: int = 0
+    breadth_market_source_hash: str = ""
+    breadth_market_missing_codes: tuple[str, ...] = ()
+    breadth_market_conflict_codes: tuple[str, ...] = ()
+    history_date_valid_counts: Mapping[str, int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    history_min_date_coverage: float = 0.0
+
+
+class CachedCanonicalV16Status(Enum):
+    AVAILABLE = "available"
+    NOT_CACHED = "not_cached"
+    IN_FLIGHT = "in_flight"
+    PERSISTENCE_PENDING = "persistence_pending"
+    FAILED = "failed"
+    TRADE_DATE_MISMATCH = "trade_date_mismatch"
+    INTEGRITY_INVALID = "integrity_invalid"
+
+
+@dataclass(frozen=True)
+class CachedCanonicalV16Result:
+    status: CachedCanonicalV16Status
+    bundle: CanonicalV16ScanBundle | None = None
+    detail: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.status is CachedCanonicalV16Status.AVAILABLE
 
 
 class CanonicalV16ScanError(RuntimeError):
@@ -161,6 +201,10 @@ class CanonicalV16ScanError(RuntimeError):
         self.notify_title = notify_title
         self.notify_detail = notify_detail
         self.data_error_notification = data_error_notification
+
+
+class CanonicalV16PersistencePendingError(RuntimeError):
+    """A verified canonical result is retained while its durable sink retries."""
 
 
 class CanonicalV16NotReadyError(CanonicalV16ScanError):
@@ -198,14 +242,42 @@ def _ready_codes(
 
 
 def _evict_stale_dates(coord: _CanonicalV16Coordinator, keep_date: date) -> None:
-    """Drop all coordinator state except the current/most recent trade date."""
-    for container in (coord.cache, coord.inflight, coord.publish, coord.partial):
-        for stale in [d for d in container if d != keep_date]:
+    """Drop stale completed state while retaining every registered master.
+
+    A newer request must not remove an older date's ``inflight`` registration:
+    the task remains live (or at least has not yet run its done callback), so
+    removing it would let a later caller start a duplicate computation.  Dates
+    can therefore compute concurrently; only completed bookkeeping is bounded to
+    the current request plus dates that still have registered masters.
+    """
+    retained_dates = {
+        keep_date,
+        *coord.inflight,
+        *coord.pending_persist,
+        *(
+            prior_date
+            for prior_date, owner_date in coord.daily_owners.items()
+            if owner_date == keep_date
+            or owner_date in coord.inflight
+            or owner_date in coord.pending_persist
+        ),
+    }
+    for container in (
+        coord.cache,
+        coord.failures,
+        coord.publish,
+        coord.partial,
+        coord.daily_bars,
+        coord.daily_owners,
+    ):
+        for stale in [d for d in container if d not in retained_dates]:
             container.pop(stale, None)
-    coord.published.intersection_update({keep_date})
-    coord.data_errors_sent.intersection_update({keep_date})
-    coord.not_ready_alert_sent.intersection_update({keep_date})
-    coord.fatal_errors_sent = {item for item in coord.fatal_errors_sent if item[0] == keep_date}
+    coord.published.intersection_update(retained_dates)
+    coord.data_errors_sent.intersection_update(retained_dates)
+    coord.not_ready_alert_sent.intersection_update(retained_dates)
+    coord.fatal_errors_sent = {
+        item for item in coord.fatal_errors_sent if item[0] in retained_dates
+    }
 
 
 async def _fail_not_ready_deadline(
@@ -650,17 +722,25 @@ async def _cleanup_scan_resources_once(
     coord = scan_state.canonical_coordinator
     try:
         if coord is not None:
-            coord_tasks: list[asyncio.Task] = []
-            for t in list(coord.inflight.values()) + list(coord.publish.values()):
+            coord_tasks: list[asyncio.Task] = [
+                *getattr(coord, "inflight", {}).values(),
+                *getattr(coord, "publish", {}).values(),
+                *getattr(coord, "daily_tasks", {}).values(),
+            ]
+            for t in coord_tasks:
                 if not t.done():
                     t.cancel()
-                    coord_tasks.append(t)
             if coord_tasks:
                 await asyncio.gather(*coord_tasks, return_exceptions=True)
     except Exception as exc:
         cleanup_errors.append(exc)
     finally:
-        scan_state.canonical_coordinator = None
+        if coord is not None:
+            getattr(coord, "pending_persist", {}).clear()
+            getattr(coord, "daily_tasks", {}).clear()
+            getattr(coord, "daily_bars", {}).clear()
+            getattr(coord, "daily_owners", {}).clear()
+            scan_state.canonical_coordinator = None
 
     try:
         shadow_tasks = tuple(_DAY_GATE_SHADOW_TASKS)
@@ -784,8 +864,37 @@ async def get_trade_calendar() -> list[date]:
 LOOKBACK_DAYS = 37  # trading days for historical data
 
 
+def _validated_computation_calendar(
+    calendar: Sequence[date],
+    trade_date: date,
+) -> tuple[date, ...]:
+    """Validate the exact exchange calendar frozen into a canonical master."""
+
+    frozen = tuple(calendar)
+    if (
+        not frozen
+        or any(type(day) is not date for day in frozen)
+        or tuple(sorted(set(frozen))) != frozen
+        or trade_date not in frozen
+    ):
+        raise CanonicalV16ScanError(
+            "V16 scan: canonical computation calendar is empty or malformed"
+        )
+    predecessors = [day for day in frozen if day < trade_date]
+    successors = [day for day in frozen if day > trade_date]
+    if len(predecessors) < LOOKBACK_DAYS or len(successors) < 2:
+        raise CanonicalV16ScanError(
+            "V16 scan: canonical computation calendar lacks 37 predecessors or D1/D2"
+        )
+    return frozen
+
+
 async def _fetch_prev_closes(
-    scan_state: V15ScanState, today: date, calendar: Sequence[date]
+    scan_state: V15ScanState,
+    today: date,
+    calendar: Sequence[date],
+    *,
+    owner_date: date | None = None,
 ) -> dict[str, float]:
     """Fetch prev_close for all stocks. Returns code → prev_close."""
     prev_dates = [d for d in calendar if d < today]
@@ -812,8 +921,21 @@ async def _fetch_prev_closes(
                 f"V16 scan: prev_close cache miss for {prev_trade_date} and no "
                 f"Tushare client available to fall back to."
             )
-        ts_date = prev_trade_date.replace("-", "")
-        api_closes = await rt_client.fetch_prev_closes(ts_date)
+        try:
+            api_closes = {
+                code: row.close_price
+                for code, row in (
+                    await _fetch_prior_daily_once(
+                        scan_state,
+                        prev_dates[-1],
+                        owner_date=owner_date,
+                    )
+                ).items()
+            }
+        except Exception:
+            if prev_closes:
+                return prev_closes
+            raise
         for bare, close_val in api_closes.items():
             if bare and len(bare) == 6 and close_val:
                 prev_closes.setdefault(bare, float(close_val))
@@ -825,6 +947,89 @@ async def _fetch_prev_closes(
         )
     logger.info(f"V16: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
     return prev_closes
+
+
+async def _fetch_prior_daily_once(
+    scan_state: V15ScanState,
+    prior_trade_date: date,
+    *,
+    owner_date: date | None = None,
+) -> dict[str, TushareDailyBar]:
+    """Load one exact D1 daily snapshot, cached across canonical retries."""
+
+    if scan_state.canonical_coordinator is None:
+        scan_state.canonical_coordinator = _CanonicalV16Coordinator()
+    coord = scan_state.canonical_coordinator
+    async with coord.lock:
+        cached = coord.daily_bars.get(prior_trade_date)
+        if cached is not None:
+            return dict(cached)
+        task = coord.daily_tasks.get(prior_trade_date)
+        coord.daily_owners[prior_trade_date] = (
+            owner_date if owner_date is not None else prior_trade_date
+        )
+        if task is None:
+
+            async def _load() -> dict[str, TushareDailyBar]:
+                date_text = prior_trade_date.isoformat()
+                cached_rows: dict[str, TushareDailyBar] = {}
+                cache = scan_state.tushare_cache
+                if cache and cache.is_ready:
+                    for code, daily in cache.get_all_codes_with_daily(date_text).items():
+                        close = daily.get("close")
+                        amount = daily.get("amount")
+                        if (
+                            isinstance(close, (int, float))
+                            and isinstance(amount, (int, float))
+                            and not isinstance(close, bool)
+                            and not isinstance(amount, bool)
+                            and isfinite(float(close))
+                            and isfinite(float(amount))
+                            and float(close) > 0
+                            and float(amount) > 0
+                        ):
+                            cached_rows[code] = TushareDailyBar(
+                                stock_code=code,
+                                trade_date=date_text,
+                                close_price=float(close),
+                                amount_yuan=float(amount),
+                            )
+                # The one market-wide Tushare ``daily`` response is the
+                # authoritative D1 close+amount snapshot.  A populated OSS
+                # cache may be partial or from a schema that did not persist
+                # amount, so it must never mask a successful API row.  Cache is
+                # only a fail-closed fallback when no realtime client exists.
+                if scan_state.realtime_client is not None:
+                    requested_date = prior_trade_date.strftime("%Y%m%d")
+                    api_rows = await scan_state.realtime_client.fetch_daily_bars(requested_date)
+                    rows = {
+                        code: row
+                        for code, row in api_rows.items()
+                        if row.stock_code == code
+                        and row.trade_date in (date_text, requested_date)
+                        and isfinite(float(row.close_price))
+                        and float(row.close_price) > 0
+                        and isfinite(float(row.amount_yuan))
+                        and float(row.amount_yuan) > 0
+                    }
+                else:
+                    rows = cached_rows
+                if not rows:
+                    raise RuntimeError("V16 scan: D1 daily snapshot is empty")
+                return rows
+
+            task = asyncio.create_task(_load())
+            coord.daily_tasks[prior_trade_date] = task
+
+            def _remove(finished: asyncio.Task[dict[str, TushareDailyBar]]) -> None:
+                coord.daily_tasks.pop(prior_trade_date, None)
+                try:
+                    coord.daily_bars[prior_trade_date] = MappingProxyType(finished.result())
+                except BaseException:
+                    return
+
+            task.add_done_callback(_remove)
+    return dict(await asyncio.shield(task))
 
 
 async def _fetch_history_ohlcv(
@@ -944,6 +1149,36 @@ def _normalize_history_inputs(
             },
         }
     return normalized
+
+
+def _valid_history_dates(history: Mapping[str, Any]) -> frozenset[str]:
+    """Return dates backed by exactly one legal OHLCV row for this symbol."""
+
+    fields = ("time", "open", "high", "low", "close", "volume")
+    arrays = {field: list(history.get(field, [])) for field in fields}
+    if len({len(values) for values in arrays.values()}) != 1:
+        return frozenset()
+    validity: dict[str, bool] = {}
+    for index, raw_day in enumerate(arrays["time"]):
+        day = str(raw_day)
+        if day in validity:
+            validity[day] = False
+            continue
+        try:
+            o, h, low, close, volume = (
+                float(arrays[field][index]) for field in ("open", "high", "low", "close", "volume")
+            )
+            legal = (
+                all(isfinite(value) for value in (o, h, low, close, volume))
+                and min(o, h, low, close, volume) > 0
+                and low <= min(o, close)
+                and h >= max(o, close)
+                and low <= h
+            )
+        except (TypeError, ValueError, OverflowError):
+            legal = False
+        validity[day] = legal
+    return frozenset(day for day, legal in validity.items() if legal)
 
 
 def _build_stock_data(
@@ -1404,7 +1639,23 @@ def _bundle_fingerprint(bundle: CanonicalV16ScanBundle) -> str:
         "model_sha256": bundle.model_sha256,
         "feature_list_sha256": bundle.feature_list_sha256,
         "input_hash": bundle.input_hash,
+        "computation_calendar": [day.isoformat() for day in bundle.computation_calendar],
         "data_error_notification": bundle.data_error_notification,
+        "prior_trade_date": (
+            bundle.prior_trade_date.isoformat() if bundle.prior_trade_date is not None else None
+        ),
+        "prior_amount_yuan": {
+            code: float(amount) for code, amount in sorted(bundle.prior_amount_yuan.items())
+        },
+        "breadth_valid_n": bundle.breadth_valid_n,
+        "breadth_down_n": bundle.breadth_down_n,
+        "breadth_market_source_hash": bundle.breadth_market_source_hash,
+        "breadth_market_missing_codes": list(bundle.breadth_market_missing_codes),
+        "breadth_market_conflict_codes": list(bundle.breadth_market_conflict_codes),
+        "history_date_valid_counts": {
+            day: count for day, count in sorted(bundle.history_date_valid_counts.items())
+        },
+        "history_min_date_coverage": bundle.history_min_date_coverage,
     }
     canonical = json.dumps(
         _canonical_json_value(payload),
@@ -1477,12 +1728,81 @@ def _isolate_bundle(bundle: CanonicalV16ScanBundle) -> CanonicalV16ScanBundle:
         ),
         early_bars=MappingProxyType(copy.deepcopy(dict(bundle.early_bars))),
         early_source_hashes=MappingProxyType(copy.deepcopy(dict(bundle.early_source_hashes))),
+        prior_amount_yuan=MappingProxyType(dict(bundle.prior_amount_yuan)),
+        history_date_valid_counts=MappingProxyType(dict(bundle.history_date_valid_counts)),
     )
+
+
+async def get_cached_canonical_v16(
+    scan_state: V15ScanState,
+    trade_date: date | None = None,
+) -> CachedCanonicalV16Result:
+    """Read the sealed canonical V16 master without computing or fetching.
+
+    This accessor is cached-only: it never creates the coordinator, starts or
+    joins an in-flight task, invokes the scanner, or contacts a vendor.  It is
+    an ``async`` API so inspection shares the coordinator's ``asyncio.Lock``
+    with scheduler-side state transitions.  As with the rest of V15ScanState,
+    the coordinator is intended for the event loop that owns it and is not a
+    cross-thread primitive.
+    """
+    if trade_date is None:
+        trade_date = datetime.now(BEIJING_TZ).date()
+
+    coord = scan_state.canonical_coordinator
+    if coord is None:
+        return CachedCanonicalV16Result(CachedCanonicalV16Status.NOT_CACHED)
+
+    async with coord.lock:
+        if coord.inflight.get(trade_date) is not None:
+            if trade_date in coord.pending_persist:
+                return CachedCanonicalV16Result(CachedCanonicalV16Status.PERSISTENCE_PENDING)
+            return CachedCanonicalV16Result(CachedCanonicalV16Status.IN_FLIGHT)
+
+        if trade_date in coord.pending_persist:
+            return CachedCanonicalV16Result(CachedCanonicalV16Status.PERSISTENCE_PENDING)
+
+        master = coord.cache.get(trade_date)
+        if master is None:
+            detail = coord.failures.get(trade_date)
+            if detail is not None:
+                return CachedCanonicalV16Result(
+                    CachedCanonicalV16Status.FAILED,
+                    detail=detail,
+                )
+            return CachedCanonicalV16Result(CachedCanonicalV16Status.NOT_CACHED)
+
+        if master.trade_date != trade_date:
+            return CachedCanonicalV16Result(CachedCanonicalV16Status.TRADE_DATE_MISMATCH)
+
+        try:
+            _verify_bundle_integrity(master)
+            bundle = _isolate_bundle(master)
+        except Exception as exc:
+            return CachedCanonicalV16Result(
+                CachedCanonicalV16Status.INTEGRITY_INVALID,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        return CachedCanonicalV16Result(
+            CachedCanonicalV16Status.AVAILABLE,
+            bundle=bundle,
+        )
 
 
 async def get_or_compute_canonical_v16(
     scan_state: V15ScanState,
     trade_date: date | None = None,
+    *,
+    early_data_seed: Mapping[str, TushareEarlyMarketData] | None = None,
+    allow_realtime_fetch: bool = True,
+    universe_override: tuple[str, ...] | None = None,
+    clean_boards_override: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+    prev_closes_override: Mapping[str, float] | None = None,
+    history_raw_override: Mapping[str, Mapping[str, Any] | None] | None = None,
+    names_override: Mapping[str, str] | None = None,
+    calendar_override: tuple[date, ...] | None = None,
+    prior_daily_override: Mapping[str, TushareDailyBar] | None = None,
+    st_eligible_codes_override: Sequence[str] | None = None,
 ) -> CanonicalV16ScanBundle:
     """Return an isolated copy of the canonical V16 bundle for ``trade_date``.
 
@@ -1492,6 +1812,14 @@ async def get_or_compute_canonical_v16(
     receives its own deep-copied artifact. Failures are not cached and may be retried.
     Cancelling a waiting caller does not cancel the shared in-flight task, and a fatal
     alert is still sent from the compute done callback even if all waiters are gone.
+
+    ``early_data_seed`` supplies pre-acquired early evidence for a cold computation
+    (e.g. a historical replay hydrated from persisted raw bars); it is merged under
+    any retained partial evidence. ``allow_realtime_fetch=False`` forbids the
+    unresolved-codes realtime pull, leaving the 09:39 readiness gate authoritative
+    over the seeded coverage. ``universe_override``/``clean_boards_override`` pin the
+    exact universe the seed was gathered for. A cached master bundle or an in-flight
+    task always wins — these arguments only shape a fresh computation.
     """
     if trade_date is None:
         trade_date = datetime.now(BEIJING_TZ).date()
@@ -1500,50 +1828,148 @@ async def get_or_compute_canonical_v16(
         scan_state.canonical_coordinator = _CanonicalV16Coordinator()
     coord = scan_state.canonical_coordinator
     key = _canonical_key(scan_state, trade_date)
+    created_task = False
 
-    _evict_stale_dates(coord, key)
+    async with coord.lock:
+        _evict_stale_dates(coord, key)
 
-    master = coord.cache.get(key)
-    if master is not None:
-        _verify_bundle_integrity(master)
-        return _isolate_bundle(master)
+        master = coord.cache.get(key)
+        if master is not None:
+            _verify_bundle_integrity(master)
+            return _isolate_bundle(master)
 
-    task = coord.inflight.get(key)
-    if task is None:
-        partial = coord.partial.get(key, {})
+        task = coord.inflight.get(key)
+        if task is None:
+            pending = coord.pending_persist.get(key)
+            partial = coord.partial.get(key, {})
+            coord.failures.pop(key, None)
 
-        async def _runner() -> CanonicalV16ScanBundle:
-            return await compute_canonical_v16_scan(scan_state, trade_date, partial=partial)
+            async def _runner() -> CanonicalV16ScanBundle:
+                if pending is not None:
+                    bundle = pending
+                else:
+                    bundle = await compute_canonical_v16_scan(
+                        scan_state,
+                        trade_date,
+                        partial=partial,
+                        universe_override=universe_override,
+                        clean_boards_override=clean_boards_override,
+                        prev_closes_override=prev_closes_override,
+                        history_raw_override=history_raw_override,
+                        names_override=names_override,
+                        calendar_override=calendar_override,
+                        prior_daily_override=prior_daily_override,
+                        st_eligible_codes_override=st_eligible_codes_override,
+                        early_data_seed=early_data_seed,
+                        allow_realtime_fetch=allow_realtime_fetch,
+                    )
+                _verify_bundle_integrity(bundle)
+                sink = scan_state.canonical_sink
+                if sink is None:
+                    return bundle
 
-        task = asyncio.create_task(_runner())
-        coord.inflight[key] = task
+                coord.pending_persist[key] = bundle
+                durable_input = _isolate_bundle(bundle)
+                try:
+                    await sink(durable_input)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise CanonicalV16PersistencePendingError(
+                        f"canonical V16 durable persistence is pending: {exc}"
+                    ) from exc
+                try:
+                    _verify_bundle_integrity(durable_input)
+                    _verify_bundle_integrity(bundle)
+                except Exception as exc:
+                    raise CanonicalV16PersistencePendingError(
+                        f"canonical V16 durable persistence output failed verification: {exc}"
+                    ) from exc
+                return bundle
+
+            task = asyncio.create_task(_runner())
+            coord.inflight[key] = task
+            created_task = True
+
+    if created_task:
 
         def _finalize(t: asyncio.Task) -> None:
             coord.inflight.pop(key, None)
             try:
                 result = t.result()
                 coord.cache[key] = result
+                coord.pending_persist.pop(key, None)
                 coord.partial.pop(key, None)
+                coord.failures.pop(key, None)
             except asyncio.CancelledError:
                 # CancelledError is a BaseException; it must not escape the callback.
-                pass
+                coord.failures[key] = "CanonicalV16 computation was cancelled"
             except CanonicalV16NotReadyError as e:
                 # Preserve 09:39-ready partial evidence so retries only fetch
                 # the unresolved subset.
                 if e.partial:
                     coord.partial[key] = e.partial
+                coord.failures[key] = f"CanonicalV16NotReadyError: {e}"
+            except CanonicalV16PersistencePendingError:
+                # The verified master remains in pending_persist for a sink-only retry.
+                coord.failures.pop(key, None)
             except CanonicalV16ScanError as e:
                 # Fatal alerts are emitted here so they survive waiter cancellation.
                 _send_fatal_once(coord, key, e)
-            except BaseException:
+                reason = e.__cause__ or e
+                coord.failures[key] = f"{type(reason).__name__}: {reason}"
+            except BaseException as e:
                 # Any other failure is left for the scheduler/consumer to handle.
-                pass
+                coord.failures[key] = f"{type(e).__name__}: {e}"
 
         task.add_done_callback(_finalize)
 
     result = await asyncio.shield(task)
     # The master bundle returned by the shared task is never handed to consumers.
     return _isolate_bundle(result)
+
+
+def derive_canonical_v16_universe(
+    scan_state: V15ScanState,
+    *,
+    universe_override: tuple[str, ...] | None = None,
+    clean_boards_override: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+) -> tuple[Any, Any, Mapping[str, tuple[tuple[str, str], ...]], tuple[str, ...]]:
+    """Construct the canonical V16 scanner and derive its deterministic universe.
+
+    This is the single construction path used by normal scans and replay. It always
+    creates the scorer and scanner from the same model paths and scan-state
+    dependencies before obtaining or normalizing the universe.
+    """
+    from src.strategy.lgbrank_scorer import LGBRankScorer as DefaultLGBRankScorer
+    from src.strategy.strategies.v16_scanner import V16Scanner as DefaultV16Scanner
+
+    scorer = DefaultLGBRankScorer(
+        _PROJECT_ROOT / "models" / "lgbrank_latest.txt",
+        _PROJECT_ROOT / "models" / "feature_list.json",
+    )
+    scanner = DefaultV16Scanner(
+        fundamentals_db=scan_state.fundamentals_db,
+        concept_mapper=scan_state.concept_mapper,
+        stock_filter=scan_state.stock_filter,
+        scorer=scorer,
+    )
+    clean_boards_raw, universe_codes = (
+        (dict(clean_boards_override), set(universe_override))
+        if universe_override is not None and clean_boards_override is not None
+        else scanner.get_universe()
+    )
+    if not universe_codes:
+        raise RuntimeError("V16 scan: universe is empty after board cleaning")
+
+    universe = tuple(sorted(universe_codes))
+    clean_boards_for_scan = {
+        board: sorted(codes) for board, codes in sorted(clean_boards_raw.items())
+    }
+    clean_boards = MappingProxyType(
+        {board: tuple(codes) for board, codes in clean_boards_for_scan.items()}
+    )
+    return scanner, scorer, clean_boards, universe
 
 
 async def compute_canonical_v16_scan(
@@ -1557,6 +1983,10 @@ async def compute_canonical_v16_scan(
     history_raw_override: Mapping[str, Mapping[str, Any] | None] | None = None,
     names_override: Mapping[str, str] | None = None,
     calendar_override: tuple[date, ...] | None = None,
+    prior_daily_override: Mapping[str, TushareDailyBar] | None = None,
+    st_eligible_codes_override: Sequence[str] | None = None,
+    early_data_seed: Mapping[str, TushareEarlyMarketData] | None = None,
+    allow_realtime_fetch: bool = True,
 ) -> CanonicalV16ScanBundle:
     """Canonical V16 scan computation; does not send V16 Top10 or day-gate messages.
 
@@ -1565,70 +1995,206 @@ async def compute_canonical_v16_scan(
     ``trade_date`` are admitted into ``quotes``, ``trading_codes``, ``stock_data``
     and ``scanner.scan``. Partial ready evidence can be supplied so retries only
     fetch the unresolved subset.
+
+    ``early_data_seed`` is pre-acquired early evidence (e.g. hydrated from
+    persisted raw bars for a historical replay); it is merged under any retained
+    partial evidence. ``allow_realtime_fetch=False`` forbids the unresolved-codes
+    realtime pull entirely, leaving the 09:39 readiness gate authoritative over
+    the seeded coverage.
     """
     from dataclasses import replace
 
-    from src.strategy.lgbrank_scorer import LGBRankScorer
-    from src.strategy.strategies.v16_scanner import V16Scanner
-
-    model_path = _PROJECT_ROOT / "models" / "lgbrank_latest.txt"
-    feature_path = _PROJECT_ROOT / "models" / "feature_list.json"
-    scorer = LGBRankScorer(model_path, feature_path)
-
-    scanner = V16Scanner(
-        fundamentals_db=scan_state.fundamentals_db,
-        concept_mapper=scan_state.concept_mapper,
-        stock_filter=scan_state.stock_filter,
-        scorer=scorer,
+    validated_calendar_override = (
+        _validated_computation_calendar(calendar_override, trade_date)
+        if calendar_override is not None
+        else None
     )
+    if not allow_realtime_fetch:
+        replay_inputs = (
+            universe_override,
+            clean_boards_override,
+            prev_closes_override,
+            history_raw_override,
+            names_override,
+            calendar_override,
+            prior_daily_override,
+            st_eligible_codes_override,
+            early_data_seed,
+        )
+        if any(value is None for value in replay_inputs):
+            raise CanonicalV16ScanError(
+                "V16 scan: vendor-free replay requires every frozen input override"
+            )
 
-    # Step 0: Get universe from board cleaning
-    clean_boards_raw, universe_codes = (
-        (dict(clean_boards_override), set(universe_override))
-        if universe_override is not None and clean_boards_override is not None
-        else scanner.get_universe()
+    scanner, scorer, clean_boards, universe_list = derive_canonical_v16_universe(
+        scan_state,
+        universe_override=universe_override,
+        clean_boards_override=clean_boards_override,
     )
-    if not universe_codes:
-        raise RuntimeError("V16 scan: universe is empty after board cleaning")
-    logger.info(f"V16 scan: universe = {len(universe_codes)} stocks")
+    logger.info(f"V16 scan: universe = {len(universe_list)} stocks")
+    clean_boards_for_scan = {board: list(codes) for board, codes in clean_boards.items()}
+    if st_eligible_codes_override is not None:
+        eligible = frozenset(st_eligible_codes_override)
+        if any(code not in universe_list for code in eligible):
+            raise CanonicalV16ScanError("V16 scan: frozen ST eligibility has unknown codes")
 
-    universe_list = sorted(universe_codes)
-    # Canonical deterministic board order: board names ascending, members sorted by
-    # (code, name). Both the bundle and the hash encode the same order the scanner
-    # actually consumes, so identical inputs always produce identical scan semantics.
-    clean_boards_for_scan: dict[str, list[tuple[str, str]]] = {
-        board: sorted(codes) for board, codes in sorted(clean_boards_raw.items())
-    }
-    clean_boards = MappingProxyType(
-        {board: tuple(codes) for board, codes in clean_boards_for_scan.items()}
+        class _FrozenStEligibility:
+            async def batch_filter_st(self, codes: list[str]) -> list[str]:
+                return sorted(code for code in codes if code in eligible)
+
+        scanner._fdb = _FrozenStEligibility()
+
+    calendar_source = (
+        validated_calendar_override
+        if validated_calendar_override is not None
+        else tuple(await get_trade_calendar())
     )
+    calendar = _validated_computation_calendar(calendar_source, trade_date)
+    previous_dates = [day for day in calendar if day < trade_date]
+    if not previous_dates:
+        raise RuntimeError("V16 scan: no previous trading day found in calendar")
+    following_dates = [day for day in calendar if day > trade_date]
+    if len(following_dates) < 2:
+        raise RuntimeError("V16 scan: canonical calendar lacks D1 and D2 evidence")
+    prior_trade_date = previous_dates[-1]
+    prior_daily = (
+        dict(prior_daily_override)
+        if prior_daily_override is not None
+        else await _fetch_prior_daily_once(
+            scan_state,
+            prior_trade_date,
+            owner_date=trade_date,
+        )
+    )
+    requested_prior_dates = {prior_trade_date.isoformat(), prior_trade_date.strftime("%Y%m%d")}
+    if not prior_daily:
+        raise CanonicalV16ScanError("V16 scan: D1 daily snapshot is empty")
+    for code, row in prior_daily.items():
+        if (
+            not isinstance(code, str)
+            or len(code) != 6
+            or not code.isdigit()
+            or row.stock_code != code
+            or row.trade_date not in requested_prior_dates
+            or isinstance(row.close_price, bool)
+            or not isinstance(row.close_price, (int, float))
+            or not isfinite(float(row.close_price))
+            or float(row.close_price) <= 0
+            or isinstance(row.amount_yuan, bool)
+            or not isinstance(row.amount_yuan, (int, float))
+            or not isfinite(float(row.amount_yuan))
+            or float(row.amount_yuan) <= 0
+        ):
+            raise CanonicalV16ScanError("V16 scan: D1 daily snapshot contains an invalid row")
 
-    # Merge previously ready partial evidence with a fresh pull of unresolved codes.
+    # A successful market-wide ``daily`` response is the live source of truth
+    # for both D1 close and amount.  Deriving closes from that same response is
+    # what keeps the 00/60 breadth union complete and prevents an older/partial
+    # OSS cache from silently shrinking it.  Vendor-free replay supplies both
+    # frozen projections and the equality check above binds them together.
+    prev_closes = (
+        dict(prev_closes_override)
+        if prev_closes_override is not None
+        else {code: float(row.close_price) for code, row in prior_daily.items()}
+    )
+    for code, previous_close in prev_closes.items():
+        if (
+            not isinstance(code, str)
+            or len(code) != 6
+            or not code.isdigit()
+            or isinstance(previous_close, bool)
+            or not isinstance(previous_close, (int, float))
+            or not isfinite(float(previous_close))
+            or float(previous_close) <= 0
+        ):
+            raise CanonicalV16ScanError("V16 scan: D1 close snapshot contains an invalid row")
+        daily_row = prior_daily.get(code)
+        if daily_row is not None and float(previous_close) != float(daily_row.close_price):
+            raise CanonicalV16ScanError(
+                f"V16 scan: D1 close differs across frozen sources for {code}"
+            )
+
+    breadth_universe = tuple(
+        sorted(
+            code
+            for code in prev_closes
+            if len(code) == 6 and code.startswith(("00", "60")) and prev_closes[code] > 0
+        )
+    )
+    early_universe = tuple(sorted(set(universe_list).union(breadth_universe)))
+
+    # Merge retained partial evidence and any caller-supplied seed with a fresh
+    # pull of unresolved codes.  Conflicting retained/seeded provenance is a
+    # semantic error; it is never resolved by arrival order.
     partial_data: dict[str, TushareEarlyMarketData] = dict(partial) if partial else {}
+    if set(partial_data) - set(early_universe):
+        raise CanonicalV16ScanError("V16 scan: retained early evidence has unknown codes")
+    if early_data_seed is not None:
+        if set(early_data_seed) - set(early_universe):
+            raise CanonicalV16ScanError("V16 scan: seeded early evidence has unknown codes")
+        for code, seeded in early_data_seed.items():
+            retained = partial_data.get(code)
+            if retained is not None and retained.source_hash != seeded.source_hash:
+                raise CanonicalV16ScanError(
+                    f"V16 scan: retained and seeded early provenance differs for {code}"
+                )
+            partial_data[code] = seeded
     ready_partial_codes = set(partial_data.keys())
-    unresolved = [c for c in universe_list if c not in ready_partial_codes]
+    unresolved = [code for code in early_universe if code not in ready_partial_codes]
 
     rt_client = scan_state.realtime_client
     new_data: dict[str, TushareEarlyMarketData] = {}
-    if unresolved:
+    if unresolved and allow_realtime_fetch:
         new_data = await rt_client.batch_get_early_market_data(
             unresolved, expected_trade_date=trade_date
         )
+    elif unresolved:
+        logger.info(
+            f"V16 scan: realtime early fetch forbidden; "
+            f"{len(unresolved)}/{len(universe_list)} codes unresolved"
+        )
 
     early_data: dict[str, TushareEarlyMarketData] = {}
-    for code in universe_list:
+    for code in early_universe:
         if code in partial_data:
             early_data[code] = partial_data[code]
         elif code in new_data:
             early_data[code] = new_data[code]
 
     ready_set = _ready_codes(early_data, trade_date)
+    breadth_ready = [code for code in breadth_universe if code in ready_set]
+    breadth_valid_n = 0
+    breadth_down_n = 0
+    for code in breadth_ready:
+        breadth_quote = early_data[code].quote
+        breadth_previous_close = prev_closes.get(code)
+        if (
+            breadth_quote.early_close is not None
+            and breadth_quote.early_close > 0
+            and breadth_previous_close is not None
+            and breadth_previous_close > 0
+        ):
+            breadth_valid_n += 1
+            if breadth_quote.early_close < float(breadth_previous_close):
+                breadth_down_n += 1
+    breadth_market_source_hash = hashlib.sha256(
+        json.dumps(
+            {code: early_data[code].source_hash for code in breadth_ready},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    breadth_missing = tuple(code for code in breadth_universe if code not in ready_set)
     ready_codes = [code for code in universe_list if code in ready_set]
     quotes = {code: early_data[code].quote for code in ready_codes}
-    early_bars_map = {code: early_data[code].early_bars for code in ready_codes}
-    early_source_hashes = {code: early_data[code].source_hash for code in ready_codes}
+    # Raw/provenance fields retain the whole one-request union.  Scanner inputs
+    # below remain restricted to the legacy V16 universe, so breadth enrichment
+    # cannot change ticket selection or its 80% readiness denominator.
+    ready_union_codes = [code for code in early_universe if code in ready_set]
+    early_bars_map = {code: early_data[code].early_bars for code in ready_union_codes}
+    early_source_hashes = {code: early_data[code].source_hash for code in ready_union_codes}
 
-    response_count = len(early_data)
+    response_count = sum(code in early_data for code in universe_list)
     readiness = len(ready_codes) / len(universe_list) if universe_list else 0
     logger.info(
         f"V16 scan: Tushare returned {response_count}/{len(universe_list)} early responses, "
@@ -1647,7 +2213,7 @@ async def compute_canonical_v16_scan(
     # 09:39 readiness bound: if <80% of the universe has a current-date 09:39 bar,
     # preserve the ready subset and raise NOT_READY so retries fetch only missing codes.
     if readiness < 0.8:
-        ready_partial = {code: early_data[code] for code in ready_codes}
+        ready_partial = {code: early_data[code] for code in early_universe if code in ready_set}
         detail = (
             f"有09:39分钟线: {len(ready_codes)} 只\n"
             f"universe: {len(universe_list)} 只\n"
@@ -1661,14 +2227,6 @@ async def compute_canonical_v16_scan(
             notify_title="9:39数据未就绪",
             notify_detail=detail,
         )
-
-    # Fetch prev_close
-    calendar = calendar_override or await get_trade_calendar()
-    prev_closes = (
-        dict(prev_closes_override)
-        if prev_closes_override is not None
-        else await _fetch_prev_closes(scan_state, trade_date, calendar)
-    )
 
     # Fetch 37d OHLCV history for ready stocks
     trading_codes = [code for code in ready_codes if quotes[code].is_trading]
@@ -1711,7 +2269,25 @@ async def compute_canonical_v16_scan(
         except (TypeError, ValueError) as exc:
             history_normalization_errors[code] = str(exc)
     hist_raw = normalized_history
-    hist_coverage = len(hist_raw) / len(trading_codes) if trading_codes else 0
+    expected_history_dates = previous_dates[-LOOKBACK_DAYS:]
+    valid_history_dates = {
+        code: _valid_history_dates(history) for code, history in hist_raw.items()
+    }
+    history_date_valid_counts = {
+        day.isoformat(): sum(
+            day.isoformat() in valid_dates for valid_dates in valid_history_dates.values()
+        )
+        for day in expected_history_dates
+    }
+    history_min_date_coverage = (
+        min(history_date_valid_counts.values()) / len(universe_list)
+        if universe_list and history_date_valid_counts
+        else 0.0
+    )
+    # Preserve the original V16 safety gate exactly.  Per-exchange-date minimum
+    # coverage is frozen separately for V20 health evaluation; it must not
+    # silently replace the legacy per-trading-symbol 80% denominator.
+    hist_coverage = len(hist_raw) / len(trading_codes) if trading_codes else 0.0
     logger.info(
         f"V16 scan: history fetched for {len(hist_raw)}/{len(trading_codes)} stocks "
         f"(coverage={hist_coverage:.1%})"
@@ -1766,8 +2342,8 @@ async def compute_canonical_v16_scan(
     skipped_new_listings: list[str] = []
 
     for code in trading_codes:
-        quote = quotes.get(code)
-        if not quote or not quote.is_trading:
+        stock_quote = quotes.get(code)
+        if not stock_quote or not stock_quote.is_trading:
             continue
 
         pc = prev_closes.get(code)
@@ -1784,7 +2360,7 @@ async def compute_canonical_v16_scan(
             continue
 
         try:
-            sd = _build_stock_data(code, name_map.get(code, ""), quote, pc, hr, trade_date)
+            sd = _build_stock_data(code, name_map.get(code, ""), stock_quote, pc, hr, trade_date)
         except RuntimeError as e:
             errors_build.append(f"{code}: {e}")
             continue
@@ -1860,7 +2436,8 @@ async def compute_canonical_v16_scan(
         ) from e
 
     # Final name refresh is part of the canonical bundle (display only).
-    await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
+    if names_override is None:
+        await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
 
     computed_at = datetime.now(BEIJING_TZ)
     recommended_names = {s.code: s.name for s in getattr(scan_result, "recommended", [])}
@@ -1899,6 +2476,23 @@ async def compute_canonical_v16_scan(
     frozen_early_bars = MappingProxyType(dict(early_bars_map))
     frozen_early_source_hashes = MappingProxyType(dict(early_source_hashes))
     frozen_quotes = MappingProxyType(dict(quotes))
+    recommended_codes = {
+        getattr(stock, "code", None) for stock in getattr(scan_result, "recommended", [])
+    }
+    prior_amount_yuan = {
+        code: float(row.amount_yuan)
+        for code, row in prior_daily.items()
+        if code in recommended_codes and isfinite(row.amount_yuan) and row.amount_yuan > 0
+    }
+    missing_prior_amounts = sorted(
+        code for code in recommended_codes if code and code not in prior_amount_yuan
+    )
+    if missing_prior_amounts:
+        raise CanonicalV16ScanError(
+            "V16 scan: authoritative D1 amount is missing for recommendations: "
+            + ",".join(missing_prior_amounts)
+        )
+    frozen_history_counts = MappingProxyType(dict(history_date_valid_counts))
 
     pre_bundle = CanonicalV16ScanBundle(
         trade_date=trade_date,
@@ -1920,7 +2514,17 @@ async def compute_canonical_v16_scan(
         computed_at=computed_at,
         input_hash=input_hash,
         _integrity_hash="",
+        computation_calendar=tuple(calendar),
         data_error_notification=data_error_notification,
+        prior_trade_date=prior_trade_date,
+        prior_amount_yuan=MappingProxyType(prior_amount_yuan),
+        breadth_valid_n=breadth_valid_n,
+        breadth_down_n=breadth_down_n,
+        breadth_market_source_hash=breadth_market_source_hash,
+        breadth_market_missing_codes=breadth_missing,
+        breadth_market_conflict_codes=(),
+        history_date_valid_counts=frozen_history_counts,
+        history_min_date_coverage=history_min_date_coverage,
     )
     return replace(pre_bundle, _integrity_hash=_bundle_fingerprint(pre_bundle))
 
@@ -2078,6 +2682,11 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                 except CanonicalV16NotReadyError:
                     # 09:39 data not yet ready; retry within the window.
                     logger.info("V16 scan not ready at %s, will retry", ex_time)
+                except CanonicalV16PersistencePendingError as e:
+                    # The canonical master is retained; only the durable write retries.
+                    scan_state.today_recommendation = None
+                    scan_state.scan_error = f"{type(e).__name__}: {e}"
+                    logger.warning("V16 canonical persistence pending; will retry")
                 except CanonicalV16ScanError as e:
                     # Fatal was already emitted once by the compute done callback.
                     # Just record state so trading knows today's scan is done.

@@ -1076,11 +1076,11 @@ def _validate_manual_0939_chain_probe(
         raise ValueError("V20 chain probe has an unsupported computation profile")
     if (
         semantic["replay_reused"] is not False
-        or semantic["data_source"] != "PERSISTED_09:31_09:39"
-        or semantic["data_window_start"] != "09:31"
+        or semantic["data_source"] != "PERSISTED_CANONICAL_EARLY_THROUGH_09:39"
+        or semantic["data_window_start"] != "00:00"
         or semantic["data_window_end"] != "09:39"
     ):
-        raise ValueError("V20 chain probe must recompute from the exact persisted 09:39 window")
+        raise ValueError("V20 chain probe must recompute from the persisted canonical early window")
     if (
         semantic["official_state_changed"] is not False
         or semantic["orders_changed"] is not False
@@ -1417,7 +1417,8 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
                 raise ValueError("V20 late replay event_id does not match outbox event")
             if (
                 semantic["replay_kind"] != "RETROSPECTIVE_POST_CUTOFF"
-                or semantic["official_entry_action"] != "INPUT_INVALID"
+                or semantic["official_entry_action"]
+                not in {"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"}
                 or semantic["non_actionable"] is not True
             ):
                 raise ValueError("V20 late replay must remain retrospective and non-actionable")

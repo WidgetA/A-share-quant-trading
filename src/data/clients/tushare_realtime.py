@@ -140,6 +140,50 @@ class TushareDailyBar:
     amount_yuan: float
 
 
+def tushare_minute_bars_to_early_market_data(
+    bare_code: str,
+    bars: tuple[TushareMinuteBar, ...],
+    expected_trade_date: date,
+) -> TushareEarlyMarketData | None:
+    """Convert normalized minute bars into the frozen early-market snapshot.
+
+    Wrong-date rows are ignored. Every returned component is derived only from
+    target-date bars ending at or before 09:39. A 09:39 bar is not required
+    here; canonical readiness owns that policy.
+    """
+    target_bars: dict[datetime, TushareMinuteBar] = {}
+    conflicted_timestamps: set[datetime] = set()
+    for bar in bars:
+        if bar.bar_end.astimezone(BEIJING_TZ).date() != expected_trade_date:
+            continue
+        if bar.stock_code != bare_code or not bar.is_valid:
+            return None
+        if bar.bar_end in conflicted_timestamps:
+            continue
+        previous = target_bars.get(bar.bar_end)
+        if previous is not None and previous != bar:
+            target_bars.pop(bar.bar_end, None)
+            conflicted_timestamps.add(bar.bar_end)
+            continue
+        target_bars[bar.bar_end] = bar
+
+    if not target_bars:
+        return None
+
+    valid_bars = tuple(target_bars[key] for key in sorted(target_bars))
+    early_bars = tuple(bar for bar in valid_bars if bar.end_label <= "09:39")
+    if not early_bars:
+        return None
+
+    quote = TushareRealtimeClient._aggregate_quote_from_bars(bare_code, early_bars)
+    source_hash = TushareRealtimeClient._canonical_early_source_hash(bare_code, early_bars)
+    return TushareEarlyMarketData(
+        quote=quote,
+        early_bars=early_bars,
+        source_hash=source_hash,
+    )
+
+
 class TushareRealtimeClient:
     """
     Fetches real-time A-share quotes from Tushare Pro.
@@ -308,17 +352,27 @@ class TushareRealtimeClient:
                 )
             return code, self._parse_minute_history(code, data)
 
-        rows = await asyncio.gather(
-            *[_fetch_one(code) for code in stock_codes],
-            return_exceptions=True,
-        )
+        tasks = [
+            asyncio.create_task(_fetch_one(code), name=f"rt-minute-history-{code}")
+            for code in stock_codes
+        ]
+        try:
+            done, _pending = await asyncio.wait(tasks, timeout=self.TIMEOUT)
+        finally:
+            unfinished = [task for task in tasks if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
         result: dict[str, tuple[TushareMinuteBar, ...]] = {}
         successful_codes = 0
-        for row in rows:
-            if isinstance(row, BaseException):
+        for task in done:
+            try:
+                row = task.result()
+            except BaseException as exc:
                 logger.warning(
                     "rt_min_daily code failed; successful sibling histories retained: %s",
-                    row,
+                    exc,
                 )
                 continue
             successful_codes += 1
@@ -345,7 +399,7 @@ class TushareRealtimeClient:
         stock_codes = list(dict.fromkeys(stock_codes))
         if not stock_codes:
             return {}
-        start = f"{trade_date.isoformat()} 09:30:00"
+        start = f"{trade_date.isoformat()} 09:15:00"
         end = f"{trade_date.isoformat()} 15:01:00"
         sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
 
@@ -452,8 +506,8 @@ class TushareRealtimeClient:
     ) -> tuple[TushareMinuteBar, ...]:
         """Parse a single-stock daily response into sorted, validated, canonical bars.
 
-        When ``expected_trade_date`` is supplied, rows that fall on a different
-        exchange date (including bare HH:MM:SS timestamps) are silently ignored.
+        When ``expected_trade_date`` is supplied, observing any row on a different
+        exchange date invalidates the per-symbol response.
         Identical duplicate rows are folded; conflicting rows for the same timestamp
         are dropped so the result is independent of raw item order.
         """
@@ -471,13 +525,22 @@ class TushareRealtimeClient:
 
         by_timestamp: dict[datetime, TushareMinuteBar] = {}
         conflicted_timestamps: set[datetime] = set()
+        wrong_trade_date_observed = False
         for item in items:
             try:
+                if "ts_code" in index:
+                    row_code = str(item[index["ts_code"]]).strip().upper()
+                    if row_code.split(".")[0] != code:
+                        raise TushareRealtimeError(
+                            f"minute-history row ts_code {row_code!r} "
+                            f"does not match requested {code!r}"
+                        )
                 bar_end = TushareRealtimeClient._parse_bar_end(str(item[index["time"]]).strip())
                 if (
                     expected_trade_date is not None
                     and bar_end.astimezone(BEIJING_TZ).date() != expected_trade_date
                 ):
+                    wrong_trade_date_observed = True
                     continue
                 bar = TushareMinuteBar(
                     stock_code=code,
@@ -490,6 +553,11 @@ class TushareRealtimeClient:
                     volume=_strict_float(item[index["vol"]]),
                     amount=_strict_float(item[index["amount"]]),
                 )
+            except TushareRealtimeError:
+                # A wrong instrument is not a locally malformed row.  It
+                # invalidates the whole per-symbol response because otherwise
+                # another stock's bars could be bound to the requested code.
+                raise
             except (IndexError, TypeError, ValueError) as exc:
                 logger.warning(
                     "ignored invalid minute-history row for %s: %r (%s)",
@@ -518,6 +586,12 @@ class TushareRealtimeClient:
                 )
                 continue
             by_timestamp[bar_end] = bar
+        if wrong_trade_date_observed:
+            logger.warning(
+                "discarded minute-history response for %s because it mixed trade dates",
+                code,
+            )
+            return ()
         return tuple(by_timestamp[key] for key in sorted(by_timestamp))
 
     @staticmethod
@@ -528,15 +602,33 @@ class TushareRealtimeClient:
     ) -> tuple[TushareMinuteBar, ...]:
         raw_data = data.get("data", {})
         fields = list(raw_data.get("fields", []))
-        if not fields or not raw_data.get("items"):
+        items = raw_data.get("items", [])
+        if not fields or not items:
             return ()
-        if "trade_time" not in fields:
-            raise TushareRealtimeError("stk_mins response missing trade_time")
+        # Both columns are mandatory evidence bindings: trade_time anchors each
+        # bar and ts_code proves every row belongs to the requested instrument.
+        for required_column in ("ts_code", "trade_time"):
+            if required_column not in fields:
+                raise TushareRealtimeError(f"stk_mins response missing {required_column}")
+        code_index = fields.index("ts_code")
+        for item in items:
+            try:
+                row_code = str(item[code_index]).strip().upper()
+            except (IndexError, TypeError) as exc:
+                raise TushareRealtimeError(
+                    f"stk_mins row has no ts_code for requested {code!r}"
+                ) from exc
+            bare = row_code.split(".")[0]
+            # A wrong or mixed instrument fails closed; it is never skipped.
+            if bare != code:
+                raise TushareRealtimeError(
+                    f"stk_mins row ts_code {row_code!r} does not match requested {code!r}"
+                )
         normalized_fields = ["time" if field == "trade_time" else field for field in fields]
         normalized = {
             "data": {
                 "fields": normalized_fields,
-                "items": raw_data.get("items", []),
+                "items": items,
             }
         }
         bars = TushareRealtimeClient._parse_minute_history(code, normalized)
@@ -731,7 +823,7 @@ class TushareRealtimeClient:
                 data = await self._api_call(
                     "rt_min_daily",
                     {"ts_code": ts_code, "freq": "1MIN"},
-                    fields="time,open,close,high,low,vol,amount",
+                    fields="ts_code,time,open,close,high,low,vol,amount",
                 )
             return bare_code, self._parse_early_market_data(
                 bare_code, data, expected_trade_date=expected_trade_date
@@ -858,19 +950,12 @@ class TushareRealtimeClient:
         has_time = "time" in idx
 
         if has_time:
+            if expected_trade_date is None:
+                expected_trade_date = datetime.now(BEIJING_TZ).date()
             bars = TushareRealtimeClient._parse_minute_history(
                 bare_code, data, expected_trade_date=expected_trade_date
             )
-            if not bars:
-                return None
-            quote = TushareRealtimeClient._aggregate_quote_from_bars(bare_code, bars)
-            early_bars = tuple(bar for bar in bars if bar.end_label <= "09:39")
-            source_hash = TushareRealtimeClient._canonical_early_source_hash(bare_code, bars)
-            return TushareEarlyMarketData(
-                quote=quote,
-                early_bars=early_bars,
-                source_hash=source_hash,
-            )
+            return tushare_minute_bars_to_early_market_data(bare_code, bars, expected_trade_date)
 
         # Legacy response without a time column: aggregate the full-day OHLCV rows.
         # Every selection-relevant field in every row must be a finite, strictly
