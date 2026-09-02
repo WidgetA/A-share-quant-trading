@@ -77,9 +77,18 @@ bootstrap.mode: EMPTY_FORWARD_SHADOW
 生产排障时必须同时检查源事件标签、服务端首次持久接收时间、事务 terminal guard
 和 post-commit outbox 密封时间，不能用日志打印时间或把 guard 冒充 COMMIT 时间。
 
-09:41 参考价先过滤合法性再选修订：模型腿截止为 D1 09:30，HEALTH/ROLLING7
-全市场影子样本截止为 D0 09:45。某一分钟行情缺失或非法只记缺口，不能屏蔽后续
-独立合法分钟的止损；D1 14:57 bar 触发时，建议从 D2 09:31 起执行。
+09:41 参考价先过滤合法性再选修订：模型腿截止为 D1 09:30；ROLLING7 事实流由每个
+完整 canonical V16 制品独立触发，其 D0 参考价使用 D0 09:45 截止前冻结的原始
+`09:41 bar.open`，迟到的恢复制品仍产生同一理论事实。某一分钟行情缺失或非法只记
+缺口，不能屏蔽后续独立合法分钟的止损；D1 14:57 bar 触发时，建议从 D2 09:31 起执行。
+
+ROLLING7 历史恢复/回填只能运行在非交易关键路径。任务从 as-of 决策窗口向后扫描，
+直到取得 7 个完整 `SIGNAL` 批次或显式有界上限，并持久化部分结果和 `DATA_GAP` 供重试；
+任何恢复失败都不得阻塞 09:40 入场或实时退出。操作核对时必须确认：空推荐列表是
+`NO_SIGNAL` 且不占 7 个批次；缺失、失败或不完整制品是 `DATA_GAP`；不足 7 个是
+`WARMUP`；窗口内未解决缺口是 `DATA_GAP`，二者均不得渲染成泛化的 `UNKNOWN`。
+每个非空 `SIGNAL` 使用 canonical V16 全名单，从 D0 原始 `09:41 bar.open` 到 D2 官方
+收盘等权计算；`R7` 是最近 7 个成熟完整批次收益之和，`L7` 是其中负收益批次数。
 
 ## 3. 镜像和不可变制品
 
@@ -341,12 +350,16 @@ HTTP 请求本身不会占用 PostgreSQL 连接。快照缺失、刷新失败或
 
 ### 5.2 MEWS 09:10 自动缓存与人工恢复
 
-独立 `mews_cache` lane 在交易日 09:10—09:40 内使用现有 `TUSHARE_TOKEN` 拉取前一交易日
+独立 `mews_cache` lane 在每个 D2 交易日 09:10—09:40 内使用现有 `TUSHARE_TOKEN` 拉取前一交易日
 的 `margin`、`margin_detail`、`daily_basic` 原始素材，在 V20 内按冻结的 `mews_v2`
 公式计算，并把紧凑增量状态和当天不可变快照写入 V20 PostgreSQL。若进程启动时当天快照
 缺失，会在现场从最近 checkpoint 补齐缺失交易日，而不是调用另一个服务取得已经算好的
-MEWS 值。原始素材质量必须为 `OK`，且计算时间与 PostgreSQL 回执都严格早于 09:40。
-成功后当天不再拉取；选股和退出只读 V20 自己的快照。
+MEWS 值。原始素材质量必须为 `OK`，且计算时间与 PostgreSQL 回执都严格早于 D2 09:40。
+成功后当天不再拉取；退出只读 V20 自己的快照。
+
+D2 首次退出求值消费当时可得的 D1 来源快照，并按模型腿原子冻结选择。允许无退出
+intent 的 legacy 较早选择升级为该 D2 选择；已存在的退出 intent 或已冻结的 D2 选择
+永不改变。无可选快照时立即冻结常规 `-12%` 兜底并告警；MEWS 永不影响入场。
 
 以下 POST 仅保留为有鉴权的人工灾备写入，不是日常生产链路：
 
@@ -451,10 +464,10 @@ D1/D2 盘中退出监控。若当日正式终态已经存在，接口只返回�
 前有效、迟到不得追买”。两条盘后路径都不创建模型腿、退出链或订单，official state
 保持不变；重算失败则发送失败报警。
 
-内嵌 forward-shadow 当前从 `EMPTY_FORWARD_SHADOW` 开始。首次上线日的复盘可以恢复 V16
-票单，但 BASE/滚动7展示的是这条已部署 shadow lineage 的暖机状态，不是研究回测中截至
-前一交易日的历史状态。只有经审计 checkpoint 才能初始化后者，禁止把回顾性研究制品
-静默写进已经运行的 lineage。
+内嵌 forward-shadow 当前从 `EMPTY_FORWARD_SHADOW` 开始，因此 BASE 展示该 shadow
+lineage 的暖机状态。ROLLING7 不从交易/shadow ledger 或 lineage checkpoint 取值；它
+读取独立持久事实，并由非交易关键路径回填历史缺口。禁止把回顾性研究制品静默写进
+已经运行的 lineage。
 
 09:40 前不会再创建 `MANUAL_TRIGGER_RECEIPT`。09:40 后为完成一次可见验收，接口会创建
 `DATA_ALERT/OPERATOR_NOTIFICATION` 运输事件，但其可见正文只能是：已封存官方正文的
@@ -570,9 +583,9 @@ V20_ALLOW_PRODUCTION_PUSH=false
 - V16 扫描覆盖与市场宽度覆盖是两个分离集合，宽度缺口不得污染 80% 扫描门槛；
 - 把同一份通过 V20 历史/分钟合法性校验的输入分别交给 V20 和线上 main V16 后，
   推荐及排序零差异；被输入门槛排除的代码另表核对，不混入算法差异；
-- 09:41 模型腿 D1 09:30 截止、影子批次 D0 09:45 截止、合法性过滤和缺口；
-- V16 完整推荐名单、BASE/rolling7/G 决定和状态 hash；
-- D1/D2 退出、MEWS 选择、提醒/ack、outbox 重试与重复投递；
+- 09:41 模型腿 D1 09:30 截止、ROLLING7 法定 D0 截止、合法性过滤和缺口；
+- V16 完整推荐名单、`NO_SIGNAL`/`DATA_GAP`/`WARMUP`、BASE/rolling7/G 决定；
+- D1/D2 退出、MEWS 原子冻结与 legacy 升级、提醒/ack、outbox 重试与重复投递；
 - 停牌、缺 bar、行情修订、重启、数据库/飞书短暂失败和公司行动样本。
 
 开始影子前应冻结观察周期、允许缺口和通过标准，不能看完结果后修改门槛。完整
@@ -618,14 +631,16 @@ python scripts/export_v20_checkpoint.py \
 ```
 
 导出器会在一个只读串行事务中校验来源 stream/lineage、官方 state hash、与目标
-配置一致的显式状态/事件/快照 schema 版本、as-of
-终态前驱和完整的 7 个有效 rolling 批次；它还会迁移健康水位、活动 rolling gap、
-所有仍待成熟的 HEALTH/ROLLING7 批次，以及在 as-of 决策后才形成、尚未被下一次
-决策消费的 HEALTH 终态和 `COMPLETE_INVALID` rolling 事实，并为目标 lineage 生成
+配置一致的显式状态/事件/快照 schema 版本和 as-of 终态前驱；它还会迁移健康水位、
+所有仍待成熟的 HEALTH 批次，以及在 as-of 决策后才形成、尚未被下一次决策消费的
+HEALTH 终态，并为目标 lineage 生成
 确定性的 source→target batch ID 映射。任一被 state 引用的健康/活动 gap 事实缺失都会
 拒绝导出。目标 state
 固定从 revision 0 开始，`last_terminal_slot_id` 和 `last_terminal_trade_date` 固定为空，
 不会用 shadow 槽伪造生产前驱。
+
+ROLLING7 独立理论事实不进入 lineage checkpoint；目标运行时读取同一独立事实流，
+缺失历史由非交易关键路径按本手册前述规则持久化并重试。
 
 导出器写入 `v20-bootstrap-checkpoint/v3` schema：在 v2 的基础上移除已退役的来源
 配置/状态语义审计 hash 字段（`source_config_hash`、`source_state_semantics_hash`、
@@ -685,7 +700,8 @@ Python 源码或 Git 字节。以上任何一项都不能决定策略是否运�
 - 禁止把 Python/源文件字节 hash 用作运行时启动、状态兼容、交易、回放或迁移授权；
 - 禁止 commit/hash 到 hash 的过渡 allowlist，以及任何形式的“兼容证据/兼容回执”；
 - 禁止因为格式化、注释或文档变化要求迁移、新 lineage 或重新走影子；
-- 禁止把源码 digest 名单作为混合文件的放行条件；运行层更新不需要任何源码哈希认证。
+- 禁止把源码 digest 名单作为混合文件的放行条件；运行层更新不需要任何源码哈希认证；
+- 禁止基于部署或源码 hash 制造运行时“版本分身”，或借新 stream/lineage 绕过唯一正式槽。
 
 状态兼容只由以下显式事实授权：状态/事件/快照 schema 版本、scope/lineage/stream
 作用域、内容完整性，以及 schema 变化时的显式数据库迁移。只有显式 schema 版本升级
@@ -739,8 +755,8 @@ Python 源码或 Git 字节。以上任何一项都不能决定策略是否运�
   从 09:39 阻塞跨过 09:40，并验证任务被截止看门狗取消、数据库门禁不被本机时钟绕过；
   若补槽暂时失败，则稳定 ID 的 `ENTRY_CUTOFF_NO_BUY` 必须先到达且可幂等重试；首次
   日历加载跨点还须验证工作日发 `ENTRY_CALENDAR_UNKNOWN_NO_BUY`、周末和已确认休市不报。
-- 09:41 后：模型腿参考价来自结束标签 09:41 的 open，不是 09:40 标签；核对模型腿
-  与影子批次各自固定截止。
+- 09:41 后：模型腿和 ROLLING7 的 D0 参考价均来自结束标签 09:41 的 open，不是 09:40
+  标签；核对各自固定截止，并确认 ROLLING7 不依赖交易/shadow ledger。
 - D1/D2：每条模型腿均有明确退出求值；单分钟缺口不能关闭后续止损，触发后检查退出
   推送和后续提醒。
 - 全日：检查 `running/healthy/runtime_lanes` freshness、数据缺口、数据库

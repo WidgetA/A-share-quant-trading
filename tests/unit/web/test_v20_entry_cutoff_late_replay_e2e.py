@@ -78,6 +78,9 @@ class Repository:
     async def load_recent_completed(self, *_args, **_kwargs):
         return []
 
+    async def load_rolling7_market_health(self, *_args, **_kwargs):
+        return ()
+
     async def list_pending_shadow_batches(self, *_args, **_kwargs):
         return []
 

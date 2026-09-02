@@ -19,9 +19,12 @@ from src.data.database.v20_repository import (
 TZ = ZoneInfo("Asia/Shanghai")
 SOURCE_DATE = date(2026, 8, 31)
 D1 = date(2026, 9, 1)
+D2 = date(2026, 9, 2)
 CUTOFF = datetime(2026, 9, 1, 9, 40, tzinfo=TZ)
+D2_CUTOFF = datetime(2026, 9, 2, 9, 40, tzinfo=TZ)
 ON_TIME = datetime(2026, 9, 1, 9, 15, tzinfo=TZ)
 LATE = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
+D2_ON_TIME = datetime(2026, 9, 2, 9, 15, tzinfo=TZ)
 
 
 def _null_snapshot_row() -> dict[str, None]:
@@ -85,12 +88,14 @@ class _FakeConnection:
         leg: Any = None,
         existing: Any = None,
         candidate: Any = None,
+        intent: Any = None,
         insert_error: Exception | None = None,
         insert_errors: list[Exception] | None = None,
     ) -> None:
         self.leg = leg
         self.existing = existing
         self.candidate = candidate
+        self.intent = intent
         self.insert_error = insert_error
         self.insert_errors = list(insert_errors or ())
         self.calls: list[tuple[str, str, tuple[Any, ...]]] = []
@@ -103,7 +108,10 @@ class _FakeConnection:
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         self.calls.append(("fetchrow", sql, args))
-        if "INSERT INTO v20.leg_mews_selection" in sql and "RETURNING" in sql:
+        is_selection_write = (
+            "UPDATE v20.leg_mews_selection" in sql or "INSERT INTO v20.leg_mews_selection" in sql
+        ) and "RETURNING" in sql
+        if is_selection_write:
             if self.insert_errors:
                 raise self.insert_errors.pop(0)
             if self.insert_error is not None:
@@ -118,6 +126,8 @@ class _FakeConnection:
             }
         if "FOR UPDATE OF leg" in sql:
             return self.leg
+        if "FROM v20.exit_intents" in sql:
+            return self.intent
         if "FROM v20.leg_mews_selection" in sql:
             return self.existing
         if "FROM v20.mews_snapshots" in sql:
@@ -668,3 +678,302 @@ async def test_retryable_transaction_failure_rolls_back_and_retries(pgcode: str)
         len([call for call in connection.calls if "INSERT INTO v20.leg_mews_selection" in call[1]])
         == 2
     )
+
+
+async def test_d2_selection_uses_exact_predecessor_source_and_d2_availability() -> None:
+    payload = _payload(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        availability_date=D2,
+    )
+    candidate = _row(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        sealed_at=D2_ON_TIME + timedelta(minutes=1),
+        payload=payload,
+    )
+    connection = _FakeConnection(leg={"d1": D1, "d2": D2}, candidate=candidate)
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+
+    assert record.snapshot_id == "mews-snapshot"
+    assert record.source_trade_date == D1
+    assert record.selection_reason == "ELIGIBLE"
+    candidate_call = next(
+        call for call in connection.calls if "FROM v20.mews_snapshots AS snapshot" in call[1]
+    )
+    assert candidate_call[2] == (D2, D2_CUTOFF, D1, D2)
+    assert connection.calls[0][1].strip().endswith("FOR UPDATE OF leg")
+
+
+async def test_d2_selection_rejects_older_d0_source_snapshot() -> None:
+    payload = _payload(
+        source_trade_date=SOURCE_DATE,
+        generated_at=D2_ON_TIME,
+        availability_date=D2,
+    )
+    candidate = _row(
+        source_trade_date=SOURCE_DATE,
+        generated_at=D2_ON_TIME,
+        sealed_at=D2_ON_TIME + timedelta(minutes=1),
+        payload=payload,
+    )
+    connection = _FakeConnection(leg={"d1": D1, "d2": D2}, candidate=candidate)
+    store = V20MewsGuardStore(_repository(connection))
+
+    with pytest.raises(V20SemanticConflict, match="source_trade_date differs from request"):
+        await store.select_freeze_and_load(
+            "leg-1",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=D1,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        )
+    assert not any("INSERT INTO" in call[1] for call in connection.calls)
+
+
+async def test_d2_missing_candidate_persists_fallback_exactly_once() -> None:
+    connection = _FakeConnection(leg={"d1": D1, "d2": D2}, candidate=None)
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+
+    assert record.snapshot_id is None
+    assert record.selection_reason == "MEWS_UNAVAILABLE_FALLBACK_12"
+    insert_calls = [
+        call for call in connection.calls if "INSERT INTO v20.leg_mews_selection" in call[1]
+    ]
+    assert len(insert_calls) == 1
+    assert "ON CONFLICT" not in insert_calls[0][1]
+    assert insert_calls[0][2] == (
+        "leg-1",
+        None,
+        None,
+        D2_CUTOFF,
+        "MEWS_UNAVAILABLE_FALLBACK_12",
+    )
+
+
+async def test_load_frozen_returns_current_d2_fallback_after_restart() -> None:
+    existing = {
+        "model_leg_id": "leg-1",
+        "cutoff_ts": D2_CUTOFF,
+        "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+        "selected_at": D2_ON_TIME + timedelta(minutes=2),
+        "selected_snapshot_id": None,
+        "selected_fast_state": None,
+        **_null_snapshot_row(),
+    }
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        existing=existing,
+        intent={"exit_intent_id": "intent-1"},
+    )
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.load_frozen_for_leg(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        evaluation_date=D2,
+    )
+
+    assert record is not None
+    assert record.selection_reason == "MEWS_UNAVAILABLE_FALLBACK_12"
+    assert not any("FROM v20.mews_snapshots" in call[1] for call in connection.calls)
+    assert not any("INSERT INTO" in call[1] or "UPDATE v20" in call[1] for call in connection.calls)
+
+
+async def test_d2_upgrades_legacy_selection_without_intent_using_explicit_update() -> None:
+    payload = _payload(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        availability_date=D2,
+    )
+    candidate = _row(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        sealed_at=D2_ON_TIME + timedelta(minutes=1),
+        payload=payload,
+    )
+    existing = {
+        "model_leg_id": "leg-1",
+        "cutoff_ts": CUTOFF,
+        "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+        "selected_at": ON_TIME + timedelta(minutes=2),
+        "selected_snapshot_id": None,
+        "selected_fast_state": None,
+        **_null_snapshot_row(),
+    }
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        existing=existing,
+        candidate=candidate,
+    )
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+
+    assert record.snapshot_id == "mews-snapshot"
+    assert record.cutoff_ts == D2_CUTOFF
+    update_calls = [call for call in connection.calls if "UPDATE v20.leg_mews_selection" in call[1]]
+    assert len(update_calls) == 1
+    assert "ON CONFLICT" not in update_calls[0][1]
+    assert update_calls[0][2] == ("leg-1", "mews-snapshot", "DANGER", D2_CUTOFF, "ELIGIBLE")
+    assert not any("INSERT INTO" in call[1] for call in connection.calls)
+
+
+async def test_d2_preserves_legacy_selection_when_intent_exists() -> None:
+    snapshot = _row(generated_at=ON_TIME, sealed_at=ON_TIME + timedelta(minutes=1))
+    existing = {
+        "model_leg_id": "leg-1",
+        "cutoff_ts": CUTOFF,
+        "selection_reason": "ELIGIBLE",
+        "selected_at": ON_TIME + timedelta(minutes=2),
+        "selected_snapshot_id": "mews-snapshot",
+        "selected_fast_state": "DANGER",
+        **snapshot,
+    }
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        existing=existing,
+        intent={"exit_intent_id": "intent-1"},
+    )
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+
+    assert record.cutoff_ts == CUTOFF
+    assert record.selection_reason == "ELIGIBLE"
+    assert not any("FROM v20.mews_snapshots" in call[1] for call in connection.calls)
+    assert not any("INSERT INTO" in call[1] or "UPDATE v20" in call[1] for call in connection.calls)
+
+
+async def test_load_frozen_returns_none_for_legacy_selection_without_intent() -> None:
+    existing = {
+        "model_leg_id": "leg-1",
+        "cutoff_ts": CUTOFF,
+        "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+        "selected_at": ON_TIME + timedelta(minutes=2),
+        "selected_snapshot_id": None,
+        "selected_fast_state": None,
+        **_null_snapshot_row(),
+    }
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        existing=existing,
+    )
+    store = V20MewsGuardStore(_repository(connection))
+
+    assert (
+        await store.load_frozen_for_leg(
+            "leg-1",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=D1,
+            evaluation_date=D2,
+        )
+        is None
+    )
+
+
+async def test_legacy_mode_never_queries_exit_intent_before_conflict_or_rewrite() -> None:
+    connection = _FakeConnection(
+        leg={"d1": D1},
+        existing={
+            "model_leg_id": "leg-1",
+            "cutoff_ts": CUTOFF,
+            "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+            "selected_at": ON_TIME + timedelta(minutes=2),
+            "selected_snapshot_id": None,
+            "selected_fast_state": None,
+            **_null_snapshot_row(),
+        },
+    )
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=CUTOFF,
+        late_source_trade_date=SOURCE_DATE,
+        late_availability_date=D1,
+    )
+
+    assert record.cutoff_ts == CUTOFF
+    assert not any("FROM v20.exit_intents" in call[1] for call in connection.calls)
+    assert not any("FROM v20.mews_snapshots" in call[1] for call in connection.calls)
+
+
+@pytest.mark.parametrize("pgcode", ["40001", "40P01", "23505"])
+async def test_d2_retry_relocks_and_rechecks_intent_selection_and_candidate(pgcode: str) -> None:
+    class RetryableInsertError(RuntimeError):
+        pass
+
+    failure = RetryableInsertError("first writer race")
+    failure.pgcode = pgcode  # type: ignore[attr-defined]
+    payload = _payload(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        availability_date=D2,
+    )
+    candidate = _row(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        sealed_at=D2_ON_TIME + timedelta(minutes=1),
+        payload=payload,
+    )
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        candidate=candidate,
+        insert_errors=[failure],
+    )
+    store = V20MewsGuardStore(_repository(connection))
+
+    record = await store.select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+
+    assert record.snapshot_id == "mews-snapshot"
+    assert connection.transaction_events == [("rollback", failure), ("commit", None)]
+    for attempt in range(2):
+        offset = attempt * 5
+        assert "FOR UPDATE OF leg" in connection.calls[offset][1]
+        assert "FROM v20.leg_mews_selection" in connection.calls[offset + 1][1]
+        assert "FROM v20.exit_intents" in connection.calls[offset + 2][1]

@@ -884,11 +884,18 @@ or submits orders.
 - Track each notified model batch in a PostgreSQL ledger and publish deterministic D1/D2
   protective-stop, final-exit, and reminder events. These are model-lot notifications, not real-account
   position management.
+- Maintain rolling7 as an independent complete-canonical-artifact fact stream, unrelated to actual
+  orders, holdings, or trading ledgers. Equal-weight the full canonical V16 list from D0 raw
+  `09:41 bar.open` to D2 official close; `R7` is the sum of seven matured batch returns and `L7`
+  counts losses. Empty recommendations are `NO_SIGNAL`, missing/failed/incomplete artifacts are
+  `DATA_GAP`, and insufficient history is `WARMUP`, never generic `UNKNOWN`.
 - At the 11:30 morning-close boundary, continue persisting and evaluating a legal 11:30 bar as soon
   as it arrives, but accept 11:29 as the minimum feed-health evidence until 11:31 to allow bounded
   vendor publication latency. From 11:31 until the first afternoon bar is due, current-day history
   is the authoritative source and must contain legal 11:30 evidence; never substitute an older bar
   for an exit decision.
+- Freeze D2 MEWS selection per model leg from the current D2-available snapshot computed from source
+  trading day D1; if no eligible snapshot exists, use the normal `-12%` fallback and alert.
 - Use an idempotent transactional outbox, sealed event payloads, route-scoped delivery ordering,
   PostgreSQL leader election, runtime-lane health, and fail-closed startup validation.
 - Keep dedicated shadow and formal Feishu credentials, streams, lineages, and checkpoints isolated.
@@ -944,7 +951,8 @@ or submits orders.
   comment, or documentation changes must never require a migration or a new lineage. State
   compatibility is authorized only by explicit state/event/snapshot schema versions,
   scope/lineage/stream identity, content integrity, and explicit DB migrations when schemas
-  change.
+  change. Never use deployment or source hashes to create a runtime "version fork" or bypass the
+  single official slot through another stream/lineage.
 - Non-code strategy artifacts (model, feature list, sector/board data, G artifacts, checkpoints)
   keep checksum integrity; those checksums prove content integrity, not source-version
   compatibility. The bootstrap checkpoint exporter writes `v20-bootstrap-checkpoint/v3`,

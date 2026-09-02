@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import re
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
@@ -95,6 +96,35 @@ def _destination_fingerprint(*, route_id: str, bot_origin: str, app_id: str, cha
 
 def _pct(value: float | None, digits: int = 2) -> str:
     return "-" if value is None else f"{value * 100:.{digits}f}%"
+
+
+def _rolling7_line(semantic: Mapping[str, Any]) -> str:
+    status = str(semantic.get("rolling7_state", "-"))
+    reason = semantic.get("rolling7_reason")
+    window_ids = semantic.get("rolling7_window_ids")
+    if status == "WARMUP":
+        mature_n: int | None = None
+        if isinstance(window_ids, list):
+            mature_n = len(window_ids)
+        if mature_n is None and isinstance(reason, str):
+            matched = re.fullmatch(r"WARMUP:(\d+)/7", reason)
+            if matched is not None:
+                mature_n = int(matched.group(1))
+        count = "-" if mature_n is None else str(mature_n)
+        return f"滚动7: WARMUP | 成熟批次={count}/7 | 尚未形成完整7批窗口"
+    if status == "DATA_GAP":
+        gap_ids: tuple[str, ...] = ()
+        if isinstance(reason, str) and reason.startswith("DATA_GAP:"):
+            gap_ids = tuple(item for item in reason.removeprefix("DATA_GAP:").split(",") if item)
+        detail = f"{len(gap_ids)}批待补齐（{', '.join(gap_ids)}）" if gap_ids else "待补齐"
+        return f"滚动7: DATA_GAP | 数据缺口={detail}"
+    if status == "UNKNOWN":
+        detail = str(reason) if reason else "信息时钟无效"
+        return f"滚动7: UNKNOWN | 无法评估={detail}"
+    return (
+        f"滚动7: {status} | R7={_pct(semantic.get('rolling7_r7'))} | "
+        f"亏损批次={semantic.get('rolling7_l7', '-')}/7"
+    )
 
 
 def _entry_action_text(multiplier: float, *, on_time: bool) -> str:
@@ -399,11 +429,7 @@ def _render_manual_entry_check_for_operator(
             f"BASE: {entry.get('health_state', '-')} / "
             f"基础倍率 {_pct(entry.get('base_multiplier'), 0)}"
         ),
-        (
-            f"滚动7: {entry.get('rolling7_state', '-')} | "
-            f"R7={_pct(entry.get('rolling7_r7'))} | "
-            f"亏损批次={entry.get('rolling7_l7', '-')}/7"
-        ),
+        _rolling7_line(entry),
         (
             f"极端门G: {entry.get('g_state', 'NOT_EVALUATED')} | "
             f"防御倍率 {_pct(entry.get('defense_multiplier'), 0)} | "
@@ -618,11 +644,7 @@ def render_entry_message(
                 f"BASE: {semantic.get('health_state', '-')} / "
                 f"基础倍率 {_pct(semantic.get('base_multiplier'), 0)}"
             ),
-            (
-                f"滚动7: {semantic.get('rolling7_state', '-')} | "
-                f"R7={_pct(semantic.get('rolling7_r7'))} | "
-                f"亏损批次={semantic.get('rolling7_l7', '-')}/7"
-            ),
+            _rolling7_line(semantic),
             (
                 f"极端门G: {semantic.get('g_state', 'NOT_EVALUATED')} | "
                 f"防御倍率 {_pct(semantic.get('defense_multiplier'), 0)} | "

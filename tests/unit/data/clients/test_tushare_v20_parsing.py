@@ -552,3 +552,151 @@ def test_stk_mins_parser_empty_response_is_confirmed_empty_not_an_error() -> Non
         )
         == ()
     )
+
+
+@pytest.mark.asyncio
+async def test_historical_stock_names_parse_one_market_wide_bak_basic_snapshot(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    calls = []
+
+    async def api_call(api_name, params, fields=""):
+        calls.append((api_name, params, fields))
+        return {
+            "data": {
+                "fields": ["trade_date", "ts_code", "name"],
+                "items": [
+                    ["20260828", "000001.SZ", "平安银行"],
+                    ["20260828", "600000.SH", "浦发银行"],
+                    ["20260828", "830799.BJ", "艾融软件"],
+                ],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    result = await client.fetch_stock_names_for_date("20260828")
+
+    assert result == {
+        "000001": "平安银行",
+        "600000": "浦发银行",
+        "830799": "艾融软件",
+    }
+    assert calls == [
+        (
+            "bak_basic",
+            {"trade_date": "20260828"},
+            "trade_date,ts_code,name",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_historical_stock_names_empty_snapshot_is_explicitly_empty(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+
+    async def api_call(*_args, **_kwargs):
+        return {
+            "data": {
+                "fields": ["trade_date", "ts_code", "name"],
+                "items": [],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    assert await client.fetch_stock_names_for_date("20260828") == {}
+
+
+@pytest.mark.asyncio
+async def test_historical_stock_names_reject_bad_request_and_wrong_row_date(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    calls = 0
+
+    async def api_call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "data": {
+                "fields": ["trade_date", "ts_code", "name"],
+                "items": [["20260827", "000001.SZ", "平安银行"]],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    with pytest.raises(ValueError, match="trade_date must be YYYYMMDD"):
+        await client.fetch_stock_names_for_date("2026-08-28")
+    assert calls == 0
+
+    with pytest.raises(TushareRealtimeError, match="does not match request"):
+        await client.fetch_stock_names_for_date("20260828")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_historical_stock_names_require_all_bound_fields(monkeypatch) -> None:
+    client = TushareRealtimeClient("token")
+
+    async def api_call(*_args, **_kwargs):
+        return {
+            "data": {
+                "fields": ["trade_date", "ts_code"],
+                "items": [["20260828", "000001.SZ"]],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    with pytest.raises(TushareRealtimeError, match="missing fields: name"):
+        await client.fetch_stock_names_for_date("20260828")
+
+
+@pytest.mark.asyncio
+async def test_historical_stock_names_reject_conflicting_duplicates(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+
+    async def api_call(*_args, **_kwargs):
+        return {
+            "data": {
+                "fields": ["trade_date", "ts_code", "name"],
+                "items": [
+                    ["20260828", "000001.SZ", "平安银行"],
+                    ["20260828", "000001.SZ", "ST平安"],
+                ],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    with pytest.raises(TushareRealtimeError, match="conflicting duplicate"):
+        await client.fetch_stock_names_for_date("20260828")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_name", [None, 123, True])
+async def test_historical_stock_names_reject_null_and_non_string_names(
+    monkeypatch,
+    invalid_name,
+) -> None:
+    client = TushareRealtimeClient("token")
+
+    async def api_call(*_args, **_kwargs):
+        return {
+            "data": {
+                "fields": ["trade_date", "ts_code", "name"],
+                "items": [["20260828", "000001.SZ", invalid_name]],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    with pytest.raises(TushareRealtimeError, match="invalid bak_basic row"):
+        await client.fetch_stock_names_for_date("20260828")

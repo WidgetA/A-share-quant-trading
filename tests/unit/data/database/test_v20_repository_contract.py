@@ -1004,17 +1004,22 @@ async def test_outbox_lease_cannot_consume_another_route_or_lineage_backlog() ->
     assert call[2][:3] == ("formal-route", "official", "lineage-1")
 
 
-def test_runtime_migration_is_mechanically_identical_to_001_plus_002() -> None:
+def test_runtime_migration_is_mechanically_identical_to_001_plus_002_plus_003() -> None:
     root = Path(__file__).resolve().parents[4]
     standalone_002 = (root / "migrations" / "v20" / "002_outbox_at_most_once.sql").read_text(
         encoding="utf-8"
     )
-    assert migration_sql("v20").endswith("\n\n" + standalone_002 + "\n")
+    standalone_003 = (root / "migrations" / "v20" / "003_rolling7_market_health.sql").read_text(
+        encoding="utf-8"
+    )
+    sql = migration_sql("v20")
+    assert sql.endswith("\n\n" + standalone_002 + "\n\n" + standalone_003 + "\n")
+    assert "CONSTRAINT ck_rolling7_market_health_d0_references_positive" in sql
+    assert "CONSTRAINT ck_rolling7_market_health_d2_closes_positive" in sql
     declaration_pattern = re.compile(r"migration_checksum text := '([^']*)';")
     match = declaration_pattern.search(standalone_002)
     assert match is not None
     assert match.group(1) == v20_repository_module._outbox_002_contract_checksum(standalone_002)
-    sql = migration_sql("v20")
     compact = _compact_sql(sql)
     assert "delivery_status IN ('PENDING','LEASED','DELIVERY_UNKNOWN','SENT')" in _compact_sql(sql)
     assert "pg_advisory_xact_lock" in sql
@@ -1320,29 +1325,13 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
         "source_deployment_mode": "forward_shadow",
         "target_lineage_count": 0,
     }
-    shadow_rows = [
-        _checkpoint_shadow_row(
-            f"rolling-{index}",
-            "ROLLING7",
-            date(2026, 8, 1) + timedelta(days=index),
-        )
-        for index in range(7)
-    ]
-    shadow_rows.extend(
+    shadow_rows = list(
         _checkpoint_shadow_row(
             f"health-{index}",
             "HEALTH",
             date(2026, 7, 1) + timedelta(days=index),
         )
         for index in range(3)
-    )
-    shadow_rows.append(
-        _checkpoint_shadow_row(
-            "active-gap",
-            "ROLLING7",
-            date(2026, 7, 10),
-            status="COMPLETE_INVALID",
-        )
     )
     pending = _checkpoint_shadow_row(
         "pending-health",
@@ -1365,14 +1354,6 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
     )
     unconsumed_health["batch_return"] = -0.10
     shadow_rows.append(unconsumed_health)
-    shadow_rows.append(
-        _checkpoint_shadow_row(
-            "rolling-invalid-after-cut",
-            "ROLLING7",
-            date(2026, 8, 21),
-            status="COMPLETE_INVALID",
-        )
-    )
     connection = _FakeConnection(
         fetchrows=[source_row],
         fetches=[shadow_rows],
@@ -1402,25 +1383,15 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
     mapping = checkpoint["batch_id_migration"]
     assert target_state["health"]["recent_valid"][0]["batch_id"] == mapping["health-0"]
     assert target_state["health"]["last_processed_key"][2] == mapping["health-2"]
-    assert target_state["official_rolling_gaps"][0]["gap_id"] == mapping["active-gap"]
-    assert (
-        sum(
-            row["kind"] == "ROLLING7" and row["status"] == "COMPLETE_VALID"
-            for row in checkpoint["state_shadow_batches"]
-        )
-        == 7
-    )
+    assert target_state["official_rolling_gaps"] == []
+    assert all(row["kind"] == "HEALTH" for row in checkpoint["state_shadow_batches"])
+    assert "active-gap" not in mapping
     assert any(
         row["source_batch_id"] == "pending-health" and row["status"] == "PENDING"
         for row in checkpoint["state_shadow_batches"]
     )
     assert any(
         row["source_batch_id"] == "health-after-watermark" and row["status"] == "COMPLETE_VALID"
-        for row in checkpoint["state_shadow_batches"]
-    )
-    assert any(
-        row["source_batch_id"] == "rolling-invalid-after-cut"
-        and row["status"] == "COMPLETE_INVALID"
         for row in checkpoint["state_shadow_batches"]
     )
     exported_health = next(
@@ -1441,19 +1412,19 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
     )
     assert advanced.status.value == "PAUSED_R0"
     shadow_fetch = next(
-        call for call in connection.calls if call[0] == "fetch" and "WITH latest_rolling" in call[1]
+        call
+        for call in connection.calls
+        if call[0] == "fetch" and "FROM v20.shadow_batches AS shadow" in call[1]
     )
     compact_shadow_sql = _compact_sql(shadow_fetch[1])
     assert "shadow.kind='HEALTH'" in compact_shadow_sql
     assert "(shadow.t2_date,shadow.signal_date,shadow.batch_id) >" in compact_shadow_sql
-    assert "shadow.kind='ROLLING7'" in compact_shadow_sql
-    assert "NOT (shadow.batch_id=ANY($8::text[]))" in compact_shadow_sql
-    assert shadow_fetch[2][-4:-1] == (
+    assert "ROLLING7" not in compact_shadow_sql
+    assert shadow_fetch[2][-3:] == (
         date(2026, 7, 5),
         date(2026, 7, 3),
         "health-2",
     )
-    assert shadow_fetch[2][-1] == ["active-gap"]
     assert connection.calls[0] == (
         "transaction",
         canonical_json({"isolation": "serializable", "readonly": True}),
@@ -1462,7 +1433,7 @@ async def test_checkpoint_export_resets_target_predecessor_and_rewrites_state_ba
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_export_rejects_incomplete_rolling_window() -> None:
+async def test_checkpoint_export_does_not_require_or_migrate_rolling_facts() -> None:
     source_state = _checkpoint_source_state()
     source_state["health"] = {
         "schema_version": "v20-health-snapshot/v1",
@@ -1471,7 +1442,6 @@ async def test_checkpoint_export_rejects_incomplete_rolling_window() -> None:
         "recent_valid": [],
         "last_processed_key": None,
     }
-    source_state["official_rolling_gaps"] = []
     source_row = {
         "bootstrap_mode": "EMPTY_FORWARD_SHADOW",
         "bootstrap_checkpoint_hash": None,
@@ -1484,25 +1454,19 @@ async def test_checkpoint_export_rejects_incomplete_rolling_window() -> None:
         "source_deployment_mode": "forward_shadow",
         "target_lineage_count": 0,
     }
-    only_six = [
-        _checkpoint_shadow_row(
-            f"rolling-{index}",
-            "ROLLING7",
-            date(2026, 8, 1) + timedelta(days=index),
-        )
-        for index in range(6)
-    ]
+    checkpoint = await _repository(
+        _FakeConnection(fetchrows=[source_row], fetches=[[]])
+    ).export_bootstrap_checkpoint(
+        source_official_stream_id="shadow-stream",
+        source_lineage_id="shadow-lineage",
+        target_official_stream_id="production-stream",
+        target_lineage_id="production-lineage",
+        as_of_trade_date=date(2026, 8, 31),
+    )
 
-    with pytest.raises(V20StateConflict, match="seven distinct valid rolling"):
-        await _repository(
-            _FakeConnection(fetchrows=[source_row], fetches=[only_six])
-        ).export_bootstrap_checkpoint(
-            source_official_stream_id="shadow-stream",
-            source_lineage_id="shadow-lineage",
-            target_official_stream_id="production-stream",
-            target_lineage_id="production-lineage",
-            as_of_trade_date=date(2026, 8, 31),
-        )
+    assert checkpoint["state_shadow_batches"] == []
+    assert checkpoint["batch_id_migration"] == {}
+    assert checkpoint["official_state"]["official_rolling_gaps"] == []
 
 
 @pytest.mark.asyncio
@@ -1520,7 +1484,20 @@ async def test_checkpoint_genesis_import_is_atomic_and_repeatable_by_source_mapp
     source_state["last_terminal_slot_id"] = None
     source_state["last_terminal_trade_date"] = None
     state_hash = sha256_json(source_state)
-    batches = []
+    health_batch = {
+        "batch_id": "target-health",
+        "source_batch_id": "source-health",
+        "kind": "HEALTH",
+        "signal_date": "2026-08-01",
+        "t2_date": "2026-08-03",
+        "status": "COMPLETE_VALID",
+        "payload": {"symbols": ["000001"]},
+        "batch_return": 0.01,
+        "reference_status": "LOCKED",
+        "reference_prices": {"000001": 10.0},
+        "reference_snapshot_hash": "b" * 64,
+    }
+    batches = [health_batch]
     for index in range(7):
         source_batch_id = f"rolling-{index}"
         batches.append(
@@ -1553,7 +1530,7 @@ async def test_checkpoint_genesis_import_is_atomic_and_repeatable_by_source_mapp
     }
     connection = _FakeConnection(
         fetchrows=[registry, state_row],
-        fetches=[[] for _ in batches],
+        fetches=[[]],
     )
 
     stored = await _repository(connection).ensure_genesis_state(
@@ -1574,36 +1551,32 @@ async def test_checkpoint_genesis_import_is_atomic_and_repeatable_by_source_mapp
         for call in connection.calls
         if call[0] == "execute" and "INSERT INTO v20.shadow_batches" in call[1]
     ]
-    assert len(shadow_inserts) == 7
-    assert all(
-        call[2][1:4]
-        == ("production-stream", "production-lineage", batches[index]["source_batch_id"])
-        for index, call in enumerate(shadow_inserts)
+    assert len(shadow_inserts) == 1
+    assert shadow_inserts[0][2][1:4] == (
+        "production-stream",
+        "production-lineage",
+        "source-health",
     )
 
-    existing_rows = []
-    for batch in batches:
-        existing_rows.append(
-            {
-                "batch_id": batch["batch_id"],
-                "decision_id": None,
-                "official_stream_id": "production-stream",
-                "lineage_id": "production-lineage",
-                "source_batch_id": batch["source_batch_id"],
-                "kind": batch["kind"],
-                "signal_date": date.fromisoformat(batch["signal_date"]),
-                "t2_date": date.fromisoformat(batch["t2_date"]),
-                "status": batch["status"],
-                "batch_json": canonical_json(batch["payload"]),
-                "batch_return": batch["batch_return"],
-                "reference_status": batch["reference_status"],
-                "reference_prices_json": canonical_json(batch["reference_prices"]),
-                "reference_snapshot_hash": batch["reference_snapshot_hash"],
-            }
-        )
+    existing_row = {
+        "batch_id": health_batch["batch_id"],
+        "decision_id": None,
+        "official_stream_id": "production-stream",
+        "lineage_id": "production-lineage",
+        "source_batch_id": health_batch["source_batch_id"],
+        "kind": health_batch["kind"],
+        "signal_date": date.fromisoformat(health_batch["signal_date"]),
+        "t2_date": date.fromisoformat(health_batch["t2_date"]),
+        "status": health_batch["status"],
+        "batch_json": canonical_json(health_batch["payload"]),
+        "batch_return": health_batch["batch_return"],
+        "reference_status": health_batch["reference_status"],
+        "reference_prices_json": canonical_json(health_batch["reference_prices"]),
+        "reference_snapshot_hash": health_batch["reference_snapshot_hash"],
+    }
     retry_connection = _FakeConnection(
         fetchrows=[registry, state_row],
-        fetches=[[row] for row in existing_rows],
+        fetches=[[existing_row]],
     )
     retried = await _repository(retry_connection).ensure_genesis_state(
         "production-lineage",
@@ -1624,7 +1597,7 @@ async def test_checkpoint_genesis_import_is_atomic_and_repeatable_by_source_mapp
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_genesis_rejects_duplicate_shadow_facts_before_db() -> None:
+async def test_checkpoint_genesis_rejects_duplicate_health_facts_before_db() -> None:
     state = {
         "schema_version": "v20-official-state/v1",
         "state_revision": 0,
@@ -1636,7 +1609,7 @@ async def test_checkpoint_genesis_rejects_duplicate_shadow_facts_before_db() -> 
     batch = {
         "batch_id": "target-1",
         "source_batch_id": "source-1",
-        "kind": "ROLLING7",
+        "kind": "HEALTH",
         "signal_date": "2026-08-01",
         "t2_date": "2026-08-03",
         "status": "COMPLETE_VALID",
@@ -2064,6 +2037,93 @@ async def test_shadow_reference_lock_updates_health_and_rolling_together() -> No
             _assert_call_is_scoped(call)
     update_call = [call for call in connection.calls if call[0] == "execute"][-1]
     assert update_call[2][2] == ["health-1", "rolling-1"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_shadow_reference_lock_accepts_health_only() -> None:
+    rows = [
+        {
+            "batch_id": "health-1",
+            "kind": "HEALTH",
+            "reference_status": "PENDING",
+            "reference_prices_json": None,
+            "reference_snapshot_hash": None,
+        }
+    ]
+    connection = _FakeConnection(fetches=[rows], executes=["UPDATE 1"])
+
+    updated = await _repository(connection).update_shadow_references(
+        date(2026, 8, 31),
+        **SCOPE,
+        reference_prices={"000001": 10.0},
+        snapshot_hash="c" * 64,
+    )
+
+    assert updated == ("health-1",)
+
+    status_rows = [{"kind": "HEALTH", "reference_status": "PENDING"}]
+    assert (
+        await _repository(_FakeConnection(fetches=[status_rows])).get_shadow_reference_status(
+            date(2026, 8, 31), **SCOPE
+        )
+        == "PENDING"
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_shadow_reference_finalization_accepts_health_only() -> None:
+    rows = [
+        {
+            "batch_id": "health-1",
+            "kind": "HEALTH",
+            "reference_status": "PENDING",
+            "reference_snapshot_hash": None,
+        }
+    ]
+    connection = _FakeConnection(fetches=[rows], executes=["UPDATE 1"])
+
+    assert await _repository(connection).finalize_shadow_references_unavailable(
+        date(2026, 8, 31), **SCOPE, snapshot_hash="e" * 64
+    ) == ("health-1",)
+
+
+@pytest.mark.asyncio
+async def test_legacy_shadow_reference_lock_rejects_invalid_streams() -> None:
+    def row(batch_id, kind, status="PENDING"):
+        return {
+            "batch_id": batch_id,
+            "kind": kind,
+            "reference_status": status,
+            "reference_prices_json": None,
+            "reference_snapshot_hash": None,
+        }
+
+    invalid_cases = [
+        [row("rolling-1", "ROLLING7")],
+        [row("health-1", "HEALTH"), row("health-2", "HEALTH")],
+        [row("health-1", "HEALTH"), row("other-1", "OTHER")],
+    ]
+    for rows in invalid_cases:
+        with pytest.raises(V20StateConflict):
+            await _repository(_FakeConnection(fetches=[rows])).update_shadow_references(
+                date(2026, 8, 31),
+                **SCOPE,
+                reference_prices={"000001": 10.0},
+                snapshot_hash="c" * 64,
+            )
+
+
+@pytest.mark.asyncio
+async def test_shadow_reference_status_rejects_split_streams() -> None:
+    rows = [
+        {"kind": "HEALTH", "reference_status": "PENDING"},
+        {"kind": "ROLLING7", "reference_status": "LOCKED"},
+    ]
+
+    with pytest.raises(V20StateConflict, match="split status"):
+        await _repository(_FakeConnection(fetches=[rows])).get_shadow_reference_status(
+            date(2026, 8, 31), **SCOPE
+        )
 
 
 @pytest.mark.asyncio

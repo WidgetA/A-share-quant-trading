@@ -40,6 +40,8 @@ class HealthStatus(StrEnum):
 class Rolling7Status(StrEnum):
     BAD = "BAD"
     NON_BAD = "NON_BAD"
+    WARMUP = "WARMUP"
+    DATA_GAP = "DATA_GAP"
     UNKNOWN = "UNKNOWN"
 
 

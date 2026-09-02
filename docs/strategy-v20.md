@@ -41,7 +41,8 @@ final_multiplier = base_multiplier × defense_multiplier
 - `defense_multiplier ∈ {1, 0.5, 0}`；
 - 两层相乘，因此最终可能为 `1 / 0.5 / 0.25 / 0`；
 - 被减掉的投入不分配给其他股票、其他日期或其他批次；
-- 没有推荐票时为 `NO_SIGNAL`；输入不合法时为 `INPUT_INVALID`；两者都不建批次。
+- 没有推荐票时为 `NO_SIGNAL`；输入不合法时为 `INPUT_INVALID`；两者都不建可行动模型批次。
+  ROLLING7 是否形成理论事实只取决于 canonical V16 制品是否完整，与是否实际开仓无关。
 
 ## 3. 时间与行情边界
 
@@ -76,7 +77,8 @@ final_multiplier = base_multiplier × defense_multiplier
    在数据库时钟严格早于 09:40:00 时放行；
 10. 到达 09:40 仍没有 durable 正常决定时，立即以数据库时钟门控失败关闭为
    `INPUT_INVALID` 并密封“不买”通知；09:40 以后形成或被 terminal guard 拒绝的正常
-   决定同样失败关闭，不建 HEALTH、rolling7 或可行动模型批次，也不允许提示追买。
+   决定同样失败关闭，不建 HEALTH 或可行动模型批次，也不允许提示追买。若完整 canonical
+   V16 制品已经形成，独立 ROLLING7 理论事实仍照常记录；否则记录可恢复 `DATA_GAP`。
    decision scheduler 的单调时钟看门狗会在 09:40 取消仍阻塞的预热、扫描或账本对账；
    若有序账本暂时不能补入 `INPUT_INVALID`，必须先持久化稳定 ID 的
    `ENTRY_CUTOFF_NO_BUY` 告警并继续幂等补槽。若交易日历首次加载也阻塞跨点，工作日
@@ -103,8 +105,9 @@ CALENDAR_0940_OPEN_END_LABEL_0941_V1
 剔除不合法候选，再按首次持久接收时间排序：
 
 - 可行动模型腿选择严格早于 D1 09:30 的最后一个合法修订，以便单腿在次日做有限历史恢复；
-- HEALTH/ROLLING7 的全市场影子样本选择严格早于 D0 09:45 的最后一个合法修订，
-  不在 D1 用数千只股票的事后批量历史查询重建；
+- ROLLING7 是由每个完整 canonical V16 制品独立触发的市场健康事实流，不依赖
+  `ENTER`、模型腿、真实订单、持仓或任何交易/shadow ledger；
+- ROLLING7 每腿的 D0 参考价是法定 D0 截止前冻结的原始 `09:41 bar.open`；
 - 同一截止口径下，同一接收时点出现不同合法内容视为该代码冲突；缺失/冲突不得填前值。
 
 模型腿与影子批次分别生成证据 hash；某只模型腿缺价时仅该腿标为 `UNAVAILABLE`。
@@ -149,11 +152,16 @@ health_return
 
 ### 5.1 rolling7
 
-每个有推荐票的 D0 产生一个 ROLLING7 影子批次。批次收益是完整推荐列表各腿从
-09:40 参考价到 D2 收盘的零成本毛价格收益等权平均，缺任一腿则保持缺口，不允许
-删除缺失腿后计算。
+每个完整 canonical V16 制品都产生一个 ROLLING7 事实，即使决策为 `INPUT_INVALID`
+或最终倍率为 0；迟到的恢复制品也产生同一理论事实。成功且完整的空推荐列表是
+`NO_SIGNAL`，不占 7 个信号批次；缺失、失败或不完整制品是 `DATA_GAP`。
 
-每日只使用决策日前已经成熟的最近 7 个完整批次：
+对每个非空 canonical 完整推荐列表，取全部腿等权。批次收益是该完整列表从法定 D0
+截止冻结的原始 `09:41 bar.open` 到官方 D2 日线收盘的零成本毛价格收益等权平均值；
+任一腿缺失是可恢复 `DATA_GAP`，不得删除该腿后计算。
+
+scheduled/manual 决策必须使用同一个冻结 as-of 窗口：取预计 D2 严格早于决策日期的
+最近 7 个已经成熟完整 `SIGNAL` 批次：
 
 ```text
 R7 = 7 个批次收益之和
@@ -161,8 +169,13 @@ L7 = 其中收益 < 0 的批次数
 BAD = (R7 < 0) AND (L7 >= 5)
 ```
 
-不足 7 个，或最近窗口仍有未老化的成熟缺口，状态为 `UNKNOWN`。`UNKNOWN` 与
-`NON_BAD` 都不启动新增防御，即 `defense_multiplier=1`。
+少于 7 个是 `WARMUP`；窗口内未解决缺口是 `DATA_GAP`，且该缺口只在被解决或被之后
+7 个完整信号批次推出窗口后消失。二者不得渲染成泛化 `UNKNOWN`。`WARMUP` 与
+`NON_BAD` 都不启动新增防御，即 `defense_multiplier=1`；`DATA_GAP` 按输入缺口处理。
+
+历史恢复/回填只允许运行在非交易关键路径。它从 as-of 决策窗口向后扫描，直到取得
+7 个完整 `SIGNAL` 批次或显式有界上限，持久化部分结果和 `DATA_GAP` 供重试，且不得
+阻塞 09:40 入场或实时退出。
 
 ### 5.2 G：只在 BAD 时判断
 
@@ -180,7 +193,7 @@ rolling7=`BAD` 时，先把 `defense_multiplier` 降为 0.5，再判断 G：
 
 | rolling7 | G | defense_multiplier |
 |---|---|---:|
-| `NON_BAD` / `UNKNOWN` | 不计算 | 1 |
+| `NON_BAD` / `WARMUP` / `DATA_GAP` | 不计算 | 1 |
 | `BAD` | `CLEAR` / `UNKNOWN` | 0.5 |
 | `BAD` | `TRIGGERED` | 0 |
 
@@ -215,12 +228,14 @@ rolling7、G、最终倍率、原因码和完整 V16 推荐列表；有旧批次
 | D2 | 其他情况分钟收盘 / 参考价 `<= 0.88` | 整腿退出 |
 | D2 14:57 | 尚无更早退出 intent | 整腿计划退出 |
 
-MEWS 只选择来源交易日严格早于 D1、生成和首次持久接收都早于 D1 09:40 的最后一个
-合法快照；缺失或元数据不合法时退回常驻 -12%，并告警。MEWS 不参与每日入场。
-V20 在每个交易日 09:10 后使用 Tushare 的 `margin`、`margin_detail` 和 `daily_basic`
+D2 退出求值消费当前 D2 可得、且来源交易日为 D1 的快照；该快照不是在 D1 前预先
+选择的快照。每条腿在第一次 D2 求值时原子冻结选择。若存在 legacy 较早
+选择且没有任何退出 intent，可升级为该 D2 选择；已存在退出 intent 或已冻结的 D2
+选择永不改变。没有合格快照时冻结常规 -12% 兜底并告警。MEWS 永不影响入场。
+V20 在每个 D2 交易日 09:10 后使用 Tushare 的 `margin`、`margin_detail` 和 `daily_basic`
 原始素材，按冻结的 `mews_v2` 公式在本地续算上一交易日结果。若当天快照缺失，则从持久化
 的紧凑状态现场补齐，校验来源日、数据质量和发布时点后写入自己的 PostgreSQL 快照；成功
-后当天不再访问上游。盘中选股和退出路径只读该快照，不依赖持仓或账本来计算 MEWS。
+后当天不再访问上游。盘中退出路径只读该快照，不依赖持仓或账本来计算 MEWS。
 
 分钟 bar 必须代码、日期和标签匹配，OHLC、成交量、成交额均为有限正数且数据源确认
 完整。退出使用每个标签“第一次持久收到的合法版本”；后续修订保留审计但不能撤销或
@@ -245,7 +260,7 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 - 同一 `official_stream_id + trade_date` 只有一个终态槽；状态更新使用 revision/hash
   CAS；同一公开 `route_id` 只允许一个 advisory-lock leader，不能通过更换 stream 或
   lineage 在同一飞书路由上启动第二个 runtime；
-- 入场槽原子写入配置绑定、输入快照、决定、下一状态、HEALTH/ROLLING7 批次、
+- 入场槽原子写入配置绑定、输入快照、决定、下一状态、HEALTH 批次、
   模型腿和 outbox 骨架；退出 intent 与退出 outbox 骨架同样原子写入；
 - V16 原始快照、当次实际消费的 HEALTH/rolling7/gap 事实、前置状态 hash 和显式
   状态/事件/快照 schema 版本共同进入决策输入快照及决定 ID；重试不能悄悄换一组
@@ -261,7 +276,7 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
   策略是否运行；
 - 禁止把 Python/源文件字节 hash 用作运行时启动、状态兼容、交易、回放或迁移授权；
   禁止 commit/hash 到 hash 的过渡 allowlist 和兼容性证据/回执；禁止因为格式化、
-  注释或文档变化要求迁移；
+  注释或文档变化要求迁移；禁止据此制造运行时“版本分身”或绕过唯一正式槽；
 - 状态兼容只由显式的状态/事件/快照 schema 版本、scope/lineage/stream 作用域、内容
   完整性，以及 schema 变化时的显式数据库迁移授权；
 - 模型、feature list、板块数据和 G 制品等非代码策略制品保留 checksum 完整性校验；
@@ -280,8 +295,9 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 - main 内嵌旧 relay 不具备上述 V20 回显协议，因此 publisher 必须先用 PostgreSQL
   lease 时钟判断剩余窗口：已到截止点时只发送非行动性的过期文案；尚未截止时 HTTP
   超时必须在 09:40 前额外留出保护余量，适配器本地时钟再做一次只会收紧的过期检查；
-- 服务停机漏过交易日时，按交易日顺序补 `INPUT_INVALID` 终态和 rolling 缺口，不能
-  跳日恢复；全新影子 lineage 以显式空前驱开始，生产 lineage 必须从 checkpoint 开始。
+- 服务停机漏过交易日时，正式终态按交易日顺序补 `INPUT_INVALID`，不能跳日恢复；
+  独立 ROLLING7 缺口由非交易关键路径持久化并重试。全新影子 lineage 以显式空前驱
+  开始，生产 lineage 必须从 checkpoint 开始。
 - 交易日历由 V20 已依赖的 Tushare `trade_cal` 独立获取，不复用 legacy 永久缓存；
   每日有界刷新，进程内安全缓存只在仍有历史前驱和至少两个未来交易日时降级复用。
 
@@ -291,12 +307,14 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 只读导出，至少包含：
 
 - 截止日官方状态、最近健康水位和活动 gap；
-- 恰好可供 rolling7 使用的 7 个有效成熟批次；
-- 尚未成熟的 HEALTH/ROLLING7 批次；
-- as-of 决策后才形成、尚未被下一次决策消费的 HEALTH 终态和无效 ROLLING7 事实；
+- 尚未成熟的 HEALTH 批次；
+- as-of 决策后才形成、尚未被下一次决策消费的 HEALTH 终态；
 - source→target 批次 ID 确定性映射；
 - 来源 stream/lineage、截止交易日、来源状态 hash；
 - 与目标运行时一致的显式状态/事件/快照 schema 版本与 scope/lineage/stream 绑定。
+
+ROLLING7 独立理论事实不随交易/shadow ledger 或 lineage checkpoint 迁移；目标运行时
+从其独立持久事实恢复，并在非交易关键路径按上述规则回填缺口。
 
 checkpoint 导出文件使用 `v20-bootstrap-checkpoint/v3` schema：在 v2 的基础上移除已
 退役的来源配置/状态语义审计 hash 字段（`source_config_hash`、

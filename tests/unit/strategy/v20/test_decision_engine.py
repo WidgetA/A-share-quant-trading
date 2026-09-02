@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 TZ = ZoneInfo("Asia/Shanghai")
 
 
-def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams(
+def test_prepare_entry_keeps_full_list_and_reads_independent_rolling_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = load_v20_runtime_config(PROJECT_ROOT)
@@ -123,7 +123,8 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams(
 
     assert prepared.action == "ENTER"
     assert prepared.final_multiplier == 1.0
-    assert len(prepared.commit.shadow_batches) == 2
+    assert len(prepared.commit.shadow_batches) == 1
+    assert prepared.commit.shadow_batches[0].kind == "HEALTH"
     assert prepared.commit.model_batch is not None
     assert len(prepared.commit.model_batch.legs) == 10
     assert all(leg.relative_weight == 0.1 for leg in prepared.commit.model_batch.legs)
@@ -313,7 +314,10 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams(
         artifacts=artifacts,
         calendar=[date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)],
     )
-    assert with_duplicate_gap.commit.semantic["rolling7_state"] == "UNKNOWN"
+    # The gap passed through maturity_gaps is an independent durable market
+    # fact, so it must still force DATA_GAP even when a stale copy also happens
+    # to exist in the legacy state payload.
+    assert with_duplicate_gap.commit.semantic["rolling7_state"] == "DATA_GAP"
     assert with_duplicate_gap.commit.next_state["official_rolling_gaps"] == [
         {
             "gap_id": "pending-gap",
@@ -353,4 +357,4 @@ def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams(
         calendar=[date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)],
     )
     assert completed_same_day.commit.semantic["rolling7_state"] == "NON_BAD"
-    assert completed_same_day.commit.next_state["official_rolling_gaps"][0]["closed"] is True
+    assert completed_same_day.commit.next_state["official_rolling_gaps"][0]["closed"] is False

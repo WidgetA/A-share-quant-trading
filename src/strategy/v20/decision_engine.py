@@ -129,26 +129,6 @@ def _t_plus_two(trade_date: date, calendar: Sequence[date]) -> tuple[date, date]
     return future[0], future[1]
 
 
-def _state_gaps(payload: Mapping[str, Any]) -> list[ActiveRollingGap]:
-    raw = payload.get("official_rolling_gaps")
-    if not isinstance(raw, list):
-        raise ValueError("official_rolling_gaps must be an array")
-    result: list[ActiveRollingGap] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            raise ValueError("official rolling gap must be an object")
-        result.append(
-            ActiveRollingGap(
-                gap_id=str(item["gap_id"]),
-                signal_date=date.fromisoformat(str(item["signal_date"])),
-                maturity_date=date.fromisoformat(str(item["maturity_date"])),
-                closed=bool(item.get("closed", False)),
-                aged_out=bool(item.get("aged_out", False)),
-            )
-        )
-    return result
-
-
 def _policy_input_snapshot(
     *,
     completed_health: Sequence[CompletedHealth],
@@ -326,70 +306,6 @@ def _validate_v16_snapshot_formatter_evidence(snapshot: Mapping[str, Any]) -> No
                 raise ValueError(f"V16 snapshot symbol {field} is invalid")
 
 
-def _coalesce_gaps(
-    persisted: Sequence[ActiveRollingGap],
-    additions: Sequence[ActiveRollingGap],
-) -> list[ActiveRollingGap]:
-    """Merge one immutable gap identity across durable and newly mature input."""
-
-    by_id: dict[str, ActiveRollingGap] = {}
-    for item in (*persisted, *additions):
-        previous = by_id.get(item.gap_id)
-        if previous is not None:
-            if (
-                previous.signal_date != item.signal_date
-                or previous.maturity_date != item.maturity_date
-            ):
-                raise ValueError(f"rolling gap {item.gap_id!r} has conflicting semantics")
-            item = ActiveRollingGap(
-                gap_id=item.gap_id,
-                signal_date=item.signal_date,
-                maturity_date=item.maturity_date,
-                closed=previous.closed or item.closed,
-                aged_out=previous.aged_out or item.aged_out,
-            )
-        by_id[item.gap_id] = item
-    return sorted(by_id.values(), key=lambda gap: (gap.signal_date, gap.gap_id))
-
-
-def _merge_and_age_gaps(
-    *,
-    persisted: Sequence[ActiveRollingGap],
-    additions: Sequence[ActiveRollingGap],
-    completed_rolling: Sequence[CompletedRolling],
-) -> list[dict[str, Any]]:
-    """Return the deterministic next rolling-gap ledger.
-
-    A mature missing/invalid shadow observation blocks rolling7 until seven
-    later complete signal batches have displaced it.  Keeping that fact in the
-    official state is essential: otherwise a process restart would silently
-    turn ``UNKNOWN`` back into an apparently complete seven-batch window.
-    """
-
-    coalesced = _coalesce_gaps(persisted, additions)
-
-    ordered_batches = sorted(
-        completed_rolling,
-        key=lambda item: (item.signal_date, item.t2_date, item.batch_id),
-    )
-    completed_ids = {item.batch_id for item in ordered_batches}
-    result: list[dict[str, Any]] = []
-    for item in coalesced:
-        closed = item.closed or item.gap_id in completed_ids
-        later_complete_n = sum(batch.signal_date > item.signal_date for batch in ordered_batches)
-        aged_out = item.aged_out or (not closed and later_complete_n >= 7)
-        result.append(
-            {
-                "gap_id": item.gap_id,
-                "signal_date": item.signal_date.isoformat(),
-                "maturity_date": item.maturity_date.isoformat(),
-                "closed": closed,
-                "aged_out": aged_out,
-            }
-        )
-    return result
-
-
 def prepare_entry(
     *,
     config: V20RuntimeConfig,
@@ -425,21 +341,15 @@ def prepare_entry(
         RollingBatch(item.batch_id, item.signal_date, item.t2_date, item.batch_return)
         for item in completed_rolling
     ]
-    persisted_gaps = _state_gaps(state.payload)
-    resolved_gap_payloads = _merge_and_age_gaps(
-        persisted=persisted_gaps,
-        additions=maturity_gaps,
-        completed_rolling=completed_rolling,
-    )
     all_gaps = [
         RollingGap(
-            str(item["gap_id"]),
-            date.fromisoformat(str(item["signal_date"])),
-            date.fromisoformat(str(item["maturity_date"])),
-            bool(item["closed"]),
-            bool(item["aged_out"]),
+            item.gap_id,
+            item.signal_date,
+            item.maturity_date,
+            item.closed,
+            item.aged_out,
         )
-        for item in resolved_gap_payloads
+        for item in maturity_gaps
     ]
     rolling = evaluate_rolling7(
         decision_date=bundle.trade_date,
@@ -495,7 +405,6 @@ def prepare_entry(
         **dict(state.payload),
         "state_revision": state.revision + 1,
         "health": serialize_health_snapshot(health_after),
-        "official_rolling_gaps": resolved_gap_payloads,
         "last_terminal_slot_id": slot,
         "last_terminal_trade_date": trade_date_text,
     }
@@ -529,6 +438,7 @@ def prepare_entry(
         "rolling7_state": rolling.status.value,
         "rolling7_r7": rolling.r7,
         "rolling7_l7": rolling.l7,
+        "rolling7_reason": rolling.unknown_reason,
         "rolling7_window_ids": [item.batch_id for item in rolling.window],
         "policy_input_hash": policy_input_hash,
         "v16_snapshot_hash": bundle.snapshot_hash,
@@ -571,7 +481,6 @@ def prepare_entry(
             "top3": symbols[:3],
             "comparison_pool_codes": list(bundle.comparison_pool_codes),
         }
-        rolling_payload = {**common, "symbols": symbols}
         shadow_writes = (
             ShadowBatchWrite(
                 batch_id=batch_id(decision, "HEALTH"),
@@ -579,13 +488,6 @@ def prepare_entry(
                 signal_date=bundle.trade_date,
                 t2_date=d2,
                 payload=health_payload,
-            ),
-            ShadowBatchWrite(
-                batch_id=batch_id(decision, "ROLLING7"),
-                kind="ROLLING7",
-                signal_date=bundle.trade_date,
-                t2_date=d2,
-                payload=rolling_payload,
             ),
         )
 
@@ -691,7 +593,6 @@ def prepare_invalid_entry(
         for item in completed_health
     ]
     health_after = advance_health_state(health_before, observations)
-    persisted_gaps = _state_gaps(state.payload)
     _, d2 = _t_plus_two(trade_date, calendar)
     trade_date_text = trade_date.isoformat()
     slot = official_slot_id(config.official_stream_id, trade_date_text)
@@ -714,25 +615,29 @@ def prepare_invalid_entry(
     snapshot_hash = sha256_json(snapshot)
     decision = decision_id(slot, config.config_hash, snapshot_hash, state.state_hash)
     event = event_id("ENTRY_DECISION", decision)
-    gap_id = named_hash(
-        "V20_OFFICIAL_SHADOW_GAP_ID_V1",
-        {"official_stream_id": config.official_stream_id, "trade_date": trade_date_text},
-    )
-    current_failure_gap = ActiveRollingGap(
-        gap_id=gap_id,
-        signal_date=trade_date,
-        maturity_date=d2,
-    )
-    gaps = _merge_and_age_gaps(
-        persisted=persisted_gaps,
-        additions=(*maturity_gaps, current_failure_gap),
-        completed_rolling=completed_rolling,
+    rolling_batches = [
+        RollingBatch(item.batch_id, item.signal_date, item.t2_date, item.batch_return)
+        for item in completed_rolling
+    ]
+    all_gaps = [
+        RollingGap(
+            item.gap_id,
+            item.signal_date,
+            item.maturity_date,
+            item.closed,
+            item.aged_out,
+        )
+        for item in maturity_gaps
+    ]
+    rolling = evaluate_rolling7(
+        decision_date=trade_date,
+        complete_batches=rolling_batches,
+        gaps=all_gaps,
     )
     next_state = {
         **dict(state.payload),
         "state_revision": state.revision + 1,
         "health": serialize_health_snapshot(health_after),
-        "official_rolling_gaps": gaps,
         "last_terminal_slot_id": slot,
         "last_terminal_trade_date": trade_date_text,
     }
@@ -757,10 +662,11 @@ def prepare_invalid_entry(
         "breadth_valid_n": None,
         "breadth_down_n": None,
         "breadth_wilson_lower": None,
-        "rolling7_state": None,
-        "rolling7_r7": None,
-        "rolling7_l7": None,
-        "rolling7_window_ids": [],
+        "rolling7_state": rolling.status.value,
+        "rolling7_r7": rolling.r7,
+        "rolling7_l7": rolling.l7,
+        "rolling7_reason": rolling.unknown_reason,
+        "rolling7_window_ids": [item.batch_id for item in rolling.window],
         "policy_input_hash": policy_input_hash,
         "g_state": "NOT_EVALUATED",
         "g_max_component_size": None,

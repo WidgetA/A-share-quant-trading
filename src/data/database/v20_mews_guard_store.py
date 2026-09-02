@@ -281,6 +281,7 @@ class V20MewsGuardStore:
         cutoff: datetime,
         late_source_trade_date: date | None = None,
         late_availability_date: date | None = None,
+        evaluation_date: date | None = None,
     ) -> tuple[str | None, str | None, str]:
         record = await self.select_freeze_and_load(
             model_leg_id,
@@ -288,101 +289,24 @@ class V20MewsGuardStore:
             cutoff=cutoff,
             late_source_trade_date=late_source_trade_date,
             late_availability_date=late_availability_date,
+            evaluation_date=evaluation_date,
         )
         return record.snapshot_id, record.fast_state, record.selection_reason
 
-    async def select_freeze_and_load(
+    async def load_frozen_for_leg(
         self,
         model_leg_id: str,
         *,
         d1: date,
         cutoff: datetime,
-        late_source_trade_date: date | None = None,
-        late_availability_date: date | None = None,
-    ) -> SelectedMewsRecord:
-        for attempt in range(_TRANSACTION_RETRY_LIMIT):
-            try:
-                return await self._select_freeze_once(
-                    model_leg_id,
-                    d1=d1,
-                    cutoff=cutoff,
-                    late_source_trade_date=late_source_trade_date,
-                    late_availability_date=late_availability_date,
-                )
-            except Exception as exc:
-                if attempt + 1 < _TRANSACTION_RETRY_LIMIT and _retryable_transaction_failure(exc):
-                    continue
-                raise
-        raise AssertionError("unreachable transaction retry loop")
-
-    async def _select_freeze_once(
-        self,
-        model_leg_id: str,
-        *,
-        d1: date,
-        cutoff: datetime,
-        late_source_trade_date: date | None = None,
-        late_availability_date: date | None = None,
-    ) -> SelectedMewsRecord:
-        if not isinstance(model_leg_id, str) or not model_leg_id:
-            raise ValueError("model_leg_id is invalid")
-        if type(d1) is not date:
-            raise TypeError("MEWS selection d1 must be a date")
-        cutoff = _aware(cutoff, "cutoff")
-        if (late_source_trade_date is None) != (late_availability_date is None):
-            raise ValueError("late source and availability must be supplied together")
-        if late_source_trade_date is not None:
-            if type(late_source_trade_date) is not date:
-                raise TypeError("MEWS late_source_trade_date must be a date")
-            if type(late_availability_date) is not date:
-                raise TypeError("MEWS late_availability_date must be a date")
-            if late_source_trade_date >= d1 or late_availability_date != d1:
-                raise ValueError("MEWS late selection dates violate d1")
-
-        candidate_sql = f"""
-            SELECT {_SNAPSHOT_COLUMNS}
-            FROM {self._schema}.mews_snapshots AS snapshot
-            WHERE snapshot.receipt_sealed_at IS NOT NULL
-              AND snapshot.model_version='{_MODEL_VERSION}'
-              AND snapshot.snapshot_json->>'model_version'=snapshot.model_version
-              AND snapshot.snapshot_json->>'source_trade_date'
-                  =snapshot.source_trade_date::text
-              AND snapshot.snapshot_json->'evidence'->>'profile'
-                  ='{_EVIDENCE_PROFILE}'
-              AND snapshot.generated_at <= snapshot.received_at
-              AND snapshot.received_at <= snapshot.receipt_sealed_at
-              AND snapshot.source_trade_date < $1::date
-              AND (
-                (
-                  snapshot.generated_at < $2
-                  AND snapshot.receipt_sealed_at < $2
-                  AND snapshot.snapshot_json->'evidence'->>'signal_available_date'
-                      =timezone('Asia/Shanghai',snapshot.generated_at)::date::text
-                  AND timezone('Asia/Shanghai',snapshot.generated_at)::date <= $1::date
-                )
-                OR (
-                  $3::date IS NOT NULL
-                  AND $4::date IS NOT NULL
-                  AND snapshot.source_trade_date=$3::date
-                  AND snapshot.snapshot_json->'evidence'->>'signal_available_date'
-                      =$4::text
-                  AND timezone('Asia/Shanghai',snapshot.generated_at)::date
-                      =$4::date
-                  AND timezone('Asia/Shanghai',snapshot.receipt_sealed_at)::date
-                      =$4::date
-                )
-              )
-            ORDER BY snapshot.source_trade_date DESC NULLS LAST,
-                     snapshot.receipt_sealed_at DESC NULLS LAST,
-                     snapshot.generated_at DESC NULLS LAST,
-                     snapshot.snapshot_id DESC
-            LIMIT 1
-        """
+        late_source_trade_date: date | None,
+        evaluation_date: date | None = None,
+    ) -> SelectedMewsRecord | None:
         async with self._repository.pool.acquire() as connection:
             async with connection.transaction(isolation="serializable"):
                 leg = await connection.fetchrow(
                     f"""
-                    SELECT leg.d1
+                    SELECT leg.d1,leg.d2
                     FROM {self._schema}.model_legs AS leg
                     JOIN {self._schema}.model_batches AS batch USING (model_batch_id)
                     JOIN {self._schema}.outbox_events AS source
@@ -398,6 +322,10 @@ class V20MewsGuardStore:
                     raise V20RepositoryError(f"unknown model leg {model_leg_id!r}")
                 if leg["d1"] != d1:
                     raise V20SemanticConflict("MEWS selection d1 does not match model leg")
+                if evaluation_date is not None and leg["d2"] != evaluation_date:
+                    raise V20SemanticConflict(
+                        "MEWS selection evaluation date does not match model leg"
+                    )
                 existing = await connection.fetchrow(
                     f"""
                     SELECT selection.model_leg_id,selection.cutoff_ts,
@@ -417,20 +345,250 @@ class V20MewsGuardStore:
                     """,
                     model_leg_id,
                 )
+                intent = None
+                if evaluation_date is not None:
+                    intent = await connection.fetchrow(
+                        f"""
+                        SELECT exit_intent_id
+                        FROM {self._schema}.exit_intents
+                        WHERE model_leg_id=$1
+                        FOR UPDATE
+                        """,
+                        model_leg_id,
+                    )
                 if existing is not None:
-                    if existing["cutoff_ts"] != cutoff:
-                        raise V20SemanticConflict(
-                            "MEWS selection was already frozen with a different cutoff"
+                    existing_cutoff = _aware(existing["cutoff_ts"], "selection cutoff_ts")
+                    if evaluation_date is None:
+                        if existing_cutoff != cutoff:
+                            raise V20SemanticConflict(
+                                "MEWS selection was already frozen with a different cutoff"
+                            )
+                        return self._record_from_selection(
+                            existing,
+                            d1=d1,
+                            cutoff=cutoff,
+                            late_source_trade_date=late_source_trade_date,
+                            evaluation_date=evaluation_date,
                         )
+                    if existing_cutoff == cutoff:
+                        return self._record_from_selection(
+                            existing,
+                            d1=d1,
+                            cutoff=cutoff,
+                            late_source_trade_date=late_source_trade_date,
+                            evaluation_date=evaluation_date,
+                        )
+                    existing_cutoff_day = existing_cutoff.astimezone(_SHANGHAI_TZ).date()
+                    if existing_cutoff_day != d1:
+                        raise V20SemanticConflict(
+                            "MEWS historical selection requires an exit intent"
+                        )
+                    if intent is None:
+                        return None
                     return self._record_from_selection(
                         existing,
                         d1=d1,
                         cutoff=cutoff,
                         late_source_trade_date=late_source_trade_date,
+                        evaluation_date=evaluation_date,
                     )
+                return None
+
+    async def select_freeze_and_load(
+        self,
+        model_leg_id: str,
+        *,
+        d1: date,
+        cutoff: datetime,
+        late_source_trade_date: date | None = None,
+        late_availability_date: date | None = None,
+        evaluation_date: date | None = None,
+    ) -> SelectedMewsRecord:
+        for attempt in range(_TRANSACTION_RETRY_LIMIT):
+            try:
+                return await self._select_freeze_once(
+                    model_leg_id,
+                    d1=d1,
+                    cutoff=cutoff,
+                    late_source_trade_date=late_source_trade_date,
+                    late_availability_date=late_availability_date,
+                    evaluation_date=evaluation_date,
+                )
+            except Exception as exc:
+                if attempt + 1 < _TRANSACTION_RETRY_LIMIT and _retryable_transaction_failure(exc):
+                    continue
+                raise
+        raise AssertionError("unreachable transaction retry loop")
+
+    async def _select_freeze_once(
+        self,
+        model_leg_id: str,
+        *,
+        d1: date,
+        cutoff: datetime,
+        late_source_trade_date: date | None = None,
+        late_availability_date: date | None = None,
+        evaluation_date: date | None = None,
+    ) -> SelectedMewsRecord:
+        if not isinstance(model_leg_id, str) or not model_leg_id:
+            raise ValueError("model_leg_id is invalid")
+        if type(d1) is not date:
+            raise TypeError("MEWS selection d1 must be a date")
+        cutoff = _aware(cutoff, "cutoff")
+        if (late_source_trade_date is None) != (late_availability_date is None):
+            raise ValueError("late source and availability must be supplied together")
+        if late_source_trade_date is not None:
+            if type(late_source_trade_date) is not date:
+                raise TypeError("MEWS late_source_trade_date must be a date")
+            if type(late_availability_date) is not date:
+                raise TypeError("MEWS late_availability_date must be a date")
+        if evaluation_date is not None:
+            if type(evaluation_date) is not date:
+                raise TypeError("MEWS evaluation_date must be a date")
+            if late_source_trade_date is None:
+                raise ValueError("MEWS evaluation requires an exact late snapshot")
+            if late_source_trade_date >= evaluation_date:
+                raise ValueError("MEWS evaluation late source is not earlier")
+            if late_availability_date != evaluation_date:
+                raise ValueError("MEWS evaluation late availability is invalid")
+        elif late_source_trade_date is not None and (
+            late_source_trade_date >= d1 or late_availability_date != d1
+        ):
+            raise ValueError("MEWS late selection dates violate d1")
+
+        candidate_sql = f"""
+            SELECT {_SNAPSHOT_COLUMNS}
+            FROM {self._schema}.mews_snapshots AS snapshot
+            WHERE snapshot.receipt_sealed_at IS NOT NULL
+              AND snapshot.model_version='{_MODEL_VERSION}'
+              AND snapshot.snapshot_json->>'model_version'=snapshot.model_version
+              AND snapshot.snapshot_json->>'source_trade_date'
+                  =snapshot.source_trade_date::text
+              AND snapshot.snapshot_json->'evidence'->>'profile'
+                  ='{_EVIDENCE_PROFILE}'
+              AND snapshot.generated_at <= snapshot.received_at
+              AND snapshot.received_at <= snapshot.receipt_sealed_at
+              AND snapshot.source_trade_date < (CASE WHEN $4::date IS NULL
+                                                     THEN $1::date ELSE $4::date END)
+              AND (
+                (
+                  $4::date IS NULL
+                  AND snapshot.generated_at < $2
+                  AND snapshot.receipt_sealed_at < $2
+                  AND snapshot.snapshot_json->'evidence'->>'signal_available_date'
+                      =timezone('Asia/Shanghai',snapshot.generated_at)::date::text
+                  AND timezone('Asia/Shanghai',snapshot.generated_at)::date <= $1::date
+                )
+                OR (
+                  $4::date IS NOT NULL
+                  AND $3::date IS NOT NULL
+                  AND snapshot.source_trade_date=$3::date
+                  AND snapshot.snapshot_json->'evidence'->>'signal_available_date'
+                      =$4::text
+                  AND timezone('Asia/Shanghai',snapshot.generated_at)::date
+                      =$4::date
+                  AND timezone('Asia/Shanghai',snapshot.receipt_sealed_at)::date
+                      =$4::date
+                )
+              )
+            ORDER BY snapshot.source_trade_date DESC NULLS LAST,
+                     snapshot.receipt_sealed_at DESC NULLS LAST,
+                     snapshot.generated_at DESC NULLS LAST,
+                     snapshot.snapshot_id DESC
+            LIMIT 1
+        """
+        async with self._repository.pool.acquire() as connection:
+            async with connection.transaction(isolation="serializable"):
+                leg = await connection.fetchrow(
+                    f"""
+                    SELECT leg.d1,leg.d2
+                    FROM {self._schema}.model_legs AS leg
+                    JOIN {self._schema}.model_batches AS batch USING (model_batch_id)
+                    JOIN {self._schema}.outbox_events AS source
+                      ON source.event_id=batch.source_event_id
+                    WHERE leg.model_leg_id=$1
+                      AND source.seal_status='SEALED'
+                      AND {_model_batch_authorization_sql(self._schema)}
+                    FOR UPDATE OF leg
+                    """,
+                    model_leg_id,
+                )
+                if leg is None:
+                    raise V20RepositoryError(f"unknown model leg {model_leg_id!r}")
+                if leg["d1"] != d1:
+                    raise V20SemanticConflict("MEWS selection d1 does not match model leg")
+                if evaluation_date is not None and leg["d2"] != evaluation_date:
+                    raise V20SemanticConflict(
+                        "MEWS selection evaluation date does not match model leg"
+                    )
+                existing = await connection.fetchrow(
+                    f"""
+                    SELECT selection.model_leg_id,selection.cutoff_ts,
+                           selection.selection_reason,selection.selected_at,
+                           selection.snapshot_id AS selected_snapshot_id,
+                           selection.fast_state AS selected_fast_state,
+                           snapshot.snapshot_id,snapshot.source_trade_date,
+                           snapshot.generated_at,snapshot.received_at,
+                           snapshot.receipt_sealed_at,snapshot.fast_state,
+                           snapshot.model_version,snapshot.data_version,
+                           snapshot.content_hash,snapshot.snapshot_json
+                    FROM {self._schema}.leg_mews_selection AS selection
+                    LEFT JOIN {self._schema}.mews_snapshots AS snapshot
+                      ON snapshot.snapshot_id=selection.snapshot_id
+                    WHERE selection.model_leg_id=$1
+                    FOR UPDATE OF selection
+                    """,
+                    model_leg_id,
+                )
+                intent = None
+                if evaluation_date is not None:
+                    intent = await connection.fetchrow(
+                        f"""
+                        SELECT exit_intent_id
+                        FROM {self._schema}.exit_intents
+                        WHERE model_leg_id=$1
+                        FOR UPDATE
+                        """,
+                        model_leg_id,
+                    )
+                if existing is not None:
+                    existing_cutoff = _aware(existing["cutoff_ts"], "selection cutoff_ts")
+                    if evaluation_date is None:
+                        if existing_cutoff != cutoff:
+                            raise V20SemanticConflict(
+                                "MEWS selection was already frozen with a different cutoff"
+                            )
+                        return self._record_from_selection(
+                            existing,
+                            d1=d1,
+                            cutoff=cutoff,
+                            late_source_trade_date=late_source_trade_date,
+                            evaluation_date=evaluation_date,
+                        )
+                    if existing_cutoff == cutoff:
+                        return self._record_from_selection(
+                            existing,
+                            d1=d1,
+                            cutoff=cutoff,
+                            late_source_trade_date=late_source_trade_date,
+                            evaluation_date=evaluation_date,
+                        )
+                    existing_cutoff_day = existing_cutoff.astimezone(_SHANGHAI_TZ).date()
+                    if existing_cutoff_day != d1:
+                        raise V20SemanticConflict(
+                            "MEWS selection was already frozen with an invalid cutoff"
+                        )
+                    if intent is not None:
+                        return self._record_from_selection(
+                            existing,
+                            d1=d1,
+                            cutoff=cutoff,
+                            late_source_trade_date=late_source_trade_date,
+                            evaluation_date=evaluation_date,
+                        )
                 row = await connection.fetchrow(
                     candidate_sql,
-                    d1,
+                    (d1 if evaluation_date is None else evaluation_date),
                     cutoff,
                     late_source_trade_date,
                     late_availability_date,
@@ -443,25 +601,45 @@ class V20MewsGuardStore:
                     snapshot_id, fast_state, reason = _snapshot_from_row(
                         row,
                         cutoff=cutoff,
-                        source_trade_date=None,
-                        availability_date=d1,
-                        source_must_precede=d1,
+                        source_trade_date=(
+                            None if evaluation_date is None else late_source_trade_date
+                        ),
+                        availability_date=(d1 if evaluation_date is None else evaluation_date),
+                        source_must_precede=(d1 if evaluation_date is None else evaluation_date),
                     )
-                inserted = await connection.fetchrow(
-                    f"""
-                    INSERT INTO {self._schema}.leg_mews_selection
-                        (model_leg_id,snapshot_id,fast_state,cutoff_ts,selection_reason)
-                    VALUES ($1,$2,$3,$4,$5)
-                    RETURNING model_leg_id,cutoff_ts,selection_reason,selected_at,
-                              snapshot_id AS selected_snapshot_id,
-                              fast_state AS selected_fast_state
-                    """,
-                    model_leg_id,
-                    snapshot_id,
-                    fast_state,
-                    cutoff,
-                    reason,
-                )
+                if existing is None:
+                    inserted = await connection.fetchrow(
+                        f"""
+                        INSERT INTO {self._schema}.leg_mews_selection
+                            (model_leg_id,snapshot_id,fast_state,cutoff_ts,selection_reason)
+                        VALUES ($1,$2,$3,$4,$5)
+                        RETURNING model_leg_id,cutoff_ts,selection_reason,selected_at,
+                                  snapshot_id AS selected_snapshot_id,
+                                  fast_state AS selected_fast_state
+                        """,
+                        model_leg_id,
+                        snapshot_id,
+                        fast_state,
+                        cutoff,
+                        reason,
+                    )
+                else:
+                    inserted = await connection.fetchrow(
+                        f"""
+                        UPDATE {self._schema}.leg_mews_selection
+                        SET snapshot_id=$2,fast_state=$3,cutoff_ts=$4,selection_reason=$5,
+                            selected_at=CURRENT_TIMESTAMP
+                        WHERE model_leg_id=$1
+                        RETURNING model_leg_id,cutoff_ts,selection_reason,selected_at,
+                                  snapshot_id AS selected_snapshot_id,
+                                  fast_state AS selected_fast_state
+                        """,
+                        model_leg_id,
+                        snapshot_id,
+                        fast_state,
+                        cutoff,
+                        reason,
+                    )
                 snapshot_for_record = row if row is not None else _null_snapshot_row()
                 snapshot_values = {
                     field: snapshot_for_record[field]
@@ -483,6 +661,7 @@ class V20MewsGuardStore:
                     d1=d1,
                     cutoff=cutoff,
                     late_source_trade_date=late_source_trade_date,
+                    evaluation_date=evaluation_date,
                 )
 
     def _record_from_selection(
@@ -492,12 +671,16 @@ class V20MewsGuardStore:
         d1: date,
         cutoff: datetime,
         late_source_trade_date: date | None,
+        evaluation_date: date | None = None,
     ) -> SelectedMewsRecord:
         if not hasattr(row, "__getitem__"):
             raise V20SemanticConflict("MEWS selection row is not indexable")
         selected_at = _aware(row["selected_at"], "selected_at")
         stored_cutoff = _aware(row["cutoff_ts"], "selection cutoff_ts")
-        if stored_cutoff != cutoff:
+        historical_cutoff = evaluation_date is not None and stored_cutoff != cutoff
+        if historical_cutoff and stored_cutoff.astimezone(_SHANGHAI_TZ).date() != d1:
+            raise V20SemanticConflict("MEWS frozen selection cutoff is unsupported")
+        if stored_cutoff != cutoff and not historical_cutoff:
             raise V20SemanticConflict("MEWS selection cutoff is invalid")
         selected_snapshot = row["selected_snapshot_id"]
         selected_fast_state = row["selected_fast_state"]
@@ -538,10 +721,16 @@ class V20MewsGuardStore:
 
         validated_id, validated_fast_state, validated_reason = _snapshot_from_row(
             row,
-            cutoff=cutoff,
-            source_trade_date=None,
-            availability_date=d1,
-            source_must_precede=d1,
+            cutoff=(stored_cutoff if historical_cutoff else cutoff),
+            source_trade_date=(
+                late_source_trade_date
+                if evaluation_date is not None and not historical_cutoff
+                else None
+            ),
+            availability_date=(
+                stored_cutoff.astimezone(_SHANGHAI_TZ).date() if evaluation_date is not None else d1
+            ),
+            source_must_precede=(evaluation_date if evaluation_date is not None else d1),
         )
         if selected_snapshot != validated_id:
             raise V20SemanticConflict("MEWS selection snapshot_id is inconsistent")
@@ -549,8 +738,12 @@ class V20MewsGuardStore:
             raise V20SemanticConflict("MEWS selected fast_state differs from snapshot")
         if selected_at < row["receipt_sealed_at"]:
             raise V20SemanticConflict("MEWS selected_at precedes receipt_sealed_at")
-        if validated_reason == "ELIGIBLE_LATE_SAME_DAY" and (
-            late_source_trade_date is None or row["source_trade_date"] != late_source_trade_date
+        if (
+            not historical_cutoff
+            and validated_reason == "ELIGIBLE_LATE_SAME_DAY"
+            and (
+                late_source_trade_date is None or row["source_trade_date"] != late_source_trade_date
+            )
         ):
             raise V20SemanticConflict("MEWS late selection lacks the exact late source trade date")
         if reason != validated_reason:

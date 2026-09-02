@@ -21,6 +21,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +33,13 @@ from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_ENTRY_SEMANTIC_SCHEMA,
     V20_FEISHU_FORMATTER_PROFILE,
+)
+from src.strategy.v20.rolling7_market_health import (
+    BatchStatus,
+    CanonicalRecommendation,
+    Rolling7Batch,
+    Rolling7Leg,
+    SignalKind,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +82,12 @@ def _render_outbox_at_most_once_migration(schema: str) -> str:
     return standalone.replace("v20.", f"{schema}.").replace(
         "table_schema='v20'", f"table_schema='{schema}'"
     )
+
+
+def _render_rolling7_market_health_migration(schema: str) -> str:
+    migration = _PROJECT_ROOT / "migrations" / "v20" / "003_rolling7_market_health.sql"
+    standalone = migration.read_text(encoding="utf-8")
+    return standalone.replace("v20.", f"{schema}.")
 
 
 class V20RepositoryError(RuntimeError):
@@ -250,7 +264,7 @@ def _normalize_bootstrap_shadow(raw: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(raw["kind"], str):
         raise ValueError("bootstrap shadow kind must be a string")
     kind = raw["kind"]
-    if kind not in {"HEALTH", "ROLLING7"}:
+    if kind != "HEALTH":
         raise ValueError("invalid bootstrap shadow kind")
     if not isinstance(raw["signal_date"], str) or not isinstance(raw["t2_date"], str):
         raise ValueError("bootstrap shadow dates must be ISO strings")
@@ -331,28 +345,24 @@ def _normalize_bootstrap_shadow(raw: Mapping[str, Any]) -> dict[str, Any]:
 def _normalize_bootstrap_shadows(
     rows: Sequence[Mapping[str, Any]],
     *,
-    require_rolling_window: bool,
+    checkpoint_import: bool,
 ) -> tuple[dict[str, Any], ...]:
-    normalized = tuple(_normalize_bootstrap_shadow(row) for row in rows)
+    if not checkpoint_import:
+        if rows:
+            raise ValueError("empty forward-shadow genesis cannot import shadow batches")
+        return ()
+    # Older checkpoint schemas carried ROLLING7 shadow rows.  Rolling7 now
+    # restores exclusively from its lineage-independent fact table, so those
+    # legacy rows are accepted as inert input and deliberately not imported.
+    normalized = tuple(
+        _normalize_bootstrap_shadow(row) for row in rows if row.get("kind") != "ROLLING7"
+    )
     batch_ids = [str(row["batch_id"]) for row in normalized]
     source_ids = [str(row["source_batch_id"]) for row in normalized]
     if len(batch_ids) != len(set(batch_ids)):
         raise ValueError("bootstrap shadow batch_id values must be unique")
     if len(source_ids) != len(set(source_ids)):
         raise ValueError("bootstrap shadow source_batch_id values must be unique")
-    if require_rolling_window:
-        valid_rolling = [
-            row
-            for row in normalized
-            if row["kind"] == "ROLLING7" and row["status"] == "COMPLETE_VALID"
-        ]
-        signal_dates = {row["signal_date"] for row in valid_rolling}
-        if len(valid_rolling) < 7 or len(signal_dates) < 7:
-            raise ValueError(
-                "checkpoint bootstrap requires at least seven distinct valid rolling batches"
-            )
-    elif normalized:
-        raise ValueError("empty forward-shadow genesis cannot import shadow batches")
     return normalized
 
 
@@ -601,44 +611,11 @@ def _validate_checkpoint_state_facts(
         ):
             raise ValueError("checkpoint health observation exceeds its watermark")
 
-    gaps = state.get("official_rolling_gaps")
-    if not isinstance(gaps, list):
-        raise ValueError("checkpoint rolling gaps must be an array")
-    seen_gap_ids: set[str] = set()
-    gap_keys = {"gap_id", "signal_date", "maturity_date", "closed", "aged_out"}
-    for gap in gaps:
-        if not isinstance(gap, Mapping) or set(gap) != gap_keys:
-            raise ValueError("checkpoint rolling gap field set mismatch")
-        if (
-            not isinstance(gap["gap_id"], str)
-            or not isinstance(gap["signal_date"], str)
-            or not isinstance(gap["maturity_date"], str)
-        ):
-            raise ValueError("checkpoint rolling gap types are invalid")
-        gap_id = gap["gap_id"]
-        if not gap_id or gap_id in seen_gap_ids:
-            raise ValueError("checkpoint rolling gap IDs must be non-empty and unique")
-        seen_gap_ids.add(gap_id)
-        try:
-            gap_signal = date.fromisoformat(gap["signal_date"])
-            gap_maturity = date.fromisoformat(gap["maturity_date"])
-        except ValueError as exc:
-            raise ValueError("checkpoint rolling gap dates are malformed") from exc
-        if (
-            type(gap["closed"]) is not bool
-            or type(gap["aged_out"]) is not bool
-            or gap_maturity <= gap_signal
-        ):
-            raise ValueError("checkpoint rolling gap values are invalid")
-        if not gap["closed"] and not gap["aged_out"]:
-            fact = by_id.get(gap_id)
-            if fact is None or not (
-                fact["kind"] == "ROLLING7"
-                and fact["signal_date"] == gap_signal
-                and fact["t2_date"] == gap_maturity
-                and fact["status"] in {"PENDING", "COMPLETE_INVALID"}
-            ):
-                raise ValueError("active checkpoint rolling gap lacks its exact shadow fact")
+    # ``official_rolling_gaps`` remains in v1 state JSON only as a retired
+    # schema field.  New checkpoints normalize it to empty and never bind it
+    # to lineage shadow facts.
+    if state.get("official_rolling_gaps") != []:
+        raise ValueError("retired checkpoint rolling gaps must be empty")
 
 
 def _model_batch_semantics(batch: ModelBatchWrite | None) -> object:
@@ -1799,8 +1776,41 @@ def migration_sql(schema: str = "v20") -> str:
         _MIGRATION_TEMPLATE.format(schema=schema)
         + "\n\n"
         + _render_outbox_at_most_once_migration(schema)
+        + "\n\n"
+        + _render_rolling7_market_health_migration(schema)
         + "\n"
     )
+
+
+@dataclass(frozen=True)
+class Rolling7MarketHealthRecord:
+    batch: Rolling7Batch
+    updated_at: datetime
+
+
+def _legacy_shadow_rows_valid(rows):
+    kinds = [str(row["kind"]) for row in rows]
+    valid = kinds.count("HEALTH") == 1
+    valid = valid and kinds.count("ROLLING7") <= 1
+    valid = valid and set(kinds) <= {"HEALTH", "ROLLING7"}
+    return valid
+
+
+def _rolling7_market_health_evidence(values) -> dict[str, float]:
+    if not isinstance(values, dict):
+        raise V20SemanticConflict("rolling7 market evidence is invalid")
+    evidence: dict[str, float] = {}
+    try:
+        for code, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+                raise ValueError
+            number = float(value)
+            if not math.isfinite(number) or number <= 0:
+                raise ValueError
+            evidence[str(code)] = number
+    except (OverflowError, TypeError, ValueError) as error:
+        raise V20SemanticConflict("rolling7 market evidence is invalid") from error
+    return evidence
 
 
 class V20Repository:
@@ -2063,7 +2073,7 @@ class V20Repository:
             raise ValueError("empty shadow bootstrap cannot carry a checkpoint hash")
         normalized_shadows = _normalize_bootstrap_shadows(
             bootstrap_shadow_batches,
-            require_rolling_window=bootstrap_mode == "CHECKPOINT",
+            checkpoint_import=bootstrap_mode == "CHECKPOINT",
         )
         _validate_checkpoint_state_facts(state, normalized_shadows)
         async with self.pool.acquire() as connection:
@@ -2318,8 +2328,8 @@ class V20Repository:
         terminal slot for ``as_of_trade_date``.  This avoids exporting a state
         that has not consumed already-mature shadow facts.  The target starts
         at revision zero with no fabricated target-stream predecessor, while
-        the health watermark, rolling gaps, seven valid rolling observations,
-        and every still-pending batch are migrated into the new lineage.
+        the health watermark and required HEALTH shadow facts are migrated
+        into the new lineage.  Rolling7 restores from its independent table.
         """
 
         _require_scope(source_official_stream_id, source_lineage_id)
@@ -2386,9 +2396,8 @@ class V20Repository:
                     raise V20StateConflict("checkpoint target lineage already exists")
 
                 health = source_state["health"]
-                gaps = source_state["official_rolling_gaps"]
-                if not isinstance(health, Mapping) or not isinstance(gaps, list):
-                    raise V20SemanticConflict("source health/gap state is malformed")
+                if not isinstance(health, Mapping):
+                    raise V20SemanticConflict("source health state is malformed")
                 recent_valid = health.get("recent_valid")
                 last_processed = health.get("last_processed_key")
                 if not isinstance(recent_valid, list):
@@ -2415,49 +2424,24 @@ class V20Repository:
                     health_watermark_signal = None
                     health_watermark_batch = None
 
-                active_gap_ids: set[str] = set()
-                all_gap_ids: set[str] = set()
-                for gap in gaps:
-                    if not isinstance(gap, Mapping) or not gap.get("gap_id"):
-                        raise V20SemanticConflict("source rolling gap is malformed")
-                    gap_id = str(gap["gap_id"])
-                    all_gap_ids.add(gap_id)
-                    if not bool(gap.get("closed", False)) and not bool(gap.get("aged_out", False)):
-                        active_gap_ids.add(gap_id)
-                referenced_ids = sorted(health_batch_ids | active_gap_ids)
+                referenced_ids = sorted(health_batch_ids)
                 shadow_rows = await connection.fetch(
                     f"""
-                    WITH latest_rolling AS (
-                        SELECT batch_id
-                        FROM {self.schema}.shadow_batches
-                        WHERE official_stream_id=$1 AND lineage_id=$2
-                          AND kind='ROLLING7' AND status='COMPLETE_VALID'
-                          AND t2_date <= $3
-                        ORDER BY t2_date DESC,signal_date DESC,batch_id DESC
-                        LIMIT 7
-                    )
                     SELECT shadow.*
                     FROM {self.schema}.shadow_batches AS shadow
                     WHERE shadow.official_stream_id=$1 AND shadow.lineage_id=$2
+                      AND shadow.kind='HEALTH'
                       AND (
                         (shadow.status='PENDING' AND shadow.signal_date <= $3)
-                        OR shadow.batch_id IN (SELECT batch_id FROM latest_rolling)
                         OR shadow.batch_id=ANY($4::text[])
                         OR (
-                            shadow.kind='HEALTH'
-                            AND shadow.status IN ('COMPLETE_VALID','COMPLETE_INVALID')
+                            shadow.status IN ('COMPLETE_VALID','COMPLETE_INVALID')
                             AND shadow.t2_date <= $3
                             AND (
                                 $5::date IS NULL
                                 OR (shadow.t2_date,shadow.signal_date,shadow.batch_id)
                                    > ($5::date,$6::date,$7::text)
                             )
-                        )
-                        OR (
-                            shadow.kind='ROLLING7'
-                            AND shadow.status='COMPLETE_INVALID'
-                            AND shadow.signal_date <= $3
-                            AND NOT (shadow.batch_id=ANY($8::text[]))
                         )
                       )
                     ORDER BY shadow.signal_date,shadow.t2_date,shadow.kind,shadow.batch_id
@@ -2469,29 +2453,21 @@ class V20Repository:
                     health_watermark_t2,
                     health_watermark_signal,
                     health_watermark_batch,
-                    sorted(all_gap_ids),
                 )
 
         rows_by_id = {str(row["batch_id"]): row for row in shadow_rows}
         if len(rows_by_id) != len(shadow_rows):
             raise V20SemanticConflict("source checkpoint contains duplicate shadow batch IDs")
-        missing_references = (health_batch_ids | active_gap_ids) - set(rows_by_id)
+        if any(row["kind"] != "HEALTH" for row in shadow_rows):
+            raise V20SemanticConflict("source checkpoint query returned a non-HEALTH shadow fact")
+        missing_references = health_batch_ids - set(rows_by_id)
         if missing_references:
             raise V20StateConflict(
-                "source checkpoint is missing referenced health/active-gap shadow facts: "
+                "source checkpoint is missing referenced health shadow facts: "
                 + ",".join(sorted(missing_references))
             )
-        rolling_rows = [
-            row
-            for row in shadow_rows
-            if row["kind"] == "ROLLING7" and row["status"] == "COMPLETE_VALID"
-        ]
-        if len(rolling_rows) != 7 or len({row["signal_date"] for row in rolling_rows}) != 7:
-            raise V20StateConflict(
-                "source checkpoint requires seven distinct valid rolling batches at the cut"
-            )
 
-        migration_source_ids = set(rows_by_id) | all_gap_ids | health_batch_ids
+        migration_source_ids = set(rows_by_id) | health_batch_ids
         id_mapping = {
             source_batch_id: _bootstrap_target_batch_id(
                 source_official_stream_id=source_official_stream_id,
@@ -2507,6 +2483,7 @@ class V20Repository:
         target_state["state_revision"] = 0
         target_state["last_terminal_slot_id"] = None
         target_state["last_terminal_trade_date"] = None
+        target_state["official_rolling_gaps"] = []
         target_health = target_state["health"]
         for observation in target_health["recent_valid"]:
             observation["batch_id"] = id_mapping[observation["batch_id"]]
@@ -2514,9 +2491,6 @@ class V20Repository:
             target_health["last_processed_key"][2] = id_mapping[
                 target_health["last_processed_key"][2]
             ]
-        for gap in target_state["official_rolling_gaps"]:
-            gap["gap_id"] = id_mapping[gap["gap_id"]]
-
         exported_batches: list[dict[str, Any]] = []
         for source_batch_id, row in sorted(rows_by_id.items()):
             exported_batches.append(
@@ -2542,7 +2516,7 @@ class V20Repository:
             )
         normalized_batches = _normalize_bootstrap_shadows(
             exported_batches,
-            require_rolling_window=True,
+            checkpoint_import=True,
         )
         _validate_checkpoint_state_facts(target_state, normalized_batches)
         serialized_batches = [
@@ -4155,10 +4129,9 @@ class V20Repository:
                     raise V20RepositoryError(
                         f"no shadow batches exist for signal date {signal_date.isoformat()}"
                     )
-                kinds = [row["kind"] for row in rows]
-                if sorted(kinds) != ["HEALTH", "ROLLING7"]:
+                if not _legacy_shadow_rows_valid(rows):
                     raise V20StateConflict(
-                        "shadow reference lock requires exactly one HEALTH and one ROLLING7 batch"
+                        "shadow reference lock requires one HEALTH and at most one legacy ROLLING7"
                     )
                 pending_ids: list[str] = []
                 for row in rows:
@@ -4222,8 +4195,8 @@ class V20Repository:
             )
         if not rows:
             return None
-        if sorted(str(row["kind"]) for row in rows) != ["HEALTH", "ROLLING7"]:
-            raise V20StateConflict("shadow reference status requires exactly two streams")
+        if not _legacy_shadow_rows_valid(rows):
+            raise V20StateConflict("shadow reference status requires valid legacy streams")
         statuses = {str(row["reference_status"]) for row in rows}
         if len(statuses) != 1:
             raise V20StateConflict("shadow reference streams have split status")
@@ -4262,9 +4235,10 @@ class V20Repository:
                     raise V20RepositoryError(
                         f"no shadow batches exist for signal date {signal_date.isoformat()}"
                     )
-                if sorted(row["kind"] for row in rows) != ["HEALTH", "ROLLING7"]:
+                if not _legacy_shadow_rows_valid(rows):
                     raise V20StateConflict(
-                        "shadow reference finalization requires one HEALTH and one ROLLING7 batch"
+                        "shadow reference finalization requires one HEALTH "
+                        "and at most one legacy ROLLING7"
                     )
                 pending_ids: list[str] = []
                 for row in rows:
@@ -6027,6 +6001,329 @@ class V20Repository:
             )
         return {row["trade_date"]: str(row["scanned_through_label"]).strip() for row in rows}
 
+    async def save_rolling7_market_health(
+        self,
+        batch: Rolling7Batch,
+        *,
+        updated_at: datetime,
+    ) -> Rolling7MarketHealthRecord:
+        _require_aware(updated_at, "rolling7 updated_at")
+        recommendations = [{"rank": item.rank, "code": item.code} for item in batch.recommendations]
+        references = {
+            leg.code: leg.d0_reference for leg in batch.legs if leg.d0_reference is not None
+        }
+        closes = {leg.code: leg.d2_close for leg in batch.legs if leg.d2_close is not None}
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                INSERT INTO {self.schema}.rolling7_market_health (
+                    signal_date,canonical_available,canonical_snapshot_id,
+                    canonical_snapshot_hash,signal_kind,recommendations,t2_date,
+                    d0_references,d2_closes,batch_return,status,reason,updated_at
+                )
+                VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+                ON CONFLICT (signal_date) DO UPDATE SET
+                    canonical_available=EXCLUDED.canonical_available,
+                    canonical_snapshot_id=EXCLUDED.canonical_snapshot_id,
+                    canonical_snapshot_hash=EXCLUDED.canonical_snapshot_hash,
+                    signal_kind=EXCLUDED.signal_kind,
+                    recommendations=EXCLUDED.recommendations,
+                    t2_date=EXCLUDED.t2_date,
+                    d0_references=EXCLUDED.d0_references,
+                    d2_closes=EXCLUDED.d2_closes,
+                    batch_return=EXCLUDED.batch_return,
+                    status=EXCLUDED.status,
+                    reason=EXCLUDED.reason,
+                    updated_at=EXCLUDED.updated_at
+                WHERE (
+                    -- Exact replay is idempotent, including a completed row.
+                    (
+                      rolling7_market_health.canonical_available
+                        IS NOT DISTINCT FROM EXCLUDED.canonical_available
+                      AND rolling7_market_health.canonical_snapshot_id=
+                        EXCLUDED.canonical_snapshot_id
+                      AND rolling7_market_health.canonical_snapshot_hash
+                        IS NOT DISTINCT FROM EXCLUDED.canonical_snapshot_hash
+                      AND rolling7_market_health.signal_kind=EXCLUDED.signal_kind
+                      AND rolling7_market_health.recommendations=
+                        EXCLUDED.recommendations
+                      AND rolling7_market_health.t2_date IS NOT DISTINCT FROM
+                        EXCLUDED.t2_date
+                      AND rolling7_market_health.d0_references=EXCLUDED.d0_references
+                      AND rolling7_market_health.d2_closes=EXCLUDED.d2_closes
+                      AND rolling7_market_health.batch_return IS NOT DISTINCT FROM
+                        EXCLUDED.batch_return
+                      AND rolling7_market_health.status=EXCLUDED.status
+                      AND rolling7_market_health.reason=EXCLUDED.reason
+                    )
+                    OR
+                    -- A missing placeholder may fill its undetermined T2 once.
+                    (
+                      rolling7_market_health.canonical_available=false
+                      AND EXCLUDED.canonical_available=false
+                      AND rolling7_market_health.d0_references
+                        IS NOT DISTINCT FROM EXCLUDED.d0_references
+                      AND rolling7_market_health.d2_closes
+                        IS NOT DISTINCT FROM EXCLUDED.d2_closes
+                      AND rolling7_market_health.batch_return
+                        IS NOT DISTINCT FROM EXCLUDED.batch_return
+                      AND rolling7_market_health.status=EXCLUDED.status
+                      AND rolling7_market_health.reason=EXCLUDED.reason
+                      AND rolling7_market_health.t2_date IS NULL
+                      AND EXCLUDED.t2_date IS NOT NULL
+                    )
+                    -- A missing placeholder may become any known canonical row; its
+                    -- old empty identity and recommendations are not authoritative.
+                    -- NO_SIGNAL is complete and intentionally discards placeholder T2.
+                    OR (
+                      rolling7_market_health.canonical_available=false
+                      AND EXCLUDED.canonical_available=true
+                      AND (
+                        EXCLUDED.signal_kind='NO_SIGNAL'
+                        OR rolling7_market_health.t2_date IS NULL
+                        OR rolling7_market_health.t2_date=EXCLUDED.t2_date
+                      )
+                    )
+                    -- A known canonical gap may only retain or first establish T2,
+                    -- add evidence monotonically, and then complete.
+                    OR (
+                      rolling7_market_health.canonical_available=true
+                      AND EXCLUDED.canonical_available=true
+                      AND rolling7_market_health.status='DATA_GAP'
+                      AND rolling7_market_health.canonical_snapshot_id=
+                        EXCLUDED.canonical_snapshot_id
+                      AND rolling7_market_health.canonical_snapshot_hash=
+                        EXCLUDED.canonical_snapshot_hash
+                      AND rolling7_market_health.signal_kind=EXCLUDED.signal_kind
+                      AND rolling7_market_health.recommendations=
+                        EXCLUDED.recommendations
+                      AND (
+                        rolling7_market_health.t2_date IS NOT DISTINCT FROM
+                          EXCLUDED.t2_date
+                        OR (
+                          rolling7_market_health.t2_date IS NULL
+                          AND EXCLUDED.t2_date IS NOT NULL
+                        )
+                      )
+                      AND EXCLUDED.d0_references @>
+                        rolling7_market_health.d0_references
+                      AND EXCLUDED.d2_closes @>
+                        rolling7_market_health.d2_closes
+                      AND (
+                        EXCLUDED.status='COMPLETE'
+                        OR (
+                          EXCLUDED.status='DATA_GAP'
+                          AND (
+                            (
+                              rolling7_market_health.t2_date IS NULL
+                              AND EXCLUDED.t2_date IS NOT NULL
+                            )
+                            OR rolling7_market_health.d0_references
+                              <> EXCLUDED.d0_references
+                            OR rolling7_market_health.d2_closes
+                              <> EXCLUDED.d2_closes
+                          )
+                        )
+                      )
+                    )
+                  )
+                RETURNING *
+                """,
+                batch.signal_date,
+                batch.canonical_available,
+                batch.canonical_snapshot_id,
+                batch.canonical_snapshot_hash,
+                batch.signal_kind.value,
+                canonical_json(recommendations),
+                batch.t2_date,
+                canonical_json(references),
+                canonical_json(closes),
+                batch.batch_return,
+                batch.status.value,
+                batch.reason,
+                updated_at,
+            )
+            if row is None:
+                row = await connection.fetchrow(
+                    f"""
+                    SELECT * FROM {self.schema}.rolling7_market_health
+                    WHERE signal_date=$1
+                    """,
+                    batch.signal_date,
+                )
+        if row is None:
+            raise V20StateConflict("rolling7 market health row disappeared")
+        existing = self._rolling7_market_health_from_row(row)
+        if existing.batch != batch:
+            raise V20SemanticConflict(
+                f"rolling7 market health row for {batch.signal_date.isoformat()} exists differently"
+            )
+        return existing
+
+    async def load_rolling7_market_health(
+        self,
+        *,
+        before_t2: date,
+        limit: int = 1000,
+    ) -> tuple[Rolling7Batch, ...]:
+        if type(before_t2) is not date:
+            raise ValueError("before_t2 must be a date")
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                f"""
+                SELECT recent.*
+                FROM (
+                    SELECT * FROM {self.schema}.rolling7_market_health
+                    WHERE t2_date IS NOT NULL AND t2_date < $1
+                    ORDER BY signal_date DESC
+                    LIMIT $2
+                ) AS recent
+                ORDER BY recent.signal_date ASC
+                """,
+                before_t2,
+                limit,
+            )
+        return tuple(self._rolling7_market_health_from_row(row).batch for row in rows)
+
+    async def get_rolling7_market_health_for_date(
+        self,
+        signal_date: date,
+    ) -> Rolling7Batch | None:
+        """Load the single durable market-health fact for ``signal_date``."""
+
+        if type(signal_date) is not date:
+            raise ValueError("signal_date must be a date")
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                SELECT * FROM {self.schema}.rolling7_market_health
+                WHERE signal_date=$1
+                """,
+                signal_date,
+            )
+        if row is None:
+            return None
+        return self._rolling7_market_health_from_row(row).batch
+
+    @staticmethod
+    def _rolling7_market_health_from_row(row: asyncpg.Record) -> Rolling7MarketHealthRecord:
+        signal_date = row["signal_date"]
+        t2_date = row["t2_date"]
+        if not isinstance(signal_date, date):
+            raise V20SemanticConflict("rolling7 signal_date is invalid")
+        if t2_date is not None and not isinstance(t2_date, date):
+            raise V20SemanticConflict("rolling7 t2_date is invalid")
+        try:
+            kind = SignalKind(row["signal_kind"])
+            status = BatchStatus(row["status"])
+        except ValueError as error:
+            raise V20SemanticConflict("rolling7 enum value is invalid") from error
+
+        canonical_available = row["canonical_available"]
+        snapshot_id = row["canonical_snapshot_id"]
+        snapshot_hash = row["canonical_snapshot_hash"]
+        recommendations_raw = _json_value(row["recommendations"])
+        if not isinstance(recommendations_raw, list):
+            raise V20SemanticConflict("rolling7 recommendations are invalid")
+        try:
+            recommendations = tuple(
+                CanonicalRecommendation(
+                    rank=int(item["rank"]),
+                    code=str(item["code"]),
+                )
+                for item in recommendations_raw
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise V20SemanticConflict("rolling7 recommendations are invalid") from error
+
+        references_raw = _rolling7_market_health_evidence(_json_value(row["d0_references"]))
+        closes_raw = _rolling7_market_health_evidence(_json_value(row["d2_closes"]))
+        try:
+            legs = tuple(
+                Rolling7Leg(
+                    rank=item.rank,
+                    code=item.code,
+                    d0_reference=(
+                        float(references_raw[item.code]) if item.code in references_raw else None
+                    ),
+                    d2_close=float(closes_raw[item.code]) if item.code in closes_raw else None,
+                )
+                for item in recommendations
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise V20SemanticConflict("rolling7 market evidence is invalid") from error
+        batch_return = _optional_finite_float(row["batch_return"], "rolling7 batch_return")
+
+        if kind is SignalKind.MISSING_CANONICAL:
+            valid = (
+                canonical_available is False
+                and snapshot_id == ""
+                and snapshot_hash == ""
+                and not recommendations
+                and not legs
+                and status is BatchStatus.DATA_GAP
+                and row["reason"] == "MISSING_CANONICAL"
+                and batch_return is None
+            )
+        else:
+            valid = (
+                canonical_available is True
+                and bool(snapshot_id)
+                and _SHA256.fullmatch(snapshot_hash) is not None
+                and (bool(recommendations) == (kind is SignalKind.SIGNAL))
+            )
+            if valid and kind is SignalKind.SIGNAL:
+                valid = (status is BatchStatus.COMPLETE or status is BatchStatus.DATA_GAP) and (
+                    status is not BatchStatus.COMPLETE
+                    or (
+                        t2_date is not None
+                        and t2_date > signal_date
+                        and len(legs) == len(recommendations)
+                        and all(
+                            leg.d0_reference is not None
+                            and leg.d2_close is not None
+                            and leg.d0_reference > 0
+                            and leg.d2_close > 0
+                            and math.isfinite(leg.d0_reference)
+                            and math.isfinite(leg.d2_close)
+                            for leg in legs
+                        )
+                        and batch_return is not None
+                    )
+                )
+            elif valid and kind is SignalKind.NO_SIGNAL:
+                valid = (
+                    not recommendations
+                    and t2_date is None
+                    and not legs
+                    and status is BatchStatus.COMPLETE
+                    and row["reason"] == "NO_SIGNAL"
+                    and batch_return is None
+                )
+        if valid and status is BatchStatus.DATA_GAP and batch_return is not None:
+            valid = False
+        if not valid:
+            raise V20SemanticConflict("rolling7 market health row is semantically invalid")
+
+        return Rolling7MarketHealthRecord(
+            batch=Rolling7Batch(
+                signal_date=signal_date,
+                canonical_snapshot_id=snapshot_id,
+                canonical_snapshot_hash=snapshot_hash,
+                canonical_available=canonical_available,
+                signal_kind=kind,
+                recommendations=recommendations,
+                t2_date=t2_date,
+                legs=legs,
+                status=status,
+                reason=row["reason"],
+                batch_return=batch_return,
+            ),
+            updated_at=row["updated_at"],
+        )
+
     @staticmethod
     def _shadow_from_row(row: asyncpg.Record) -> ShadowBatchRecord:
         prices = _optional_json_value(row["reference_prices_json"])
@@ -6218,6 +6515,7 @@ __all__ = [
     "ModelLegWrite",
     "OutboxRecord",
     "PendingReferenceLeg",
+    "Rolling7MarketHealthRecord",
     "SelectedMewsRecord",
     "ShadowBatchRecord",
     "ShadowBatchWrite",

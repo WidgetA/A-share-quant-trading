@@ -1256,6 +1256,60 @@ class TushareRealtimeClient:
             result[code] = row
         return result
 
+    async def fetch_stock_names_for_date(self, trade_date: str) -> dict[str, str]:
+        """Fetch the official market-wide stock-name snapshot for one trade date.
+
+        Historical canonical replay must not use today's ``stock_basic`` names
+        to decide whether a past candidate was ST.  Tushare ``bak_basic`` is a
+        date-addressed market snapshot, so one response supplies both the
+        frozen display names and the exact-day ST eligibility input.
+        """
+
+        self._parse_trade_date(trade_date)
+        data = await self._api_call(
+            "bak_basic",
+            {"trade_date": trade_date},
+            fields="trade_date,ts_code,name",
+        )
+        fields = data.get("data", {}).get("fields", [])
+        items = data.get("data", {}).get("items", [])
+        if not fields or not items:
+            return {}
+        index = {field: position for position, field in enumerate(fields)}
+        required = {"trade_date", "ts_code", "name"}
+        if not required.issubset(index):
+            missing = ", ".join(sorted(required - set(index)))
+            raise TushareRealtimeError(f"bak_basic response missing fields: {missing}")
+
+        result: dict[str, str] = {}
+        for item in items:
+            try:
+                raw_date = item[index["trade_date"]]
+                raw_code = item[index["ts_code"]]
+                raw_name = item[index["name"]]
+            except (IndexError, TypeError, ValueError) as exc:
+                raise TushareRealtimeError(f"invalid bak_basic row: {item!r}") from exc
+            if (
+                not isinstance(raw_date, str)
+                or not isinstance(raw_code, str)
+                or not isinstance(raw_name, str)
+            ):
+                raise TushareRealtimeError(f"invalid bak_basic row: {item!r}")
+            row_date = raw_date
+            code = raw_code.split(".")[0]
+            name = raw_name.strip()
+            if row_date != trade_date:
+                raise TushareRealtimeError(
+                    f"bak_basic row date {row_date!r} does not match request {trade_date!r}"
+                )
+            if len(code) != 6 or not code.isdigit() or not name:
+                raise TushareRealtimeError(f"invalid bak_basic row: {item!r}")
+            previous = result.get(code)
+            if previous is not None and previous != name:
+                raise TushareRealtimeError(f"conflicting duplicate bak_basic rows for {code}")
+            result[code] = name
+        return result
+
     async def get_exchange_time(self) -> tuple[str, str] | None:
         """Not available from Tushare. Returns None."""
         return None

@@ -113,6 +113,7 @@ jobs:
         run: >-
           uv run pytest -q
           tests/integration/data/database/test_v16_canonical_artifact_store_postgres.py
+          tests/integration/data/database/test_v20_rolling7_market_health_postgres.py
           tests/integration/data/database/test_v20_mews_receipt_guard_postgres.py
           tests/integration/data/database/test_v20_mews_guard_store_postgres.py
           tests/integration/data/database/test_v20_outbox_postgres.py

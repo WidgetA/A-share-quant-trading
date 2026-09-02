@@ -62,8 +62,6 @@ from src.data.database.v20_repository import (
     ModelLegWrite,
     OutboxRecord,
     SelectedMewsRecord,
-    ShadowBatchRecord,
-    StateRecord,
     V20EntryDeadlineExceeded,
     V20LeadershipLost,
     V20MinuteBarIntegrityConflict,
@@ -104,7 +102,18 @@ from src.strategy.v20.models import (
     MinuteBar,
     ModelLeg,
     ReferenceStatus,
+    RollingBatch,
+    RollingGap,
     deserialize_health_snapshot,
+)
+from src.strategy.v20.policy import evaluate_rolling7
+from src.strategy.v20.rolling7_market_health import (
+    BatchStatus,
+    CanonicalRecommendation,
+    Rolling7Batch,
+    SignalKind,
+    make_batch,
+    make_missing_canonical_batch,
 )
 from src.strategy.v20.runtime_config import (
     V20ConfigError,
@@ -119,6 +128,7 @@ from src.strategy.v20.shadow_evaluator import evaluate_shadow_batch
 from src.web.v15_scan_service import (
     CanonicalV16ScanBundle,
     V15ScanState,
+    _fetch_history_ohlcv,
     _initialize_scan_resources_once,
     cleanup_scan_resources,
     compute_canonical_v16_scan,
@@ -207,6 +217,11 @@ STALE_EXIT_TICK_SECONDS = 30.0
 STALE_EXIT_TICK_TIMEOUT_SECONDS = 3.0
 OUTBOX_RECOVERY_TICK_SECONDS = 2.0
 OUTBOX_RECOVERY_LANE_TIMEOUT_SECONDS = 1.5
+ROLLING7_RECOVERY_TICK_SECONDS = 300.0
+ROLLING7_RECOVERY_OVERALL_CAP = 90
+ROLLING7_RECOVERY_SLICE = 3
+ROLLING7_AUTOMATIC_BLACKOUT_START = time(9, 0)
+ROLLING7_AUTOMATIC_BLACKOUT_END = time(15, 5)
 STATUS_SNAPSHOT_MAX_AGE_SECONDS = OUTBOX_RECOVERY_TICK_SECONDS * 3.0 + 1.0
 MANUAL_TRIGGER_DECISION_LOCK_TIMEOUT_SECONDS = 15.0
 LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS = 180.0
@@ -373,6 +388,7 @@ class _DayContext:
     shadow_reference_finalized: bool = False
     early_history_attempted: bool = False
     early_stored_history_loaded: bool = False
+    last_rolling7_d0_history_at: datetime | None = None
     reference_history_attempted: bool = False
     last_reference_history_at: datetime | None = None
     last_reference_poll_at: datetime | None = None
@@ -389,6 +405,19 @@ class _DayContext:
     late_0939_replay_last_attempt_at: datetime | None = None
     late_0939_replay_automatic_attempts: int = 0
     late_0939_replay_completed: bool = False
+
+
+@dataclass(frozen=True)
+class _HistoricalCanonicalInputs:
+    early_data_seed: Mapping[str, TushareEarlyMarketData]
+    universe: tuple[str, ...]
+    clean_boards: Mapping[str, Sequence[tuple[str, str]]]
+    prev_closes: Mapping[str, float]
+    history_raw: Mapping[str, Mapping[str, Any] | None]
+    names: Mapping[str, str]
+    calendar: tuple[date, ...]
+    prior_daily: Mapping[str, TushareDailyBar]
+    st_eligible_codes: tuple[str, ...]
 
 
 class V20LiveExitStageTimeout(RuntimeError):
@@ -916,19 +945,16 @@ def _bootstrap_bundle(
         raise V20ConfigError("V20 checkpoint state_shadow_batches is missing")
     if any(not isinstance(item, Mapping) for item in shadow_batches):
         raise V20ConfigError("V20 checkpoint shadow batch must be an object")
-    valid_rolling_dates = {
-        str(item.get("signal_date"))
-        for item in shadow_batches
-        if isinstance(item, Mapping)
-        and item.get("kind") == "ROLLING7"
-        and item.get("status") == "COMPLETE_VALID"
-    }
-    if len(valid_rolling_dates) < 7:
-        raise V20ConfigError("production checkpoint requires seven completed rolling7 facts")
+    # ROLLING7 now has its own durable, lineage-independent fact stream.
+    # Historical checkpoints may still contain legacy rolling rows and gaps;
+    # retain the schema fields for compatibility but never import those facts.
+    bootstrap_state = dict(state)
+    bootstrap_state["official_rolling_gaps"] = []
+    health_batches = tuple(dict(item) for item in shadow_batches if item.get("kind") != "ROLLING7")
     return _BootstrapBundle(
-        dict(state),
+        bootstrap_state,
         predecessor_trade_date,
-        tuple(dict(item) for item in shadow_batches),
+        health_batches,
     )
 
 
@@ -1303,6 +1329,10 @@ class V20Service:
         self._mews_last_failure: str | None = None
         self._mews_alerted_for: date | None = None
         self._mews_failed_for: date | None = None
+        self._rolling7_recovery_lock = asyncio.Lock()
+        self._rolling7_canonical_bootstrap_lock = asyncio.Lock()
+        self._rolling7_recovery_last_at: datetime | None = None
+        self._rolling7_recovery_cursor: date | None = None
         self._exit_context: _DayContext | None = None
         self._stale_exit_context: _DayContext | None = None
         self._started = False
@@ -1752,6 +1782,10 @@ class V20Service:
                 asyncio.create_task(
                     self._run_outbox_recovery_scheduler(),
                     name="v20-outbox-recovery-scheduler",
+                ),
+                asyncio.create_task(
+                    self._run_rolling7_recovery_scheduler(),
+                    name="v20-rolling7-recovery-scheduler",
                 ),
                 asyncio.create_task(
                     self._run_publisher_scheduler(),
@@ -3126,37 +3160,6 @@ class V20Service:
                     )
                     scheduled = tuple(status_before.semantic.get("scheduled_exits_today") or ())
                     prepare_state = state_before
-                    if status_before.action == "INPUT_INVALID":
-                        failure_gap_id = named_hash(
-                            "V20_OFFICIAL_SHADOW_GAP_ID_V1",
-                            {
-                                "official_stream_id": self.config.official_stream_id,
-                                "trade_date": trade_date.isoformat(),
-                            },
-                        )
-                        raw_gaps = state_before.payload.get("official_rolling_gaps")
-                        if not isinstance(raw_gaps, list) or any(
-                            not isinstance(item, Mapping) for item in raw_gaps
-                        ):
-                            raise V20SemanticConflict("official state rolling gaps are malformed")
-                        if sum(item.get("gap_id") == failure_gap_id for item in raw_gaps) != 1:
-                            raise V20SemanticConflict(
-                                "failed slot replay gap is missing or duplicated"
-                            )
-                        replay_payload = {
-                            **dict(state_before.payload),
-                            "official_rolling_gaps": [
-                                dict(item)
-                                for item in raw_gaps
-                                if item.get("gap_id") != failure_gap_id
-                            ],
-                        }
-                        prepare_state = StateRecord(
-                            lineage_id=state_before.lineage_id,
-                            revision=state_before.revision,
-                            state_hash=sha256_json(replay_payload),
-                            payload=replay_payload,
-                        )
                 prepared = prepare_entry(
                     config=self.config,
                     state=prepare_state,
@@ -4018,6 +4021,21 @@ class V20Service:
             return True
         task = await self._mews_singleflight_join(current, stage="SELECTION_TRIGGER")
         return await self._await_mews_singleflight(task)
+
+    async def _ensure_mews_for_exit_date(
+        self,
+        target_date: date,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Calculate the exact daily D2 value without using process time."""
+
+        self._require_running()
+        target = _local(target_date, MEWS_PUBLISH_TIME)
+        task = await self._mews_singleflight_join(target, stage="D2_EXIT")
+        return bool(
+            await self._await_mews_singleflight(task) or self._mews_cached_for == target_date
+        )
 
     async def _mews_singleflight_join(
         self,
@@ -4912,6 +4930,9 @@ class V20Service:
         pending = await self._repository.list_pending_shadow_batches(
             context.trade_date, **self._ledger_scope
         )
+        # Legacy ROLLING7 rows are retired, inert schema history.  Market
+        # health rolling facts mature through the independent fact store.
+        pending = [item for item in pending if item.kind == "HEALTH"]
         if not pending:
             context.maturity_done = True
             return
@@ -4919,53 +4940,15 @@ class V20Service:
         # Reference arbitration is owned by _expire_reference_gaps and must
         # happen before this method.  A PENDING row is therefore a real state
         # gap, not permission to discard possibly eligible persisted evidence.
-        unresolved_health = any(
-            item.kind == "HEALTH" and item.reference_status == "PENDING" for item in pending
-        )
+        unresolved_health = any(item.reference_status == "PENDING" for item in pending)
         pending = [item for item in pending if item.reference_status != "PENDING"]
 
-        # A rolling gap is no longer recoverable once seven later complete
-        # batches have displaced it.  Terminalize it before any daily-source
-        # calls so old suspended/missing legs cannot accumulate as an
-        # unbounded oldest-first retry backlog.
-        completed_for_aging = await self._repository.load_recent_completed(
-            "ROLLING7",
-            before_t2=context.trade_date,
-            limit=1_000,
-            **self._ledger_scope,
-        )
-        rolling_complete_dates = [
-            item.signal_date for item in completed_for_aging if item.status == "COMPLETE_VALID"
-        ]
-        retained: list[ShadowBatchRecord] = []
         daily_candidates: dict[tuple[date, datetime | None], list[Any]] = {}
         daily_corrupt_ids: dict[tuple[date, datetime | None], tuple[str, ...]] = {}
-        for batch in pending:
-            later_complete_n = sum(
-                signal_date > batch.signal_date for signal_date in rolling_complete_dates
-            )
-            if batch.kind == "ROLLING7" and later_complete_n >= 7:
-                await self._repository.complete_shadow_batch(
-                    batch.batch_id,
-                    batch_return=None,
-                    status="COMPLETE_INVALID",
-                    payload_update={
-                        "evaluation_profile_id": "ZERO_COST_GROSS_PRICE_RETURN_V1",
-                        "evaluation_status": "INVALID",
-                        "invalid_reason": "ROLLING_GAP_AGED_OUT",
-                        "later_complete_n": later_complete_n,
-                    },
-                    official_stream_id=self.config.official_stream_id,
-                    lineage_id=self.config.state_lineage_id,
-                )
-                continue
-            retained.append(batch)
-        pending = retained
-
         # Poll each T+2 daily response at a bounded cadence and persist the raw
         # candidate before it can affect policy.  HEALTH later reads only the
         # candidate whose conservative post-commit receipt is no later than its
-        # fixed D3 09:39 cutoff; ROLLING7 may legally accept a later completion.
+        # fixed D3 09:39 cutoff.
         daily_dates = {item.t2_date for item in pending if item.reference_status == "LOCKED"}
         for t2_date in sorted(daily_dates, reverse=True):
             last_attempt = context.maturity_daily_last_attempt.get(t2_date)
@@ -4985,7 +4968,7 @@ class V20Service:
             except Exception as exc:
                 # A fresh source poll is only a staging attempt.  It must not
                 # hide a snapshot that was already durably eligible at the
-                # HEALTH cutoff (or an earlier ROLLING7 candidate).
+                # HEALTH cutoff.
                 await self._safe_alert(
                     code="DAILY_MATURITY_SOURCE_UNAVAILABLE",
                     entity_id=t2_date.isoformat(),
@@ -4994,17 +4977,15 @@ class V20Service:
                 )
 
         for batch in pending:
-            health_cutoff: datetime | None = None
-            if batch.kind == "HEALTH":
-                health_cutoff = _local(
-                    _next_trade_date(context.calendar, batch.t2_date),
-                    time.fromisoformat(self.config.clock.decision_bar_label),
-                )
-                if now < health_cutoff or not await self._repository.database_cutoff_reached(
-                    health_cutoff
-                ):
-                    unresolved_health = True
-                    continue
+            health_cutoff = _local(
+                _next_trade_date(context.calendar, batch.t2_date),
+                time.fromisoformat(self.config.clock.decision_bar_label),
+            )
+            if now < health_cutoff or not await self._repository.database_cutoff_reached(
+                health_cutoff
+            ):
+                unresolved_health = True
+                continue
             snapshots: list[Any] = []
             candidate_key = (batch.t2_date, health_cutoff)
             if batch.reference_status == "LOCKED":
@@ -5069,9 +5050,6 @@ class V20Service:
                 official_stream_id=self.config.official_stream_id,
                 lineage_id=self.config.state_lineage_id,
             )
-        # A rolling batch may intentionally remain PENDING/INCOMPLETE and is
-        # represented as an active maturity gap in today's policy input.  That
-        # is a completed maturity pass, not a reason to starve the 09:40 slot.
         context.maturity_done = not unresolved_health
 
     async def _policy_inputs(
@@ -5080,11 +5058,9 @@ class V20Service:
         health_rows = await self._repository.load_recent_completed(
             "HEALTH", before_t2=trade_date, limit=1_000, **self._ledger_scope
         )
-        rolling_rows = await self._repository.load_recent_completed(
-            "ROLLING7", before_t2=trade_date, limit=1_000, **self._ledger_scope
-        )
-        pending_rows = await self._repository.list_pending_shadow_batches(
-            trade_date, **self._ledger_scope
+        rolling_rows = await self._repository.load_rolling7_market_health(
+            before_t2=trade_date,
+            limit=1_000,
         )
 
         health = [
@@ -5104,25 +5080,28 @@ class V20Service:
         ]
         rolling = [
             CompletedRolling(
-                batch_id=row.batch_id,
+                batch_id=(
+                    row.canonical_snapshot_id
+                    if row.canonical_snapshot_id
+                    else f"rolling7:{row.signal_date.isoformat()}"
+                ),
                 signal_date=row.signal_date,
-                t2_date=row.t2_date,
-                batch_return=float(row.batch_return),
+                t2_date=row.t2_date or row.signal_date,
+                batch_return=float(row.batch_return or 0.0),
             )
             for row in rolling_rows
-            if row.status == "COMPLETE_VALID" and row.batch_return is not None
+            if row.signal_kind is SignalKind.SIGNAL
+            and row.status.value == "COMPLETE"
+            and row.batch_return is not None
         ]
-        invalid_or_pending: list[ShadowBatchRecord] = [
-            row for row in rolling_rows if row.status == "COMPLETE_INVALID"
-        ]
-        invalid_or_pending.extend(row for row in pending_rows if row.kind == "ROLLING7")
         gaps = [
             ActiveRollingGap(
-                gap_id=row.batch_id,
+                gap_id=f"rolling7:{row.signal_date.isoformat()}",
                 signal_date=row.signal_date,
-                maturity_date=row.t2_date,
+                maturity_date=row.t2_date or row.signal_date,
             )
-            for row in invalid_or_pending
+            for row in rolling_rows
+            if row.status.value == "DATA_GAP"
         ]
         return health, rolling, gaps
 
@@ -5536,6 +5515,8 @@ class V20Service:
                         # semantic identity.  Preserve the first durable
                         # artifact/receipt instead of colliding merely because
                         # an equivalent retry finished one second later.
+                        if callable(getattr(self._repository, "save_rolling7_market_health", None)):
+                            await self._record_rolling7_intent_from_artifact(existing)
                         return
                 canonical_calendar = tuple(canonical.computation_calendar)
                 projected = self._project_canonical_v16(
@@ -5564,9 +5545,601 @@ class V20Service:
             hydrated_trade_date = getattr(hydrated, "trade_date", None)
             if hydrated_trade_date != canonical.trade_date:
                 raise V20SemanticConflict("canonical V16 artifact readback date differs")
+            if callable(getattr(self._repository, "save_rolling7_market_health", None)):
+                await self._record_rolling7_intent_from_artifact(record)
             completed_at = self._aware_now()
             if completed_at.date() == canonical.trade_date:
                 self._canonical_barrier_completed_at[canonical.trade_date] = completed_at
+
+    async def _record_rolling7_intent_from_artifact(self, record: Any) -> Rolling7Batch:
+        try:
+            batch = self._rolling7_batch_from_artifact(record)
+        except (KeyError, TypeError, ValueError, V20SemanticConflict):
+            expected_t2 = await self._rolling7_expected_t2(record.trade_date)
+            batch = make_missing_canonical_batch(
+                signal_date=record.trade_date,
+                t2_date=expected_t2,
+            )
+        current = await self._repository.get_rolling7_market_health_for_date(record.trade_date)
+        if current is not None and current.canonical_available:
+            current_identity = (
+                current.canonical_snapshot_id,
+                current.canonical_snapshot_hash,
+                current.signal_kind,
+                current.recommendations,
+            )
+            incoming_identity = (
+                batch.canonical_snapshot_id,
+                batch.canonical_snapshot_hash,
+                batch.signal_kind,
+                batch.recommendations,
+            )
+            if not batch.canonical_available or current_identity != incoming_identity:
+                raise V20SemanticConflict(
+                    "rolling7 canonical artifact differs from its durable fact"
+                )
+            if current.t2_date not in (None, batch.t2_date):
+                raise V20SemanticConflict("rolling7 canonical artifact changed its established T2")
+            if current.t2_date == batch.t2_date:
+                return current
+            batch = make_batch(
+                signal_date=current.signal_date,
+                canonical_snapshot_id=current.canonical_snapshot_id,
+                canonical_snapshot_hash=current.canonical_snapshot_hash,
+                recommendations=current.recommendations,
+                t2_date=batch.t2_date,
+                d0_references={
+                    leg.code: leg.d0_reference
+                    for leg in current.legs
+                    if leg.d0_reference is not None
+                },
+                d2_closes={
+                    leg.code: leg.d2_close for leg in current.legs if leg.d2_close is not None
+                },
+            )
+        return (
+            await self._repository.save_rolling7_market_health(
+                batch,
+                updated_at=self._aware_now(),
+            )
+        ).batch
+
+    def _rolling7_batch_from_artifact(self, record: Any) -> Rolling7Batch:
+        payload = record.payload
+        if not isinstance(payload, Mapping):
+            raise V20SemanticConflict("canonical V16 artifact payload is invalid")
+        snapshot = payload.get("v20_snapshot", payload)
+        if not isinstance(snapshot, Mapping):
+            raise V20SemanticConflict("canonical V16 snapshot is invalid")
+        symbols = snapshot.get("symbols", ())
+        if not isinstance(symbols, Sequence) or isinstance(symbols, (str, bytes)):
+            raise V20SemanticConflict("canonical V16 recommendations are invalid")
+        recommendations = tuple(
+            CanonicalRecommendation(rank=int(item["rank"]), code=str(item["code"]))
+            for item in symbols
+        )
+        calendar_raw = payload.get("calendar", ())
+        if not isinstance(calendar_raw, Sequence) or isinstance(calendar_raw, (str, bytes)):
+            raise V20SemanticConflict("canonical V16 calendar is invalid")
+        try:
+            calendar = tuple(date.fromisoformat(str(item)) for item in calendar_raw)
+        except ValueError as exc:
+            raise V20SemanticConflict("canonical V16 calendar is invalid") from exc
+        if any(left >= right for left, right in zip(calendar, calendar[1:])):
+            raise V20SemanticConflict("canonical V16 calendar is not strictly ordered")
+        try:
+            signal_index = calendar.index(record.trade_date)
+        except ValueError as exc:
+            raise V20SemanticConflict("canonical V16 calendar lacks its signal date") from exc
+        if signal_index > len(calendar) - 3:
+            raise V20SemanticConflict("canonical V16 calendar lacks D1/D2 successors")
+        return make_batch(
+            signal_date=record.trade_date,
+            canonical_snapshot_id=str(record.snapshot_id),
+            canonical_snapshot_hash=str(record.snapshot_hash),
+            recommendations=recommendations,
+            t2_date=calendar[signal_index + 2],
+        )
+
+    async def _rolling7_expected_t2(self, signal_date: date) -> date | None:
+        calendar = await self._load_trade_calendar(self._aware_now().date())
+        try:
+            index = calendar.index(signal_date)
+        except ValueError:
+            return None
+        if index > len(calendar) - 3:
+            return None
+        return calendar[index + 2]
+
+    def _rolling7_d0_references(
+        self,
+        records: Sequence[Any],
+        signal_date: date,
+        recommendations: Sequence[CanonicalRecommendation],
+    ) -> dict[str, float]:
+        candidates: dict[str, tuple[datetime, float]] = {}
+        for record in records:
+            bar = _tushare_minute_from_record(record.payload)
+            received_at = record.first_received_at
+            if (
+                bar.end_label != self.config.clock.reference_bar_label
+                or bar.bar_end.astimezone(SHANGHAI).date() != signal_date
+                or not bar.is_valid
+                or bar.open_price <= 0
+                or received_at is None
+                or received_at.tzinfo is None
+                or received_at.utcoffset() is None
+                or received_at <= bar.bar_end
+            ):
+                continue
+            previous = candidates.get(bar.stock_code)
+            if previous is not None and previous[1] != bar.open_price:
+                raise V20SemanticConflict("conflicting D0 09:41 open evidence")
+            if previous is None:
+                candidates[bar.stock_code] = (received_at, bar.open_price)
+        return {
+            code: value[1]
+            for code, value in candidates.items()
+            if code in set(item.code for item in recommendations)
+        }
+
+    async def _acquire_rolling7_d0_evidence(
+        self,
+        context: _DayContext,
+        now: datetime,
+    ) -> None:
+        signal_date = context.trade_date
+        if now.timetz().replace(tzinfo=None) < time.fromisoformat(
+            self.config.clock.reference_bar_label
+        ):
+            return
+        store = self._canonical_artifact_store
+        if store is None:
+            raise V20RepositoryError("canonical V16 artifact store is unavailable")
+        current = await self._repository.get_rolling7_market_health_for_date(signal_date)
+        if current is not None and current.status is BatchStatus.COMPLETE:
+            return
+        record = await store.load(
+            official_stream_id=self.config.official_stream_id,
+            trade_date=signal_date,
+            event=V16_CANONICAL_ARTIFACT_EVENT,
+        )
+        if record is None:
+            if current is not None:
+                return
+            await self._repository.save_rolling7_market_health(
+                make_missing_canonical_batch(
+                    signal_date=signal_date,
+                    t2_date=await self._rolling7_expected_t2(signal_date),
+                ),
+                updated_at=now,
+            )
+            return
+        intent = await self._record_rolling7_intent_from_artifact(record)
+        if not intent.recommendations:
+            return
+        codes = tuple(item.code for item in intent.recommendations)
+        records = await self._repository.list_raw_minute_bar_records(
+            codes,
+            trade_date=signal_date,
+            end_labels=(self.config.clock.reference_bar_label,),
+        )
+        references = self._rolling7_d0_references(
+            records,
+            signal_date,
+            intent.recommendations,
+        )
+        if intent.status is BatchStatus.DATA_GAP:
+            references.update(
+                {leg.code: leg.d0_reference for leg in intent.legs if leg.d0_reference is not None}
+            )
+        missing = [code for code in codes if code not in references]
+        if (
+            missing
+            and (
+                context.last_rolling7_d0_history_at is None
+                or (now - context.last_rolling7_d0_history_at).total_seconds() >= 30.0
+            )
+            and self._scan_state.realtime_client is not None
+        ):
+            context.last_rolling7_d0_history_at = now
+            latest = await asyncio.wait_for(
+                self._scan_state.realtime_client.batch_get_latest_minute_bars(list(missing)),
+                timeout=LIVE_EXIT_LIVE_HISTORY_TIMEOUT_SECONDS,
+            )
+            payloads = [
+                _bar_payload(bar)
+                for code in missing
+                for bar in (latest.get(code),)
+                if bar is not None
+                and bar.end_label == self.config.clock.reference_bar_label
+                and bar.bar_end.astimezone(SHANGHAI).date() == signal_date
+                and bar.is_valid
+                and bar.open_price > 0
+                and now > bar.bar_end
+            ]
+            if payloads:
+                sealed = await asyncio.wait_for(
+                    self._repository.record_minute_bars(payloads),
+                    timeout=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+                )
+                if len(sealed) != len({sha256_json(payload) for payload in payloads}):
+                    raise V20RepositoryError("rolling7 D0 raw persistence was incomplete")
+            records = await asyncio.wait_for(
+                self._repository.list_raw_minute_bar_records(
+                    codes,
+                    trade_date=signal_date,
+                    end_labels=(self.config.clock.reference_bar_label,),
+                ),
+                timeout=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+            )
+            references = self._rolling7_d0_references(
+                records,
+                signal_date,
+                intent.recommendations,
+            )
+        await self._repository.save_rolling7_market_health(
+            make_batch(
+                signal_date=signal_date,
+                canonical_snapshot_id=intent.canonical_snapshot_id,
+                canonical_snapshot_hash=intent.canonical_snapshot_hash,
+                recommendations=intent.recommendations,
+                t2_date=intent.t2_date,
+                d0_references=references,
+            ),
+            updated_at=self._aware_now(now),
+        )
+
+    async def _rolling7_d2_closes(
+        self,
+        t2_date: date,
+        recommendations: Sequence[CanonicalRecommendation],
+        now: datetime,
+    ) -> dict[str, float]:
+        official_close = _local(t2_date, time(15, 0))
+        if now < official_close:
+            return {}
+        snapshots, _corrupt = await self._repository.list_daily_bar_snapshots(
+            t2_date,
+            received_before=None,
+        )
+        required = {item.code for item in recommendations}
+        selected_close: dict[str, float] = {}
+        for snapshot in snapshots:
+            if snapshot.first_received_at < official_close:
+                continue
+            rows = _daily_rows_from_snapshot(snapshot.payload)
+            for code in required:
+                if code not in rows:
+                    continue
+                close = rows[code].close_price
+                previous = selected_close.get(code)
+                if previous is not None and previous != close:
+                    raise V20SemanticConflict("conflicting D2 official close evidence")
+                if previous is None:
+                    selected_close[code] = close
+            if required.issubset(selected_close):
+                return {code: selected_close[code] for code in required}
+        client = self._scan_state.realtime_client
+        if client is None:
+            return {}
+        daily = await asyncio.wait_for(
+            client.fetch_daily_bars(t2_date.strftime("%Y%m%d")),
+            timeout=LIVE_EXIT_LIVE_HISTORY_TIMEOUT_SECONDS,
+        )
+        snapshot = await asyncio.wait_for(
+            self._repository.record_daily_bar_snapshot(
+                t2_date,
+                _daily_snapshot_payload(t2_date, daily),
+            ),
+            timeout=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+        )
+        if snapshot.first_received_at < official_close:
+            return {}
+        rows = _daily_rows_from_snapshot(snapshot.payload)
+        return {code: rows[code].close_price for code in required if code in rows}
+
+    async def _finalize_rolling7_market_health(
+        self,
+        signal_date: date,
+        t2_date: date,
+        now: datetime | None = None,
+        *,
+        calendar: Sequence[date] | None = None,
+    ) -> Rolling7Batch:
+        now = self._aware_now(now)
+        current = await self._repository.get_rolling7_market_health_for_date(signal_date)
+        if current is not None and current.status.value == "COMPLETE":
+            return current
+        store = self._canonical_artifact_store
+        if store is None:
+            raise V20RepositoryError("canonical V16 artifact store is unavailable")
+        record = await store.load(
+            official_stream_id=self.config.official_stream_id,
+            trade_date=signal_date,
+            event=V16_CANONICAL_ARTIFACT_EVENT,
+        )
+        if record is None and (current is None or not current.canonical_available):
+            try:
+                bootstrap_calendar = (
+                    tuple(calendar)
+                    if calendar is not None
+                    else tuple(await self._load_trade_calendar(now.date()))
+                )
+                record = await self._bootstrap_historical_canonical_artifact(
+                    signal_date,
+                    bootstrap_calendar,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "V20 Rolling7 bootstrap %s stage=CANONICAL_COMPUTE pending: %s: %s",
+                    signal_date.isoformat(),
+                    type(exc).__name__,
+                    exc,
+                )
+                return (
+                    await self._repository.save_rolling7_market_health(
+                        make_missing_canonical_batch(
+                            signal_date=signal_date,
+                            t2_date=t2_date,
+                        ),
+                        updated_at=now,
+                    )
+                ).batch
+        intent = (
+            current if record is None else await self._record_rolling7_intent_from_artifact(record)
+        )
+        if intent is None:
+            raise V20RepositoryError("rolling7 canonical intent is unavailable")
+        if not intent.recommendations:
+            return intent
+        records = await self._repository.list_raw_minute_bar_records(
+            tuple(item.code for item in intent.recommendations),
+            trade_date=signal_date,
+            end_labels=(self.config.clock.reference_bar_label,),
+        )
+        d0_references = self._rolling7_d0_references(
+            records,
+            signal_date,
+            intent.recommendations,
+        )
+        persisted_d0 = {
+            leg.code: leg.d0_reference for leg in intent.legs if leg.d0_reference is not None
+        }
+        persisted_d0.update(d0_references)
+        d0_references = persisted_d0
+        missing_d0 = [
+            item.code for item in intent.recommendations if item.code not in d0_references
+        ]
+        if missing_d0 and self._scan_state.realtime_client is not None:
+            histories = await asyncio.wait_for(
+                self._scan_state.realtime_client.batch_get_minute_history_for_date(
+                    missing_d0,
+                    signal_date,
+                ),
+                timeout=ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
+            )
+            payloads = [
+                _bar_payload(bar)
+                for code in missing_d0
+                for bar in histories.get(code, ())
+                if bar.end_label == self.config.clock.reference_bar_label
+                and bar.bar_end.astimezone(SHANGHAI).date() == signal_date
+                and bar.is_valid
+                and bar.open_price > 0
+                and now > bar.bar_end
+            ]
+            if payloads:
+                await asyncio.wait_for(
+                    self._repository.record_minute_bars(payloads),
+                    timeout=LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS,
+                )
+            records = await self._repository.list_raw_minute_bar_records(
+                tuple(item.code for item in intent.recommendations),
+                trade_date=signal_date,
+                end_labels=(self.config.clock.reference_bar_label,),
+            )
+            d0_references = self._rolling7_d0_references(
+                records,
+                signal_date,
+                intent.recommendations,
+            )
+            recovered_d0 = dict(persisted_d0)
+            recovered_d0.update(d0_references)
+            d0_references = recovered_d0
+        d2_closes = await self._rolling7_d2_closes(t2_date, intent.recommendations, now)
+        persisted_d2 = {leg.code: leg.d2_close for leg in intent.legs if leg.d2_close is not None}
+        persisted_d2.update(d2_closes)
+        d2_closes = persisted_d2
+        return (
+            await self._repository.save_rolling7_market_health(
+                make_batch(
+                    signal_date=signal_date,
+                    canonical_snapshot_id=intent.canonical_snapshot_id,
+                    canonical_snapshot_hash=intent.canonical_snapshot_hash,
+                    recommendations=intent.recommendations,
+                    t2_date=t2_date,
+                    d0_references=d0_references,
+                    d2_closes=d2_closes,
+                ),
+                updated_at=now,
+            )
+        ).batch
+
+    def _evaluate_rolling7_recovery_state(
+        self,
+        rows: Sequence[Rolling7Batch],
+        decision_date: date,
+    ):
+        complete = [
+            RollingBatch(
+                row.canonical_snapshot_id or f"rolling7:{row.signal_date.isoformat()}",
+                row.signal_date,
+                row.t2_date,
+                float(row.batch_return or 0.0),
+            )
+            for row in rows
+            if row.signal_kind is SignalKind.SIGNAL
+            and row.status is BatchStatus.COMPLETE
+            and row.batch_return is not None
+            and row.t2_date is not None
+        ]
+        gaps = [
+            RollingGap(
+                f"rolling7:{row.signal_date.isoformat()}",
+                row.signal_date,
+                row.t2_date,
+            )
+            for row in rows
+            if row.status is BatchStatus.DATA_GAP and row.t2_date is not None
+        ]
+        return evaluate_rolling7(
+            decision_date=decision_date,
+            complete_batches=complete,
+            gaps=gaps,
+        )
+
+    async def backfill_rolling7_market_health(
+        self,
+        *,
+        signal_dates: Sequence[date] | None = None,
+        limit: int = ROLLING7_RECOVERY_SLICE,
+        overall_cap: int = ROLLING7_RECOVERY_OVERALL_CAP,
+    ) -> tuple[Rolling7Batch, ...]:
+        if limit < 1 or overall_cap < 1:
+            raise ValueError("Rolling7 recovery bounds must be positive")
+        now = self._aware_now()
+        calendar = await self._load_trade_calendar(now.date())
+        known_t2 = {session: calendar[index + 2] for index, session in enumerate(calendar[:-2])}
+        rows = await self._repository.load_rolling7_market_health(
+            before_t2=now.date(),
+            limit=1_000,
+        )
+        facts = {row.signal_date: row for row in rows}
+        recovery_state = self._evaluate_rolling7_recovery_state(rows, now.date())
+        if recovery_state.status.value in {"NON_BAD", "BAD"}:
+            self._rolling7_recovery_cursor = None
+            return ()
+        if signal_dates is not None:
+            candidates = tuple(session for session in signal_dates if session in known_t2)
+            cursor_index = len(candidates) - 1
+        else:
+            matured = [
+                session
+                for session, t2 in known_t2.items()
+                if t2 < now.date() or (t2 == now.date() and now >= _local(t2, time(15, 0)))
+            ]
+            candidates = tuple(calendar)
+            cursor_index = (
+                calendar.index(self._rolling7_recovery_cursor)
+                if self._rolling7_recovery_cursor in calendar
+                else len(matured) - 1
+            )
+        processed: list[Rolling7Batch] = []
+        scanned = 0
+        while cursor_index >= 0 and scanned < overall_cap and len(processed) < limit:
+            signal_date = candidates[cursor_index]
+            previous_cursor = self._rolling7_recovery_cursor
+            self._rolling7_recovery_cursor = signal_date
+            scanned += 1
+            cursor_index -= 1
+            fact = facts.get(signal_date)
+            if fact is not None and fact.status.value == "COMPLETE":
+                continue
+            if fact is not None and fact.signal_kind is SignalKind.NO_SIGNAL:
+                continue
+            if fact is None:
+                store = self._canonical_artifact_store
+                if store is None:
+                    raise V20RepositoryError("canonical V16 artifact store is unavailable")
+                record = await store.load(
+                    official_stream_id=self.config.official_stream_id,
+                    trade_date=signal_date,
+                    event=V16_CANONICAL_ARTIFACT_EVENT,
+                )
+                if record is not None:
+                    try:
+                        artifact_batch = self._rolling7_batch_from_artifact(record)
+                    except (KeyError, TypeError, ValueError, V20SemanticConflict):
+                        artifact_batch = None
+                    if artifact_batch is not None and not artifact_batch.recommendations:
+                        no_signal = await self._record_rolling7_intent_from_artifact(record)
+                        facts[signal_date] = no_signal
+                        continue
+            t2_date = known_t2.get(signal_date)
+            if (
+                t2_date is None
+                or t2_date > now.date()
+                or (t2_date == now.date() and now < _local(t2_date, time(15, 0)))
+            ):
+                continue
+            try:
+                batch = await self._finalize_rolling7_market_health(
+                    signal_date,
+                    t2_date,
+                    now=now,
+                    calendar=calendar,
+                )
+            except asyncio.CancelledError:
+                self._rolling7_recovery_cursor = previous_cursor
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "V20 Rolling7 recovery left %s pending: %s",
+                    signal_date.isoformat(),
+                    exc,
+                )
+                continue
+            processed.append(batch)
+            facts[signal_date] = batch
+            recovery_state = self._evaluate_rolling7_recovery_state(
+                tuple(facts.values()),
+                now.date(),
+            )
+            if recovery_state.status.value in {"NON_BAD", "BAD"}:
+                break
+        if cursor_index < 0:
+            self._rolling7_recovery_cursor = None
+        elif candidates:
+            self._rolling7_recovery_cursor = candidates[max(cursor_index, 0)]
+        return tuple(processed)
+
+    def _rolling7_recovery_due(self, now: datetime) -> bool:
+        return (
+            self._rolling7_recovery_last_at is None
+            or now - self._rolling7_recovery_last_at
+            >= timedelta(seconds=ROLLING7_RECOVERY_TICK_SECONDS)
+        )
+
+    async def _rolling7_automatic_recovery_allowed(self, now: datetime) -> bool:
+        """Keep heavyweight historical reconstruction off live trading lanes."""
+
+        local_now = now.astimezone(SHANGHAI)
+        calendar = await self._load_trade_calendar(local_now.date())
+        wall = local_now.timetz().replace(tzinfo=None)
+        return not (
+            local_now.date() in calendar
+            and ROLLING7_AUTOMATIC_BLACKOUT_START <= wall < ROLLING7_AUTOMATIC_BLACKOUT_END
+        )
+
+    async def _run_rolling7_recovery_scheduler(self) -> None:
+        while not self._stop_event.is_set():
+            started_at = asyncio.get_running_loop().time()
+            now = self._aware_now()
+            try:
+                if self._rolling7_recovery_due(
+                    now
+                ) and await self._rolling7_automatic_recovery_allowed(now):
+                    async with self._rolling7_recovery_lock:
+                        self._rolling7_recovery_last_at = now
+                        await self.backfill_rolling7_market_health()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("V20 Rolling7 recovery tick failed: %s", exc)
+            await self._wait_for_runtime_tick(started_at, 1.0)
 
     async def _hydrate_canonical_artifact_record(self, record: Any) -> Any:
         """Hydrate one durable ticket and prove its raw barrier still exists."""
@@ -5788,6 +6361,10 @@ class V20Service:
     async def _historical_early_evidence_seed(
         self,
         trade_date: date,
+        *,
+        universe_override: tuple[str, ...] | None = None,
+        clean_boards_override: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+        evidence_codes: Sequence[str] = (),
     ) -> tuple[
         dict[str, TushareEarlyMarketData],
         tuple[str, ...],
@@ -5825,13 +6402,22 @@ class V20Service:
         the pending set from the database on the next call.  Hash corruption
         stays fatal inside the repository.
         """
-        _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(self._scan_state)
+        _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(
+            self._scan_state,
+            universe_override=universe_override,
+            clean_boards_override=clean_boards_override,
+        )
+        evidence_universe = tuple(sorted(set(universe).union(evidence_codes)))
         records = await self._repository.list_raw_minute_bar_records(
-            universe,
+            evidence_universe,
             trade_date=trade_date,
             end_labels=EARLY_RAW_BAR_LABELS,
         )
-        usable, missing, conflicted = self._fold_universe_raw_records(records, universe, trade_date)
+        usable, missing, conflicted = self._fold_universe_raw_records(
+            records,
+            evidence_universe,
+            trade_date,
+        )
         if conflicted:
             self._raise_historical_seed_conflict(conflicted, phase="initial")
         # Targets are always every missing nonconflicted code plus the legacy
@@ -5915,12 +6501,14 @@ class V20Service:
             # vendor response that was just written — the database readback is
             # mandatory after any stk_mins attempt, even if nothing was sealed.
             records = await self._repository.list_raw_minute_bar_records(
-                universe,
+                evidence_universe,
                 trade_date=trade_date,
                 end_labels=EARLY_RAW_BAR_LABELS,
             )
             usable, missing, readback_conflicted = self._fold_universe_raw_records(
-                records, universe, trade_date
+                records,
+                evidence_universe,
+                trade_date,
             )
             if readback_conflicted:
                 self._raise_historical_seed_conflict(readback_conflicted, phase="readback")
@@ -5949,6 +6537,203 @@ class V20Service:
                 seed[code] = early
         return seed, universe, clean_boards
 
+    async def _historical_canonical_inputs(
+        self,
+        context: _DayContext,
+    ) -> _HistoricalCanonicalInputs:
+        """Acquire every date-bound input required by vendor-free V16 replay."""
+
+        trade_date = context.trade_date
+        context_calendar = tuple(context.calendar)
+        if context_calendar and (
+            any(type(item) is not date for item in context_calendar)
+            or tuple(sorted(set(context_calendar))) != context_calendar
+        ):
+            raise V20SemanticConflict("Rolling7 canonical bootstrap context calendar is invalid")
+        context_predecessors = [day for day in context_calendar if day < trade_date]
+        context_successors = [day for day in context_calendar if day > trade_date]
+        if trade_date in context_calendar and context_predecessors and len(context_successors) >= 2:
+            calendar = context_calendar
+        else:
+            calendar = tuple(await self._load_trade_calendar(trade_date))
+        if trade_date not in calendar:
+            raise V20RepositoryError(
+                f"Rolling7 canonical bootstrap calendar lacks {trade_date.isoformat()}"
+            )
+        predecessors = [day for day in calendar if day < trade_date]
+        successors = [day for day in calendar if day > trade_date]
+        if not predecessors or len(successors) < 2:
+            raise V20RepositoryError(
+                "Rolling7 canonical bootstrap calendar lacks predecessor or D1/D2"
+            )
+        prior_trade_date = predecessors[-1]
+
+        _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(self._scan_state)
+        client = self._scan_state.realtime_client
+        if client is None or not callable(getattr(client, "fetch_daily_bars", None)):
+            raise V20RepositoryError(
+                "Rolling7 canonical bootstrap daily-history adapter is unavailable"
+            )
+        historical_adapter = self._scan_state.historical_adapter
+        if historical_adapter is None:
+            raise V20RepositoryError(
+                "Rolling7 canonical bootstrap OHLCV-history adapter is unavailable"
+            )
+
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=D1_DAILY source=tushare.daily date=%s start",
+            trade_date.isoformat(),
+            prior_trade_date.isoformat(),
+        )
+        daily = await client.fetch_daily_bars(prior_trade_date.strftime("%Y%m%d"))
+        if not daily:
+            raise V20RepositoryError(
+                f"Rolling7 canonical bootstrap D1 daily is empty for {prior_trade_date}"
+            )
+        daily_record = await self._repository.record_daily_bar_snapshot(
+            prior_trade_date,
+            _daily_snapshot_payload(prior_trade_date, daily),
+        )
+        prior_daily = _daily_rows_from_snapshot(daily_record.payload)
+        expected_prior_text = prior_trade_date.strftime("%Y%m%d")
+        if not prior_daily or any(
+            row.stock_code != code or row.trade_date != expected_prior_text
+            for code, row in prior_daily.items()
+        ):
+            raise V20SemanticConflict("Rolling7 canonical bootstrap D1 daily readback is invalid")
+        prev_closes = {code: float(row.close_price) for code, row in prior_daily.items()}
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=D1_DAILY complete rows=%d",
+            trade_date.isoformat(),
+            len(prior_daily),
+        )
+
+        breadth_codes = tuple(
+            sorted(
+                code
+                for code, previous_close in prev_closes.items()
+                if len(code) == 6 and code.startswith(("00", "60")) and previous_close > 0
+            )
+        )
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=EARLY_STK_MINS source=tushare.stk_mins "
+            "universe=%d breadth=%d start",
+            trade_date.isoformat(),
+            len(universe),
+            len(breadth_codes),
+        )
+        seed, frozen_universe, frozen_boards = await self._historical_early_evidence_seed(
+            trade_date,
+            universe_override=universe,
+            clean_boards_override=clean_boards,
+            evidence_codes=breadth_codes,
+        )
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=EARLY_STK_MINS complete ready=%d",
+            trade_date.isoformat(),
+            len(seed),
+        )
+
+        today = self._aware_now().date()
+        if trade_date == today:
+            fundamentals = self._scan_state.fundamentals_db
+            if fundamentals is None or not callable(
+                getattr(fundamentals, "batch_current_names", None)
+            ):
+                raise V20RepositoryError(
+                    "Rolling7 same-day canonical bootstrap stock_basic adapter is unavailable"
+                )
+            logger.info(
+                "V20 Rolling7 bootstrap %s stage=ST_NAMES source=tushare.stock_basic start",
+                trade_date.isoformat(),
+            )
+            names_raw = await fundamentals.batch_current_names(list(frozen_universe))
+            frozen_codes = set(frozen_universe)
+            if not isinstance(names_raw, Mapping) or any(
+                not isinstance(code, str)
+                or code not in frozen_codes
+                or not isinstance(name, str)
+                or not name.strip()
+                for code, name in names_raw.items()
+            ):
+                raise V20SemanticConflict("Rolling7 same-day stock_basic name snapshot is invalid")
+            names = {code: name.strip() for code, name in names_raw.items()}
+            st_eligible_codes = tuple(
+                sorted(code for code, name in names.items() if not name.startswith(("ST", "*ST")))
+            )
+        else:
+            if not callable(getattr(client, "fetch_stock_names_for_date", None)):
+                raise V20RepositoryError(
+                    "Rolling7 canonical bootstrap historical-name adapter is unavailable"
+                )
+            logger.info(
+                "V20 Rolling7 bootstrap %s stage=ST_NAMES source=tushare.bak_basic start",
+                trade_date.isoformat(),
+            )
+            historical_names = await client.fetch_stock_names_for_date(
+                trade_date.strftime("%Y%m%d")
+            )
+            if not historical_names:
+                raise V20RepositoryError(
+                    f"Rolling7 canonical bootstrap bak_basic is empty for {trade_date}"
+                )
+            names = {
+                code: historical_names[code] for code in frozen_universe if code in historical_names
+            }
+            st_eligible_codes = tuple(
+                sorted(code for code, name in names.items() if not name.startswith(("ST", "*ST")))
+            )
+        if not names:
+            raise V20RepositoryError(
+                "Rolling7 canonical bootstrap name snapshot has no universe overlap"
+            )
+        if len(st_eligible_codes) != len(set(st_eligible_codes)) or any(
+            code not in frozen_universe for code in st_eligible_codes
+        ):
+            raise V20SemanticConflict("Rolling7 canonical bootstrap ST eligibility is invalid")
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=ST_NAMES complete names=%d non_st=%d",
+            trade_date.isoformat(),
+            len(names),
+            len(st_eligible_codes),
+        )
+
+        trading_codes = [
+            code for code in frozen_universe if code in seed and seed[code].quote.is_trading
+        ]
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=DAILY_HISTORY source=iquant.history_quotes "
+            "codes=%d start",
+            trade_date.isoformat(),
+            len(trading_codes),
+        )
+        history_raw = await _fetch_history_ohlcv(
+            historical_adapter,
+            trading_codes,
+            trade_date,
+        )
+        if trading_codes and not history_raw:
+            raise V20RepositoryError(
+                f"Rolling7 canonical bootstrap history is empty for {trade_date}"
+            )
+        logger.info(
+            "V20 Rolling7 bootstrap %s stage=DAILY_HISTORY complete rows=%d",
+            trade_date.isoformat(),
+            len(history_raw),
+        )
+
+        return _HistoricalCanonicalInputs(
+            early_data_seed=seed,
+            universe=frozen_universe,
+            clean_boards=frozen_boards,
+            prev_closes=prev_closes,
+            history_raw=history_raw,
+            names=names,
+            calendar=calendar,
+            prior_daily=prior_daily,
+            st_eligible_codes=st_eligible_codes,
+        )
+
     async def _compute_canonical_v16_from_persisted_raw(
         self,
         context: _DayContext,
@@ -5974,17 +6759,64 @@ class V20Service:
         today = self._aware_now().date()
         if trade_date > today:
             raise V20StateConflict("canonical V16 replay cannot target a future trade date")
-        seed, universe, clean_boards = await self._historical_early_evidence_seed(trade_date)
+        frozen = await self._historical_canonical_inputs(context)
         canonical = await compute_canonical_v16_scan(
             self._scan_state,
             trade_date,
-            early_data_seed=seed,
-            universe_override=universe,
-            clean_boards_override=clean_boards,
+            early_data_seed=frozen.early_data_seed,
+            universe_override=frozen.universe,
+            clean_boards_override=frozen.clean_boards,
+            prev_closes_override=frozen.prev_closes,
+            history_raw_override=frozen.history_raw,
+            names_override=frozen.names,
+            calendar_override=frozen.calendar,
+            prior_daily_override=frozen.prior_daily,
+            st_eligible_codes_override=frozen.st_eligible_codes,
             allow_realtime_fetch=False,
         )
         await self._persist_canonical_raw_minute_bars(canonical)
         return canonical
+
+    async def _bootstrap_historical_canonical_artifact(
+        self,
+        signal_date: date,
+        calendar: Sequence[date],
+    ) -> Any:
+        """Rebuild and durably publish one absent canonical V16 artifact."""
+
+        store = self._canonical_artifact_store
+        if store is None:
+            raise V20RepositoryError("canonical V16 artifact store is unavailable")
+        async with self._rolling7_canonical_bootstrap_lock:
+            existing = await store.load(
+                official_stream_id=self.config.official_stream_id,
+                trade_date=signal_date,
+                event=V16_CANONICAL_ARTIFACT_EVENT,
+            )
+            if existing is not None:
+                return existing
+            logger.info(
+                "V20 Rolling7 bootstrap %s stage=CANONICAL_COMPUTE start",
+                signal_date.isoformat(),
+            )
+            canonical = await self._compute_canonical_v16_from_persisted_raw(
+                _DayContext(trade_date=signal_date, calendar=tuple(calendar))
+            )
+            await self._persist_canonical_artifact_barrier(canonical)
+            record = await store.load(
+                official_stream_id=self.config.official_stream_id,
+                trade_date=signal_date,
+                event=V16_CANONICAL_ARTIFACT_EVENT,
+            )
+            if record is None:
+                raise V20RepositoryError(
+                    "Rolling7 canonical bootstrap completed without durable artifact"
+                )
+            logger.info(
+                "V20 Rolling7 bootstrap %s stage=CANONICAL_COMPUTE complete",
+                signal_date.isoformat(),
+            )
+            return record
 
     async def _build_late_0939_replay_semantic(
         self,
@@ -6225,34 +7057,9 @@ class V20Service:
         completed_health, completed_rolling, maturity_gaps = (
             self._policy_inputs_from_terminal_status(status)
         )
-        failure_gap_id = named_hash(
-            "V20_OFFICIAL_SHADOW_GAP_ID_V1",
-            {
-                "official_stream_id": self.config.official_stream_id,
-                "trade_date": context.trade_date.isoformat(),
-            },
-        )
-        raw_gaps = state.payload.get("official_rolling_gaps")
-        if not isinstance(raw_gaps, list) or any(
-            not isinstance(item, Mapping) for item in raw_gaps
-        ):
-            raise V20SemanticConflict("official state rolling gaps are malformed")
-        if sum(item.get("gap_id") == failure_gap_id for item in raw_gaps) != 1:
-            raise V20SemanticConflict("failed slot replay gap is missing or duplicated")
-        replay_gaps = [dict(item) for item in raw_gaps if item.get("gap_id") != failure_gap_id]
-        replay_state_payload = {
-            **dict(state.payload),
-            "official_rolling_gaps": replay_gaps,
-        }
-        replay_state = StateRecord(
-            lineage_id=state.lineage_id,
-            revision=state.revision,
-            state_hash=sha256_json(replay_state_payload),
-            payload=replay_state_payload,
-        )
         prepared = prepare_entry(
             config=self.config,
-            state=replay_state,
+            state=state,
             bundle=bundle,
             completed_health=completed_health,
             completed_rolling=completed_rolling,
@@ -7177,6 +7984,16 @@ class V20Service:
         )
 
     async def _run_reference_cycle(self, context: _DayContext, now: datetime) -> None:
+        try:
+            await self._acquire_rolling7_d0_evidence(context, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "V20 Rolling7 D0 evidence acquisition left %s pending: %s",
+                context.trade_date.isoformat(),
+                exc,
+            )
         status = await self._refresh_entry_status(context)
         if status is None or context.reference_finalized:
             return
@@ -7232,24 +8049,10 @@ class V20Service:
             }
             return rows
 
+        # The shared ``rt_min`` poll above is the only current-day reference
+        # acquisition path.  A missing 09:41 row stays recoverable on the next
+        # batch poll; never fan out Top-N ``rt_min_daily`` calls here.
         exact = _staged_reference_rows()
-        missing = [code for code in required if code not in exact]
-        # Historical recovery is bounded to recommended symbols.  Pulling
-        # rt_min_daily for the entire comparison universe would miss the hard
-        # clock budget and is unnecessary for model-leg protection.
-        history_targets = [code for code in missing if code in symbol_codes]
-        history_due = (
-            context.last_reference_history_at is None
-            or (now - context.last_reference_history_at).total_seconds() >= 60
-        )
-        if history_targets and history_due:
-            context.reference_history_attempted = True
-            context.last_reference_history_at = now
-            history = await self._scan_state.realtime_client.batch_get_minute_history(
-                history_targets
-            )
-            await self._persist_history(context, history, observed_at=now)
-            exact = _staged_reference_rows()
         _prices, missing_codes, _source_hash = exact_reference_prices(
             exact,
             required,
@@ -7299,6 +8102,7 @@ class V20Service:
         pending_shadows = await self._repository.list_pending_shadow_reference_batches(
             context.trade_date, **self._ledger_scope
         )
+        pending_shadows = [batch for batch in pending_shadows if batch.kind == "HEALTH"]
 
         signal_dates = {leg.signal_date for leg in pending_legs}
         signal_dates.update(batch.signal_date for batch in pending_shadows)
@@ -7328,8 +8132,8 @@ class V20Service:
                 # A restart on D1 must still be able to stage a selected leg's
                 # raw D0 09:41 row before the immutable 09:30 receipt cutoff.
                 # This bounded historical query deliberately targets model legs
-                # only; the market-wide shadow comparison snapshot is collected
-                # on D0 and has its own explicit 09:45 cutoff.
+                # only; the HEALTH comparison snapshot is collected on D0 and
+                # has its own explicit 09:45 cutoff.
                 history_targets = tuple(sorted({leg.code for leg in legs}))
                 last_attempt = context.reference_gap_history_last_at.get(signal_date)
                 history_due = last_attempt is None or (now - last_attempt).total_seconds() >= 60
@@ -7397,7 +8201,7 @@ class V20Service:
                 expected_label=self.config.clock.reference_bar_label,
             )
 
-            # HEALTH/ROLLING7 compare a market-wide D0 snapshot.  Rebuilding
+            # HEALTH compares a market-wide D0 snapshot.  Rebuilding
             # thousands of names on D1 would make the result depend on a later
             # bulk history job, so their immutable receipt cutoff is D0 09:45.
             # Model legs remain independently recoverable until D1 09:30.
@@ -8231,28 +9035,49 @@ class V20Service:
             reference_entry_price=record.reference_price,
         )
         selected: SelectedMewsRecord | None = None
-        if now.date() >= record.d2:
+        if now.date() >= record.d2 and record.exit_intent_id is None:
             try:
-                cutoff = _local(record.d1, self.config.clock.mews_cutoff_d1)
-                # The leg's daily value may have been repaired later on D1
-                # itself; offer that exact (predecessor, D1) window so a late
-                # local calculation can serve legs that have not produced a
-                # formal exit intent yet.  Without calendar evidence the
-                # window stays closed and only the strict cutoff applies.
-                late_source_trade_date = None
-                predecessors = [day for day in calendar if day < record.d1]
-                if predecessors:
-                    late_source_trade_date = predecessors[-1]
+                cutoff = _local(record.d2, self.config.clock.mews_cutoff_d1)
+                predecessors = [day for day in calendar if day < record.d2]
+                if not predecessors:
+                    raise V20RepositoryError("MEWS calendar has no D2 predecessor")
+                late_source_trade_date = predecessors[-1]
                 if self._mews_guard_store is not None:
-                    selected = await self._mews_guard_store.select_freeze_and_load(
+                    selected = await self._mews_guard_store.load_frozen_for_leg(
                         record.model_leg_id,
                         d1=record.d1,
                         cutoff=cutoff,
                         late_source_trade_date=late_source_trade_date,
-                        late_availability_date=(
-                            record.d1 if late_source_trade_date is not None else None
-                        ),
+                        evaluation_date=record.d2,
                     )
+                    if selected is None:
+                        existing_snapshot_id = await self._mews_guard_store.find_eligible_snapshot(
+                            source_trade_date=late_source_trade_date,
+                            cutoff=cutoff,
+                            availability_date=record.d2,
+                        )
+                        if existing_snapshot_id is None:
+                            try:
+                                await self._ensure_mews_for_exit_date(record.d2, now=now)
+                                existing_snapshot_id = (
+                                    await self._mews_guard_store.find_eligible_snapshot(
+                                        source_trade_date=late_source_trade_date,
+                                        cutoff=cutoff,
+                                        availability_date=record.d2,
+                                    )
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                pass
+                        selected = await self._mews_guard_store.select_freeze_and_load(
+                            record.model_leg_id,
+                            d1=record.d1,
+                            cutoff=cutoff,
+                            late_source_trade_date=late_source_trade_date,
+                            late_availability_date=record.d2,
+                            evaluation_date=record.d2,
+                        )
                 else:
                     # Compatibility-only repositories.  A connected production
                     # PostgreSQL service always takes the atomic strict-store
@@ -8262,9 +9087,7 @@ class V20Service:
                         d1=record.d1,
                         cutoff=cutoff,
                         late_source_trade_date=late_source_trade_date,
-                        late_availability_date=(
-                            record.d1 if late_source_trade_date is not None else None
-                        ),
+                        late_availability_date=record.d2,
                     )
                     selected = await self._repository.load_selected_mews_for_leg(
                         record.model_leg_id

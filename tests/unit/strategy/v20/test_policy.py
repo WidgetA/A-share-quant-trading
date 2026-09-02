@@ -186,13 +186,15 @@ def test_rolling7_exact_bad_boundaries_and_maturity_strictness() -> None:
         decision_date=decision_day,
         complete_batches=[*[_rolling(i, 0.01) for i in range(6)], equal_maturity],
     )
-    assert result.status is Rolling7Status.UNKNOWN
+    assert result.status is Rolling7Status.WARMUP
+    assert result.unknown_reason == "WARMUP:6/7"
 
 
 def test_rolling7_gap_activates_only_after_maturity_and_ages_after_seven_later_batches() -> None:
     gap = RollingGap("gap", date(2026, 1, 1), date(2026, 1, 3))
     before = evaluate_rolling7(decision_date=date(2026, 1, 3), complete_batches=[], gaps=[gap])
-    assert before.unknown_reason == "INSUFFICIENT_MATURE_BATCHES"
+    assert before.status is Rolling7Status.WARMUP
+    assert before.unknown_reason == "WARMUP:0/7"
 
     active = evaluate_rolling7(
         decision_date=date(2026, 1, 10),

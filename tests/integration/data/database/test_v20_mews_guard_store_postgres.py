@@ -24,9 +24,12 @@ SAFE_PREFIX = "v20_test_mews_guard_store_"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SOURCE_DATE = date(2026, 8, 31)
 D1 = date(2026, 9, 1)
+D2 = date(2026, 9, 2)
 CUTOFF = datetime(2026, 9, 1, 9, 40, tzinfo=SHANGHAI)
 ON_TIME = datetime(2026, 9, 1, 9, 15, tzinfo=SHANGHAI)
 LATE = datetime(2026, 9, 1, 14, 4, tzinfo=SHANGHAI)
+D2_ON_TIME = datetime(2026, 9, 2, 9, 15, tzinfo=SHANGHAI)
+D2_CUTOFF = datetime(2026, 9, 2, 9, 40, tzinfo=SHANGHAI)
 
 pytestmark = [
     pytest.mark.postgres,
@@ -358,10 +361,68 @@ async def guard_store():
             generated_at=LATE - timedelta(days=1),
             receipt_sealed_at=LATE + timedelta(minutes=1),
         )
+        await _insert_snapshot(
+            pool,
+            schema,
+            "d2-current-day",
+            source_trade_date=D1,
+            generated_at=D2_ON_TIME,
+            receipt_sealed_at=D2_ON_TIME + timedelta(minutes=1),
+            signal_available_date=D2,
+        )
         yield V20MewsGuardStore(repository), repository, pool, schema
     finally:
         await _drop_schema(pool, schema)
         await pool.close()
+
+
+async def _selection_row(
+    pool: asyncpg.Pool,
+    schema: str,
+    model_leg_id: str,
+) -> dict[str, Any]:
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            f"""
+            SELECT ctid::text AS ctid,xmin::text::bigint AS xmin,
+                   model_leg_id,snapshot_id,fast_state,cutoff_ts,
+                   selection_reason,selected_at
+            FROM {schema}.leg_mews_selection
+            WHERE model_leg_id=$1
+            """,
+            model_leg_id,
+        )
+    assert row is not None
+    return dict(row)
+
+
+async def _insert_exit_intent(
+    pool: asyncpg.Pool,
+    schema: str,
+    model_leg_id: str,
+) -> None:
+    event_id = f"{model_leg_id}-exit-event"
+    await _insert_event(pool, schema, event_id, "EXIT_SIGNAL")
+    semantic = {"model_leg_id": model_leg_id, "signal_type": "MEWS"}
+    async with pool.acquire() as connection:
+        await connection.execute(
+            f"""
+            INSERT INTO {schema}.exit_intents
+                (exit_intent_id,model_leg_id,event_id,signal_type,trigger_ts,
+                 rule_actionable_from,semantic_content_hash,commit_fingerprint,
+                 semantic_json,initial_exit_persisted_local_date)
+            VALUES ($1,$2,$3,'MEWS',$4,$5,$6,$7,$8::jsonb,$9)
+            """,
+            f"{model_leg_id}-intent",
+            model_leg_id,
+            event_id,
+            ON_TIME,
+            ON_TIME,
+            sha256_json(semantic),
+            sha256_json({"commit": model_leg_id}),
+            canonical_json(semantic),
+            D1,
+        )
 
 
 async def test_postgres_on_time_and_late_discovery_boundaries(
@@ -517,6 +578,168 @@ async def test_postgres_no_candidate_writes_one_null_fallback(
             """
         )
     assert count == 1
+
+
+async def test_postgres_d2_current_day_selection_and_conflict_idempotency(
+    guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
+) -> None:
+    store, _repository, pool, schema = guard_store
+    await _insert_manual_leg(pool, schema, "leg-d2-current-day", d1=D1)
+
+    first, second = await asyncio.gather(
+        store.select_and_freeze_for_leg(
+            "leg-d2-current-day",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=D1,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        ),
+        store.select_and_freeze_for_leg(
+            "leg-d2-current-day",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=D1,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        ),
+    )
+    assert first == ("d2-current-day", "DANGER", "ELIGIBLE")
+    assert second == first
+
+    frozen = await _selection_row(pool, schema, "leg-d2-current-day")
+    assert frozen["snapshot_id"] == "d2-current-day"
+    assert frozen["cutoff_ts"] == D2_CUTOFF
+    assert frozen["selection_reason"] == "ELIGIBLE"
+
+    with pytest.raises(V20SemanticConflict, match="invalid cutoff"):
+        await store.select_and_freeze_for_leg(
+            "leg-d2-current-day",
+            d1=D1,
+            cutoff=D2_CUTOFF + timedelta(minutes=1),
+            late_source_trade_date=D1,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        )
+    assert await _selection_row(pool, schema, "leg-d2-current-day") == frozen
+
+
+async def test_postgres_d2_upgrades_legacy_selection_without_intent_once(
+    guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
+) -> None:
+    store, _repository, pool, schema = guard_store
+    await _insert_manual_leg(pool, schema, "leg-d2-legacy-upgrade", d1=D1)
+    legacy = await store.select_freeze_and_load(
+        "leg-d2-legacy-upgrade",
+        d1=D1,
+        cutoff=CUTOFF,
+    )
+    assert legacy.snapshot_id == "on-time"
+    assert legacy.source_trade_date == SOURCE_DATE
+    assert legacy.selection_reason == "ELIGIBLE"
+    legacy_row = await _selection_row(pool, schema, "leg-d2-legacy-upgrade")
+
+    upgraded = await store.select_freeze_and_load(
+        "leg-d2-legacy-upgrade",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+    assert upgraded.snapshot_id == "d2-current-day"
+    assert upgraded.source_trade_date == D1
+    assert upgraded.generated_at == D2_ON_TIME
+    assert upgraded.received_at == D2_ON_TIME + timedelta(seconds=1)
+    assert upgraded.receipt_sealed_at == D2_ON_TIME + timedelta(minutes=1)
+    assert upgraded.cutoff_ts == D2_CUTOFF
+    assert upgraded.selection_reason == "ELIGIBLE"
+
+    upgraded_row = await _selection_row(pool, schema, "leg-d2-legacy-upgrade")
+    replay = await store.select_freeze_and_load(
+        "leg-d2-legacy-upgrade",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+    assert replay == upgraded
+    assert await _selection_row(pool, schema, "leg-d2-legacy-upgrade") == upgraded_row
+    assert upgraded_row != legacy_row
+
+
+async def test_postgres_d2_preserves_legacy_selection_with_exit_intent(
+    guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
+) -> None:
+    store, _repository, pool, schema = guard_store
+    await _insert_manual_leg(pool, schema, "leg-d2-existing-intent", d1=D1)
+    legacy = await store.select_freeze_and_load(
+        "leg-d2-existing-intent",
+        d1=D1,
+        cutoff=CUTOFF,
+    )
+    assert legacy.snapshot_id == "on-time"
+    assert legacy.source_trade_date == SOURCE_DATE
+    assert legacy.selection_reason == "ELIGIBLE"
+    await _insert_exit_intent(pool, schema, "leg-d2-existing-intent")
+    before = await _selection_row(pool, schema, "leg-d2-existing-intent")
+
+    preserved = await store.select_freeze_and_load(
+        "leg-d2-existing-intent",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+    assert preserved == legacy
+    assert await _selection_row(pool, schema, "leg-d2-existing-intent") == before
+
+
+async def test_postgres_d2_no_candidate_fallback_survives_repository_restart(
+    guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
+) -> None:
+    store, _repository, pool, schema = guard_store
+    await _insert_manual_leg(pool, schema, "leg-d2-fallback", d1=D1)
+    result = await store.select_and_freeze_for_leg(
+        "leg-d2-fallback",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=SOURCE_DATE,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+    assert result == (None, None, "MEWS_UNAVAILABLE_FALLBACK_12")
+    before = await _selection_row(pool, schema, "leg-d2-fallback")
+
+    restart_repository = V20Repository(_config(schema), shared_pool=pool)
+    await restart_repository.connect(migrate=True)
+    try:
+        restart_store = V20MewsGuardStore(restart_repository)
+        replay = await restart_store.select_and_freeze_for_leg(
+            "leg-d2-fallback",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=SOURCE_DATE,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        )
+        loaded = await restart_store.load_frozen_for_leg(
+            "leg-d2-fallback",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=SOURCE_DATE,
+            evaluation_date=D2,
+        )
+    finally:
+        await restart_repository.close()
+
+    assert replay == result
+    assert loaded is not None
+    assert loaded.snapshot_id is None
+    assert loaded.selection_reason == "MEWS_UNAVAILABLE_FALLBACK_12"
+    assert await _selection_row(pool, schema, "leg-d2-fallback") == before
 
 
 async def test_postgres_rejects_illegal_existing_freeze_without_mutation(

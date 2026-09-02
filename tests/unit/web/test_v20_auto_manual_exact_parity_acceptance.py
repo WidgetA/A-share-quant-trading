@@ -208,6 +208,9 @@ class _DecisionRepository:
     async def load_recent_completed(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         return []
 
+    async def load_rolling7_market_health(self, **_kwargs: Any) -> tuple[Any, ...]:
+        return ()
+
     async def list_pending_shadow_batches(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         return []
 

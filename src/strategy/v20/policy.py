@@ -224,20 +224,20 @@ def evaluate_rolling7(
     )
     if active_gap_ids:
         return Rolling7Decision(
-            Rolling7Status.UNKNOWN,
+            Rolling7Status.DATA_GAP,
             None,
             None,
             (),
             active_gap_ids=active_gap_ids,
-            unknown_reason="ACTIVE_SHADOW_GAP",
+            unknown_reason="DATA_GAP:" + ",".join(active_gap_ids),
         )
     if len(eligible) < ROLLING_WINDOW_SIZE:
         return Rolling7Decision(
-            Rolling7Status.UNKNOWN,
+            Rolling7Status.WARMUP,
             None,
             None,
             tuple(eligible),
-            unknown_reason="INSUFFICIENT_MATURE_BATCHES",
+            unknown_reason=f"WARMUP:{len(eligible)}/{ROLLING_WINDOW_SIZE}",
         )
 
     window = tuple(eligible[-ROLLING_WINDOW_SIZE:])

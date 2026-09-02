@@ -18,6 +18,7 @@ import src.web.v20_service as service_module
 from src.common.v20_feishu import V20FeishuRoute
 from src.data.clients.mews_snapshot import MewsSnapshotSourceError
 from src.data.clients.tushare_realtime import (
+    TushareDailyBar,
     TushareMinuteBar,
     tushare_minute_bars_to_early_market_data,
 )
@@ -3407,6 +3408,7 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
         "v20-outbox-recovery-scheduler",
         "v20-outbox-publisher",
         "v20-mews-cache-scheduler",
+        "v20-rolling7-recovery-scheduler",
     }
     assert all(not task.done() for task in service._tasks)
     assert service.startup_stage == "RUNNING"
@@ -4104,6 +4106,13 @@ class _LateReplayRepository(_ManualTriggerRepository):
             hashes.add(source_hash)
         return frozenset(hashes)
 
+    async def record_daily_bar_snapshot(self, trade_date, payload):
+        return SimpleNamespace(
+            trade_date=trade_date,
+            payload=dict(payload),
+            first_received_at=datetime(2026, 8, 31, 15, 30, 1, tzinfo=TZ),
+        )
+
     async def commit_entry(self, *_args, **_kwargs):
         self.official_write_calls += 1
         raise AssertionError("late replay must not commit an official entry")
@@ -4154,6 +4163,46 @@ class _LateReplayClient:
             )
             for code in codes
         }
+
+    async def fetch_daily_bars(self, trade_date):
+        return {
+            code: TushareDailyBar(
+                stock_code=code,
+                trade_date=trade_date,
+                close_price=10.0,
+                amount_yuan=1_000_000.0,
+            )
+            for code in _LATE_REPLAY_CODES
+        }
+
+    async def fetch_stock_names_for_date(self, trade_date):
+        assert trade_date == "20260831"
+        return {code: f"fresh-{code}" for code in _LATE_REPLAY_CODES}
+
+
+class _ReplayHistoricalAdapter:
+    async def history_quotes(self, *, codes, **_kwargs):
+        return {
+            "tables": [
+                {
+                    "thscode": ts_code,
+                    "table": {
+                        "time": ["2026-08-28"],
+                        "open": [10.0],
+                        "high": [10.1],
+                        "low": [9.9],
+                        "close": [10.0],
+                        "volume": [1_000.0],
+                    },
+                }
+                for ts_code in codes.split(",")
+            ]
+        }
+
+
+class _ReplayCurrentNames:
+    async def batch_current_names(self, codes):
+        return {code: f"fresh-{code}" for code in codes}
 
 
 _LATE_REPLAY_CODES = (
@@ -4373,6 +4422,19 @@ def _late_replay_service(
     client = _LateReplayClient(missing_label=missing_label)
     service = _service(monkeypatch, repository, client)
     service._clock = lambda: datetime(2026, 8, 31, 15, 30, 3, tzinfo=TZ)
+    replay_calendar = (
+        date(2026, 8, 28),
+        status.trade_date,
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+    )
+
+    async def calendar_provider():
+        return list(replay_calendar)
+
+    service._calendar_provider = calendar_provider
+    service._scan_state.historical_adapter = _ReplayHistoricalAdapter()
+    service._scan_state.fundamentals_db = _ReplayCurrentNames()
     # Durable morning evidence: the full early raw bars (09:25/09:30 strategy
     # inputs included) were persisted at 09:39, so the post-cutoff replay
     # rehydrates from the database alone.
@@ -4395,10 +4457,23 @@ def _late_replay_service(
                 first_received_at=datetime(2026, 8, 31, 9, 39, tzinfo=TZ),
             )
     boards = {"board-a": tuple((code, f"name-{code}") for code in _LATE_REPLAY_CODES)}
+
+    def derive_universe(
+        _state,
+        *,
+        universe_override=None,
+        clean_boards_override=None,
+    ):
+        selected_universe = tuple(
+            sorted(_LATE_REPLAY_CODES if universe_override is None else universe_override)
+        )
+        selected_boards = boards if clean_boards_override is None else clean_boards_override
+        return None, None, selected_boards, selected_universe
+
     monkeypatch.setattr(
         service_module,
         "derive_canonical_v16_universe",
-        lambda _state: (None, None, boards, tuple(sorted(_LATE_REPLAY_CODES))),
+        derive_universe,
     )
     # The post-cutoff replay attests V16 DayGate evidence after recompute; the
     # evidence store is outside these fixtures, so stub a PASS attestation.
@@ -4419,12 +4494,7 @@ def _late_replay_service(
     )
     context = _DayContext(
         trade_date=status.trade_date,
-        calendar=(
-            date(2026, 8, 28),
-            status.trade_date,
-            date(2026, 9, 1),
-            date(2026, 9, 2),
-        ),
+        calendar=replay_calendar,
         entry_status=status,
     )
     return service, repository, client, compute_calls, observed, context
@@ -4448,7 +4518,7 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     assert first.semantic["replay_action"] == "ENTER"
     assert first.semantic["final_multiplier"] == 1.0
     assert first.semantic["health_state"] == "WARMUP"
-    assert first.semantic["rolling7_state"] == "UNKNOWN"
+    assert first.semantic["rolling7_state"] == "WARMUP"
     assert first.semantic["breadth_replay_mode"] == ("SKIPPED_NOT_USED_BY_BASE_WARMUP_OR_HEALTHY")
     assert first.semantic["raw_fact_n"] == 110
     assert first.semantic["raw_post_cutoff_n"] == 110
@@ -4652,17 +4722,42 @@ class _SeedRepository:
             hashes.add(source_hash)
         return frozenset(hashes)
 
+    async def record_daily_bar_snapshot(self, trade_date, payload):
+        return SimpleNamespace(
+            trade_date=trade_date,
+            payload=dict(payload),
+            first_received_at=datetime(2026, 9, 1, 15, 30, 1, tzinfo=TZ),
+        )
+
 
 class _HistoricalSeedClient:
-    """Past-date evidence may only come from stk_mins; every live path bombs."""
+    """Frozen historical adapters; current-day RT endpoints still bomb."""
 
     def __init__(self, bars_by_code: Mapping[str, tuple[TushareMinuteBar, ...]] | None = None):
         self.bars_by_code = dict(bars_by_code or {})
         self.calls: list[tuple[tuple[str, ...], date]] = []
+        self.daily_calls: list[str] = []
+        self.name_calls: list[str] = []
 
     async def batch_get_minute_history_for_date(self, codes, trade_date):
         self.calls.append((tuple(codes), trade_date))
         return {code: self.bars_by_code.get(code, ()) for code in codes}
+
+    async def fetch_daily_bars(self, trade_date):
+        self.daily_calls.append(trade_date)
+        return {
+            code: TushareDailyBar(
+                stock_code=code,
+                trade_date=trade_date,
+                close_price=10.0,
+                amount_yuan=1_000_000.0,
+            )
+            for code in _LATE_REPLAY_CODES
+        }
+
+    async def fetch_stock_names_for_date(self, trade_date):
+        self.name_calls.append(trade_date)
+        return {code: f"fresh-{code}" for code in _LATE_REPLAY_CODES}
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"past-date replay touched a live/vendor boundary: {name}")
@@ -4676,12 +4771,39 @@ def _historical_seed_service(
 ) -> V20Service:
     service = _service(monkeypatch, repository, client)
     boards = {"board-a": tuple((code, f"name-{code}") for code in universe)}
+
+    def derive_universe(
+        _state,
+        *,
+        universe_override=None,
+        clean_boards_override=None,
+    ):
+        selected_universe = tuple(
+            sorted(universe if universe_override is None else universe_override)
+        )
+        selected_boards = boards if clean_boards_override is None else clean_boards_override
+        return None, None, selected_boards, selected_universe
+
     monkeypatch.setattr(
         service_module,
         "derive_canonical_v16_universe",
-        lambda _state: (None, None, boards, tuple(sorted(universe))),
+        derive_universe,
     )
     service._clock = lambda: datetime(2026, 9, 1, 15, 30, 3, tzinfo=TZ)
+    replay_calendar = (
+        date(2026, 8, 28),
+        _HIST_TRADE_DATE,
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+    )
+
+    async def calendar_provider():
+        return list(replay_calendar)
+
+    service._calendar_provider = calendar_provider
+    service._scan_state.historical_adapter = _ReplayHistoricalAdapter()
+    service._scan_state.fundamentals_db = _ReplayCurrentNames()
     return service
 
 
@@ -6114,7 +6236,7 @@ async def test_revision_zero_recovery_uses_persisted_genesis_boundary(
     assert recovered.shadow_batches == ()
     assert recovered.model_batch is None
     assert recovered.invalid_commit_not_before_ts == datetime(2026, 8, 31, 9, 45, tzinfo=TZ)
-    assert recovered.next_state["official_rolling_gaps"][-1]["signal_date"] == "2026-08-31"
+    assert recovered.next_state["official_rolling_gaps"] == []
 
 
 def test_empty_forward_shadow_genesis_has_explicit_first_day_anchor(
@@ -6154,9 +6276,8 @@ def _checkpoint_payload(config, state: Mapping[str, Any], as_of: date) -> dict[s
             {
                 "kind": "ROLLING7",
                 "status": "COMPLETE_VALID",
-                "signal_date": date(2026, 8, 3 + index).isoformat(),
+                "signal_date": date(2026, 8, 3).isoformat(),
             }
-            for index in range(7)
         ],
     }
 
@@ -6180,7 +6301,17 @@ def test_checkpoint_v3_valid_shape_carries_no_retired_fields(
         bootstrap_mode="CHECKPOINT",
         bootstrap_checkpoint_path=checkpoint_path,
     )
-    checkpoint = _checkpoint_payload(config, genesis_state(), as_of)
+    state = genesis_state()
+    state["official_rolling_gaps"] = [
+        {
+            "gap_id": "legacy-gap",
+            "signal_date": "2026-08-01",
+            "maturity_date": "2026-08-03",
+            "closed": False,
+            "aged_out": False,
+        }
+    ]
+    checkpoint = _checkpoint_payload(config, state, as_of)
     assert not set(checkpoint) & set(_RETIRED_CHECKPOINT_FIELDS)
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
 
@@ -6191,6 +6322,8 @@ def test_checkpoint_v3_valid_shape_carries_no_retired_fields(
 
     assert bootstrap.predecessor_trade_date == as_of
     assert bootstrap.state["state_revision"] == 0
+    assert bootstrap.state["official_rolling_gaps"] == []
+    assert bootstrap.shadow_batches == ()
 
 
 @pytest.mark.parametrize("field", [*_RETIRED_CHECKPOINT_FIELDS, "surprise_field"])
@@ -6421,11 +6554,16 @@ def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
 
     for schema_version in ("v20-bootstrap-checkpoint/v2", "v20-bootstrap-checkpoint/v3"):
         checkpoint = checkpoint_payload(schema_version)
+        invalid_schema_state = {**state, "schema_version": "legacy"}
         mutations = (
             ({**checkpoint, "target_official_stream_id": "other-stream"}, "target stream"),
             ({**checkpoint, "state_lineage_id": "other-lineage"}, "checkpoint lineage"),
             (
-                {**checkpoint, "official_state": {**state, "schema_version": "legacy"}},
+                {
+                    **checkpoint,
+                    "official_state": invalid_schema_state,
+                    "official_state_hash": sha256_json(invalid_schema_state),
+                },
                 "official_state schema",
             ),
             ({**checkpoint, "official_state_hash": "0" * 64}, "official_state_hash mismatch"),
@@ -6472,6 +6610,9 @@ class _LateNormalEntryRepository:
 
     async def load_recent_completed(self, kind, **kwargs):
         return []
+
+    async def load_rolling7_market_health(self, **_kwargs):
+        return ()
 
     async def list_pending_shadow_batches(self, trade_date, **kwargs):
         return []
@@ -6555,7 +6696,7 @@ async def test_late_normal_v16_candidate_becomes_gap_without_consumable_batches(
     assert commit.shadow_batches == ()
     assert commit.model_batch is None
     assert commit.invalid_commit_not_before_ts == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
-    assert commit.next_state["official_rolling_gaps"][-1]["signal_date"] == "2026-08-31"
+    assert commit.next_state["official_rolling_gaps"] == []
 
 
 async def test_missing_0939_coverage_finalizes_no_buy_at_0940_idempotently(
@@ -7415,6 +7556,7 @@ class _MaturityRepository:
         self.requested_cutoffs: list[datetime | None] = []
         self.recorded: list[tuple[date, Any]] = []
         self.completed: list[dict[str, Any]] = []
+        self.recent_completed_calls = 0
         self.batch = SimpleNamespace(
             batch_id="health-1",
             kind="HEALTH",
@@ -7439,6 +7581,7 @@ class _MaturityRepository:
         return [self.batch]
 
     async def load_recent_completed(self, *args, **kwargs):
+        self.recent_completed_calls += 1
         return []
 
     async def database_cutoff_reached(self, cutoff):
@@ -7549,7 +7692,7 @@ async def test_health_maturity_source_failure_does_not_hide_persisted_cutoff_sna
     assert context.maturity_done is True
 
 
-async def test_maturity_prefers_older_complete_candidate_over_newer_empty_candidate(
+async def test_legacy_rolling_maturity_row_is_inert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     received = datetime(2026, 8, 31, 15, 5, tzinfo=TZ)
@@ -7585,7 +7728,8 @@ async def test_maturity_prefers_older_complete_candidate_over_newer_empty_candid
     repository.batch.kind = "ROLLING7"
     repository.batch.payload = {"symbols": [{"code": "000001"}]}
     repository.batch.reference_prices = {"000001": 10.0}
-    service = _service(monkeypatch, repository, _MaturityClient(fail=True))
+    client = _MaturityClient(fail=True)
+    service = _service(monkeypatch, repository, client)
     context = _DayContext(
         trade_date=date(2026, 8, 31),
         calendar=(date(2026, 8, 27), date(2026, 8, 28), date(2026, 8, 31)),
@@ -7593,11 +7737,12 @@ async def test_maturity_prefers_older_complete_candidate_over_newer_empty_candid
 
     await service._process_mature_shadow(context, received)
 
-    assert len(repository.completed) == 1
-    completed = repository.completed[0]
-    assert completed["status"] == "COMPLETE_VALID"
-    assert completed["batch_return"] == pytest.approx(0.1)
-    assert completed["payload_update"]["daily_snapshot_id"] == "daily-older-complete"
+    assert client.calls == []
+    assert repository.recorded == []
+    assert repository.requested_cutoffs == []
+    assert repository.completed == []
+    assert repository.recent_completed_calls == 0
+    assert context.maturity_done is True
 
 
 def _bar(
@@ -7961,20 +8106,25 @@ async def test_reference_deadline_ignores_later_illegal_revision(
 
 
 class _ShadowReferenceRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, kind: str = "HEALTH") -> None:
+        self.kind = kind
         self.cutoff: datetime | None = None
         self.locked: dict[str, float] | None = None
+        self.cutoff_checks = 0
+        self.pending_leg_calls = 0
 
     async def list_active_legs(self, trade_date, **kwargs):
         return []
 
     async def database_cutoff_reached(self, cutoff):
+        self.cutoff_checks += 1
         return True
 
     async def list_pending_shadow_reference_batches(self, before_signal_date, **kwargs):
         return [
             SimpleNamespace(
                 batch_id="health",
+                kind=self.kind,
                 signal_date=date(2026, 8, 28),
                 payload={
                     "d1": "2026-08-31",
@@ -7985,6 +8135,7 @@ class _ShadowReferenceRepository:
         ]
 
     async def list_pending_reference_legs(self, signal_date, **kwargs):
+        self.pending_leg_calls += 1
         return []
 
     async def list_raw_minute_bar_records(
@@ -8020,6 +8171,34 @@ async def test_shadow_reference_uses_explicit_d0_0945_cutoff(
 
     assert repository.cutoff == datetime(2026, 8, 28, 9, 45, tzinfo=TZ)
     assert repository.locked == {"000001": 10.0}
+
+
+async def test_legacy_rolling_reference_gap_is_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _ShadowReferenceRepository(kind="ROLLING7")
+    service = _service(monkeypatch, repository)
+    alerts: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def capture_alert(*args: Any, **kwargs: Any) -> None:
+        alerts.append((args, kwargs))
+
+    monkeypatch.setattr(service, "_safe_alert", capture_alert)
+    context = _DayContext(
+        trade_date=date(2026, 8, 31),
+        calendar=(date(2026, 8, 31), date(2026, 9, 1)),
+    )
+
+    await service._expire_reference_gaps(
+        context,
+        datetime(2026, 8, 31, 9, 30, tzinfo=TZ),
+    )
+
+    assert repository.cutoff_checks == 0
+    assert repository.pending_leg_calls == 0
+    assert repository.cutoff is None
+    assert repository.locked is None
+    assert alerts == []
 
 
 async def test_reference_equal_latest_receipt_with_different_hashes_is_conflict(
@@ -8201,9 +8380,9 @@ async def test_d2_selection_offers_late_same_day_mews_window_from_calendar(
     call = repository.selection_calls[0]
     assert call["model_leg_id"] == "leg"
     assert call["d1"] == date(2026, 8, 28)
-    assert call["cutoff"] == datetime(2026, 8, 28, 9, 40, tzinfo=TZ)
-    assert call["late_source_trade_date"] == date(2026, 8, 27)
-    assert call["late_availability_date"] == date(2026, 8, 28)
+    assert call["cutoff"] == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
+    assert call["late_source_trade_date"] == date(2026, 8, 28)
+    assert call["late_availability_date"] == date(2026, 8, 31)
 
 
 class _SparseExitRepository(_ExitRepository):

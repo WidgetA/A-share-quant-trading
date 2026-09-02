@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime, timedelta
+from dataclasses import replace
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.data.database.v20_mews_guard_store import V20MewsGuardStore
-from src.data.database.v20_repository import (
-    ActiveModelLeg,
-    sha256_json,
-)
+from src.data.database.v20_repository import ActiveModelLeg, sha256_json
 from src.web.v20_service import V20Service
 from tests.unit.web.test_v20_service import _service
 
@@ -20,11 +18,12 @@ TZ = ZoneInfo("Asia/Shanghai")
 SOURCE_DATE = date(2026, 8, 31)
 D1 = date(2026, 9, 1)
 D2 = date(2026, 9, 2)
-CALENDAR = (SOURCE_DATE, D1, D2, date(2026, 9, 3))
-T_0910 = datetime(2026, 9, 1, 9, 10, tzinfo=TZ)
+NEXT_DAY = date(2026, 9, 3)
+CALENDAR = (SOURCE_DATE, D1, D2, NEXT_DAY)
 T_0915 = datetime(2026, 9, 1, 9, 15, tzinfo=TZ)
-T_1404 = datetime(2026, 9, 1, 14, 4, tzinfo=TZ)
-T_D2_MORNING = datetime(2026, 9, 2, 9, tzinfo=TZ)
+T_D2_0910 = datetime(2026, 9, 2, 9, 10, tzinfo=TZ)
+T_D2_0945 = datetime(2026, 9, 2, 9, 45, tzinfo=TZ)
+D2_CUTOFF = datetime(2026, 9, 2, 9, 40, tzinfo=TZ)
 
 
 class _AsyncContext:
@@ -39,10 +38,10 @@ class _AsyncContext:
 
 
 class _FakePool:
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: _StrictPGConnection) -> None:
         self.connection = connection
 
-    def acquire(self) -> _AsyncContext:
+    def acquire(self) -> _AsyncContext[_StrictPGConnection]:
         return _AsyncContext(self.connection)
 
 
@@ -54,7 +53,7 @@ class _FakeTransaction:
         return False
 
 
-class _AsyncpgLikeRecord:
+class _Row:
     def __init__(self, values: dict[str, Any]) -> None:
         self.values = values
 
@@ -62,9 +61,90 @@ class _AsyncpgLikeRecord:
         return self.values[key]
 
 
+def _payload(
+    *,
+    source_trade_date: date,
+    availability_date: date,
+) -> dict[str, Any]:
+    generated_at = datetime.combine(availability_date, time(9, 45), tzinfo=TZ)
+    return {
+        "snapshot_id": f"mews-{source_trade_date:%Y%m%d}-{availability_date:%Y%m%d}",
+        "source_trade_date": source_trade_date.isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "fast_state": "NORMAL",
+        "model_version": "mews_v2",
+        "data_version": "d" * 64,
+        "evidence": {
+            "profile": "LOCAL_TUSHARE_MEWS_V2_0910_V1",
+            "signal_available_date": availability_date.isoformat(),
+        },
+    }
+
+
+def _snapshot_values(payload: dict[str, Any]) -> dict[str, Any]:
+    generated_at = datetime.fromisoformat(payload["generated_at"])
+    return {
+        "snapshot_id": payload["snapshot_id"],
+        "source_trade_date": date.fromisoformat(payload["source_trade_date"]),
+        "generated_at": generated_at,
+        "received_at": generated_at + timedelta(seconds=1),
+        "receipt_sealed_at": generated_at + timedelta(minutes=1),
+        "fast_state": payload["fast_state"],
+        "model_version": payload["model_version"],
+        "data_version": payload["data_version"],
+        "content_hash": sha256_json(payload),
+        "snapshot_json": json.dumps(payload),
+    }
+
+
+def _snapshot(source_trade_date: date, availability_date: date) -> dict[str, Any]:
+    return _snapshot_values(
+        _payload(
+            source_trade_date=source_trade_date,
+            availability_date=availability_date,
+        )
+    )
+
+
+def _legacy_selection() -> dict[str, Any]:
+    return {
+        "model_leg_id": "leg-strict",
+        "cutoff_ts": datetime(2026, 9, 1, 9, 40, tzinfo=TZ),
+        "selection_reason": "ELIGIBLE",
+        "selected_at": T_0915,
+        "selected_snapshot_id": _snapshot(SOURCE_DATE, D1)["snapshot_id"],
+        "selected_fast_state": "NORMAL",
+        **_snapshot(SOURCE_DATE, D1),
+    }
+
+
+def _fallback_values() -> dict[str, None]:
+    return {
+        field: None
+        for field in (
+            "source_trade_date",
+            "generated_at",
+            "received_at",
+            "receipt_sealed_at",
+            "fast_state",
+            "model_version",
+            "data_version",
+            "content_hash",
+            "snapshot_json",
+        )
+    }
+
+
 class _StrictPGConnection:
-    def __init__(self, *, existing: Any = None) -> None:
-        self.existing = existing
+    def __init__(
+        self,
+        *,
+        selections: dict[str, dict[str, Any]] | None = None,
+        intent: str | None = None,
+    ) -> None:
+        self.selections = selections or {}
+        self.intent = intent
+        self.snapshots: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     def transaction(self, *, isolation: str) -> _FakeTransaction:
@@ -74,68 +154,87 @@ class _StrictPGConnection:
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         self.calls.append((sql, args))
         if "FOR UPDATE OF leg" in sql:
-            return {"d1": D1}
+            return {"d1": D1, "d2": D2}
+        if "FROM v20.exit_intents" in sql:
+            return {"exit_intent_id": self.intent} if self.intent else None
         if "FROM v20.leg_mews_selection" in sql:
-            return self.existing
+            selection = self.selections.get(args[0])
+            return _Row(selection) if selection else None
         if "INSERT INTO v20.leg_mews_selection" in sql:
-            return {
-                "model_leg_id": args[0],
+            return self._persist_selection(*args)
+        if "UPDATE v20.leg_mews_selection" in sql or "ON CONFLICT (model_leg_id) DO UPDATE" in sql:
+            return self._persist_selection(*args)
+        if "FROM v20.mews_snapshots AS snapshot" in sql:
+            return self._matching_snapshot(*args)
+        raise AssertionError(f"unexpected strict SQL: {sql}")
+
+    def _persist_selection(self, *args: Any) -> Any:
+        model_leg_id = args[0]
+        selected = args[1]
+        selection = self.selections.setdefault(model_leg_id, {})
+        selection.update(
+            {
+                "model_leg_id": model_leg_id,
+                "selected_snapshot_id": selected,
+                "selected_fast_state": args[2],
                 "cutoff_ts": args[3],
                 "selection_reason": args[4],
-                "selected_at": T_0915 + timedelta(minutes=2),
-                "selected_snapshot_id": args[1],
-                "selected_fast_state": args[2],
+                "selected_at": T_D2_0945,
             }
-        if "FROM v20.mews_snapshots AS snapshot" in sql:
-            return _snapshot_row()
-        raise AssertionError(f"unexpected strict PostgreSQL SQL: {sql}")
+        )
+        snapshot = self.snapshots.get(selected) if selected else None
+        selection.update(snapshot or _fallback_values())
+        return _Row(selection)
+
+    def _matching_snapshot(self, *args: Any) -> Any:
+        source = args[0] if len(args) == 3 else args[2]
+        availability = args[2] if len(args) == 3 else args[3]
+        for snapshot in self.snapshots.values():
+            payload = json.loads(snapshot["snapshot_json"])
+            evidence_date = payload["evidence"]["signal_available_date"]
+            if (
+                snapshot["source_trade_date"] == source
+                and evidence_date == availability.isoformat()
+            ):
+                return _Row(snapshot)
+        return None
 
 
 class _StrictRepository:
-    """Repository surface that makes legacy MEWS selection/read paths fail."""
-
     schema = "v20"
 
     def __init__(self, connection: _StrictPGConnection) -> None:
         self.pool = _FakePool(connection)
-        self.record_calls: list[dict[str, Any]] = []
-        self.old_select_calls = 0
-        self.old_load_calls = 0
-        self.closed = False
+        self.recorded: list[dict[str, Any]] = []
 
     async def assert_runtime_leader(self) -> None:
         return None
 
     async def record_mews_snapshot(self, payload: dict[str, Any]) -> str:
-        self.record_calls.append(dict(payload))
-        return sha256_json(payload)
+        self.recorded.append(dict(payload))
+        values = _snapshot_values(payload)
+        self.pool.connection.snapshots[values["snapshot_id"]] = values
+        return values["snapshot_id"]
 
-    async def mews_snapshot_is_eligible(self, *_args: Any, **_kwargs: Any) -> bool:
-        return True
-
-    async def find_eligible_mews_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+    async def enqueue_alert(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def select_mews_for_leg(self, *_args: Any, **_kwargs: Any) -> None:
-        self.old_select_calls += 1
-        raise AssertionError("legacy repository select_mews_for_leg is forbidden")
+    async def seal_event(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
 
-    async def load_selected_mews_for_leg(self, *_args: Any, **_kwargs: Any) -> None:
-        self.old_load_calls += 1
-        raise AssertionError("legacy repository load_selected_mews_for_leg is forbidden")
-
-    async def get_exit_scan_watermarks(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+    async def get_exit_scan_watermarks(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> dict[str, str]:
         return {D1.isoformat(): "14:57", D2.isoformat(): "14:56"}
-
-    async def close(self) -> None:
-        self.closed = True
 
 
 class _LocalMewsSource:
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
-        self.calls = 0
+        self.requests: list[tuple[date, date]] = []
 
     async def fetch_snapshot(
         self,
@@ -143,89 +242,32 @@ class _LocalMewsSource:
         source_trade_date: date,
         availability_date: date,
     ) -> dict[str, Any]:
-        self.calls += 1
-        assert source_trade_date == SOURCE_DATE
-        assert availability_date == D1
+        self.requests.append((source_trade_date, availability_date))
         self.started.set()
-        await asyncio.wait_for(self.release.wait(), timeout=2)
-        generated_at = T_0915 if self.calls == 1 else T_1404
-        return _payload(generated_at=generated_at)
+        await self.release.wait()
+        return _payload(
+            source_trade_date=source_trade_date,
+            availability_date=availability_date,
+        )
 
 
-def _payload(*, generated_at: datetime = T_0915) -> dict[str, Any]:
-    return {
-        "snapshot_id": "service-mews-v2",
-        "source_trade_date": SOURCE_DATE.isoformat(),
-        "generated_at": generated_at.isoformat(),
-        "fast_state": "NORMAL",
-        "model_version": "mews_v2",
-        "data_version": "d" * 64,
-        "evidence": {
-            "profile": "LOCAL_TUSHARE_MEWS_V2_0910_V1",
-            "signal_available_date": D1.isoformat(),
-        },
-    }
+class _FailingMewsSource:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def fetch_snapshot(self, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise RuntimeError("D2 calculation failed")
 
 
-def _snapshot_row(*, sealed: datetime | None = T_0915 + timedelta(minutes=1)) -> Any:
-    payload = _payload()
-    return _AsyncpgLikeRecord(
-        {
-            "snapshot_id": payload["snapshot_id"],
-            "source_trade_date": SOURCE_DATE,
-            "generated_at": T_0915,
-            "received_at": T_0915 + timedelta(seconds=1),
-            "receipt_sealed_at": sealed,
-            "fast_state": payload["fast_state"],
-            "model_version": payload["model_version"],
-            "data_version": payload["data_version"],
-            "content_hash": sha256_json(payload),
-            "snapshot_json": json.dumps(payload),
-        }
-    )
-
-
-def _illegal_existing_selection() -> dict[str, Any]:
-    snapshot = _snapshot_row(sealed=None).values
-    return {
-        "model_leg_id": "leg-strict",
-        "cutoff_ts": datetime(2026, 9, 1, 9, 40, tzinfo=TZ),
-        "selection_reason": "ELIGIBLE",
-        "selected_at": T_0915 + timedelta(minutes=2),
-        "selected_snapshot_id": snapshot["snapshot_id"],
-        "selected_fast_state": snapshot["fast_state"],
-        **snapshot,
-    }
-
-
-def _service_from_repository(
-    monkeypatch: pytest.MonkeyPatch,
-    repository: _StrictRepository,
-    source: Any,
-    *,
-    now: datetime = T_0910,
-) -> V20Service:
-    service = _service(monkeypatch, repository)
-    service._started = True
-    service._repository_started = True
-    service._mews_source = source
-    service._clock = lambda: now
-
-    async def calendar_provider() -> list[date]:
-        return list(CALENDAR)
-
-    monkeypatch.setattr(service, "_calendar_provider", calendar_provider)
-    return service
-
-
-def _active_leg() -> ActiveModelLeg:
+def _active_leg(*, exit_intent_id: str | None = None) -> ActiveModelLeg:
     return ActiveModelLeg(
         model_leg_id="leg-strict",
         model_batch_id="batch-strict",
         decision_id=None,
         signal_date=SOURCE_DATE,
         code="600000",
-        stock_name="strict-stock",
+        stock_name="strict",
         rank=1,
         relative_weight=1.0,
         d1=D1,
@@ -236,162 +278,229 @@ def _active_leg() -> ActiveModelLeg:
         evaluation_only=False,
         mews_snapshot_id=None,
         mews_fast_state=None,
-        exit_intent_id=None,
+        exit_intent_id=exit_intent_id,
     )
 
 
-async def test_service_owns_strict_postgres_guard_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    repository = _StrictRepository(_StrictPGConnection())
-    service = _service_from_repository(monkeypatch, repository, _LocalMewsSource())
+def _make_service(
+    monkeypatch: pytest.MonkeyPatch,
+    connection: _StrictPGConnection,
+    source: Any,
+) -> tuple[V20Service, _StrictRepository]:
+    repository = _StrictRepository(connection)
+    service = _service(monkeypatch, repository)
+    service._started = True
+    service._repository_started = True
+    service._mews_source = source
+    service._clock = lambda: T_D2_0945
+    service._mews_guard_store = V20MewsGuardStore(repository)
+    return service, repository
 
-    assert isinstance(getattr(service, "_mews_guard_store", None), V20MewsGuardStore)
-    assert service._mews_guard_store._repository is repository
+
+def _fixed_calendar(calendar: tuple[date, ...]) -> Any:
+    async def load(_current_date: date) -> tuple[date, ...]:
+        return calendar
+
+    return load
 
 
-async def test_0910_scheduler_starts_local_mews_and_persists_once(
+async def _evaluate_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    service: V20Service,
+    *,
+    leg: ActiveModelLeg | None = None,
+    calendar: tuple[date, ...] = CALENDAR,
+) -> list[str]:
+    alerts: list[str] = []
+
+    async def alert(*, code: str, **_kwargs: Any) -> None:
+        alerts.append(code)
+
+    async def bars(_record: Any, _now: datetime) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(service, "_safe_alert", alert)
+    monkeypatch.setattr(service, "_load_exit_bar_records", bars)
+    monkeypatch.setattr(
+        service,
+        "_load_trade_calendar",
+        _fixed_calendar(calendar),
+    )
+    await service._evaluate_one_exit(
+        leg or _active_leg(),
+        T_D2_0945,
+        detection_calendar_status="CONFIRMED_TRADING",
+        detection_is_trading_day=True,
+        next_trade_date=NEXT_DAY,
+        calendar=calendar,
+    )
+    return alerts
+
+
+def _snapshot_queries(
+    connection: _StrictPGConnection,
+) -> list[tuple[str, tuple[Any, ...]]]:
+    return [
+        call
+        for call in connection.calls
+        if "mews_snapshots AS snapshot" in call[0] and len(call[1]) in (3, 4)
+    ]
+
+
+async def test_first_exit_miss_calculates_exact_d2_then_freezes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = _StrictRepository(_StrictPGConnection())
+    connection = _StrictPGConnection()
     source = _LocalMewsSource()
     source.release.set()
-    service = _service_from_repository(monkeypatch, repository, source)
+    service, repository = _make_service(monkeypatch, connection, source)
 
-    result = await service._refresh_mews_cache_once(T_0910, CALENDAR)
-    assert result is True
-    assert service._mews_last_failure is None
+    await _evaluate_exit(monkeypatch, service)
+
+    assert source.requests == [(D1, D2)]
+    assert len(repository.recorded) == 1
+    queries = _snapshot_queries(connection)
+    assert queries[0][1] == (D1, D2_CUTOFF, D2)
+    assert queries[-1][1] == (D2, D2_CUTOFF, D1, D2)
+    selection = connection.selections["leg-strict"]
+    assert selection["cutoff_ts"] == D2_CUTOFF
+    assert selection["selection_reason"] == "ELIGIBLE_LATE_SAME_DAY"
+    assert selection["source_trade_date"] == D1
+
+
+async def test_failed_calculation_persists_fallback_and_restart_reads_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _StrictPGConnection()
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+
+    first_alerts = await _evaluate_exit(monkeypatch, service)
+    second_alerts = await _evaluate_exit(monkeypatch, service)
+
     assert source.calls == 1
-    assert len(repository.record_calls) == 1
-    assert service._mews_cached_for == D1
-    assert service._mews_source_trade_date == SOURCE_DATE
-    assert service._mews_snapshot_id == "service-mews-v2"
+    assert first_alerts == [
+        "MEWS_CALCULATION_FAILED",
+        "MEWS_UNAVAILABLE_FALLBACK_12",
+    ]
+    assert second_alerts == ["MEWS_UNAVAILABLE_FALLBACK_12"]
+    selection = connection.selections["leg-strict"]
+    assert selection["selection_reason"] == "MEWS_UNAVAILABLE_FALLBACK_12"
+    assert selection["cutoff_ts"] == D2_CUTOFF
+    exact_queries = [query for query in _snapshot_queries(connection) if len(query[1]) == 3]
+    freeze_queries = [query for query in _snapshot_queries(connection) if len(query[1]) == 4]
+    assert [query[1] for query in exact_queries] == [
+        (D1, D2_CUTOFF, D2),
+        (D1, D2_CUTOFF, D2),
+    ]
+    assert len(freeze_queries) == 1
 
 
-async def test_missing_cache_trigger_kicks_singleflight_without_awaiting_it(
+async def test_holiday_d2_uses_calendar_predecessor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = _StrictRepository(_StrictPGConnection())
+    connection = _StrictPGConnection()
     source = _LocalMewsSource()
-    service = _service_from_repository(
-        monkeypatch, repository, source, now=datetime(2026, 9, 1, 9, 39, tzinfo=TZ)
-    )
-    first = service.kick_mews_for_selection_trigger(T_1404)
-    second = service.kick_mews_for_selection_trigger(T_1404)
+    source.release.set()
+    service, _repository = _make_service(monkeypatch, connection, source)
 
-    try:
-        # ``kick`` is the production route/selection surface: both calls return
-        # owned tasks immediately while the shared provider attempt is still
-        # blocked.  Callers are never required to await MEWS before selecting.
-        await asyncio.wait_for(source.started.wait(), timeout=1)
-        await asyncio.sleep(0)
-        assert first.done() is False
-        assert second.done() is False
-        assert source.calls == 1
-        assert service._mews_trigger_tasks == {first, second}
-    finally:
-        source.release.set()
-        assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1) == [True, True]
+    await _evaluate_exit(monkeypatch, service, calendar=(SOURCE_DATE, D2, NEXT_DAY))
 
-    await asyncio.sleep(0)
-    assert service._mews_trigger_tasks == set()
-    assert service._mews_singleflight_task is None
+    assert source.requests == [(SOURCE_DATE, D2)]
+    queries = _snapshot_queries(connection)
+    assert queries[0][1] == (SOURCE_DATE, D2_CUTOFF, D2)
+    assert queries[-1][1] == (D2, D2_CUTOFF, SOURCE_DATE, D2)
+    assert connection.selections["leg-strict"]["source_trade_date"] == SOURCE_DATE
 
 
-async def test_concurrent_missing_cache_triggers_compute_exactly_once(
+async def test_concurrent_legs_share_one_calculation_and_freeze_separately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = _StrictRepository(_StrictPGConnection())
+    connection = _StrictPGConnection()
     source = _LocalMewsSource()
-    service = _service_from_repository(monkeypatch, repository, source, now=T_1404)
-    triggers = [
-        asyncio.create_task(service.ensure_mews_for_selection_trigger(T_1404)) for _ in range(2)
+    service, _repository = _make_service(monkeypatch, connection, source)
+    legs = [replace(_active_leg(), model_leg_id=f"leg-{index}") for index in range(2)]
+    evaluations = [
+        asyncio.create_task(_evaluate_exit(monkeypatch, service, leg=leg)) for leg in legs
     ]
 
     await asyncio.wait_for(source.started.wait(), timeout=1)
     source.release.set()
-    first, second = await asyncio.wait_for(asyncio.gather(*triggers), timeout=1)
+    await asyncio.wait_for(asyncio.gather(*evaluations), timeout=1)
 
-    assert (first, second) == (True, True)
-    assert source.calls == 1
-    assert len(repository.record_calls) == 1
-    assert service._mews_singleflight_task is None
+    assert source.requests == [(D1, D2)]
+    assert set(connection.selections) == {"leg-0", "leg-1"}
+    assert all(selection["source_trade_date"] == D1 for selection in connection.selections.values())
 
 
-async def test_stop_cancels_and_drains_service_owned_mews_master(
+async def test_existing_exit_intent_skips_all_mews_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = _StrictRepository(_StrictPGConnection())
-    source = _LocalMewsSource()
-    service = _service_from_repository(monkeypatch, repository, source, now=T_1404)
-    trigger = asyncio.create_task(service.ensure_mews_for_selection_trigger(T_1404))
-    await asyncio.wait_for(source.started.wait(), timeout=1)
-    master = service._mews_singleflight_task
-    assert master is not None
+    connection = _StrictPGConnection()
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
 
-    await asyncio.wait_for(service.stop(), timeout=1)
-
-    assert master.cancelled() is True
-    assert service._mews_singleflight_task is None
-    assert repository.closed is True
-    assert await asyncio.wait_for(trigger, timeout=1) is False
-    assert not any(
-        task.get_name().startswith("v20-mews-singleflight-")
-        for task in asyncio.all_tasks()
-        if task is not asyncio.current_task()
+    await _evaluate_exit(
+        monkeypatch,
+        service,
+        leg=_active_leg(exit_intent_id="exit-strict"),
     )
 
+    assert source.calls == 0
+    assert connection.calls == []
 
-@pytest.mark.parametrize(
-    ("existing", "expected_alerts", "expected_sql_count", "expect_insert"),
-    [
-        (None, [], 4, True),
-        (_illegal_existing_selection(), ["MEWS_UNAVAILABLE_FALLBACK_12"], 2, False),
-    ],
-    ids=["strict-success", "illegal-existing-freeze"],
-)
-async def test_exit_path_uses_only_guard_store_select_freeze_and_load(
+
+async def test_legacy_selection_with_db_intent_is_reused_without_lookup(
     monkeypatch: pytest.MonkeyPatch,
-    existing: Any,
-    expected_alerts: list[str],
-    expected_sql_count: int,
-    expect_insert: bool,
 ) -> None:
-    connection = _StrictPGConnection(existing=existing)
-    repository = _StrictRepository(connection)
+    connection = _StrictPGConnection(
+        selections={"leg-strict": _legacy_selection()},
+        intent="exit-strict",
+    )
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+
+    await _evaluate_exit(monkeypatch, service)
+
+    assert source.calls == 0
+    assert _snapshot_queries(connection) == []
+    assert connection.selections["leg-strict"]["source_trade_date"] == SOURCE_DATE
+
+
+async def test_legacy_selection_without_intent_is_upgraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _StrictPGConnection(
+        selections={"leg-strict": _legacy_selection()},
+    )
     source = _LocalMewsSource()
     source.release.set()
-    service = _service_from_repository(monkeypatch, repository, source, now=T_D2_MORNING)
-    service._mews_guard_store = V20MewsGuardStore(repository)
-    alerts: list[str] = []
+    service, _repository = _make_service(monkeypatch, connection, source)
 
-    async def record_alert(*, code: str, **_kwargs: Any) -> None:
-        alerts.append(code)
+    await _evaluate_exit(monkeypatch, service)
 
-    async def no_bars(_record: Any, _now: datetime) -> list[Any]:
-        return []
+    assert source.requests == [(D1, D2)]
+    selection = connection.selections["leg-strict"]
+    assert selection["cutoff_ts"] == D2_CUTOFF
+    assert selection["source_trade_date"] == D1
+    assert selection["selection_reason"] == "ELIGIBLE_LATE_SAME_DAY"
 
-    monkeypatch.setattr(service, "_safe_alert", record_alert)
-    monkeypatch.setattr(service, "_load_exit_bar_records", no_bars)
 
-    await service._evaluate_one_exit(
-        _active_leg(),
-        T_D2_MORNING,
-        detection_calendar_status="CONFIRMED_TRADING",
-        detection_is_trading_day=True,
-        next_trade_date=date(2026, 9, 3),
-        calendar=CALENDAR,
-    )
+async def test_entry_selection_trigger_keeps_its_own_date_singleflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _StrictPGConnection()
+    source = _LocalMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+    monkeypatch.setattr(service, "_load_trade_calendar", _fixed_calendar(CALENDAR))
+    triggers = [
+        asyncio.create_task(service.ensure_mews_for_selection_trigger(T_D2_0910)) for _ in range(2)
+    ]
 
-    assert repository.old_select_calls == 0
-    assert repository.old_load_calls == 0
-    assert alerts == expected_alerts
-    assert len(connection.calls) == expected_sql_count
-    assert any("FOR UPDATE OF leg" in sql for sql, _args in connection.calls)
-    assert (
-        any("INSERT INTO v20.leg_mews_selection" in sql for sql, _args in connection.calls)
-        is expect_insert
-    )
-    assert (
-        any("FROM v20.mews_snapshots AS snapshot" in sql for sql, _args in connection.calls)
-        is expect_insert
-    )
-    assert all("SELECT " in sql or "INSERT " in sql for sql, _args in connection.calls)
+    await asyncio.wait_for(source.started.wait(), timeout=1)
+    source.release.set()
+    assert await asyncio.wait_for(asyncio.gather(*triggers), timeout=1) == [True, True]
+    assert source.requests == [(D1, D2)]
+    entry_queries = _snapshot_queries(connection)
+    assert len(entry_queries) == 1
+    assert entry_queries[0][1] == (D1, D2_CUTOFF, D2)

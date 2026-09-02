@@ -862,6 +862,15 @@ async def test_checkpoint_export_import_uses_explicit_state_facts(repository) ->
                 health_observations[-1]["batch_id"],
             ],
         },
+        official_rolling_gaps=[
+            {
+                "gap_id": "legacy-checkpoint-gap",
+                "signal_date": "2026-08-20",
+                "maturity_date": "2026-08-22",
+                "closed": False,
+                "aged_out": False,
+            }
+        ],
         last_terminal_slot_id="slot-v3",
         last_terminal_trade_date="2026-09-02",
     )
@@ -917,8 +926,10 @@ async def test_checkpoint_export_import_uses_explicit_state_facts(repository) ->
     assert checkpoint["official_state"]["state_revision"] == 0
     assert checkpoint["official_state"]["last_terminal_slot_id"] is None
     assert checkpoint["official_state"]["last_terminal_trade_date"] is None
-    assert len(checkpoint["batch_id_migration"]) == 10
-    assert len(checkpoint["state_shadow_batches"]) == 10
+    assert checkpoint["official_state"]["official_rolling_gaps"] == []
+    assert len(checkpoint["batch_id_migration"]) == 3
+    assert len(checkpoint["state_shadow_batches"]) == 3
+    assert all(row["kind"] == "HEALTH" for row in checkpoint["state_shadow_batches"])
     assert "source_config_hash" not in checkpoint
     assert "source_state_semantics_hash" not in checkpoint
     assert "resolved_state_semantics_hash" not in checkpoint
@@ -941,4 +952,4 @@ async def test_checkpoint_export_import_uses_explicit_state_facts(repository) ->
             f"SELECT COUNT(*) FROM {schema}.shadow_batches WHERE lineage_id=$1",
             "v20-production-lineage",
         )
-    assert imported_shadows == 10
+    assert imported_shadows == 3

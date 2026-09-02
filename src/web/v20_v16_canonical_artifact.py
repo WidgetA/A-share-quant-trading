@@ -131,8 +131,8 @@ def encode(
         raise V20SemanticConflict("frozen V16 snapshot hash differs from its JSON")
     if bundle.frozen_at.tzinfo is None or bundle.frozen_at.utcoffset() is None:
         raise V20SemanticConflict("frozen V16 timestamp lacks a timezone")
-    if bundle.frozen_at.date() != bundle.trade_date:
-        raise V20SemanticConflict("frozen V16 timestamp and trade date differ")
+    if bundle.frozen_at.date() < bundle.trade_date:
+        raise V20SemanticConflict("frozen V16 timestamp predates its trade date")
     computation_calendar = tuple(getattr(bundle, "computation_calendar", ()))
     if computation_calendar:
         successors = [day for day in computation_calendar if day > bundle.trade_date]
@@ -168,8 +168,8 @@ def hydrate(payload: Mapping[str, Any]) -> HydratedFrozenV16Artifact:
         raise V20SemanticConflict("portable frozen V16 schema is unsupported")
     trade_date = _date(payload["trade_date"])
     frozen_at = _datetime(payload["frozen_at"])
-    if frozen_at.date() != trade_date:
-        raise V20SemanticConflict("portable frozen V16 timestamp date differs")
+    if frozen_at.date() < trade_date:
+        raise V20SemanticConflict("portable frozen V16 timestamp predates its trade date")
     calendar_tuple = _validate_calendar(
         payload["calendar"],
         trade_date,
