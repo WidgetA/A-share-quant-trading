@@ -4853,14 +4853,13 @@ async def test_historical_seed_preserves_0925_and_0930_through_persist_readback(
 async def test_past_date_replay_reruns_scanner_directly_and_never_touches_coordinator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two past-date replays rerun the scanner twice; the D0 cache is untouched."""
+    """Fresh fixed-nine history enters the same scanner and is then reused durably."""
     today = date(2026, 9, 1)
     repository = _SeedRepository()
-    for code in _LATE_REPLAY_CODES:
-        await repository.record_minute_bars(
-            [_bar_payload(_bar(code, label)) for label in _ENRICHED_LABELS]
-        )
-    client = _HistoricalSeedClient()
+    vendor_bars = {
+        code: tuple(_bar(code, label) for label in _LEGACY_LABELS) for code in _LATE_REPLAY_CODES
+    }
+    client = _HistoricalSeedClient(vendor_bars)
     service = _historical_seed_service(monkeypatch, repository, client)
 
     d0_bundle = SimpleNamespace(marker="d0-canonical-cache-entry")
@@ -4883,10 +4882,10 @@ async def test_past_date_replay_reruns_scanner_directly_and_never_touches_coordi
         assert "board-a" in kwargs["clean_boards_override"]
         seed = kwargs["early_data_seed"]
         assert set(seed) == set(_LATE_REPLAY_CODES)
-        assert [bar.end_label for bar in seed["603068"].early_bars] == list(_ENRICHED_LABELS)
+        assert [bar.end_label for bar in seed["603068"].early_bars] == list(_LEGACY_LABELS)
         compute_calls.append(kwargs)
         early_bars = {
-            code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
+            code: tuple(_bar(code, label) for label in _LEGACY_LABELS)
             for code in _LATE_REPLAY_CODES
         }
         return CanonicalV16ScanBundle(
@@ -4937,15 +4936,16 @@ async def test_past_date_replay_reruns_scanner_directly_and_never_touches_coordi
 
     assert first.trade_date == second.trade_date == _HIST_TRADE_DATE
     assert len(compute_calls) == 2
-    assert client.calls == []
+    assert client.calls == [(tuple(sorted(_LATE_REPLAY_CODES)), _HIST_TRADE_DATE)]
+    assert repository.list_calls == 3
     assert pickle.dumps(coordinator_cache) == d0_cache_bytes
     assert service._scan_state.canonical_coordinator.cache[today] is d0_bundle
 
 
-async def test_past_date_bootstrap_covers_missing_and_legacy_codes_once_with_readback(
+async def test_past_date_bootstrap_fetches_only_missing_codes_and_reuses_fixed_nine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sub-80% coverage bootstraps missing + legacy fixed-nine codes via stk_mins."""
+    """A persisted legal 09:39 prevents refetch while missing codes are restored."""
     repository = _SeedRepository()
     legacy_codes = _LATE_REPLAY_CODES[:2]
     for code in legacy_codes:
@@ -4957,8 +4957,8 @@ async def test_past_date_bootstrap_covers_missing_and_legacy_codes_once_with_rea
     for code in _LATE_REPLAY_CODES:
         if code == suspended:
             continue
-        bars = [_bar(code, label) for label in _ENRICHED_LABELS]
-        if code == "603068":
+        bars = [_bar(code, label) for label in _LEGACY_LABELS]
+        if code == "603990":
             # Late and wrong-date vendor rows must be truncated away BEFORE
             # the normalizer and persistence.
             bars += [
@@ -4972,24 +4972,18 @@ async def test_past_date_bootstrap_covers_missing_and_legacy_codes_once_with_rea
 
     seed, universe, _clean_boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
 
-    # One deterministic chunk covering every missing code plus the two legacy
-    # fixed-nine codes, then a mandatory database readback.  Legacy codes only
-    # gain the labels they never had; their stored nine revisions are never
-    # rewritten, so no conflict can appear.
-    assert client.calls == [(tuple(sorted(universe)), _HIST_TRADE_DATE)]
+    missing_codes = tuple(sorted(set(universe) - set(legacy_codes)))
+    # Only genuinely missing codes enter the deterministic batch.  The two
+    # already-usable fixed-nine codes are neither fetched nor rewritten.
+    assert client.calls == [(missing_codes, _HIST_TRADE_DATE)]
     assert repository.list_calls == 2
     assert len(repository.persist_calls) == 1
     persisted_now = repository.persist_calls[0]
-    for code in legacy_codes:
-        assert sorted(
-            str(payload["end_label"])
-            for payload in persisted_now
-            if str(payload["stock_code"]) == code
-        ) == ["09:25", "09:30"]
+    assert all(str(payload["stock_code"]) not in legacy_codes for payload in persisted_now)
     assert suspended not in seed
     assert set(seed) == set(universe) - {suspended}
     for code in seed:
-        assert [bar.end_label for bar in seed[code].early_bars] == list(_ENRICHED_LABELS)
+        assert [bar.end_label for bar in seed[code].early_bars] == list(_LEGACY_LABELS)
     persisted_labels = {label for _code, label in repository.raw}
     assert "09:40" not in persisted_labels
     assert all(
@@ -5003,7 +4997,7 @@ async def test_past_date_bootstrap_covers_missing_and_legacy_codes_once_with_rea
     seed_again, _universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
     assert set(seed_again) == set(seed)
     assert client.calls == [
-        (tuple(sorted(universe)), _HIST_TRADE_DATE),
+        (missing_codes, _HIST_TRADE_DATE),
         ((suspended,), _HIST_TRADE_DATE),
     ]
     assert repository.list_calls == 4
@@ -5444,75 +5438,54 @@ async def test_past_date_seed_readback_conflict_blocks_compute(
     assert repository.list_calls == 2
 
 
-async def test_past_date_bootstrap_legacy_empty_response_stays_unresolved(
+async def test_past_date_seed_reuses_499_fixed_nine_codes_without_vendor_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty tuple never confirms 'no data' for a legacy fixed-nine code."""
+    """The old 499-code partial backfill is already canonical under the 09:39 rule."""
+    codes = tuple(f"{index:06d}" for index in range(1, 500))
     repository = _SeedRepository()
-    legacy_codes = _LATE_REPLAY_CODES[:2]
-    for code in legacy_codes:
+    for code in codes:
         await repository.record_minute_bars(
             [_bar_payload(_bar(code, label)) for label in _LEGACY_LABELS]
         )
     repository.persist_calls.clear()
-    vendor_bars = {
-        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
-        for code in _LATE_REPLAY_CODES[2:]
-    }
-    # The legacy codes answer with an explicit empty tuple; that response must
-    # not resolve them — only an authoritative non-legacy label can.
-    client = _HistoricalSeedClient(vendor_bars)
-    service = _historical_seed_service(monkeypatch, repository, client)
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(monkeypatch, repository, client, universe=codes)
 
-    with pytest.raises(V20RepositoryError, match="backfill is incomplete: 2/10"):
-        await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+    seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
 
-    assert len(client.calls) == 1
-    assert repository.list_calls == 2
-    # The legacy nines were never rewritten and no legacy payload was persisted.
+    assert universe == codes
+    assert set(seed) == set(codes)
+    assert client.calls == []
+    assert repository.list_calls == 1
+    assert repository.persist_calls == []
     assert all(
-        str(payload["stock_code"]) not in legacy_codes
-        for call in repository.persist_calls
-        for payload in call
+        [bar.end_label for bar in seed[code].early_bars] == list(_LEGACY_LABELS) for code in codes
     )
-    for code in legacy_codes:
-        assert sorted(
-            label for persisted_code, label in repository.raw if persisted_code == code
-        ) == sorted(_LEGACY_LABELS)
 
 
-async def test_past_date_bootstrap_legacy_no_new_labels_stays_unresolved(
+async def test_past_date_seed_does_not_loosen_0939_date_or_validity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A legacy response carrying only the old nine labels adds nothing."""
+    """Earlier-only, wrong-date and invalid rows cannot satisfy readiness."""
+    codes = ("000001", "000002", "000003")
     repository = _SeedRepository()
-    legacy_codes = _LATE_REPLAY_CODES[:2]
-    for code in legacy_codes:
-        await repository.record_minute_bars(
-            [_bar_payload(_bar(code, label)) for label in _LEGACY_LABELS]
-        )
-    repository.persist_calls.clear()
     vendor_bars = {
-        code: tuple(_bar(code, label) for label in _ENRICHED_LABELS)
-        for code in _LATE_REPLAY_CODES[2:]
+        "000001": tuple(_bar("000001", label) for label in _LEGACY_LABELS[:-1]),
+        "000002": (_bar("000002", "09:39", trade_date=date(2026, 8, 28)),),
+        "000003": (replace(_bar("000003", "09:39"), volume=-1.0),),
     }
-    # The vendor restates exactly the already-stored nine labels for the legacy
-    # codes — no new label is ever persisted, so they stay unresolved.
-    for code in legacy_codes:
-        vendor_bars[code] = tuple(_bar(code, label) for label in _LEGACY_LABELS)
     client = _HistoricalSeedClient(vendor_bars)
-    service = _historical_seed_service(monkeypatch, repository, client)
+    service = _historical_seed_service(monkeypatch, repository, client, universe=codes)
 
-    with pytest.raises(V20RepositoryError, match="backfill is incomplete: 2/10"):
+    with pytest.raises(V20RepositoryError, match="backfill is incomplete: 3/3"):
         await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
 
-    assert len(client.calls) == 1
+    assert client.calls == [(codes, _HIST_TRADE_DATE)]
     assert repository.list_calls == 2
-    assert all(
-        str(payload["stock_code"]) not in legacy_codes
-        for call in repository.persist_calls
-        for payload in call
-    )
+    assert {(code, label) for code, label in repository.raw} == {
+        ("000001", label) for label in _LEGACY_LABELS[:-1]
+    }
 
 
 class _SealRepository:

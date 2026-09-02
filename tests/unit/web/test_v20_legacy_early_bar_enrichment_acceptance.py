@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-from src.data.database.v20_repository import V20RepositoryError
 from src.web import v20_service as service_module
 from src.web.v20_service import _DayContext
 from tests.unit.web.test_v20_service import (
@@ -28,91 +27,46 @@ async def seed_legacy(repository: _SeedRepository) -> None:
         await repository.record_minute_bars(rows)
 
 
-@pytest.mark.parametrize("special_label", ["09:25", "09:30"])
-async def test_one_special_label_stays_unresolved(
+async def test_fixed_nine_is_usable_without_special_label_refetch(
     monkeypatch: pytest.MonkeyPatch,
-    special_label: str,
 ) -> None:
-    """Legacy fixed-nine plus one special label is not canonical V16."""
+    """A legal target-date 09:39 is sufficient for historical V16 readiness."""
     repository = _SeedRepository()
     await seed_legacy(repository)
     repository.persist_calls.clear()
-
-    class OneLabelClient(_HistoricalSeedClient):
-        async def batch_get_early_minute_history_for_date(self, codes, trade_date):
-            self.calls.append((tuple(codes), trade_date))
-            missing_label = "09:30" if special_label == "09:25" else "09:25"
-            labels = (special_label,) if len(self.calls) == 1 else (missing_label,)
-            return {
-                code: tuple(_bar(code, label, trade_date=trade_date) for label in labels)
-                for code in codes
-            }
-
-    client = OneLabelClient()
-    service = _historical_seed_service(monkeypatch, repository, client)
-    try:
-        await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
-    except V20RepositoryError as exc:
-        assert str(exc) == (
-            "canonical V16 historical backfill is incomplete: "
-            "10/10 targets lack qualified persisted evidence "
-            "or an explicitly empty vendor response"
-        )
-    else:
-        pytest.fail(
-            f"one non-legacy label {special_label} was treated complete; "
-            "both 09:25 and 09:30 are required"
-        )
-
-    assert client.calls == [(tuple(sorted(_LATE_REPLAY_CODES)), _HIST_TRADE_DATE)]
-    assert repository.list_calls == 2
-    assert len(repository.persist_calls) == 1
-    assert len(repository.persist_calls[0]) == len(_LATE_REPLAY_CODES)
-    assert {row["end_label"] for row in repository.persist_calls[0]} == {special_label}
-    for code in _LATE_REPLAY_CODES:
-        labels = {label for stored, label in repository.raw if stored == code}
-        assert labels == set(_LEGACY_LABELS) | {special_label}
-
-    seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
-    assert len(client.calls) == 2
-    assert repository.list_calls == 4
-    assert len(repository.persist_calls) == 2
-    assert len(repository.persist_calls[1]) == len(_LATE_REPLAY_CODES)
-    assert {row["end_label"] for row in repository.persist_calls[1]} == {
-        "09:30" if special_label == "09:25" else "09:25"
-    }
-    assert client.calls[1] == (tuple(sorted(_LATE_REPLAY_CODES)), _HIST_TRADE_DATE)
-    assert set(seed) == set(universe)
-    assert {label for _code, label in repository.raw} == set(_ENRICHED_LABELS)
-
-
-async def test_legacy_nine_completes_after_both_special_labels(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Historical stk_mins evidence completes only with both special labels."""
-    repository = _SeedRepository()
-    await seed_legacy(repository)
-    repository.persist_calls.clear()
-
-    class BothLabelsClient(_HistoricalSeedClient):
-        async def batch_get_early_minute_history_for_date(self, codes, trade_date):
-            self.calls.append((tuple(codes), trade_date))
-            bars = ("09:25", "09:30")
-            return {
-                code: tuple(_bar(code, label, trade_date=trade_date) for label in bars)
-                for code in codes
-            }
-
-    client = BothLabelsClient()
+    client = _HistoricalSeedClient()
     service = _historical_seed_service(monkeypatch, repository, client)
     seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
 
-    assert client.calls == [(tuple(sorted(_LATE_REPLAY_CODES)), _HIST_TRADE_DATE)]
-    assert repository.list_calls == 2
+    assert client.calls == []
+    assert repository.list_calls == 1
+    assert repository.persist_calls == []
     assert set(seed) == set(universe)
-    assert {label for _code, label in repository.raw} == set(_ENRICHED_LABELS)
     assert all(
-        [bar.end_label for bar in seed[code].early_bars] == list(_ENRICHED_LABELS)
+        [bar.end_label for bar in seed[code].early_bars] == list(_LEGACY_LABELS)
+        for code in universe
+    )
+
+
+async def test_optional_preopen_labels_are_preserved_without_becoming_a_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted earlier labels survive hydration but do not create a new gate."""
+    repository = _SeedRepository()
+    await seed_legacy(repository)
+    for code in _LATE_REPLAY_CODES:
+        await repository.record_minute_bars([_bar_payload(_bar(code, "09:25"))])
+    repository.persist_calls.clear()
+    client = _HistoricalSeedClient()
+    service = _historical_seed_service(monkeypatch, repository, client)
+    seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert client.calls == []
+    assert repository.list_calls == 1
+    assert set(seed) == set(universe)
+    expected_labels = ("09:25", *_LEGACY_LABELS)
+    assert all(
+        [bar.end_label for bar in seed[code].early_bars] == list(expected_labels)
         for code in universe
     )
 

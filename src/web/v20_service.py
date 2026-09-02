@@ -170,11 +170,6 @@ EARLY_RAW_BAR_LABELS: tuple[str, ...] = tuple(
     if (hour, minute) <= (9, 39)
 )
 EARLY_RAW_LAST_LABEL = "09:39"
-# The legacy fixed-nine evidence shape: days persisted before the early window
-# was widened carry exactly 09:31..09:39 and lack the 09:25/09:30 strategy
-# inputs, so a historical bootstrap must refetch exactly these usable codes.
-LEGACY_FIXED_NINE_LABELS: frozenset[str] = frozenset(f"09:{minute:02d}" for minute in range(31, 40))
-HISTORICAL_REQUIRED_SPECIAL_LABELS: frozenset[str] = frozenset({"09:25", "09:30"})
 # Deterministic chunk size for historical stk_mins backfill.  Each completed
 # chunk is normalized and persisted immediately, so a cancellation or failure
 # never loses finished work and the next attempt re-derives pending from the
@@ -6447,29 +6442,26 @@ class V20Service:
         semantics.  Every persisted raw revision for that universe is read with
         the full set of possible early end labels (00:00..09:39); identical
         duplicate revisions fold and unequal, malformed, or misbound revisions
-        make the code conflicted/unusable.  Backfill targets are always every
-        missing nonconflicted code plus the legacy fixed-nine usable codes
-        (they lack the 09:25/09:30 strategy inputs); the canonical 80%
-        readiness gate only decides scan readiness and never stops fetching.
+        make the code conflicted/unusable.  Backfill targets are exactly the
+        missing nonconflicted codes.  An already-persisted legal target-date
+        09:39 bar is sufficient under the same canonical V16 readiness rule
+        and is never fetched again; the canonical 80% readiness gate only
+        decides scan readiness and never stops fetching.
         A present response key is a successful per-code answer — an empty
         tuple explicitly confirms no bars — while a missing key is a failure.
         The live ``rt_min_daily`` early path is never touched for a past date.
         Backfilled bars are truncated to the exact target date and known early
         end labels *before* they enter the single shared normalizer
         (``tushare_minute_bars_to_early_market_data``), persisted per completed
-        128-code chunk with ``record_minute_bars`` (legacy codes only gain
-        labels they never had), and the database is then always read back so
-        the seed is hydrated exclusively from persisted evidence through the
+        128-code chunk with ``record_minute_bars``, and the database is then
+        always read back so the seed is hydrated exclusively from persisted evidence through the
         same normalizer.  Any conflicted universe code — in the initial fold
         or in the mandatory readback fold — raises ``V20SemanticConflict``
         with the total and a bounded sorted sample before any vendor fetch or
-        V16 compute.  An empty tuple confirms "no data" only for a truly
-        missing code, never for a legacy fixed-nine code; a legacy code
-        resolves only when the readback shows at least one authoritative
-        non-legacy label, and an empty/no-new-labels response leaves it
-        unresolved even though the old nine stays usable.  Any unresolved
-        initial target after the readback fails before the actual compute;
-        a cancelled attempt simply keeps its completed chunks and re-derives
+        V16 compute.  An empty tuple confirms "no data" for a requested
+        missing code.  Any unresolved initial target after the readback fails
+        before the actual compute; a cancelled attempt simply keeps its
+        completed chunks and re-derives
         the pending set from the database on the next call.  Hash corruption
         stays fatal inside the repository.
         """
@@ -6491,16 +6483,10 @@ class V20Service:
         )
         if conflicted:
             self._raise_historical_seed_conflict(conflicted, phase="initial")
-        # Targets are always every missing nonconflicted code plus the legacy
-        # usable codes still holding the old fixed nine 09:31..09:39 bars (they
-        # lack the 09:25/09:30 strategy inputs).  The canonical 80% readiness
-        # gate only decides scan readiness — it never stops evidence fetching.
-        enrichment = {
-            code
-            for code, bars in usable.items()
-            if not HISTORICAL_REQUIRED_SPECIAL_LABELS.issubset({bar.end_label for bar in bars})
-        }
-        targets = sorted(set(missing) | enrichment)
+        # A legal target-date 09:39 bar is the one canonical V16 per-symbol
+        # readiness boundary.  Earlier labels are preserved when present but
+        # never become a second, historical-only admission rule.
+        targets = sorted(missing)
         if targets:
             client = self._scan_state.realtime_client
             batched_early_loader = (
@@ -6518,8 +6504,7 @@ class V20Service:
             # pending codes from the database rather than re-requesting them.
             # Response contract: a present key means the API call succeeded for
             # that code — an empty tuple is an explicit "no bars" (e.g.
-            # suspended) for a truly missing code, never for a legacy code —
-            # while a missing key means failure/incomplete.
+            # suspended), while a missing key means failure/incomplete.
             confirmed_empty: set[str] = set()
             for start in range(0, len(targets), HISTORICAL_SEED_BACKFILL_CHUNK):
                 chunk = targets[start : start + HISTORICAL_SEED_BACKFILL_CHUNK]
@@ -6530,8 +6515,7 @@ class V20Service:
                         continue
                     rows = history[code]
                     if not rows:
-                        if code not in enrichment:
-                            confirmed_empty.add(code)
+                        confirmed_empty.add(code)
                         continue
                     # Truncate to the exact target date and known early end
                     # labels (<=09:39) BEFORE the normalizer and persistence,
@@ -6546,17 +6530,7 @@ class V20Service:
                     early = tushare_minute_bars_to_early_market_data(code, truncated, trade_date)
                     if early is None:
                         continue
-                    new_bars = early.early_bars
-                    if code in enrichment:
-                        # A legacy code only persists the labels it never had;
-                        # its already-stored nine revisions are never rewritten,
-                        # so a restated vendor row cannot become a conflict.
-                        existing_labels = {bar.end_label for bar in usable[code]}
-                        new_bars = tuple(
-                            bar for bar in new_bars if bar.end_label not in existing_labels
-                        )
-                    if new_bars:
-                        payloads.extend(_bar_payload(bar) for bar in new_bars)
+                    payloads.extend(_bar_payload(bar) for bar in early.early_bars)
                 if payloads:
                     sealed_hashes = await self._repository.record_minute_bars(payloads)
                     expected_hashes = frozenset(sha256_json(payload) for payload in payloads)
@@ -6588,18 +6562,9 @@ class V20Service:
             )
             if readback_conflicted:
                 self._raise_historical_seed_conflict(readback_conflicted, phase="readback")
-            unrecovered = []
-            for code in targets:
-                if code in enrichment:
-                    # A legacy code resolves only when the mandatory readback
-                    # shows both authoritative strategy labels; either label
-                    # alone leaves the code targeted for another backfill.
-                    labels = {bar.end_label for bar in usable.get(code, ())}
-                    enriched = HISTORICAL_REQUIRED_SPECIAL_LABELS.issubset(labels)
-                    if not enriched:
-                        unrecovered.append(code)
-                elif code not in usable and code not in confirmed_empty:
-                    unrecovered.append(code)
+            unrecovered = [
+                code for code in targets if code not in usable and code not in confirmed_empty
+            ]
             if unrecovered:
                 raise V20RepositoryError(
                     "canonical V16 historical backfill is incomplete: "
