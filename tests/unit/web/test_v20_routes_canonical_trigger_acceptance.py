@@ -234,3 +234,91 @@ async def test_post_cutoff_terminal_miss_uses_canonical_hook_and_one_durable_eve
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(*service.mews_tasks, return_exceptions=True)
+
+
+class _SerializationConflict(RuntimeError):
+    sqlstate = "40001"
+
+
+@pytest.mark.asyncio
+async def test_post_cutoff_same_key_serialization_conflict_retries_check_only_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status, source = _source("NO_SIGNAL")
+    repository = CanonicalRepository(status, source)
+    service = CanonicalCheckService(repository)
+    _forbid_fresh_probe(monkeypatch)
+    original = service.trigger_canonical_selection_check_only
+    attempts = 0
+
+    async def conflict_then_converge(request_id: str, now: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise _SerializationConflict("could not serialize access due to concurrent update")
+        return await original(request_id, now)
+
+    service.trigger_canonical_selection_check_only = conflict_then_converge
+
+    result = await _dispatch_manual_trigger(service, "canonical-serialization-001")
+
+    assert result["accepted"] is True
+    assert result["created"] is True
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
+    assert attempts == 3
+    assert repository.operator_enqueues == 1
+    assert repository.official_writes == 0
+    await asyncio.gather(*service.mews_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_post_cutoff_non_serialization_failure_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status, source = _source("NO_SIGNAL")
+    repository = CanonicalRepository(status, source)
+    service = CanonicalCheckService(repository)
+    _forbid_fresh_probe(monkeypatch)
+    attempts = 0
+
+    async def fail_once(_request_id: str, _now: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("not a PostgreSQL serialization conflict")
+
+    service.trigger_canonical_selection_check_only = fail_once
+
+    with pytest.raises(RuntimeError, match="not a PostgreSQL serialization conflict"):
+        await _dispatch_manual_trigger(service, "canonical-nonserialization-001")
+
+    assert attempts == 1
+    assert repository.operator_enqueues == 0
+    assert repository.official_writes == 0
+    await asyncio.gather(*service.mews_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_post_cutoff_serialization_retry_is_finite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status, source = _source("NO_SIGNAL")
+    repository = CanonicalRepository(status, source)
+    service = CanonicalCheckService(repository)
+    _forbid_fresh_probe(monkeypatch)
+    attempts = 0
+
+    async def always_conflict(_request_id: str, _now: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise _SerializationConflict("persistent serialization conflict")
+
+    service.trigger_canonical_selection_check_only = always_conflict
+
+    with pytest.raises(_SerializationConflict, match="persistent serialization conflict"):
+        await _dispatch_manual_trigger(service, "canonical-serialization-exhausted-001")
+
+    assert attempts == routes._POST_CUTOFF_SERIALIZATION_RETRY_LIMIT
+    assert repository.operator_enqueues == 0
+    assert repository.official_writes == 0
+    await asyncio.gather(*service.mews_tasks, return_exceptions=True)

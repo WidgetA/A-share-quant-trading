@@ -45,7 +45,7 @@ def _config(schema: str) -> V20DatabaseConfig:
     return V20DatabaseConfig(
         schema=schema,
         pool_min_size=1,
-        pool_max_size=4,
+        pool_max_size=7,
         ssl_mode="disable",
         connection_profile="legacy_embedded",
     )

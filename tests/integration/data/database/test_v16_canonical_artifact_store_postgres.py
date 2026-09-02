@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -238,7 +239,7 @@ async def test_postgres_volatile_computed_at_is_excluded_from_one_semantic_slot(
     ("assignment", "parameters"),
     [
         ("snapshot_hash=$2", "f" * 64),
-        ("snapshot_json=$2::jsonb", {"changed": True}),
+        ("snapshot_json=$2::jsonb", json.dumps({"changed": True})),
     ],
     ids=["hash", "json"],
 )

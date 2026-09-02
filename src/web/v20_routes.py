@@ -56,6 +56,8 @@ _FRESH_PROBE_ALERT_CODE = "MANUAL_0939_CHAIN_PROBE_RESULT"
 _FRESH_PROBE_PROFILE = "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2"
 _FROZEN_ENTRY_REPLAY_ALERT_CODE = "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
 _FROZEN_ENTRY_REPLAY_PROFILE = "FROZEN_OFFICIAL_ENTRY_MESSAGE_V1"
+_POST_CUTOFF_SERIALIZATION_RETRY_LIMIT = 4
+_POST_CUTOFF_SERIALIZATION_RETRY_BASE_SECONDS = 0.01
 
 
 _POST_CUTOFF_TERMINAL_ACTIONS = frozenset({"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"})
@@ -1012,6 +1014,53 @@ def _kick_mews_for_selection_trigger(service: Any, now: datetime) -> Any:
     return kick(now)
 
 
+def _is_postgres_serialization_conflict(exc: BaseException) -> bool:
+    """Recognize only PostgreSQL serialization failures (SQLSTATE 40001)."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        code = getattr(current, "pgcode", None) or getattr(current, "sqlstate", None)
+        if code == "40001":
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def _run_post_cutoff_idempotent_check(
+    canonical_trigger: Callable[[str, datetime], Awaitable[Any]],
+    request_id: str,
+    now: datetime,
+) -> Any:
+    """Converge concurrent same-key operator probes after a serializable race.
+
+    This adapter is intentionally restricted to the post-cutoff canonical
+    check-only hook.  That hook has a deterministic event id and may only
+    persist its idempotent operator notification; official state, orders, and
+    model batches are read-only.  The live morning/ordering lanes never call
+    this retry boundary.
+    """
+
+    for attempt in range(_POST_CUTOFF_SERIALIZATION_RETRY_LIMIT):
+        try:
+            return await canonical_trigger(request_id, now)
+        except Exception as exc:
+            if (
+                not _is_postgres_serialization_conflict(exc)
+                or attempt + 1 >= _POST_CUTOFF_SERIALIZATION_RETRY_LIMIT
+            ):
+                raise
+            logger.warning(
+                "V20 post-cutoff same-key probe hit PostgreSQL serialization conflict; "
+                "retrying idempotent durable read (attempt %s/%s)",
+                attempt + 2,
+                _POST_CUTOFF_SERIALIZATION_RETRY_LIMIT,
+            )
+            await asyncio.sleep(_POST_CUTOFF_SERIALIZATION_RETRY_BASE_SECONDS * (2**attempt))
+    raise AssertionError("unreachable post-cutoff serialization retry state")
+
+
 async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
     """Run the live lane or a post-cutoff durable-artifact check-only probe."""
 
@@ -1037,7 +1086,11 @@ async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
         raise V20StateConflict("canonical V20 check-only selection adapter is unavailable")
     mews_attempt = _kick_mews_for_selection_trigger(service, now)
     try:
-        return await canonical_trigger(request_id, now)
+        return await _run_post_cutoff_idempotent_check(
+            canonical_trigger,
+            request_id,
+            now,
+        )
     finally:
         # A post-cutoff operator probe is allowed to wait for the independently
         # managed MEWS singleflight to settle.  Its success/failure never changes

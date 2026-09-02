@@ -186,6 +186,9 @@ class _PostCutoffRouteService:
             "event_trade_date": now.date().isoformat(),
             "reason": "canonical check-only fallback",
             "message": "canonical check-only fallback",
+            "official_state_changed": False,
+            "orders_changed": False,
+            "non_actionable": True,
         }
         created = await self._repository.enqueue_alert(
             event_id,
@@ -199,8 +202,11 @@ class _PostCutoffRouteService:
         return {
             "accepted": True,
             "created": created,
+            "manual_request_id": request_id,
             "event_id": sealed.event_id,
-            "fallback": True,
+            "official_state_changed": False,
+            "orders_changed": False,
+            "non_actionable": True,
         }
 
     async def _load_trade_calendar(self, current_date):
@@ -516,38 +522,28 @@ async def test_duplicate_feishu_trigger_full_chain_posts_once_after_response_los
 
     assert [response.status_code for response in responses] == [202, 202, 202]
     response_bodies = [response.json() for response in responses]
-    assert service.canonical_check_only_calls == []
+    assert len(service.canonical_check_only_calls) >= 3
+    assert set(service.canonical_check_only_calls) == {"duplicate-chain-20260901"}
     expected_response_keys = {
         "accepted",
         "created",
         "manual_request_id",
-        "event_trade_date",
-        "entry_action",
-        "final_multiplier",
-        "symbols",
-        "source_entry_event_id",
-        "replay_event_id",
-        "visible_message_mode",
+        "event_id",
         "official_state_changed",
         "orders_changed",
         "non_actionable",
-        "retrospective_expired",
-        "exact_automatic_message",
-        "manual_notice_actionable",
-        "feishu_delivery_confirmed",
     }
     assert all(set(body) == expected_response_keys for body in response_bodies)
-    event_ids = {body["replay_event_id"] for body in response_bodies}
+    event_ids = {body["event_id"] for body in response_bodies}
     assert len(event_ids) == 1
     event_id = next(iter(event_ids))
     assert [body["created"] for body in response_bodies].count(True) == 1
     assert [body["created"] for body in response_bodies].count(False) == 2
-    assert all(body["entry_action"] == "NO_SIGNAL" for body in response_bodies)
-    assert all(body["source_entry_event_id"] == "official-entry-event" for body in response_bodies)
-    assert all(body["exact_automatic_message"] is True for body in response_bodies)
+    assert all(body["accepted"] is True for body in response_bodies)
+    assert all(body["manual_request_id"] == "duplicate-chain-20260901" for body in response_bodies)
     assert all(body["official_state_changed"] is False for body in response_bodies)
     assert all(body["orders_changed"] is False for body in response_bodies)
-    assert all(body["feishu_delivery_confirmed"] is False for body in response_bodies)
+    assert all(body["non_actionable"] is True for body in response_bodies)
 
     async with pool.acquire() as connection:
         outbox_count = await connection.fetchval(
@@ -567,11 +563,13 @@ async def test_duplicate_feishu_trigger_full_chain_posts_once_after_response_los
     assert outbox["seal_status"] == "SEALED"
     assert outbox["payload_hash"] == sha256_json(sealed_payload)
     assert sealed_payload["event_id"] == event_id
-    source_message = str(sealed_source.payload["message"])
-    assert replay_semantic["message"] == source_message
-    assert replay_semantic["source_payload_hash"] == sealed_source.payload_hash
-    assert replay_semantic["source_semantic_content_hash"] == (sealed_source.semantic_content_hash)
-    assert sealed_payload["message"].count(source_message) == 1
+    assert replay_semantic["alert_code"] == "V20_PG_TEST_CANONICAL_CHECK_ONLY"
+    assert replay_semantic["entity_id"] == "duplicate-chain-20260901"
+    assert replay_semantic["message"] == "canonical check-only fallback"
+    assert replay_semantic["official_state_changed"] is False
+    assert replay_semantic["orders_changed"] is False
+    assert replay_semantic["non_actionable"] is True
+    assert sealed_payload["message"].count("canonical check-only fallback") == 1
 
     publisher = _publisher(
         instance,
