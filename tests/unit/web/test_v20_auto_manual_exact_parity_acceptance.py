@@ -26,6 +26,10 @@ from src.data.database.v20_repository import (
 )
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import genesis_state
+from src.strategy.v20.rolling7_market_health import (
+    CanonicalRecommendation,
+    make_batch,
+)
 from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.web.v15_scan_service import (
     V15ScanState,
@@ -141,6 +145,8 @@ class _DecisionRepository:
         self.alert_write_calls = 0
         self.raw_write_calls = 0
         self.forbidden_write_calls: list[str] = []
+        self.rolling7_rows: tuple[Any, ...] = ()
+        self.rolling7_read_calls = 0
 
     def bind_lineage(self, lineage_id: str) -> None:
         self.state = replace(self.state, lineage_id=lineage_id)
@@ -209,7 +215,8 @@ class _DecisionRepository:
         return []
 
     async def load_rolling7_market_health(self, **_kwargs: Any) -> tuple[Any, ...]:
-        return ()
+        self.rolling7_read_calls += 1
+        return self.rolling7_rows
 
     async def list_pending_shadow_batches(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         return []
@@ -665,6 +672,79 @@ async def test_check_only_terminal_compares_old_official_and_current_canonical_h
     assert check_repo.commit_entry_calls == 0
     assert check_repo.forbidden_write_calls == []
     assert check_repo.alert_write_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_check_only_refreshes_rolling7_after_same_service_background_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _artifact = _service_and_artifact(monkeypatch)
+
+    # The automatic lane initially sees no mature Rolling7 facts and commits
+    # its immutable morning slot as WARMUP.  Keep this exact service/context
+    # alive to model production recovery without a restart.
+    await service._run_decision_iteration_with_cutoff(RUN_AT)
+    assert service._context is not None
+    original_context = service._context
+    assert repository.commit is not None
+    assert repository.status is not None
+    assert repository.commit.semantic["rolling7_state"] == "WARMUP"
+    assert repository.commit.semantic["rolling7_reason"] == "WARMUP:0/7"
+    assert repository.commit.semantic["rolling7_window_ids"] == []
+    reads_before_backfill = repository.rolling7_read_calls
+
+    signal_and_t2 = (
+        (date(2026, 8, 17), date(2026, 8, 19)),
+        (date(2026, 8, 18), date(2026, 8, 20)),
+        (date(2026, 8, 19), date(2026, 8, 21)),
+        (date(2026, 8, 20), date(2026, 8, 24)),
+        (date(2026, 8, 21), date(2026, 8, 25)),
+        (date(2026, 8, 24), date(2026, 8, 26)),
+        (date(2026, 8, 25), date(2026, 8, 27)),
+    )
+    expected_window_ids = [
+        f"rolling7-snapshot-{index}" for index in range(1, len(signal_and_t2) + 1)
+    ]
+    recommendation = (CanonicalRecommendation(rank=1, code="000001"),)
+    repository.rolling7_rows = tuple(
+        make_batch(
+            signal_date=signal_date,
+            canonical_snapshot_id=expected_window_ids[index - 1],
+            canonical_snapshot_hash=f"{index:064x}",
+            recommendations=recommendation,
+            t2_date=t2_date,
+            d0_references={"000001": 10.0},
+            d2_closes={"000001": 10.1},
+        )
+        for index, (signal_date, t2_date) in enumerate(signal_and_t2, start=1)
+    )
+
+    formal_state = repository.state
+    formal_status = repository.status
+    formal_commit = repository.commit
+    repository.seal_at = POST_CUTOFF_AT
+    result = await service.trigger_canonical_selection_check_only(
+        "check-only-refresh-rolling7-001",
+        POST_CUTOFF_AT,
+    )
+
+    alert = repository.alerts[result["operator_event_id"]]
+    current_prepare = alert.semantic["entry_render_semantic"]
+    assert current_prepare["rolling7_state"] == "NON_BAD"
+    assert current_prepare["rolling7_reason"] is None
+    assert current_prepare["rolling7_window_ids"] == expected_window_ids
+    assert current_prepare["rolling7_r7"] == pytest.approx(0.07)
+    assert current_prepare["rolling7_l7"] == 0
+    assert repository.rolling7_read_calls == reads_before_backfill + 1
+
+    # The operator event is non-actionable.  Refreshing the prepared result
+    # cannot rewrite the already committed morning state or terminal slot.
+    assert service._context is original_context
+    assert repository.state == formal_state
+    assert repository.status == formal_status
+    assert repository.commit == formal_commit
+    assert result["official_state_changed"] is False
+    assert result["orders_changed"] is False
 
 
 @pytest.mark.asyncio

@@ -3157,17 +3157,20 @@ class V20Service:
                         )
                     official_v16_snapshot_hash = official_semantic_v16_hash
 
+                # A check-only run evaluates the currently durable strategy
+                # facts just like the automatic 09:40 lane.  The terminal
+                # entry snapshot remains immutable evidence of what was known
+                # when that slot committed; it must not become a process-long
+                # cache that hides Rolling7 batches completed by background
+                # recovery later in the same service lifetime.
+                completed_health, completed_rolling, maturity_gaps = await self._policy_inputs(
+                    trade_date
+                )
                 scheduled: Sequence[Mapping[str, Any]]
                 if status_before is None:
-                    completed_health, completed_rolling, maturity_gaps = await self._policy_inputs(
-                        trade_date
-                    )
                     scheduled = await self._scheduled_exits_today(trade_date)
                     prepare_state = state_before
                 else:
-                    completed_health, completed_rolling, maturity_gaps = (
-                        self._policy_inputs_from_terminal_status(status_before)
-                    )
                     scheduled = tuple(status_before.semantic.get("scheduled_exits_today") or ())
                     prepare_state = state_before
                 prepared = prepare_entry(

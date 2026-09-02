@@ -1046,6 +1046,7 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
             self.raw_reads: list[tuple[tuple[str, ...], date]] = []
             self.raw_by_key: dict[tuple[str, str], Any] = {}
             self.persist_calls: list[tuple[Mapping[str, Any], ...]] = []
+            self.policy_reads: list[tuple[str, date]] = []
 
         async def assert_runtime_leader(self) -> None:
             return None
@@ -1060,6 +1061,32 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
 
         async def load_state(self, _lineage: str) -> StateRecord:
             return failed_state
+
+        async def load_recent_completed(
+            self,
+            kind: str,
+            *,
+            before_t2: date,
+            limit: int,
+            **scope: Any,
+        ) -> list[Any]:
+            assert kind == "HEALTH"
+            assert before_t2 == today
+            assert limit == 1_000
+            assert scope == service._ledger_scope
+            self.policy_reads.append(("health", before_t2))
+            return []
+
+        async def load_rolling7_market_health(
+            self,
+            *,
+            before_t2: date,
+            limit: int,
+        ) -> tuple[Any, ...]:
+            assert before_t2 == today
+            assert limit == 1_000
+            self.policy_reads.append(("rolling7", before_t2))
+            return ()
 
         async def list_raw_minute_bar_records(
             self,
@@ -1447,6 +1474,7 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
     )
     assert check_only_result["official_v16_snapshot_hash"] is None
     assert state.canonical_coordinator.inflight == {}
+    assert repository.policy_reads == [("health", today), ("rolling7", today)]
     assert all(
         result.snapshot_hash == automatic_result.canonical_bundle.snapshot_hash
         for result in (
@@ -1811,6 +1839,7 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     class Repository:
         def __init__(self) -> None:
             self.events: dict[str, OutboxRecord] = {}
+            self.policy_reads: list[tuple[str, date]] = []
 
         async def assert_runtime_leader(self) -> None:
             return None
@@ -1818,6 +1847,32 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
         async def load_state(self, lineage_id: str) -> StateRecord:
             assert state is not None
             return state
+
+        async def load_recent_completed(
+            self,
+            kind: str,
+            *,
+            before_t2: date,
+            limit: int,
+            **scope: Any,
+        ) -> list[Any]:
+            assert kind == "HEALTH"
+            assert before_t2 == today
+            assert limit == 1_000
+            assert scope == service._ledger_scope
+            self.policy_reads.append(("health", before_t2))
+            return []
+
+        async def load_rolling7_market_health(
+            self,
+            *,
+            before_t2: date,
+            limit: int,
+        ) -> tuple[Any, ...]:
+            assert before_t2 == today
+            assert limit == 1_000
+            self.policy_reads.append(("rolling7", before_t2))
+            return ()
 
         async def get_entry_status(self, _stream: str, trade_date: date) -> Any:
             return terminal if trade_date == today else None
@@ -1969,6 +2024,7 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
     assert result["official_v16_snapshot_hash"] == current_bundle.snapshot_hash
     assert [item["code"] for item in result["symbols"]] == ["603068"]
+    assert repository.policy_reads == [("health", today), ("rolling7", today)]
     assert selection_source.calls == 1
     assert service._mews_singleflight_task is None
     mews_alerts = [
@@ -3106,6 +3162,7 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
             self.model_batches: list[Any] = ["existing-model-batch"]
             self.orders: list[Any] = ["existing-order"]
             self.raw_reads = 0
+            self.policy_reads: list[tuple[str, date]] = []
 
         async def assert_runtime_leader(self) -> None:
             return None
@@ -3113,6 +3170,32 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
         async def load_state(self, _lineage_id: str) -> StateRecord:
             assert self.state is not None
             return self.state
+
+        async def load_recent_completed(
+            self,
+            kind: str,
+            *,
+            before_t2: date,
+            limit: int,
+            **scope: Any,
+        ) -> list[Any]:
+            assert kind == "HEALTH"
+            assert before_t2 == today
+            assert limit == 1_000
+            assert scope == service._ledger_scope
+            self.policy_reads.append(("health", before_t2))
+            return []
+
+        async def load_rolling7_market_health(
+            self,
+            *,
+            before_t2: date,
+            limit: int,
+        ) -> tuple[Any, ...]:
+            assert before_t2 == today
+            assert limit == 1_000
+            self.policy_reads.append(("rolling7", before_t2))
+            return ()
 
         async def get_entry_status(self, _stream: str, trade_date: date) -> EntryStatus | None:
             return self.status if trade_date == today else None
@@ -3279,6 +3362,7 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
     assert artifact_store.save_calls == 0
     assert artifact_store.load_calls == 1
     assert repository.raw_reads >= 2
+    assert repository.policy_reads == [("health", today), ("rolling7", today)]
 
 
 @pytest.mark.asyncio
