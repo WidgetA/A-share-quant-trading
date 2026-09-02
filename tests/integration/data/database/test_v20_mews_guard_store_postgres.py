@@ -706,7 +706,7 @@ async def test_postgres_d2_no_candidate_fallback_survives_repository_restart(
         "leg-d2-fallback",
         d1=D1,
         cutoff=D2_CUTOFF,
-        late_source_trade_date=SOURCE_DATE,
+        late_source_trade_date=D1,
         late_availability_date=D2,
         evaluation_date=D2,
     )
@@ -721,7 +721,7 @@ async def test_postgres_d2_no_candidate_fallback_survives_repository_restart(
             "leg-d2-fallback",
             d1=D1,
             cutoff=D2_CUTOFF,
-            late_source_trade_date=SOURCE_DATE,
+            late_source_trade_date=D1,
             late_availability_date=D2,
             evaluation_date=D2,
         )
@@ -729,7 +729,7 @@ async def test_postgres_d2_no_candidate_fallback_survives_repository_restart(
             "leg-d2-fallback",
             d1=D1,
             cutoff=D2_CUTOFF,
-            late_source_trade_date=SOURCE_DATE,
+            late_source_trade_date=D1,
             evaluation_date=D2,
         )
     finally:
