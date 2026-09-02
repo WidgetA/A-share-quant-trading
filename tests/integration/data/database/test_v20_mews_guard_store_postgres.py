@@ -701,6 +701,12 @@ async def test_postgres_d2_no_candidate_fallback_survives_repository_restart(
     guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
 ) -> None:
     store, _repository, pool, schema = guard_store
+    async with pool.acquire() as connection:
+        deleted = await connection.execute(
+            f"DELETE FROM {schema}.mews_snapshots WHERE snapshot_id=$1",
+            "d2-current-day",
+        )
+    assert deleted == "DELETE 1"
     await _insert_manual_leg(pool, schema, "leg-d2-fallback", d1=D1)
     result = await store.select_and_freeze_for_leg(
         "leg-d2-fallback",
