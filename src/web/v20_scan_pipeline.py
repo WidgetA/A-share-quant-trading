@@ -178,6 +178,10 @@ class FrozenV16ScanBundle:
     snapshot: Mapping[str, Any]
     snapshot_hash: str
     computation_calendar: tuple[date, ...] = ()
+    # Portable artifact v2 persists the already-computed legacy V16 Top-1
+    # projection here.  It is deliberately separate from ``stock_data``:
+    # restart hydration omits the full raw/history-heavy stock objects.
+    legacy_recommendation: Mapping[str, Any] | None = None
 
 
 class V20ScanPipeline:

@@ -20,6 +20,7 @@ from src.data.clients.mews_snapshot import MewsSnapshotSourceError
 from src.data.clients.tushare_realtime import (
     TushareDailyBar,
     TushareMinuteBar,
+    TushareRealtimeClient,
     tushare_minute_bars_to_early_market_data,
 )
 from src.data.database.fundamentals_db import FundamentalsDBConfig
@@ -3413,6 +3414,13 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
     assert all(not task.done() for task in service._tasks)
     assert service.startup_stage == "RUNNING"
 
+    sampled_at = service._aware_now()
+    for lane_name in service._lane_health:
+        service._record_lane_success(lane_name, sampled_at)
+    await service._refresh_status_snapshot()
+    assert (await service.status())["healthy"] is True
+    await service._require_manual_trigger_ready()
+
     await service.stop()
 
     assert resources_stopped is True
@@ -3664,7 +3672,8 @@ def _arm_manual_trigger_runtime(service: V20Service) -> list[asyncio.Task[Any]]:
     service._stop_event.clear()
     blocker = asyncio.Event()
     tasks = [
-        asyncio.create_task(blocker.wait(), name=f"v20-test-lane-{index}") for index in range(6)
+        asyncio.create_task(blocker.wait(), name=task_name)
+        for task_name in sorted(service_module.V20_RUNTIME_TASK_NAMES)
     ]
     service._tasks = tasks
     sampled_at = service._aware_now()
@@ -4148,7 +4157,7 @@ class _LateReplayClient:
             for code in codes
         }
 
-    async def batch_get_minute_history_for_date(self, codes, trade_date):
+    async def batch_get_early_minute_history_for_date(self, codes, trade_date):
         self.stk_mins_calls.append((tuple(codes), trade_date))
         labels = ["09:25", "09:30"] + [f"09:{minute:02d}" for minute in range(31, 40)]
         # The vendor restates the same facts the morning persisted.
@@ -4739,7 +4748,7 @@ class _HistoricalSeedClient:
         self.daily_calls: list[str] = []
         self.name_calls: list[str] = []
 
-    async def batch_get_minute_history_for_date(self, codes, trade_date):
+    async def batch_get_early_minute_history_for_date(self, codes, trade_date):
         self.calls.append((tuple(codes), trade_date))
         return {code: self.bars_by_code.get(code, ()) for code in codes}
 
@@ -5016,6 +5025,63 @@ async def test_past_date_seed_reads_back_even_when_bootstrap_seals_nothing(
     assert repository.list_calls == 2
 
 
+async def test_past_date_seed_uses_25_physical_batch_calls_for_3195_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production-shape Rolling7 recovery never falls back to per-symbol history."""
+    codes = tuple(f"{index:06d}" for index in range(1, 3_196))
+    repository = _SeedRepository()
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    physical_calls: list[dict[str, str]] = []
+
+    async def api_call(api_name, params, **_kwargs):
+        assert api_name == "stk_mins"
+        physical_calls.append(dict(params))
+        return {
+            "data": {
+                "fields": [
+                    "ts_code",
+                    "trade_time",
+                    "open",
+                    "close",
+                    "high",
+                    "low",
+                    "vol",
+                    "amount",
+                ],
+                "items": [],
+            }
+        }
+
+    async def legacy_per_symbol_bomb(*_args, **_kwargs):
+        raise AssertionError("Rolling7 recovery called the per-symbol full-day adapter")
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+    monkeypatch.setattr(client, "batch_get_minute_history_for_date", legacy_per_symbol_bomb)
+    service = _historical_seed_service(
+        monkeypatch,
+        repository,
+        client,
+        universe=codes,
+    )
+
+    seed, universe, _clean_boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert seed == {}
+    assert universe == codes
+    assert len(physical_calls) == (len(codes) + 127) // 128 == 25
+    requested = [
+        ts_code.split(".")[0]
+        for params in physical_calls
+        for ts_code in params["ts_code"].split(",")
+    ]
+    assert requested == list(codes)
+    assert max(len(params["ts_code"].split(",")) for params in physical_calls) == 128
+    assert repository.list_calls == 2
+    assert repository.persist_calls == []
+
+
 async def test_past_date_bootstrap_chunk_cancellation_resumes_from_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5027,7 +5093,7 @@ async def test_past_date_bootstrap_chunk_cancellation_resumes_from_database(
         def __init__(self) -> None:
             self.calls: list[tuple[str, ...]] = []
 
-        async def batch_get_minute_history_for_date(self, requested, trade_date):
+        async def batch_get_early_minute_history_for_date(self, requested, trade_date):
             self.calls.append(tuple(requested))
             if len(self.calls) == 2:
                 raise asyncio.CancelledError()
@@ -5071,7 +5137,7 @@ async def test_past_date_bootstrap_failed_code_raises_instead_of_fake_pass(
     repository = _SeedRepository()
 
     class _FlakyClient(_HistoricalSeedClient):
-        async def batch_get_minute_history_for_date(self, codes, trade_date):
+        async def batch_get_early_minute_history_for_date(self, codes, trade_date):
             self.calls.append((tuple(codes), trade_date))
             # A missing key means the per-code API call failed.
             return {code: self.bars_by_code[code] for code in codes if code != dropped}

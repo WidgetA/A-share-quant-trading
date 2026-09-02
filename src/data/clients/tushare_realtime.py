@@ -206,6 +206,13 @@ class TushareRealtimeClient:
     MAX_CONCURRENCY = 40
     MAX_RETRIES = 3
     RETRY_BACKOFF = 1.0  # base seconds; doubles each attempt
+    # ``stk_mins`` accepts comma-separated equity codes even though the public
+    # examples show one code.  Keep the early window below the endpoint's
+    # 8,000-row response cap: 400 symbols x at most 16 minute labels leaves
+    # deterministic headroom and turns a main-board replay into a handful of
+    # physical requests instead of one request per symbol.
+    HISTORICAL_EARLY_BATCH_SIZE = 400
+    STK_MINS_MAX_ROWS = 8_000
 
     def __init__(self, token: str) -> None:
         self._token = token
@@ -433,6 +440,81 @@ class TushareRealtimeClient:
             result[code] = bars
         return result
 
+    async def batch_get_early_minute_history_for_date(
+        self,
+        stock_codes: list[str],
+        trade_date: date,
+    ) -> dict[str, tuple[TushareMinuteBar, ...]]:
+        """Fetch one closed day's selection window with batched ``stk_mins`` calls.
+
+        This is deliberately narrower than :meth:`batch_get_minute_history_for_date`.
+        Rolling7 canonical recovery only needs the auction/early labels used by
+        V16, so the request spans ``09:24 < t < 09:40`` and can safely carry
+        hundreds of comma-separated symbols without approaching Tushare's
+        8,000-row cap.  The full-day method remains per-symbol because batching
+        a complete session would be truncated and is still required by exits.
+
+        A successful batch returns a key for every requested symbol; an absent
+        row set is therefore an explicit empty response (for example a suspended
+        stock).  A failed batch returns no keys for its symbols so callers keep
+        those targets pending instead of confusing transport failure with no data.
+        """
+
+        if not self._client:
+            raise TushareRealtimeError("Client not started - call start() first")
+        stock_codes = list(dict.fromkeys(stock_codes))
+        if not stock_codes:
+            return {}
+        if type(trade_date) is not date:
+            raise TypeError("trade_date must be a date")
+
+        start = f"{trade_date.isoformat()} 09:24:00"
+        end = f"{trade_date.isoformat()} 09:40:00"
+        batches = [
+            stock_codes[index : index + self.HISTORICAL_EARLY_BATCH_SIZE]
+            for index in range(0, len(stock_codes), self.HISTORICAL_EARLY_BATCH_SIZE)
+        ]
+        sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
+
+        async def _fetch_batch(
+            batch: list[str],
+        ) -> dict[str, tuple[TushareMinuteBar, ...]]:
+            async with sem:
+                data = await self._api_call(
+                    "stk_mins",
+                    {
+                        "ts_code": ",".join(self._to_ts_code(code) for code in batch),
+                        "freq": "1min",
+                        "start_date": start,
+                        "end_date": end,
+                    },
+                    fields="ts_code,trade_time,open,close,high,low,vol,amount",
+                )
+            return self._parse_historical_minute_history_batch(
+                batch,
+                trade_date,
+                data,
+            )
+
+        rows = await asyncio.gather(
+            *[_fetch_batch(batch) for batch in batches],
+            return_exceptions=True,
+        )
+        result: dict[str, tuple[TushareMinuteBar, ...]] = {}
+        for batch, row in zip(batches, rows, strict=True):
+            if isinstance(row, asyncio.CancelledError):
+                raise row
+            if isinstance(row, BaseException):
+                logger.warning(
+                    "batched early stk_mins failed for %d codes; successful sibling "
+                    "batches retained: %s",
+                    len(batch),
+                    row,
+                )
+                continue
+            result.update(row)
+        return result
+
     @staticmethod
     def _parse_minute_bars(
         data: dict[str, Any],
@@ -648,6 +730,77 @@ class TushareRealtimeClient:
         return tuple(
             bar for bar in bars if bar.bar_end.astimezone(BEIJING_TZ).date() == expected_trade_date
         )
+
+    @staticmethod
+    def _parse_historical_minute_history_batch(
+        codes: list[str],
+        expected_trade_date: date,
+        data: dict[str, Any],
+    ) -> dict[str, tuple[TushareMinuteBar, ...]]:
+        """Split one batched ``stk_mins`` response into validated symbol histories."""
+
+        requested = tuple(dict.fromkeys(codes))
+        requested_set = set(requested)
+        if any(len(code) != 6 or not code.isdigit() for code in requested):
+            raise ValueError("invalid bare A-share code in historical minute batch")
+        raw_data = data.get("data", {})
+        fields = list(raw_data.get("fields", []))
+        items = list(raw_data.get("items", []))
+        required_columns = {
+            "ts_code",
+            "trade_time",
+            "open",
+            "close",
+            "high",
+            "low",
+            "vol",
+            "amount",
+        }
+        missing_columns = required_columns - set(fields)
+        if missing_columns:
+            raise TushareRealtimeError(
+                "batched stk_mins response missing fields: " + ", ".join(sorted(missing_columns))
+            )
+        if not items:
+            return {code: () for code in requested}
+        if len(items) >= TushareRealtimeClient.STK_MINS_MAX_ROWS:
+            raise TushareRealtimeError(
+                "batched early stk_mins response reached the 8000-row cap and may be truncated"
+            )
+
+        code_index = fields.index("ts_code")
+        time_index = fields.index("trade_time")
+        grouped: dict[str, list[Any]] = {code: [] for code in requested}
+        for item in items:
+            try:
+                row_code = str(item[code_index]).strip().upper()
+                row_time = TushareRealtimeClient._parse_bar_end(str(item[time_index]).strip())
+            except (IndexError, TypeError, ValueError) as exc:
+                raise TushareRealtimeError("batched stk_mins row has an invalid identity") from exc
+            bare = row_code.split(".")[0]
+            if bare not in requested_set:
+                raise TushareRealtimeError(
+                    f"batched stk_mins row ts_code {row_code!r} was not requested"
+                )
+            if row_time.astimezone(BEIJING_TZ).date() != expected_trade_date:
+                raise TushareRealtimeError(
+                    "batched stk_mins response contains a row outside the requested trade date"
+                )
+            grouped[bare].append(item)
+
+        parsed: dict[str, tuple[TushareMinuteBar, ...]] = {}
+        for code in requested:
+            bars = TushareRealtimeClient._parse_historical_minute_history(
+                code,
+                expected_trade_date,
+                {"data": {"fields": fields, "items": grouped[code]}},
+            )
+            if grouped[code] and not bars:
+                raise TushareRealtimeError(
+                    f"batched stk_mins rows for {code} produced no valid canonical bars"
+                )
+            parsed[code] = bars
+        return parsed
 
     @staticmethod
     def _parse_rt_min(data: dict[str, Any]) -> dict[str, TushareQuote]:

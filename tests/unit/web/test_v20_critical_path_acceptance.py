@@ -61,6 +61,7 @@ from src.web.v15_scan_service import (
 )
 from src.web.v20_routes import _dispatch_manual_trigger, create_v20_router
 from src.web.v20_service import (
+    V20_RUNTIME_TASK_NAMES,
     V20Service,
     _bar_payload,
     _DayContext,
@@ -1344,7 +1345,7 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
     async def empty_stk_mins(codes: list[str], trade_date: date) -> dict[str, tuple]:
         raise AssertionError("seed must be complete from persisted evidence; no stk_mins")
 
-    realtime.batch_get_minute_history_for_date = empty_stk_mins
+    realtime.batch_get_early_minute_history_for_date = empty_stk_mins
 
     class FixedDateTime(datetime):
         @classmethod
@@ -2020,7 +2021,10 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     ]
     assert len(mews_alerts) == 1
 
-    readiness_tasks = [asyncio.create_task(asyncio.Event().wait()) for _ in range(6)]
+    readiness_tasks = [
+        asyncio.create_task(asyncio.Event().wait(), name=task_name)
+        for task_name in sorted(V20_RUNTIME_TASK_NAMES)
+    ]
     service._tasks = readiness_tasks
     service._record_lane_success("decision", now)
     await service._refresh_status_snapshot()

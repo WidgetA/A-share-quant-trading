@@ -228,7 +228,17 @@ LATE_0939_REPLAY_TOTAL_TIMEOUT_SECONDS = 180.0
 LATE_0939_REPLAY_RETRY_SECONDS = 900.0
 LATE_0939_REPLAY_MAX_AUTOMATIC_ATTEMPTS = 2
 MANUAL_MONITOR_HISTORY_TIMEOUT_SECONDS = 30.0
-V20_RUNTIME_LANE_COUNT = 6
+V20_RUNTIME_TASK_NAMES = frozenset(
+    {
+        "v20-decision-scheduler",
+        "v20-live-exit-scheduler",
+        "v20-stale-exit-scheduler",
+        "v20-outbox-recovery-scheduler",
+        "v20-rolling7-recovery-scheduler",
+        "v20-outbox-publisher",
+        "v20-mews-cache-scheduler",
+    }
+)
 MEWS_CACHE_CUTOFF = time(9, 40)
 MEWS_CACHE_POLL_SECONDS = 30.0
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
@@ -6493,9 +6503,14 @@ class V20Service:
         targets = sorted(set(missing) | enrichment)
         if targets:
             client = self._scan_state.realtime_client
-            if client is None or not hasattr(client, "batch_get_minute_history_for_date"):
+            batched_early_loader = (
+                None
+                if client is None
+                else getattr(client, "batch_get_early_minute_history_for_date", None)
+            )
+            if not callable(batched_early_loader):
                 raise V20RepositoryError(
-                    "canonical V16 historical replay minute-history adapter is unavailable"
+                    "canonical V16 historical replay batched early-minute adapter is unavailable"
                 )
             # Deterministic 128-code chunks; each finished chunk is normalized
             # and persisted immediately.  Cancellation propagates naturally,
@@ -6508,7 +6523,7 @@ class V20Service:
             confirmed_empty: set[str] = set()
             for start in range(0, len(targets), HISTORICAL_SEED_BACKFILL_CHUNK):
                 chunk = targets[start : start + HISTORICAL_SEED_BACKFILL_CHUNK]
-                history = await client.batch_get_minute_history_for_date(chunk, trade_date)
+                history = await batched_early_loader(chunk, trade_date)
                 payloads: list[dict[str, Any]] = []
                 for code in chunk:
                     if code not in history:
@@ -9779,10 +9794,12 @@ class V20Service:
         """Require the entry-trigger readiness profile, not global health."""
 
         self._require_running()
+        task_names = tuple(task.get_name() for task in self._tasks)
         if (
             not self._started
             or self._stop_event.is_set()
-            or len(self._tasks) != V20_RUNTIME_LANE_COUNT
+            or len(task_names) != len(V20_RUNTIME_TASK_NAMES)
+            or frozenset(task_names) != V20_RUNTIME_TASK_NAMES
             or any(task.done() for task in self._tasks)
         ):
             raise V20RepositoryError("V20 runtime is not healthy enough for manual trigger")

@@ -79,11 +79,13 @@ def _canonical(*, recommendations: int = 1) -> CanonicalV16ScanBundle:
 
 
 def _frozen(*, recommendations: int = 1) -> FrozenV16ScanBundle:
+    scan_result = _scan_result(recommendations=recommendations)
+    stock_data = {"600000": _stock_data()}
     return FrozenV16ScanBundle(
         trade_date=TRADE_DATE,
         frozen_at=datetime.combine(TRADE_DATE, time(9, 39), tzinfo=BEIJING_TZ),
-        scan_result=_scan_result(recommendations=recommendations),
-        stock_data={"600000": _stock_data()},
+        scan_result=scan_result,
+        stock_data=stock_data,
         comparison_pool_codes=("600000",),
         breadth_valid_n=1,
         breadth_down_n=0,
@@ -91,6 +93,10 @@ def _frozen(*, recommendations: int = 1) -> FrozenV16ScanBundle:
         prior_amount_yuan=MappingProxyType({}),
         snapshot=MappingProxyType({}),
         snapshot_hash="d" * 64,
+        legacy_recommendation=v15_scan_service._build_v16_recommendation_payload(
+            scan_result,
+            stock_data,
+        ),
     )
 
 
@@ -323,7 +329,7 @@ async def test_present_artifact_restores_once_and_settles_locally(monkeypatch):
     )
 
     assert actions == ["probe"]
-    assert state.today_recommendation is not None
+    assert state.today_recommendation == _frozen().legacy_recommendation
     assert state.scan_error is None
     assert state.scan_done_date == ""
     assert state.canonical_durable_received_at == {TRADE_DATE: RECEIVED_AT_BEIJING}
@@ -341,8 +347,43 @@ async def test_frozen_restore_never_populates_canonical_cache():
     )
 
     assert state.canonical_coordinator is None
-    assert state.today_recommendation is not None
+    assert state.today_recommendation == _frozen().legacy_recommendation
     assert state.scan_done_date == ""
+
+
+@pytest.mark.asyncio
+async def test_old_v1_nonempty_artifact_settles_once_without_fabricating_display(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    state = V15ScanState(today_recommendation={"stock_code": "stale"})
+    actions: list[str] = []
+    old_v1 = replace(
+        _frozen(),
+        stock_data=MappingProxyType({}),
+        legacy_recommendation=None,
+    )
+
+    async def probe(_trade_date: date):
+        actions.append("probe")
+        return old_v1, RECEIVED_AT
+
+    state.canonical_artifact_probe = probe
+    _forbid_vendor_and_publish(monkeypatch, actions)
+    with caplog.at_level("WARNING", logger="src.web.v15_scan_service"):
+        await _run_scheduler(
+            monkeypatch,
+            state,
+            [_at(10, 1), _at(10, 2)],
+            cancel_on_sleep=2,
+        )
+
+    assert actions == ["probe"]
+    assert state.today_recommendation is None
+    assert state.scan_error is None
+    assert state.scan_done_date == ""
+    assert state.canonical_durable_received_at == {TRADE_DATE: RECEIVED_AT_BEIJING}
+    assert "portable v1 without a provable legacy recommendation" in caplog.text
 
 
 def test_naive_receipt_is_rejected_without_partial_mutation():
@@ -564,7 +605,7 @@ def test_restoration_accepts_verified_canonical_and_frozen_shapes():
         _frozen(),
         RECEIVED_AT,
     )
-    assert frozen_state.today_recommendation is not None
+    assert frozen_state.today_recommendation == _frozen().legacy_recommendation
     assert frozen_state.scan_done_date == ""
     assert frozen_state.canonical_coordinator is None
 

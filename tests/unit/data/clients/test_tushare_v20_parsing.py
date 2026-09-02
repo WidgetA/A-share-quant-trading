@@ -481,6 +481,216 @@ async def test_closed_history_api_keeps_successful_code_when_a_sibling_fails(
     assert result["000002"][0].end_label == "14:57"
 
 
+@pytest.mark.asyncio
+async def test_historical_early_api_batches_symbols_into_narrow_stk_mins_requests(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    client.HISTORICAL_EARLY_BATCH_SIZE = 400
+    calls: list[tuple[str, dict[str, str], str]] = []
+
+    async def api_call(api_name, params, fields=""):
+        calls.append((api_name, dict(params), fields))
+        return {
+            "data": {
+                "fields": [
+                    "ts_code",
+                    "trade_time",
+                    "open",
+                    "close",
+                    "high",
+                    "low",
+                    "vol",
+                    "amount",
+                ],
+                "items": [],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+    codes = [f"{index:06d}" for index in range(805)]
+
+    result = await client.batch_get_early_minute_history_for_date(
+        codes,
+        date(2026, 8, 28),
+    )
+
+    assert result == {code: () for code in codes}
+    assert len(calls) == 3
+    assert [len(params["ts_code"].split(",")) for _api, params, _fields in calls] == [
+        400,
+        400,
+        5,
+    ]
+    assert {api for api, _params, _fields in calls} == {"stk_mins"}
+    assert {params["start_date"] for _api, params, _fields in calls} == {"2026-08-28 09:24:00"}
+    assert {params["end_date"] for _api, params, _fields in calls} == {"2026-08-28 09:40:00"}
+
+
+@pytest.mark.asyncio
+async def test_historical_early_api_splits_batched_rows_and_keeps_failed_batch_pending(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    client.HISTORICAL_EARLY_BATCH_SIZE = 2
+
+    async def api_call(_api_name, params, **_kwargs):
+        requested = params["ts_code"].split(",")
+        if requested[0].startswith("000003"):
+            raise RuntimeError("one physical batch failed")
+        return {
+            "data": {
+                "fields": [
+                    "ts_code",
+                    "trade_time",
+                    "open",
+                    "close",
+                    "high",
+                    "low",
+                    "vol",
+                    "amount",
+                ],
+                "items": [[requested[0], "2026-08-28 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1000]],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", api_call)
+
+    result = await client.batch_get_early_minute_history_for_date(
+        ["000001", "000002", "000003"],
+        date(2026, 8, 28),
+    )
+
+    assert set(result) == {"000001", "000002"}
+    assert result["000001"][0].end_label == "09:39"
+    assert result["000002"] == ()
+    assert "000003" not in result
+
+
+def test_historical_early_batch_parser_rejects_unrequested_code_and_row_cap(
+    monkeypatch,
+) -> None:
+    fields = ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"]
+    row = ["000002.SZ", "2026-08-28 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1000]
+    parse = TushareRealtimeClient._parse_historical_minute_history_batch
+
+    with pytest.raises(TushareRealtimeError, match="was not requested"):
+        parse(
+            ["000001"],
+            date(2026, 8, 28),
+            {"data": {"fields": fields, "items": [row]}},
+        )
+
+    monkeypatch.setattr(TushareRealtimeClient, "STK_MINS_MAX_ROWS", 2)
+    with pytest.raises(TushareRealtimeError, match="may be truncated"):
+        parse(
+            ["000002"],
+            date(2026, 8, 28),
+            {"data": {"fields": fields, "items": [row, row]}},
+        )
+
+
+def test_historical_early_batch_parser_requires_schema_before_confirming_empty() -> None:
+    parse = TushareRealtimeClient._parse_historical_minute_history_batch
+    requested = ["000001", "000002"]
+
+    with pytest.raises(TushareRealtimeError, match="missing fields"):
+        parse(
+            requested,
+            date(2026, 8, 28),
+            {"data": {"items": []}},
+        )
+
+    with pytest.raises(TushareRealtimeError, match="amount"):
+        parse(
+            requested,
+            date(2026, 8, 28),
+            {
+                "data": {
+                    "fields": [
+                        "ts_code",
+                        "trade_time",
+                        "open",
+                        "close",
+                        "high",
+                        "low",
+                        "vol",
+                    ],
+                    "items": [],
+                }
+            },
+        )
+
+    fields = ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"]
+    assert parse(
+        requested,
+        date(2026, 8, 28),
+        {"data": {"fields": fields, "items": []}},
+    ) == {"000001": (), "000002": ()}
+
+
+def test_historical_early_batch_parser_rejects_any_wrong_trade_date_row() -> None:
+    fields = ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"]
+    parse = TushareRealtimeClient._parse_historical_minute_history_batch
+
+    with pytest.raises(TushareRealtimeError, match="outside the requested trade date"):
+        parse(
+            ["000001", "000002"],
+            date(2026, 8, 28),
+            {
+                "data": {
+                    "fields": fields,
+                    "items": [
+                        [
+                            "000001.SZ",
+                            "2026-08-28 09:39:00",
+                            10,
+                            10.1,
+                            10.2,
+                            9.9,
+                            100,
+                            1000,
+                        ],
+                        [
+                            "000002.SZ",
+                            "2026-08-27 09:39:00",
+                            20,
+                            20.1,
+                            20.2,
+                            19.9,
+                            200,
+                            2000,
+                        ],
+                    ],
+                }
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [["000001.SZ", "2026-08-28 09:39:00", True, 10.1, 10.2, 9.9, 100, 1000]],
+        [
+            ["000001.SZ", "2026-08-28 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1000],
+            ["000001.SZ", "2026-08-28 09:39:00", 10, 10.2, 10.3, 9.9, 100, 1000],
+        ],
+    ],
+    ids=["invalid-boolean-ohlcv", "conflicting-0939-bars"],
+)
+def test_historical_early_batch_parser_never_confirms_raw_rows_as_empty(items) -> None:
+    fields = ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"]
+
+    with pytest.raises(TushareRealtimeError, match="produced no valid canonical bars"):
+        TushareRealtimeClient._parse_historical_minute_history_batch(
+            ["000001"],
+            date(2026, 8, 28),
+            {"data": {"fields": fields, "items": items}},
+        )
+
+
 def test_stk_mins_parser_requires_ts_code_and_trade_time_columns() -> None:
     parse = TushareRealtimeClient._parse_historical_minute_history
     row = ["000002.SZ", "2026-08-28 09:39:00", 10, 10.1, 10.2, 9.9, 100, 1000]

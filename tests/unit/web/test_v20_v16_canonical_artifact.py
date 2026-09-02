@@ -5,6 +5,7 @@ import math
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,8 +22,17 @@ from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import CompletedRolling, genesis_state, prepare_entry
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
 from src.strategy.v20.runtime_config import load_v20_runtime_config
+from src.web.v15_scan_service import (
+    V15ScanState,
+    _build_v16_recommendation_payload,
+    _restore_canonical_artifact,
+)
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
-from src.web.v20_v16_canonical_artifact import encode, hydrate
+from src.web.v20_v16_canonical_artifact import (
+    PORTABLE_FROZEN_V16_SCHEMA_V1,
+    encode,
+    hydrate,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -175,11 +185,19 @@ def _scan(recommendations: list[ScoredStock]) -> V16ScanResult:
 
 def _bundle(recommendations: list[ScoredStock] = STOCKS) -> FrozenV16ScanBundle:
     snapshot = _snapshot(recommendations)
+    scan_result = _scan(recommendations)
+    stock_data = {
+        stock.code: SimpleNamespace(
+            open_price=10.12345 + stock.rank,
+            prev_close=9.98765 + stock.rank,
+        )
+        for stock in recommendations
+    }
     return FrozenV16ScanBundle(
         trade_date=D0,
         frozen_at=datetime(2026, 8, 31, 9, 39, 10, tzinfo=TZ),
-        scan_result=_scan(recommendations),
-        stock_data={},
+        scan_result=scan_result,
+        stock_data=stock_data,
         comparison_pool_codes=("000001", "600000"),
         breadth_valid_n=1800,
         breadth_down_n=700,
@@ -187,6 +205,7 @@ def _bundle(recommendations: list[ScoredStock] = STOCKS) -> FrozenV16ScanBundle:
         prior_amount_yuan={stock.code: 1_000_000.0 + stock.rank for stock in recommendations},
         snapshot=snapshot,
         snapshot_hash=sha256_json(snapshot),
+        legacy_recommendation=_build_v16_recommendation_payload(scan_result, stock_data),
     )
 
 
@@ -208,6 +227,7 @@ def test_live_encode_hydrate_preserves_prepare_entry_inputs_and_hashes() -> None
         "calendar",
         "v20_snapshot",
         "v20_snapshot_hash",
+        "legacy_recommendation",
     }
     assert payload["v20_snapshot"] == original.snapshot
     assert payload["v20_snapshot_hash"] == original.snapshot_hash
@@ -227,6 +247,18 @@ def test_live_encode_hydrate_preserves_prepare_entry_inputs_and_hashes() -> None
     assert bundle.prior_amount_yuan == original.prior_amount_yuan
     assert bundle.scan_result.recommended == original.scan_result.recommended
     assert bundle.stock_data == {}
+    assert bundle.legacy_recommendation == payload["legacy_recommendation"]
+    assert bundle.legacy_recommendation == {
+        "stock_code": "000001",
+        "stock_name": "stock-one",
+        "board_name": "board-a",
+        "open_price": 11.1235,
+        "prev_close": 10.9877,
+        "latest_price": 12.5,
+        "lgb_score": 9.5,
+        "hot_board_count": 2,
+        "final_candidates": 2,
+    }
     assert bundle.scan_result.stock_best_board == original.scan_result.stock_best_board
     assert bundle.scan_result.stock_all_boards == original.scan_result.stock_all_boards
     assert bundle.scan_result.stock_is_driver == original.scan_result.stock_is_driver
@@ -272,6 +304,66 @@ def test_zero_recommendations_are_a_valid_portable_no_signal() -> None:
 
     assert hydrated.bundle.snapshot["list_n"] == 0
     assert hydrated.bundle.scan_result.recommended == []
+    assert hydrated.bundle.legacy_recommendation is None
+
+
+def test_v1_payload_hydrates_without_fabricating_legacy_recommendation() -> None:
+    payload = encode(
+        _bundle(),
+        calendar=CALENDAR,
+        canonical_integrity_hash=CANONICAL_INTEGRITY_HASH,
+    )
+    payload["schema_version"] = PORTABLE_FROZEN_V16_SCHEMA_V1
+    payload.pop("legacy_recommendation")
+
+    hydrated = hydrate(payload)
+
+    assert hydrated.bundle.scan_result.recommended == STOCKS
+    assert hydrated.bundle.stock_data == {}
+    assert hydrated.bundle.legacy_recommendation is None
+    assert hydrated.payload == payload
+
+
+def test_v2_restart_restores_the_exact_computed_legacy_projection() -> None:
+    original = _bundle()
+    expected = _build_v16_recommendation_payload(
+        original.scan_result,
+        original.stock_data,
+    )
+    hydrated = hydrate(
+        encode(
+            original,
+            calendar=CALENDAR,
+            canonical_integrity_hash=CANONICAL_INTEGRITY_HASH,
+        )
+    )
+    state = V15ScanState(today_recommendation={"stock_code": "stale"})
+
+    _restore_canonical_artifact(
+        state,
+        D0,
+        hydrated.bundle,
+        datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+    )
+
+    assert state.today_recommendation == expected
+    assert state.today_recommendation is not hydrated.bundle.legacy_recommendation
+
+
+def test_encode_rejects_legacy_projection_different_from_canonical_stock_data() -> None:
+    original = _bundle()
+    mismatched = copy.deepcopy(dict(original.legacy_recommendation or {}))
+    mismatched["open_price"] += 1.0
+
+    with pytest.raises(
+        V20SemanticConflict,
+        match="differs from canonical stock data",
+    ):
+        encode(
+            replace(original, legacy_recommendation=mismatched),
+            calendar=CALENDAR,
+            canonical_integrity_hash=CANONICAL_INTEGRITY_HASH,
+        )
 
 
 def test_prepare_entry_commit_is_identical_after_portable_hydration(
@@ -342,6 +434,11 @@ def _payload() -> dict[str, Any]:
         lambda payload: payload.__setitem__("history_raw", {}),
         lambda payload: payload.__setitem__("quotes", {}),
         lambda payload: payload.__setitem__("early_bars", {}),
+        lambda payload: payload.__setitem__("legacy_recommendation", None),
+        lambda payload: payload.__setitem__("legacy_recommendation", []),
+        lambda payload: payload["legacy_recommendation"].__setitem__("stock_code", "600000"),
+        lambda payload: payload["legacy_recommendation"].__setitem__("open_price", 0.0),
+        lambda payload: payload["legacy_recommendation"].pop("prev_close"),
         lambda payload: payload["v20_snapshot"].__setitem__("unknown", 1),
         lambda payload: payload["v20_snapshot"].__setitem__("trade_date", D1.isoformat()),
         lambda payload: payload["v20_snapshot"]["symbols"][0].__setitem__("score", True),

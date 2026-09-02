@@ -2686,13 +2686,28 @@ def _restore_canonical_artifact(
         raise CanonicalV16ArtifactProbeError("durable canonical artifact trade date differs")
     if isinstance(bundle, CanonicalV16ScanBundle):
         _verify_bundle_integrity(bundle)
+        recommendation = _build_v16_recommendation_payload(
+            bundle.scan_result,
+            bundle.stock_data,
+        )
     elif not isinstance(bundle, FrozenV16ScanBundle):
         raise CanonicalV16ArtifactProbeError("durable canonical artifact bundle type is invalid")
-
-    recommendation = _build_v16_recommendation_payload(
-        bundle.scan_result,
-        bundle.stock_data,
-    )
+    else:
+        persisted = bundle.legacy_recommendation
+        recommendation = copy.deepcopy(dict(persisted)) if persisted is not None else None
+        if bundle.scan_result.recommended and persisted is None:
+            # Portable v1 intentionally omitted the full stock-data objects and
+            # did not freeze the two legacy display prices.  Post-window recovery
+            # must not fabricate them or re-run selection.  The V20 canonical
+            # result remains valid; only the non-authorizing legacy display is
+            # unavailable for this already-persisted old artifact.
+            logger.warning(
+                "V16 durable artifact uses portable v1 without a provable legacy "
+                "recommendation; canonical receipt restored without display state: "
+                "trade_date=%s top1=%s",
+                trade_date.isoformat(),
+                bundle.scan_result.recommended[0].code,
+            )
     receipt = first_received_at.astimezone(BEIJING_TZ)
     scan_state.today_recommendation = recommendation
     scan_state.canonical_durable_received_at[trade_date] = receipt

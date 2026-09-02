@@ -15,8 +15,9 @@ from src.strategy.strategies.v16_scanner import V16ScanResult
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 
-PORTABLE_FROZEN_V16_SCHEMA = "v20-v16-portable-frozen/v1"
-_TOP_FIELDS = frozenset(
+PORTABLE_FROZEN_V16_SCHEMA_V1 = "v20-v16-portable-frozen/v1"
+PORTABLE_FROZEN_V16_SCHEMA = "v20-v16-portable-frozen/v2"
+_TOP_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "trade_date",
@@ -27,6 +28,7 @@ _TOP_FIELDS = frozenset(
         "v20_snapshot_hash",
     }
 )
+_TOP_FIELDS = _TOP_FIELDS_V1 | {"legacy_recommendation"}
 _SNAPSHOT_FIELDS = frozenset(
     {
         "schema_version",
@@ -105,6 +107,19 @@ _FUNNEL_OPTIONAL = frozenset(
 )
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _CODE_RE = re.compile(r"^[0-9]{6}$")
+_LEGACY_RECOMMENDATION_FIELDS = frozenset(
+    {
+        "stock_code",
+        "stock_name",
+        "board_name",
+        "open_price",
+        "prev_close",
+        "latest_price",
+        "lgb_score",
+        "hot_board_count",
+        "final_candidates",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -149,6 +164,20 @@ def encode(
         calendar_tuple = _validate_calendar(calendar, bundle.trade_date)
     _validate_hash(canonical_integrity_hash, "canonical integrity hash")
     _validate_bundle_projection(bundle, snapshot)
+    expected_legacy_recommendation = _legacy_recommendation_from_live_bundle(bundle)
+    legacy_recommendation = (
+        copy.deepcopy(dict(bundle.legacy_recommendation))
+        if bundle.legacy_recommendation is not None
+        else expected_legacy_recommendation
+    )
+    if legacy_recommendation != expected_legacy_recommendation:
+        raise V20SemanticConflict(
+            "portable frozen V16 legacy recommendation differs from canonical stock data"
+        )
+    _validate_legacy_recommendation(
+        legacy_recommendation,
+        bundle.scan_result,
+    )
 
     return {
         "schema_version": PORTABLE_FROZEN_V16_SCHEMA,
@@ -158,14 +187,22 @@ def encode(
         "calendar": [day.isoformat() for day in calendar_tuple],
         "v20_snapshot": snapshot,
         "v20_snapshot_hash": bundle.snapshot_hash,
+        "legacy_recommendation": legacy_recommendation,
     }
 
 
 def hydrate(payload: Mapping[str, Any]) -> HydratedFrozenV16Artifact:
-    if not isinstance(payload, Mapping) or set(payload) != _TOP_FIELDS:
+    if not isinstance(payload, Mapping):
         raise V20SemanticConflict("portable frozen V16 payload field set is invalid")
-    if payload["schema_version"] != PORTABLE_FROZEN_V16_SCHEMA:
+    schema_version = payload.get("schema_version")
+    if schema_version == PORTABLE_FROZEN_V16_SCHEMA:
+        expected_fields = _TOP_FIELDS
+    elif schema_version == PORTABLE_FROZEN_V16_SCHEMA_V1:
+        expected_fields = _TOP_FIELDS_V1
+    else:
         raise V20SemanticConflict("portable frozen V16 schema is unsupported")
+    if set(payload) != expected_fields:
+        raise V20SemanticConflict("portable frozen V16 payload field set is invalid")
     trade_date = _date(payload["trade_date"])
     frozen_at = _datetime(payload["frozen_at"])
     if frozen_at.date() < trade_date:
@@ -186,14 +223,21 @@ def hydrate(payload: Mapping[str, Any]) -> HydratedFrozenV16Artifact:
     if payload["v20_snapshot_hash"] != snapshot_hash:
         raise V20SemanticConflict("portable frozen V16 snapshot hash is invalid")
 
+    legacy_recommendation = (
+        copy.deepcopy(payload["legacy_recommendation"])
+        if schema_version == PORTABLE_FROZEN_V16_SCHEMA
+        else None
+    )
+
     frozen = _frozen_from_snapshot(
         snapshot=snapshot,
         trade_date=trade_date,
         frozen_at=frozen_at,
         calendar=calendar_tuple,
+        legacy_recommendation=legacy_recommendation,
     )
     portable = {
-        "schema_version": PORTABLE_FROZEN_V16_SCHEMA,
+        "schema_version": schema_version,
         "trade_date": trade_date.isoformat(),
         "frozen_at": frozen_at.isoformat(),
         "canonical_integrity_hash": canonical_integrity_hash,
@@ -201,6 +245,12 @@ def hydrate(payload: Mapping[str, Any]) -> HydratedFrozenV16Artifact:
         "v20_snapshot": snapshot,
         "v20_snapshot_hash": snapshot_hash,
     }
+    if schema_version == PORTABLE_FROZEN_V16_SCHEMA:
+        _validate_legacy_recommendation(
+            legacy_recommendation,
+            frozen.scan_result,
+        )
+        portable["legacy_recommendation"] = legacy_recommendation
     return HydratedFrozenV16Artifact(
         bundle=frozen,
         calendar=calendar_tuple,
@@ -266,6 +316,7 @@ def _frozen_from_snapshot(
     trade_date: date,
     frozen_at: datetime,
     calendar: tuple[date, date, date],
+    legacy_recommendation: Mapping[str, Any] | None,
 ) -> FrozenV16ScanBundle:
     symbols = snapshot["symbols"]
     recommended = [
@@ -325,7 +376,92 @@ def _frozen_from_snapshot(
         snapshot=snapshot,
         snapshot_hash=sha256_json(snapshot),
         computation_calendar=calendar,
+        legacy_recommendation=(
+            MappingProxyType(copy.deepcopy(dict(legacy_recommendation)))
+            if isinstance(legacy_recommendation, Mapping)
+            else None
+        ),
     )
+
+
+def _legacy_recommendation_from_live_bundle(
+    bundle: FrozenV16ScanBundle,
+) -> dict[str, Any] | None:
+    """Freeze the exact legacy payload while full canonical stock data exists."""
+
+    from src.web.v15_scan_service import _build_v16_recommendation_payload
+
+    try:
+        return _build_v16_recommendation_payload(
+            bundle.scan_result,
+            bundle.stock_data,
+        )
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise V20SemanticConflict(
+            "portable frozen V16 legacy recommendation lacks canonical stock evidence"
+        ) from exc
+
+
+def _validate_legacy_recommendation(
+    value: Any,
+    scan_result: V16ScanResult,
+) -> None:
+    """Bind the persisted legacy projection to the exact frozen recommendation."""
+
+    recommended = scan_result.recommended
+    if not recommended:
+        if value is not None:
+            raise V20SemanticConflict(
+                "portable frozen V16 no-signal result has a legacy recommendation"
+            )
+        return
+    if not isinstance(value, Mapping) or set(value) != _LEGACY_RECOMMENDATION_FIELDS:
+        raise V20SemanticConflict("portable frozen V16 legacy recommendation is invalid")
+    top1 = recommended[0]
+    expected = {
+        "stock_code": top1.code,
+        "stock_name": top1.name,
+        "board_name": scan_result.stock_best_board.get(top1.code, ""),
+        "latest_price": round(top1.buy_price, 4),
+        "lgb_score": round(top1.score, 6),
+        "hot_board_count": scan_result.step2_hot_board_count,
+        "final_candidates": scan_result.final_candidates,
+    }
+    if any(value[name] != expected_value for name, expected_value in expected.items()):
+        raise V20SemanticConflict(
+            "portable frozen V16 legacy recommendation differs from frozen selection"
+        )
+    if (
+        not isinstance(value["stock_code"], str)
+        or not isinstance(value["stock_name"], str)
+        or not isinstance(value["board_name"], (str, type(None)))
+        or type(value["hot_board_count"]) is not int
+        or value["hot_board_count"] < 0
+        or type(value["final_candidates"]) is not int
+        or value["final_candidates"] < 0
+    ):
+        raise V20SemanticConflict("portable frozen V16 legacy recommendation is invalid")
+    for name, digits in (("latest_price", 4), ("lgb_score", 6)):
+        number = value[name]
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(float(number))
+            or round(float(number), digits) != float(number)
+        ):
+            raise V20SemanticConflict(
+                "portable frozen V16 legacy recommendation score or price is invalid"
+            )
+    for name in ("open_price", "prev_close"):
+        number = value[name]
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(float(number))
+            or float(number) <= 0
+            or round(float(number), 4) != float(number)
+        ):
+            raise V20SemanticConflict("portable frozen V16 legacy recommendation price is invalid")
 
 
 def _validate_snapshot(value: Mapping[str, Any], trade_date: date) -> None:

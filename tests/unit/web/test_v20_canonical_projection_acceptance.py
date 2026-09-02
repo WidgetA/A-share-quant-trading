@@ -424,6 +424,18 @@ def test_portable_artifact_omits_full_raw_stock_and_history(service: Any) -> Non
         "calendar",
         "v20_snapshot",
         "v20_snapshot_hash",
+        "legacy_recommendation",
+    }
+    assert payload["legacy_recommendation"] == {
+        "stock_code": "603068",
+        "stock_name": "recommended-one",
+        "board_name": "board-603068",
+        "open_price": 10.0,
+        "prev_close": 10.0,
+        "latest_price": 20.25,
+        "lgb_score": 9.75,
+        "hot_board_count": 2,
+        "final_candidates": 2,
     }
 
 

@@ -39,7 +39,7 @@ async def test_one_special_label_stays_unresolved(
     repository.persist_calls.clear()
 
     class OneLabelClient(_HistoricalSeedClient):
-        async def batch_get_minute_history_for_date(self, codes, trade_date):
+        async def batch_get_early_minute_history_for_date(self, codes, trade_date):
             self.calls.append((tuple(codes), trade_date))
             missing_label = "09:30" if special_label == "09:25" else "09:25"
             labels = (special_label,) if len(self.calls) == 1 else (missing_label,)
@@ -95,7 +95,7 @@ async def test_legacy_nine_completes_after_both_special_labels(
     repository.persist_calls.clear()
 
     class BothLabelsClient(_HistoricalSeedClient):
-        async def batch_get_minute_history_for_date(self, codes, trade_date):
+        async def batch_get_early_minute_history_for_date(self, codes, trade_date):
             self.calls.append((tuple(codes), trade_date))
             bars = ("09:25", "09:30")
             return {
