@@ -4,13 +4,14 @@ import json
 import os
 import uuid
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import asyncpg
 import pytest
 
 from src.data.database.v20_repository import (
+    StateRecord,
     V20DatabaseConfig,
     V20Repository,
     V20SemanticConflict,
@@ -21,7 +22,6 @@ from src.strategy.v20.decision_engine import genesis_state
 from src.strategy.v20.runtime_config import (
     declared_state_semantics_is_authentic,
     load_v20_runtime_config,
-    state_semantics_payload_from_frozen_payload,
 )
 
 DSN = os.environ.get("V20_TEST_POSTGRES_DSN", "")
@@ -35,8 +35,6 @@ B2_SOURCE_COMMIT = "4211cd0f6fa0da8afd7557d2cff8b0821df1dcc5"
 CA867_CORE = "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc"
 SELECTION_V3_CORE = "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b"
 SELECTION_V3_CONFIG_HASH = "3659caae539d63ac0cf03d6d8d0ed20c9458a9401bca4df965efc96c363f5140"
-SELECTION_V4_CORE = "0f5fbbd1e6cce372217373023f3681cf09100b870e7c4d187e2ebc7ebd1a8290"
-TYPE_CLEAN_CORE = "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41"
 
 _PRE_SELECTION_V2_DEPENDENCIES = {
     "pyproject.toml": "b98d44b91a0509ff84f8bda06fdfaf5e7ed5d764465bf56fcd7920b438555ee0",
@@ -119,11 +117,7 @@ def _fixture() -> dict[str, object]:
 def _current_payload() -> dict[str, object]:
     config = load_v20_runtime_config(_project_root())
     payload = json.loads(canonical_json(config.frozen_payload))
-    assert config.state_semantics_hash == TYPE_CLEAN_CORE
-    assert payload["state_semantics_hash"] == TYPE_CLEAN_CORE
-    semantics = payload["state_semantics_payload"]
-    assert isinstance(semantics, dict)
-    assert semantics["state_input_orchestration_profile"] == ("V20_STATE_INPUT_ORCHESTRATION_V3")
+    assert payload["state_semantics_hash"] == config.state_semantics_hash
     assert declared_state_semantics_is_authentic(payload)
     return payload
 
@@ -141,21 +135,24 @@ def _selection_v3_payload(_current: Mapping[str, object]) -> dict[str, object]:
     semantics = payload["state_semantics_payload"]
     assert isinstance(semantics, dict)
     assert semantics["state_input_orchestration_profile"] == ("V20_STATE_INPUT_ORCHESTRATION_V1")
-    assert declared_state_semantics_is_authentic(payload)
     return payload
 
 
 def _pre_selection_payload(selection_v3: Mapping[str, object], index: int) -> dict[str, object]:
+    # Historical pre-selection (CA867) runtime config rows are inert opaque
+    # audit data: clone the historical selection_v3 fixture, pin the retired
+    # semantics hash, and keep an opaque audit payload.  Do NOT run the
+    # current explicit-contract authenticity/builder functions on it.
     payload = json.loads(canonical_json(selection_v3))
     dependencies = payload["strategy_dependency_hashes"]
     assert isinstance(dependencies, dict)
     dependencies.update(_PRE_SELECTION_V2_DEPENDENCIES)
-    semantics = state_semantics_payload_from_frozen_payload(payload)
-    assert sha256_json(semantics) == CA867_CORE
-    payload["state_semantics_payload"] = semantics
+    payload["state_semantics_payload"] = {
+        "schema_version": "v20-historical-audit/v0",
+        "note": "pre-selection historical audit payload; opaque to current runtime",
+    }
     payload["state_semantics_hash"] = CA867_CORE
     payload["database_config_sha256"] = f"{'0' * 63}{index}"
-    assert declared_state_semantics_is_authentic(payload)
     return payload
 
 
@@ -224,7 +221,6 @@ async def _seed(pool: asyncpg.Pool, schema: str) -> None:
     assert isinstance(b2, dict)
     assert sha256_json(b2) == B2_CONFIG_HASH
     assert b2["state_semantics_hash"] == B2_CORE
-    assert declared_state_semantics_is_authentic(b2)
 
     current = _current_payload()
     selection_v3 = _selection_v3_payload(current)
@@ -510,20 +506,15 @@ async def _seed(pool: asyncpg.Pool, schema: str) -> None:
             )
 
 
-async def _call(
-    repository: V20Repository,
-    payload: Mapping[str, object],
-) -> object:
+async def _call(repository: V20Repository) -> StateRecord:
     config = load_v20_runtime_config(_project_root())
+    genesis = genesis_state()
     return await repository.ensure_genesis_state(
         config.state_lineage_id,
-        genesis_state(),
-        sha256_json(genesis_state()),
+        genesis,
+        sha256_json(genesis),
         official_stream_id=config.official_stream_id,
         state_semantics_hash=config.state_semantics_hash,
-        current_config_id=sha256_json(payload)[:24],
-        current_config_hash=sha256_json(payload),
-        current_config_payload=payload,
         bootstrap_mode="EMPTY_FORWARD_SHADOW",
         bootstrap_checkpoint_hash=None,
         bootstrap_predecessor_trade_date=date(2026, 8, 30),
@@ -571,193 +562,62 @@ async def _compatibility_snapshot(
         return tuple(row["data"] for row in rows)
 
 
-def _normalized_receipt(receipt: Mapping[str, object]) -> dict[str, object]:
-    normalized = dict(receipt)
-    evidence_json = normalized.get("evidence_json")
-    if isinstance(evidence_json, str):
-        normalized["evidence_json"] = json.loads(evidence_json)
-    elif not isinstance(evidence_json, Mapping):
-        raise AssertionError("compatibility receipt evidence_json is malformed")
-    normalized.pop("created_at", None)
-    return normalized
-
-
-def _normalized_sql_receipts(snapshot: tuple[str, ...]) -> set[str]:
-    normalized = set()
-    for receipt_json in snapshot:
-        receipt = json.loads(receipt_json)
-        normalized.add(canonical_json(_normalized_receipt(receipt)))
-    return normalized
-
-
 @pytest.mark.asyncio
-async def test_deployed_v3_tail_upgrades_directly_without_unreleased_v4_evidence(
+async def test_legacy_receipts_and_differing_registry_hash_do_not_gate_restart(
     repository,
 ) -> None:
     instance, pool, schema = repository
     before = await _snapshot(pool, schema)
-    original = await _compatibility_snapshot(pool, schema)
-    async with pool.acquire() as connection:
-        unreleased_config_count = await connection.fetchval(
-            f"""
-            SELECT count(*)
-            FROM {schema}.runtime_configs
-            WHERE config_json->>'state_semantics_hash'=$1
-            """,
-            SELECTION_V4_CORE,
-        )
-        unreleased_receipt_count = await connection.fetchval(
-            f"""
-            SELECT count(*)
-            FROM {schema}.state_semantics_compatibility
-            WHERE legacy_state_semantics_hash=$1 OR core_state_semantics_hash=$1
-            """,
-            SELECTION_V4_CORE,
-        )
-    assert unreleased_config_count == 0
-    assert unreleased_receipt_count == 0
-    assert len(original) == 10
-    assert _normalized_sql_receipts(original) == _expected_original_receipts()
+    receipts_before = await _compatibility_snapshot(pool, schema)
+    assert len(receipts_before) == 10
     assert {
         (
             receipt["legacy_state_semantics_hash"],
             receipt["core_state_semantics_hash"],
         )
-        for receipt in map(json.loads, original)
+        for receipt in map(json.loads, receipts_before)
     } == {
         (B2_CORE, CA867_CORE),
         (CA867_CORE, SELECTION_V3_CORE),
     }
 
-    current = _current_payload()
-    selection_v3 = _selection_v3_payload(current)
     current_config = load_v20_runtime_config(_project_root())
-    current_hash = sha256_json(current)
-    selection_v3_hash = sha256_json(selection_v3)
-    terminal_ca = _pre_selection_payload(selection_v3, 9)
-    terminal_ca_hash = sha256_json(terminal_ca)
-    expected_tail = _compatibility_receipt(
-        selection_v3,
-        current,
-        current_config.state_lineage_id,
-        current_config.official_stream_id,
-    )
-    first = await _call(instance, current)
+    async with pool.acquire() as connection:
+        registry_hash = await connection.fetchval(
+            f"""
+            SELECT state_semantics_hash
+            FROM {schema}.state_lineage_registry
+            WHERE lineage_id=$1
+            """,
+            current_config.state_lineage_id,
+        )
+    # The registry still pins the retired B2 semantics hash while the runtime
+    # runs with a different one; the column is audit-only historical data.
+    assert registry_hash == B2_CORE
+    assert current_config.state_semantics_hash != registry_hash
+
+    first = await _call(instance)
     registry_state = _revision_2_state()
 
     assert first.lineage_id == current_config.state_lineage_id
     assert first.revision == 2
     assert first.state_hash == sha256_json(registry_state)
     assert canonical_json(first.payload) == canonical_json(registry_state)
+    assert await instance.load_state(current_config.state_lineage_id) == first
+    # Restart is authorized by the registry row and the persisted official
+    # state alone: runtime neither appends to nor rewrites the audit-only
+    # compatibility table, and it leaves every other table untouched.
     assert await _snapshot(pool, schema) == before
+    assert await _compatibility_snapshot(pool, schema) == receipts_before
 
-    after_first = await _compatibility_snapshot(pool, schema)
-    assert len(after_first) == 11
-    assert _normalized_sql_receipts(after_first) == _expected_receipts_with_tail(expected_tail)
-    assert {
-        (
-            receipt["legacy_state_semantics_hash"],
-            receipt["core_state_semantics_hash"],
-        )
-        for receipt in map(json.loads, after_first)
-    } == {
-        (B2_CORE, CA867_CORE),
-        (CA867_CORE, SELECTION_V3_CORE),
-        (SELECTION_V3_CORE, TYPE_CLEAN_CORE),
-    }
-
-    appended = None
-    for receipt_json in after_first:
-        receipt = json.loads(receipt_json)
-        if receipt["accepted_config_hash"] == current_hash:
-            appended = receipt
-            break
-    assert appended is not None
-    assert appended["evidence_config_hash"] == selection_v3_hash
-    assert "created_at" in appended
-    assert set(appended) == set(expected_tail) | {"created_at"}
-    assert _normalized_receipt(appended) == _normalized_receipt(expected_tail)
-    assert not any(
-        receipt["legacy_state_semantics_hash"]
-        in {
-            B2_CORE,
-            CA867_CORE,
-            SELECTION_V4_CORE,
-        }
-        and receipt["core_state_semantics_hash"] == TYPE_CLEAN_CORE
-        for receipt in map(json.loads, after_first)
-    )
-    actual_bindings = {
-        (binding.config_id, binding.config_hash, binding.state_semantics_hash)
-        for binding in instance.compatible_entry_bindings
-    }
-    expected_bindings = {
-        (
-            _config_id(_fixture()["payload"]),
-            B2_CONFIG_HASH,
-            B2_CORE,
-        ),
-        (
-            terminal_ca_hash[:24],
-            terminal_ca_hash,
-            CA867_CORE,
-        ),
-        (selection_v3_hash[:24], selection_v3_hash, SELECTION_V3_CORE),
-    }
-    assert len(actual_bindings) == 3
-    assert actual_bindings == expected_bindings
-
-    retry = await _call(instance, current)
+    retry = await _call(instance)
     assert retry == first
     assert await _snapshot(pool, schema) == before
-    assert await _compatibility_snapshot(pool, schema) == after_first
-    assert {
-        (binding.config_id, binding.config_hash, binding.state_semantics_hash)
-        for binding in instance.compatible_entry_bindings
-    } == expected_bindings
-
-
-def _expected_original_receipts() -> set[str]:
-    fixture = _fixture()
-    b2 = fixture["payload"]
-    assert isinstance(b2, dict)
-    current = _current_payload()
-    selection_v3 = _selection_v3_payload(current)
-    current_config = load_v20_runtime_config(_project_root())
-    ca_configs = [_pre_selection_payload(selection_v3, index) for index in range(1, 10)]
-
-    expected = set()
-    for ca_config in ca_configs:
-        receipt = _compatibility_receipt(
-            b2,
-            ca_config,
-            current_config.state_lineage_id,
-            current_config.official_stream_id,
-        )
-        expected.add(canonical_json(_normalized_receipt(receipt)))
-    expected.add(
-        canonical_json(
-            _normalized_receipt(
-                _compatibility_receipt(
-                    ca_configs[-1],
-                    selection_v3,
-                    current_config.state_lineage_id,
-                    current_config.official_stream_id,
-                )
-            )
-        )
-    )
-    return expected
-
-
-def _expected_receipts_with_tail(tail: Mapping[str, object]) -> set[str]:
-    expected = _expected_original_receipts()
-    expected.add(canonical_json(_normalized_receipt(tail)))
-    return expected
+    assert await _compatibility_snapshot(pool, schema) == receipts_before
 
 
 @pytest.mark.asyncio
-async def test_tampered_deployed_v3_to_type_clean_receipt_rolls_back(repository) -> None:
+async def test_tampered_legacy_receipt_does_not_block_restart(repository) -> None:
     instance, pool, schema = repository
     current = _current_payload()
     selection_v3 = _selection_v3_payload(current)
@@ -796,34 +656,31 @@ async def test_tampered_deployed_v3_to_type_clean_receipt_rolls_back(repository)
               AND core_state_semantics_hash=$2
             """,
             SELECTION_V3_CORE,
-            TYPE_CLEAN_CORE,
+            current_config.state_semantics_hash,
         )
     assert updated == "UPDATE 1"
 
-    noncompat_before = await _snapshot(pool, schema)
+    before = await _snapshot(pool, schema)
     receipts_before = await _compatibility_snapshot(pool, schema)
-    with pytest.raises(
-        V20SemanticConflict,
-        match="V20 compatibility receipt IDs or evidence are invalid",
-    ):
-        await _call(instance, current)
+    assert len(receipts_before) == 11
 
-    assert await _snapshot(pool, schema) == noncompat_before
+    record = await _call(instance)
+    assert record.revision == 2
+    # The retired receipt rows are inert audit history: even a tampered row
+    # neither blocks nor authorizes the restart, and runtime leaves the
+    # tampered row byte-identical.
+    assert await _snapshot(pool, schema) == before
     assert await _compatibility_snapshot(pool, schema) == receipts_before
 
 
 @pytest.mark.asyncio
-async def test_pre_selection_v2_cannot_bypass_deployed_v3(repository) -> None:
+async def test_missing_legacy_receipts_do_not_gate_restart(repository) -> None:
     instance, pool, schema = repository
     async with pool.acquire() as connection:
         deleted = await connection.execute(
             f"""
             DELETE FROM {schema}.state_semantics_compatibility
-            WHERE legacy_state_semantics_hash=$1
-              AND core_state_semantics_hash=$2
-            """,
-            CA867_CORE,
-            SELECTION_V3_CORE,
+            """
         )
         opened = await connection.execute(
             f"""
@@ -832,47 +689,24 @@ async def test_pre_selection_v2_cannot_bypass_deployed_v3(repository) -> None:
             WHERE slot_id='slot-v3'
             """
         )
-    assert deleted == "DELETE 1"
+    assert deleted == "DELETE 10"
     assert opened == "UPDATE 1"
 
-    tables_before = await _snapshot(pool, schema)
+    before = await _snapshot(pool, schema)
     receipts_before = await _compatibility_snapshot(pool, schema)
-    with pytest.raises(
-        V20SemanticConflict,
-        match="V20 tail-to-current transition is unsupported",
-    ):
-        await _call(instance, _current_payload())
+    assert receipts_before == ()
 
-    assert await _snapshot(pool, schema) == tables_before
+    record = await _call(instance)
+    assert record.revision == 2
+    # With every legacy receipt gone there is nothing left to authorize the
+    # restart except the registry row and the persisted official state -- and
+    # that is sufficient.  Receipts never authorized anything.
+    assert await _snapshot(pool, schema) == before
     assert await _compatibility_snapshot(pool, schema) == receipts_before
 
 
 @pytest.mark.asyncio
-async def test_late_official_state_failure_rolls_back_tail_insert(repository) -> None:
-    instance, pool, schema = repository
-    async with pool.acquire() as connection:
-        updated = await connection.execute(
-            f"""
-            UPDATE {schema}.official_state
-            SET state_hash=repeat('0',64)
-            """
-        )
-    assert updated == "UPDATE 1"
-
-    tables_before = await _snapshot(pool, schema)
-    receipts_before = await _compatibility_snapshot(pool, schema)
-    with pytest.raises(
-        V20SemanticConflict,
-        match="persisted official state hash mismatch",
-    ):
-        await _call(instance, _current_payload())
-
-    assert await _snapshot(pool, schema) == tables_before
-    assert await _compatibility_snapshot(pool, schema) == receipts_before
-
-
-@pytest.mark.asyncio
-async def test_same_lineage_wrong_stream_receipt_is_rejected(repository) -> None:
+async def test_wrong_scope_legacy_receipt_is_inert(repository) -> None:
     instance, pool, schema = repository
     current = _current_payload()
     selection_v3 = _selection_v3_payload(current)
@@ -881,7 +715,7 @@ async def test_same_lineage_wrong_stream_receipt_is_rejected(repository) -> None
         selection_v3,
         current,
         current_config.state_lineage_id,
-        current_config.official_stream_id,
+        "wrong-official-stream",
     )
     async with pool.acquire() as connection:
         inserted = await connection.execute(
@@ -890,9 +724,10 @@ async def test_same_lineage_wrong_stream_receipt_is_rejected(repository) -> None
                 (lineage_id,official_stream_id,legacy_state_semantics_hash,
                  core_state_semantics_hash,evidence_config_id,evidence_config_hash,
                  accepted_config_id,accepted_config_hash,evidence_json,evidence_hash)
-            VALUES ($1,'wrong-official-stream',$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
             """,
             receipt["lineage_id"],
+            receipt["official_stream_id"],
             receipt["legacy_state_semantics_hash"],
             receipt["core_state_semantics_hash"],
             receipt["evidence_config_id"],
@@ -904,10 +739,206 @@ async def test_same_lineage_wrong_stream_receipt_is_rejected(repository) -> None
         )
     assert inserted == "INSERT 0 1"
 
-    noncompat_before = await _snapshot(pool, schema)
+    before = await _snapshot(pool, schema)
     receipts_before = await _compatibility_snapshot(pool, schema)
-    with pytest.raises(V20SemanticConflict, match="row binding is invalid"):
-        await _call(instance, current)
+    assert len(receipts_before) == 11
 
-    assert await _snapshot(pool, schema) == noncompat_before
+    record = await _call(instance)
+    assert record.revision == 2
+    # A receipt pinned to a foreign stream is inert audit history:
+    # it neither blocks nor authorizes the restart and stays byte-identical.
+    assert await _snapshot(pool, schema) == before
     assert await _compatibility_snapshot(pool, schema) == receipts_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "reseal", "error"),
+    [
+        (
+            lambda state: state | {"schema_version": "v20-official-state/v0"},
+            True,
+            "official state schema/field set mismatch",
+        ),
+        (
+            lambda state: state | {"unexpected_key": True},
+            True,
+            "official state schema/field set mismatch",
+        ),
+        (
+            lambda state: state | {"state_revision": 3},
+            True,
+            "persisted official state revision mismatch",
+        ),
+        (
+            lambda state: state | {"last_terminal_slot_id": "tampered-slot"},
+            False,
+            "persisted official state hash mismatch",
+        ),
+    ],
+    ids=["schema", "keyset", "revision", "content-hash"],
+)
+async def test_invalid_persisted_official_state_fails_transactionally(
+    repository,
+    mutation,
+    reseal,
+    error,
+) -> None:
+    instance, pool, schema = repository
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            f"SELECT state_json FROM {schema}.official_state",
+        )
+        assert row is not None
+        mutated = mutation(json.loads(row["state_json"]))
+        if reseal:
+            # Reseal state_hash to the mutated payload so the contract
+            # validator (schema/keyset/revision) is actually reached.
+            updated = await connection.execute(
+                f"UPDATE {schema}.official_state SET state_hash=$1,state_json=$2::jsonb",
+                sha256_json(mutated),
+                canonical_json(mutated),
+            )
+        else:
+            # Content mismatch: leave the old state_hash in place so the
+            # persisted-hash guard fires first.
+            updated = await connection.execute(
+                f"UPDATE {schema}.official_state SET state_json=$1::jsonb",
+                canonical_json(mutated),
+            )
+    assert updated == "UPDATE 1"
+
+    tables_before = await _snapshot(pool, schema)
+    receipts_before = await _compatibility_snapshot(pool, schema)
+    with pytest.raises(V20SemanticConflict, match=error):
+        await _call(instance)
+
+    assert await _snapshot(pool, schema) == tables_before
+    assert await _compatibility_snapshot(pool, schema) == receipts_before
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_export_import_uses_explicit_state_facts(repository) -> None:
+    instance, pool, schema = repository
+    current_config = load_v20_runtime_config(_project_root())
+    source_state = genesis_state()
+    health_observations = []
+    shadow_rows = []
+    for index in range(3):
+        signal_date = date(2026, 8, 25) + timedelta(days=index)
+        t2_date = signal_date + timedelta(days=2)
+        batch_id = f"checkpoint-health-{index}"
+        health_observations.append(
+            {
+                "batch_id": batch_id,
+                "signal_date": signal_date.isoformat(),
+                "t2_exit_date": t2_date.isoformat(),
+                "relative_return": 0.01,
+            }
+        )
+        shadow_rows.append((batch_id, "HEALTH", signal_date, t2_date, "COMPLETE_VALID", 0.01))
+    for index in range(7):
+        signal_date = date(2026, 8, 22) + timedelta(days=index)
+        shadow_rows.append(
+            (
+                f"checkpoint-rolling-{index}",
+                "ROLLING7",
+                signal_date,
+                signal_date + timedelta(days=2),
+                "COMPLETE_VALID",
+                0.02,
+            )
+        )
+    source_state.update(
+        state_revision=2,
+        health={
+            "schema_version": "v20-health-snapshot/v1",
+            "status": "HEALTHY",
+            "recovery_count": 0,
+            "recent_valid": health_observations,
+            "last_processed_key": [
+                health_observations[-1]["t2_exit_date"],
+                health_observations[-1]["signal_date"],
+                health_observations[-1]["batch_id"],
+            ],
+        },
+        last_terminal_slot_id="slot-v3",
+        last_terminal_trade_date="2026-09-02",
+    )
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            f"UPDATE {schema}.official_state SET state_hash=$1,state_json=$2::jsonb",
+            sha256_json(source_state),
+            canonical_json(source_state),
+        )
+        await connection.executemany(
+            f"""
+            INSERT INTO {schema}.shadow_batches
+                (batch_id,decision_id,official_stream_id,lineage_id,source_batch_id,
+                 kind,signal_date,t2_date,status,batch_json,batch_return,
+                 reference_status,reference_prices_json,reference_snapshot_hash,
+                 reference_locked_at,completed_at)
+            VALUES ($1,NULL,$2,$3,$1,$4,$5,$6,$7,$8::jsonb,$9,'LOCKED',
+                    $10::jsonb,$11, TIMESTAMPTZ '2026-09-02 01:00:00+00',
+                    TIMESTAMPTZ '2026-09-02 01:00:00+00')
+            """,
+            [
+                (
+                    batch_id,
+                    current_config.official_stream_id,
+                    current_config.state_lineage_id,
+                    kind,
+                    signal_date,
+                    t2_date,
+                    status,
+                    canonical_json({"batch_id": batch_id}),
+                    batch_return,
+                    canonical_json({"000001": 10.0}),
+                    "a" * 64,
+                )
+                for batch_id, kind, signal_date, t2_date, status, batch_return in shadow_rows
+            ],
+        )
+
+    checkpoint = await instance.export_bootstrap_checkpoint(
+        source_official_stream_id=current_config.official_stream_id,
+        source_lineage_id=current_config.state_lineage_id,
+        target_official_stream_id="v20-production-stream",
+        target_lineage_id="v20-production-lineage",
+        as_of_trade_date=date(2026, 9, 2),
+    )
+
+    assert checkpoint["schema_version"] == "v20-bootstrap-checkpoint/v3"
+    assert checkpoint["as_of_trade_date"] == "2026-09-02"
+    assert checkpoint["source_state_revision"] == 2
+    assert checkpoint["source_state_hash"] == sha256_json(source_state)
+    assert checkpoint["official_state_hash"] == sha256_json(checkpoint["official_state"])
+    assert checkpoint["official_state"]["state_revision"] == 0
+    assert checkpoint["official_state"]["last_terminal_slot_id"] is None
+    assert checkpoint["official_state"]["last_terminal_trade_date"] is None
+    assert len(checkpoint["batch_id_migration"]) == 10
+    assert len(checkpoint["state_shadow_batches"]) == 10
+    assert "source_config_hash" not in checkpoint
+    assert "source_state_semantics_hash" not in checkpoint
+    assert "resolved_state_semantics_hash" not in checkpoint
+
+    imported = await instance.ensure_genesis_state(
+        "v20-production-lineage",
+        checkpoint["official_state"],
+        checkpoint["official_state_hash"],
+        official_stream_id="v20-production-stream",
+        state_semantics_hash=current_config.state_semantics_hash,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_hash=sha256_json(checkpoint),
+        bootstrap_predecessor_trade_date=date(2026, 9, 2),
+        bootstrap_shadow_batches=checkpoint["state_shadow_batches"],
+    )
+    assert imported.revision == 0
+    assert imported.state_hash == checkpoint["official_state_hash"]
+    async with pool.acquire() as connection:
+        imported_shadows = await connection.fetchval(
+            f"SELECT COUNT(*) FROM {schema}.shadow_batches WHERE lineage_id=$1",
+            "v20-production-lineage",
+        )
+    assert imported_shadows == 10

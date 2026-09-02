@@ -17,7 +17,6 @@ import yaml
 
 from src.data.database.tls import sha256_file
 from src.data.sources.local_concept_mapper import resolve_concept_data_path
-from src.strategy.v20.runtime_compatibility import is_audited_state_semantics_transition
 
 
 class V20ConfigError(RuntimeError):
@@ -117,368 +116,30 @@ _ROUTE_BINDING_KEYS = {
     "expected_chat_id_sha256",
 }
 
-# These files jointly define the stock-selection and state-evolution semantics.
-# Hashing the deployed bytes is deliberately stricter than recording a git
-# branch name: two hosts cannot claim the same V20 config while running a
-# different V16 scanner, model, feature list, board universe, or V20 rule.
+# Non-code strategy inputs are integrity-checked as exact deployed artifacts.
+# Python source, lockfiles, and project manifests are intentionally excluded:
+# runtime authorization is declarative and cannot depend on source formatting.
 _STRATEGY_DEPENDENCY_FILES = (
-    "src/data/database/v16_canonical_artifact_store.py",
-    "src/data/database/v20_mews_guard_store.py",
-    "src/data/database/v20_mews_receipt_guard.py",
-    "src/web/v20_v16_canonical_artifact.py",
-    "src/web/v20_v16_daygate_attestation.py",
-    "src/strategy/strategies/v16_scanner.py",
-    "src/strategy/strategies/momentum_sector_scanner.py",
-    "src/strategy/lgbrank_scorer.py",
-    "src/strategy/filters/stock_filter.py",
-    "src/strategy/filters/board_filter.py",
-    "src/strategy/filters/reversal_factor_filter.py",
-    "src/strategy/filters/momentum_quality_filter.py",
-    "src/data/clients/ifind_http_client.py",
-    "src/data/clients/mews_snapshot.py",
-    "src/common/config.py",
-    "src/data/sources/local_concept_mapper.py",
-    "src/data/clients/tushare_realtime.py",
-    "src/data/clients/iquant_historical_adapter.py",
-    "src/data/clients/v20_market_data.py",
-    "src/data/database/fundamentals_db.py",
-    "src/data/database/tls.py",
-    "src/data/database/v20_repository.py",
-    "src/common/feishu_bot.py",
-    "src/common/v20_feishu.py",
-    "src/web/v15_scan_service.py",
-    "src/web/v20_scan_pipeline.py",
-    "src/web/v20_service.py",
-    "src/web/v20_routes.py",
-    "src/strategy/v20/artifacts.py",
-    "src/strategy/v20/decision_engine.py",
-    "src/strategy/v20/exit_policy.py",
-    "src/strategy/v20/identity.py",
-    "src/strategy/v20/models.py",
-    "src/strategy/v20/policy.py",
-    "src/strategy/v20/runtime_config.py",
-    "src/strategy/v20/runtime_compatibility.py",
-    "src/strategy/v20/shadow_evaluator.py",
     "models/lgbrank_latest.txt",
     "models/feature_list.json",
     "data/sectors.json",
     "data/board_constituents.json",
     "data/v20_mews_bootstrap.json.gz",
-    "pyproject.toml",
-    "uv.lock",
 )
 
-# Only these deployed bytes can change a V20 selection, BASE/R7/G input, or
-# official state transition.  Operational wrappers remain covered by the full
-# config hash above, but no longer fork a state lineage merely because a
-# formatter, route, replay, database adapter, or service lifecycle changed.
-#
-# ``V20_STATE_INPUT_ORCHESTRATION_V3`` explicitly versions the state-sensitive
-# orchestration that still lives in ``v20_service.py`` (receipt selection,
-# cutoff handling, policy input assembly, gap maturity, and invalid-state
-# transition ordering).  V3 binds actionability to the completed canonical
-# durable barrier and isolates live-exit evidence deadlines per leg.  Any later
-# semantic edit there must bump this profile again.  The retired V2 marker is
-# intentionally not reused: it identified a reverted historical candidate.
-_STATE_SEMANTICS_DEPENDENCY_FILES = (
-    "src/strategy/strategies/v16_scanner.py",
-    "src/strategy/strategies/momentum_sector_scanner.py",
-    "src/strategy/lgbrank_scorer.py",
-    "src/strategy/filters/stock_filter.py",
-    "src/strategy/filters/board_filter.py",
-    "src/strategy/filters/reversal_factor_filter.py",
-    "src/strategy/filters/momentum_quality_filter.py",
-    "src/data/clients/ifind_http_client.py",
-    "src/common/config.py",
-    "src/data/sources/local_concept_mapper.py",
-    "src/data/clients/tushare_realtime.py",
-    "src/data/clients/iquant_historical_adapter.py",
-    "src/data/clients/v20_market_data.py",
-    "src/data/database/fundamentals_db.py",
-    "src/web/v15_scan_service.py",
-    "src/web/v20_scan_pipeline.py",
-    "src/strategy/v20/artifacts.py",
-    "src/strategy/v20/decision_engine.py",
-    "src/strategy/v20/exit_policy.py",
-    "src/strategy/v20/identity.py",
-    "src/strategy/v20/models.py",
-    "src/strategy/v20/policy.py",
-    "src/strategy/v20/shadow_evaluator.py",
-    "models/lgbrank_latest.txt",
-    "models/feature_list.json",
-    "data/sectors.json",
-    "data/board_constituents.json",
-    "pyproject.toml",
-    "uv.lock",
+# The official-state contract is an explicit semantic declaration.  It does not
+# include source or artifact hashes and therefore cannot change merely because
+# Python formatting, comments, line endings, or deployment source bytes change.
+_STATE_CONTRACT_SCHEMA = "v20-state-contract/v1"
+_OFFICIAL_STATE_SCHEMA = "v20-official-state/v1"
+_STATE_CONTRACT_FIELDS = (
+    "strategy_identifier",
+    "official_stream_id",
+    "state_lineage_id",
+    "timezone",
+    "return_profile_id",
+    "reference_profile_id",
 )
-_V4_STATE_SEMANTICS_ADDITIONAL_FILES = (
-    # The durable receipt time and collision/readback rules decide whether the
-    # canonical V16 input is actionable before the entry cutoff.
-    "src/data/database/v16_canonical_artifact_store.py",
-    # Candidate discovery plus the atomic per-leg freeze decides which MEWS
-    # value feeds the official D2 exit threshold.
-    "src/data/database/v20_mews_guard_store.py",
-    # The compatibility receipt path is unreachable for a healthy connected
-    # V20Repository, but the service can still consume it if strict-store
-    # construction fails.  Bind it rather than leave that failover unreviewed.
-    "src/data/database/v20_mews_receipt_guard.py",
-    # Portable encode/hydrate validation defines the exact canonical entry
-    # input, including the complete breadth-only raw-evidence boundary.
-    "src/web/v20_v16_canonical_artifact.py",
-)
-# ``v20_v16_daygate_attestation.py`` remains full-config-only: it is consumed
-# exclusively by the explicit post-cutoff operator replay and the production
-# scheduler has no automatic replay entry.  It cannot create or replace an
-# official decision.  Every MEWS receipt module is intentionally included
-# above because the service retains a guarded strict-store construction
-# fallback even though a healthy connected V20Repository never enters it.
-_STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v2"
-_STATE_INPUT_ORCHESTRATION_PROFILE = "V20_STATE_INPUT_ORCHESTRATION_V3"
-_STATE_INPUT_ORCHESTRATION_PROFILE_BY_SERVICE_CLASS = {
-    "V20_SERVICE_STATE_ORCHESTRATION_V1": "V20_STATE_INPUT_ORCHESTRATION_V1",
-    "V20_SERVICE_STATE_ORCHESTRATION_V2": "V20_STATE_INPUT_ORCHESTRATION_V1",
-    "V20_SERVICE_STATE_ORCHESTRATION_V3": "V20_STATE_INPUT_ORCHESTRATION_V1",
-    "V20_SERVICE_STATE_ORCHESTRATION_V4": _STATE_INPUT_ORCHESTRATION_PROFILE,
-}
-_STATE_SEMANTICS_DEPENDENCY_FILES_BY_SERVICE_CLASS = {
-    "V20_SERVICE_STATE_ORCHESTRATION_V1": _STATE_SEMANTICS_DEPENDENCY_FILES,
-    "V20_SERVICE_STATE_ORCHESTRATION_V2": _STATE_SEMANTICS_DEPENDENCY_FILES,
-    "V20_SERVICE_STATE_ORCHESTRATION_V3": _STATE_SEMANTICS_DEPENDENCY_FILES,
-    "V20_SERVICE_STATE_ORCHESTRATION_V4": (
-        _STATE_SEMANTICS_DEPENDENCY_FILES + _V4_STATE_SEMANTICS_ADDITIONAL_FILES
-    ),
-}
-_LEGACY_STATE_SEMANTICS_SCHEMA = "v20-state-semantics/v1"
-_AUDITED_LEGACY_STATE_SEMANTICS_HASHES = frozenset(
-    {
-        # main@4211cd0: the only legacy lineage admitted to the v2 core model.
-        # Its only deployment-byte changes before this migration were the
-        # reviewed V20 late-replay service and Feishu formatter changes.
-        "b2ba54f990cfe6b0e4b8f38c97e096a72205d78e34e484593eacaf5243ac2ce0",
-    }
-)
-_MIXED_STATE_SOURCE_CLASSES = {
-    "src/web/v20_service.py": {
-        "07ac09b4e61f376ec896c893ea5e88ee89562ae573402bccd9d63a0694d52e6e": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        "533534faf87d7f1b45bff3af9624d12365f91275f9609f549ea9b3c91d7d2bbb": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        "12fd28d7abdcdafca6932cf2b08d2c870a971d2f4c3e38a06e97bdd29921d24e": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        "95900ffebbdac8f08615c35049cf4d76499059e15ea5a114549045a82dbbcece": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        "1c71c2a8ff33f52d0d4f2366a3c7d1316ce24e6a38c9ab75ebbfb7dd982bf0bd": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        # Reviewed operational-only change: bound the 11:30 feed-health
-        # frontier to vendor publication timing without changing which legal
-        # minute bar can create an exit intent or any official state input.
-        "c8d41b69c58a5b6b4e6a7cbac909e22214de0aa69308213c7116810468f487bb": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        # Adds an isolated 09:10 MEWS cache lane. Entry state transitions,
-        # rolling inputs, and reference orchestration are unchanged.
-        "ec8c8065cfd81da6776a91886fa3efd95cee36c3eaa76a9588671dae6d6230b9": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        # Adds missing-MEWS recovery through the owning service's production
-        # calculator. Entry, rolling, reference, and exit policy are unchanged.
-        "8223a0c5886010a40854015d507565e7dc9489bf62f32d7c0f67da6bd18851ac": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        # Combines the reviewed lunch publication frontier with the isolated
-        # MEWS cache/recovery lane; neither changes official strategy inputs.
-        "662fc3ba7cafe531bda4508bdd4ead0d8234f0342a3a316f686ef30f6d21f61e": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        # Combines the reviewed lunch publication frontier with the isolated
-        # MEWS cache/recovery lane on the production-compatible V1 input
-        # orchestration profile.
-        "e3e7bf911f80b8ad1e097028fdceda5b69e83fbfce6554ebdc685a6e245a6136": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        # Replaces the computed-MEWS HTTP dependency with a local raw-Tushare
-        # calculator. MEWS remains outside entry and official state inputs.
-        "a537782d460f11280f21c87fb9ae6fb4f228a13b549deb4ec37053c8d6a7581a": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        # A selection trigger repairs a missing locally calculated MEWS value
-        # without promoting a late receipt into point-in-time strategy input.
-        "8980fac4479611337dbac117b8265829ba20e1ed6c882b2f3f1718d3a9624051": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        # The 09:40 cutoff watchdog performs one bounded cold-start calendar
-        # load before failing closed; entry state transitions and official
-        # state inputs are unchanged.
-        "ad54b0ac5fd688f2cb3e3ad5c3b32f5c7e298e322267f51df2cda7c792a2564d": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V1"
-        ),
-        # After-cutoff MEWS repair: a missing daily value is recalculated
-        # locally once (scheduler tick or selection trigger) and the leg D2
-        # selection window admits the same-day late repair (availability D1,
-        # correct predecessor source) for legs without a formal exit intent.
-        # This deliberately widens which MEWS value can feed D2 exit
-        # thresholds, so it is NOT orchestration-profile V1.
-        "6c377e7ac0112dcc06100c510ad4aa214bbaa06683d129d764ce4f003226a9d4": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        # Manual-monitor source validation now requires the dedicated manual
-        # check-only message mode (MANUAL_OPERATOR_RENDER) instead of the
-        # retired automatic-entry render mode.  Entry, rolling, reference,
-        # exit policy, and official state inputs are unchanged.
-        "baf11cb027e8b46160ed8431977590d314ece9ee479cb9e21048c76faffef1fa": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        # Publisher health now reports durable UNKNOWN delivery outcomes.
-        # Entry, rolling, reference, and official state orchestration unchanged.
-        "defaf4786c8b1597fa5f99723ca8f8fc85c39a7a8ce140554f15005f07944224": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V2"
-        ),
-        # V20 now consumes the one canonical V16 morning result for both the
-        # automatic lane and current-code manual checks, validates the frozen
-        # Top-10/raw evidence boundary, and removes the second in-service scan
-        # implementation.  That can change the selected entry legs and hence
-        # official state.  The accompanying MEWS recovery and live-exit
-        # deadline changes share these exact reviewed bytes, so this release
-        # is deliberately a new state-orchestration class rather than being
-        # disguised as V2.
-        # V3 with the reviewed 09:40 decision-waiter race: the scheduler
-        # cancels only its waiter at the deadline while the shielded canonical
-        # singleflight master remains reusable by check-only replay.
-        # Git/deployment LF bytes.
-        "985b11a06d4222fbb1ef42da6313bf155522400606e08c205d365ec901a3f7df": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V3"
-        ),
-        # The same reviewed source in the Windows QA worktree's CRLF form.
-        "2aaf4957addc5f09d7eca3aa7e45ed525c87a7fb8e470ad68f0b5b2f94d9d78f": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V3"
-        ),
-        # Final canonical-artifact release: actionability is bound to the
-        # complete raw -> portable -> readback -> hydrate barrier, automatic
-        # post-cutoff rescans are forbidden, and live exits isolate each leg's
-        # evidence deadline.  These can change official entry/exit outcomes,
-        # so the bytes are deliberately V4 rather than an alias for V3.
-        # Git/deployment LF bytes.
-        "aa5268d53a9337c84c1a4ef9f25e78b1e657dbe81e72de989a36ea370dcc4f24": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # The exact same reviewed V4 source in Windows QA CRLF form.
-        "a33c99d74fe3cdbc220b5806ddb071fd551eb6ae15505a0b0e57d02707ca445e": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # Explicit operator triggers now consume the same durable canonical
-        # artifact even when today's official slot is already terminal.  The
-        # probe remains read-only and therefore stays inside the reviewed V4
-        # state-orchestration class.  Git/deployment LF bytes.
-        "ba7e69ab519186e8ac77441423ef67a034778cb770f71fe65028f22b69ceff62": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # The exact same terminal check-only source in Windows QA CRLF form.
-        "616059227bf2e79802ba17fb0936102143f9e3c73bb63fbe8215491d64d092a8": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # Static typing only: narrows the scheduled-exit sequence and replaces
-        # an untyped async lambda with an equivalent named coroutine.  Runtime
-        # ordering, persistence, deadlines, and state transitions are unchanged.
-        # Git/deployment LF bytes.
-        "d1135bbf20c3beecaa114ad918fa49b6a6b279b62d3fb1d455a4d3e7122d97f1": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # The exact same type-only V4 source in Windows QA CRLF form.
-        "e514292401bde5930b503fc640393cd90f7a241a2ff93059cff1bc230902e5e0": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # Diagnostic-only correction: LIVE_EXIT_SYMBOL_DATA_GAP now labels
-        # missing symbols separately from siblings that have persisted legal
-        # evidence.  Exit rules, deadlines, and state transitions are unchanged.
-        # Git/deployment LF bytes.
-        "a7170343fdac66b177bb1ca50c4680308f2ce4e83d77ec00aabb69204b71b0ac": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # The exact same diagnostic-only V4 source in Windows QA CRLF form.
-        "149c36817be6665c12e2bbfeceb5527fd6382d2865cbbf95b16a86ee118b0d17": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-        # Canonical artifact restart recovery and live-exit shared
-        # deadline/per-symbol cancellation are reviewed and preserve the
-        # existing V4 state semantics.  Git/deployment LF bytes.
-        "3052cfcf7ce96f616b770e3360435bfaa88ecb32522412149a575d48c0696731": (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-        ),
-    },
-    "src/data/database/v20_repository.py": {
-        "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
-            "V20_LEDGER_STATE_CONTRACT_V1"
-        ),
-        "7167e475f3a6dd857673540a8ac0bf812c4a72b9bff4a871e61ea677c22f1209": (
-            "V20_LEDGER_STATE_CONTRACT_V1"
-        ),
-        "6f74da33d9b8d632b1357e432117600d73356975d59ea96242a7f2c38d815f9f": (
-            "V20_LEDGER_STATE_CONTRACT_V1"
-        ),
-        # Adds a read-only cutoff receipt verification for cached MEWS.
-        "83bdfa110cd6857407c5ae9fdaf9936f81339c755e9e337a0aed8d47b5c39d24": (
-            "V20_LEDGER_STATE_CONTRACT_V1"
-        ),
-        # Adds an isolated incremental MEWS calculation checkpoint. It cannot
-        # change entry, rolling-health, or official model state transitions.
-        "ef6f26eec1a3ea40ae2fb9937d097307290c558b331f8633d4dde4b10e8f8dd7": (
-            "V20_LEDGER_STATE_CONTRACT_V1"
-        ),
-        # Widens the frozen leg MEWS selection to admit the same-day late
-        # repair (availability == d1, predecessor source) alongside the strict
-        # 09:40 cutoff, adds the ELIGIBLE_LATE_SAME_DAY reason, and lets the
-        # restart recovery restore a late-calculated daily snapshot.  Frozen
-        # selections are still never rewritten.  This changes the ledger
-        # selection contract, so it is NOT contract V1.
-        "aa6bc1b48073d5535ae89dcc5dd546eab80a05257d82ec9ab57ab78dbc76c40d": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # Manual-monitor source validation now requires the dedicated manual
-        # check-only message mode (MANUAL_OPERATOR_RENDER) instead of the
-        # retired automatic-entry render mode.  Enrollment writes, entry,
-        # rolling, reference, and official state transitions are unchanged.
-        "e35b40b788c086d51509595a15cf5be5f4a9198d56b90b67493f5a32e6a13a32": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # Adds the durable Feishu outbox dispatch-boundary state and audit
-        # columns. Entry, rolling-health, reference, and official state inputs
-        # remain unchanged.
-        "3be1c8534c2338cbc147225e8dc07a39a8cd89a14caef49b188d6619b7e12315": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # Selection-release repository bytes after excluding every Rolling7
-        # table/helper/fact path.  The reviewed delta is limited to F1 outbox
-        # delivery state plus MEWS/raw-canonical evidence and idempotency
-        # auditing; official ledger state transitions remain contract V2.
-        "bfcb7d5881e2597bfbc46d3826e9cee45656e4419d2e6dc489fea3c81de4d35e": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # Strict multi-generation receipt chaining and checkpoint resolution.
-        # This validates compatibility evidence without changing ledger transitions.
-        "3bc8af735d9ca07e7e106fda727324c8dfec7a9211230d16eb6c9aedaf6bd643": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # The same reviewed repository bytes in the Windows QA CRLF form.
-        "8a9c6ba5e380f4d362bce690aec863618f59ef597b8e2e488e28871edb35c97e": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # Multi-hop compatibility authentication plus removal of a nonexistent
-        # deployment-mode read and lineage-wide receipt-scope validation.
-        # Git/deployment LF bytes.
-        "d34ba101ec95cd6a3a8c7b0933fbb3b6cee9c29dfca7af9fd316f13bf04b9601": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-        # The same reviewed repository bytes in Windows QA CRLF form.
-        "535fd459ac0867e7373d3a398f8d4425f5e388cf6a331c65fbd61faefc5255e9": (
-            "V20_LEDGER_STATE_CONTRACT_V2"
-        ),
-    },
-}
 
 
 def _canonical_hash(value: object) -> str:
@@ -494,70 +155,24 @@ def _canonical_hash(value: object) -> str:
 
 
 def _state_semantics_source(payload: Mapping[str, Any]) -> dict[str, Any]:
-    dependencies = payload.get("strategy_dependency_hashes")
-    if not isinstance(dependencies, Mapping):
-        raise V20ConfigError("frozen config lacks strategy dependency hashes")
-    mixed_source_classes: dict[str, str] = {}
-    for relative, reviewed in _MIXED_STATE_SOURCE_CLASSES.items():
-        digest = dependencies.get(relative)
-        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
-            raise V20ConfigError(f"frozen config lacks valid mixed dependency: {relative}")
-        semantic_class = reviewed.get(digest)
-        if semantic_class is None:
-            raise V20ConfigError(
-                f"unreviewed state-sensitive mixed source bytes: {relative}={digest}"
-            )
-        mixed_source_classes[relative] = semantic_class
-    service_class = mixed_source_classes.get("src/web/v20_service.py")
-    orchestration_profile = _STATE_INPUT_ORCHESTRATION_PROFILE_BY_SERVICE_CLASS.get(
-        service_class or ""
-    )
-    if orchestration_profile is None:
-        raise V20ConfigError("reviewed V20 service class lacks an orchestration profile")
-    state_dependency_files = _STATE_SEMANTICS_DEPENDENCY_FILES_BY_SERVICE_CLASS.get(
-        service_class or ""
-    )
-    if state_dependency_files is None:
-        raise V20ConfigError("reviewed V20 service class lacks a state dependency profile")
-    state_dependencies: dict[str, str] = {}
-    for relative in state_dependency_files:
-        digest = dependencies.get(relative)
-        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
-            raise V20ConfigError(f"frozen config lacks valid state dependency: {relative}")
-        state_dependencies[relative] = digest
-    required_mappings = ("clock", "market_data", "policy")
-    for field in required_mappings:
-        if not isinstance(payload.get(field), Mapping):
-            raise V20ConfigError(f"frozen config lacks valid {field}")
-    for field in (
-        "strategy_version",
-        "timezone",
-        "return_profile_id",
-        "reference_profile_id",
-    ):
-        if not isinstance(payload.get(field), str) or not str(payload[field]):
-            raise V20ConfigError(f"frozen config lacks valid {field}")
-    manifest_hash = payload.get("g_manifest_sha256")
-    if not isinstance(manifest_hash, str) or not _SHA256.fullmatch(manifest_hash):
-        raise V20ConfigError("frozen config lacks valid g_manifest_sha256")
-    return {
-        "schema_version": _STATE_SEMANTICS_SCHEMA,
-        "strategy_version": payload["strategy_version"],
-        "timezone": payload["timezone"],
-        "return_profile_id": payload["return_profile_id"],
-        "reference_profile_id": payload["reference_profile_id"],
-        "clock": dict(cast(Mapping[str, Any], payload["clock"])),
-        "market_data": dict(cast(Mapping[str, Any], payload["market_data"])),
-        "policy": dict(cast(Mapping[str, Any], payload["policy"])),
-        "g_manifest_sha256": manifest_hash,
-        "state_input_orchestration_profile": orchestration_profile,
-        "mixed_state_source_classes": mixed_source_classes,
-        "state_dependency_hashes": state_dependencies,
+    contract: dict[str, Any] = {
+        "contract_schema": _STATE_CONTRACT_SCHEMA,
+        "official_state_schema": _OFFICIAL_STATE_SCHEMA,
     }
+    for field in _STATE_CONTRACT_FIELDS:
+        value = (
+            payload.get("strategy_version")
+            if field == "strategy_identifier" and "strategy_identifier" not in payload
+            else payload.get(field)
+        )
+        if not isinstance(value, str) or not value:
+            raise V20ConfigError(f"frozen config lacks valid {field}")
+        contract[field] = value
+    return contract
 
 
 def state_semantics_hash_from_frozen_payload(payload: Mapping[str, Any]) -> str:
-    """Derive the stable state/core hash from a frozen runtime-config payload."""
+    """Derive the stable official-state contract hash from a frozen payload."""
 
     return _canonical_hash(_state_semantics_source(payload))
 
@@ -569,107 +184,19 @@ def state_semantics_payload_from_frozen_payload(
 
 
 def declared_state_semantics_is_authentic(payload: Mapping[str, Any]) -> bool:
-    """Authenticate either the legacy full-byte hash or the current core hash."""
+    """Validate the explicit state contract embedded in the frozen payload."""
 
     declared = payload.get("state_semantics_hash")
+    embedded = payload.get("state_semantics_payload")
     if not isinstance(declared, str) or not _SHA256.fullmatch(declared):
         return False
-    embedded = payload.get("state_semantics_payload")
-    if embedded is not None:
-        return (
-            isinstance(embedded, Mapping)
-            and dict(embedded) == _state_semantics_source(payload)
-            and _canonical_hash(embedded) == declared
-        )
-    dependencies = payload.get("strategy_dependency_hashes")
-    if not isinstance(dependencies, Mapping):
+    if not isinstance(embedded, Mapping):
         return False
-    legacy = {
-        "schema_version": _LEGACY_STATE_SEMANTICS_SCHEMA,
-        "strategy_version": payload.get("strategy_version"),
-        "timezone": payload.get("timezone"),
-        "return_profile_id": payload.get("return_profile_id"),
-        "reference_profile_id": payload.get("reference_profile_id"),
-        "clock": payload.get("clock"),
-        "market_data": payload.get("market_data"),
-        "policy": payload.get("policy"),
-        "g_manifest_sha256": payload.get("g_manifest_sha256"),
-        "strategy_dependency_hashes": dict(dependencies),
-    }
-    return _canonical_hash(legacy) == declared
-
-
-def legacy_state_semantics_is_compatible_with_current(
-    legacy_payload: Mapping[str, Any],
-    current_payload: Mapping[str, Any],
-) -> bool:
-    """Prove the one reviewed legacy-full-hash to current-core bridge.
-
-    This is intentionally not a generic legacy migration.  Unknown v1 service
-    bytes are rejected even when their obvious policy files happen to match.
-    Once a config carries the v2 payload, ordinary compatibility is exact core
-    hash equality.
-    """
-
-    declared = legacy_payload.get("state_semantics_hash")
-    current_declared = current_payload.get("state_semantics_hash")
-    is_exact_release_transition = is_audited_state_semantics_transition(
-        declared,
-        current_declared,
-    )
-    if declared not in _AUDITED_LEGACY_STATE_SEMANTICS_HASHES and not (is_exact_release_transition):
+    try:
+        expected = _state_semantics_source(payload)
+    except V20ConfigError:
         return False
-    if not declared_state_semantics_is_authentic(legacy_payload):
-        return False
-    if not declared_state_semantics_is_authentic(current_payload):
-        return False
-    if current_payload.get("state_semantics_hash") != state_semantics_hash_from_frozen_payload(
-        current_payload
-    ):
-        return False
-    identity_fields = (
-        "strategy_version",
-        "official_stream_id",
-        "state_lineage_id",
-        "timezone",
-        "return_profile_id",
-        "reference_profile_id",
-        "clock",
-        "market_data",
-        "policy",
-        "g_manifest_sha256",
-        "bootstrap_mode",
-        "bootstrap_checkpoint_sha256",
-    )
-    if any(legacy_payload.get(field) != current_payload.get(field) for field in identity_fields):
-        return False
-    if is_exact_release_transition:
-        return True
-    legacy_dependencies = legacy_payload.get("strategy_dependency_hashes")
-    current_dependencies = current_payload.get("strategy_dependency_hashes")
-    if not isinstance(legacy_dependencies, Mapping) or not isinstance(
-        current_dependencies, Mapping
-    ):
-        return False
-    if not all(
-        legacy_dependencies.get(relative) == current_dependencies.get(relative)
-        for relative in _STATE_SEMANTICS_DEPENDENCY_FILES
-    ):
-        return False
-    for relative, reviewed in _MIXED_STATE_SOURCE_CLASSES.items():
-        legacy_digest = legacy_dependencies.get(relative)
-        current_digest = current_dependencies.get(relative)
-        if not isinstance(legacy_digest, str) or not isinstance(current_digest, str):
-            return False
-        legacy_class = reviewed.get(legacy_digest)
-        current_class = reviewed.get(current_digest)
-        if legacy_class is None or legacy_class != current_class:
-            return False
-    return True
-
-
-def is_audited_legacy_state_semantics_hash(value: object) -> bool:
-    return isinstance(value, str) and value in _AUDITED_LEGACY_STATE_SEMANTICS_HASHES
+    return dict(embedded) == expected and _canonical_hash(embedded) == declared
 
 
 def _exact_keys(value: dict[str, Any], expected: set[str], field: str) -> None:
@@ -1289,15 +816,12 @@ def load_v20_runtime_config(
     database_config_sha256 = _sha256_file(database_config_path)
     state_semantics_payload = _state_semantics_source(
         {
-            "strategy_version": raw["strategy_version"],
+            "strategy_identifier": strategy_version,
+            "official_stream_id": stream_id,
+            "state_lineage_id": lineage_id,
             "timezone": raw["timezone"],
             "return_profile_id": raw["return_profile_id"],
             "reference_profile_id": raw["reference_profile_id"],
-            "clock": clock_raw,
-            "market_data": market_raw,
-            "policy": policy_raw,
-            "g_manifest_sha256": actual_manifest_hash,
-            "strategy_dependency_hashes": dependency_hashes,
         }
     )
     state_semantics_hash = _canonical_hash(state_semantics_payload)
@@ -1409,8 +933,6 @@ __all__ = [
     "V20RouteBinding",
     "V20RuntimeConfig",
     "declared_state_semantics_is_authentic",
-    "is_audited_legacy_state_semantics_hash",
-    "legacy_state_semantics_is_compatible_with_current",
     "load_v20_runtime_config",
     "state_semantics_hash_from_frozen_payload",
     "state_semantics_payload_from_frozen_payload",

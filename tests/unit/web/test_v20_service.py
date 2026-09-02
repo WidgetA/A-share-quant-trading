@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.strategy.v20.runtime_config as runtime_config_module
 import src.web.v15_scan_service as v15_scan_service
 import src.web.v20_service as service_module
 from src.common.v20_feishu import V20FeishuRoute
@@ -81,23 +80,6 @@ from src.web.v20_service import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 TZ = ZoneInfo("Asia/Shanghai")
-_TEST_MIXED_STATE_CLASSES = {
-    "src/web/v20_service.py": "V20_SERVICE_STATE_ORCHESTRATION_V4",
-    "src/data/database/v20_repository.py": "V20_LEDGER_STATE_CONTRACT_V2",
-}
-
-
-@pytest.fixture(autouse=True)
-def _review_current_mixed_sources(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep isolated tests focused on behavior while source hashes are in flight."""
-
-    for relative, reviewed_hashes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
-        source_hash = hashlib.sha256((PROJECT_ROOT / relative).read_bytes()).hexdigest()
-        monkeypatch.setitem(
-            reviewed_hashes,
-            source_hash,
-            _TEST_MIXED_STATE_CLASSES[relative],
-        )
 
 
 class _UnusedMewsSource:
@@ -106,13 +88,6 @@ class _UnusedMewsSource:
 
 
 def _config(monkeypatch: pytest.MonkeyPatch):
-    for relative, reviewed_hashes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
-        source_hash = hashlib.sha256((PROJECT_ROOT / relative).read_bytes()).hexdigest()
-        monkeypatch.setitem(
-            reviewed_hashes,
-            source_hash,
-            _TEST_MIXED_STATE_CLASSES[relative],
-        )
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
     monkeypatch.setenv("DB_SSLROOTCERT_SHA256", "c" * 64)
@@ -2147,11 +2122,12 @@ async def test_entry_collection_never_touches_old_scan_pipeline_or_vendor(
     ]
 
 
-def test_bind_preserves_already_owned_scan_resources() -> None:
+@pytest.mark.asyncio
+async def test_bind_preserves_already_owned_scan_resources() -> None:
     owned_fundamentals = object()
     realtime = object()
     historical = object()
-    owner_task = asyncio.Future()
+    owner_task = asyncio.get_running_loop().create_future()
     service = V20Service.__new__(V20Service)
     service._resources_started = False
     service._started = False
@@ -3205,6 +3181,8 @@ def _entry_status(config, *, action: str = "BLOCK") -> EntryStatus:
         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
         "strategy_version": config.strategy_version,
         "config_hash": config.config_hash,
+        "official_stream_id": config.official_stream_id,
+        "state_lineage_id": config.state_lineage_id,
         "state_semantics_hash": config.state_semantics_hash,
         "action": action,
     }
@@ -3278,7 +3256,7 @@ def test_entry_binding_rejects_legacy_semantic_and_snapshot_contracts(
         )
 
 
-def test_entry_binding_reattaches_only_proven_historical_terminal_config(
+def test_entry_binding_accepts_historical_terminal_explicit_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(monkeypatch, SimpleNamespace())
@@ -3303,19 +3281,9 @@ def test_entry_binding_reattaches_only_proven_historical_terminal_config(
         snapshot=snapshot,
         snapshot_hash=sha256_json(snapshot),
     )
-    binding = (
-        historical.config_id,
-        historical.config_hash,
-        historical_state_hash,
-    )
-
-    with pytest.raises(V20ConfigError, match="unproven historical config"):
-        service._verify_entry_binding(historical)
-
-    service._compatible_entry_bindings.add(binding)
     service._verify_entry_binding(historical)
 
-    with pytest.raises(V20ConfigError, match="unproven historical config"):
+    with pytest.raises(V20ConfigError, match="another config/lineage"):
         service._verify_entry_binding(replace(historical, slot_status="OPEN"))
 
     tampered_semantic = {**semantic, "config_hash": "e" * 64}
@@ -6055,13 +6023,6 @@ async def test_recovery_finalizes_each_missed_trade_day_before_today(
         snapshot=historical_snapshot,
         snapshot_hash=sha256_json(historical_snapshot),
     )
-    service._compatible_entry_bindings.add(
-        (
-            historical_config_hash[:24],
-            historical_config_hash,
-            historical_state_hash,
-        )
-    )
 
     async def expire(context, now):
         return None
@@ -6171,20 +6132,22 @@ def test_empty_forward_shadow_genesis_has_explicit_first_day_anchor(
     assert bootstrap.state["state_revision"] == 0
 
 
-def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    config = _config(monkeypatch)
-    state = genesis_state()
-    as_of = date(2026, 8, 28)
-    checkpoint = {
-        "schema_version": "v20-bootstrap-checkpoint/v2",
+def _checkpoint_payload(config, state: Mapping[str, Any], as_of: date) -> dict[str, Any]:
+    """Return a valid v3 checkpoint: the exact exporter keyset, no retired fields."""
+    return {
+        "schema_version": "v20-bootstrap-checkpoint/v3",
         "target_official_stream_id": config.official_stream_id,
         "state_lineage_id": config.state_lineage_id,
-        "source_state_semantics_hash": config.state_semantics_hash,
+        "source_official_stream_id": "shadow-stream",
+        "source_lineage_id": "shadow-lineage",
         "as_of_trade_date": as_of.isoformat(),
+        "source_state_revision": 42,
+        "source_state_hash": "e" * 64,
+        "source_bootstrap_mode": "CHECKPOINT",
+        "source_bootstrap_checkpoint_hash": None,
+        "source_last_terminal_slot_id": "shadow-slot-1",
         "source_last_terminal_trade_date": as_of.isoformat(),
+        "batch_id_migration": {},
         "official_state": state,
         "official_state_hash": sha256_json(state),
         "state_shadow_batches": [
@@ -6196,21 +6159,29 @@ def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
             for index in range(7)
         ],
     }
+
+
+_RETIRED_CHECKPOINT_FIELDS = (
+    "source_config_hash",
+    "source_state_semantics_hash",
+    "resolved_state_semantics_hash",
+)
+
+
+def test_checkpoint_v3_valid_shape_carries_no_retired_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    as_of = date(2026, 8, 28)
     checkpoint_path = tmp_path / "checkpoint.json"
-    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
     checkpoint_config = replace(
         config,
         bootstrap_mode="CHECKPOINT",
         bootstrap_checkpoint_path=checkpoint_path,
     )
-
-    mismatched = {**checkpoint, "source_state_semantics_hash": "0" * 64}
-    checkpoint_path.write_text(json.dumps(mismatched), encoding="utf-8")
-    with pytest.raises(V20ConfigError, match="state semantics"):
-        _bootstrap_bundle(
-            checkpoint_config,
-            empty_predecessor_trade_date=date(1999, 1, 1),
-        )
+    checkpoint = _checkpoint_payload(config, genesis_state(), as_of)
+    assert not set(checkpoint) & set(_RETIRED_CHECKPOINT_FIELDS)
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
 
     bootstrap = _bootstrap_bundle(
@@ -6219,37 +6190,253 @@ def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
     )
 
     assert bootstrap.predecessor_trade_date == as_of
+    assert bootstrap.state["state_revision"] == 0
 
-    audited_legacy_hash = "a" * 64
-    monkeypatch.setattr(
-        runtime_config_module,
-        "_AUDITED_LEGACY_STATE_SEMANTICS_HASHES",
-        frozenset({audited_legacy_hash}),
-    )
-    resolved_legacy = {
-        **checkpoint,
-        "source_state_semantics_hash": audited_legacy_hash,
-        "resolved_state_semantics_hash": config.state_semantics_hash,
-    }
-    checkpoint_path.write_text(json.dumps(resolved_legacy), encoding="utf-8")
-    assert (
-        _bootstrap_bundle(
-            checkpoint_config,
-            empty_predecessor_trade_date=date(1999, 1, 1),
-        ).predecessor_trade_date
-        == as_of
-    )
 
-    tampered_resolution = {
-        **resolved_legacy,
-        "source_state_semantics_hash": "b" * 64,
+@pytest.mark.parametrize("field", [*_RETIRED_CHECKPOINT_FIELDS, "surprise_field"])
+def test_checkpoint_v3_rejects_retired_and_unknown_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+) -> None:
+    config = _config(monkeypatch)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+    checkpoint = {
+        **_checkpoint_payload(config, genesis_state(), date(2026, 8, 28)),
+        field: "f" * 64,
     }
-    checkpoint_path.write_text(json.dumps(tampered_resolution), encoding="utf-8")
-    with pytest.raises(V20ConfigError, match="state semantics"):
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(V20ConfigError, match="top-level field set mismatch"):
         _bootstrap_bundle(
             checkpoint_config,
             empty_predecessor_trade_date=date(1999, 1, 1),
         )
+
+
+@pytest.mark.parametrize("field", ["official_state_hash", "state_shadow_batches"])
+def test_checkpoint_v3_rejects_missing_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+) -> None:
+    config = _config(monkeypatch)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+    checkpoint = _checkpoint_payload(config, genesis_state(), date(2026, 8, 28))
+    del checkpoint[field]
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(V20ConfigError, match="top-level field set mismatch"):
+        _bootstrap_bundle(
+            checkpoint_config,
+            empty_predecessor_trade_date=date(1999, 1, 1),
+        )
+
+
+def test_checkpoint_v2_legacy_shape_ignores_arbitrary_retired_hash_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    as_of = date(2026, 8, 28)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+    state = genesis_state()
+    v3_checkpoint = _checkpoint_payload(config, state, as_of)
+    v2_checkpoint = {
+        **v3_checkpoint,
+        "schema_version": "v20-bootstrap-checkpoint/v2",
+        # Legacy provenance values are opaque to authorization: any bytes go.
+        "source_config_hash": "not-a-real-hash",
+        "source_state_semantics_hash": "",
+        "resolved_state_semantics_hash": 12345,
+    }
+    checkpoint_path.write_text(json.dumps(v2_checkpoint), encoding="utf-8")
+
+    v2_bootstrap = _bootstrap_bundle(
+        checkpoint_config,
+        empty_predecessor_trade_date=date(1999, 1, 1),
+    )
+    checkpoint_path.write_text(json.dumps(v3_checkpoint), encoding="utf-8")
+    v3_bootstrap = _bootstrap_bundle(
+        checkpoint_config,
+        empty_predecessor_trade_date=date(1999, 1, 1),
+    )
+
+    assert v2_bootstrap.predecessor_trade_date == as_of
+    assert v2_bootstrap == v3_bootstrap
+
+
+def test_checkpoint_v2_early_shape_without_resolved_matches_v3(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    as_of = date(2026, 8, 28)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+    state = genesis_state()
+    v3_checkpoint = _checkpoint_payload(config, state, as_of)
+    v2_checkpoint = {
+        **v3_checkpoint,
+        "schema_version": "v20-bootstrap-checkpoint/v2",
+        # Early v2 exports predate resolved_state_semantics_hash; the retired
+        # provenance values stay opaque to authorization.
+        "source_config_hash": "not-a-real-hash",
+        "source_state_semantics_hash": "",
+    }
+    checkpoint_path.write_text(json.dumps(v2_checkpoint), encoding="utf-8")
+
+    v2_bootstrap = _bootstrap_bundle(
+        checkpoint_config,
+        empty_predecessor_trade_date=date(1999, 1, 1),
+    )
+    checkpoint_path.write_text(json.dumps(v3_checkpoint), encoding="utf-8")
+    v3_bootstrap = _bootstrap_bundle(
+        checkpoint_config,
+        empty_predecessor_trade_date=date(1999, 1, 1),
+    )
+
+    assert v2_bootstrap.predecessor_trade_date == as_of
+    assert v2_bootstrap == v3_bootstrap
+
+
+@pytest.mark.parametrize("field", ["source_config_hash", "source_state_semantics_hash"])
+def test_checkpoint_v2_rejects_missing_required_retired_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+) -> None:
+    config = _config(monkeypatch)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+    checkpoint = {
+        **_checkpoint_payload(config, genesis_state(), date(2026, 8, 28)),
+        "schema_version": "v20-bootstrap-checkpoint/v2",
+        "source_config_hash": "c" * 64,
+        "source_state_semantics_hash": "a" * 64,
+    }
+    del checkpoint[field]
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(V20ConfigError, match="top-level field set mismatch"):
+        _bootstrap_bundle(
+            checkpoint_config,
+            empty_predecessor_trade_date=date(1999, 1, 1),
+        )
+
+
+@pytest.mark.parametrize("with_resolved", [False, True])
+def test_checkpoint_v2_rejects_unknown_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    with_resolved: bool,
+) -> None:
+    config = _config(monkeypatch)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+    checkpoint = {
+        **_checkpoint_payload(config, genesis_state(), date(2026, 8, 28)),
+        "schema_version": "v20-bootstrap-checkpoint/v2",
+        "source_config_hash": "c" * 64,
+        "source_state_semantics_hash": "a" * 64,
+        "surprise_field": "f" * 64,
+    }
+    if with_resolved:
+        checkpoint["resolved_state_semantics_hash"] = "b" * 64
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(V20ConfigError, match="top-level field set mismatch"):
+        _bootstrap_bundle(
+            checkpoint_config,
+            empty_predecessor_trade_date=date(1999, 1, 1),
+        )
+
+
+def test_checkpoint_as_of_date_is_the_revision_zero_predecessor_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    state = genesis_state()
+    as_of = date(2026, 8, 28)
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_config = replace(
+        config,
+        bootstrap_mode="CHECKPOINT",
+        bootstrap_checkpoint_path=checkpoint_path,
+    )
+
+    def checkpoint_payload(schema_version: str) -> dict[str, Any]:
+        checkpoint = {
+            **_checkpoint_payload(config, state, as_of),
+            "schema_version": schema_version,
+        }
+        if schema_version == "v20-bootstrap-checkpoint/v2":
+            checkpoint.update(
+                source_config_hash="c" * 64,
+                source_state_semantics_hash="a" * 64,
+                resolved_state_semantics_hash="b" * 64,
+            )
+        return checkpoint
+
+    bootstraps = []
+    for schema_version in ("v20-bootstrap-checkpoint/v2", "v20-bootstrap-checkpoint/v3"):
+        checkpoint_path.write_text(json.dumps(checkpoint_payload(schema_version)), encoding="utf-8")
+        bootstraps.append(
+            _bootstrap_bundle(
+                checkpoint_config,
+                empty_predecessor_trade_date=date(1999, 1, 1),
+            )
+        )
+
+    assert all(bootstrap.predecessor_trade_date == as_of for bootstrap in bootstraps)
+    assert bootstraps[0] == bootstraps[1]
+
+    for schema_version in ("v20-bootstrap-checkpoint/v2", "v20-bootstrap-checkpoint/v3"):
+        checkpoint = checkpoint_payload(schema_version)
+        mutations = (
+            ({**checkpoint, "target_official_stream_id": "other-stream"}, "target stream"),
+            ({**checkpoint, "state_lineage_id": "other-lineage"}, "checkpoint lineage"),
+            (
+                {**checkpoint, "official_state": {**state, "schema_version": "legacy"}},
+                "official_state schema",
+            ),
+            ({**checkpoint, "official_state_hash": "0" * 64}, "official_state_hash mismatch"),
+        )
+        for mutated_checkpoint, expected_error in mutations:
+            checkpoint_path.write_text(json.dumps(mutated_checkpoint), encoding="utf-8")
+            with pytest.raises(V20ConfigError, match=expected_error):
+                _bootstrap_bundle(
+                    checkpoint_config,
+                    empty_predecessor_trade_date=date(1999, 1, 1),
+                )
 
 
 async def test_checkpoint_as_of_day_is_already_consumed_by_target_lineage(
@@ -9254,6 +9441,8 @@ class _ManualMonitorRepository:
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
             "strategy_version": service.config.strategy_version,
             "config_hash": self.official_config_hash,
+            "official_stream_id": service.config.official_stream_id,
+            "state_lineage_id": service.config.state_lineage_id,
             "state_semantics_hash": service.config.state_semantics_hash,
             "action": "INPUT_INVALID",
             "state_after_hash": "e" * 64,
@@ -9290,8 +9479,6 @@ class _ManualMonitorRepository:
         self.enrollment: ManualMonitorEnrollmentRecord | None = None
         self.events: dict[str, OutboxRecord] = {self.source_event_id: self.source}
         self.alert_semantics: list[Mapping[str, Any]] = []
-        self.registered_config_compatible = True
-        self.registered_config_checks = 0
         self.manual_legs_exited = False
         self.fail_confirmation_seal_once = False
         self.active_leg_reads = 0
@@ -9330,10 +9517,6 @@ class _ManualMonitorRepository:
 
     async def get_entry_status(self, _stream: str, trade_date: date) -> EntryStatus | None:
         return self.official if trade_date == self.official.trade_date else None
-
-    async def is_registered_source_config_compatible(self, *_args: Any, **_kwargs: Any) -> bool:
-        self.registered_config_checks += 1
-        return self.registered_config_compatible
 
     async def list_raw_minute_bar_records(
         self,
@@ -9620,7 +9803,7 @@ async def test_manual_monitor_recovers_and_persists_d0_0941_before_enrollment(
     )
 
 
-async def test_manual_monitor_accepts_an_audited_previous_full_config(
+async def test_manual_monitor_accepts_historical_explicit_source_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_hash = "7" * 64
@@ -9629,10 +9812,6 @@ async def test_manual_monitor_accepts_an_audited_previous_full_config(
         now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
         source_config_hash=old_hash,
     )
-    service._compatible_entry_bindings.add(
-        ("unrelated-config-id", "6" * 64, service.config.state_semantics_hash)
-    )
-
     result = await service.enroll_manual_monitor(
         repository.source_event_id,
         "manual-monitor-old-config",
@@ -9640,10 +9819,9 @@ async def test_manual_monitor_accepts_an_audited_previous_full_config(
 
     assert result["created"] is True
     assert repository.enrollment_commit.source_config_hash == old_hash
-    assert repository.registered_config_checks == 1
 
 
-async def test_manual_monitor_rejects_an_unregistered_previous_full_config(
+async def test_manual_monitor_rejects_tampered_historical_source_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository = await _manual_monitor_service(
@@ -9651,12 +9829,108 @@ async def test_manual_monitor_rejects_an_unregistered_previous_full_config(
         now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
         source_config_hash="7" * 64,
     )
-    repository.registered_config_compatible = False
+    repository.events[repository.source.event_id] = replace(
+        repository.source,
+        payload={"message": "tampered retrospective result"},
+    )
 
-    with pytest.raises(V20SemanticConflict, match="unaudited historical config"):
+    with pytest.raises(V20SemanticConflict, match="source payload hash differs"):
         await service.enroll_manual_monitor(
             repository.source_event_id,
             "manual-monitor-unknown-config",
+        )
+
+    assert repository.enrollment_commit is None
+
+
+def _reseal_manual_monitor_source_semantic(
+    repository: _ManualMonitorRepository,
+    semantic: Mapping[str, Any],
+) -> None:
+    repository.events[repository.source_event_id] = replace(
+        repository.source,
+        semantic=semantic,
+        semantic_content_hash=sha256_json(semantic),
+    )
+
+
+@pytest.mark.parametrize("invalid_config_hash", ["A" * 64, "g" * 64])
+async def test_manual_monitor_rejects_malformed_historical_source_config_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_config_hash: str,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+        source_config_hash="7" * 64,
+    )
+    semantic = dict(repository.source.semantic)
+    semantic["config_hash"] = invalid_config_hash
+    _reseal_manual_monitor_source_semantic(repository, semantic)
+
+    with pytest.raises(V20SemanticConflict, match="source config hash is invalid"):
+        await service.enroll_manual_monitor(
+            repository.source_event_id,
+            "manual-monitor-invalid-config-hash",
+        )
+
+    assert repository.enrollment_commit is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("schema_version", "legacy"), ("feishu_formatter_profile", "other-formatter")],
+)
+async def test_manual_monitor_rejects_incompatible_nested_entry_render_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+        source_config_hash="7" * 64,
+    )
+    semantic = dict(repository.source.semantic)
+    semantic["entry_render_semantic"] = {
+        **semantic["entry_render_semantic"],
+        field: value,
+    }
+    _reseal_manual_monitor_source_semantic(repository, semantic)
+
+    with pytest.raises(V20SemanticConflict, match="ticket list is inconsistent"):
+        await service.enroll_manual_monitor(
+            repository.source_event_id,
+            "manual-monitor-invalid-entry-render",
+        )
+
+    assert repository.enrollment_commit is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["strategy_version", "config_hash", "state_semantics_hash"],
+)
+async def test_manual_monitor_rejects_nested_identity_mismatch_with_source(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    service, repository = await _manual_monitor_service(
+        monkeypatch,
+        now=datetime(2026, 9, 1, 2, 0, tzinfo=TZ),
+        source_config_hash="7" * 64,
+    )
+    semantic = dict(repository.source.semantic)
+    semantic["entry_render_semantic"] = {
+        **semantic["entry_render_semantic"],
+        field: "9" * 64 if field != "strategy_version" else "other-strategy",
+    }
+    _reseal_manual_monitor_source_semantic(repository, semantic)
+
+    with pytest.raises(V20SemanticConflict, match="ticket list is inconsistent"):
+        await service.enroll_manual_monitor(
+            repository.source_event_id,
+            "manual-monitor-source-mismatch",
         )
 
     assert repository.enrollment_commit is None

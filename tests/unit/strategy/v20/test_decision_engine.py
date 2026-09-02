@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.strategy.v20.runtime_config as runtime_config_module
 from src.data.database.v20_repository import StateRecord, sha256_json
 from src.strategy.lgbrank_scorer import ScoredStock
 from src.strategy.strategies.v16_scanner import V16ScanResult
@@ -27,22 +26,11 @@ from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 TZ = ZoneInfo("Asia/Shanghai")
-_TEST_MIXED_STATE_CLASSES = {
-    "src/web/v20_service.py": "V20_SERVICE_STATE_ORCHESTRATION_V4",
-    "src/data/database/v20_repository.py": "V20_LEDGER_STATE_CONTRACT_V2",
-}
 
 
 def test_prepare_entry_keeps_full_list_and_builds_two_shadow_streams(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for relative_path, source_classes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
-        current_hash = hashlib.sha256((PROJECT_ROOT / relative_path).read_bytes()).hexdigest()
-        monkeypatch.setitem(
-            source_classes,
-            current_hash,
-            _TEST_MIXED_STATE_CLASSES[relative_path],
-        )
     config = load_v20_runtime_config(PROJECT_ROOT)
     artifacts = load_g_artifacts(
         config.artifact_manifest_path.parent,

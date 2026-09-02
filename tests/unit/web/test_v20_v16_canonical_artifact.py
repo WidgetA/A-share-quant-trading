@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import math
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -11,7 +10,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.strategy.v20.runtime_config as runtime_config_module
 from src.data.database.v20_repository import (
     StateRecord,
     V20SemanticConflict,
@@ -22,6 +20,7 @@ from src.strategy.strategies.v16_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import CompletedRolling, genesis_state, prepare_entry
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
+from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_v16_canonical_artifact import encode, hydrate
 
@@ -278,19 +277,7 @@ def test_zero_recommendations_are_a_valid_portable_no_signal() -> None:
 def test_prepare_entry_commit_is_identical_after_portable_hydration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for relative_path, source_classes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
-        current_hash = hashlib.sha256((PROJECT_ROOT / relative_path).read_bytes()).hexdigest()
-        source_class = (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-            if relative_path == "src/web/v20_service.py"
-            else (
-                "V20_LEDGER_STATE_CONTRACT_V2"
-                if relative_path == "src/data/database/v20_repository.py"
-                else source_classes[current_hash]
-            )
-        )
-        monkeypatch.setitem(source_classes, current_hash, source_class)
-    config = runtime_config_module.load_v20_runtime_config(PROJECT_ROOT)
+    config = load_v20_runtime_config(PROJECT_ROOT)
     artifacts = load_g_artifacts(
         config.artifact_manifest_path.parent,
         expected_manifest_sha256=config.artifact_manifest_sha256,

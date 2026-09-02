@@ -5,61 +5,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.strategy.v20.runtime_compatibility import is_audited_state_semantics_transition
 from src.strategy.v20.runtime_config import (
-    _MIXED_STATE_SOURCE_CLASSES,
     _STRATEGY_DEPENDENCY_FILES,
     V20ConfigError,
+    declared_state_semantics_is_authentic,
     load_v20_runtime_config,
-    state_semantics_hash_from_frozen_payload,
-    state_semantics_payload_from_frozen_payload,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-
-
-_PRE_SELECTION_V2_CORE = "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc"
-_SELECTION_V3_CORE = "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b"
-_SELECTION_V4_CORE = "0f5fbbd1e6cce372217373023f3681cf09100b870e7c4d187e2ebc7ebd1a8290"
-_PREVIOUS_TYPE_CLEAN_CORE = "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41"
-_TYPE_CLEAN_CORE = "d933fdabe1f4d856b06b2855be2bbc0dcf7d4a0646c2240c3dd78d6fb85af6aa"
-_SELECTION_V3_DEPENDENCIES = {
-    "src/data/clients/tushare_realtime.py": (
-        "5acbe08e3309d5db7d62cd2a6811eff07b212d665035894573ebe463ed61f6b9"
-    ),
-    "src/data/database/v20_repository.py": (
-        "d34ba101ec95cd6a3a8c7b0933fbb3b6cee9c29dfca7af9fd316f13bf04b9601"
-    ),
-    "src/web/v15_scan_service.py": (
-        "e7b786a06fee5c3d4d73af19a82137bb3bc4b1890ea0ef482a332286c630b4f3"
-    ),
-    "src/web/v20_scan_pipeline.py": (
-        "526fa5aa2dae700c3824dc84576b166dcc1b9b1d3e6f48dffb7eb57efb61865c"
-    ),
-    "src/web/v20_service.py": ("985b11a06d4222fbb1ef42da6313bf155522400606e08c205d365ec901a3f7df"),
-}
-
-_SELECTION_V4_DEPENDENCIES = {
-    "src/data/clients/tushare_realtime.py": (
-        "ff1fc6d7e38c4b51f56a6d71f7abc1c7e3ef71034f365006c161fad0eceb381f"
-    ),
-    "src/data/database/v16_canonical_artifact_store.py": (
-        "b5bbc0616384ebc07351d3af4946a3978f026d8145efadd5018fac0b5c3f9a51"
-    ),
-    "src/strategy/v20/runtime_compatibility.py": (
-        "71a43defc9d6c07cff922d8b696dc27ebab57823aa2ad1bc095d4681d55d1f7d"
-    ),
-    "src/strategy/v20/runtime_config.py": (
-        "e224cad5a81e065b42260b8463a34fd12dd1654a6f63f8d831880afe09a8bd4d"
-    ),
-    "src/web/v15_scan_service.py": (
-        "e0c4835f87fc8962cf073277dbeebc27bc510623c854934960590975ea96efcd"
-    ),
-    "src/web/v20_service.py": ("ba7e69ab519186e8ac77441423ef67a034778cb770f71fe65028f22b69ceff62"),
-    "src/web/v20_v16_daygate_attestation.py": (
-        "cfeeb8bcef49bddb581df4a325325de32e3aee28ceb57ed4349b08c990adde77"
-    ),
-}
 
 
 def _isolated_project(tmp_path: Path) -> tuple[Path, dict]:
@@ -166,44 +119,68 @@ def test_frozen_runtime_config_loads_with_safe_defaults(monkeypatch: pytest.Monk
     assert config.clock.reference_bar_label == "09:41"
     assert config.return_profile_id == "ZERO_COST_GROSS_PRICE_RETURN_V1"
     assert len(config.strategy_dependency_hashes) == len(_STRATEGY_DEPENDENCY_FILES)
-    assert config.state_semantics_hash == _TYPE_CLEAN_CORE
-    assert (
-        config.state_semantics_payload["state_input_orchestration_profile"]
-        == "V20_STATE_INPUT_ORCHESTRATION_V3"
+    assert not any(
+        relative.endswith(".py") or relative in {"pyproject.toml", "uv.lock"}
+        for relative in config.strategy_dependency_hashes
     )
-    assert {
-        "src/data/database/v16_canonical_artifact_store.py",
-        "src/data/database/v20_mews_guard_store.py",
-        "src/data/database/v20_mews_receipt_guard.py",
-        "src/web/v20_v16_canonical_artifact.py",
-    }.issubset(config.state_semantics_payload["state_dependency_hashes"])
-    assert (
-        "src/web/v20_v16_daygate_attestation.py"
-        not in config.state_semantics_payload["state_dependency_hashes"]
-    )
+    assert config.state_semantics_payload == {
+        "contract_schema": "v20-state-contract/v1",
+        "official_state_schema": "v20-official-state/v1",
+        "strategy_identifier": config.strategy_version,
+        "official_stream_id": config.official_stream_id,
+        "state_lineage_id": config.state_lineage_id,
+        "timezone": config.timezone,
+        "return_profile_id": config.return_profile_id,
+        "reference_profile_id": config.reference_profile_id,
+    }
     assert config.frozen_payload["state_semantics_hash"] == config.state_semantics_hash
+    assert declared_state_semantics_is_authentic(config.frozen_payload)
     assert len(config.config_hash) == 64
     assert config.schema_version == "v20-runtime/v2"
     assert config.route_binding.configured is False
     assert config.v20_db_ca_sha256 == "UNCONFIGURED"
 
 
-def test_config_hash_binds_exact_v16_and_v20_strategy_bytes(tmp_path, monkeypatch) -> None:
+def test_python_line_endings_and_comments_do_not_affect_runtime_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("V20_ENABLED", raising=False)
+    monkeypatch.delenv("V20_MODE", raising=False)
+    root, raw = _isolated_project(tmp_path)
+    source = root / "src" / "web" / "v20_service.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"class Service:\n    pass\n")
+    _write_runtime(root, raw)
+    before = load_v20_runtime_config(root)
+
+    source.write_bytes(b"# formatting-only change\r\nclass Service:\r\n    pass\r\n")
+    after = load_v20_runtime_config(root)
+
+    assert "src/web/v20_service.py" not in before.strategy_dependency_hashes
+    assert before.state_semantics_hash == after.state_semantics_hash
+    assert before.config_hash == after.config_hash
+
+
+def test_explicit_state_contract_change_forks_state_and_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.delenv("V20_MODE", raising=False)
     root, raw = _isolated_project(tmp_path)
     _write_runtime(root, raw)
-
     before = load_v20_runtime_config(root)
-    dependency = root / "src" / "strategy" / "strategies" / "v16_scanner.py"
-    dependency.write_text("different deployed V16 bytes\n", encoding="utf-8")
+    raw["state_lineage_id"] = "V20-STATE-LINEAGE-TEST-SHADOW-V2"
+    _write_runtime(root, raw)
     after = load_v20_runtime_config(root)
 
     assert before.state_semantics_hash != after.state_semantics_hash
     assert before.config_hash != after.config_hash
+    assert after.state_semantics_payload["state_lineage_id"] == raw["state_lineage_id"]
 
 
-def test_config_hash_binds_database_wiring_without_changing_state_semantics(
+def test_non_code_strategy_artifact_drift_changes_persisted_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -211,346 +188,33 @@ def test_config_hash_binds_database_wiring_without_changing_state_semantics(
     monkeypatch.delenv("V20_MODE", raising=False)
     root, raw = _isolated_project(tmp_path)
     _write_runtime(root, raw)
-
     before = load_v20_runtime_config(root)
-    database_config = root / "config" / "database-config.yaml"
-    database_config.write_text(
-        database_config.read_text(encoding="utf-8") + "\n# reviewed wiring changed\n",
-        encoding="utf-8",
-    )
+    model = root / "models" / "lgbrank_latest.txt"
+    model.write_text("changed model artifact\n", encoding="utf-8")
     after = load_v20_runtime_config(root)
 
-    assert before.database_config_sha256 != after.database_config_sha256
-    assert before.config_hash != after.config_hash
+    assert (
+        before.strategy_dependency_hashes["models/lgbrank_latest.txt"]
+        != (after.strategy_dependency_hashes["models/lgbrank_latest.txt"])
+    )
     assert before.state_semantics_hash == after.state_semantics_hash
-
-
-@pytest.mark.parametrize(
-    "relative",
-    [
-        "src/data/database/v16_canonical_artifact_store.py",
-        "src/data/database/v20_mews_guard_store.py",
-        "src/data/database/v20_mews_receipt_guard.py",
-        "src/web/v20_v16_canonical_artifact.py",
-    ],
-)
-def test_v4_state_hash_binds_each_new_official_state_module(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    relative: str,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    root, raw = _isolated_project(tmp_path)
-    _write_runtime(root, raw)
-    before = load_v20_runtime_config(root)
-    (root / relative).write_text("changed new runtime module bytes\n", encoding="utf-8")
-    after = load_v20_runtime_config(root)
-
-    assert before.state_semantics_hash != after.state_semantics_hash
     assert before.config_hash != after.config_hash
 
 
-def test_daygate_check_only_bytes_bind_full_config_without_forking_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    root, raw = _isolated_project(tmp_path)
-    _write_runtime(root, raw)
-    before = load_v20_runtime_config(root)
-
-    (root / "src/web/v20_v16_daygate_attestation.py").write_text(
-        "changed explicit check-only attestation bytes\n",
-        encoding="utf-8",
-    )
-    after = load_v20_runtime_config(root)
-
-    assert before.config_hash != after.config_hash
-    assert before.state_semantics_hash == after.state_semantics_hash
-
-
-@pytest.mark.parametrize(
-    "relative",
-    [
-        "src/strategy/strategies/momentum_sector_scanner.py",
-        "src/strategy/filters/momentum_quality_filter.py",
-        "src/data/clients/ifind_http_client.py",
-        "src/common/config.py",
-    ],
-)
-def test_config_hash_binds_lazy_v16_import_closure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    relative: str,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    root, raw = _isolated_project(tmp_path)
-    _write_runtime(root, raw)
-    before = load_v20_runtime_config(root)
-
-    (root / relative).write_text("changed lazy V16 dependency\n", encoding="utf-8")
-    after = load_v20_runtime_config(root)
-
-    assert before.state_semantics_hash != after.state_semantics_hash
-    assert before.config_hash != after.config_hash
-
-
-@pytest.mark.parametrize(
-    "relative",
-    ["src/common/feishu_bot.py", "src/common/v20_feishu.py"],
-)
-def test_notification_only_bytes_do_not_fork_state_semantics(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    relative: str,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    root, raw = _isolated_project(tmp_path)
-    _write_runtime(root, raw)
-    before = load_v20_runtime_config(root)
-
-    (root / relative).write_text("changed notification-only bytes\n", encoding="utf-8")
-    after = load_v20_runtime_config(root)
-
-    assert before.config_hash != after.config_hash
-    assert before.state_semantics_hash == after.state_semantics_hash
-
-
-def test_unreviewed_mixed_service_bytes_fail_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    root, raw = _isolated_project(tmp_path)
-    _write_runtime(root, raw)
-
-    (root / "src/web/v20_service.py").write_text(
-        "unreviewed state-sensitive service bytes\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(V20ConfigError, match="unreviewed state-sensitive mixed source"):
-        load_v20_runtime_config(root)
-
-
-def test_current_service_lf_loads_and_unreviewed_crlf_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    root, raw = _isolated_project(tmp_path)
-    _write_runtime(root, raw)
-    service_path = root / "src/web/v20_service.py"
-    source = (PROJECT_ROOT / "src/web/v20_service.py").read_bytes()
-    lf_source = source.replace(b"\r\n", b"\n")
-    crlf_source = lf_source.replace(b"\n", b"\r\n")
-
-    assert hashlib.sha256(lf_source).hexdigest() == (
-        "3052cfcf7ce96f616b770e3360435bfaa88ecb32522412149a575d48c0696731"
-    )
-    assert hashlib.sha256(crlf_source).hexdigest() == (
-        "ec3e33acf8892ef1beca3e9ce5ce8effcdc9849776710dd56ba1011cfd4a2b25"
-    )
-
-    service_path.write_bytes(lf_source)
-    lf_config = load_v20_runtime_config(root)
-    service_path.write_bytes(crlf_source)
-
-    assert (
-        lf_config.state_semantics_payload["mixed_state_source_classes"]["src/web/v20_service.py"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    with pytest.raises(V20ConfigError, match="unreviewed state-sensitive mixed source"):
-        load_v20_runtime_config(root)
-
-
-def test_selection_v3_and_v4_source_bytes_and_upgrade_edges_are_exact() -> None:
-    service_classes = _MIXED_STATE_SOURCE_CLASSES["src/web/v20_service.py"]
-    repository_classes = _MIXED_STATE_SOURCE_CLASSES["src/data/database/v20_repository.py"]
-
-    assert (
-        service_classes["985b11a06d4222fbb1ef42da6313bf155522400606e08c205d365ec901a3f7df"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V3"
-    )
-    assert (
-        service_classes["2aaf4957addc5f09d7eca3aa7e45ed525c87a7fb8e470ad68f0b5b2f94d9d78f"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V3"
-    )
-    assert (
-        service_classes["aa5268d53a9337c84c1a4ef9f25e78b1e657dbe81e72de989a36ea370dcc4f24"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["a33c99d74fe3cdbc220b5806ddb071fd551eb6ae15505a0b0e57d02707ca445e"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["ba7e69ab519186e8ac77441423ef67a034778cb770f71fe65028f22b69ceff62"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["616059227bf2e79802ba17fb0936102143f9e3c73bb63fbe8215491d64d092a8"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["d1135bbf20c3beecaa114ad918fa49b6a6b279b62d3fb1d455a4d3e7122d97f1"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["e514292401bde5930b503fc640393cd90f7a241a2ff93059cff1bc230902e5e0"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["a7170343fdac66b177bb1ca50c4680308f2ce4e83d77ec00aabb69204b71b0ac"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["149c36817be6665c12e2bbfeceb5527fd6382d2865cbbf95b16a86ee118b0d17"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert (
-        service_classes["3052cfcf7ce96f616b770e3360435bfaa88ecb32522412149a575d48c0696731"]
-        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-    assert "ec3e33acf8892ef1beca3e9ce5ce8effcdc9849776710dd56ba1011cfd4a2b25" not in (
-        service_classes
-    )
-    assert "56fe73c25e65309a3fc52cc1a47c0a102c99a07b8370f9d5788c8ef2222921e1" not in (
-        service_classes
-    )
-    assert "568616622cc3fcd7cf21f60773a87db6a9bda9cdbb236eec6d5c960c31b2e998" not in (
-        service_classes
-    )
-    assert (
-        repository_classes["bfcb7d5881e2597bfbc46d3826e9cee45656e4419d2e6dc489fea3c81de4d35e"]
-        == "V20_LEDGER_STATE_CONTRACT_V2"
-    )
-    assert (
-        repository_classes["d34ba101ec95cd6a3a8c7b0933fbb3b6cee9c29dfca7af9fd316f13bf04b9601"]
-        == "V20_LEDGER_STATE_CONTRACT_V2"
-    )
-    assert (
-        repository_classes["535fd459ac0867e7373d3a398f8d4425f5e388cf6a331c65fbd61faefc5255e9"]
-        == "V20_LEDGER_STATE_CONTRACT_V2"
-    )
-    assert "e0d8cedccc7a69b1d47addd4948a02c5f7f80647d9f67d1c9bd2fa74aa8e6040" not in (
-        repository_classes
-    )
-    assert "948285f38293a07c07e27e4e77b54999506a7a3a1a926aa4a58c6e543544c094" not in (
-        repository_classes
-    )
-    assert is_audited_state_semantics_transition(
-        _PRE_SELECTION_V2_CORE,
-        _SELECTION_V3_CORE,
-    )
-    assert is_audited_state_semantics_transition(
-        _SELECTION_V3_CORE,
-        _PREVIOUS_TYPE_CLEAN_CORE,
-    )
-    assert is_audited_state_semantics_transition(
-        _PREVIOUS_TYPE_CLEAN_CORE,
-        _TYPE_CLEAN_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _SELECTION_V3_CORE,
-        _SELECTION_V4_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _SELECTION_V4_CORE,
-        _PREVIOUS_TYPE_CLEAN_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _PRE_SELECTION_V2_CORE,
-        _SELECTION_V4_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _PRE_SELECTION_V2_CORE,
-        _PREVIOUS_TYPE_CLEAN_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _SELECTION_V3_CORE,
-        _TYPE_CLEAN_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _TYPE_CLEAN_CORE,
-        _PREVIOUS_TYPE_CLEAN_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _PREVIOUS_TYPE_CLEAN_CORE,
-        _SELECTION_V3_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        "0" * 64,
-        _SELECTION_V3_CORE,
-    )
-    assert not is_audited_state_semantics_transition(
-        _PRE_SELECTION_V2_CORE,
-        "f" * 64,
-    )
-
-
-def test_historical_v3_payload_keeps_its_original_profile_and_core(
+def test_current_payload_authentication_requires_embedded_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.delenv("V20_MODE", raising=False)
     current = load_v20_runtime_config(PROJECT_ROOT)
-    payload = dict(current.frozen_payload)
-    dependencies = dict(payload["strategy_dependency_hashes"])
-    dependencies.update(_SELECTION_V3_DEPENDENCIES)
-    payload["strategy_dependency_hashes"] = dependencies
 
-    historical = state_semantics_payload_from_frozen_payload(payload)
+    assert declared_state_semantics_is_authentic(current.frozen_payload)
+    tampered = dict(current.frozen_payload)
+    contract = dict(tampered["state_semantics_payload"])
+    contract["official_state_schema"] = "v20-official-state/v0"
+    tampered["state_semantics_payload"] = contract
 
-    assert state_semantics_hash_from_frozen_payload(payload) == _SELECTION_V3_CORE
-    assert historical["state_input_orchestration_profile"] == ("V20_STATE_INPUT_ORCHESTRATION_V1")
-    assert not {
-        "src/data/database/v16_canonical_artifact_store.py",
-        "src/data/database/v20_mews_guard_store.py",
-        "src/data/database/v20_mews_receipt_guard.py",
-        "src/web/v20_v16_canonical_artifact.py",
-    }.intersection(historical["state_dependency_hashes"])
-
-
-def test_historical_v4_payload_keeps_its_original_profile_and_core(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    current = load_v20_runtime_config(PROJECT_ROOT)
-    payload = dict(current.frozen_payload)
-    dependencies = dict(payload["strategy_dependency_hashes"])
-    dependencies.update(_SELECTION_V4_DEPENDENCIES)
-    payload["strategy_dependency_hashes"] = dependencies
-
-    historical = state_semantics_payload_from_frozen_payload(payload)
-
-    assert state_semantics_hash_from_frozen_payload(payload) == _SELECTION_V4_CORE
-    assert historical["state_input_orchestration_profile"] == ("V20_STATE_INPUT_ORCHESTRATION_V3")
-    assert historical["mixed_state_source_classes"]["src/web/v20_service.py"] == (
-        "V20_SERVICE_STATE_ORCHESTRATION_V4"
-    )
-
-
-def test_v4_payload_fails_closed_when_new_state_dependency_is_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("V20_ENABLED", raising=False)
-    monkeypatch.delenv("V20_MODE", raising=False)
-    current = load_v20_runtime_config(PROJECT_ROOT)
-    payload = dict(current.frozen_payload)
-    dependencies = dict(payload["strategy_dependency_hashes"])
-    dependencies.pop("src/web/v20_v16_canonical_artifact.py")
-    payload["strategy_dependency_hashes"] = dependencies
-
-    with pytest.raises(V20ConfigError, match="lacks valid state dependency"):
-        state_semantics_payload_from_frozen_payload(payload)
+    assert not declared_state_semantics_is_authentic(tampered)
 
 
 def test_container_bundled_data_paths_keep_same_logical_hash_keys(tmp_path, monkeypatch) -> None:

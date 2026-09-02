@@ -89,21 +89,9 @@ def test_importing_dedicated_host_does_not_import_execution_surface() -> None:
     code = """
 import os
 import sys
-import hashlib
-from pathlib import Path
 os.environ['V20_ENABLED'] = 'false'
 os.environ['V20_MODE'] = 'forward_shadow'
 os.environ['V20_ALLOW_PRODUCTION_PUSH'] = 'false'
-import src.strategy.v20.runtime_config as runtime_config
-project_root = Path.cwd()
-test_mixed_classes = {
-    'src/web/v20_service.py': 'V20_SERVICE_STATE_ORCHESTRATION_V4',
-    'src/data/database/v20_repository.py': 'V20_LEDGER_STATE_CONTRACT_V2',
-}
-for relative, reviewed_hashes in runtime_config._MIXED_STATE_SOURCE_CLASSES.items():
-    reviewed_hashes[hashlib.sha256((project_root / relative).read_bytes()).hexdigest()] = (
-        test_mixed_classes[relative]
-    )
 import src.web.v20_app as v20_host
 service = v20_host._create_default_v20_service()
 assert service.config.enabled is False
@@ -161,16 +149,8 @@ from src.web.v15_scan_service import V15ScanState
 from src.web.v20_app import create_v20_app
 from src.web.v20_service import V20Service, _cleanup_v20_scan_resources, _init_v20_scan_resources
 
-project_root = Path.cwd()
-test_mixed_classes = {
-    'src/web/v20_service.py': 'V20_SERVICE_STATE_ORCHESTRATION_V4',
-    'src/data/database/v20_repository.py': 'V20_LEDGER_STATE_CONTRACT_V2',
-}
-for relative, reviewed_hashes in runtime_config._MIXED_STATE_SOURCE_CLASSES.items():
-    reviewed_hashes[hashlib.sha256((project_root / relative).read_bytes()).hexdigest()] = (
-        test_mixed_classes[relative]
-    )
 owned = {}
+project_root = Path.cwd()
 
 
 class FakeRealtime:

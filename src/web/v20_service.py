@@ -53,7 +53,6 @@ from src.data.database.v20_mews_guard_store import V20MewsGuardStore
 from src.data.database.v20_mews_receipt_guard import V20MewsReceiptGuard
 from src.data.database.v20_repository import (
     ActiveModelLeg,
-    CompatibleEntryBinding,
     EntryStatus,
     ExitCommit,
     ManualMonitorEnrollmentCommit,
@@ -111,7 +110,6 @@ from src.strategy.v20.runtime_config import (
     V20ConfigError,
     V20RouteBinding,
     V20RuntimeConfig,
-    is_audited_legacy_state_semantics_hash,
     load_v20_runtime_config,
     validate_v20_api_keys,
     validate_v20_database_consumers,
@@ -811,6 +809,55 @@ def _mews_snapshot(record: SelectedMewsRecord | None) -> tuple[MewsSnapshot, ...
     )
 
 
+# Retired checkpoint provenance fields.  Historical v2 exports still carry
+# them and their values are never consulted for authorization; the v3 exporter
+# no longer emits them, so a v3 checkpoint containing one is malformed.
+# Early v2 exports carried only source_config_hash and
+# source_state_semantics_hash; resolved_state_semantics_hash was added by the
+# later v2 exporter, so both enumerated v2 keysets are accepted below.
+RETIRED_CHECKPOINT_FIELDS: frozenset[str] = frozenset(
+    {
+        "source_config_hash",
+        "source_state_semantics_hash",
+        "resolved_state_semantics_hash",
+    }
+)
+BOOTSTRAP_CHECKPOINT_V3_KEYS: frozenset[str] = frozenset(
+    {
+        "schema_version",
+        "target_official_stream_id",
+        "state_lineage_id",
+        "source_official_stream_id",
+        "source_lineage_id",
+        "as_of_trade_date",
+        "source_state_revision",
+        "source_state_hash",
+        "source_bootstrap_mode",
+        "source_bootstrap_checkpoint_hash",
+        "source_last_terminal_slot_id",
+        "source_last_terminal_trade_date",
+        "batch_id_migration",
+        "official_state",
+        "official_state_hash",
+        "state_shadow_batches",
+    }
+)
+BOOTSTRAP_CHECKPOINT_V2_EARLY_KEYS: frozenset[str] = BOOTSTRAP_CHECKPOINT_V3_KEYS | {
+    "source_config_hash",
+    "source_state_semantics_hash",
+}
+BOOTSTRAP_CHECKPOINT_V2_KEYS: frozenset[str] = BOOTSTRAP_CHECKPOINT_V2_EARLY_KEYS | {
+    "resolved_state_semantics_hash",
+}
+BOOTSTRAP_CHECKPOINT_KEYS: Mapping[str, tuple[frozenset[str], ...]] = {
+    "v20-bootstrap-checkpoint/v3": (BOOTSTRAP_CHECKPOINT_V3_KEYS,),
+    "v20-bootstrap-checkpoint/v2": (
+        BOOTSTRAP_CHECKPOINT_V2_EARLY_KEYS,
+        BOOTSTRAP_CHECKPOINT_V2_KEYS,
+    ),
+}
+
+
 def _bootstrap_bundle(
     config: V20RuntimeConfig,
     *,
@@ -829,29 +876,18 @@ def _bootstrap_bundle(
         raise V20ConfigError(f"cannot read V20 bootstrap checkpoint: {exc}") from exc
     if not isinstance(checkpoint, Mapping):
         raise V20ConfigError("V20 checkpoint root must be an object")
-    if checkpoint.get("schema_version") != "v20-bootstrap-checkpoint/v2":
+    schema_version = checkpoint.get("schema_version")
+    if not isinstance(schema_version, str):
         raise V20ConfigError("unsupported V20 checkpoint schema")
+    checkpoint_keysets = BOOTSTRAP_CHECKPOINT_KEYS.get(schema_version)
+    if checkpoint_keysets is None:
+        raise V20ConfigError("unsupported V20 checkpoint schema")
+    if all(set(checkpoint) != keyset for keyset in checkpoint_keysets):
+        raise V20ConfigError("V20 checkpoint top-level field set mismatch for its schema")
     if checkpoint.get("target_official_stream_id") != config.official_stream_id:
         raise V20ConfigError("V20 checkpoint target stream does not match active config")
     if checkpoint.get("state_lineage_id") != config.state_lineage_id:
         raise V20ConfigError("V20 checkpoint lineage does not match active config")
-    source_state_semantics_hash = checkpoint.get("source_state_semantics_hash")
-    resolved_state_semantics_hash = checkpoint.get("resolved_state_semantics_hash")
-    if resolved_state_semantics_hash is None:
-        resolved_state_semantics_hash = source_state_semantics_hash
-    source_is_current = source_state_semantics_hash == resolved_state_semantics_hash
-    source_is_resolved_legacy = (
-        source_state_semantics_hash != resolved_state_semantics_hash
-        and is_audited_legacy_state_semantics_hash(source_state_semantics_hash)
-    )
-    if (
-        not source_is_current
-        and not source_is_resolved_legacy
-        or resolved_state_semantics_hash != config.state_semantics_hash
-    ):
-        raise V20ConfigError(
-            "V20 checkpoint state semantics do not match the active strategy bytes/config"
-        )
     raw_as_of = checkpoint.get("as_of_trade_date")
     if not isinstance(raw_as_of, str):
         raise V20ConfigError("V20 checkpoint as_of_trade_date is missing")
@@ -866,6 +902,8 @@ def _bootstrap_bundle(
     state = checkpoint.get("official_state")
     if not isinstance(state, Mapping):
         raise V20ConfigError("V20 checkpoint official_state is missing")
+    if state.get("schema_version") != "v20-official-state/v1":
+        raise V20ConfigError("V20 checkpoint official_state schema is unsupported")
     expected_hash = checkpoint.get("official_state_hash")
     if not isinstance(expected_hash, str) or sha256_json(state) != expected_hash:
         raise V20ConfigError("V20 checkpoint official_state_hash mismatch")
@@ -1277,13 +1315,6 @@ class V20Service:
         self._status_snapshot: Mapping[str, Any] | None = None
         self._status_snapshot_error: str | None = None
         self._startup_stage = "NOT_STARTED"
-        self._compatible_entry_bindings: set[tuple[str, str, str]] = {
-            (
-                self.config.config_hash[:24],
-                self.config.config_hash,
-                self.config.state_semantics_hash,
-            )
-        }
         self._lane_health = {
             name: _RuntimeLaneHealth()
             for name in (
@@ -1696,30 +1727,12 @@ class V20Service:
                 official_stream_id=self.config.official_stream_id,
                 bootstrap_mode=self.config.bootstrap_mode,
                 state_semantics_hash=self.config.state_semantics_hash,
-                current_config_id=self.config.config_hash[:24],
-                current_config_hash=self.config.config_hash,
-                current_config_payload=self.config.frozen_payload,
                 bootstrap_checkpoint_hash=self.config.bootstrap_checkpoint_sha256,
                 bootstrap_predecessor_trade_date=bootstrap.predecessor_trade_date,
                 bootstrap_shadow_batches=bootstrap.shadow_batches,
             )
             self._startup_stage = "ATTACHING_CANONICAL_ARTIFACT"
             await self._initialize_canonical_artifact_boundary()
-            repository_bindings: Iterable[object] = getattr(
-                self._repository,
-                "compatible_entry_bindings",
-                frozenset(),
-            )
-            for binding in repository_bindings:
-                if not isinstance(binding, CompatibleEntryBinding):
-                    raise V20ConfigError("repository returned an invalid config compatibility")
-                self._compatible_entry_bindings.add(
-                    (
-                        binding.config_id,
-                        binding.config_hash,
-                        binding.state_semantics_hash,
-                    )
-                )
             self._startup_stage = "REFRESHING_STATUS"
             await self._refresh_status_snapshot()
             self._startup_stage = "INITIALIZING_MARKET_RESOURCES"
@@ -2154,34 +2167,28 @@ class V20Service:
                 or semantic.get("non_actionable") is not True
                 or semantic.get("retrospective_expired") is not True
                 or semantic.get("visible_message_mode") != "MANUAL_OPERATOR_RENDER"
-                or semantic.get("state_semantics_hash") != self.config.state_semantics_hash
+                or not isinstance(semantic.get("state_semantics_hash"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", str(semantic.get("state_semantics_hash"))) is None
+                or not isinstance(semantic.get("strategy_version"), str)
+                or not semantic.get("strategy_version")
                 or semantic.get("strategy_version") != self.config.strategy_version
+                or semantic.get("state_semantics_hash") != self.config.state_semantics_hash
+                or semantic.get("official_stream_id") != self.config.official_stream_id
+                or semantic.get("state_lineage_id") != self.config.state_lineage_id
             ):
                 raise V20SemanticConflict(
                     "manual monitor source is not a sealed compatible PASS/ENTER chain probe"
                 )
             source_config_hash = semantic.get("config_hash")
-            if not isinstance(source_config_hash, str) or len(source_config_hash) != 64:
-                raise V20SemanticConflict("manual monitor source config hash is invalid")
-            source_binding = (
-                source_config_hash[:24],
-                source_config_hash,
-                self.config.state_semantics_hash,
-            )
-            if source_config_hash != self.config.config_hash and (
-                source_binding not in self._compatible_entry_bindings
-                and not await self._repository.is_registered_source_config_compatible(
-                    source_config_hash,
-                    strategy_version=self.config.strategy_version,
-                    state_semantics_hash=self.config.state_semantics_hash,
-                    official_stream_id=self.config.official_stream_id,
-                    lineage_id=self.config.state_lineage_id,
-                    route_id=self.config.route_id,
-                )
+            if (
+                not isinstance(source_config_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", source_config_hash) is None
             ):
-                raise V20SemanticConflict(
-                    "manual monitor source belongs to an unaudited historical config"
-                )
+                raise V20SemanticConflict("manual monitor source config hash is invalid")
+            if sha256_json(dict(source.semantic)) != source.semantic_content_hash:
+                raise V20SemanticConflict("manual monitor source semantic hash differs")
+            if sha256_json(dict(source.payload)) != source.payload_hash:
+                raise V20SemanticConflict("manual monitor source payload hash differs")
 
             try:
                 signal_date = date.fromisoformat(str(semantic["event_trade_date"]))
@@ -2211,6 +2218,11 @@ class V20Service:
                 not isinstance(entry_render, Mapping)
                 or not isinstance(symbols, list)
                 or not symbols
+                or entry_render.get("schema_version") != V20_ENTRY_SEMANTIC_SCHEMA
+                or entry_render.get("feishu_formatter_profile") != V20_FEISHU_FORMATTER_PROFILE
+                or entry_render.get("strategy_version") != semantic.get("strategy_version")
+                or entry_render.get("config_hash") != source_config_hash
+                or entry_render.get("state_semantics_hash") != semantic.get("state_semantics_hash")
                 or entry_render.get("symbols") != symbols
                 or entry_render.get("action") != "ENTER"
                 or entry_render.get("final_multiplier") != multiplier
@@ -8012,9 +8024,7 @@ class V20Service:
                         stage="rules_symbol",
                         elapsed_seconds=max(0.0, timed_out_at - started_at),
                         remaining_seconds=(
-                            max(0.0, deadline - timed_out_at)
-                            if deadline is not None
-                            else 0.0
+                            max(0.0, deadline - timed_out_at) if deadline is not None else 0.0
                         ),
                         deadline=symbol_deadline,
                         symbols=(record.code,),
@@ -8800,45 +8810,29 @@ class V20Service:
         return comparison_codes, symbol_codes
 
     def _verify_entry_binding(self, status: EntryStatus) -> None:
-        if (
-            status.official_stream_id != self.config.official_stream_id
-            or status.strategy_version != self.config.strategy_version
-            or status.lineage_id != self.config.state_lineage_id
-            or status.config_id != status.config_hash[:24]
-            or status.semantic.get("strategy_version") != status.strategy_version
-            or status.semantic.get("config_hash") != status.config_hash
-        ):
-            raise V20ConfigError("today's terminal V20 slot belongs to another config/lineage")
-        exact_current = (
-            status.config_id == self.config.config_hash[:24]
-            and status.config_hash == self.config.config_hash
-        )
         semantic_state_hash = status.semantic.get("state_semantics_hash")
         snapshot_state_hash = status.snapshot.get("state_semantics_hash")
-        if exact_current:
-            if (
-                semantic_state_hash != self.config.state_semantics_hash
-                or snapshot_state_hash != self.config.state_semantics_hash
-            ):
-                raise V20ConfigError("persisted V20 slot state semantics are incompatible")
-        else:
-            compatible_binding = (
-                status.config_id,
-                status.config_hash,
-                semantic_state_hash,
-            )
-            if (
-                status.slot_status not in {"COMPLETED", "FAILED"}
-                or semantic_state_hash != snapshot_state_hash
-                or compatible_binding not in self._compatible_entry_bindings
-            ):
-                raise V20ConfigError(
-                    "today's terminal V20 slot belongs to an unproven historical config"
-                )
+        if (
+            status.official_stream_id != self.config.official_stream_id
+            or status.lineage_id != self.config.state_lineage_id
+            or status.config_id != status.config_hash[:24]
+            or re.fullmatch(r"[0-9a-f]{64}", status.config_hash) is None
+            or not isinstance(status.strategy_version, str)
+            or not status.strategy_version
+            or status.semantic.get("strategy_version") != status.strategy_version
+            or status.semantic.get("config_hash") != status.config_hash
+            or not isinstance(semantic_state_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", semantic_state_hash) is None
+            or semantic_state_hash != snapshot_state_hash
+            or status.slot_status not in {"COMPLETED", "FAILED"}
+        ):
+            raise V20ConfigError("today's terminal V20 slot belongs to another config/lineage")
         if (
             status.semantic.get("schema_version") != V20_ENTRY_SEMANTIC_SCHEMA
             or status.semantic.get("feishu_formatter_profile") != V20_FEISHU_FORMATTER_PROFILE
             or status.semantic.get("action") != status.action
+            or sha256_json(dict(status.semantic)) != status.semantic_content_hash
+            or sha256_json(dict(status.snapshot)) != status.snapshot_hash
         ):
             raise V20ConfigError("persisted V20 entry semantic contract is incompatible")
         if status.action == "INPUT_INVALID":

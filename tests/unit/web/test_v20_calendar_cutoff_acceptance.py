@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.strategy.v20.runtime_config as runtime_config_module
 import src.web.v15_scan_service as v15_scan_service
 import src.web.v20_service as service_module
 from src.data.database.v20_repository import EntryStatus, V20SemanticConflict, sha256_json
@@ -40,18 +39,6 @@ CUTOFF = datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
 
 @pytest.fixture(autouse=True)
 def _runtime_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for relative, reviewed_hashes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
-        source_hash = hashlib.sha256((PROJECT_ROOT / relative).read_bytes()).hexdigest()
-        source_class = (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-            if relative == "src/web/v20_service.py"
-            else (
-                "V20_LEDGER_STATE_CONTRACT_V2"
-                if relative == "src/data/database/v20_repository.py"
-                else reviewed_hashes[source_hash]
-            )
-        )
-        monkeypatch.setitem(reviewed_hashes, source_hash, source_class)
     monkeypatch.delenv("V20_ENABLED", raising=False)
     monkeypatch.setenv("V20_MODE", "forward_shadow")
     monkeypatch.setenv("DB_SSLROOTCERT_SHA256", "c" * 64)

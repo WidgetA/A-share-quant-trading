@@ -55,10 +55,6 @@ class StartupRepository:
     async def ensure_genesis_state(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
-    @property
-    def compatible_entry_bindings(self) -> frozenset[Any]:
-        return frozenset()
-
     async def close(self) -> None:
         self.timeline.append("repository-closed")
 

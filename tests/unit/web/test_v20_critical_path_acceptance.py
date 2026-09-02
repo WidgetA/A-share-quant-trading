@@ -845,8 +845,6 @@ async def test_real_factories_and_app_lifecycle_have_no_scan_pipeline(
     )
 
     class LifecycleRepository:
-        compatible_entry_bindings: frozenset[Any] = frozenset()
-
         def __init__(self) -> None:
             self.config = repository_config
 

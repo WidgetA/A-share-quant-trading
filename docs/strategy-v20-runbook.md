@@ -529,8 +529,8 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/manual-monitor \
 事件和票单。
 
 服务只接受同 route/stream/lineage、已密封、`PASS`、当前代码确实重算、结果为 `ENTER`
-且 state semantics 与当前版本相同的来源；full config 可以是同一 lineage 中已经审计为
-兼容的上一部署。服务根据交易所日历自行固定 D1/D2，并先恢复 D0 原始结束标签 `09:41`
+且显式状态/事件/快照 schema 版本与当前运行时一致的来源；部署字节或源码变化本身不是
+拒绝理由，也不存在“已审计兼容的上一部署”这类 hash 到 hash 的兼容授权。服务根据交易所日历自行固定 D1/D2，并先恢复 D0 原始结束标签 `09:41`
 bar。全部票都具有合法、无冲突且在 D1 09:30 前首次落库的证据后，数据库事务才一次性
 建立 `origin_kind=MANUAL_MONITOR` 的批次和全部 PENDING 腿；任一票缺失或冲突则整批不建。
 09:39 展示价绝不能充当参考价。最终参考价仍由正常恢复链在 D1 09:30 从合格修订中统一
@@ -618,7 +618,7 @@ python scripts/export_v20_checkpoint.py \
 ```
 
 导出器会在一个只读串行事务中校验来源 stream/lineage、官方 state hash、与目标
-配置一致的 `state_semantics_hash`、as-of
+配置一致的显式状态/事件/快照 schema 版本、as-of
 终态前驱和完整的 7 个有效 rolling 批次；它还会迁移健康水位、活动 rolling gap、
 所有仍待成熟的 HEALTH/ROLLING7 批次，以及在 as-of 决策后才形成、尚未被下一次
 决策消费的 HEALTH 终态和 `COMPLETE_INVALID` rolling 事实，并为目标 lineage 生成
@@ -626,6 +626,12 @@ python scripts/export_v20_checkpoint.py \
 拒绝导出。目标 state
 固定从 revision 0 开始，`last_terminal_slot_id` 和 `last_terminal_trade_date` 固定为空，
 不会用 shadow 槽伪造生产前驱。
+
+导出器写入 `v20-bootstrap-checkpoint/v3` schema：在 v2 的基础上移除已退役的来源
+配置/状态语义审计 hash 字段（`source_config_hash`、`source_state_semantics_hash`、
+`resolved_state_semantics_hash`）。loader 同时接受历史 v2 和 v3 文件；v2 中遗留的
+来源 config/state-semantics 审计 hash 只作历史审计记录被忽略，绝不用于状态兼容或
+任何其他授权。
 
 命令只会新建 checkpoint；同路径已有不同内容时会拒绝覆盖。把命令输出的
 `checkpoint_sha256` 原样填入 `bootstrap.checkpoint_sha256`，并把 target stream/lineage
@@ -668,23 +674,33 @@ GROUP BY 1,2,3,4,5
 ORDER BY 1,2,3,4,5;
 ```
 
-### 7.1 运行层更新与状态语义兼容
+### 7.1 版本、哈希与状态兼容的规范禁令
 
-`config_hash` 继续绑定完整部署字节，用于确认实际运行的镜像；
-`state_semantics_hash` 只绑定会改变选股、BASE、滚动 7、G、状态迁移或退出判断的核心语义。
-包含状态敏感逻辑的混合文件必须命中已审核的源码 digest 与语义类别；未知 digest 一律
-fail closed，不能把改动自行解释为“只是运行层更新”。
+Git commit/build SHA 和镜像 digest 只是可观测/审计元数据，用于核对实际部署的镜像。
+`config_hash` 不是纯审计元数据：它是规范化运行时配置与保留非代码制品身份的规范
+身份，标识当前 config registry 记录并被事件、决定和幂等绑定引用；它不含任何
+Python 源码或 Git 字节。以上任何一项都不能决定策略是否运行，也不能作为启动、历史
+状态兼容、源码过渡、交易、回放或迁移授权。在此之上，以下行为一律禁止：
 
-从 2026-08-31 的 legacy 完整哈希迁移时，系统不会覆盖
-`state_lineage_registry.state_semantics_hash`，而是在
-`v20.state_semantics_compatibility` 中追加经过 config ledger、终局 slot、官方 state 和源码
-依赖共同认证的兼容证据。禁止手工修改该表、删除旧 registry 或重写旧 slot。旧终局只可
-在兼容证据已验证后供当前 runtime 接回；新决策仍必须绑定当前 `config_hash`。
+- 禁止把 Python/源文件字节 hash 用作运行时启动、状态兼容、交易、回放或迁移授权；
+- 禁止 commit/hash 到 hash 的过渡 allowlist，以及任何形式的“兼容证据/兼容回执”；
+- 禁止因为格式化、注释或文档变化要求迁移、新 lineage 或重新走影子；
+- 禁止把源码 digest 名单作为混合文件的放行条件；运行层更新不需要任何源码哈希认证。
 
-checkpoint 导出必须同时保留来源 legacy 哈希和已验证的 core 哈希，并复核兼容证据；
-没有唯一可信 core 解析时拒绝导出。旧镜像回滚只能视为应急停机手段：一旦新 core runtime
-已经提交新的同日 slot，旧镜像未必能理解该 slot，不能把“registry 原值仍在”误认为可以
-无条件热回滚并继续决策。
+状态兼容只由以下显式事实授权：状态/事件/快照 schema 版本、scope/lineage/stream
+作用域、内容完整性，以及 schema 变化时的显式数据库迁移。只有显式 schema 版本升级
+才要求新 lineage 并重新走影子与 checkpoint；纯源码重构、格式化或注释变化不要求。
+
+模型、feature list、板块数据、G 制品和 checkpoint 文件保留 SHA-256 内容完整性校验；
+这些 checksum 只证明内容未被改动，不构成源版本兼容链。
+
+`v20.state_semantics_compatibility` 表运行时不读、不写，也不做破坏性清理迁移，
+保留原行仅供审计。`state_lineage_registry.state_semantics_hash` 仅可在 genesis
+写入非授权审计 metadata，绝不作为兼容、启动、交易或 replay 门禁被读取、比较或
+重写。同样禁止手工修改该表、删除旧 registry 或
+重写旧 slot。旧镜像回滚只能视为应急停机手段：一旦新 runtime 已经提交新的同日 slot，
+旧镜像未必能理解该 slot，不能把“registry 原值仍在”误认为可以无条件热回滚并继续
+决策。
 
 ## 8. 回滚
 

@@ -2872,8 +2872,7 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                     except Exception as exc:
                         post_window_probe_dates.remove(trade_date)
                         artifact_recovery_error = (
-                            "CanonicalV16ArtifactProbeError: "
-                            f"{type(exc).__name__}: {exc}"
+                            f"CanonicalV16ArtifactProbeError: {type(exc).__name__}: {exc}"
                         )
                         scan_state.scan_error = artifact_recovery_error
                         logger.warning(

@@ -396,8 +396,7 @@ async def test_probe_exception_is_retryable_and_not_not_ready(monkeypatch):
     assert state.today_recommendation == {"stock_code": "600000"}
     assert state.scan_done_date == ""
     assert (
-        state.scan_error
-        == "CanonicalV16ArtifactProbeError: RuntimeError: artifact JSON malformed"
+        state.scan_error == "CanonicalV16ArtifactProbeError: RuntimeError: artifact JSON malformed"
     )
     assert "CanonicalV16NotReadyError" not in state.scan_error
 

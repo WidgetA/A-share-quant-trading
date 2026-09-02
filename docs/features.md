@@ -40,9 +40,10 @@
 | 0.11.1 | 2026-08-31 | - | STR-006: Add an idempotent V20 manual deployment trigger with a durable non-actionable Feishu receipt |
 | 0.11.2 | 2026-08-31 | - | STR-006: Embed V20 forward-shadow in the existing main/V16 runtime, reusing deployed DB, Tushare, and Feishu infrastructure while preserving an isolated ledger/outbox and notification-only boundary |
 | 0.11.3 | 2026-08-31 | - | STR-006: Add a durable, non-actionable exact-09:39 retrospective replay when a late deployment has already failed the official entry slot |
-| 0.11.4 | 2026-08-31 | - | STR-006: Separate deploy-byte identity from V20 state semantics and add an authenticated, append-only legacy-to-core compatibility bridge so notification/replay-only releases can reattach terminal state without rewriting the ledger |
+| 0.11.4 | 2026-08-31 | - | STR-006: Separate deploy-byte identity from V20 state semantics and add an authenticated, append-only legacy-to-core compatibility bridge so notification/replay-only releases can reattach terminal state without rewriting the ledger (bridge retired by 0.11.7: hash-to-hash compatibility receipts are banned) |
 | 0.11.5 | 2026-09-01 | - | STR-006: Add explicit, idempotent pre-D1 enrollment of a sealed retrospective ticket list into the existing D1/D2 exit-notification ledger without changing official state or creating orders |
 | 0.11.6 | 2026-09-01 | - | STR-006: Make live-exit feed health session-aware at the 11:30 lunch boundary: allow one minute for the closing bar to publish, then require current-day 11:30 history throughout lunch without consuming stale prices |
+| 0.11.7 | 2026-09-02 | - | STR-006: Ban Python/source-file byte hashes and commit/hash-to-hash transition allowlists or compatibility receipts as runtime startup, state-compatibility, trading, replay, or migration authorization; commit/build SHAs are audit metadata only; state compatibility is authorized only by explicit schema versions, scope/lineage/stream, content integrity, and explicit DB migrations |
 
 ---
 
@@ -932,6 +933,27 @@ or submits orders.
   shadow batches, model legs, MEWS selections, exits, orders, or brokerage state.
 - Keep fees and slippage at zero in strategy semantics. V20 reports relative batch multipliers and
   stock lists, never assumed capital or share quantities.
+- Never use Python/source-file byte hashes, Git commit/build SHAs, or commit/hash-to-hash
+  transition allowlists and compatibility receipts as runtime startup, state-compatibility,
+  trading, replay, or migration authorization. Only commit/build SHAs and image digests are
+  pure audit/log metadata. `config_hash` is not audit-only: it is the canonical identity of
+  the normalized runtime configuration plus retained non-code artifact identity — it
+  identifies the current config registry record and is referenced by event, decision, and
+  idempotency bindings — but it contains no Python/source/Git bytes and must never authorize
+  historical state compatibility or source transitions. Formatting,
+  comment, or documentation changes must never require a migration or a new lineage. State
+  compatibility is authorized only by explicit state/event/snapshot schema versions,
+  scope/lineage/stream identity, content integrity, and explicit DB migrations when schemas
+  change.
+- Non-code strategy artifacts (model, feature list, sector/board data, G artifacts, checkpoints)
+  keep checksum integrity; those checksums prove content integrity, not source-version
+  compatibility. The bootstrap checkpoint exporter writes `v20-bootstrap-checkpoint/v3`,
+  which omits the retired legacy source config/state-semantics audit hash fields
+  (`source_config_hash`, `source_state_semantics_hash`, `resolved_state_semantics_hash`);
+  the loader accepts historical v2 and v3 and ignores the v2 legacy source/config/state-semantics
+  audit hashes for authorization. The legacy `state_semantics_compatibility` table and historical
+  `state_semantics_hash` columns are retired audit fields: no runtime read/write gate and no
+  destructive cleanup migration.
 - Keep checked-in YAML disabled (`V20_ENABLED=false`, `forward_shadow`) so it can never activate
   formal push. The legacy main app constructs only the bounded embedded shadow profile at runtime.
 

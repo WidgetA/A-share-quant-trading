@@ -238,18 +238,37 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 ## 8. 状态、幂等与恢复
 
 - PostgreSQL 是唯一正式状态源；不使用进程内猜测状态继续决策；
-- 每个 lineage 在建立时永久绑定 `state_semantics_hash`；规则、代码或状态口径变化后不得
-  复用旧 lineage，必须重新走影子与 checkpoint；
+- 每个 lineage 在建立时永久绑定显式的状态/事件/快照 schema 版本；只有这些 schema
+  版本、scope/lineage/stream 作用域或状态内容完整性的变化才要求新 lineage 并重新走
+  影子与 checkpoint。规则或状态口径变化必须通过升级显式 schema 版本表达；Python 源码、
+  格式化、注释或文档变化本身不构成状态不兼容，不得因此强制迁移或新建 lineage；
 - 同一 `official_stream_id + trade_date` 只有一个终态槽；状态更新使用 revision/hash
   CAS；同一公开 `route_id` 只允许一个 advisory-lock leader，不能通过更换 stream 或
   lineage 在同一飞书路由上启动第二个 runtime；
 - 入场槽原子写入配置绑定、输入快照、决定、下一状态、HEALTH/ROLLING7 批次、
   模型腿和 outbox 骨架；退出 intent 与退出 outbox 骨架同样原子写入；
-- V16 原始快照、当次实际消费的 HEALTH/rolling7/gap 事实、前置状态 hash 和
-  `state_semantics_hash` 共同进入决策输入快照及决定 ID；重试不能悄悄换一组状态输入；
-- `v20-runtime/v2` 配置 hash 绑定冻结规则、时钟、G manifest、受审飞书 relay origin/
-  APP ID hash/chat ID hash、两路 PostgreSQL CA 内容 hash，以及实际部署的 V16/V20
-  源文件、模型、feature list、板块数据、`pyproject.toml` 和 `uv.lock` 的逐文件 hash；
+- V16 原始快照、当次实际消费的 HEALTH/rolling7/gap 事实、前置状态 hash 和显式
+  状态/事件/快照 schema 版本共同进入决策输入快照及决定 ID；重试不能悄悄换一组
+  状态输入；
+- `v20-runtime/v2` 的 `config_hash` 不是纯审计元数据：它是规范化运行时配置与保留
+  非代码制品身份的规范身份，记录冻结规则、时钟、G manifest、受审飞书 relay
+  origin/APP ID hash/chat ID hash、两路 PostgreSQL CA 内容 hash 以及部署制品摘要。
+  它标识当前 config registry 记录，并被事件、决定和幂等绑定引用，用于确认当前运行
+  的配置。它不包含任何 Python 源码或 Git 字节，且不得作为历史状态兼容或源码过渡
+  授权的依据；
+- 只有 Git commit/build SHA 和镜像 digest 是纯审计/日志元数据；它们连同
+  `config_hash` 一律不得作为启动、状态兼容、交易、回放或迁移授权的依据，不能决定
+  策略是否运行；
+- 禁止把 Python/源文件字节 hash 用作运行时启动、状态兼容、交易、回放或迁移授权；
+  禁止 commit/hash 到 hash 的过渡 allowlist 和兼容性证据/回执；禁止因为格式化、
+  注释或文档变化要求迁移；
+- 状态兼容只由显式的状态/事件/快照 schema 版本、scope/lineage/stream 作用域、内容
+  完整性，以及 schema 变化时的显式数据库迁移授权；
+- 模型、feature list、板块数据和 G 制品等非代码策略制品保留 checksum 完整性校验；
+  这些 checksum 只证明内容未被改动，不构成源版本兼容链；
+- 既有 `state_semantics_compatibility` 表运行时不读、不写，也不做破坏性清理迁移；
+  registry `state_semantics_hash` 仅可在 genesis 写入非授权审计 metadata，绝不
+  作为兼容、启动、交易或 replay 门禁被读取、比较或重写；
 - 行情、MEWS 和成熟日线先以不可变候选保存，再按各自固定截止时间选用；
 - 核心事务提交后由 durable outbox 密封并投递；崩溃重启会继续密封和重试，不重算
   已提交决定；
@@ -277,7 +296,13 @@ D2 14:57 是最后一道闸门：即使此前分钟窗口有缺口或参考价�
 - as-of 决策后才形成、尚未被下一次决策消费的 HEALTH 终态和无效 ROLLING7 事实；
 - source→target 批次 ID 确定性映射；
 - 来源 stream/lineage、截止交易日、来源状态 hash；
-- 与目标运行时相同的 `state_semantics_hash`。
+- 与目标运行时一致的显式状态/事件/快照 schema 版本与 scope/lineage/stream 绑定。
+
+checkpoint 导出文件使用 `v20-bootstrap-checkpoint/v3` schema：在 v2 的基础上移除已
+退役的来源配置/状态语义审计 hash 字段（`source_config_hash`、
+`source_state_semantics_hash`、`resolved_state_semantics_hash`）。导入器同时接受
+历史 v2 和 v3 文件；v2 中遗留的来源 config/state-semantics 审计 hash 只作历史审计
+记录被忽略，绝不用于状态兼容或任何其他授权。
 
 导入会把目标状态置为 revision 0，目标最后终态槽保持空；不得把影子槽伪装成生产
 前驱。checkpoint 文件本身和配置中声明的 SHA-256 必须一致，同一目标 lineage 不能

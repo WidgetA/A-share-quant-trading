@@ -123,8 +123,7 @@ async def test_hanging_symbol_evaluation_cannot_starve_healthy_sibling_in_same_t
     pending_exit_tasks = [
         task
         for task in asyncio.all_tasks()
-        if task is not asyncio.current_task()
-        and not task.done()
+        if task is not asyncio.current_task() and not task.done()
         if task.get_name().startswith(("v20-exit-leg-", "v20-exit-leg-boundary-"))
     ]
     assert pending_exit_tasks == []
@@ -187,8 +186,7 @@ async def test_symbol_operation_between_old_half_budget_and_new_budget_succeeds(
     assert commit.semantic["code"] == leg.code
     assert repository.sealed_event_ids == [commit.event_id]
     persisted_rows = {
-        (str(row["stock_code"]), str(row["end_label"]))
-        for row in repository.persisted_rows
+        (str(row["stock_code"]), str(row["end_label"])) for row in repository.persisted_rows
     }
     assert persisted_rows == {(leg.code, "10:00")}
 
@@ -324,9 +322,7 @@ async def test_final_rule_timeout_replaces_initial_timeout_and_cleared_none(
     service._repository_started = True
     _seed_warm_live_history(context, first.code)
     _seed_warm_live_history(context, second.code)
-    list_results = iter(
-        ([first], [first, second], [first, second], [first, second], [second])
-    )
+    list_results = iter(([first], [first, second], [first, second], [first, second], [second]))
     evaluations = [_rules_timeout(first.code), None, _rules_timeout(second.code)]
 
     async def list_active_legs(*_args: Any, **_kwargs: Any) -> list[Any]:

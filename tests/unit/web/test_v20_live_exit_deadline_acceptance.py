@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from dataclasses import replace
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.strategy.v20.runtime_config as runtime_config_module
 import src.web.v20_service as service_module
 from src.data.clients.tushare_realtime import TushareMinuteBar
 from src.data.database.v20_repository import (
@@ -231,19 +228,6 @@ def _prepare(
     repository: _DeadlineRepository,
     client: _DeadlineClient,
 ) -> tuple[Any, _DayContext]:
-    project_root = Path(__file__).resolve().parents[3]
-    for relative, reviewed_hashes in runtime_config_module._MIXED_STATE_SOURCE_CLASSES.items():
-        source_hash = hashlib.sha256((project_root / relative).read_bytes()).hexdigest()
-        source_class = (
-            "V20_SERVICE_STATE_ORCHESTRATION_V4"
-            if relative == "src/web/v20_service.py"
-            else (
-                "V20_LEDGER_STATE_CONTRACT_V2"
-                if relative == "src/data/database/v20_repository.py"
-                else reviewed_hashes[source_hash]
-            )
-        )
-        monkeypatch.setitem(reviewed_hashes, source_hash, source_class)
     service = _service(monkeypatch, repository, client)
     return service, _DayContext(trade_date=TRADE_DATE, calendar=(TRADE_DATE,))
 
@@ -769,6 +753,7 @@ async def test_outer_watchdog_cancellation_waits_for_cycle_and_does_not_duplicat
     assert repository.alerts == []
     assert repository.enqueue_alert_calls == []
     assert spy.cancel_boundaries == [pytest.approx(started + 13.5, abs=1.0)]
+
 
 async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
     monkeypatch: pytest.MonkeyPatch,

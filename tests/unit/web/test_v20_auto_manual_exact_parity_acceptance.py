@@ -437,9 +437,8 @@ def _service_and_artifact(
     now: datetime = RUN_AT,
     artifact_hit: bool = True,
 ) -> tuple[V20Service, _DecisionRepository, _ImmutableArtifactReader]:
-    # This intentionally loads the checked-in reviewed source hashes.  Do not
-    # patch `_MIXED_STATE_SOURCE_CLASSES` or `_dependency_hashes`: a source-byte
-    # change must make this acceptance fail until it is explicitly reviewed.
+    # Runtime config loading verifies the manifest and retained non-code
+    # strategy artifacts without authorizing implementation source bytes.
     monkeypatch.setenv("V20_MODE", "forward_shadow")
     monkeypatch.setenv("DB_SSLROOTCERT_SHA256", "c" * 64)
     monkeypatch.setenv("V20_INGEST_API_KEY", "i" * 32)
