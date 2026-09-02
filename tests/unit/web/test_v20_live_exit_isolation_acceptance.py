@@ -17,7 +17,9 @@ from src.web.v20_service import (
 from tests.unit.web.test_v20_live_exit_deadline_acceptance import (
     TRADE_DATE,
     TZ,
+    _advance_until,
     _bar,
+    _bind_virtual_clock,
     _DeadlineClient,
     _DeadlineRepository,
     _leg,
@@ -74,7 +76,7 @@ async def test_hanging_symbol_evaluation_cannot_starve_healthy_sibling_in_same_t
         service.config,
         market=replace(service.config.market, exit_poll_seconds=1),
     )
-    monkeypatch.setattr(service_module, "LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS", 0.02)
+    _set_rule_budgets(monkeypatch, symbol=0.3, batch=0.6)
     monkeypatch.setattr(service, "_evaluate_one_exit", evaluate_one)
     monkeypatch.setattr(repository, "commit_exit", commit_and_retire_healthy_leg)
     monkeypatch.setattr(service, "_safe_alert", quiet_alert)
@@ -84,8 +86,9 @@ async def test_hanging_symbol_evaluation_cannot_starve_healthy_sibling_in_same_t
             datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
         )
     )
-    with pytest.raises(V20LiveExitStageTimeout):
+    with pytest.raises(V20LiveExitStageTimeout) as raised:
         await asyncio.wait_for(task, timeout=2.0)
+    assert raised.value.symbols == (bad.code,)
     assert task.done()
     assert hanging_tasks
     hanging_results = await asyncio.gather(
@@ -94,6 +97,7 @@ async def test_hanging_symbol_evaluation_cannot_starve_healthy_sibling_in_same_t
     )
     assert len(hanging_results) == len(hanging_tasks)
     assert all(isinstance(result, asyncio.CancelledError) for result in hanging_results)
+    assert all(task.cancelled() for task in hanging_tasks)
 
     expected_rows = {
         (bad.code, "10:00"),
@@ -116,6 +120,239 @@ async def test_hanging_symbol_evaluation_cannot_starve_healthy_sibling_in_same_t
     assert repository.sealed_event_ids == [commit.event_id]
     assert persisted_rows == expected_rows
     assert repository.record_calls == 1
+    pending_exit_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and not task.done()
+        if task.get_name().startswith(("v20-exit-leg-", "v20-exit-leg-boundary-"))
+    ]
+    assert pending_exit_tasks == []
+
+
+def _set_rule_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    symbol: float,
+    batch: float,
+) -> None:
+    final_names = (
+        "LIVE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS",
+        "LIVE_EXIT_RULE_BATCH_TIMEOUT_SECONDS",
+    )
+    for name, value in zip(final_names, (symbol, batch), strict=True):
+        monkeypatch.setattr(service_module, name, value)
+
+
+async def test_symbol_operation_between_old_half_budget_and_new_budget_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    latest_bar = _bar(leg.code, "10:00", close=8.0, trade_date=TRADE_DATE)
+    client = _DeadlineClient(
+        latest={leg.code: latest_bar},
+        history={},
+    )
+    service, context = _prepare(monkeypatch, repository, client)
+    _seed_warm_live_history(context, leg.code)
+    clock = _bind_virtual_clock(monkeypatch)
+    _set_rule_budgets(monkeypatch, symbol=0.4, batch=0.8)
+    original_evaluate_one = service._evaluate_one_exit
+    operation_durations: list[float] = []
+    shared_deadline = clock.time() + 2.0
+
+    async def slower_evaluate_one(*args: Any, **kwargs: Any) -> None:
+        started_at = clock.time()
+        await _advance_until(clock, started_at + 0.25, shared_deadline)
+        operation_durations.append(clock.time() - started_at)
+        await original_evaluate_one(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_evaluate_one_exit", slower_evaluate_one)
+    await service._persist_history(context, {leg.code: (latest_bar,)})
+    unresolved_timeout = await service._evaluate_active_exits(
+        [leg],
+        datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
+        context.calendar,
+        deadline=shared_deadline,
+        symbol_timeout_seconds=0.4,
+    )
+
+    assert unresolved_timeout is None
+    assert operation_durations == [pytest.approx(0.25)]
+    assert len(repository.exit_commits) == 1
+    commit = repository.exit_commits[0]
+    assert commit.model_leg_id == leg.model_leg_id
+    assert commit.signal_type == "D2_ENTRY_12"
+    assert commit.semantic["code"] == leg.code
+    assert repository.sealed_event_ids == [commit.event_id]
+    persisted_rows = {
+        (str(row["stock_code"]), str(row["end_label"]))
+        for row in repository.persisted_rows
+    }
+    assert persisted_rows == {(leg.code, "10:00")}
+
+
+async def test_stale_rule_symbol_budget_default_remains_one_and_a_half_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    client = _DeadlineClient(latest={}, history={})
+    service, _context = _prepare(monkeypatch, repository, client)
+    clock = _bind_virtual_clock(monkeypatch)
+    started = clock.time()
+
+    async def slow_evaluate_one(*_args: Any, **_kwargs: Any) -> None:
+        await _advance_until(clock, started + 1.6, started + 2.0)
+
+    monkeypatch.setattr(service, "_evaluate_one_exit", slow_evaluate_one)
+    unresolved_timeout = await service._evaluate_active_exits(
+        [leg],
+        datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
+    )
+
+    assert service_module.STALE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS == 1.5
+    assert isinstance(unresolved_timeout, V20LiveExitStageTimeout)
+    assert unresolved_timeout.symbols == (leg.code,)
+    assert unresolved_timeout.deadline == pytest.approx(started + 1.5)
+
+
+def _rules_timeout(code: str, *, deadline: float = 112.0) -> V20LiveExitStageTimeout:
+    return V20LiveExitStageTimeout(
+        stage="rules_symbol",
+        elapsed_seconds=1.0,
+        remaining_seconds=0.0,
+        deadline=deadline,
+        symbols=(code,),
+        provider="rules",
+    )
+
+
+async def test_later_successful_rules_pass_clears_initial_rule_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    client = _DeadlineClient(
+        latest={leg.code: _bar(leg.code, "10:00", trade_date=TRADE_DATE)},
+        history={},
+    )
+    service, context = _prepare(monkeypatch, repository, client)
+    _seed_warm_live_history(context, leg.code)
+    clock = _bind_virtual_clock(monkeypatch)
+    evaluations: list[V20LiveExitStageTimeout | None] = [
+        _rules_timeout(leg.code),
+        None,
+        None,
+    ]
+
+    async def evaluate(*_args: Any, **_kwargs: Any) -> V20LiveExitStageTimeout | None:
+        return evaluations.pop(0)
+
+    async def quiet_alert(**_kwargs: Any) -> None:
+        return None
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_evaluate_active_exits", evaluate)
+    monkeypatch.setattr(service, "_safe_alert", quiet_alert)
+    monkeypatch.setattr(service, "_recover_closed_exit_windows", no_recovery)
+    await service._run_exit_cycle(
+        context,
+        datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
+        include_stale=False,
+        deadline=clock.time() + 12.0,
+        tick_started_at=clock.time(),
+    )
+
+    assert evaluations == []
+
+
+async def test_initial_rule_timeout_and_empty_active_list_end_cycle_without_later_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    client = _DeadlineClient(latest={}, history={})
+    service, context = _prepare(monkeypatch, repository, client)
+    clock = _bind_virtual_clock(monkeypatch)
+    list_results = iter(([leg], []))
+    evaluate_calls = 0
+
+    async def list_active_legs(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return next(list_results)
+
+    async def evaluate(*_args: Any, **_kwargs: Any) -> V20LiveExitStageTimeout:
+        nonlocal evaluate_calls
+        evaluate_calls += 1
+        return _rules_timeout(leg.code)
+
+    async def fail_later(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("later provider/rule work must not run")
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(repository, "list_active_legs", list_active_legs)
+    monkeypatch.setattr(service, "_evaluate_active_exits", evaluate)
+    monkeypatch.setattr(client, "batch_get_latest_minute_bars", fail_later)
+    monkeypatch.setattr(client, "batch_get_minute_history", fail_later)
+    monkeypatch.setattr(service, "_recover_closed_exit_windows", no_recovery)
+    await service._run_exit_cycle(
+        context,
+        datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
+        include_stale=False,
+        deadline=clock.time() + 12.0,
+        tick_started_at=clock.time(),
+    )
+
+    assert evaluate_calls == 1
+    assert client.latest_calls == []
+    assert client.history_calls == []
+
+
+async def test_final_rule_timeout_replaces_initial_timeout_and_cleared_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _leg("000001")
+    second = _leg("001306")
+    repository = _DeadlineRepository([first])
+    client = _DeadlineClient(latest={}, history={})
+    service, context = _prepare(monkeypatch, repository, client)
+    service._repository_started = True
+    _seed_warm_live_history(context, first.code)
+    _seed_warm_live_history(context, second.code)
+    list_results = iter(
+        ([first], [first, second], [first, second], [first, second], [second])
+    )
+    evaluations = [_rules_timeout(first.code), None, _rules_timeout(second.code)]
+
+    async def list_active_legs(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return next(list_results)
+
+    async def evaluate(*_args: Any, **_kwargs: Any) -> V20LiveExitStageTimeout | None:
+        return evaluations.pop(0)
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(repository, "list_active_legs", list_active_legs)
+    monkeypatch.setattr(service, "_evaluate_active_exits", evaluate)
+    monkeypatch.setattr(service, "_recover_closed_exit_windows", no_recovery)
+    with pytest.raises(V20LiveExitStageTimeout) as raised:
+        await service._run_live_exit_tick(
+            context,
+            datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
+        )
+
+    assert raised.value.symbols == (second.code,)
+    assert len(repository.alerts) == 1
+    semantic = repository.alerts[0][1]
+    assert semantic["stage"] == "rules_symbol"
+    assert semantic["symbols"] == [second.code]
+    assert first.code not in semantic["symbols"]
 
 
 async def test_stage_alert_identity_is_bound_to_every_runtime_scope(
@@ -345,7 +582,7 @@ async def test_specific_live_exit_incident_suppresses_duplicate_umbrella(
 
 
 @pytest.mark.parametrize("cadence", [1, 2, 15])
-async def test_shared_production_budgets_prevent_outer_inner_inversion(
+async def test_tick_and_watchdog_budgets_scale_below_cadence(
     monkeypatch: pytest.MonkeyPatch,
     cadence: int,
 ) -> None:

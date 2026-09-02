@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,14 @@ from src.data.database.v20_repository import (
     sha256_json,
 )
 from src.strategy.v20.identity import named_hash
-from src.web.v20_service import FULL_EXIT_LABELS, V20LiveExitStageTimeout, _DayContext
+from src.web.v20_service import (
+    FULL_EXIT_LABELS,
+    LIVE_EXIT_MAX_TICK_SECONDS,
+    LIVE_EXIT_MIN_DEADLINE_RESERVE_SECONDS,
+    LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS,
+    V20LiveExitStageTimeout,
+    _DayContext,
+)
 from tests.unit.web.test_v20_service import _bar, _service
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -60,10 +68,10 @@ class _TimeoutSpy:
         monkeypatch.setattr(service_module.asyncio, "wait_for", spying_wait_for)
 
 
-def _bind_virtual_clock() -> _VirtualClock:
+def _bind_virtual_clock(monkeypatch: pytest.MonkeyPatch) -> _VirtualClock:
     clock = _VirtualClock()
     loop = asyncio.get_running_loop()
-    loop.time = clock.time  # type: ignore[method-assign]
+    monkeypatch.setattr(loop, "time", clock.time)
     return clock
 
 
@@ -306,7 +314,7 @@ async def test_stage_timeouts_share_one_monotonic_deadline(
     )
     service, context = _prepare(monkeypatch, repository, client)
     _seed_warm_live_history(context, healthy.code)
-    clock = _bind_virtual_clock()
+    clock = _bind_virtual_clock(monkeypatch)
     spy = _TimeoutSpy(clock)
     spy.install(monkeypatch)
     started = clock.time()
@@ -366,6 +374,155 @@ async def test_stage_timeouts_share_one_monotonic_deadline(
     assert 15.0 not in spy.timeouts
     assert len(spy.timeouts) >= 5
     assert all(timeout <= 8.0 for timeout in spy.timeouts[3:5])
+
+
+async def test_live_exit_deadline_constants_and_stage_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    repository = _DeadlineRepository([leg])
+    client = _DeadlineClient(latest={}, history={leg.code: _expected_live_history(leg.code)})
+    service, context = _prepare(monkeypatch, repository, client)
+    service.config = replace(
+        service.config,
+        market=replace(service.config.market, exit_poll_seconds=15),
+    )
+    tick_started_at = asyncio.get_running_loop().time()
+    tick_deadline = tick_started_at + service._live_exit_tick_budget()
+    original_stage = service._run_live_exit_stage
+    stage_calls: list[tuple[str, float, float]] = []
+    rule_calls: list[tuple[float, float]] = []
+
+    async def recording_stage(
+        operation_factory: Any,
+        *,
+        stage: str,
+        stage_cap: float,
+        deadline: float,
+        **kwargs: Any,
+    ) -> Any:
+        stage_calls.append((stage, float(stage_cap), float(deadline)))
+        return await original_stage(
+            operation_factory,
+            stage=stage,
+            stage_cap=stage_cap,
+            deadline=deadline,
+            **kwargs,
+        )
+
+    async def evaluate(*_args: Any, **kwargs: Any) -> None:
+        rule_calls.append((float(kwargs["symbol_timeout_seconds"]), float(kwargs["deadline"])))
+        return None
+
+    async def quiet_alert(**_kwargs: Any) -> None:
+        return None
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_run_live_exit_stage", recording_stage)
+    monkeypatch.setattr(service, "_evaluate_active_exits", evaluate)
+    monkeypatch.setattr(service, "_safe_alert", quiet_alert)
+    monkeypatch.setattr(service, "_recover_closed_exit_windows", no_recovery)
+    await service._run_exit_cycle(
+        context,
+        datetime(2026, 9, 1, 10, 0, 15, tzinfo=TZ),
+        include_stale=False,
+        deadline=tick_deadline,
+        tick_started_at=tick_started_at,
+    )
+
+    symbol_cap = getattr(service_module, "LIVE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS", None)
+    batch_cap = getattr(service_module, "LIVE_EXIT_RULE_BATCH_TIMEOUT_SECONDS", None)
+    history_cap = getattr(service_module, "LIVE_EXIT_LIVE_HISTORY_TIMEOUT_SECONDS", None)
+    assert symbol_cap == 3.0
+    assert batch_cap == 4.0
+    assert history_cap == 8.0
+    assert symbol_cap <= batch_cap <= LIVE_EXIT_MAX_TICK_SECONDS
+    assert history_cap <= LIVE_EXIT_MAX_TICK_SECONDS
+    assert (
+        LIVE_EXIT_MAX_TICK_SECONDS
+        < LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS
+        < service.config.market.exit_poll_seconds
+    )
+    assert stage_calls
+    assert [cap for stage, cap, _deadline in stage_calls if stage.startswith("rules_")] == [
+        4.0,
+        4.0,
+        4.0,
+    ]
+    assert [timeout for timeout, _deadline in rule_calls] == [3.0, 3.0, 3.0]
+    assert [deadline for _timeout, deadline in rule_calls] == [
+        tick_deadline,
+        tick_deadline,
+        tick_deadline,
+    ]
+    observed_deadlines = [deadline for _stage, _cap, deadline in stage_calls]
+    assert observed_deadlines
+    assert len(set(observed_deadlines)) == 1
+    assert observed_deadlines[0] == tick_deadline
+    assert all(cap <= LIVE_EXIT_MAX_TICK_SECONDS for _stage, cap, _deadline in stage_calls)
+    assert [cap for stage, cap, _deadline in stage_calls if stage == "history"] == [8.0]
+
+
+async def test_live_exit_stage_rejects_remaining_smaller_than_deadline_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    service, _context = _prepare(
+        monkeypatch, _DeadlineRepository([leg]), _DeadlineClient(latest={}, history={})
+    )
+    clock = _VirtualClock()
+    clock.current = 101.5
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", clock.time)
+    deadline = clock.current + LIVE_EXIT_MIN_DEADLINE_RESERVE_SECONDS / 2
+    tick_started_at = clock.current - 2.0
+    observed_at = clock.current + 0.01
+    clock.current = observed_at
+
+    def operation_factory() -> Any:
+        raise AssertionError("operation factory must not run")
+
+    with pytest.raises(V20LiveExitStageTimeout) as exc_info:
+        await service._run_live_exit_stage(
+            operation_factory,
+            stage="test",
+            stage_cap=LIVE_EXIT_MIN_DEADLINE_RESERVE_SECONDS * 10,
+            deadline=deadline,
+            tick_started_at=tick_started_at,
+            symbols=(leg.code,),
+            provider="test",
+        )
+
+    assert exc_info.value.elapsed_seconds == observed_at - tick_started_at
+    assert exc_info.value.remaining_seconds == deadline - observed_at
+
+
+async def test_live_exit_stage_accepts_completed_future_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leg = _leg()
+    service, _context = _prepare(
+        monkeypatch, _DeadlineRepository([leg]), _DeadlineClient(latest={}, history={})
+    )
+    loop = asyncio.get_running_loop()
+    result = "completed"
+    future: asyncio.Future[Any] = loop.create_future()
+    future.set_result(result)
+
+    assert (
+        await service._run_live_exit_stage(
+            lambda: future,
+            stage="test",
+            stage_cap=1.0,
+            deadline=loop.time() + 2.0,
+            tick_started_at=loop.time(),
+            symbols=(leg.code,),
+            provider="test",
+        )
+        == result
+    )
 
 
 async def test_cold_missing_history_bypasses_latest_and_warm_polls_latest(
@@ -458,7 +615,7 @@ async def test_pg_rejected_hash_cannot_stop_healthy_sibling_exit(
     )
     service, context = _prepare(monkeypatch, repository, client)
     _seed_warm_live_history(context, healthy.code)
-    clock = _bind_virtual_clock()
+    clock = _bind_virtual_clock(monkeypatch)
     started = clock.time()
     original_history = client.batch_get_minute_history
 
@@ -493,7 +650,7 @@ async def test_closed_recovery_lane_cannot_delay_live_tick(
     )
     service, context = _prepare(monkeypatch, repository, client)
     _seed_warm_live_history(context, leg.code)
-    clock = _bind_virtual_clock()
+    clock = _bind_virtual_clock(monkeypatch)
     original_closed = client.batch_get_minute_history_for_date
 
     async def delayed_closed(
@@ -529,7 +686,7 @@ async def test_scheduler_watchdog_is_fourteen_seconds_and_normal_tick_survives_t
     )
     service, context = _prepare(monkeypatch, repository, client)
     _seed_warm_live_history(context, leg.code)
-    clock = _bind_virtual_clock()
+    clock = _bind_virtual_clock(monkeypatch)
     spy = _TimeoutSpy(clock)
     spy.install(monkeypatch)
     original_latest = client.batch_get_latest_minute_bars
@@ -557,21 +714,21 @@ async def test_scheduler_watchdog_is_fourteen_seconds_and_normal_tick_survives_t
     assert 13.0 not in spy.timeouts
 
 
-async def test_outer_watchdog_cancellation_waits_for_provider_and_does_not_duplicate_alarm(
+async def test_outer_watchdog_cancellation_waits_for_cycle_and_does_not_duplicate_alarm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     leg = _leg()
     repository = _DeadlineRepository([leg])
     client = _DeadlineClient(latest={}, history={leg.code: ()})
     service, context = _prepare(monkeypatch, repository, client)
-    clock = _bind_virtual_clock()
+    clock = _bind_virtual_clock(monkeypatch)
     spy = _TimeoutSpy(clock)
     spy.install(monkeypatch)
     started = clock.time()
     blocked = asyncio.Event()
-    provider_started = asyncio.Event()
-    provider_finished = asyncio.Event()
-    provider_task: asyncio.Task[dict[str, tuple[TushareMinuteBar, ...]]] | None = None
+    cycle_started = asyncio.Event()
+    cycle_finished = asyncio.Event()
+    cycle_task: asyncio.Task[None] | None = None
     cancellation_observed = False
 
     monkeypatch.setattr(service, "_live_exit_tick_budget", lambda: 20.0)
@@ -582,40 +739,36 @@ async def test_outer_watchdog_cancellation_waits_for_provider_and_does_not_dupli
         lambda *_args, **_kwargs: datetime(2026, 9, 1, 9, 37, tzinfo=TZ),
     )
 
-    async def hanging_history(
-        codes: list[str],
-    ) -> dict[str, tuple[TushareMinuteBar, ...]]:
-        nonlocal provider_task
-        assert provider_task is None
-        provider_task = asyncio.current_task()
-        provider_started.set()
+    async def hanging_exit_cycle(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal cycle_task
+        assert cycle_task is None
+        cycle_task = asyncio.current_task()
+        cycle_started.set()
         try:
-            return {code: () for code in codes} if await blocked.wait() else {}
+            await blocked.wait()
         except asyncio.CancelledError:
             nonlocal cancellation_observed
             cancellation_observed = True
             service._stop_event.set()
             blocked.set()
             await asyncio.sleep(0)
-            provider_finished.set()
+            cycle_finished.set()
             raise
 
-    monkeypatch.setattr(client, "batch_get_minute_history", hanging_history)
+    monkeypatch.setattr(service, "_run_exit_cycle", hanging_exit_cycle)
     task = asyncio.create_task(service._run_live_exit_scheduler())
-    await _wait_until(provider_started.is_set)
+    await _wait_until(cycle_started.is_set)
     await _advance_until(clock, started + 14.0, started + 15.0)
     await _wait_until(task.done)
 
-    assert provider_task is not None
-    assert provider_task.done()
-    assert provider_task.cancelled()
+    assert cycle_task is not None
+    assert cycle_task.done()
     assert cancellation_observed
-    assert provider_finished.is_set()
+    assert cycle_finished.is_set()
     assert service._lane_health["live_exit"].last_error == "LIVE_EXIT_CYCLE_TIMEOUT"
     assert repository.alerts == []
     assert repository.enqueue_alert_calls == []
     assert spy.cancel_boundaries == [pytest.approx(started + 13.5, abs=1.0)]
-
 
 async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
     monkeypatch: pytest.MonkeyPatch,
@@ -626,7 +779,7 @@ async def test_timeout_incident_is_structured_stable_and_retry_is_terminal_only(
     client = _DeadlineClient(latest=RuntimeError("provider down"), history={})
     service, context = _prepare(monkeypatch, repository, client)
     service._repository_started = True
-    clock = _bind_virtual_clock()
+    clock = _bind_virtual_clock(monkeypatch)
 
     async def evaluate(*_args: Any, **_kwargs: Any) -> None:
         return None

@@ -13,7 +13,19 @@ import src.web.v20_service as service_module
 from src.data.database.v20_repository import V20RepositoryError, V20SemanticConflict, sha256_json
 from src.strategy.v20.decision_engine import genesis_state
 from src.web.v15_scan_service import CanonicalV16ScanBundle, _bundle_fingerprint
+from src.web.v20_routes import _dispatch_manual_trigger
 from src.web.v20_service import _DayContext
+from src.web.v20_v16_canonical_artifact import encode
+from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
+    ARTIFACT_CALENDAR,
+    FULL_EXCHANGE_CALENDAR,
+    POST_CUTOFF_AT,
+    _artifact_record,
+    _canonical_master,
+    _DecisionRepository,
+    _ImmutableArtifactReader,
+    _raw_records,
+)
 from tests.unit.web.test_v20_service import TZ, _bar, _bar_payload, _service
 
 TRADE_DATE = date(2026, 8, 31)
@@ -630,6 +642,122 @@ async def test_zero_recommendations_remain_legal_durable_no_signal(
         assert TRADE_DATE in repository.raw_barriers
     finally:
         await _stop_started_service(service)
+
+
+@pytest.mark.asyncio
+async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _DecisionRepository(_raw_records(), seal_at=POST_CUTOFF_AT)
+    service = _service(monkeypatch, repository)
+    repository.bind_lineage(service.config.state_lineage_id)
+    service._clock = lambda: POST_CUTOFF_AT
+    service._calendar_provider = lambda: FULL_EXCHANGE_CALENDAR
+    service._calendar_loaded_for = POST_CUTOFF_AT.date()
+    service._mews_cached_for = POST_CUTOFF_AT.date()
+    artifact = _ImmutableArtifactReader(
+        None,
+        service.config.official_stream_id,
+    )
+    service._canonical_artifact_store = artifact
+    service._canonical_callbacks_open = True
+    service._scan_state.canonical_sink = service._persist_canonical_artifact_barrier
+    service._repository_started = True
+    service._started = True
+    canonical = _canonical_master()
+    expected = service._project_canonical_v16(
+        canonical,
+        calendar=FULL_EXCHANGE_CALENDAR,
+    )
+    encoded = encode(
+        expected,
+        calendar=ARTIFACT_CALENDAR,
+        canonical_integrity_hash=canonical._integrity_hash,
+    )
+    assert _artifact_record(encoded).payload == encoded
+
+    async def ready() -> None:
+        return None
+
+    monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
+    compute_entered = asyncio.Event()
+    release_compute = asyncio.Event()
+    compute_calls = 0
+    state_before = repository.state
+
+    async def one_canonical_computation(
+        _state: Any,
+        requested: date,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        nonlocal compute_calls
+        assert requested == POST_CUTOFF_AT.date()
+        compute_calls += 1
+        compute_entered.set()
+        await release_compute.wait()
+        return canonical
+
+    async def legacy_scan_duplicate(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("manual artifact recovery must not use the legacy scan path")
+
+    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", one_canonical_computation)
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", one_canonical_computation)
+    monkeypatch.setattr(scan_module, "run_v16_scan", legacy_scan_duplicate)
+
+    canonical_owner = asyncio.create_task(
+        scan_module.get_or_compute_canonical_v16(
+            service._scan_state,
+            POST_CUTOFF_AT.date(),
+        ),
+        name="canonical-0940-owner",
+    )
+    await asyncio.wait_for(compute_entered.wait(), timeout=1.0)
+    coordinator = service._scan_state.canonical_coordinator
+    assert coordinator is not None
+    master = coordinator.inflight[POST_CUTOFF_AT.date()]
+
+    manual_waiter = asyncio.create_task(
+        _dispatch_manual_trigger(service, "manual-artifact-miss-001"),
+        name="post-cutoff-manual-trigger",
+    )
+    for _ in range(100):
+        if artifact.load_calls:
+            break
+        await asyncio.sleep(0)
+    else:
+        release_compute.set()
+        await canonical_owner
+        raise AssertionError("manual trigger did not probe the missing durable artifact")
+
+    assert coordinator.inflight[POST_CUTOFF_AT.date()] is master
+    assert manual_waiter.done() is False
+    release_compute.set()
+    result = await asyncio.wait_for(manual_waiter, timeout=2.0)
+    await canonical_owner
+
+    assert compute_calls == 1
+    assert len(artifact.save_calls) == 1
+    assert artifact.record is not None
+    expected_load = (
+        service.config.official_stream_id,
+        POST_CUTOFF_AT.date(),
+        "V16_CANONICAL_MASTER_V1",
+    )
+    assert len(artifact.load_calls) == 4
+    assert artifact.load_calls[0] == expected_load
+    assert artifact.load_calls[-1] == expected_load
+    assert result["current_v16_snapshot_hash"] == expected.snapshot_hash
+    assert result["symbols"] == expected.snapshot["symbols"]
+    assert result["non_actionable"] is True
+    assert result["retrospective_expired"] is True
+    assert service._scan_state.scan_done_date == ""
+    assert service._scan_state.today_recommendation is None
+    assert repository.state == state_before
+    assert repository.status is None
+    assert repository.commit is None
+    assert repository.commit_entry_calls == 0
+    assert repository.forbidden_write_calls == []
 
 
 class CutoffRepository:

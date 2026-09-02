@@ -31,6 +31,13 @@ _AUDITED_STATE_SEMANTICS_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
             "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b",
             "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41",
         ),
+        # Canonical V16 post-window/restart durable-artifact recovery changes
+        # the v15 state dependency bytes.  The effect is restricted to future
+        # decisions; authenticated historical payloads remain unchanged.
+        (
+            "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41",
+            "d933fdabe1f4d856b06b2855be2bbc0dcf7d4a0646c2240c3dd78d6fb85af6aa",
+        ),
     }
 )
 

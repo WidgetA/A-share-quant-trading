@@ -21,7 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _PRE_SELECTION_V2_CORE = "ca8670343e13251287e7016ed2af1d26101f567b40f70705020733350e56dbbc"
 _SELECTION_V3_CORE = "94464f2a2c4a9c33c5041aeb640f0510947a438f4d5ddd305cdfc0e5f1cfba4b"
 _SELECTION_V4_CORE = "0f5fbbd1e6cce372217373023f3681cf09100b870e7c4d187e2ebc7ebd1a8290"
-_TYPE_CLEAN_CORE = "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41"
+_PREVIOUS_TYPE_CLEAN_CORE = "d402b32262be3f922a218c3fcd87c67c3943460b61103bdb9fae0e27104b8c41"
+_TYPE_CLEAN_CORE = "d933fdabe1f4d856b06b2855be2bbc0dcf7d4a0646c2240c3dd78d6fb85af6aa"
 _SELECTION_V3_DEPENDENCIES = {
     "src/data/clients/tushare_realtime.py": (
         "5acbe08e3309d5db7d62cd2a6811eff07b212d665035894573ebe463ed61f6b9"
@@ -337,7 +338,7 @@ def test_unreviewed_mixed_service_bytes_fail_closed(
         load_v20_runtime_config(root)
 
 
-def test_selection_v4_service_lf_and_crlf_share_core_but_bind_full_config(
+def test_current_service_lf_loads_and_unreviewed_crlf_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -351,23 +352,22 @@ def test_selection_v4_service_lf_and_crlf_share_core_but_bind_full_config(
     crlf_source = lf_source.replace(b"\n", b"\r\n")
 
     assert hashlib.sha256(lf_source).hexdigest() == (
-        "a7170343fdac66b177bb1ca50c4680308f2ce4e83d77ec00aabb69204b71b0ac"
+        "3052cfcf7ce96f616b770e3360435bfaa88ecb32522412149a575d48c0696731"
     )
     assert hashlib.sha256(crlf_source).hexdigest() == (
-        "149c36817be6665c12e2bbfeceb5527fd6382d2865cbbf95b16a86ee118b0d17"
+        "ec3e33acf8892ef1beca3e9ce5ce8effcdc9849776710dd56ba1011cfd4a2b25"
     )
 
     service_path.write_bytes(lf_source)
     lf_config = load_v20_runtime_config(root)
     service_path.write_bytes(crlf_source)
-    crlf_config = load_v20_runtime_config(root)
 
-    assert lf_config.state_semantics_hash == crlf_config.state_semantics_hash
     assert (
         lf_config.state_semantics_payload["mixed_state_source_classes"]["src/web/v20_service.py"]
         == "V20_SERVICE_STATE_ORCHESTRATION_V4"
     )
-    assert lf_config.config_hash != crlf_config.config_hash
+    with pytest.raises(V20ConfigError, match="unreviewed state-sensitive mixed source"):
+        load_v20_runtime_config(root)
 
 
 def test_selection_v3_and_v4_source_bytes_and_upgrade_edges_are_exact() -> None:
@@ -414,6 +414,13 @@ def test_selection_v3_and_v4_source_bytes_and_upgrade_edges_are_exact() -> None:
         service_classes["149c36817be6665c12e2bbfeceb5527fd6382d2865cbbf95b16a86ee118b0d17"]
         == "V20_SERVICE_STATE_ORCHESTRATION_V4"
     )
+    assert (
+        service_classes["3052cfcf7ce96f616b770e3360435bfaa88ecb32522412149a575d48c0696731"]
+        == "V20_SERVICE_STATE_ORCHESTRATION_V4"
+    )
+    assert "ec3e33acf8892ef1beca3e9ce5ce8effcdc9849776710dd56ba1011cfd4a2b25" not in (
+        service_classes
+    )
     assert "56fe73c25e65309a3fc52cc1a47c0a102c99a07b8370f9d5788c8ef2222921e1" not in (
         service_classes
     )
@@ -444,6 +451,10 @@ def test_selection_v3_and_v4_source_bytes_and_upgrade_edges_are_exact() -> None:
     )
     assert is_audited_state_semantics_transition(
         _SELECTION_V3_CORE,
+        _PREVIOUS_TYPE_CLEAN_CORE,
+    )
+    assert is_audited_state_semantics_transition(
+        _PREVIOUS_TYPE_CLEAN_CORE,
         _TYPE_CLEAN_CORE,
     )
     assert not is_audited_state_semantics_transition(
@@ -452,7 +463,7 @@ def test_selection_v3_and_v4_source_bytes_and_upgrade_edges_are_exact() -> None:
     )
     assert not is_audited_state_semantics_transition(
         _SELECTION_V4_CORE,
-        _TYPE_CLEAN_CORE,
+        _PREVIOUS_TYPE_CLEAN_CORE,
     )
     assert not is_audited_state_semantics_transition(
         _PRE_SELECTION_V2_CORE,
@@ -460,7 +471,19 @@ def test_selection_v3_and_v4_source_bytes_and_upgrade_edges_are_exact() -> None:
     )
     assert not is_audited_state_semantics_transition(
         _PRE_SELECTION_V2_CORE,
+        _PREVIOUS_TYPE_CLEAN_CORE,
+    )
+    assert not is_audited_state_semantics_transition(
+        _SELECTION_V3_CORE,
         _TYPE_CLEAN_CORE,
+    )
+    assert not is_audited_state_semantics_transition(
+        _TYPE_CLEAN_CORE,
+        _PREVIOUS_TYPE_CLEAN_CORE,
+    )
+    assert not is_audited_state_semantics_transition(
+        _PREVIOUS_TYPE_CLEAN_CORE,
+        _SELECTION_V3_CORE,
     )
     assert not is_audited_state_semantics_transition(
         "0" * 64,

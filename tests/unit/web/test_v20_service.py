@@ -7690,7 +7690,7 @@ async def test_manual_monitor_restart_locks_reference_and_enters_ordinary_exit_l
 
     evaluated: list[ActiveModelLeg] = []
 
-    async def capture(active, _now, _calendar=()):
+    async def capture(active, _now, _calendar=(), **_kwargs):
         evaluated.extend(active)
 
     monkeypatch.setattr(service, "_evaluate_active_exits", capture)
@@ -8234,7 +8234,7 @@ async def _run_live_data_probe(
         if alert_payloads is not None:
             alert_payloads.append(dict(kwargs))
 
-    async def evaluate(active, _now, _calendar=()):
+    async def evaluate(active, _now, _calendar=(), **_kwargs):
         evaluations.append(tuple(item.code for item in active))
 
     async def no_recovery(*_args, **_kwargs):
@@ -8947,7 +8947,7 @@ async def test_exit_evaluates_actionable_state_before_closed_history_recovery(
     recovery_started = asyncio.Event()
     release_recovery = asyncio.Event()
 
-    async def evaluate(_active, _now, _calendar=()):
+    async def evaluate(_active, _now, _calendar=(), **_kwargs):
         evaluated.set()
         await release_evaluation.wait()
 

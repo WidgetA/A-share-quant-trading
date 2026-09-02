@@ -198,7 +198,12 @@ LIVE_EXIT_MAX_TICK_SECONDS = 12.0
 LATEST_MINUTE_POLL_TIMEOUT_SECONDS = 8.0
 LIVE_EXIT_SCHEDULER_WATCHDOG_SECONDS = 14.0
 LIVE_EXIT_DB_STAGE_TIMEOUT_SECONDS = 2.0
-LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS = 3.0
+LIVE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS = 3.0
+LIVE_EXIT_RULE_BATCH_TIMEOUT_SECONDS = 4.0
+LIVE_EXIT_LIVE_HISTORY_TIMEOUT_SECONDS = 8.0
+LIVE_EXIT_RULE_DRAIN_RESERVE_SECONDS = 1.0
+LIVE_EXIT_MIN_DEADLINE_RESERVE_SECONDS = 0.1
+STALE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS = 1.5
 LIVE_EXIT_MORNING_CLOSE_PUBLICATION_GRACE_SECONDS = 60.0
 STALE_EXIT_TICK_SECONDS = 30.0
 STALE_EXIT_TICK_TIMEOUT_SECONDS = 3.0
@@ -1224,6 +1229,9 @@ class V20Service:
         self._canonical_sink_callback: (
             Callable[[CanonicalV16ScanBundle], Awaitable[None]] | None
         ) = None
+        self._canonical_artifact_probe_callback: (
+            Callable[[date], Awaitable[tuple[Any, datetime] | None]] | None
+        ) = None
         self._canonical_callbacks_open = False
         self._canonical_artifact_lock = asyncio.Lock()
         self._canonical_barrier_completed_at: dict[date, datetime] = {}
@@ -1542,12 +1550,32 @@ class V20Service:
         existing_sink = self._scan_state.canonical_sink
         if existing_sink is not None and existing_sink is not self._canonical_sink_callback:
             raise V20StateConflict("canonical V16 durable sink is already owned")
+        existing_probe = self._scan_state.canonical_artifact_probe
+        if (
+            existing_probe is not None
+            and existing_probe is not self._canonical_artifact_probe_callback
+        ):
+            raise V20StateConflict("canonical V16 artifact probe is already owned")
         self._canonical_artifact_store = store
         self._canonical_callbacks_open = True
         callback = self._persist_canonical_artifact_barrier
         self._canonical_sink_callback = callback
         self._scan_state.canonical_sink = callback
+        probe_callback = self._probe_canonical_artifact
+        self._canonical_artifact_probe_callback = probe_callback
+        self._scan_state.canonical_artifact_probe = probe_callback
         await self._reconcile_canonical_artifact_boundary()
+
+    async def _probe_canonical_artifact(self, trade_date: date) -> tuple[Any, datetime] | None:
+        """Return one durable canonical bundle and its immutable receipt time."""
+
+        loaded = await self._load_canonical_artifact(trade_date)
+        if loaded is None:
+            return None
+        bundle, first_received_at = loaded
+        if not isinstance(bundle, (CanonicalV16ScanBundle, FrozenV16ScanBundle)):
+            raise V20SemanticConflict("canonical V16 artifact probe bundle is invalid")
+        return bundle, first_received_at
 
     async def _reconcile_canonical_artifact_boundary(self) -> None:
         """Persist masters completed before the V20 sink was attached.
@@ -1586,6 +1614,13 @@ class V20Service:
             # also covers shutdown tests that install a pending sink directly.
             self._scan_state.canonical_sink = None
         self._canonical_sink_callback = None
+        probe_callback = self._canonical_artifact_probe_callback
+        if (
+            probe_callback is not None
+            and self._scan_state.canonical_artifact_probe is probe_callback
+        ):
+            self._scan_state.canonical_artifact_probe = None
+        self._canonical_artifact_probe_callback = None
 
     async def start(self) -> None:
         if self._started:
@@ -3584,34 +3619,46 @@ class V20Service:
         loop = asyncio.get_running_loop()
         remaining = deadline - loop.time()
         if remaining <= 0:
+            observed = loop.time()
             raise V20LiveExitStageTimeout(
                 stage=stage,
-                elapsed_seconds=loop.time() - tick_started_at,
-                remaining_seconds=0.0,
+                elapsed_seconds=max(0.0, observed - tick_started_at),
+                remaining_seconds=max(0.0, deadline - observed),
                 deadline=deadline,
                 symbols=tuple(sorted(set(symbols))),
                 provider=provider,
             )
         budget = min(stage_cap, remaining)
         if budget == remaining:
-            budget = max(0.0, budget - 0.1)
-        try:
-            return await asyncio.wait_for(operation_factory(), timeout=budget)
-        except asyncio.TimeoutError as exc:
+            budget -= LIVE_EXIT_MIN_DEADLINE_RESERVE_SECONDS
+        if budget <= 0:
             observed = loop.time()
-            elapsed = (
-                deadline - tick_started_at if stage_cap >= remaining else observed - tick_started_at
-            )
             raise V20LiveExitStageTimeout(
                 stage=stage,
-                elapsed_seconds=elapsed,
-                remaining_seconds=(
-                    0.0 if stage_cap >= remaining else max(0.0, deadline - observed)
-                ),
+                elapsed_seconds=max(0.0, observed - tick_started_at),
+                remaining_seconds=max(0.0, deadline - observed),
+                deadline=deadline,
+                symbols=tuple(sorted(set(symbols))),
+                provider=provider,
+            )
+        operation = operation_factory()
+        operation_task: asyncio.Future[Any] = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.wait_for(asyncio.shield(operation_task), timeout=budget)
+        except asyncio.TimeoutError as exc:
+            observed = loop.time()
+            raise V20LiveExitStageTimeout(
+                stage=stage,
+                elapsed_seconds=max(0.0, observed - tick_started_at),
+                remaining_seconds=max(0.0, deadline - observed),
                 deadline=deadline,
                 symbols=tuple(sorted(set(symbols))),
                 provider=provider,
             ) from exc
+        finally:
+            if not operation_task.done():
+                operation_task.cancel()
+            await asyncio.gather(operation_task, return_exceptions=True)
 
     async def _run_live_exit_tick(self, context: _DayContext, now: datetime) -> None:
         """Run today's D1/D2 protection under a budget shorter than its cadence."""
@@ -7508,10 +7555,16 @@ class V20Service:
 
         today_legs = self._today_exit_legs(active, context.trade_date)
         all_codes = tuple(leg.code for leg in today_legs)
-        deferred_rule_timeout = await stage(
-            lambda: self._evaluate_active_exits(today_legs, now, context.calendar),
+        unresolved_rule_timeout = await stage(
+            lambda: self._evaluate_active_exits(
+                today_legs,
+                now,
+                context.calendar,
+                deadline=deadline,
+                symbol_timeout_seconds=LIVE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS,
+            ),
             name="rules_initial",
-            cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
+            cap=LIVE_EXIT_RULE_BATCH_TIMEOUT_SECONDS,
             symbols=all_codes,
             provider="rules",
         )
@@ -7522,8 +7575,6 @@ class V20Service:
             symbols=(),
         )
         if not active:
-            if isinstance(deferred_rule_timeout, V20LiveExitStageTimeout):
-                raise deferred_rule_timeout
             return
 
         wall = now.timetz().replace(tzinfo=None)
@@ -7601,15 +7652,19 @@ class V20Service:
             symbols=(),
         )
         today_legs = self._today_exit_legs(active, context.trade_date)
-        rule_timeout = await stage(
-            lambda: self._evaluate_active_exits(today_legs, now, context.calendar),
+        unresolved_rule_timeout = await stage(
+            lambda: self._evaluate_active_exits(
+                today_legs,
+                now,
+                context.calendar,
+                deadline=deadline,
+                symbol_timeout_seconds=LIVE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS,
+            ),
             name="rules_after_latest",
-            cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
+            cap=LIVE_EXIT_RULE_BATCH_TIMEOUT_SECONDS,
             symbols=tuple(leg.code for leg in today_legs),
             provider="rules",
         )
-        if isinstance(rule_timeout, V20LiveExitStageTimeout):
-            deferred_rule_timeout = rule_timeout
         active = await stage(
             lambda: self._repository.list_active_legs(context.trade_date, **self._ledger_scope),
             name="db_list_before_history",
@@ -7641,7 +7696,7 @@ class V20Service:
                         recovery_codes
                     ),
                     name="history",
-                    cap=ENTRY_HISTORY_RECOVERY_TIMEOUT_SECONDS,
+                    cap=LIVE_EXIT_LIVE_HISTORY_TIMEOUT_SECONDS,
                     symbols=recovery_codes,
                     provider="tushare_rt",
                 )
@@ -7801,17 +7856,21 @@ class V20Service:
             symbols=(),
         )
         today_legs = self._today_exit_legs(active, context.trade_date)
-        rule_timeout = await stage(
-            lambda: self._evaluate_active_exits(today_legs, now, context.calendar),
+        unresolved_rule_timeout = await stage(
+            lambda: self._evaluate_active_exits(
+                today_legs,
+                now,
+                context.calendar,
+                deadline=deadline,
+                symbol_timeout_seconds=LIVE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS,
+            ),
             name="rules_final",
-            cap=LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS,
+            cap=LIVE_EXIT_RULE_BATCH_TIMEOUT_SECONDS,
             symbols=tuple(leg.code for leg in today_legs),
             provider="rules",
         )
-        if isinstance(rule_timeout, V20LiveExitStageTimeout):
-            deferred_rule_timeout = rule_timeout
-        if isinstance(deferred_rule_timeout, V20LiveExitStageTimeout):
-            raise deferred_rule_timeout
+        if isinstance(unresolved_rule_timeout, V20LiveExitStageTimeout):
+            raise unresolved_rule_timeout
         if include_stale:
             await self._run_stale_exit_cycle(context, now)
 
@@ -7872,6 +7931,9 @@ class V20Service:
         active: Sequence[ActiveModelLeg],
         now: datetime,
         calendar: Sequence[date] = (),
+        *,
+        deadline: float | None = None,
+        symbol_timeout_seconds: float = STALE_EXIT_RULE_SYMBOL_TIMEOUT_SECONDS,
     ) -> V20LiveExitStageTimeout | None:
         """Evaluate each leg in an independently cancellable timeout boundary.
 
@@ -7886,7 +7948,32 @@ class V20Service:
             return None
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        symbol_budget = max(0.001, LIVE_EXIT_RULE_STAGE_TIMEOUT_SECONDS * 0.5)
+        symbol_deadline = started_at + max(0.0, symbol_timeout_seconds)
+        if deadline is not None:
+            tick_remaining = max(0.0, deadline - started_at)
+            reserve = min(
+                LIVE_EXIT_RULE_DRAIN_RESERVE_SECONDS,
+                tick_remaining * 0.25,
+            )
+            reserve = max(LIVE_EXIT_MIN_DEADLINE_RESERVE_SECONDS, reserve)
+            symbol_deadline = min(
+                symbol_deadline,
+                max(started_at, deadline - reserve),
+            )
+        symbol_deadline = max(started_at, symbol_deadline)
+
+        if symbol_deadline <= started_at:
+            timed_out_at = started_at
+            return V20LiveExitStageTimeout(
+                stage="rules_symbol",
+                elapsed_seconds=0.0,
+                remaining_seconds=(
+                    max(0.0, deadline - timed_out_at) if deadline is not None else 0.0
+                ),
+                deadline=symbol_deadline,
+                symbols=tuple(sorted({record.code for record in active})),
+                provider="rules",
+            )
 
         async def evaluate_one(
             record: ActiveModelLeg,
@@ -7913,18 +8000,23 @@ class V20Service:
                 ),
                 name=f"v20-exit-leg-{record.model_leg_id}",
             )
-            timeout_scope = asyncio.timeout(symbol_budget)
+            timeout_scope = asyncio.timeout_at(symbol_deadline)
             try:
                 async with timeout_scope:
                     await asyncio.shield(child)
                 return record, None
             except TimeoutError as exc:
                 if timeout_scope.expired():
+                    timed_out_at = loop.time()
                     return record, V20LiveExitStageTimeout(
                         stage="rules_symbol",
-                        elapsed_seconds=max(0.0, loop.time() - started_at),
-                        remaining_seconds=0.0,
-                        deadline=started_at + symbol_budget,
+                        elapsed_seconds=max(0.0, timed_out_at - started_at),
+                        remaining_seconds=(
+                            max(0.0, deadline - timed_out_at)
+                            if deadline is not None
+                            else 0.0
+                        ),
+                        deadline=symbol_deadline,
                         symbols=(record.code,),
                         provider="rules",
                     )
@@ -7980,11 +8072,14 @@ class V20Service:
                 diagnostic_alert_emitted=False,
             )
         if timeout_codes:
+            timed_out_at = loop.time()
             return V20LiveExitStageTimeout(
                 stage="rules_symbol",
-                elapsed_seconds=max(0.0, loop.time() - started_at),
-                remaining_seconds=0.0,
-                deadline=started_at + symbol_budget,
+                elapsed_seconds=max(0.0, timed_out_at - started_at),
+                remaining_seconds=(
+                    max(0.0, deadline - timed_out_at) if deadline is not None else 0.0
+                ),
+                deadline=symbol_deadline,
                 symbols=tuple(sorted(timeout_codes)),
                 provider="rules",
             )

@@ -1697,8 +1697,21 @@ async def test_not_ready_deadline_clears_recommendation_and_alerts_once(fakes):
     deadline = datetime.combine(fakes.trade_date, datetime.min.time()).replace(
         hour=10, minute=1, tzinfo=BEIJING_TZ
     )
+    evidence = v15_scan_service._CanonicalV16NotReadyEvidence(
+        fakes.trade_date,
+        datetime.combine(fakes.trade_date, datetime.min.time()).replace(
+            hour=9,
+            minute=59,
+            tzinfo=BEIJING_TZ,
+        ),
+    )
 
-    await v15_scan_service._fail_not_ready_deadline(fakes.state, fakes.trade_date, deadline)
+    await v15_scan_service._fail_not_ready_deadline(
+        fakes.state,
+        fakes.trade_date,
+        deadline,
+        evidence,
+    )
 
     assert fakes.state.today_recommendation is None
     assert fakes.state.scan_error is not None
@@ -1708,7 +1721,12 @@ async def test_not_ready_deadline_clears_recommendation_and_alerts_once(fakes):
     assert "10:01" in detail
 
     # Second call is deduplicated.
-    await v15_scan_service._fail_not_ready_deadline(fakes.state, fakes.trade_date, deadline)
+    await v15_scan_service._fail_not_ready_deadline(
+        fakes.state,
+        fakes.trade_date,
+        deadline,
+        evidence,
+    )
     assert len(fakes.error_calls) == 1
 
 

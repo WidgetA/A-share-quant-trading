@@ -28,7 +28,7 @@ from enum import Enum
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -37,6 +37,11 @@ import pandas as pd
 from src.data.clients.tushare_realtime import TushareDailyBar, TushareEarlyMarketData
 
 logger = logging.getLogger(__name__)
+
+_AwareDatetime = datetime
+
+if TYPE_CHECKING:
+    from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -81,6 +86,14 @@ class V15ScanState:
     # Lazy single-flight coordinator for canonical V16 scan results.
     canonical_coordinator: "_CanonicalV16Coordinator | None" = None
     canonical_sink: Callable[[CanonicalV16ScanBundle], Awaitable[None]] | None = None
+    canonical_artifact_probe: (
+        Callable[
+            [date],
+            Awaitable[tuple["CanonicalV16ScanBundle | FrozenV16ScanBundle", datetime] | None],
+        ]
+        | None
+    ) = None
+    canonical_durable_received_at: dict[date, datetime] = field(default_factory=dict)
 
 
 @dataclass
@@ -207,6 +220,16 @@ class CanonicalV16PersistencePendingError(RuntimeError):
     """A verified canonical result is retained while its durable sink retries."""
 
 
+class CanonicalV16ArtifactProbeError(RuntimeError):
+    """Recovering a durable canonical artifact failed and may be retried."""
+
+
+@dataclass(frozen=True)
+class _CanonicalV16NotReadyEvidence:
+    trade_date: date
+    observed_at: datetime
+
+
 class CanonicalV16NotReadyError(CanonicalV16ScanError):
     """09:39 early evidence is not yet available for enough returned quotes.
 
@@ -284,8 +307,40 @@ async def _fail_not_ready_deadline(
     scan_state: V15ScanState,
     trade_date: date,
     now_bj: datetime,
+    evidence: _CanonicalV16NotReadyEvidence | None = None,
 ) -> None:
     """Single audit alert when 09:39 evidence is still missing at the 10:00 deadline."""
+    observed_at = evidence.observed_at if evidence is not None else None
+    now_bj_local = (
+        now_bj.astimezone(BEIJING_TZ)
+        if isinstance(now_bj, _AwareDatetime)
+        and now_bj.tzinfo is not None
+        and now_bj.utcoffset() is not None
+        else None
+    )
+    observed_bj = (
+        observed_at.astimezone(BEIJING_TZ)
+        if isinstance(observed_at, _AwareDatetime)
+        and observed_at is not None
+        and observed_at.tzinfo is not None
+        and observed_at.utcoffset() is not None
+        else None
+    )
+    observed_minute = observed_bj.replace(second=0, microsecond=0).time() if observed_bj else None
+    valid_observation = (
+        evidence is not None
+        and evidence.trade_date == trade_date
+        and observed_bj is not None
+        and observed_bj.date() == trade_date
+        and observed_minute is not None
+        and time(9, 39) <= observed_minute <= time(10, 0)
+        and now_bj_local is not None
+        and now_bj_local.date() == trade_date
+        and now_bj_local.replace(second=0, microsecond=0).time() > time(10, 0)
+    )
+    if not valid_observation:
+        logger.warning("Refusing V16 NOT_READY deadline alert without in-window evidence")
+        return
     if scan_state.canonical_coordinator is None:
         scan_state.canonical_coordinator = _CanonicalV16Coordinator()
     coord = scan_state.canonical_coordinator
@@ -293,9 +348,10 @@ async def _fail_not_ready_deadline(
         return
     coord.not_ready_alert_sent.add(trade_date)
     detail = f"截至 {now_bj.strftime('%H:%M')} 09:39数据仍未就绪\n今日V16扫描终止，已清空推荐"
-    await _notify_feishu_error("9:39数据未就绪截止", detail)
+    scan_state.scan_done_date = trade_date.isoformat()
     scan_state.scan_error = f"CanonicalV16NotReadyError: {detail}"
     scan_state.today_recommendation = None
+    await _notify_feishu_error("9:39数据未就绪截止", detail)
 
 
 # --- Feishu notification helpers ---
@@ -2608,6 +2664,40 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     return _build_v16_recommendation_payload(bundle.scan_result, bundle.stock_data)
 
 
+def _restore_canonical_artifact(
+    scan_state: V15ScanState,
+    trade_date: date,
+    bundle: CanonicalV16ScanBundle | FrozenV16ScanBundle,
+    first_received_at: datetime,
+) -> None:
+    """Restore display state from a durable fact without authorizing trading."""
+
+    from src.web.v20_scan_pipeline import FrozenV16ScanBundle
+
+    if (
+        not isinstance(first_received_at, _AwareDatetime)
+        or first_received_at.tzinfo is None
+        or first_received_at.utcoffset() is None
+    ):
+        raise CanonicalV16ArtifactProbeError(
+            "durable canonical artifact receipt timestamp lacks a timezone"
+        )
+    if bundle.trade_date != trade_date:
+        raise CanonicalV16ArtifactProbeError("durable canonical artifact trade date differs")
+    if isinstance(bundle, CanonicalV16ScanBundle):
+        _verify_bundle_integrity(bundle)
+    elif not isinstance(bundle, FrozenV16ScanBundle):
+        raise CanonicalV16ArtifactProbeError("durable canonical artifact bundle type is invalid")
+
+    recommendation = _build_v16_recommendation_payload(
+        bundle.scan_result,
+        bundle.stock_data,
+    )
+    receipt = first_received_at.astimezone(BEIJING_TZ)
+    scan_state.today_recommendation = recommendation
+    scan_state.canonical_durable_received_at[trade_date] = receipt
+
+
 # --- Scan scheduler ---
 
 
@@ -2621,7 +2711,11 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
     - Does NOT check holdings or push trading signals
     """
     SCAN_WINDOW = (time(9, 39), time(10, 0))
-    scan_done_date = ""
+    scheduler_date: date | None = None
+    scheduler_done_dates: set[date] = set()
+    not_ready_evidence: dict[date, _CanonicalV16NotReadyEvidence] = {}
+    post_window_probe_dates: set[date] = set()
+    artifact_recovery_error: str | None = None
 
     logger.info("V16 scan scheduler started (autonomous)")
 
@@ -2649,14 +2743,24 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
             ex_date = now_bj.strftime("%Y-%m-%d")
             ex_time = now_bj.time().replace(second=0, microsecond=0)
             trade_date = now_bj.date()
+            if scheduler_date != trade_date:
+                scheduler_date = trade_date
+                scheduler_done_dates.clear()
+                not_ready_evidence.clear()
+                post_window_probe_dates.clear()
 
             # --- SCAN: 09:39-10:00 ---
-            if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
+            shared_scan_done = scan_state.scan_done_date == ex_date
+            if (
+                not shared_scan_done
+                and trade_date not in scheduler_done_dates
+                and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]
+            ):
                 try:
                     rec = await run_v16_scan(scan_state)
                     scan_state.today_recommendation = rec
                     scan_state.scan_error = None
-                    scan_done_date = ex_date
+                    scheduler_done_dates.add(trade_date)
                     scan_state.scan_done_date = ex_date
 
                     if rec:
@@ -2681,6 +2785,10 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                         )
                 except CanonicalV16NotReadyError:
                     # 09:39 data not yet ready; retry within the window.
+                    not_ready_evidence[trade_date] = _CanonicalV16NotReadyEvidence(
+                        trade_date,
+                        now_bj,
+                    )
                     logger.info("V16 scan not ready at %s, will retry", ex_time)
                 except CanonicalV16PersistencePendingError as e:
                     # The canonical master is retained; only the durable write retries.
@@ -2693,27 +2801,90 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                     error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                     scan_state.scan_error = error_detail
                     scan_state.today_recommendation = None
-                    scan_done_date = ex_date
+                    scheduler_done_dates.add(trade_date)
                     scan_state.scan_done_date = ex_date
                     logger.error(f"V16 scan failed: {error_detail}")
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                     scan_state.scan_error = error_detail
                     scan_state.today_recommendation = None
-                    scan_done_date = ex_date
+                    scheduler_done_dates.add(trade_date)
                     scan_state.scan_done_date = ex_date
                     logger.error(f"V16 scan failed: {error_detail}")
                     await _notify_feishu_error("V16扫描失败", error_detail)
 
             # Scan deadline: after 10:00, NOT_READY becomes a fatal single audit alert
             # and the previous recommendation is cleared.
-            if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
-                scan_done_date = ex_date
-                scan_state.scan_done_date = ex_date
-                await _fail_not_ready_deadline(scan_state, trade_date, now_bj)
+            if (
+                not shared_scan_done
+                and trade_date not in scheduler_done_dates
+                and ex_time > SCAN_WINDOW[1]
+            ):
+                probe = scan_state.canonical_artifact_probe
+                if probe is None:
+                    if trade_date in not_ready_evidence:
+                        scheduler_done_dates.add(trade_date)
+                        await _fail_not_ready_deadline(
+                            scan_state,
+                            trade_date,
+                            now_bj,
+                            not_ready_evidence.get(trade_date),
+                        )
+                    else:
+                        scheduler_done_dates.add(trade_date)
+                elif trade_date not in post_window_probe_dates:
+                    post_window_probe_dates.add(trade_date)
+                    try:
+                        loaded = await probe(trade_date)
+                        if loaded is not None:
+                            if not isinstance(loaded, tuple) or len(loaded) != 2:
+                                raise RuntimeError("probe result must be a two-item tuple")
+                            bundle, first_received_at = loaded
+                            _restore_canonical_artifact(
+                                scan_state,
+                                trade_date,
+                                bundle,
+                                first_received_at,
+                            )
+                            if (
+                                artifact_recovery_error is not None
+                                and scan_state.scan_error == artifact_recovery_error
+                            ):
+                                scan_state.scan_error = None
+                            artifact_recovery_error = None
+                            scheduler_done_dates.add(trade_date)
+                        elif trade_date in not_ready_evidence:
+                            scheduler_done_dates.add(trade_date)
+                            await _fail_not_ready_deadline(
+                                scan_state,
+                                trade_date,
+                                now_bj,
+                                not_ready_evidence.get(trade_date),
+                            )
+                        else:
+                            if (
+                                artifact_recovery_error is not None
+                                and scan_state.scan_error == artifact_recovery_error
+                            ):
+                                scan_state.scan_error = None
+                            artifact_recovery_error = None
+                            scheduler_done_dates.add(trade_date)
+                    except Exception as exc:
+                        post_window_probe_dates.remove(trade_date)
+                        artifact_recovery_error = (
+                            "CanonicalV16ArtifactProbeError: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        scan_state.scan_error = artifact_recovery_error
+                        logger.warning(
+                            "V16 durable artifact recovery failed; will retry",
+                            exc_info=True,
+                        )
 
             # Adaptive sleep
-            await asyncio.sleep(30 if scan_done_date == ex_date else 15)
+            await asyncio.sleep(
+                30 if shared_scan_done or trade_date in scheduler_done_dates else 15
+            )
 
     except asyncio.CancelledError:
         logger.info("V16 scan scheduler stopped")

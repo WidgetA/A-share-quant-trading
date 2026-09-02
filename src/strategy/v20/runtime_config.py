@@ -403,6 +403,12 @@ _MIXED_STATE_SOURCE_CLASSES = {
         "149c36817be6665c12e2bbfeceb5527fd6382d2865cbbf95b16a86ee118b0d17": (
             "V20_SERVICE_STATE_ORCHESTRATION_V4"
         ),
+        # Canonical artifact restart recovery and live-exit shared
+        # deadline/per-symbol cancellation are reviewed and preserve the
+        # existing V4 state semantics.  Git/deployment LF bytes.
+        "3052cfcf7ce96f616b770e3360435bfaa88ecb32522412149a575d48c0696731": (
+            "V20_SERVICE_STATE_ORCHESTRATION_V4"
+        ),
     },
     "src/data/database/v20_repository.py": {
         "4e1afb37e369340891f2d5c9e807de2c7636391168877f91932a2152471c2902": (
