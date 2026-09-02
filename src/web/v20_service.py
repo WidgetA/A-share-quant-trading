@@ -828,7 +828,9 @@ def _mews_snapshot(record: SelectedMewsRecord | None) -> tuple[MewsSnapshot, ...
         MewsSnapshot(
             source_trade_date=record.source_trade_date,
             generated_at=record.generated_at,
-            received_at=record.received_at,
+            # Exit policy consumes the first durable receipt, not the earlier
+            # unsealed inbox timestamp.
+            received_at=record.receipt_sealed_at,
             fast_state=record.fast_state,
             model_version=record.model_version,
             data_version=record.data_version,
@@ -1310,6 +1312,7 @@ class V20Service:
         # later trigger retries while the cache is still missing.
         self._mews_singleflight_task: asyncio.Task[bool] | None = None
         self._mews_singleflight_date: date | None = None
+        self._mews_singleflight_source_trade_date: date | None = None
         self._mews_trigger_tasks: set[asyncio.Task[bool]] = set()
         try:
             self._mews_guard_store: V20MewsGuardStore | None = (
@@ -1810,6 +1813,7 @@ class V20Service:
                     None,
                 )
                 self._mews_singleflight_date = None
+                self._mews_singleflight_source_trade_date = None
             tasks, self._tasks = self._tasks, []
             for task in tasks:
                 task.cancel()
@@ -1880,6 +1884,7 @@ class V20Service:
                 None,
             )
             self._mews_singleflight_date = None
+            self._mews_singleflight_source_trade_date = None
         async with self._calendar_tasks_lock:
             calendar_tasks = list(self._calendar_tasks.values())
             self._calendar_tasks = {}
@@ -3897,24 +3902,29 @@ class V20Service:
         self,
         now: datetime,
         calendar: Sequence[date],
+        *,
+        source_trade_date: date | None = None,
     ) -> bool:
         """Calculate a missing daily value; time affects eligibility, never calculation."""
 
         current = self._aware_now(now)
-        if self._mews_cached_for == current.date():
+        if source_trade_date is None and current.date() not in calendar:
             return False
-        if current.date() not in calendar:
+        if source_trade_date is None:
+            predecessors = [day for day in calendar if day < current.date()]
+            if not predecessors:
+                raise V20RepositoryError("MEWS calendar has no preceding trading day")
+            source_trade_date = predecessors[-1]
+        elif source_trade_date >= current.date():
+            raise V20RepositoryError("MEWS source trade date must precede availability date")
+        if self._mews_cache_matches(current.date(), source_trade_date):
             return False
-        predecessors = [day for day in calendar if day < current.date()]
-        if not predecessors:
-            raise V20RepositoryError("MEWS calendar has no preceding trading day")
-        source_trade_date = predecessors[-1]
         source = self._mews_source
         if source is None:
             raise V20ConfigError("V20 local MEWS calculator is not configured")
 
         async with self._mews_refresh_lock:
-            if self._mews_cached_for == current.date():
+            if self._mews_cache_matches(current.date(), source_trade_date):
                 return False
             published = await source.fetch_snapshot(
                 source_trade_date=source_trade_date,
@@ -3973,6 +3983,16 @@ class V20Service:
             )
             return True
 
+    def _mews_cache_matches(
+        self,
+        availability_date: date,
+        source_trade_date: date,
+    ) -> bool:
+        return (
+            self._mews_cached_for == availability_date
+            and self._mews_source_trade_date == source_trade_date
+        )
+
     def kick_mews_for_selection_trigger(
         self,
         now: datetime | None = None,
@@ -4026,22 +4046,27 @@ class V20Service:
         self,
         target_date: date,
         *,
+        source_trade_date: date,
         now: datetime,
     ) -> bool:
         """Calculate the exact daily D2 value without using process time."""
 
         self._require_running()
         target = _local(target_date, MEWS_PUBLISH_TIME)
-        task = await self._mews_singleflight_join(target, stage="D2_EXIT")
-        return bool(
-            await self._await_mews_singleflight(task) or self._mews_cached_for == target_date
+        task = await self._mews_singleflight_join(
+            target,
+            stage="D2_EXIT",
+            source_trade_date=source_trade_date,
         )
+        await self._await_mews_singleflight(task)
+        return self._mews_cache_matches(target_date, source_trade_date)
 
     async def _mews_singleflight_join(
         self,
         current: datetime,
         *,
         stage: str,
+        source_trade_date: date | None = None,
     ) -> asyncio.Task[bool]:
         """Return the live per-date shared attempt, creating it exactly once."""
 
@@ -4051,7 +4076,10 @@ class V20Service:
             self._require_running()
             task = self._mews_singleflight_task
             if task is not None and not task.done():
-                if self._mews_singleflight_date == current.date():
+                if self._mews_singleflight_date == current.date() and (
+                    source_trade_date is None
+                    or self._mews_singleflight_source_trade_date == source_trade_date
+                ):
                     return task
                 task.cancel()
             if task is not None:
@@ -4059,15 +4087,21 @@ class V20Service:
             if self._mews_singleflight_task is task:
                 self._mews_singleflight_task = None
                 self._mews_singleflight_date = None
+                self._mews_singleflight_source_trade_date = None
             if self._stop_event.is_set():
                 raise V20RepositoryError("V20 MEWS singleflight is stopped")
             self._require_running()
             task = asyncio.create_task(
-                self._mews_singleflight_attempt(current, stage=stage),
+                self._mews_singleflight_attempt(
+                    current,
+                    stage=stage,
+                    source_trade_date=source_trade_date,
+                ),
                 name=f"v20-mews-singleflight-{current.date().isoformat()}",
             )
             self._mews_singleflight_task = task
             self._mews_singleflight_date = current.date()
+            self._mews_singleflight_source_trade_date = source_trade_date
             return task
 
     async def _await_mews_singleflight(
@@ -4106,12 +4140,14 @@ class V20Service:
                     # the attempt while the cache is still missing.
                     self._mews_singleflight_task = None
                     self._mews_singleflight_date = None
+                    self._mews_singleflight_source_trade_date = None
 
     async def _mews_singleflight_attempt(
         self,
         current: datetime,
         *,
         stage: str,
+        source_trade_date: date | None = None,
     ) -> bool:
         """Fill a missing daily MEWS value as the shared per-date attempt."""
 
@@ -4119,21 +4155,36 @@ class V20Service:
         await self._repository.assert_runtime_leader()
         calendar: Sequence[date] = ()
         try:
-            calendar = await self._load_trade_calendar(current.date())
-            if current.date() not in calendar:
-                self._record_lane_success("mews_cache", current)
-                return False
+            if source_trade_date is None:
+                calendar = await self._load_trade_calendar(current.date())
+                if current.date() not in calendar:
+                    self._record_lane_success("mews_cache", current)
+                    return False
             # The long-running scheduler performs its own restart restore
             # before the scheduled 09:10 calculation.  A post-cutoff recovery
             # may be invoked directly, so it owns the same restore here.  A
             # selection-trigger miss deliberately calculates locally instead
             # of depending on a stale external/computed source.
-            if (
-                stage == "SCHEDULED_AFTER_CUTOFF_RECOVERY" or self._mews_guard_store is None
-            ) and self._mews_cached_for != current.date():
-                await self._restore_mews_cache_once(current, calendar)
-            await self._calculate_mews_once(current, calendar)
+            if (stage == "SCHEDULED_AFTER_CUTOFF_RECOVERY" or self._mews_guard_store is None) and (
+                self._mews_cached_for != current.date()
+                or (
+                    source_trade_date is not None
+                    and self._mews_source_trade_date != source_trade_date
+                )
+            ):
+                await self._restore_mews_cache_once(
+                    current,
+                    calendar,
+                    source_trade_date=source_trade_date,
+                )
+            await self._calculate_mews_once(
+                current,
+                calendar,
+                source_trade_date=source_trade_date,
+            )
             self._record_lane_success("mews_cache", self._aware_now())
+            if source_trade_date is not None:
+                return self._mews_cache_matches(current.date(), source_trade_date)
             return self._mews_cached_for == current.date()
         except asyncio.CancelledError:
             raise
@@ -4143,6 +4194,7 @@ class V20Service:
                 current,
                 stage=stage,
                 calendar=calendar,
+                source_trade_date=source_trade_date,
             )
             raise
 
@@ -4153,6 +4205,7 @@ class V20Service:
         *,
         stage: str,
         calendar: Sequence[date],
+        source_trade_date: date | None = None,
     ) -> bool:
         """Report one stable, idempotent daily failure with full context.
 
@@ -4162,8 +4215,11 @@ class V20Service:
         """
 
         current = self._aware_now(now)
-        predecessors = [day for day in calendar if day < current.date()]
-        source_trade_date = predecessors[-1].isoformat() if predecessors else "UNKNOWN"
+        if source_trade_date is None:
+            predecessors = [day for day in calendar if day < current.date()]
+            source_label = predecessors[-1].isoformat() if predecessors else "UNKNOWN"
+        else:
+            source_label = source_trade_date.isoformat()
         self._mews_last_failure = f"{type(exc).__name__}: {exc}"
         self._record_lane_error(
             "mews_cache",
@@ -4178,7 +4234,7 @@ class V20Service:
             message=(
                 f"阶段={stage}; 异常={type(exc).__name__}; "
                 f"availability_date={current.date().isoformat()}; "
-                f"source_trade_date={source_trade_date}; "
+                f"source_trade_date={source_label}; "
                 f"详情: {exc}"
             ),
             now=current,
@@ -4237,16 +4293,21 @@ class V20Service:
         self,
         now: datetime,
         calendar: Sequence[date],
+        *,
+        source_trade_date: date | None = None,
     ) -> bool:
         """Reattach to today's already-sealed cache after a process restart."""
 
         current = self._aware_now(now)
-        if self._mews_cached_for == current.date() or current.date() not in calendar:
+        if source_trade_date is None and current.date() not in calendar:
             return False
-        predecessors = [day for day in calendar if day < current.date()]
-        if not predecessors:
-            raise V20RepositoryError("MEWS calendar has no preceding trading day")
-        source_trade_date = predecessors[-1]
+        if source_trade_date is None:
+            predecessors = [day for day in calendar if day < current.date()]
+            if not predecessors:
+                raise V20RepositoryError("MEWS calendar has no preceding trading day")
+            source_trade_date = predecessors[-1]
+        if self._mews_cache_matches(current.date(), source_trade_date):
+            return False
         cutoff = _local(current.date(), MEWS_CACHE_CUTOFF)
         if self._mews_guard_store is not None:
             snapshot_id = await self._mews_guard_store.find_eligible_snapshot(
@@ -9038,10 +9099,7 @@ class V20Service:
         if now.date() >= record.d2 and record.exit_intent_id is None:
             try:
                 cutoff = _local(record.d2, self.config.clock.mews_cutoff_d1)
-                predecessors = [day for day in calendar if day < record.d2]
-                if not predecessors:
-                    raise V20RepositoryError("MEWS calendar has no D2 predecessor")
-                late_source_trade_date = predecessors[-1]
+                late_source_trade_date = record.d1
                 if self._mews_guard_store is not None:
                     selected = await self._mews_guard_store.load_frozen_for_leg(
                         record.model_leg_id,
@@ -9058,7 +9116,11 @@ class V20Service:
                         )
                         if existing_snapshot_id is None:
                             try:
-                                await self._ensure_mews_for_exit_date(record.d2, now=now)
+                                await self._ensure_mews_for_exit_date(
+                                    record.d2,
+                                    source_trade_date=record.d1,
+                                    now=now,
+                                )
                                 existing_snapshot_id = (
                                     await self._mews_guard_store.find_eligible_snapshot(
                                         source_trade_date=late_source_trade_date,

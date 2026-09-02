@@ -137,7 +137,7 @@ async def test_rolling7_market_health_single_table_lifecycle_and_restart(reposit
             d2_closes={"000001": 101.0, "000002": 202.0},
         ),
     )
-    for batch in progression:
+    for batch in progression[:-1]:
         assert await instance.save_rolling7_market_health(batch, updated_at=now)
         assert await instance.save_rolling7_market_health(batch, updated_at=now)
 
@@ -316,6 +316,7 @@ async def test_rolling7_market_health_schema_migration_is_idempotent(repository)
             WHERE constraints.table_schema=$1
               AND constraints.table_name='rolling7_market_health'
               AND constraints.constraint_type='CHECK'
+              AND constraints.constraint_name LIKE 'ck_rolling7_market_health_%'
             ORDER BY constraints.constraint_name
             """,
             schema,

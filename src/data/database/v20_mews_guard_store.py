@@ -43,22 +43,9 @@ _STRICT_CANDIDATE_SQL = f"""
       AND snapshot.snapshot_json->'evidence'->>'profile'='{_EVIDENCE_PROFILE}'
       AND snapshot.generated_at <= snapshot.received_at
       AND snapshot.received_at <= snapshot.receipt_sealed_at
-      AND (
-          (
-            snapshot.generated_at < $2
-            AND snapshot.receipt_sealed_at < $2
-            AND snapshot.snapshot_json->'evidence'->>'signal_available_date' IS NOT NULL
-            AND snapshot.snapshot_json->'evidence'->>'signal_available_date'
-                =timezone('Asia/Shanghai',snapshot.generated_at)::date::text
-            AND timezone('Asia/Shanghai',snapshot.generated_at)::date <= $3::date
-          )
-          OR (
-            snapshot.source_trade_date=$1::date
-            AND snapshot.snapshot_json->'evidence'->>'signal_available_date'=$3::text
-            AND timezone('Asia/Shanghai',snapshot.generated_at)::date=$3::date
-            AND timezone('Asia/Shanghai',snapshot.receipt_sealed_at)::date=$3::date
-          )
-      )
+      AND snapshot.snapshot_json->'evidence'->>'signal_available_date'=$2::date::text
+      AND timezone('Asia/Shanghai',snapshot.generated_at)::date=$2::date
+      AND timezone('Asia/Shanghai',snapshot.receipt_sealed_at)::date=$2::date
 """
 
 
@@ -212,6 +199,8 @@ def _snapshot_from_row(
             raise V20SemanticConflict("MEWS evidence availability differs from generated_at date")
         if on_time and generated_shanghai_date > availability_date:
             raise V20SemanticConflict("MEWS on-time evidence is after its availability date")
+        if source_trade_date is not None and not late:
+            raise V20SemanticConflict("MEWS snapshot is not the requested daily value")
     if not (on_time or late):
         raise V20SemanticConflict("MEWS snapshot violates receipt cutoff")
     if received_at < generated_at:
@@ -259,7 +248,6 @@ class V20MewsGuardStore:
             row = await connection.fetchrow(
                 sql,
                 source_trade_date,
-                cutoff,
                 availability_date,
             )
         if row is None:
@@ -326,6 +314,8 @@ class V20MewsGuardStore:
                     raise V20SemanticConflict(
                         "MEWS selection evaluation date does not match model leg"
                     )
+                if evaluation_date is not None and late_source_trade_date != d1:
+                    raise V20SemanticConflict("D2 MEWS source does not match model leg d1")
                 existing = await connection.fetchrow(
                     f"""
                     SELECT selection.model_leg_id,selection.cutoff_ts,
@@ -447,8 +437,8 @@ class V20MewsGuardStore:
                 raise TypeError("MEWS evaluation_date must be a date")
             if late_source_trade_date is None:
                 raise ValueError("MEWS evaluation requires an exact late snapshot")
-            if late_source_trade_date >= evaluation_date:
-                raise ValueError("MEWS evaluation late source is not earlier")
+            if late_source_trade_date != d1:
+                raise ValueError("MEWS evaluation source must equal the model leg's d1")
             if late_availability_date != evaluation_date:
                 raise ValueError("MEWS evaluation late availability is invalid")
         elif late_source_trade_date is not None and (
@@ -712,6 +702,7 @@ class V20MewsGuardStore:
                 source_trade_date=None,
                 generated_at=None,
                 received_at=None,
+                receipt_sealed_at=None,
                 fast_state=None,
                 model_version=None,
                 data_version=None,
@@ -758,6 +749,7 @@ class V20MewsGuardStore:
             source_trade_date=row["source_trade_date"],
             generated_at=row["generated_at"],
             received_at=row["received_at"],
+            receipt_sealed_at=row["receipt_sealed_at"],
             fast_state=validated_fast_state,
             model_version=row["model_version"],
             data_version=row["data_version"],

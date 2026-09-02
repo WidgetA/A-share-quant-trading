@@ -239,9 +239,9 @@ async def test_find_accepts_only_strictly_sealed_asyncpg_like_rows(
     assert "LOCAL_TUSHARE_MEWS_V2_0910_V1" in sql
     assert "snapshot.generated_at <= snapshot.received_at" in sql
     assert "snapshot.received_at <= snapshot.receipt_sealed_at" in sql
-    assert "timezone('Asia/Shanghai',snapshot.generated_at)::date::text" in sql
+    assert "timezone('Asia/Shanghai',snapshot.generated_at)::date=$2::date" in sql
     assert "NULLS LAST" in sql
-    assert connection.calls[0][2] == (SOURCE_DATE, CUTOFF, availability_date)
+    assert connection.calls[0][2] == (SOURCE_DATE, availability_date)
 
 
 async def test_find_unsealed_or_wrong_candidate_is_excluded_by_sql() -> None:
@@ -259,8 +259,8 @@ async def test_find_unsealed_or_wrong_candidate_is_excluded_by_sql() -> None:
     sql = connection.calls[0][1]
     assert "snapshot.receipt_sealed_at IS NOT NULL" in sql
     assert "snapshot.source_trade_date=$1::date" in sql
-    assert "timezone('Asia/Shanghai',snapshot.generated_at)::date=$3::date" in sql
-    assert "timezone('Asia/Shanghai',snapshot.receipt_sealed_at)::date=$3::date" in sql
+    assert "timezone('Asia/Shanghai',snapshot.generated_at)::date=$2::date" in sql
+    assert "timezone('Asia/Shanghai',snapshot.receipt_sealed_at)::date=$2::date" in sql
     ordering = sql[sql.index("ORDER BY") :]
     assert ordering.index("receipt_sealed_at DESC NULLS LAST") < ordering.index(
         "generated_at DESC NULLS LAST"
@@ -360,6 +360,28 @@ async def test_unsupported_fast_state_fails_closed_even_with_consistent_payload(
         )
 
 
+async def test_find_d2_rejects_prior_daily_value_even_when_before_cutoff() -> None:
+    prior_payload = _payload(
+        source_trade_date=D1,
+        generated_at=ON_TIME,
+        availability_date=D1,
+    )
+    prior_row = _row(
+        source_trade_date=D1,
+        generated_at=ON_TIME,
+        sealed_at=ON_TIME + timedelta(minutes=1),
+        payload=prior_payload,
+    )
+    store = V20MewsGuardStore(_repository(_FakeConnection(candidate=prior_row)))
+
+    with pytest.raises(V20SemanticConflict, match="requested daily value"):
+        await store.find_eligible_snapshot(
+            source_trade_date=D1,
+            cutoff=D2_CUTOFF,
+            availability_date=D2,
+        )
+
+
 async def test_select_freezes_authorized_leg_exactly_once() -> None:
     connection = _FakeConnection(
         leg={"d1": D1},
@@ -445,6 +467,8 @@ async def test_select_freeze_and_load_returns_verified_selected_record() -> None
     assert record.snapshot_id == "mews-snapshot"
     assert record.source_trade_date == SOURCE_DATE
     assert record.generated_at == LATE
+    assert record.received_at == LATE + timedelta(seconds=1)
+    assert record.receipt_sealed_at == LATE + timedelta(minutes=1)
     assert record.fast_state == "DANGER"
     assert record.model_version == "mews_v2"
     assert record.payload["snapshot_id"] == "mews-snapshot"
@@ -741,6 +765,22 @@ async def test_d2_selection_rejects_older_d0_source_snapshot() -> None:
     assert not any("INSERT INTO" in call[1] for call in connection.calls)
 
 
+async def test_d2_selection_rejects_request_for_source_older_than_leg_d1() -> None:
+    connection = _FakeConnection(leg={"d1": D1, "d2": D2})
+    store = V20MewsGuardStore(_repository(connection))
+
+    with pytest.raises(ValueError, match="source must equal the model leg's d1"):
+        await store.select_freeze_and_load(
+            "leg-1",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=SOURCE_DATE,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        )
+    assert connection.calls == []
+
+
 async def test_d2_missing_candidate_persists_fallback_exactly_once() -> None:
     connection = _FakeConnection(leg={"d1": D1, "d2": D2}, candidate=None)
     store = V20MewsGuardStore(_repository(connection))
@@ -799,6 +839,21 @@ async def test_load_frozen_returns_current_d2_fallback_after_restart() -> None:
     assert record.selection_reason == "MEWS_UNAVAILABLE_FALLBACK_12"
     assert not any("FROM v20.mews_snapshots" in call[1] for call in connection.calls)
     assert not any("INSERT INTO" in call[1] or "UPDATE v20" in call[1] for call in connection.calls)
+
+
+async def test_load_frozen_d2_rejects_source_older_than_model_leg_d1() -> None:
+    connection = _FakeConnection(leg={"d1": D1, "d2": D2})
+    store = V20MewsGuardStore(_repository(connection))
+
+    with pytest.raises(V20SemanticConflict, match="source does not match model leg d1"):
+        await store.load_frozen_for_leg(
+            "leg-1",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=SOURCE_DATE,
+            evaluation_date=D2,
+        )
+    assert not any("FROM v20.leg_mews_selection" in call[1] for call in connection.calls)
 
 
 async def test_d2_upgrades_legacy_selection_without_intent_using_explicit_update() -> None:

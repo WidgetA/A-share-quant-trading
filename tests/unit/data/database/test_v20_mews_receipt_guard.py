@@ -81,6 +81,20 @@ async def test_on_time_generated_and_sealed_receipt_is_eligible() -> None:
     assert connection.calls[0][2] == ("mews-on-time",)
 
 
+async def test_on_time_prior_daily_value_is_not_eligible_for_new_availability_date() -> None:
+    prior_day = AVAILABILITY_DATE
+    current_day = prior_day + timedelta(days=1)
+    row = _row(signal_available_date=prior_day.isoformat())
+    guard = V20MewsReceiptGuard(_repository(_FakeConnection(row)))
+
+    assert not await guard.is_eligible(
+        "mews-prior-day",
+        source_trade_date=SOURCE_DATE,
+        cutoff=datetime(2026, 9, 2, 9, 40, tzinfo=TZ),
+        availability_date=current_day,
+    )
+
+
 async def test_asyncpg_like_indexable_record_is_eligible() -> None:
     class AsyncpgLikeRecord:
         def __init__(self, values: dict[str, Any]) -> None:

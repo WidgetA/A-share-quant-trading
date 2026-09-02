@@ -89,10 +89,8 @@ class V20MewsReceiptGuard:
             or receipt_sealed_at.utcoffset() is None
         ):
             return False
-        if generated_at < cutoff and receipt_sealed_at < cutoff:
-            return True
         if availability_date is None:
-            return False
+            return generated_at < cutoff and receipt_sealed_at < cutoff
         if (
             generated_at.astimezone(_SHANGHAI_TZ).date() != availability_date
             or receipt_sealed_at.astimezone(_SHANGHAI_TZ).date() != availability_date

@@ -860,6 +860,7 @@ class SelectedMewsRecord:
     source_trade_date: date | None
     generated_at: datetime | None
     received_at: datetime | None
+    receipt_sealed_at: datetime | None
     fast_state: str | None
     model_version: str | None
     data_version: str | None
@@ -4866,10 +4867,9 @@ class V20Repository:
     ) -> str | None:
         """Recover a qualified daily cache after a V20 process restart.
 
-        A snapshot qualifies on time (generated and sealed before the cutoff)
-        or as the same day's late local repair (its evidence availability date
-        matches ``availability_date``); a late repair is never invalid merely
-        because it was calculated after the cutoff.
+        The restored snapshot must belong to ``availability_date``.  Scheduled
+        and on-demand calculations have the same provenance once durably
+        sealed; an older daily value must not suppress today's repair.
         """
 
         _require_aware(cutoff, "MEWS cutoff")
@@ -4879,15 +4879,16 @@ class V20Repository:
                 f"""
                 SELECT snapshot_id FROM {self.schema}.mews_snapshots
                 WHERE source_trade_date=$1
-                  AND (
-                    (generated_at < $2 AND receipt_sealed_at < $2)
-                    OR (snapshot_json->'evidence'->>'signal_available_date' = $3)
-                  )
+                  AND receipt_sealed_at IS NOT NULL
+                  AND generated_at <= received_at
+                  AND received_at <= receipt_sealed_at
+                  AND snapshot_json->'evidence'->>'signal_available_date' = $2
+                  AND timezone('Asia/Shanghai',generated_at)::date = $2::date
+                  AND timezone('Asia/Shanghai',receipt_sealed_at)::date = $2::date
                 ORDER BY generated_at DESC,receipt_sealed_at DESC,snapshot_id DESC
                 LIMIT 1
                 """,
                 source_trade_date,
-                cutoff,
                 availability,
             )
         return str(value) if value is not None else None
@@ -4903,15 +4904,14 @@ class V20Repository:
     ) -> tuple[str | None, str | None, str]:
         """Freeze the leg's MEWS selection exactly once.
 
-        Candidates qualify on time (generated and sealed before ``cutoff``) or
-        as the leg's late-repaired daily value: generated after the cutoff but
-        with ``late_source_trade_date`` as source (the correct predecessor of
-        ``d1``) and evidence availability equal to ``late_availability_date``
-        (``d1``).  An already frozen selection — including a fallback freeze —
-        is returned unchanged and is never rewritten.
+        D1 compatibility calls retain the historical cutoff selection.  D2
+        calls require the model leg's D1 as source and D2 as availability; a
+        scheduled value and a same-day repair are equivalent once sealed.  An
+        already frozen selection is returned unchanged.
         """
 
         _require_aware(cutoff, "MEWS cutoff")
+        cutoff_date = cutoff.astimezone(BEIJING_TZ).date()
         late_availability = (
             late_availability_date.isoformat() if late_availability_date is not None else None
         )
@@ -4919,7 +4919,7 @@ class V20Repository:
             async with connection.transaction(isolation="serializable"):
                 leg = await connection.fetchrow(
                     f"""
-                    SELECT leg.d1
+                    SELECT leg.d1,leg.d2
                     FROM {self.schema}.model_legs AS leg
                     JOIN {self.schema}.model_batches AS batch USING (model_batch_id)
                     JOIN {self.schema}.outbox_events AS source
@@ -4935,6 +4935,18 @@ class V20Repository:
                     raise V20RepositoryError(f"unknown model leg {model_leg_id!r}")
                 if leg["d1"] != d1:
                     raise V20SemanticConflict("MEWS selection d1 does not match model leg")
+                current_d2 = cutoff_date == leg["d2"]
+                if not current_d2 and cutoff_date != d1:
+                    raise V20SemanticConflict("MEWS cutoff is not a model-leg evaluation date")
+                if current_d2:
+                    if late_source_trade_date != d1 or late_availability_date != cutoff_date:
+                        raise V20SemanticConflict(
+                            "D2 MEWS selection requires source D1 and availability D2"
+                        )
+                elif late_source_trade_date is not None and (
+                    late_source_trade_date >= d1 or late_availability_date != d1
+                ):
+                    raise V20SemanticConflict("D1 MEWS late-selection dates are invalid")
                 existing = await connection.fetchrow(
                     f"SELECT snapshot_id,fast_state,selection_reason,cutoff_ts FROM "
                     f"{self.schema}.leg_mews_selection WHERE model_leg_id=$1",
@@ -4955,23 +4967,33 @@ class V20Repository:
                     SELECT snapshot_id,fast_state,
                            (generated_at < $2 AND receipt_sealed_at < $2) AS on_time
                     FROM {self.schema}.mews_snapshots
-                    WHERE source_trade_date < $1
+                    WHERE receipt_sealed_at IS NOT NULL
+                      AND generated_at <= received_at
+                      AND received_at <= receipt_sealed_at
+                      AND source_trade_date < $1
                       AND (
-                        (generated_at < $2 AND receipt_sealed_at < $2)
+                        (
+                          NOT $5::boolean
+                          AND generated_at < $2
+                          AND receipt_sealed_at < $2
+                        )
                         OR (
                           $3::date IS NOT NULL
                           AND source_trade_date = $3
                           AND snapshot_json->'evidence'->>'signal_available_date' = $4
+                          AND timezone('Asia/Shanghai',generated_at)::date = $1::date
+                          AND timezone('Asia/Shanghai',receipt_sealed_at)::date = $1::date
                         )
                       )
                     ORDER BY source_trade_date DESC,generated_at DESC,
                              receipt_sealed_at DESC,snapshot_id DESC
                     LIMIT 1
                     """,
-                    d1,
+                    cutoff_date,
                     cutoff,
                     late_source_trade_date,
                     late_availability,
+                    current_d2,
                 )
                 snapshot_id = row["snapshot_id"] if row else None
                 fast_state = row["fast_state"] if row else None
@@ -5003,11 +5025,11 @@ class V20Repository:
         async with self.pool.acquire() as connection:
             row = await connection.fetchrow(
                 f"""
-                SELECT leg.model_leg_id,leg.d1,selection.cutoff_ts,
+                SELECT leg.model_leg_id,leg.d1,leg.d2,selection.cutoff_ts,
                        selection.selection_reason,selection.selected_at,
                        selection.snapshot_id,selection.fast_state AS selected_fast_state,
                        snapshot.source_trade_date,snapshot.generated_at,
-                       snapshot.receipt_sealed_at AS received_at,
+                       snapshot.received_at,snapshot.receipt_sealed_at,
                        snapshot.fast_state,snapshot.model_version,snapshot.data_version,
                        snapshot.content_hash,snapshot.snapshot_json
                 FROM {self.schema}.model_legs AS leg
@@ -5035,6 +5057,7 @@ class V20Repository:
                 row["source_trade_date"],
                 row["generated_at"],
                 row["received_at"],
+                row["receipt_sealed_at"],
                 row["fast_state"],
                 row["model_version"],
                 row["data_version"],
@@ -5047,15 +5070,30 @@ class V20Repository:
                 raise V20SemanticConflict("selected MEWS fast_state does not match snapshot")
             if sha256_json(payload) != row["content_hash"]:
                 raise V20SemanticConflict("selected MEWS snapshot hash mismatch")
+            if not (row["generated_at"] <= row["received_at"] <= row["receipt_sealed_at"]):
+                raise V20SemanticConflict("selected MEWS snapshot timestamps are out of order")
+            evaluation_date = row["cutoff_ts"].astimezone(BEIJING_TZ).date()
+            if evaluation_date not in (row["d1"], row["d2"]):
+                raise V20SemanticConflict("selected MEWS cutoff is not a model-leg date")
             on_time = (
-                row["generated_at"] < row["cutoff_ts"] and row["received_at"] < row["cutoff_ts"]
+                row["generated_at"] < row["cutoff_ts"]
+                and row["receipt_sealed_at"] < row["cutoff_ts"]
             )
             evidence = payload.get("evidence") if isinstance(payload, Mapping) else None
             availability = (
                 evidence.get("signal_available_date") if isinstance(evidence, Mapping) else None
             )
-            late_same_day = availability == row["d1"].isoformat()
-            if not (row["source_trade_date"] < row["d1"] and (on_time or late_same_day)):
+            if evaluation_date == row["d2"]:
+                legal = (
+                    row["source_trade_date"] == row["d1"]
+                    and availability == row["d2"].isoformat()
+                    and row["generated_at"].astimezone(BEIJING_TZ).date() == row["d2"]
+                    and row["receipt_sealed_at"].astimezone(BEIJING_TZ).date() == row["d2"]
+                )
+            else:
+                late_same_day = availability == row["d1"].isoformat()
+                legal = row["source_trade_date"] < row["d1"] and (on_time or late_same_day)
+            if not legal:
                 raise V20SemanticConflict("selected MEWS snapshot violates PIT cutoff")
         return SelectedMewsRecord(
             model_leg_id=row["model_leg_id"],
@@ -5067,6 +5105,7 @@ class V20Repository:
             source_trade_date=row["source_trade_date"],
             generated_at=row["generated_at"],
             received_at=row["received_at"],
+            receipt_sealed_at=row["receipt_sealed_at"],
             fast_state=row["fast_state"],
             model_version=row["model_version"],
             data_version=row["data_version"],

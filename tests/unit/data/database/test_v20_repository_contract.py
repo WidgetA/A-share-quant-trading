@@ -2649,6 +2649,7 @@ async def test_load_selected_mews_verifies_complete_pit_snapshot() -> None:
     cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
     generated = datetime(2026, 8, 31, 16, 0, tzinfo=BEIJING_TZ)
     received = datetime(2026, 8, 31, 16, 1, tzinfo=BEIJING_TZ)
+    sealed = datetime(2026, 8, 31, 16, 2, tzinfo=BEIJING_TZ)
     payload = {
         "snapshot_id": "mews-1",
         "source_trade_date": "2026-08-31",
@@ -2660,6 +2661,7 @@ async def test_load_selected_mews_verifies_complete_pit_snapshot() -> None:
     row = {
         "model_leg_id": "leg-1",
         "d1": date(2026, 9, 1),
+        "d2": date(2026, 9, 2),
         "cutoff_ts": cutoff,
         "selection_reason": "ELIGIBLE",
         "selected_at": cutoff,
@@ -2668,6 +2670,7 @@ async def test_load_selected_mews_verifies_complete_pit_snapshot() -> None:
         "source_trade_date": date(2026, 8, 31),
         "generated_at": generated,
         "received_at": received,
+        "receipt_sealed_at": sealed,
         "fast_state": "DANGER",
         "model_version": "m1",
         "data_version": "d1",
@@ -2682,6 +2685,8 @@ async def test_load_selected_mews_verifies_complete_pit_snapshot() -> None:
     assert selected is not None
     assert selected.fast_state == "DANGER"
     assert selected.source_trade_date == date(2026, 8, 31)
+    assert selected.received_at == received
+    assert selected.receipt_sealed_at == sealed
     assert selected.payload == payload
 
 
@@ -2699,6 +2704,7 @@ async def test_selected_mews_rejects_timestamp_equal_to_cutoff() -> None:
     row = {
         "model_leg_id": "leg-1",
         "d1": date(2026, 9, 1),
+        "d2": date(2026, 9, 2),
         "cutoff_ts": cutoff,
         "selection_reason": "ELIGIBLE",
         "selected_at": cutoff,
@@ -2707,6 +2713,7 @@ async def test_selected_mews_rejects_timestamp_equal_to_cutoff() -> None:
         "source_trade_date": date(2026, 8, 31),
         "generated_at": cutoff,
         "received_at": cutoff,
+        "receipt_sealed_at": cutoff,
         "fast_state": "DANGER",
         "model_version": "m1",
         "data_version": "d1",
@@ -2722,7 +2729,11 @@ async def test_selected_mews_rejects_timestamp_equal_to_cutoff() -> None:
 async def test_mews_selection_sql_uses_strict_cutoff_boundary() -> None:
     cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
     connection = _FakeConnection(
-        fetchrows=[{"d1": date(2026, 9, 1)}, None, None],
+        fetchrows=[
+            {"d1": date(2026, 9, 1), "d2": date(2026, 9, 2)},
+            None,
+            None,
+        ],
         executes=["OK"],
     )
 
@@ -2740,6 +2751,39 @@ async def test_mews_selection_sql_uses_strict_cutoff_boundary() -> None:
     ][0]
     assert "generated_at < $2" in candidate_sql
     assert "receipt_sealed_at < $2" in candidate_sql
+
+
+@pytest.mark.asyncio
+async def test_mews_selection_uses_d2_boundary_and_exact_d1_source() -> None:
+    d1 = date(2026, 9, 1)
+    d2 = date(2026, 9, 2)
+    cutoff = datetime(2026, 9, 2, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FakeConnection(
+        fetchrows=[
+            {"d1": d1, "d2": d2},
+            None,
+            {"snapshot_id": "mews-d2", "fast_state": "DANGER", "on_time": True},
+        ],
+        executes=["OK"],
+    )
+
+    selected = await _repository(connection).select_mews_for_leg(
+        "leg-1",
+        d1=d1,
+        cutoff=cutoff,
+        late_source_trade_date=d1,
+        late_availability_date=d2,
+    )
+
+    assert selected == ("mews-d2", "DANGER", "ELIGIBLE")
+    candidate = next(
+        call
+        for call in connection.calls
+        if call[0] == "fetchrow" and "FROM v20.mews_snapshots" in call[1]
+    )
+    assert "NOT $5::boolean" in candidate[1]
+    assert "source_trade_date = $3" in candidate[1]
+    assert candidate[2] == (d2, cutoff, d1, d2.isoformat(), True)
 
 
 @pytest.mark.asyncio
@@ -2778,10 +2822,10 @@ async def test_0910_mews_cache_can_be_restored_after_process_restart() -> None:
     assert snapshot_id == "mews-v2-2026-08-31-restored"
     call = connection.calls[0]
     assert "source_trade_date=$1" in call[1]
-    assert "generated_at < $2" in call[1]
-    assert "receipt_sealed_at < $2" in call[1]
-    assert "signal_available_date" in call[1]
-    assert call[2] == (date(2026, 8, 31), cutoff, "2026-09-01")
+    assert "signal_available_date' = $2" in call[1]
+    assert "timezone('Asia/Shanghai',generated_at)::date = $2::date" in call[1]
+    assert "timezone('Asia/Shanghai',receipt_sealed_at)::date = $2::date" in call[1]
+    assert call[2] == (date(2026, 8, 31), "2026-09-01")
 
 
 @pytest.mark.asyncio
@@ -2797,7 +2841,7 @@ async def test_late_same_day_daily_snapshot_is_restorable_after_restart() -> Non
 
     assert snapshot_id == "mews-v2-2026-08-31-late"
     call = connection.calls[0]
-    assert "snapshot_json->'evidence'->>'signal_available_date' = $3" in call[1]
+    assert "snapshot_json->'evidence'->>'signal_available_date' = $2" in call[1]
 
 
 @pytest.mark.asyncio
@@ -2805,7 +2849,7 @@ async def test_mews_selection_accepts_late_same_day_daily_snapshot() -> None:
     cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
     connection = _FakeConnection(
         fetchrows=[
-            {"d1": date(2026, 9, 1)},
+            {"d1": date(2026, 9, 1), "d2": date(2026, 9, 2)},
             None,
             {"snapshot_id": "mews-v2-2026-08-31-late", "fast_state": "DANGER", "on_time": False},
         ],
@@ -2836,6 +2880,7 @@ async def test_mews_selection_accepts_late_same_day_daily_snapshot() -> None:
         cutoff,
         date(2026, 8, 31),
         "2026-09-01",
+        False,
     )
     insert = [call for call in connection.calls if call[0] == "execute"][0]
     assert insert[2] == (
@@ -2852,7 +2897,7 @@ async def test_frozen_mews_selection_is_never_rewritten_by_the_late_window() -> 
     cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
     connection = _FakeConnection(
         fetchrows=[
-            {"d1": date(2026, 9, 1)},
+            {"d1": date(2026, 9, 1), "d2": date(2026, 9, 2)},
             {
                 "snapshot_id": None,
                 "fast_state": None,
@@ -2883,6 +2928,7 @@ async def test_load_selected_mews_accepts_late_same_day_daily_snapshot() -> None
     cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
     generated = datetime(2026, 9, 1, 14, 4, tzinfo=BEIJING_TZ)
     received = datetime(2026, 9, 1, 14, 5, tzinfo=BEIJING_TZ)
+    sealed = datetime(2026, 9, 1, 14, 6, tzinfo=BEIJING_TZ)
     payload = {
         "snapshot_id": "mews-late",
         "source_trade_date": "2026-08-31",
@@ -2895,14 +2941,16 @@ async def test_load_selected_mews_accepts_late_same_day_daily_snapshot() -> None
     row = {
         "model_leg_id": "leg-1",
         "d1": date(2026, 9, 1),
+        "d2": date(2026, 9, 2),
         "cutoff_ts": cutoff,
         "selection_reason": "ELIGIBLE_LATE_SAME_DAY",
-        "selected_at": received,
+        "selected_at": sealed,
         "snapshot_id": "mews-late",
         "selected_fast_state": "DANGER",
         "source_trade_date": date(2026, 8, 31),
         "generated_at": generated,
         "received_at": received,
+        "receipt_sealed_at": sealed,
         "fast_state": "DANGER",
         "model_version": "mews_v2",
         "data_version": "d1",
@@ -2917,6 +2965,55 @@ async def test_load_selected_mews_accepts_late_same_day_daily_snapshot() -> None
     assert selected is not None
     assert selected.snapshot_id == "mews-late"
     assert selected.fast_state == "DANGER"
+    assert selected.received_at == received
+    assert selected.receipt_sealed_at == sealed
+
+
+@pytest.mark.asyncio
+async def test_load_selected_mews_accepts_current_d2_snapshot() -> None:
+    d1 = date(2026, 9, 1)
+    d2 = date(2026, 9, 2)
+    cutoff = datetime(2026, 9, 2, 9, 40, tzinfo=BEIJING_TZ)
+    generated = datetime(2026, 9, 2, 9, 10, tzinfo=BEIJING_TZ)
+    received = datetime(2026, 9, 2, 9, 10, 1, tzinfo=BEIJING_TZ)
+    sealed = datetime(2026, 9, 2, 9, 11, tzinfo=BEIJING_TZ)
+    payload = {
+        "snapshot_id": "mews-d2",
+        "source_trade_date": d1.isoformat(),
+        "generated_at": generated.isoformat(),
+        "fast_state": "DANGER",
+        "model_version": "mews_v2",
+        "data_version": "d2",
+        "evidence": {"signal_available_date": d2.isoformat()},
+    }
+    row = {
+        "model_leg_id": "leg-1",
+        "d1": d1,
+        "d2": d2,
+        "cutoff_ts": cutoff,
+        "selection_reason": "ELIGIBLE",
+        "selected_at": sealed,
+        "snapshot_id": "mews-d2",
+        "selected_fast_state": "DANGER",
+        "source_trade_date": d1,
+        "generated_at": generated,
+        "received_at": received,
+        "receipt_sealed_at": sealed,
+        "fast_state": "DANGER",
+        "model_version": "mews_v2",
+        "data_version": "d2",
+        "content_hash": sha256_json(payload),
+        "snapshot_json": canonical_json(payload),
+    }
+
+    selected = await _repository(_FakeConnection(fetchrows=[row])).load_selected_mews_for_leg(
+        "leg-1"
+    )
+
+    assert selected is not None
+    assert selected.source_trade_date == d1
+    assert selected.received_at == received
+    assert selected.receipt_sealed_at == sealed
 
 
 @pytest.mark.asyncio
@@ -2924,6 +3021,7 @@ async def test_load_selected_mews_rejects_late_snapshot_with_wrong_availability(
     cutoff = datetime(2026, 9, 1, 9, 40, tzinfo=BEIJING_TZ)
     generated = datetime(2026, 9, 1, 14, 4, tzinfo=BEIJING_TZ)
     received = datetime(2026, 9, 1, 14, 5, tzinfo=BEIJING_TZ)
+    sealed = datetime(2026, 9, 1, 14, 6, tzinfo=BEIJING_TZ)
     payload = {
         "snapshot_id": "mews-stale",
         "source_trade_date": "2026-08-31",
@@ -2936,14 +3034,16 @@ async def test_load_selected_mews_rejects_late_snapshot_with_wrong_availability(
     row = {
         "model_leg_id": "leg-1",
         "d1": date(2026, 9, 1),
+        "d2": date(2026, 9, 2),
         "cutoff_ts": cutoff,
         "selection_reason": "ELIGIBLE",
-        "selected_at": received,
+        "selected_at": sealed,
         "snapshot_id": "mews-stale",
         "selected_fast_state": "DANGER",
         "source_trade_date": date(2026, 8, 31),
         "generated_at": generated,
         "received_at": received,
+        "receipt_sealed_at": sealed,
         "fast_state": "DANGER",
         "model_version": "mews_v2",
         "data_version": "d1",

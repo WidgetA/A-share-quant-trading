@@ -78,16 +78,16 @@ def _bar(
 def _mews(
     *,
     fast_state: str = "DANGER",
-    source_trade_date: date | None = D0,
+    source_trade_date: date | None = D1,
     generated_at: datetime | None = None,
     received_at: datetime | None = None,
     snapshot_id: str | None = "m1",
-    availability_date: date | None = None,
+    availability_date: date | None = D2,
 ) -> MewsSnapshot:
     return MewsSnapshot(
         source_trade_date=source_trade_date,
-        generated_at=generated_at or _dt(D1, 9, 39),
-        received_at=received_at or _dt(D1, 9, 39),
+        generated_at=generated_at or _dt(D2, 9, 10),
+        received_at=received_at or _dt(D2, 9, 11),
         fast_state=fast_state,
         model_version="model-v1",
         data_version="data-v1",
@@ -222,61 +222,67 @@ def test_mews_danger_tightens_d2_to_five_percent() -> None:
     assert result.mews_selection is not None and result.mews_selection.danger
 
 
-def test_mews_cutoff_is_strict_and_latest_qualified_selection() -> None:
-    eligible_old = _mews(generated_at=_dt(D1, 9, 38), received_at=_dt(D1, 9, 38), snapshot_id="a")
+def test_mews_uses_latest_visible_current_d2_value() -> None:
+    eligible_old = _mews(
+        generated_at=_dt(D2, 9, 10),
+        received_at=_dt(D2, 9, 11),
+        snapshot_id="a",
+    )
     eligible_latest = _mews(
-        generated_at=_dt(D1, 9, 39),
-        received_at=_dt(D1, 9, 39),
+        generated_at=_dt(D2, 9, 20),
+        received_at=_dt(D2, 9, 21),
         snapshot_id="b",
     )
-    exactly_at_cutoff = _mews(
-        generated_at=_dt(D1, 9, 40), received_at=_dt(D1, 9, 40), snapshot_id="cutoff"
+    late_repair = _mews(
+        generated_at=_dt(D2, 14, 4),
+        received_at=_dt(D2, 14, 5),
+        snapshot_id="late",
     )
-    future = _mews(generated_at=_dt(D1, 9, 41), received_at=_dt(D1, 9, 41), snapshot_id="c")
-    wrong_source = _mews(source_trade_date=D1, snapshot_id="d")
+    wrong_source = _mews(source_trade_date=D0, snapshot_id="wrong-source")
+    wrong_availability = _mews(availability_date=D1, snapshot_id="wrong-day")
     selected = select_mews_snapshot(
         leg=_leg(),
-        snapshots=[eligible_old, future, wrong_source, exactly_at_cutoff, eligible_latest],
+        snapshots=[eligible_old, late_repair, wrong_source, wrong_availability, eligible_latest],
         as_of=_dt(D2, 9, 31),
     )
     assert selected.available
     assert selected.snapshot is eligible_latest
 
     not_yet_visible = select_mews_snapshot(
-        leg=_leg(), snapshots=[eligible_latest], as_of=_dt(D1, 9, 38)
+        leg=_leg(), snapshots=[eligible_latest], as_of=_dt(D2, 9, 20)
     )
     assert not not_yet_visible.available
 
-    cutoff_only = select_mews_snapshot(
-        leg=_leg(), snapshots=[exactly_at_cutoff], as_of=_dt(D2, 9, 31)
+    repaired = select_mews_snapshot(
+        leg=_leg(), snapshots=[eligible_latest, late_repair], as_of=_dt(D2, 14, 5)
     )
-    assert not cutoff_only.available
+    assert repaired.available
+    assert repaired.snapshot is late_repair
 
 
 def test_late_same_day_daily_mews_is_available_for_d2_judgment() -> None:
     late = _mews(
-        generated_at=_dt(D1, 14, 4),
-        received_at=_dt(D1, 14, 5),
+        generated_at=_dt(D2, 14, 4),
+        received_at=_dt(D2, 14, 5),
         snapshot_id="late",
-        availability_date=D1,
     )
     selected = select_mews_snapshot(
         leg=_leg(),
         snapshots=[late, _mews(snapshot_id="on-time")],
-        as_of=_dt(D2, 9, 31),
+        as_of=_dt(D2, 14, 5),
     )
     assert selected.available
     assert selected.snapshot is late
 
     # A D2 evaluation before the late snapshot was sealed cannot see it.
-    not_yet_visible = select_mews_snapshot(leg=_leg(), snapshots=[late], as_of=_dt(D1, 14, 3))
+    not_yet_visible = select_mews_snapshot(leg=_leg(), snapshots=[late], as_of=_dt(D2, 14, 3))
     assert not not_yet_visible.available
 
     # The late-repaired DANGER value tightens the D2 threshold to -5%.
     result = evaluate_exit(
         leg=_leg(),
-        bars=[_bar(D2, 9, 31, 95.0)],
-        as_of=_dt(D2, 9, 31),
+        bars=[_bar(D2, 14, 5, 95.0)],
+        as_of=_dt(D2, 14, 5),
         mews_snapshots=[late],
         d1_window_complete=True,
     )
@@ -285,35 +291,36 @@ def test_late_same_day_daily_mews_is_available_for_d2_judgment() -> None:
 
 
 def test_late_mews_without_matching_availability_is_never_promoted() -> None:
-    # A stale source regenerated late on D1 (availability belongs to an older
-    # day) must not be recycled into the D1 daily value.
+    # An older source regenerated on D2 must not be recycled into the current
+    # D2 daily value.
     stale_regen = _mews(
         source_trade_date=date(2026, 8, 26),
-        generated_at=_dt(D1, 14, 4),
-        received_at=_dt(D1, 14, 5),
+        generated_at=_dt(D2, 14, 4),
+        received_at=_dt(D2, 14, 5),
         snapshot_id="stale",
         availability_date=date(2026, 8, 26),
     )
-    # No availability evidence at all: the strict 09:40 cutoff still applies.
+    # No D2 availability evidence cannot describe the D2 decision.
     no_evidence = _mews(
-        generated_at=_dt(D1, 14, 4),
-        received_at=_dt(D1, 14, 5),
+        generated_at=_dt(D2, 14, 4),
+        received_at=_dt(D2, 14, 5),
         snapshot_id="no-evidence",
+        availability_date=None,
     )
-    # Availability after D1 is not the leg's daily value either.
-    future_day = _mews(
-        generated_at=_dt(D1, 14, 4),
-        received_at=_dt(D1, 14, 5),
-        snapshot_id="future-day",
-        availability_date=D2,
+    # A D1 availability marker is the retired prior-day selection, not D2.
+    prior_day = _mews(
+        generated_at=_dt(D2, 14, 4),
+        received_at=_dt(D2, 14, 5),
+        snapshot_id="prior-day",
+        availability_date=D1,
     )
     selected = select_mews_snapshot(
         leg=_leg(),
-        snapshots=[stale_regen, no_evidence, future_day],
-        as_of=_dt(D2, 9, 31),
+        snapshots=[stale_regen, no_evidence, prior_day],
+        as_of=_dt(D2, 14, 6),
     )
     assert not selected.available
-    assert selected.reason == "MEWS_UNAVAILABLE"
+    assert selected.reason == "MEWS_INVALID"
 
 
 def test_invalid_mews_uses_default_threshold_and_records_alert_reason() -> None:

@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.data.database.v20_mews_guard_store import V20MewsGuardStore
-from src.data.database.v20_repository import ActiveModelLeg, sha256_json
-from src.web.v20_service import V20Service
+from src.data.database.v20_repository import ActiveModelLeg, SelectedMewsRecord, sha256_json
+from src.web.v20_service import V20Service, _mews_snapshot
 from tests.unit.web.test_v20_service import _service
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -24,6 +24,37 @@ T_0915 = datetime(2026, 9, 1, 9, 15, tzinfo=TZ)
 T_D2_0910 = datetime(2026, 9, 2, 9, 10, tzinfo=TZ)
 T_D2_0945 = datetime(2026, 9, 2, 9, 45, tzinfo=TZ)
 D2_CUTOFF = datetime(2026, 9, 2, 9, 40, tzinfo=TZ)
+
+
+def test_selected_mews_maps_durable_seal_into_exit_policy_snapshot() -> None:
+    generated_at = datetime(2026, 9, 2, 9, 10, tzinfo=TZ)
+    received_at = generated_at + timedelta(seconds=1)
+    sealed_at = generated_at + timedelta(minutes=1)
+    record = SelectedMewsRecord(
+        model_leg_id="leg-1",
+        d1=D1,
+        cutoff_ts=D2_CUTOFF,
+        selection_reason="ELIGIBLE",
+        selected_at=sealed_at,
+        snapshot_id="mews-d2",
+        source_trade_date=D1,
+        generated_at=generated_at,
+        received_at=received_at,
+        receipt_sealed_at=sealed_at,
+        fast_state="DANGER",
+        model_version="mews_v2",
+        data_version="d2",
+        content_hash="a" * 64,
+        payload={"evidence": {"signal_available_date": D2.isoformat()}},
+    )
+
+    snapshot = _mews_snapshot(record)[0]
+
+    assert snapshot.source_trade_date == D1
+    assert snapshot.availability_date == D2
+    assert snapshot.generated_at == generated_at
+    assert snapshot.received_at == sealed_at
+    assert snapshot.received_at != received_at
 
 
 class _AsyncContext:
@@ -187,8 +218,8 @@ class _StrictPGConnection:
         return _Row(selection)
 
     def _matching_snapshot(self, *args: Any) -> Any:
-        source = args[0] if len(args) == 3 else args[2]
-        availability = args[2] if len(args) == 3 else args[3]
+        source = args[0] if len(args) == 2 else args[2]
+        availability = args[1] if len(args) == 2 else args[3]
         for snapshot in self.snapshots.values():
             payload = json.loads(snapshot["snapshot_json"])
             evidence_date = payload["evidence"]["signal_available_date"]
@@ -310,6 +341,7 @@ async def _evaluate_exit(
     *,
     leg: ActiveModelLeg | None = None,
     calendar: tuple[date, ...] = CALENDAR,
+    calendar_error: bool = False,
 ) -> list[str]:
     alerts: list[str] = []
 
@@ -321,11 +353,18 @@ async def _evaluate_exit(
 
     monkeypatch.setattr(service, "_safe_alert", alert)
     monkeypatch.setattr(service, "_load_exit_bar_records", bars)
-    monkeypatch.setattr(
-        service,
-        "_load_trade_calendar",
-        _fixed_calendar(calendar),
-    )
+    if calendar_error:
+
+        async def fail_calendar(_current_date: date) -> tuple[date, ...]:
+            raise RuntimeError("calendar unavailable")
+
+        monkeypatch.setattr(service, "_load_trade_calendar", fail_calendar)
+    else:
+        monkeypatch.setattr(
+            service,
+            "_load_trade_calendar",
+            _fixed_calendar(calendar),
+        )
     await service._evaluate_one_exit(
         leg or _active_leg(),
         T_D2_0945,
@@ -343,7 +382,7 @@ def _snapshot_queries(
     return [
         call
         for call in connection.calls
-        if "mews_snapshots AS snapshot" in call[0] and len(call[1]) in (3, 4)
+        if "mews_snapshots AS snapshot" in call[0] and len(call[1]) in (2, 4)
     ]
 
 
@@ -360,7 +399,7 @@ async def test_first_exit_miss_calculates_exact_d2_then_freezes(
     assert source.requests == [(D1, D2)]
     assert len(repository.recorded) == 1
     queries = _snapshot_queries(connection)
-    assert queries[0][1] == (D1, D2_CUTOFF, D2)
+    assert queries[0][1] == (D1, D2)
     assert queries[-1][1] == (D2, D2_CUTOFF, D1, D2)
     selection = connection.selections["leg-strict"]
     assert selection["cutoff_ts"] == D2_CUTOFF
@@ -387,30 +426,45 @@ async def test_failed_calculation_persists_fallback_and_restart_reads_it(
     selection = connection.selections["leg-strict"]
     assert selection["selection_reason"] == "MEWS_UNAVAILABLE_FALLBACK_12"
     assert selection["cutoff_ts"] == D2_CUTOFF
-    exact_queries = [query for query in _snapshot_queries(connection) if len(query[1]) == 3]
+    exact_queries = [query for query in _snapshot_queries(connection) if len(query[1]) == 2]
     freeze_queries = [query for query in _snapshot_queries(connection) if len(query[1]) == 4]
     assert [query[1] for query in exact_queries] == [
-        (D1, D2_CUTOFF, D2),
-        (D1, D2_CUTOFF, D2),
+        (D1, D2),
+        (D1, D2),
     ]
     assert len(freeze_queries) == 1
 
 
-async def test_holiday_d2_uses_calendar_predecessor(
+@pytest.mark.parametrize(
+    ("calendar", "calendar_error"),
+    [((SOURCE_DATE, D2, NEXT_DAY), False), ((), False), ((), True)],
+    ids=["calendar-omits-d1", "calendar-empty", "calendar-unavailable"],
+)
+async def test_d2_source_is_model_leg_d1_even_when_calendar_is_incomplete(
     monkeypatch: pytest.MonkeyPatch,
+    calendar: tuple[date, ...],
+    calendar_error: bool,
 ) -> None:
     connection = _StrictPGConnection()
     source = _LocalMewsSource()
     source.release.set()
     service, _repository = _make_service(monkeypatch, connection, source)
+    service._mews_cached_for = D2
+    service._mews_source_trade_date = SOURCE_DATE
+    service._mews_snapshot_id = "mews-wrong-source"
 
-    await _evaluate_exit(monkeypatch, service, calendar=(SOURCE_DATE, D2, NEXT_DAY))
+    await _evaluate_exit(
+        monkeypatch,
+        service,
+        calendar=calendar,
+        calendar_error=calendar_error,
+    )
 
-    assert source.requests == [(SOURCE_DATE, D2)]
+    assert source.requests == [(D1, D2)]
     queries = _snapshot_queries(connection)
-    assert queries[0][1] == (SOURCE_DATE, D2_CUTOFF, D2)
-    assert queries[-1][1] == (D2, D2_CUTOFF, SOURCE_DATE, D2)
-    assert connection.selections["leg-strict"]["source_trade_date"] == SOURCE_DATE
+    assert queries[0][1] == (D1, D2)
+    assert queries[-1][1] == (D2, D2_CUTOFF, D1, D2)
+    assert connection.selections["leg-strict"]["source_trade_date"] == D1
 
 
 async def test_concurrent_legs_share_one_calculation_and_freeze_separately(
@@ -503,4 +557,4 @@ async def test_entry_selection_trigger_keeps_its_own_date_singleflight(
     assert source.requests == [(D1, D2)]
     entry_queries = _snapshot_queries(connection)
     assert len(entry_queries) == 1
-    assert entry_queries[0][1] == (D1, D2_CUTOFF, D2)
+    assert entry_queries[0][1] == (D1, D2)

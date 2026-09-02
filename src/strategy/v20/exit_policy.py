@@ -129,15 +129,17 @@ def next_continuous_minute(bar_end_ts: datetime) -> datetime | None:
 def select_mews_snapshot(
     *, leg: ModelLeg, snapshots: Iterable[MewsSnapshot], as_of: datetime
 ) -> MewsSelection:
-    """Select the latest fully qualified MEWS snapshot at the frozen cutoff.
+    """Select the latest fully qualified MEWS value available on D2.
 
-    A snapshot qualifies either on time (generated and first durably received
-    before the D1 09:40 cutoff) or as the leg's late-repaired daily value
-    (availability_date == D1 from a strictly earlier source trade date).
+    D2 protection consumes the value calculated for D2 from the immediately
+    preceding trading day's material (the leg's D1).  The normal 09:10 value
+    and an on-demand repair later on D2 have identical strategy provenance;
+    either is legal once its durable receipt is visible to ``as_of``.  A D1
+    selection or a value sourced from an older session must never be promoted
+    into the D2 protection decision.
     """
 
     _require_aware(as_of, "as_of")
-    cutoff = _local_datetime(leg.d1, time(9, 40))
     visible_as_of = as_of.astimezone(SHANGHAI)
     valid: list[MewsSnapshot] = []
     invalid_seen = False
@@ -150,6 +152,7 @@ def select_mews_snapshot(
             snapshot.model_version,
             snapshot.data_version,
             snapshot.snapshot_id,
+            snapshot.availability_date,
         )
         if any(value is None or value == "" for value in required):
             invalid_seen = True
@@ -160,24 +163,21 @@ def select_mews_snapshot(
         assert snapshot.source_trade_date is not None
         assert snapshot.generated_at is not None
         assert snapshot.received_at is not None
+        assert snapshot.availability_date is not None
         if snapshot.generated_at.tzinfo is None or snapshot.received_at.tzinfo is None:
             invalid_seen = True
             continue
-        if snapshot.source_trade_date >= leg.d1:
+        if snapshot.generated_at > snapshot.received_at:
             invalid_seen = True
             continue
-        # "Before D1 09:40" is deliberately strict.  A record timestamped
-        # exactly at the cutoff was not available to the frozen 09:40 choice.
         generated_local = snapshot.generated_at.astimezone(SHANGHAI)
         received_local = snapshot.received_at.astimezone(SHANGHAI)
-        on_time = generated_local < cutoff and received_local < cutoff
-        # The daily MEWS value is a pure function of its source trade date, so
-        # a late local repair generated later on D1 itself (availability_date
-        # == D1) remains point-in-time evidence for D2 judgments.  Anything
-        # without matching availability evidence keeps the strict cutoff so a
-        # stale or empty old source can never be recycled into a daily value.
-        late_same_day = snapshot.availability_date == leg.d1
-        if not (on_time or late_same_day):
+        if (
+            snapshot.source_trade_date != leg.d1
+            or snapshot.availability_date != leg.d2
+            or generated_local.date() != leg.d2
+            or received_local.date() != leg.d2
+        ):
             continue
         if generated_local > visible_as_of:
             continue
