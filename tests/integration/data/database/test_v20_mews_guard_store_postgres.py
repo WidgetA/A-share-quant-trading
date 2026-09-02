@@ -125,7 +125,16 @@ async def _insert_event(
     schema: str,
     event_id: str,
     event_type: str,
+    *,
+    action_expiry_ts: datetime | None = None,
 ) -> None:
+    if event_type == "ENTRY_DECISION" and action_expiry_ts is None:
+        raise ValueError("ENTRY_DECISION fixtures require an action expiry")
+    event_ts = (
+        action_expiry_ts - timedelta(minutes=1)
+        if event_type == "ENTRY_DECISION" and action_expiry_ts is not None
+        else ON_TIME
+    )
     semantic = {"event_type": event_type, "event_id": event_id}
     payload = {"event_id": event_id}
     async with pool.acquire() as connection:
@@ -134,9 +143,11 @@ async def _insert_event(
             INSERT INTO {schema}.outbox_events
                 (event_id,event_type,route_id,official_stream_id,lineage_id,
                  semantic_content_hash,semantic_json,payload_json,payload_hash,
-                 seal_status,delivery_status,generated_at,available_at,created_at)
+                 seal_status,delivery_status,action_expiry_ts,generated_at,
+                 commit_marker,available_at,created_at)
             VALUES ($1,$2,'test-route','test-stream','test-lineage',$3,$4::jsonb,
-                    $5::jsonb,$6,'SEALED','PENDING',$7,$7,$7)
+                    $5::jsonb,$6,'SEALED','PENDING',$7,$8,
+                    nextval('{schema}.commit_marker_seq'),$8,$8)
             """,
             event_id,
             event_type,
@@ -144,7 +155,8 @@ async def _insert_event(
             canonical_json(semantic),
             canonical_json(payload),
             sha256_json(payload),
-            ON_TIME,
+            action_expiry_ts,
+            event_ts,
         )
 
 
@@ -159,7 +171,20 @@ async def _insert_manual_leg(
     source_event = f"{model_leg_id}-source"
     official_event = f"{model_leg_id}-official"
     batch_id = f"{model_leg_id}-batch"
-    await _insert_event(pool, schema, official_event, "ENTRY_DECISION")
+    await _insert_event(
+        pool,
+        schema,
+        official_event,
+        "ENTRY_DECISION",
+        action_expiry_ts=datetime(
+            signal_date.year,
+            signal_date.month,
+            signal_date.day,
+            9,
+            40,
+            tzinfo=SHANGHAI,
+        ),
+    )
     await _insert_event(pool, schema, source_event, "DATA_ALERT")
     async with pool.acquire() as connection:
         await connection.execute(
