@@ -836,6 +836,24 @@ def test_manual_0939_chain_probe_pass_message_is_check_only_manual_render() -> N
         assert banned not in message
 
 
+def test_successful_calculation_rejects_official_difference_in_legacy_probe_fields() -> None:
+    semantic = {
+        **_manual_0939_chain_probe_semantic(event_id="manual-chain-separated-comparison"),
+        "calculation_result": "SUCCESS",
+        "official_comparison_result": "DIFFERENT",
+        "official_mismatch_fields": ["v16_snapshot_hash"],
+        "probe_mismatch_fields": ["v16_snapshot_hash"],
+    }
+
+    with pytest.raises(ValueError, match="cannot expose official differences"):
+        seal_v20_payload(
+            _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+            21,
+            True,
+        )
+
+
 def test_formal_and_manual_messages_embed_byte_identical_strategy_body() -> None:
     semantic = _manual_0939_chain_probe_semantic()
     entry = semantic["entry_render_semantic"]

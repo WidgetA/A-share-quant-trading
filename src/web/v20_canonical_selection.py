@@ -288,6 +288,10 @@ class CanonicalV16ScanBundle:
         default_factory=lambda: MappingProxyType({})
     )
     history_min_date_coverage: float = 0.0
+    # Pure external fact identity consumed by V20 artifact comparison. It is
+    # intentionally separate from ``input_hash``, whose legacy contract also
+    # covers model and scanner-derived structures.
+    external_market_fact_hash: str = "0" * 64
 
 
 class CachedCanonicalV16Status(Enum):
@@ -1077,6 +1081,66 @@ def _stable_input_hash(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _stable_external_market_fact_hash(
+    trade_date: date,
+    universe: Sequence[str],
+    clean_boards: Mapping[str, Any],
+    early_source_hashes: Mapping[str, str],
+    prior_daily: Mapping[str, TushareDailyBar],
+    names: Mapping[str, str],
+    calendar: Sequence[date],
+) -> str:
+    """Hash external market/reference facts without code or scan output."""
+
+    ordered_calendar = tuple(sorted(set(calendar)))
+    relevant_calendar = (
+        *tuple(day for day in ordered_calendar if day < trade_date)[-LOOKBACK_DAYS:],
+        trade_date,
+        *tuple(day for day in ordered_calendar if day > trade_date)[:2],
+    )
+    if len(relevant_calendar) != LOOKBACK_DAYS + 3 or relevant_calendar != tuple(
+        sorted(set(relevant_calendar))
+    ):
+        raise ValueError("external market fact calendar lacks the canonical 37d+D0/D1/D2 window")
+    payload = {
+        "profile": "V20_EXTERNAL_MARKET_FACTS_V1",
+        "trade_date": trade_date.isoformat(),
+        "universe": sorted(universe),
+        "clean_boards": {
+            board: [
+                list(member)
+                for member in sorted(
+                    members,
+                    key=lambda value: tuple(str(part) for part in value),
+                )
+            ]
+            for board, members in sorted(clean_boards.items())
+        },
+        "early_source_hashes": {
+            code: source_hash for code, source_hash in sorted(early_source_hashes.items())
+        },
+        "prior_daily": {
+            code: {
+                "stock_code": row.stock_code,
+                "trade_date": row.trade_date,
+                "close_price": float(row.close_price),
+                "amount_yuan": float(row.amount_yuan),
+            }
+            for code, row in sorted(prior_daily.items())
+        },
+        "names": {code: name for code, name in sorted(names.items())},
+        "calendar": [day.isoformat() for day in relevant_calendar],
+    }
+    canonical = json.dumps(
+        _canonical_json_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _bundle_fingerprint(bundle: CanonicalV16ScanBundle) -> str:
     """Integrity fingerprint over selection-relevant bundle contents.
 
@@ -1262,6 +1326,7 @@ def _bundle_fingerprint(bundle: CanonicalV16ScanBundle) -> str:
             day: count for day, count in sorted(bundle.history_date_valid_counts.items())
         },
         "history_min_date_coverage": bundle.history_min_date_coverage,
+        "external_market_fact_hash": bundle.external_market_fact_hash,
     }
     canonical = json.dumps(
         _canonical_json_value(payload),
@@ -1629,7 +1694,7 @@ async def compute_canonical_v16_scan(
         )
         if any(value is None for value in replay_inputs):
             raise CanonicalV16ScanError(
-                "V16 scan: vendor-free replay requires every frozen input override"
+                "V16 scan: frozen-input replay requires every production input override"
             )
 
     scanner, scorer, clean_boards, universe_list = derive_canonical_v16_universe(
@@ -2065,6 +2130,15 @@ async def compute_canonical_v16_scan(
             recommended_names,
             getattr(scan_result, "st_eligible_codes", []),
         )
+        external_market_fact_hash = _stable_external_market_fact_hash(
+            trade_date,
+            tuple(universe_list),
+            clean_boards,
+            early_source_hashes,
+            prior_daily,
+            {code: name_map[code] for code in trading_codes if code in name_map},
+            calendar,
+        )
     except (ValueError, TypeError) as exc:
         raise CanonicalV16ScanError(
             f"V16 scan: failed to canonicalize selection inputs: {exc}",
@@ -2131,5 +2205,6 @@ async def compute_canonical_v16_scan(
         breadth_market_conflict_codes=(),
         history_date_valid_counts=frozen_history_counts,
         history_min_date_coverage=history_min_date_coverage,
+        external_market_fact_hash=external_market_fact_hash,
     )
     return replace(pre_bundle, _integrity_hash=_bundle_fingerprint(pre_bundle))

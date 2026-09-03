@@ -15,11 +15,9 @@ from tests.unit.web.test_v20_routes_post_cutoff_terminal_acceptance import (
 )
 
 
-def _forbid_fresh_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fresh_bomb(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("terminal miss must use the canonical check-only hook")
-
-    monkeypatch.setattr(routes, "_run_fresh_0939_probe", fresh_bomb)
+def _assert_no_alternate_probe() -> None:
+    assert not hasattr(routes, "_run_fresh_0939_probe")
+    assert not hasattr(routes, "_select_fresh_probe_context")
 
 
 class CanonicalRepository(Repository):
@@ -114,7 +112,7 @@ async def test_prewarm_manual_trigger_still_runs_morning_selection(
         return False
 
     service.ensure_mews_for_selection_trigger = allow_mews_for_prewarm
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
 
     with pytest.raises(AssertionError, match="post-cutoff must not run morning selection"):
         await asyncio.wait_for(
@@ -139,7 +137,7 @@ async def test_post_cutoff_today_terminal_uses_current_canonical_check_only(
     status, source = _source("NO_SIGNAL")
     repository = CanonicalRepository(status, source)
     service = CanonicalCheckService(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
 
     result = await asyncio.wait_for(
         _dispatch_manual_trigger(service, "canonical-terminal-001"),
@@ -175,12 +173,18 @@ async def test_before_prewarm_never_enters_today_terminal_lookup(
         service.mews_calculation_calls += 1
         return False
 
-    async def fresh_probe(_service: Any, request_id: str, now: Any) -> dict[str, Any]:
-        return {"manual_request_id": request_id, "now": now}
+    async def pending_morning(request_id: str) -> dict[str, Any]:
+        service.morning_calls += 1
+        return {
+            "manual_request_id": request_id,
+            "cycle_result": "BEFORE_WINDOW",
+            "formal_decision_available": False,
+        }
 
     service.ensure_mews_for_selection_trigger = allow_mews
+    service.trigger_morning_selection = pending_morning
     monkeypatch.setattr(routes, "_today_terminal_entry", terminal_bomb)
-    monkeypatch.setattr(routes, "_run_fresh_0939_probe", fresh_probe)
+    _assert_no_alternate_probe()
 
     result = await asyncio.wait_for(
         _dispatch_manual_trigger(service, "prewarm-terminal-gate-001"),
@@ -188,6 +192,8 @@ async def test_before_prewarm_never_enters_today_terminal_lookup(
     )
 
     assert result["manual_request_id"] == "prewarm-terminal-gate-001"
+    assert result["cycle_result"] == "BEFORE_WINDOW"
+    assert service.morning_calls == 1
     assert service.mews_kick_calls == 1
     await asyncio.wait_for(
         asyncio.gather(*service.mews_kick_tasks, return_exceptions=True),
@@ -205,7 +211,7 @@ async def test_post_cutoff_terminal_miss_uses_canonical_hook_and_one_durable_eve
     repository = CanonicalRepository(status, source)
     repository.status_by_date.clear()
     service = CanonicalCheckService(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
     tasks = [
         asyncio.create_task(_dispatch_manual_trigger(service, "canonical-check-same-key"))
         for _ in range(2)
@@ -247,7 +253,7 @@ async def test_post_cutoff_same_key_serialization_conflict_retries_check_only_ho
     status, source = _source("NO_SIGNAL")
     repository = CanonicalRepository(status, source)
     service = CanonicalCheckService(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
     original = service.trigger_canonical_selection_check_only
     attempts = 0
 
@@ -279,7 +285,7 @@ async def test_post_cutoff_non_serialization_failure_is_not_retried(
     status, source = _source("NO_SIGNAL")
     repository = CanonicalRepository(status, source)
     service = CanonicalCheckService(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
     attempts = 0
 
     async def fail_once(_request_id: str, _now: Any) -> dict[str, Any]:
@@ -305,7 +311,7 @@ async def test_post_cutoff_serialization_retry_is_finite(
     status, source = _source("NO_SIGNAL")
     repository = CanonicalRepository(status, source)
     service = CanonicalCheckService(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
     attempts = 0
 
     async def always_conflict(_request_id: str, _now: Any) -> dict[str, Any]:

@@ -540,7 +540,18 @@ def _render_manual_entry_check_for_operator(
         _MANUAL_CHECK_CURRENT_ACTION,
         _MANUAL_CHECK_CURRENT_REASON,
     ]
-    if semantic.get("probe_result") == "FAIL":
+    if semantic.get("calculation_result") == "SUCCESS":
+        comparison = semantic.get("official_comparison_result")
+        lines.extend(["", "本次计算：成功"])
+        if comparison == "MATCH":
+            lines.append("与早盘正式结果对比：一致")
+        elif comparison == "DIFFERENT":
+            mismatch_fields = semantic.get("official_mismatch_fields") or []
+            lines.append("与早盘正式结果对比：不一致（仅为对比结果，不代表本次计算失败）")
+            lines.append("差异字段：" + " / ".join(str(item) for item in mismatch_fields))
+        else:
+            lines.append("与早盘正式结果对比：无可比较的正式结果")
+    elif semantic.get("probe_result") == "FAIL":
         mismatch_fields = semantic.get("probe_mismatch_fields") or []
         lines.extend(
             [
@@ -554,7 +565,7 @@ def _render_manual_entry_check_for_operator(
     lines.extend(
         [
             "",
-            "策略计算结果（当前V20代码基于同一份持久化canonical事实重新计算）：",
+            "策略计算结果（当前V20代码按正式分钟/D1边界重算，并核验重取的历史输入）：",
             _render_entry_strategy_body(entry),
         ]
     )
@@ -1097,6 +1108,38 @@ def _validate_manual_0939_chain_probe(
         raise ValueError("V20 chain probe result must be PASS or FAIL")
     if not isinstance(semantic["current_version_recomputed"], bool):
         raise ValueError("V20 chain probe recomputation flag must be boolean")
+    comparison_fields = {
+        "calculation_result",
+        "official_comparison_result",
+        "official_mismatch_fields",
+    }
+    if comparison_fields.intersection(semantic):
+        _require_fields(
+            semantic,
+            comparison_fields,
+            subject="V20 manual 09:39 chain probe comparison",
+        )
+        if semantic["calculation_result"] != "SUCCESS":
+            raise ValueError("completed V20 chain probe calculation must be SUCCESS")
+        comparison = semantic["official_comparison_result"]
+        if comparison not in {"MATCH", "DIFFERENT", "NOT_AVAILABLE"}:
+            raise ValueError("V20 chain probe official comparison result is invalid")
+        mismatch_fields = semantic["official_mismatch_fields"]
+        if not isinstance(mismatch_fields, list) or any(
+            not isinstance(item, str) or not item for item in mismatch_fields
+        ):
+            raise ValueError("V20 chain probe official mismatch fields are invalid")
+        if (comparison == "DIFFERENT") != bool(mismatch_fields):
+            raise ValueError("V20 chain probe official comparison fields are inconsistent")
+        if result != "PASS":
+            raise ValueError("a successful V20 calculation must retain legacy PASS semantics")
+        if semantic.get("probe_mismatch_fields") != []:
+            raise ValueError(
+                "a successful V20 calculation cannot expose official differences "
+                "as probe mismatches"
+            )
+        if "failure_stage" in semantic or "failure_reason" in semantic:
+            raise ValueError("an official comparison difference is not a calculation failure")
 
     for field in ("v16_count", "raw_fact_n"):
         value = semantic[field]

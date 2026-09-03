@@ -213,6 +213,7 @@ def _canonical(
         breadth_market_conflict_codes=(),
         history_date_valid_counts=HISTORY_COUNTS,
         history_min_date_coverage=1.0,
+        external_market_fact_hash="f" * 64,
     )
     return replace(pre_hash, _integrity_hash=_bundle_fingerprint(pre_hash))
 

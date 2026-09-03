@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Mapping, Sequence
@@ -122,6 +123,77 @@ def _validate_state(
     return deserialize_health_snapshot(health)
 
 
+def _state_before_snapshot(state: StateRecord) -> dict[str, Any]:
+    """Freeze the exact official state consumed by one terminal decision.
+
+    ``state_before_hash`` alone proves an identity but cannot reconstruct the
+    input after the official state advances.  The existing input snapshot is
+    therefore also the durable home for the canonical state record; no new
+    database object or parallel version mechanism is involved.
+    """
+
+    _validate_state(state)
+    if (
+        not isinstance(state.lineage_id, str)
+        or not state.lineage_id
+        or type(state.revision) is not int
+        or state.revision < 0
+    ):
+        raise ValueError("official V20 state identity is invalid")
+    payload = deepcopy(dict(state.payload))
+    if sha256_json(payload) != state.state_hash:
+        raise ValueError("official V20 state payload hash mismatch")
+    return {
+        "lineage_id": state.lineage_id,
+        "revision": state.revision,
+        "state_hash": state.state_hash,
+        "payload": payload,
+    }
+
+
+def restore_state_before(
+    snapshot: Mapping[str, Any],
+    *,
+    expected_lineage_id: str,
+    expected_state_before_hash: str,
+) -> StateRecord:
+    """Restore and validate the exact pre-decision state from a snapshot."""
+
+    raw = snapshot.get("state_before")
+    required = {"lineage_id", "revision", "state_hash", "payload"}
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        raise ValueError("terminal snapshot lacks canonical state_before payload")
+    lineage_id = raw.get("lineage_id")
+    revision = raw.get("revision")
+    state_hash = raw.get("state_hash")
+    payload = raw.get("payload")
+    if not isinstance(lineage_id, str) or not lineage_id or lineage_id != expected_lineage_id:
+        raise ValueError("terminal state_before lineage mismatch")
+    if type(revision) is not int or revision < 0:
+        raise ValueError("terminal state_before revision is invalid")
+    if not isinstance(state_hash, str) or len(state_hash) != 64:
+        raise ValueError("terminal state_before hash is invalid")
+    if (
+        not isinstance(expected_state_before_hash, str)
+        or snapshot.get("state_before_hash") != expected_state_before_hash
+        or state_hash != expected_state_before_hash
+    ):
+        raise ValueError("terminal state_before hash binding mismatch")
+    if not isinstance(payload, Mapping):
+        raise ValueError("terminal state_before payload is invalid")
+    restored_payload = deepcopy(dict(payload))
+    if sha256_json(restored_payload) != state_hash:
+        raise ValueError("terminal state_before payload hash mismatch")
+    restored = StateRecord(
+        lineage_id=lineage_id,
+        revision=revision,
+        state_hash=state_hash,
+        payload=restored_payload,
+    )
+    _validate_state(restored, expected_lineage_id=expected_lineage_id)
+    return restored
+
+
 def _t_plus_two(trade_date: date, calendar: Sequence[date]) -> tuple[date, date]:
     future = [item for item in calendar if item > trade_date]
     if len(future) < 2:
@@ -191,7 +263,7 @@ def _bind_decision_snapshot(
     *,
     v16_snapshot: Mapping[str, Any],
     v16_snapshot_hash: str,
-    state_before_hash: str,
+    state_before: StateRecord,
     state_semantics_hash: str,
     policy_inputs: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str, str]:
@@ -204,7 +276,8 @@ def _bind_decision_snapshot(
         "schema_version": V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
         "v16_snapshot_schema_version": v16_snapshot.get("schema_version"),
         "v16_snapshot_hash": v16_snapshot_hash,
-        "state_before_hash": state_before_hash,
+        "state_before_hash": state_before.state_hash,
+        "state_before": _state_before_snapshot(state_before),
         "state_semantics_hash": state_semantics_hash,
         "policy_input_hash": policy_input_hash,
         "policy_inputs": dict(policy_inputs),
@@ -392,7 +465,7 @@ def prepare_entry(
     decision_snapshot, decision_snapshot_hash, policy_input_hash = _bind_decision_snapshot(
         v16_snapshot=bundle.snapshot,
         v16_snapshot_hash=bundle.snapshot_hash,
-        state_before_hash=state.state_hash,
+        state_before=state,
         state_semantics_hash=config.state_semantics_hash,
         policy_inputs=policy_inputs,
     )
@@ -608,6 +681,7 @@ def prepare_invalid_entry(
         "reason_code": reason_code,
         "detail": detail,
         "state_before_hash": state.state_hash,
+        "state_before": _state_before_snapshot(state),
         "state_semantics_hash": config.state_semantics_hash,
         "policy_input_hash": policy_input_hash,
         "policy_inputs": policy_inputs,
@@ -725,4 +799,5 @@ __all__ = [
     "genesis_state",
     "prepare_entry",
     "prepare_invalid_entry",
+    "restore_state_before",
 ]

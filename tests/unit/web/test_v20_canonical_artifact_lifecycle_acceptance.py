@@ -239,6 +239,7 @@ def _canonical(*, recommendations: int = 10) -> CanonicalV16ScanBundle:
         _integrity_hash="",
         prior_amount_yuan=MappingProxyType({}),
         history_date_valid_counts=MappingProxyType({}),
+        external_market_fact_hash="f" * 64,
     )
     return replace(result, _integrity_hash=_bundle_fingerprint(result))
 

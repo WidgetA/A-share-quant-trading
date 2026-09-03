@@ -8,7 +8,7 @@
 # Resource initialization retries on failure (resilient to transient errors).
 #
 # === DATA FLOW ===
-# 09:38-10:00  → Run V16 scan → push Feishu top-10 + recommendation
+# 09:38 minute → Run V16 scan → push Feishu top-10 + recommendation
 #              → Write result to scan_state.today_recommendation (top-1 for trading)
 # Trading scheduler (in iquant_routes.py) reads scan_state to decide BUY/SELL.
 
@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
+V16_AUTO_SCAN_START = time(9, 38)
+V16_REALTIME_CUTOFF = time(9, 39)
+V16_MANUAL_BLOCK_END = time(9, 45)
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Strong references for observation-only DayGate workers.  These tasks never
@@ -50,6 +54,8 @@ class V15ScanState:
     initialized: bool = False
     today_recommendation: dict[str, Any] | None = None
     scan_done_date: str = ""  # "YYYY-MM-DD" of last completed scan
+    scan_published_date: str = ""  # result fields were completely published by this runtime
+    auto_scan_missed_date: str = ""  # automatic 09:38 slot missed without a scan
     scan_error: str | None = None
 
     # Resources (initialized by init_scan_resources)
@@ -69,6 +75,13 @@ class V15ScanState:
     resource_cleanup_task: asyncio.Task[None] | None = None
     resource_init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     resource_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    scan_flight_task: asyncio.Task[dict[str, Any] | None] | None = None
+    scan_flight_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    early_quotes_key: tuple[str, str] | None = None
+    early_quotes_targets: tuple[str, ...] | None = None
+    early_quotes_client: Any = None
+    early_quotes_task: asyncio.Task[Mapping[str, Any]] | None = None
+    early_quotes_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # --- Feishu notification helpers ---
@@ -488,6 +501,36 @@ async def _cleanup_scan_resources_once(
     finally:
         scan_state.scheduler_task = None
 
+    # A manual request can be awaiting the same V16-owned scan after the
+    # scheduler task has been cancelled.  Detach and settle that flight before
+    # closing its private realtime client or database resources.
+    async with scan_state.scan_flight_lock:
+        scan_flight = scan_state.scan_flight_task
+        scan_state.scan_flight_task = None
+    try:
+        if scan_flight is not None and not scan_flight.done():
+            scan_flight.cancel()
+        if scan_flight is not None:
+            await asyncio.gather(scan_flight, return_exceptions=True)
+    except Exception as exc:
+        cleanup_errors.append(exc)
+
+    # The minute-scoped acquisition task is independent from the full scan
+    # task.  Cancel and forget it before closing the V16-owned provider client.
+    async with scan_state.early_quotes_lock:
+        early_quotes_task = scan_state.early_quotes_task
+        scan_state.early_quotes_task = None
+        scan_state.early_quotes_key = None
+        scan_state.early_quotes_targets = None
+        scan_state.early_quotes_client = None
+    try:
+        if early_quotes_task is not None and not early_quotes_task.done():
+            early_quotes_task.cancel()
+        if early_quotes_task is not None:
+            await asyncio.gather(early_quotes_task, return_exceptions=True)
+    except Exception as exc:
+        cleanup_errors.append(exc)
+
     try:
         shadow_tasks = tuple(_DAY_GATE_SHADOW_TASKS)
         for shadow_task in shadow_tasks:
@@ -825,7 +868,110 @@ def _build_stock_data(
     )
 
 
-async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
+async def _fetch_v16_early_quotes(
+    rt_client: Any,
+    universe: list[str],
+    *,
+    realtime_deadline: datetime | None,
+) -> Mapping[str, Any]:
+    """Load the one V16 current-day fan-out and settle it by its deadline.
+
+    Only the ``batch_get_early_quotes`` stage is bounded.  Once those current-day
+    facts have arrived, V16's existing history, scoring, and report path may
+    finish normally without competing with V20 for ``rt_min_daily`` capacity.
+    """
+
+    if realtime_deadline is None:
+        return await rt_client.batch_get_early_quotes(universe)
+    if realtime_deadline.tzinfo is None or realtime_deadline.utcoffset() is None:
+        raise ValueError("V16 realtime deadline must be timezone-aware")
+    deadline = realtime_deadline.astimezone(BEIJING_TZ)
+    remaining = (deadline - datetime.now(BEIJING_TZ)).total_seconds()
+    if remaining <= 0:
+        raise TimeoutError("V16 rt_min_daily acquisition reached the 09:39 cutoff")
+
+    task = asyncio.create_task(
+        rt_client.batch_get_early_quotes(universe),
+        name=f"v16-early-quotes-{deadline.date().isoformat()}",
+    )
+    deadline_timer = asyncio.create_task(
+        asyncio.sleep(remaining),
+        name=f"v16-early-quotes-cutoff-{deadline.date().isoformat()}",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            (task, deadline_timer),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task in done:
+            # ``result`` deliberately propagates the provider's own exception,
+            # including a native TimeoutError, without relabelling it as our
+            # wall-clock cutoff.
+            return task.result()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise TimeoutError("V16 rt_min_daily acquisition did not settle before the 09:39 cutoff")
+    finally:
+        for pending_task in (task, deadline_timer):
+            if not pending_task.done():
+                pending_task.cancel()
+        await asyncio.gather(task, deadline_timer, return_exceptions=True)
+
+
+async def _load_v16_early_quotes(
+    scan_state: V15ScanState,
+    rt_client: Any,
+    universe: list[str],
+    *,
+    realtime_deadline: datetime | None,
+) -> Mapping[str, Any]:
+    """Share one V16 provider acquisition within a Shanghai wall-clock minute.
+
+    Successful and failed attempts remain cached for the provider minute, so
+    sequential automatic/manual scans cannot start another full-market fan-out.
+    The next minute starts a fresh acquisition; scoring and reporting are never
+    cached here.
+    """
+
+    now_bj = datetime.now(BEIJING_TZ)
+    acquisition_key = (now_bj.date().isoformat(), now_bj.strftime("%H:%M"))
+    acquisition_targets = tuple(sorted(universe))
+    async with scan_state.early_quotes_lock:
+        task = scan_state.early_quotes_task
+        if scan_state.early_quotes_key == acquisition_key and task is not None:
+            if (
+                scan_state.early_quotes_targets != acquisition_targets
+                or scan_state.early_quotes_client is not rt_client
+            ):
+                raise RuntimeError(
+                    "same-minute V16 early acquisition conflicts with the cached "
+                    "target set or realtime client"
+                )
+        else:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            task = asyncio.create_task(
+                _fetch_v16_early_quotes(
+                    rt_client,
+                    universe,
+                    realtime_deadline=realtime_deadline,
+                ),
+                name=f"v16-early-acquisition-{acquisition_key[0]}-{acquisition_key[1]}",
+            )
+            scan_state.early_quotes_key = acquisition_key
+            scan_state.early_quotes_targets = acquisition_targets
+            scan_state.early_quotes_client = rt_client
+            scan_state.early_quotes_task = task
+
+    return await asyncio.shield(task)
+
+
+async def run_v16_scan(
+    scan_state: V15ScanState,
+    *,
+    realtime_deadline: datetime | None = None,
+) -> dict[str, Any] | None:
     """Run one fresh, standalone V16 scan and publish its Top-10 report.
 
     Every invocation deliberately repeats the original V16 production path:
@@ -860,7 +1006,12 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     if rt_client is None:
         raise RuntimeError("V16 scan: Tushare realtime client is unavailable")
     universe_list = sorted(universe_codes)
-    quotes = await rt_client.batch_get_early_quotes(universe_list)
+    quotes = await _load_v16_early_quotes(
+        scan_state,
+        rt_client,
+        universe_list,
+        realtime_deadline=realtime_deadline,
+    )
     quote_coverage = len(quotes) / len(universe_list) if universe_list else 0
     logger.info(
         "V16 scan: Tushare returned %d/%d quotes (coverage=%.1f%%)",
@@ -1062,19 +1213,55 @@ async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
     return recommendation_payload
 
 
+async def run_v16_scan_singleflight(
+    scan_state: V15ScanState,
+    *,
+    realtime_deadline: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Join one V16-owned scan while preserving fresh sequential reruns.
+
+    The coordinator lives only on ``V15ScanState``.  It shares no task, lock,
+    client, cache, or result with V20.  Overlapping automatic/manual callers
+    await the same scan (and therefore publish one report); after that task is
+    terminal, the next caller starts a fresh historical V16 run.
+    """
+
+    async with scan_state.scan_flight_lock:
+        if not scan_state.initialized:
+            raise RuntimeError("V16 scan resources are not initialized")
+        task = scan_state.scan_flight_task
+        if task is None or task.done():
+            if realtime_deadline is None:
+                operation = run_v16_scan(scan_state)
+            else:
+                operation = run_v16_scan(
+                    scan_state,
+                    realtime_deadline=realtime_deadline,
+                )
+            task = asyncio.create_task(operation, name="v16-scan-singleflight")
+            scan_state.scan_flight_task = task
+
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done():
+            async with scan_state.scan_flight_lock:
+                if scan_state.scan_flight_task is task:
+                    scan_state.scan_flight_task = None
+
+
 # --- Scan scheduler ---
 
 
 async def _scan_scheduler(scan_state: V15ScanState) -> None:
     """Autonomous scan scheduler. Runs from app startup, independent of iQuant.
 
-    Time window: 09:38-10:00
+    Start window: [09:38:00, 09:39:00)
     - Always runs V16 scan
     - Always pushes Feishu top-10 report + recommendation
     - Writes result to scan_state.today_recommendation
     - Does NOT check holdings or push trading signals
     """
-    SCAN_WINDOW = (time(9, 38), time(10, 0))
     scan_done_date = ""
 
     logger.info("V16 scan scheduler started (autonomous)")
@@ -1101,17 +1288,35 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
         while True:
             now_bj = datetime.now(BEIJING_TZ)
             ex_date = now_bj.strftime("%Y-%m-%d")
-            ex_time = now_bj.time().replace(second=0, microsecond=0)
+            ex_time = now_bj.timetz().replace(tzinfo=None)
 
-            # --- SCAN: 09:38-10:00 ---
-            if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
+            # --- SCAN: only start during the dedicated 09:38 provider minute ---
+            if scan_done_date != ex_date and V16_AUTO_SCAN_START <= ex_time < V16_REALTIME_CUTOFF:
                 scan_done_date = ex_date
-                scan_state.scan_done_date = ex_date
+                # ``scan_done_date`` is consumed as a completion marker.  Clear
+                # yesterday's payload before starting, then publish today's
+                # date only after the complete result has formed.
+                scan_state.today_recommendation = None
+                scan_state.scan_error = None
+                scan_state.scan_published_date = ""
+                scan_state.auto_scan_missed_date = ""
 
                 try:
-                    rec = await run_v16_scan(scan_state)
+                    rec = await run_v16_scan_singleflight(
+                        scan_state,
+                        realtime_deadline=datetime.combine(
+                            now_bj.date(),
+                            V16_REALTIME_CUTOFF,
+                            tzinfo=BEIJING_TZ,
+                        ),
+                    )
                     scan_state.today_recommendation = rec
                     scan_state.scan_error = None
+                    scan_state.scan_done_date = ex_date
+                    # Publish readiness last.  Consumers must not trust the
+                    # legacy date marker alone because older code wrote it
+                    # before the scan had actually completed.
+                    scan_state.scan_published_date = ex_date
 
                     if rec:
                         now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
@@ -1140,10 +1345,29 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                     logger.error(f"V16 scan failed: {error_detail}")
                     await _notify_feishu_error("V16扫描失败", error_detail)
 
-            # Scan deadline
-            if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
+            # A cold start or resource-init retry after 09:39 never backfills
+            # the automatic scan into V20's provider window.
+            if scan_done_date != ex_date and ex_time >= V16_REALTIME_CUTOFF:
                 scan_done_date = ex_date
-                scan_state.scan_done_date = ex_date
+                if (
+                    scan_state.scan_done_date == ex_date
+                    and scan_state.scan_published_date == ex_date
+                ):
+                    # A fresh manual scan may have completed while this
+                    # scheduler was still initializing or pre-loading the
+                    # calendar.  Its last-written publication marker proves
+                    # the payload transition completed; do not erase it.
+                    logger.info(
+                        "V16 automatic slot was missed, but a fresh manual result "
+                        "was already published for %s",
+                        ex_date,
+                    )
+                else:
+                    scan_state.scan_published_date = ""
+                    scan_state.auto_scan_missed_date = ex_date
+                    scan_state.today_recommendation = None
+                    scan_state.scan_error = f"V16 automatic 09:38 scan window missed for {ex_date}"
+                    logger.warning("V16 automatic 09:38 scan window was missed for %s", ex_date)
 
             # Adaptive sleep
             await asyncio.sleep(30 if scan_done_date == ex_date else 15)

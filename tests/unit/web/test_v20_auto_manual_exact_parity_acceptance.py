@@ -23,7 +23,6 @@ from src.data.database.v20_repository import (
     OutboxRecord,
     StateRecord,
     V20SemanticConflict,
-    V20StateConflict,
     sha256_json,
 )
 from src.strategy.v20.artifacts import load_g_artifacts
@@ -842,8 +841,11 @@ async def test_check_only_terminal_compares_old_official_and_current_canonical_h
     )
 
     assert result["current_version_recomputed"] is True
-    assert result["probe_result"] == "FAIL"
-    assert "v16_snapshot_hash" in result["probe_mismatch_fields"]
+    assert result["calculation_result"] == "SUCCESS"
+    assert result["official_comparison_result"] == "DIFFERENT"
+    assert result["probe_result"] == "PASS"
+    assert result["probe_mismatch_fields"] == []
+    assert "v16_snapshot_hash" in result["official_mismatch_fields"]
     assert result["official_entry_action"] == status_before.action
     assert result["official_entry_event_id"] == status_before.event_id
     assert result["official_v16_snapshot_hash"] == old_v16_hash
@@ -924,6 +926,8 @@ async def test_check_only_uses_terminal_frozen_rolling7_after_background_backfil
     assert current_prepare["rolling7_r7"] is None
     assert current_prepare["rolling7_l7"] is None
     assert repository.rolling7_read_calls == reads_before_backfill
+    assert result["calculation_result"] == "SUCCESS"
+    assert result["official_comparison_result"] == "MATCH"
     assert result["probe_result"] == "PASS"
 
     # The operator event is non-actionable.  Refreshing the prepared result
@@ -937,12 +941,13 @@ async def test_check_only_uses_terminal_frozen_rolling7_after_background_backfil
 
 
 @pytest.mark.asyncio
-async def test_terminal_check_fails_closed_if_official_state_has_moved(
+async def test_terminal_check_uses_frozen_prestate_after_state_head_moves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository, _artifact = _service_and_artifact(monkeypatch)
     await service._run_decision_iteration_with_cutoff(RUN_AT)
     assert repository.status is not None
+    formal_status = repository.status
 
     moved_payload = {
         **dict(repository.state.payload),
@@ -954,15 +959,20 @@ async def test_terminal_check_fails_closed_if_official_state_has_moved(
         state_hash=sha256_json(moved_payload),
         payload=moved_payload,
     )
+    moved_state = repository.state
     repository.seal_at = POST_CUTOFF_AT
 
-    with pytest.raises(V20StateConflict, match="moved beyond the terminal"):
-        await service.trigger_canonical_selection_check_only(
-            "check-only-state-moved-001",
-            POST_CUTOFF_AT,
-        )
+    result = await service.trigger_canonical_selection_check_only(
+        "check-only-state-moved-001",
+        POST_CUTOFF_AT,
+    )
+    alert = repository.alerts[result["operator_event_id"]]
 
-    assert repository.alert_write_calls == 0
+    assert result["official_comparison_result"] == "MATCH"
+    assert alert.semantic["entry_render_semantic"] == formal_status.semantic
+    assert repository.state == moved_state
+    assert repository.status == formal_status
+    assert repository.alert_write_calls == 1
     assert repository.commit_entry_calls == 1
 
 

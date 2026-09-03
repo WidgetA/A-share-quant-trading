@@ -43,7 +43,7 @@ from src.strategy.lgbrank_scorer import ScoredStock
 from src.strategy.strategies.v16_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import genesis_state
-from src.strategy.v20.identity import named_hash
+from src.strategy.v20.identity import named_hash, official_slot_id
 from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
@@ -1758,6 +1758,7 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
         feature_list_sha256="f" * 64,
         computed_at=datetime(2026, 9, 1, 9, 39, 59, tzinfo=TZ),
         input_hash="i" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="c" * 64,
         computation_calendar=(
             date(2026, 8, 31),
@@ -2788,6 +2789,7 @@ def _entry_cycle_bundle(trade_date: date) -> CanonicalV16ScanBundle:
         feature_list_sha256="b" * 64,
         computed_at=datetime(2026, 9, 1, 9, 39, 30, tzinfo=TZ),
         input_hash="c" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
         computation_calendar=(
             date(2026, 8, 31),
@@ -4565,6 +4567,7 @@ def _install_late_replay_canonical(
             ],
             computed_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
             input_hash="c" * 64,
+            external_market_fact_hash="f" * 64,
             _integrity_hash="",
             computation_calendar=(
                 date(2026, 8, 28),
@@ -4586,6 +4589,7 @@ def _install_late_replay_canonical(
 
 def _late_replay_status_and_state(service: V20Service) -> tuple[EntryStatus, StateRecord]:
     trade_date = date(2026, 8, 31)
+    slot = official_slot_id(service.config.official_stream_id, trade_date.isoformat())
     before = genesis_state()
     before_hash = sha256_json(before)
     policy_inputs = {
@@ -4595,26 +4599,10 @@ def _late_replay_status_and_state(service: V20Service) -> tuple[EntryStatus, Sta
         "maturity_gaps": [],
     }
     policy_hash = sha256_json(policy_inputs)
-    failure_gap_id = named_hash(
-        "V20_OFFICIAL_SHADOW_GAP_ID_V1",
-        {
-            "official_stream_id": service.config.official_stream_id,
-            "trade_date": trade_date.isoformat(),
-        },
-    )
     after = {
         **json.loads(json.dumps(before)),
         "state_revision": 1,
-        "official_rolling_gaps": [
-            {
-                "gap_id": failure_gap_id,
-                "signal_date": trade_date.isoformat(),
-                "maturity_date": "2026-09-02",
-                "closed": False,
-                "aged_out": False,
-            }
-        ],
-        "last_terminal_slot_id": "failed-slot",
+        "last_terminal_slot_id": slot,
         "last_terminal_trade_date": trade_date.isoformat(),
     }
     after_hash = sha256_json(after)
@@ -4636,6 +4624,12 @@ def _late_replay_status_and_state(service: V20Service) -> tuple[EntryStatus, Sta
         "reason_code": "SLOT_FINALIZED_FAILED",
         "detail": "late deployment",
         "state_before_hash": before_hash,
+        "state_before": {
+            "lineage_id": service.config.state_lineage_id,
+            "revision": 0,
+            "state_hash": before_hash,
+            "payload": before,
+        },
         "state_semantics_hash": service.config.state_semantics_hash,
         "policy_input_hash": policy_hash,
         "policy_inputs": policy_inputs,
@@ -4643,7 +4637,7 @@ def _late_replay_status_and_state(service: V20Service) -> tuple[EntryStatus, Sta
     status = EntryStatus(
         official_stream_id=service.config.official_stream_id,
         trade_date=trade_date,
-        slot_id="failed-slot",
+        slot_id=slot,
         slot_status="FAILED",
         slot_revision=1,
         strategy_version=service.config.strategy_version,
@@ -4819,7 +4813,7 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     assert context.late_0939_replay_completed is True
 
 
-async def test_late_0939_replay_rejects_state_that_moved_past_failed_slot(
+async def test_late_0939_replay_uses_snapshot_after_state_head_advances(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository, client, compute_calls, _observed, context = _late_replay_service(
@@ -4833,15 +4827,15 @@ async def test_late_0939_replay_rejects_state_that_moved_past_failed_slot(
         payload=moved,
     )
 
-    with pytest.raises(V20StateConflict, match="moved beyond"):
-        await service._ensure_late_0939_replay(
-            context,
-            datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
-        )
+    record = await service._ensure_late_0939_replay(
+        context,
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+    )
 
     assert client.calls == []
-    assert compute_calls == []
-    assert repository.events == {}
+    assert compute_calls == [context.trade_date]
+    assert record.semantic["replay_action"] == "ENTER"
+    assert repository.state.revision == 2
     assert repository.official_write_calls == 0
 
 
@@ -5169,6 +5163,7 @@ async def test_past_date_replay_reruns_scanner_directly_and_never_touches_coordi
             feature_list_sha256="b" * 64,
             computed_at=datetime(2026, 9, 1, 15, 30, 2, tzinfo=TZ),
             input_hash="c" * 64,
+            external_market_fact_hash="f" * 64,
             _integrity_hash="",
             computation_calendar=(
                 date(2026, 8, 28),
@@ -5563,6 +5558,7 @@ async def test_canonical_raw_persistence_seals_every_ready_code_not_just_top10(
         feature_list_sha256="b" * 64,
         computed_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
         input_hash="c" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
         computation_calendar=(
             date(2026, 8, 28),
@@ -5612,6 +5608,7 @@ async def test_canonical_raw_persistence_seals_every_ready_code_not_just_top10(
         feature_list_sha256="b" * 64,
         computed_at=datetime(2026, 9, 2, 15, 30, 2, tzinfo=TZ),
         input_hash="d" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
         computation_calendar=(
             date(2026, 9, 1),
@@ -7426,6 +7423,7 @@ async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutof
         feature_list_sha256="b" * 64,
         computed_at=cutoff,
         input_hash="c" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
         computation_calendar=(
             date(2026, 8, 28),

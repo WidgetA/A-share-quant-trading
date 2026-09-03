@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -62,6 +63,7 @@ from src.data.database.v20_repository import (
     ModelLegWrite,
     OutboxRecord,
     SelectedMewsRecord,
+    StateRecord,
     V20EntryDeadlineExceeded,
     V20LeadershipLost,
     V20MinuteBarIntegrityConflict,
@@ -83,6 +85,7 @@ from src.strategy.v20.decision_engine import (
     genesis_state,
     prepare_entry,
     prepare_invalid_entry,
+    restore_state_before,
 )
 from src.strategy.v20.exit_policy import (
     derive_model_leg_id,
@@ -377,6 +380,15 @@ class _DayContext:
     late_0939_replay_last_attempt_at: datetime | None = None
     late_0939_replay_automatic_attempts: int = 0
     late_0939_replay_completed: bool = False
+    # Retrospective scanner calls carry the artifact's immutable raw-fact
+    # boundary on the same context object consumed by the normal scanner path.
+    # Empty values mean a first/live computation may acquire missing evidence.
+    canonical_fact_received_before: datetime | None = None
+    canonical_fact_universe: tuple[str, ...] | None = None
+    canonical_fact_evidence_codes: tuple[str, ...] | None = None
+    canonical_fact_calendar: tuple[date, ...] | None = None
+    canonical_fact_allow_backfill: bool = True
+    canonical_fact_persist_raw: bool = True
 
 
 @dataclass(frozen=True)
@@ -1325,6 +1337,19 @@ class V20Service:
         # Trade dates whose canonical early (<=09:39) raw bars are already durably
         # persisted by this process; same-process cache reuse never re-runs it.
         self._canonical_raw_persisted_dates: set[date] = set()
+        self._current_day_early_attempt_lock = asyncio.Lock()
+        # ``rt_min_daily`` is one physical request per symbol.  The concrete
+        # client already retries each symbol, so the service must never restart
+        # the complete market fan-out inside the same provider minute.  Keep a
+        # completed *or failed* task until the minute changes; all same-minute
+        # scheduled/manual contenders observe that one attempt.
+        self._current_day_early_attempts: dict[
+            tuple[date, datetime],
+            tuple[
+                frozenset[str],
+                asyncio.Task[Mapping[str, TushareEarlyMarketData]],
+            ],
+        ] = {}
         self._live_exit_lock = asyncio.Lock()
         self._mews_refresh_lock = asyncio.Lock()
         self._mews_singleflight_lock = asyncio.Lock()
@@ -1725,6 +1750,7 @@ class V20Service:
             self._record_error("STARTUP_FAILED")
             self._stop_event.set()
             self._detach_canonical_artifact_boundary()
+            current_day_early_tasks = await self._take_current_day_early_attempt_tasks()
             async with self._mews_singleflight_lock:
                 mews_task, self._mews_singleflight_task = (
                     self._mews_singleflight_task,
@@ -1733,6 +1759,7 @@ class V20Service:
                 self._mews_singleflight_date = None
                 self._mews_singleflight_source_trade_date = None
             tasks, self._tasks = self._tasks, []
+            tasks.extend(current_day_early_tasks)
             for task in tasks:
                 task.cancel()
             if tasks:
@@ -1790,6 +1817,18 @@ class V20Service:
         """Expose a secret-free lifecycle stage for legacy host diagnostics."""
         return self._startup_stage
 
+    async def _take_current_day_early_attempt_tasks(self) -> list[asyncio.Task[Any]]:
+        """Detach V20-owned acquisition tasks so lifecycle cleanup can cancel them."""
+
+        async with self._current_day_early_attempt_lock:
+            tasks = list(
+                {
+                    id(task): task for _targets, task in self._current_day_early_attempts.values()
+                }.values()
+            )
+            self._current_day_early_attempts = {}
+        return tasks
+
     async def stop(self) -> None:
         self._stop_event.set()
         # Close only V20's private evidence callbacks.  The independent V16
@@ -1805,6 +1844,7 @@ class V20Service:
         async with self._calendar_tasks_lock:
             calendar_tasks = list(self._calendar_tasks.values())
             self._calendar_tasks = {}
+        current_day_early_tasks = await self._take_current_day_early_attempt_tasks()
         tasks, self._tasks = self._tasks, []
         late_replay_task, self._late_0939_replay_task = self._late_0939_replay_task, None
         if late_replay_task is not None:
@@ -1814,6 +1854,7 @@ class V20Service:
         tasks.extend(self._mews_trigger_tasks)
         self._mews_trigger_tasks = set()
         tasks.extend(calendar_tasks)
+        tasks.extend(current_day_early_tasks)
         for task in tasks:
             task.cancel()
         primary_error: BaseException | None = None
@@ -2115,7 +2156,6 @@ class V20Service:
                 or semantic.get("probe_result") != "PASS"
                 or semantic.get("current_version_recomputed") is not True
                 or semantic.get("replay_reused") is not False
-                or semantic.get("replay_action") != "ENTER"
                 or semantic.get("v20_action") != "ENTER"
                 or semantic.get("official_entry_action") != "INPUT_INVALID"
                 or semantic.get("official_state_changed") is not False
@@ -2157,11 +2197,8 @@ class V20Service:
             if official is None:
                 raise V20RepositoryError("manual monitor source official slot is unavailable")
             self._verify_entry_binding(official)
-            if (
-                official.action != "INPUT_INVALID"
-                or official.event_id != semantic.get("official_entry_event_id")
-                or semantic.get("official_entry_event_id_before") != official.event_id
-                or semantic.get("official_entry_event_id_after") != official.event_id
+            if official.action != "INPUT_INVALID" or official.event_id != semantic.get(
+                "official_entry_event_id"
             ):
                 raise V20SemanticConflict(
                     "manual monitor source is not bound to the frozen failed official slot"
@@ -2777,7 +2814,7 @@ class V20Service:
         await self._repository.assert_runtime_leader()
         now = self._aware_now()
         wall = now.timetz().replace(tzinfo=None)
-        if not self.config.clock.prewarm <= wall < self.config.clock.publish_deadline:
+        if wall >= self.config.clock.publish_deadline:
             raise V20StateConflict("live morning selection is outside the pre-09:40 window")
         if self._manual_trigger_lock.locked():
             raise V20StateConflict("another V20 manual trigger is already running")
@@ -2793,7 +2830,7 @@ class V20Service:
             if status_before is not None:
                 self._verify_entry_binding(status_before)
 
-            if status_before is None:
+            if status_before is None and wall >= self.config.clock.prewarm:
                 try:
                     await asyncio.wait_for(
                         self._decision_cycle_lock.acquire(),
@@ -2822,14 +2859,19 @@ class V20Service:
                     if self._context is not None and self._context.trade_date == trade_date
                     else None
                 )
+                completed_wall = completed_at.timetz().replace(tzinfo=None)
+                if completed_wall < self.config.clock.prewarm:
+                    cycle_result = "BEFORE_WINDOW"
+                elif completed_wall < time.fromisoformat(self.config.clock.decision_bar_label):
+                    cycle_result = "COLLECTING"
+                else:
+                    cycle_result = context.last_phase if context is not None else "DECISION_PENDING"
                 return {
                     "accepted": True,
                     "created": False,
                     "manual_request_id": request_id,
                     "trade_date": trade_date.isoformat(),
-                    "cycle_result": (
-                        context.last_phase if context is not None else "DECISION_PENDING"
-                    ),
+                    "cycle_result": cycle_result,
                     "formal_decision_available": False,
                     "entry_action": None,
                     "entry_event_id": None,
@@ -2978,6 +3020,9 @@ class V20Service:
                 "canonical_artifact_matches": artifact_matches,
                 "canonical_source": canonical_source,
                 "policy_recomputed": True,
+                "calculation_result": semantic.get("calculation_result"),
+                "official_comparison_result": semantic.get("official_comparison_result"),
+                "official_mismatch_fields": list(semantic.get("official_mismatch_fields") or ()),
                 "probe_result": semantic.get("probe_result"),
                 "probe_mismatch_fields": list(semantic.get("probe_mismatch_fields") or ()),
                 "replay_reused": False,
@@ -3045,7 +3090,8 @@ class V20Service:
                         "official V20 state payload hash differs before check-only preparation"
                     )
 
-                calculation = await self._compute_morning_selection(trade_date)
+                calculation = await self._orchestrate_morning_selection(trade_date)
+                calculation_completed_at = max(current, self._aware_now())
                 bundle = calculation.bundle
                 first_received_at = calculation.canonical_first_received_at
                 official_v16_snapshot_hash: str | None = None
@@ -3075,13 +3121,8 @@ class V20Service:
                 entry_render_semantic = dict(pure)
                 symbols = list(pure.get("symbols") or ())
                 mismatched_business_fields: list[str] = []
-                if status_before is None:
-                    # A fresh calculation cannot certify parity with an
-                    # official decision that does not exist.  Persisting its
-                    # own canonical evidence still leaves the probe
-                    # unverified, rather than turning self-comparison into a
-                    # misleading PASS.
-                    mismatched_business_fields.append("official_entry_missing")
+                if status_before is None or status_before.action == "INPUT_INVALID":
+                    official_comparison_result = "NOT_AVAILABLE"
                 else:
                     mismatched_business_fields = [
                         field
@@ -3093,10 +3134,14 @@ class V20Service:
                         and official_v16_snapshot_hash != bundle.snapshot_hash
                     ):
                         mismatched_business_fields.append("v16_snapshot_hash")
-                if calculation.canonical_artifact_matches is False:
-                    mismatched_business_fields.append("canonical_artifact_snapshot")
-                mismatched_business_fields = sorted(set(mismatched_business_fields))
-                probe_result = "FAIL" if mismatched_business_fields else "PASS"
+                    mismatched_business_fields = sorted(set(mismatched_business_fields))
+                    official_comparison_result = (
+                        "DIFFERENT" if mismatched_business_fields else "MATCH"
+                    )
+                # ``probe_result`` is retained for already-deployed consumers.
+                # It describes whether this calculation completed, not whether
+                # an older official result happened to be identical.
+                probe_result = "PASS"
                 raw_codes = tuple(bundle.snapshot["scan_input_codes"])
                 raw_records = await self._repository.list_raw_minute_bar_records(
                     raw_codes,
@@ -3136,8 +3181,11 @@ class V20Service:
                 "manual_request_id": request_id,
                 "event_trade_date": trade_date.isoformat(),
                 "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2",
+                "calculation_result": "SUCCESS",
+                "official_comparison_result": official_comparison_result,
+                "official_mismatch_fields": mismatched_business_fields,
                 "probe_result": probe_result,
-                "probe_mismatch_fields": mismatched_business_fields,
+                "probe_mismatch_fields": [],
                 "current_version_recomputed": True,
                 "replay_reused": False,
                 "canonical_source": calculation.canonical_source,
@@ -3154,7 +3202,7 @@ class V20Service:
                 "symbols": symbols,
                 "raw_fact_n": len(raw_records),
                 "quote_coverage": bundle.snapshot.get("scan_input_coverage"),
-                "computed_at": current.isoformat(),
+                "computed_at": calculation_completed_at.isoformat(),
                 "canonical_first_received_at": first_received_at.isoformat(),
                 "current_v16_snapshot_hash": bundle.snapshot_hash,
                 "official_v16_snapshot_hash": official_v16_snapshot_hash,
@@ -3174,20 +3222,11 @@ class V20Service:
                 "message": (
                     "当前V20策略计算器已基于持久化 canonical 09:39 事实完成一次只读核查；"
                     f"canonical来源={calculation.canonical_source}；"
-                    f"核查结果={probe_result}；"
+                    "本次计算=SUCCESS；"
+                    f"早盘正式结果对比={official_comparison_result}；"
                     "未修改正式决策、模型批次、模型腿、持仓或订单。"
                 ),
             }
-            if probe_result == "FAIL":
-                semantic.update(
-                    {
-                        "failure_stage": "OFFICIAL_RESULT_COMPARISON",
-                        "failure_reason": (
-                            "recomputed strategy fields differ from frozen evidence: "
-                            + ",".join(mismatched_business_fields)
-                        ),
-                    }
-                )
             await self._decision_cycle_lock.acquire()
             try:
                 await self._require_manual_trigger_ready()
@@ -5289,6 +5328,59 @@ class V20Service:
         return health, rolling, gaps
 
     @staticmethod
+    def _state_before_from_terminal_status(status: EntryStatus) -> StateRecord:
+        """Restore the immutable state input consumed by the terminal slot."""
+
+        expected_hash = status.semantic.get("state_before_hash")
+        if not isinstance(expected_hash, str):
+            raise V20SemanticConflict("terminal slot lacks a valid canonical state_before payload")
+        try:
+            return restore_state_before(
+                status.snapshot,
+                expected_lineage_id=status.lineage_id,
+                expected_state_before_hash=expected_hash,
+            )
+        except (TypeError, ValueError) as exc:
+            raise V20SemanticConflict(
+                "terminal slot lacks a valid canonical state_before payload"
+            ) from exc
+
+    @staticmethod
+    def _verify_terminal_replay_transition(
+        status: EntryStatus,
+        prepared: PreparedEntry,
+    ) -> None:
+        """Bind replay inputs to the immutable terminal slot and prestate.
+
+        The replay deliberately does not require its newly calculated
+        ``next_state_hash`` to equal the old terminal ``state_after_hash``.
+        The former is current-code output: a legitimate strategy change must
+        be rendered as a successful calculation whose official comparison is
+        ``DIFFERENT``, rather than being rejected as corrupt input.
+        """
+
+        commit = prepared.commit
+        frozen_prestate = status.snapshot.get("state_before")
+        frozen_revision = (
+            frozen_prestate.get("revision") if isinstance(frozen_prestate, Mapping) else None
+        )
+        frozen_hash = (
+            frozen_prestate.get("state_hash") if isinstance(frozen_prestate, Mapping) else None
+        )
+        if (
+            commit.official_stream_id != status.official_stream_id
+            or commit.trade_date != status.trade_date
+            or commit.slot_id != status.slot_id
+            or commit.lineage_id != status.lineage_id
+            or commit.expected_state_revision != frozen_revision
+            or commit.expected_state_hash != frozen_hash
+            or frozen_hash != status.semantic.get("state_before_hash")
+        ):
+            raise V20SemanticConflict(
+                "terminal slot state transition does not bind to canonical state_before"
+            )
+
+    @staticmethod
     def _canonical_raw_top10_codes(canonical: CanonicalV16ScanBundle) -> tuple[str, ...]:
         """Return the theoretical Top10 codes (by rank) of the canonical scan.
 
@@ -6136,11 +6228,24 @@ class V20Service:
         ):
             raise V20SemanticConflict("canonical V16 artifact receipt timestamp is invalid")
         try:
-            all_records = await self._repository.list_raw_minute_bar_records(
-                required_codes,
-                trade_date=bundle.trade_date,
-                end_labels=EARLY_RAW_BAR_LABELS,
-            )
+            raw_loader = self._repository.list_raw_minute_bar_records
+            raw_kwargs: dict[str, Any] = {
+                "trade_date": bundle.trade_date,
+                "end_labels": EARLY_RAW_BAR_LABELS,
+            }
+            supports_received_before = False
+            try:
+                parameters = inspect.signature(raw_loader).parameters.values()
+                supports_received_before = "received_before" in {
+                    parameter.name for parameter in parameters
+                } or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+                )
+            except (TypeError, ValueError):
+                pass
+            if supports_received_before:
+                raw_kwargs["received_before"] = artifact_received_at
+            all_records = await raw_loader(required_codes, **raw_kwargs)
         except V20MinuteBarIntegrityConflict as exc:
             raise V20SemanticConflict("canonical V16 raw barrier is corrupt") from exc
         records: list[MinuteBarRecord] = []
@@ -6154,7 +6259,7 @@ class V20Service:
                 raise V20SemanticConflict(
                     "canonical V16 artifact has raw evidence with an invalid receipt"
                 )
-            if received_at <= artifact_received_at:
+            if received_at < artifact_received_at:
                 records.append(raw_record)
         _usable, missing, conflicted = self._fold_universe_raw_records(
             records,
@@ -6195,9 +6300,10 @@ class V20Service:
         # its mutable stand-in while proving the raw barrier.
         first_received_at = first_received_at.astimezone(SHANGHAI)
         hydrated = await self._hydrate_canonical_artifact_record(record)
-        barrier_completed_at = self._canonical_barrier_completed_at.get(trade_date)
-        if barrier_completed_at is not None and barrier_completed_at > first_received_at:
-            first_received_at = barrier_completed_at
+        # This database-owned receipt is the immutable visibility cutoff for a
+        # retrospective recomputation.  Hydration/readback may finish later,
+        # but that process timing must never admit raw rows received after the
+        # artifact itself was durably visible.
         return hydrated, first_received_at
 
     @staticmethod
@@ -6396,6 +6502,99 @@ class V20Service:
             f"{len(conflicted)} conflicted universe codes (sample: {sample})"
         )
 
+    async def _acquire_current_day_early_market_data_once(
+        self,
+        trade_date: date,
+        targets: Sequence[str],
+        loader: Callable[
+            [Sequence[str], date],
+            Awaitable[Mapping[str, TushareEarlyMarketData]],
+        ],
+    ) -> Mapping[str, TushareEarlyMarketData]:
+        """Join the sole V20 full-market acquisition for this provider minute.
+
+        A task remains cached after both success and failure.  Retrying a failed
+        full fan-out in the same minute would duplicate roughly 3,000 physical
+        ``rt_min_daily`` requests even though the client has already exhausted
+        its bounded per-symbol transport retries.  A later provider minute gets
+        a new key and may make one new, independently fenced attempt.
+        """
+
+        current = self._aware_now().astimezone(SHANGHAI)
+        decision_at = _local(
+            trade_date,
+            time.fromisoformat(self.config.clock.decision_bar_label),
+        )
+        if current < decision_at:
+            raise V20StateConflict(
+                "current-day canonical early acquisition is unavailable before 09:39"
+            )
+        provider_minute = current.replace(second=0, microsecond=0)
+        key = (trade_date, provider_minute)
+        requested = frozenset(targets)
+        async with self._current_day_early_attempt_lock:
+            if self._stop_event.is_set():
+                raise V20StateConflict(
+                    "current-day V20 acquisition is unavailable while the service is stopping"
+                )
+            active_prior_attempt: (
+                tuple[
+                    date,
+                    frozenset[str],
+                    asyncio.Task[Mapping[str, TushareEarlyMarketData]],
+                ]
+                | None
+            ) = None
+            for old_key, (_old_targets, old_task) in tuple(
+                self._current_day_early_attempts.items()
+            ):
+                if old_key != key and old_task.done():
+                    self._current_day_early_attempts.pop(old_key, None)
+                elif old_key != key and active_prior_attempt is None:
+                    active_prior_attempt = (old_key[0], _old_targets, old_task)
+            shared = self._current_day_early_attempts.get(key)
+            if shared is None and active_prior_attempt is not None:
+                # Never overlap two V20 full-market rounds.  A request arriving
+                # in a new minute first joins the still-running prior-minute
+                # attempt; it may start the new minute's one attempt only after
+                # the earlier round has reached a terminal state.
+                active_trade_date, active_targets, active_task = active_prior_attempt
+                if active_trade_date != trade_date:
+                    raise V20StateConflict(
+                        "a prior-date V20 current-day acquisition is still running"
+                    )
+                shared = (active_targets, active_task)
+                # Occupy the new provider-minute key as well.  Otherwise a
+                # later caller in this same minute could delete the completed
+                # old key and accidentally launch a second full-market round.
+                self._current_day_early_attempts[key] = shared
+            if shared is None:
+                launched_targets = requested
+
+                async def _load() -> Mapping[str, TushareEarlyMarketData]:
+                    return await loader(sorted(launched_targets), trade_date)
+
+                attempt = asyncio.create_task(
+                    _load(),
+                    name=(
+                        "v20-current-day-early-"
+                        f"{trade_date.isoformat()}-{provider_minute.strftime('%H%M')}"
+                    ),
+                )
+                self._current_day_early_attempts[key] = (launched_targets, attempt)
+            else:
+                launched_targets, attempt = shared
+                uncovered = requested - launched_targets
+                if uncovered:
+                    sample = ",".join(sorted(uncovered)[:5])
+                    raise V20StateConflict(
+                        "current-day V20 acquisition already started with a smaller "
+                        f"target set in this provider minute; uncovered={len(uncovered)} "
+                        f"(sample: {sample})"
+                    )
+        response = await asyncio.shield(attempt)
+        return {code: response[code] for code in sorted(requested) if code in response}
+
     async def _historical_early_evidence_seed(
         self,
         trade_date: date,
@@ -6403,6 +6602,9 @@ class V20Service:
         universe_override: tuple[str, ...] | None = None,
         clean_boards_override: Mapping[str, Sequence[tuple[str, str]]] | None = None,
         evidence_codes: Sequence[str] = (),
+        exact_evidence_codes: Sequence[str] | None = None,
+        received_before: datetime | None = None,
+        allow_backfill: bool = True,
     ) -> tuple[
         dict[str, TushareEarlyMarketData],
         tuple[str, ...],
@@ -6430,18 +6632,69 @@ class V20Service:
         evidence.  Any conflicted universe code raises
         ``V20SemanticConflict``.  Missing current-day keys remain visible to
         the canonical 80% readiness gate; unresolved historical targets fail.
+
+        With ``exact_evidence_codes`` and ``received_before`` from an existing
+        artifact, only those codes and rows received before the artifact are
+        visible.  Every declared evidence code must be reconstructable, and a
+        caller can disable backfill so a retrospective run cannot change which
+        symbols were present in the formal run.
         """
         _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(
             self._scan_state,
             universe_override=universe_override,
             clean_boards_override=clean_boards_override,
         )
-        evidence_universe = tuple(sorted(set(universe).union(evidence_codes)))
-        records = await self._repository.list_raw_minute_bar_records(
-            evidence_universe,
-            trade_date=trade_date,
-            end_labels=EARLY_RAW_BAR_LABELS,
-        )
+        if received_before is not None and (
+            received_before.tzinfo is None or received_before.utcoffset() is None
+        ):
+            raise V20SemanticConflict("canonical V16 raw receipt cutoff is invalid")
+        if exact_evidence_codes is None:
+            evidence_universe = tuple(sorted(set(universe).union(evidence_codes)))
+        else:
+            evidence_universe = tuple(exact_evidence_codes)
+            if (
+                not evidence_universe
+                or tuple(sorted(set(evidence_universe))) != evidence_universe
+                or any(
+                    not isinstance(code, str) or len(code) != 6 or not code.isdigit()
+                    for code in evidence_universe
+                )
+            ):
+                raise V20SemanticConflict("canonical V16 frozen raw-evidence universe is invalid")
+        raw_loader = self._repository.list_raw_minute_bar_records
+        raw_kwargs: dict[str, Any] = {
+            "trade_date": trade_date,
+            "end_labels": EARLY_RAW_BAR_LABELS,
+        }
+        if received_before is not None:
+            supports_received_before = False
+            try:
+                parameters = inspect.signature(raw_loader).parameters.values()
+                supports_received_before = "received_before" in {
+                    parameter.name for parameter in parameters
+                } or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+                )
+            except (TypeError, ValueError):
+                pass
+            if supports_received_before:
+                raw_kwargs["received_before"] = received_before
+        records = await raw_loader(evidence_universe, **raw_kwargs)
+        if received_before is not None:
+            visible_records: list[MinuteBarRecord] = []
+            for record in records:
+                received_at = getattr(record, "first_received_at", None)
+                if (
+                    not isinstance(received_at, datetime)
+                    or received_at.tzinfo is None
+                    or received_at.utcoffset() is None
+                ):
+                    raise V20SemanticConflict(
+                        "canonical V16 frozen raw evidence has an invalid receipt"
+                    )
+                if received_at < received_before:
+                    visible_records.append(record)
+            records = visible_records
         usable, missing, conflicted = self._fold_universe_raw_records(
             records,
             evidence_universe,
@@ -6449,11 +6702,23 @@ class V20Service:
         )
         if conflicted:
             self._raise_historical_seed_conflict(conflicted, phase="initial")
+        if exact_evidence_codes is not None and missing:
+            sample = ", ".join(sorted(missing)[:HISTORICAL_SEED_CONFLICT_SAMPLE])
+            raise V20SemanticConflict(
+                "canonical V16 frozen raw barrier is incomplete at artifact receipt: "
+                f"{len(missing)} code(s) missing (sample: {sample})"
+            )
         # A legal target-date 09:39 bar is the one canonical V16 per-symbol
         # readiness boundary.  Earlier labels are preserved when present but
         # never become a second, historical-only admission rule.
         today = self._aware_now().astimezone(SHANGHAI).date()
         targets = sorted(missing)
+        if targets and not allow_backfill:
+            sample = ", ".join(targets[:HISTORICAL_SEED_CONFLICT_SAMPLE])
+            raise V20SemanticConflict(
+                "canonical V16 frozen raw boundary forbids backfill: "
+                f"{len(targets)} code(s) missing (sample: {sample})"
+            )
         if targets:
             client = self._scan_state.realtime_client
             if trade_date > today:
@@ -6465,7 +6730,11 @@ class V20Service:
                     raise V20RepositoryError(
                         "canonical V16 current-day early-minute adapter is unavailable"
                     )
-                early_response = await current_loader(targets, today)
+                early_response = await self._acquire_current_day_early_market_data_once(
+                    trade_date,
+                    targets,
+                    current_loader,
+                )
                 payloads = [
                     _bar_payload(bar)
                     for code in targets
@@ -6555,10 +6824,19 @@ class V20Service:
         self,
         context: _DayContext,
     ) -> _HistoricalCanonicalInputs:
-        """Acquire every date-bound input required by vendor-free V16 replay."""
+        """Acquire date-bound V16 inputs under an optional artifact boundary.
+
+        Minute and D1 daily facts are read from the durable receipt boundary.
+        The portable artifact stores identities rather than full OHLCV-history
+        or name payloads, so those production dependencies are reacquired.  An
+        outage fails the calculation; per-code OHLCV history or full consumed
+        name-map drift is rejected by artifact identity before success is
+        reported.
+        """
 
         trade_date = context.trade_date
-        context_calendar = tuple(context.calendar)
+        frozen_calendar = getattr(context, "canonical_fact_calendar", None)
+        context_calendar = tuple(frozen_calendar or context.calendar)
         if context_calendar and (
             any(type(item) is not date for item in context_calendar)
             or tuple(sorted(set(context_calendar))) != context_calendar
@@ -6582,9 +6860,28 @@ class V20Service:
             )
         prior_trade_date = predecessors[-1]
 
-        _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(self._scan_state)
+        _scanner, _scorer, clean_boards, derived_universe = derive_canonical_v16_universe(
+            self._scan_state
+        )
+        universe = derived_universe
+        fact_universe = getattr(context, "canonical_fact_universe", None)
+        if fact_universe is not None:
+            universe_override = fact_universe
+            if (
+                not universe_override
+                or tuple(sorted(set(universe_override))) != universe_override
+                or any(
+                    not isinstance(code, str) or len(code) != 6 or not code.isdigit()
+                    for code in universe_override
+                )
+            ):
+                raise V20SemanticConflict("canonical V16 frozen comparison universe is invalid")
+            universe = universe_override
         client = self._scan_state.realtime_client
-        if client is None or not callable(getattr(client, "fetch_daily_bars", None)):
+        fact_received_before = getattr(context, "canonical_fact_received_before", None)
+        if fact_received_before is None and (
+            client is None or not callable(getattr(client, "fetch_daily_bars", None))
+        ):
             raise V20RepositoryError(
                 "Rolling7 canonical bootstrap daily-history adapter is unavailable"
             )
@@ -6599,15 +6896,47 @@ class V20Service:
             trade_date.isoformat(),
             prior_trade_date.isoformat(),
         )
-        daily = await client.fetch_daily_bars(prior_trade_date.strftime("%Y%m%d"))
-        if not daily:
-            raise V20RepositoryError(
-                f"Rolling7 canonical bootstrap D1 daily is empty for {prior_trade_date}"
+        if fact_received_before is None:
+            daily = await client.fetch_daily_bars(prior_trade_date.strftime("%Y%m%d"))
+            if not daily:
+                raise V20RepositoryError(
+                    f"Rolling7 canonical bootstrap D1 daily is empty for {prior_trade_date}"
+                )
+            daily_record = await self._repository.record_daily_bar_snapshot(
+                prior_trade_date,
+                _daily_snapshot_payload(prior_trade_date, daily),
             )
-        daily_record = await self._repository.record_daily_bar_snapshot(
-            prior_trade_date,
-            _daily_snapshot_payload(prior_trade_date, daily),
-        )
+        else:
+            daily_loader = getattr(self._repository, "list_daily_bar_snapshots", None)
+            if not callable(daily_loader):
+                raise V20SemanticConflict(
+                    "canonical V16 artifact cannot reload its frozen D1 daily fact"
+                )
+            daily_candidates, _corrupt_ids = await daily_loader(
+                prior_trade_date,
+                received_before=fact_received_before,
+            )
+            visible_daily_candidates = []
+            for candidate in daily_candidates:
+                received_at = getattr(candidate, "first_received_at", None)
+                if (
+                    not isinstance(received_at, datetime)
+                    or received_at.tzinfo is None
+                    or received_at.utcoffset() is None
+                ):
+                    raise V20SemanticConflict(
+                        "canonical V16 frozen D1 daily fact has an invalid receipt"
+                    )
+                if received_at < fact_received_before:
+                    visible_daily_candidates.append(candidate)
+            if not visible_daily_candidates:
+                raise V20SemanticConflict(
+                    "canonical V16 artifact lacks a D1 daily fact at its receipt boundary"
+                )
+            # Repository order is newest durable candidate first within the
+            # artifact receipt fence.  The selected candidate's full close and
+            # amount map is bound by the external-market identity comparison.
+            daily_record = visible_daily_candidates[0]
         prior_daily = _daily_rows_from_snapshot(daily_record.payload)
         expected_prior_text = prior_trade_date.strftime("%Y%m%d")
         if not prior_daily or any(
@@ -6644,6 +6973,9 @@ class V20Service:
             universe_override=universe,
             clean_boards_override=clean_boards,
             evidence_codes=breadth_codes,
+            exact_evidence_codes=getattr(context, "canonical_fact_evidence_codes", None),
+            received_before=fact_received_before,
+            allow_backfill=getattr(context, "canonical_fact_allow_backfill", True),
         )
         logger.info(
             "V20 Rolling7 bootstrap %s stage=EARLY_MINUTE_BACKFILL source=tushare.%s "
@@ -6790,7 +7122,8 @@ class V20Service:
             st_eligible_codes_override=frozen.st_eligible_codes,
             allow_realtime_fetch=False,
         )
-        await self._persist_canonical_raw_minute_bars(canonical)
+        if getattr(context, "canonical_fact_persist_raw", True):
+            await self._persist_canonical_raw_minute_bars(canonical)
         return canonical
 
     async def _bootstrap_historical_canonical_artifact(
@@ -6860,10 +7193,22 @@ class V20Service:
         self._verify_entry_binding(status)
         if now < _local(context.trade_date, self.config.clock.publish_deadline):
             raise V20StateConflict("late 09:39 replay cannot run before the live cutoff")
-        state = await self._repository.load_state(self.config.state_lineage_id)
-        if state.state_hash != status.semantic.get("state_after_hash"):
-            raise V20StateConflict("official state has moved beyond the terminal replay slot")
-        calculation = await self._compute_morning_selection(context.trade_date)
+        state_at_start = await self._repository.load_state(self.config.state_lineage_id)
+        state_payload_hash = sha256_json(dict(state_at_start.payload))
+        if (
+            state_at_start.lineage_id != self.config.state_lineage_id
+            or state_payload_hash != state_at_start.state_hash
+        ):
+            raise V20SemanticConflict("official state head is malformed before terminal replay")
+        calculation = await self._orchestrate_morning_selection(context.trade_date)
+        state_at_end = await self._repository.load_state(self.config.state_lineage_id)
+        if (
+            state_at_end.lineage_id != state_at_start.lineage_id
+            or state_at_end.revision != state_at_start.revision
+            or state_at_end.state_hash != state_at_start.state_hash
+            or sha256_json(dict(state_at_end.payload)) != state_payload_hash
+        ):
+            raise V20StateConflict("official state changed during terminal replay")
         prepared = calculation.prepared
         bundle = calculation.bundle
         pure = dict(prepared.commit.semantic)
@@ -7151,14 +7496,17 @@ class V20Service:
     async def _resolve_canonical_morning_bundle(
         self,
         trade_date: date,
+        *,
+        terminal_status: EntryStatus | None = None,
     ) -> tuple[FrozenV16ScanBundle, datetime, tuple[date, ...], str, bool, bool | None]:
-        """Actually rerun V16 from durable facts and verify its frozen master.
+        """Rerun V16 and bind any replay to its durable artifact fact boundary.
 
-        A stored artifact contributes only calendar evidence and an immutable
-        comparison target.  It is never returned as the computed selection.
-        Both automatic and manual callers rebuild the V16 inputs from persisted
-        <=09:39 raw facts, execute ``compute_canonical_v16_scan`` with realtime
-        per-symbol fetches disabled, then run the V20 policy calculator.
+        A first calculation may acquire missing <=09:39 evidence and publish
+        the artifact.  Once that artifact exists, every caller uses its exact
+        comparison universe, exact raw-evidence code set, and database receipt
+        as an immutable visibility cutoff; it may not backfill formal misses.
+        The scanner still executes current strategy code, and the frozen input
+        identities must match before output differences can be reported.
         """
 
         loaded = (
@@ -7167,6 +7515,15 @@ class V20Service:
             else None
         )
         expected_bundle: FrozenV16ScanBundle | None = None
+        # INPUT_INVALID proves that no usable formal V16 decision fact existed.
+        # An artifact found later (or written by the legacy mixed-hash build)
+        # is not an official comparison boundary: compute the current theory,
+        # report NOT_AVAILABLE upstream, and leave that artifact untouched.
+        ignore_existing_artifact = (
+            loaded is not None
+            and terminal_status is not None
+            and getattr(terminal_status, "action", None) == "INPUT_INVALID"
+        )
         calendar_hint: tuple[date, ...] = (
             tuple(self._context.calendar)
             if self._context is not None and self._context.trade_date == trade_date
@@ -7174,8 +7531,9 @@ class V20Service:
             if self._calendar_loaded_for == trade_date
             else ()
         )
-        if loaded is not None:
-            hydrated, _artifact_received_at = loaded
+        artifact_received_at: datetime | None = None
+        if loaded is not None and not ignore_existing_artifact:
+            hydrated, artifact_received_at = loaded
             if isinstance(hydrated, CanonicalV16ScanBundle):
                 expected_bundle = self._project_canonical_v16(
                     hydrated,
@@ -7185,9 +7543,48 @@ class V20Service:
                 expected_bundle = hydrated
             else:
                 raise V20SemanticConflict("canonical V16 artifact hydration is invalid")
+        elif terminal_status is not None and terminal_status.action in {
+            "ENTER",
+            "BLOCK",
+            "NO_SIGNAL",
+        }:
+            raise V20SemanticConflict(
+                "terminal V20 slot lacks its canonical V16 artifact fact boundary"
+            )
+
+        exact_universe: tuple[str, ...] | None = None
+        exact_evidence_codes: tuple[str, ...] | None = None
+        exact_calendar: tuple[date, ...] | None = None
+        if expected_bundle is not None:
+            if artifact_received_at is None:
+                raise V20SemanticConflict("canonical V16 artifact receipt boundary is missing")
+            try:
+                snapshot = expected_bundle.snapshot
+                exact_universe = tuple(snapshot["comparison_pool_codes"])
+                exact_evidence_codes = tuple(snapshot["raw_evidence_codes"])
+                history_dates = tuple(
+                    date.fromisoformat(str(value))
+                    for value in snapshot["history_date_valid_counts"]
+                )
+                exact_calendar = tuple(
+                    sorted(set((*history_dates, *expected_bundle.computation_calendar)))
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise V20SemanticConflict(
+                    "canonical V16 artifact lacks its frozen raw fact boundary"
+                ) from exc
 
         canonical = await self._compute_canonical_v16_from_persisted_raw(
-            _DayContext(trade_date=trade_date, calendar=calendar_hint)
+            _DayContext(
+                trade_date=trade_date,
+                calendar=calendar_hint,
+                canonical_fact_received_before=artifact_received_at,
+                canonical_fact_universe=exact_universe,
+                canonical_fact_evidence_codes=exact_evidence_codes,
+                canonical_fact_calendar=exact_calendar,
+                canonical_fact_allow_backfill=expected_bundle is None,
+                canonical_fact_persist_raw=expected_bundle is None,
+            )
         )
         calendar = tuple(canonical.computation_calendar)
         bundle = self._project_canonical_v16(canonical, calendar=calendar)
@@ -7195,10 +7592,14 @@ class V20Service:
         artifact_compared = expected_bundle is not None
         artifact_matches: bool | None = None
         if expected_bundle is not None:
+            self._verify_frozen_canonical_input_identity(expected_bundle, bundle)
             artifact_matches = expected_bundle.snapshot_hash == bundle.snapshot_hash and dict(
                 expected_bundle.snapshot
             ) == dict(bundle.snapshot)
-        elif getattr(self, "_canonical_artifact_store", None) is not None:
+        elif (
+            getattr(self, "_canonical_artifact_store", None) is not None
+            and not ignore_existing_artifact
+        ):
             await self._persist_canonical_artifact_barrier(canonical)
             persisted = await self._load_canonical_artifact(trade_date)
             if persisted is None:
@@ -7254,6 +7655,41 @@ class V20Service:
             artifact_matches,
         )
 
+    @staticmethod
+    def _verify_frozen_canonical_input_identity(
+        expected: FrozenV16ScanBundle,
+        actual: FrozenV16ScanBundle,
+    ) -> None:
+        """Verify only external facts the existing artifact can prove exactly.
+
+        Candidate minute and D1 rows are first fenced by the artifact's database
+        receipt.  ``early_market_source_hash`` then binds the exact selected
+        minute facts plus full D1, name, board, universe, and calendar facts;
+        per-code OHLCV history hashes are checked separately.  Model/feature
+        identities and scanner-derived fields are deliberately excluded: they
+        are current-code outputs whose changes must be reported as ``DIFFERENT``,
+        not rejected as input corruption.
+        """
+
+        immutable_input_fields = (
+            "early_market_source_hash",
+            "history_input_hashes",
+            "comparison_pool_codes",
+            "prior_trade_date",
+        )
+        expected_snapshot = expected.snapshot
+        actual_snapshot = actual.snapshot
+        differing = tuple(
+            field
+            for field in immutable_input_fields
+            if expected_snapshot.get(field) != actual_snapshot.get(field)
+        )
+        if differing:
+            raise V20SemanticConflict(
+                "canonical V16 replay cannot prove the artifact fact boundary; "
+                f"input identity differs: {', '.join(differing)}"
+            )
+
     async def _compute_morning_selection(
         self,
         trade_date: date,
@@ -7267,6 +7703,12 @@ class V20Service:
         method completes.
         """
 
+        status = await self._repository.get_entry_status(
+            self.config.official_stream_id,
+            trade_date,
+        )
+        if status is not None:
+            self._verify_entry_binding(status)
         (
             bundle,
             first_received_at,
@@ -7274,31 +7716,26 @@ class V20Service:
             canonical_source,
             artifact_compared,
             artifact_matches,
-        ) = await self._resolve_canonical_morning_bundle(trade_date)
-        status = await self._repository.get_entry_status(
-            self.config.official_stream_id,
+        ) = await self._resolve_canonical_morning_bundle(
             trade_date,
+            terminal_status=status,
         )
         if status is not None:
-            self._verify_entry_binding(status)
             scheduled_source = status.semantic.get("scheduled_exits_today") or ()
             completed_health, completed_rolling, maturity_gaps = (
                 self._policy_inputs_from_terminal_status(status)
             )
+            calculation_state = self._state_before_from_terminal_status(status)
         else:
             scheduled_source = await self._scheduled_exits_today(trade_date)
             completed_health, completed_rolling, maturity_gaps = await self._policy_inputs(
                 trade_date
             )
+            calculation_state = await self._repository.load_state(self.config.state_lineage_id)
         scheduled = tuple(dict(item) for item in scheduled_source)
-        state = await self._repository.load_state(self.config.state_lineage_id)
-        if status is not None and state.state_hash != status.semantic.get("state_after_hash"):
-            raise V20StateConflict(
-                "official state has moved beyond the terminal morning-selection slot"
-            )
         prepared = prepare_entry(
             config=self.config,
-            state=state,
+            state=calculation_state,
             bundle=bundle,
             completed_health=completed_health,
             completed_rolling=completed_rolling,
@@ -7307,6 +7744,8 @@ class V20Service:
             calendar=calendar,
             scheduled_exits_today=scheduled,
         )
+        if status is not None:
+            self._verify_terminal_replay_transition(status, prepared)
         if prepared.commit.semantic.get("action") not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
             raise V20SemanticConflict(
                 "canonical V20 morning calculation produced an illegal action"
@@ -7321,6 +7760,20 @@ class V20Service:
             canonical_artifact_compared=artifact_compared,
             canonical_artifact_matches=artifact_matches,
         )
+
+    async def _orchestrate_morning_selection(
+        self,
+        trade_date: date,
+    ) -> _MorningSelectionComputation:
+        """Single high-level entry point for every V20 morning calculation.
+
+        This layer deliberately contains no actionability or official-write
+        decision.  Scheduled, pre-cutoff manual, retrospective check-only, and
+        legacy late-replay callers all receive the same prepared proposal; only
+        their final fence decides whether it may be committed or merely shown.
+        """
+
+        return await self._compute_morning_selection(trade_date)
 
     async def _run_entry_collection_cycle(
         self,
@@ -7373,6 +7826,13 @@ class V20Service:
             or not set(scan_input_codes).issubset(raw_evidence_codes)
         ):
             raise V20SemanticConflict("canonical V16 raw evidence universe is invalid")
+        external_market_fact_hash = getattr(canonical, "external_market_fact_hash", None)
+        if (
+            not isinstance(external_market_fact_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", external_market_fact_hash) is None
+            or external_market_fact_hash == "0" * 64
+        ):
+            raise V20SemanticConflict("canonical V16 external market fact identity is unavailable")
         symbols = [
             {
                 "rank": stock.rank,
@@ -7420,7 +7880,10 @@ class V20Service:
             "schema_version": V20_V16_SNAPSHOT_SCHEMA,
             "trade_date": canonical.trade_date.isoformat(),
             "last_complete_bar": self.config.clock.decision_bar_label,
-            "early_market_source_hash": canonical.input_hash,
+            # This existing artifact field is a pure external-fact envelope.
+            # ``canonical.input_hash`` is intentionally excluded because its
+            # legacy contract mixes model and scanner-derived structures.
+            "early_market_source_hash": external_market_fact_hash,
             "early_market_conflict_codes": [],
             "breadth_market_source_hash": canonical.breadth_market_source_hash,
             "breadth_market_missing_codes": list(canonical.breadth_market_missing_codes),
@@ -7657,7 +8120,7 @@ class V20Service:
         context: _DayContext,
         now: datetime,
     ) -> None:
-        calculation = await self._compute_morning_selection(context.trade_date)
+        calculation = await self._orchestrate_morning_selection(context.trade_date)
         resolved_bundle = calculation.bundle
         prepared = calculation.prepared
         context.canonical_bundle = resolved_bundle

@@ -3805,6 +3805,32 @@ async def test_manual_monitor_enrollment_is_atomic_explicit_and_non_official() -
 
 
 @pytest.mark.asyncio
+async def test_manual_monitor_accepts_current_probe_without_legacy_alias_fields() -> None:
+    commit, source, _registered = _manual_monitor_fixture()
+    semantic = json.loads(str(source["semantic_json"]))
+    for field in (
+        "replay_action",
+        "official_entry_event_id_before",
+        "official_entry_event_id_after",
+    ):
+        semantic.pop(field)
+    semantic_hash = sha256_json(semantic)
+    source = {
+        **source,
+        "semantic_json": canonical_json(semantic),
+        "semantic_content_hash": semantic_hash,
+    }
+    commit = replace(commit, source_semantic_content_hash=semantic_hash)
+    connection = _FakeConnection(
+        fetchrows=[source, _failed_official_entry_row(commit), None],
+        fetchvals=[True],
+        executes=["OK", "OK", "OK", "INSERT 0 1"],
+    )
+
+    assert await _repository(connection).enroll_manual_monitor(commit) is True
+
+
+@pytest.mark.asyncio
 async def test_manual_monitor_same_source_retry_is_idempotent_even_after_cutoff() -> None:
     commit, source, _registered = _manual_monitor_fixture()
     first_connection = _FakeConnection(

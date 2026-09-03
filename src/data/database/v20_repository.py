@@ -2753,12 +2753,7 @@ class V20Repository:
                     or source_semantic.get("official_entry_action") != "INPUT_INVALID"
                     or source_semantic.get("official_entry_event_id")
                     != commit.official_entry_event_id
-                    or source_semantic.get("official_entry_event_id_before")
-                    != commit.official_entry_event_id
-                    or source_semantic.get("official_entry_event_id_after")
-                    != commit.official_entry_event_id
                     or source_semantic.get("v20_action") != "ENTER"
-                    or source_semantic.get("replay_action") != "ENTER"
                     or source_semantic.get("official_state_changed") is not False
                     or source_semantic.get("orders_changed") is not False
                     or source_semantic.get("non_actionable") is not True

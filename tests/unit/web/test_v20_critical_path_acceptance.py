@@ -39,7 +39,7 @@ from src.strategy.v20.decision_engine import (
     genesis_state,
     prepare_entry,
 )
-from src.strategy.v20.identity import named_hash
+from src.strategy.v20.identity import official_slot_id
 from src.strategy.v20.models import (
     V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
     V20_ENTRY_SEMANTIC_SCHEMA,
@@ -644,6 +644,7 @@ def _portable_canonical(
         feature_list_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
         computed_at=datetime.combine(trade_date, time(9, 39, 20), TZ),
         input_hash=sha256_json({"trade_date": trade_date.isoformat(), "codes": codes}),
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
         prior_amount_yuan={code: 1_000_000.0 for code in codes},
         breadth_valid_n=len(codes),
@@ -701,6 +702,21 @@ def _terminal_status(
     v16_snapshot_hash: str,
     event_id: str = "old-terminal-enter",
 ) -> EntryStatus:
+    if state.revision <= 0:
+        raise AssertionError("terminal fixture requires an advanced official state")
+    slot = official_slot_id(service.config.official_stream_id, trade_date.isoformat())
+    state_before_payload = {
+        **dict(state.payload),
+        "state_revision": state.revision - 1,
+    }
+    state_before_hash = sha256_json(state_before_payload)
+    state_after_payload = {
+        **state_before_payload,
+        "state_revision": state.revision,
+        "last_terminal_slot_id": slot,
+        "last_terminal_trade_date": trade_date.isoformat(),
+    }
+    state_after_hash = sha256_json(state_after_payload)
     policy_inputs = {
         "schema_version": "v20-policy-input-snapshot/v1",
         "completed_health": [],
@@ -713,7 +729,13 @@ def _terminal_status(
         "v16_snapshot_schema_version": V20_V16_SNAPSHOT_SCHEMA,
         "trade_date": trade_date.isoformat(),
         "state_semantics_hash": service.config.state_semantics_hash,
-        "state_before_hash": state.state_hash,
+        "state_before_hash": state_before_hash,
+        "state_before": {
+            "lineage_id": state.lineage_id,
+            "revision": state.revision - 1,
+            "state_hash": state_before_hash,
+            "payload": state_before_payload,
+        },
         "policy_input_hash": policy_hash,
         "policy_inputs": policy_inputs,
         "v16_snapshot_hash": v16_snapshot_hash,
@@ -727,8 +749,8 @@ def _terminal_status(
         "config_hash": service.config.config_hash,
         "state_semantics_hash": service.config.state_semantics_hash,
         "action": "ENTER",
-        "state_before_hash": state.state_hash,
-        "state_after_hash": state.state_hash,
+        "state_before_hash": state_before_hash,
+        "state_after_hash": state_after_hash,
         "policy_input_hash": policy_hash,
         "scheduled_exits_today": [],
         "v16_snapshot_hash": v16_snapshot_hash,
@@ -737,7 +759,7 @@ def _terminal_status(
     return EntryStatus(
         official_stream_id=service.config.official_stream_id,
         trade_date=trade_date,
-        slot_id=f"slot-{trade_date.isoformat()}",
+        slot_id=slot,
         slot_status="COMPLETED",
         slot_revision=1,
         strategy_version=service.config.strategy_version,
@@ -1022,6 +1044,7 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
         stock_filter=object(),
     )
     today = datetime.now(BEIJING_TZ).date()
+    v16_at = datetime.combine(today, time(9, 38, 10), TZ)
     pre_cutoff = datetime.combine(today, time(9, 39, 30), TZ)
     post_cutoff = datetime.combine(today, time(9, 40, 1), TZ)
     prior_trade_date = today - timedelta(days=1)
@@ -1191,23 +1214,11 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
 
     before_payload = genesis_state()
     before_hash = sha256_json(before_payload)
-    failure_gap_id = named_hash(
-        "V20_OFFICIAL_SHADOW_GAP_ID_V1",
-        {"official_stream_id": service.config.official_stream_id, "trade_date": today.isoformat()},
-    )
+    slot = official_slot_id(service.config.official_stream_id, today.isoformat())
     after_payload = {
         **before_payload,
         "state_revision": 1,
-        "official_rolling_gaps": [
-            {
-                "gap_id": failure_gap_id,
-                "signal_date": prior_trade_date.isoformat(),
-                "maturity_date": (today + timedelta(days=2)).isoformat(),
-                "closed": False,
-                "aged_out": False,
-            }
-        ],
-        "last_terminal_slot_id": "failed-slot",
+        "last_terminal_slot_id": slot,
         "last_terminal_trade_date": today.isoformat(),
     }
     after_hash = sha256_json(after_payload)
@@ -1241,6 +1252,12 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
         "schema_version": V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
         "trade_date": today.isoformat(),
         "state_before_hash": before_hash,
+        "state_before": {
+            "lineage_id": service.config.state_lineage_id,
+            "revision": 0,
+            "state_hash": before_hash,
+            "payload": before_payload,
+        },
         "state_semantics_hash": service.config.state_semantics_hash,
         "policy_input_hash": policy_hash,
         "policy_inputs": policy_inputs,
@@ -1248,7 +1265,7 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     status = EntryStatus(
         official_stream_id=service.config.official_stream_id,
         trade_date=today,
-        slot_id="failed-slot",
+        slot_id=slot,
         slot_status="FAILED",
         slot_revision=1,
         strategy_version=service.config.strategy_version,
@@ -1317,19 +1334,22 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     monkeypatch.setattr(service, "_verify_entry_binding", lambda _status: None)
     monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", manual_decision)
 
-    release = asyncio.Event()
-    scanner_entered = asyncio.Event()
-    both_scanners_entered = asyncio.Event()
+    v16_release = asyncio.Event()
+    v20_release = asyncio.Event()
+    v16_scanner_entered = asyncio.Event()
+    v20_scanner_entered = asyncio.Event()
     scan_entries = 0
     original_scan = FakeV16Scanner.scan
 
     async def gated_scan(self: FakeV16Scanner, stock_data: Any, boards: Any) -> Any:
         nonlocal scan_entries
         scan_entries += 1
-        scanner_entered.set()
-        if scan_entries == 2:
-            both_scanners_entered.set()
-        await release.wait()
+        if scan_entries == 1:
+            v16_scanner_entered.set()
+            await v16_release.wait()
+        else:
+            v20_scanner_entered.set()
+            await v20_release.wait()
         return await original_scan(self, stock_data, boards)
 
     monkeypatch.setattr(FakeV16Scanner, "scan", gated_scan)
@@ -1391,9 +1411,11 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     realtime.batch_get_early_minute_history_for_date = empty_stk_mins
 
     class FixedDateTime(datetime):
+        value = v16_at
+
         @classmethod
         def now(cls, tz: Any = None) -> datetime:
-            return pre_cutoff if tz is BEIJING_TZ or tz is TZ else datetime.now(tz)
+            return cls.value if tz is BEIJING_TZ or tz is TZ else datetime.now(tz)
 
     async def v16_calendar() -> list[date]:
         return list(service_calendar)
@@ -1412,6 +1434,22 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
         v15_scan_service._scan_scheduler(v16_state),
         name="real-v16-scheduler",
     )
+    await asyncio.wait_for(v16_scanner_entered.wait(), timeout=1.0)
+    assert scan_entries == 1
+    v16_release.set()
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if v16_state.today_recommendation is not None:
+            break
+    else:
+        raise AssertionError("independent 09:38 V16 scan did not complete")
+    scheduler_task.cancel()
+    await asyncio.gather(scheduler_task, return_exceptions=True)
+
+    # V20 owns a different state/client/coordinator and starts only after the
+    # completed V16 provider minute.  Its cancellation shielding and persisted
+    # canonical evidence are still exercised independently below.
+    FixedDateTime.value = pre_cutoff
     automatic_context = _DayContext(trade_date=today, calendar=service_calendar)
 
     async def automatic_entry_with_production_persist() -> None:
@@ -1427,20 +1465,15 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
         name="canonical-cancelled-waiter",
     )
 
-    for _ in range(100):
-        await asyncio.sleep(0)
-        coordinator = state.canonical_coordinator
-        if coordinator is not None and coordinator.inflight.get(today) and scanner_entered.is_set():
-            break
-    else:
-        raise AssertionError("concurrent paths did not create one canonical scan task")
-    await asyncio.wait_for(both_scanners_entered.wait(), timeout=1.0)
+    await asyncio.wait_for(v20_scanner_entered.wait(), timeout=1.0)
+    coordinator = state.canonical_coordinator
+    assert coordinator is not None and coordinator.inflight.get(today)
     master_task = state.canonical_coordinator.inflight[today]
     cancelled_waiter.cancel()
     await asyncio.gather(cancelled_waiter, return_exceptions=True)
     assert not master_task.cancelled()
 
-    release.set()
+    v20_release.set()
 
     automatic_context = await automatic_task
     master = await master_task
@@ -1479,9 +1512,6 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     manual_pre_result = await _dispatch_manual_trigger(service, "modes-manual-pre")
     service._clock = lambda: post_cutoff
     check_only_result = await _dispatch_manual_trigger(service, "modes-check-only")
-    scheduler_task.cancel()
-    await asyncio.gather(scheduler_task, return_exceptions=True)
-
     assert automatic_context.canonical_bundle is None
     assert manual_pre_result["accepted"] is True
     assert check_only_result["accepted"] is True
@@ -1759,6 +1789,7 @@ async def test_canonical_v20_snapshot_is_lossless_and_stable(
         feature_list_sha256="f" * 64,
         computed_at=computed_at,
         input_hash="i" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="c" * 64,
     )
 
@@ -1881,7 +1912,7 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
 ) -> None:
     today = date(2026, 9, 1)
     now = datetime(2026, 9, 1, 9, 40, 1, tzinfo=TZ)
-    state_payload = genesis_state()
+    state_payload = {**genesis_state(), "state_revision": 1}
     state: StateRecord | None = None
     terminal: EntryStatus | None = None
     artifact_raw: tuple[Any, ...] = ()
@@ -2021,9 +2052,15 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     service._repository_started = True
     service._started = True
     service._clock = lambda: now
+    terminal_slot = official_slot_id(service.config.official_stream_id, today.isoformat())
+    state_payload = {
+        **state_payload,
+        "last_terminal_slot_id": terminal_slot,
+        "last_terminal_trade_date": today.isoformat(),
+    }
     state = StateRecord(
         lineage_id=service.config.state_lineage_id,
-        revision=0,
+        revision=1,
         state_hash=sha256_json(state_payload),
         payload=state_payload,
     )
@@ -2940,6 +2977,7 @@ async def _legacy_post_cutoff_terminal_enter_persisted_raw_contract(
         feature_list_sha256="f" * 64,
         computed_at=datetime(2026, 9, 1, 9, 39, 59, tzinfo=TZ),
         input_hash=canonical_input_hash,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
     )
     canonical = dataclasses_replace(
@@ -3269,7 +3307,13 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
     service._scan_state.historical_adapter = Bomb()
     service._scan_state.canonical_coordinator = Bomb()
 
-    state_payload = {**genesis_state(), "state_revision": 7}
+    terminal_slot = official_slot_id(service.config.official_stream_id, today.isoformat())
+    state_payload = {
+        **genesis_state(),
+        "state_revision": 7,
+        "last_terminal_slot_id": terminal_slot,
+        "last_terminal_trade_date": today.isoformat(),
+    }
     repository.state = StateRecord(
         lineage_id=service.config.state_lineage_id,
         revision=7,
@@ -3450,6 +3494,7 @@ async def _legacy_deployment_probe_persisted_raw_contract(
         feature_list_sha256="2" * 64,
         computed_at=datetime(2026, 9, 1, 9, 39, 59, tzinfo=TZ),
         input_hash="b" * 64,
+        external_market_fact_hash="f" * 64,
         _integrity_hash="",
     )
     old_canonical = dataclasses_replace(
@@ -3847,8 +3892,10 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
     assert result["current_version_recomputed"] is True
     assert result["replay_reused"] is False
     assert result["formal_decision_available"] is False
-    assert result["probe_result"] == "FAIL"
-    assert "official_entry_missing" in result["probe_mismatch_fields"]
+    assert result["calculation_result"] == "SUCCESS"
+    assert result["official_comparison_result"] == "NOT_AVAILABLE"
+    assert result["official_mismatch_fields"] == []
+    assert result["probe_result"] == "PASS"
     assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
     assert result["official_v16_snapshot_hash"] is None
     assert [item["code"] for item in result["symbols"]] == ["603068"]

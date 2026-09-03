@@ -682,7 +682,27 @@ def create_iquant_router() -> APIRouter:
                     and TRADE_DECISION_WINDOW[0] <= ex_time <= TRADE_DECISION_WINDOW[1]
                 ):
                     scan_state = _state.get("scan_state")
-                    if scan_state and scan_state.scan_done_date == ex_date:
+                    scan_missed = bool(scan_state and scan_state.auto_scan_missed_date == ex_date)
+                    scan_flight = scan_state.scan_flight_task if scan_state else None
+                    scan_in_flight = bool(scan_flight is not None and not scan_flight.done())
+                    if scan_missed:
+                        # Keep polling: a fresh manual V16 scan is allowed from
+                        # 09:45 and may still publish a valid result inside the
+                        # legacy trade window.  Until then, never reinterpret an
+                        # older recommendation as today's result.
+                        logger.info(
+                            "V15 trading: automatic V16 scan window was missed; "
+                            "waiting for a fresh V16 result"
+                        )
+                    elif scan_in_flight:
+                        # A result is not consumable until its producer has
+                        # published the complete state after the flight settles.
+                        logger.info("V15 trading: V16 scan still in flight; waiting")
+                    elif (
+                        scan_state
+                        and scan_state.scan_done_date == ex_date
+                        and scan_state.scan_published_date == ex_date
+                    ):
                         # Scan completed today — read result
                         trade_done_date = ex_date
                         rec = scan_state.today_recommendation
@@ -772,6 +792,8 @@ def create_iquant_router() -> APIRouter:
                 "V15交易调度器崩溃",
                 f"交易调度器意外退出!\n{error_detail}\nV15今日将无法自动交易，请立即检查",
             )
+
+    router._trading_scheduler = _trading_scheduler  # type: ignore[attr-defined]
 
     # --- Endpoints ---
 
@@ -1007,7 +1029,7 @@ def create_iquant_router() -> APIRouter:
 
     @router.post("/trigger-scan")
     async def trigger_scan() -> dict:
-        """Manually trigger V16 scan + Feishu top-10 report (bypasses time window).
+        """Manually trigger V16 scan + report outside V20's critical window.
 
         This is a scan-only re-run for inspecting today's selection / report. It
         deliberately does NOT push a BUY signal — placing trades is left to the
@@ -1020,19 +1042,51 @@ def create_iquant_router() -> APIRouter:
         "look at today's selection" action behind the trading key was just an
         accident of living in the same router.
         """
-        from src.web.v15_scan_service import run_v16_scan
+        from src.web.v15_scan_service import (
+            V16_MANUAL_BLOCK_END,
+            V16_REALTIME_CUTOFF,
+            run_v16_scan_singleflight,
+        )
 
         scan_state = _state.get("scan_state")
         if not scan_state or not scan_state.initialized:
             raise HTTPException(status_code=503, detail="Scan resources not initialized yet")
 
+        now_bj = datetime.now(BEIJING_TZ)
+        wall = now_bj.timetz().replace(tzinfo=None)
+        if V16_REALTIME_CUTOFF <= wall < V16_MANUAL_BLOCK_END:
+            raise HTTPException(
+                status_code=409,
+                detail="V16 manual scan is unavailable during the V20 09:39-09:45 window",
+            )
+        realtime_deadline = (
+            datetime.combine(
+                now_bj.date(),
+                V16_REALTIME_CUTOFF,
+                tzinfo=BEIJING_TZ,
+            )
+            if wall < V16_REALTIME_CUTOFF
+            else None
+        )
+
         try:
-            rec = await run_v16_scan(scan_state)
+            rec = await run_v16_scan_singleflight(
+                scan_state,
+                realtime_deadline=realtime_deadline,
+            )
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             raise HTTPException(status_code=500, detail=error_detail)
 
+        # Publish the fresh manual result as one non-awaiting state transition.
+        # A failed manual call exits above and leaves the previous state intact.
         scan_state.today_recommendation = rec
+        scan_state.scan_error = None
+        scan_state.scan_done_date = now_bj.date().isoformat()
+        scan_state.auto_scan_missed_date = ""
+        # Last-written readiness marker: consumers and a late-starting
+        # scheduler may trust the result only after this assignment.
+        scan_state.scan_published_date = now_bj.date().isoformat()
 
         result: dict = {"success": True, "recommendation": rec}
         return result

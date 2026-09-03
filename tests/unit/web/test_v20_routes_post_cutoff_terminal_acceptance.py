@@ -231,15 +231,9 @@ def _source(action: str) -> tuple[Any, OutboxRecord]:
     return status, source
 
 
-def _forbid_fresh_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fresh_bomb(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("sealed today terminal must not enter fresh probe")
-
-    async def select_bomb(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("sealed today terminal must not select a fresh context")
-
-    monkeypatch.setattr(routes, "_run_fresh_0939_probe", fresh_bomb)
-    monkeypatch.setattr(routes, "_select_fresh_probe_context", select_bomb)
+def _assert_no_alternate_probe() -> None:
+    assert not hasattr(routes, "_run_fresh_0939_probe")
+    assert not hasattr(routes, "_select_fresh_probe_context")
 
 
 @pytest.mark.parametrize("action", ["ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"])
@@ -251,7 +245,7 @@ async def test_post_cutoff_today_terminal_runs_current_check_only_and_settles_me
     status, source = _source(action)
     repository = Repository(status, source)
     service = Service(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
 
     result = await asyncio.wait_for(
         _dispatch_manual_trigger(service, "terminal-replay-001"),
@@ -321,7 +315,7 @@ async def test_post_cutoff_terminal_race_waits_for_today_and_never_uses_prior_da
     repository.status_by_date[PRIOR] = prior
     repository.get_entry_status = racing_status
     service = Service(repository)
-    _forbid_fresh_probe(monkeypatch)
+    _assert_no_alternate_probe()
     await service._decision_cycle_lock.acquire()
     pending = asyncio.create_task(_dispatch_manual_trigger(service, "terminal-race-001"))
     try:
