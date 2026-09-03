@@ -40,10 +40,7 @@ from src.data.clients.tushare_realtime import (
     TushareMinuteBar,
     tushare_minute_bars_to_early_market_data,
 )
-from src.data.clients.v20_market_data import (
-    V20EarlyBarCollector,
-    exact_reference_prices,
-)
+from src.data.clients.v20_market_data import V20EarlyBarCollector, exact_reference_prices
 from src.data.database.v16_canonical_artifact_store import (
     SNAPSHOT_TYPE as V16_CANONICAL_ARTIFACT_EVENT,
 )
@@ -5576,9 +5573,6 @@ class V20Service:
                     raise V20SemanticConflict(f"canonical V16 early raw bar is invalid for {code}")
                 seen_labels.add(bar.end_label)
                 payloads.append(_bar_payload(bar))
-            # Canonical readiness owns the 09:39 policy: a ready code must
-            # contribute a valid target-date 09:39 bar, however many or few
-            # earlier labels (09:25/09:30 included) it actually has.
             if EARLY_RAW_LAST_LABEL not in seen_labels:
                 raise V20SemanticConflict(
                     f"canonical V16 early raw bars lack a valid 09:39 bar for {code}"
@@ -6449,7 +6443,7 @@ class V20Service:
         the path needed by V16 without allowing subsequent revisions to rewrite
         it.
         There is no fixed-label continuity requirement: a legal 09:39 remains
-        the canonical readiness boundary.  Every revision at or before the
+        the canonical readiness boundary. Every revision at or before the
         anchor must still be exactly bound to its row identity, durably
         received after its bar end, numerically legal, and date-bound.  A
         malformed, misbound, or illegal selected revision makes the whole code
@@ -7716,8 +7710,8 @@ class V20Service:
             raise V20SemanticConflict("canonical V16 artifact belongs to another trade date")
         expected_dependencies = self.config.strategy_dependency_hashes
         for logical_path, snapshot_field in (
-            ("models/lgbrank_latest.txt", "scorer_model_sha256"),
-            ("models/feature_list.json", "scorer_feature_sha256"),
+            ("models/v20/lgbrank_latest.txt", "scorer_model_sha256"),
+            ("models/v20/feature_list.json", "scorer_feature_sha256"),
         ):
             if bundle.snapshot.get(snapshot_field) != expected_dependencies.get(logical_path):
                 raise V20SemanticConflict(
@@ -8075,8 +8069,8 @@ class V20Service:
 
         expected = self.config.strategy_dependency_hashes
         actual = {
-            "models/lgbrank_latest.txt": prewarmed.scorer_model_sha256,
-            "models/feature_list.json": prewarmed.scorer_feature_sha256,
+            "models/v20/lgbrank_latest.txt": prewarmed.scorer_model_sha256,
+            "models/v20/feature_list.json": prewarmed.scorer_feature_sha256,
         }
         for filename in ("sectors.json", "board_constituents.json"):
             path = resolve_concept_data_path(self.config.project_root, filename)

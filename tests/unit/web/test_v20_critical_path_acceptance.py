@@ -31,8 +31,6 @@ from src.data.database.v20_repository import (
     StateRecord,
     sha256_json,
 )
-from src.strategy.lgbrank_scorer import ScoredStock
-from src.strategy.strategies.v16_scanner import V16ScanResult, V16StockData
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import (
     _validate_v16_snapshot_formatter_evidence,
@@ -52,6 +50,8 @@ from src.strategy.v20.models import (
     serialize_health_snapshot,
 )
 from src.strategy.v20.runtime_config import load_v20_runtime_config
+from src.strategy.v20.selection_scanner import V16ScanResult, V16StockData
+from src.strategy.v20.selection_scorer import ScoredStock
 from src.web import app as web_app
 from src.web import v15_scan_service
 from src.web import v20_canonical_selection as canonical_selection
@@ -190,12 +190,17 @@ class FakeRealtimeClient:
             # early_bars mirrors the real normalizer contract: only target-date
             # rows at or before 09:39 — a late 09:40+ row never appears here.
             bars = []
-            for minute in range(31, 40):
+            labels = ("09:25", "09:30", *(f"09:{minute:02d}" for minute in range(31, 40)))
+            for label in labels:
                 bars.append(
                     TushareMinuteBar(
                         stock_code=code,
-                        bar_end=datetime.combine(trade_date, time(9, minute), TZ),
-                        end_label=f"09:{minute:02d}",
+                        bar_end=datetime.combine(
+                            trade_date,
+                            time(int(label[:2]), int(label[3:])),
+                            TZ,
+                        ),
+                        end_label=label,
                         open_price=11.0,
                         close_price=12.3,
                         high_price=12.4,
@@ -348,8 +353,8 @@ def _canonical_fixture(monkeypatch: pytest.MonkeyPatch) -> V20CanonicalSelection
     FakeV16Scanner.scan_calls = 0
     FakeRealtimeClient.early_calls = 0
     FakeHistoryAdapter.history_calls = 0
-    monkeypatch.setattr("src.strategy.lgbrank_scorer.LGBRankScorer", FakeScorer)
-    monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", FakeV16Scanner)
+    monkeypatch.setattr("src.strategy.v20.selection_scorer.LGBRankScorer", FakeScorer)
+    monkeypatch.setattr("src.strategy.v20.selection_scanner.V16Scanner", FakeV16Scanner)
 
     async def fake_calendar() -> list[date]:
         today = datetime.now(BEIJING_TZ).date()
@@ -390,8 +395,8 @@ def _v20_config(monkeypatch: pytest.MonkeyPatch) -> Any:
         runtime_config,
         "_dependency_hashes",
         lambda _root: {
-            "models/lgbrank_latest.txt": "1" * 64,
-            "models/feature_list.json": "2" * 64,
+            "models/v20/lgbrank_latest.txt": "1" * 64,
+            "models/v20/feature_list.json": "2" * 64,
         },
     )
     monkeypatch.setattr(
@@ -640,8 +645,8 @@ def _portable_canonical(
         failed_no_history=(),
         failed_build=(),
         skipped_new_listings=(),
-        model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
-        feature_list_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
+        model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
+        feature_list_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
         computed_at=datetime.combine(trade_date, time(9, 39, 20), TZ),
         input_hash=sha256_json({"trade_date": trade_date.isoformat(), "codes": codes}),
         external_market_fact_hash="f" * 64,
@@ -1429,6 +1434,10 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", no_v16_notification)
     monkeypatch.setattr(v15_scan_service, "_notify_feishu_signal", no_v16_notification)
     monkeypatch.setattr(v15_scan_service, "_schedule_v16_day_gate_shadow", lambda *_args: None)
+    monkeypatch.setattr(
+        "src.strategy.strategies.v16_scanner.V16Scanner",
+        FakeV16Scanner,
+    )
 
     scheduler_task = asyncio.create_task(
         v15_scan_service._scan_scheduler(v16_state),
@@ -1479,8 +1488,8 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     master = await master_task
     configured_master = dataclasses_replace(
         master,
-        model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
-        feature_list_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
+        model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
+        feature_list_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
         _integrity_hash="",
     )
     v20_master = dataclasses_replace(
@@ -1614,7 +1623,7 @@ async def test_canonical_v20_snapshot_is_lossless_and_stable(
     from src.web import v20_service as service_module
 
     assert not hasattr(service_module, "V20ScanPipeline")
-    monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", Bomb)
+    monkeypatch.setattr("src.strategy.v20.selection_scanner.V16Scanner", Bomb)
     monkeypatch.setattr("src.data.clients.tushare_realtime.TushareRealtimeClient", Bomb)
     monkeypatch.setattr(
         "src.data.clients.iquant_historical_adapter.IQuantHistoricalAdapter",

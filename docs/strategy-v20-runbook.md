@@ -38,7 +38,7 @@ bootstrap.mode: EMPTY_FORWARD_SHADOW
 | `V20_EMBEDDED_ENABLED=false` | 不启动 | 启动 |
 | `V20_ENABLED=true`, `V20_MODE=forward_shadow` | 影子账本及影子飞书 | 同时启动 |
 | legacy `runtime` + `V20_MODE=production_push` | 拒绝承载正式 V20 | 一律禁用，进程 fail closed |
-| Docker `v20` target + `production_push` | V20 正式账本及正式飞书 | 不启动旧 V16 通知、iQuant 或交易接口；内部仍复用 V16 选股算法 |
+| Docker `v20` target + `production_push` | V20 正式账本及正式飞书 | 不启动旧 V16 通知、iQuant 或交易接口；使用 V20 自有的冻结选股实现和模型 |
 
 最后一行是 fail-closed 设计：正式模式故障时不能静默改由另一套策略推票。
 
@@ -46,9 +46,10 @@ bootstrap.mode: EMPTY_FORWARD_SHADOW
 
 所有策略时间使用 `Asia/Shanghai`，行情原始分钟时间是分钟结束标签：
 
-1. 09:15 预热 V16 模型、股票池和历史输入；单次预热调用最多占用 60 秒并可重试，
+1. 09:15 预热 V20 自有模型、股票池和历史输入；单次预热调用最多占用 60 秒并可重试，
    且至少在 09:40 前预留 2 秒把控制权交回截止处理，不能由挂死的历史请求越过
-   每日“不买”终态。09:31 起采集分钟行情。
+   每日“不买”终态。行情响应中的 `09:25/09:30` 集合竞价原始行必须保留并计入
+   开盘价、`early_volume` 和 `volume_937`；09:31 起采集连续交易分钟行情。
 2. 先以交易所日历冻结 D0 前最近 37 个交易日。每只进入 V16 打分的代码必须逐日
    精确覆盖这 37 日的真实合法 OHLCV；缺任一日即排除该票。对于已经进入冻结 V16
    股票池的代码，停牌、新股和来源缺失都不得补零、前向填充、用更老的第 38 日替代，

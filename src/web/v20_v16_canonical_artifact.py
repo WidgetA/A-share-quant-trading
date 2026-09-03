@@ -10,9 +10,9 @@ from types import MappingProxyType
 from typing import Any
 
 from src.data.database.v20_repository import V20SemanticConflict, sha256_json
-from src.strategy.lgbrank_scorer import ScoredStock
-from src.strategy.strategies.v16_scanner import V16ScanResult
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
+from src.strategy.v20.selection_scanner import V16ScanResult
+from src.strategy.v20.selection_scorer import ScoredStock
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 
 PORTABLE_FROZEN_V16_SCHEMA_V1 = "v20-v16-portable-frozen/v1"

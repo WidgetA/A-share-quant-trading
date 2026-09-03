@@ -189,13 +189,13 @@ def test_non_code_strategy_artifact_drift_changes_persisted_config(
     root, raw = _isolated_project(tmp_path)
     _write_runtime(root, raw)
     before = load_v20_runtime_config(root)
-    model = root / "models" / "lgbrank_latest.txt"
+    model = root / "models" / "v20" / "lgbrank_latest.txt"
     model.write_text("changed model artifact\n", encoding="utf-8")
     after = load_v20_runtime_config(root)
 
     assert (
-        before.strategy_dependency_hashes["models/lgbrank_latest.txt"]
-        != (after.strategy_dependency_hashes["models/lgbrank_latest.txt"])
+        before.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"]
+        != (after.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"])
     )
     assert before.state_semantics_hash == after.state_semantics_hash
     assert before.config_hash != after.config_hash

@@ -1,9 +1,9 @@
 """V20-owned canonical V16 selection computation.
 
 This module owns the state, resources, single-flight cache, persistence hook,
-and reproducible selection bundle used by V20. It may reuse the stateless V16
-scanner and ranking algorithm, but it never imports or mutates the V16 runtime,
-scheduler, trade calendar, Feishu callbacks, or iQuant state.
+and reproducible selection bundle used by V20. Its scanner, scorer, and model
+artifacts are V20-owned frozen copies; it never imports or mutates V16 code,
+runtime state, scheduler, trade calendar, callbacks, or iQuant state.
 """
 
 from __future__ import annotations
@@ -806,7 +806,7 @@ def _build_stock_data(
 
     Raises RuntimeError for old stocks with missing data.
     """
-    from src.strategy.strategies.v16_scanner import V16StockData
+    from src.strategy.v20.selection_scanner import V16StockData
 
     time_vals = hist_raw.get("time", [])
     close_vals = hist_raw.get("close", [])
@@ -1612,12 +1612,12 @@ def derive_canonical_v16_universe(
     creates the scorer and scanner from the same model paths and scan-state
     dependencies before obtaining or normalizing the universe.
     """
-    from src.strategy.lgbrank_scorer import LGBRankScorer as DefaultLGBRankScorer
-    from src.strategy.strategies.v16_scanner import V16Scanner as DefaultV16Scanner
+    from src.strategy.v20.selection_scanner import V16Scanner as DefaultV16Scanner
+    from src.strategy.v20.selection_scorer import LGBRankScorer as DefaultLGBRankScorer
 
     scorer = DefaultLGBRankScorer(
-        _PROJECT_ROOT / "models" / "lgbrank_latest.txt",
-        _PROJECT_ROOT / "models" / "feature_list.json",
+        _PROJECT_ROOT / "models" / "v20" / "lgbrank_latest.txt",
+        _PROJECT_ROOT / "models" / "v20" / "feature_list.json",
     )
     scanner = DefaultV16Scanner(
         fundamentals_db=scan_state.fundamentals_db,
@@ -1810,7 +1810,10 @@ async def compute_canonical_v16_scan(
                     f"V16 scan: retained and seeded early provenance differs for {code}"
                 )
             partial_data[code] = seeded
-    ready_partial_codes = set(partial_data.keys())
+    ready_partial_codes = _ready_codes(partial_data, trade_date)
+    partial_data = {
+        code: data for code, data in partial_data.items() if code in ready_partial_codes
+    }
     unresolved = [code for code in early_universe if code not in ready_partial_codes]
 
     rt_client = scan_state.realtime_client
@@ -1881,7 +1884,8 @@ async def compute_canonical_v16_scan(
             ),
         )
 
-    # 09:39 readiness bound: if <80% of the universe has a current-date 09:39 bar,
+    # 09:39 readiness bound: auction rows are preserved and consumed whenever
+    # returned, matching V16, but its readiness gate remains the exact 09:39 row.
     # preserve the ready subset and raise NOT_READY so retries fetch only missing codes.
     if readiness < 0.8:
         ready_partial = {code: early_data[code] for code in early_universe if code in ready_set}
@@ -2004,7 +2008,7 @@ async def compute_canonical_v16_scan(
             logger.warning(f"V16 scan: failed to fetch company names: {e}")
 
     # Build V16StockData for each stock
-    from src.strategy.strategies.v16_scanner import V16StockData  # noqa: F811
+    from src.strategy.v20.selection_scanner import V16StockData  # noqa: F811
 
     stock_data: dict[str, V16StockData] = {}
     errors_no_prev_close: list[str] = []

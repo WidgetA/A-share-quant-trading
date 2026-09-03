@@ -21,7 +21,7 @@ from src.data.database.v20_repository import (
     V20SemanticConflict,
     sha256_json,
 )
-from src.strategy.strategies.v16_scanner import V16ScanResult
+from src.strategy.v20.selection_scanner import V16ScanResult
 from src.web.v20_canonical_selection import _stable_external_market_fact_hash
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_service import V20Service, _bar_payload, _daily_snapshot_payload, _DayContext
@@ -515,8 +515,8 @@ async def test_resolver_passes_artifact_exact_boundary_to_scanner_recomputation(
         config=SimpleNamespace(
             official_stream_id="shadow",
             strategy_dependency_hashes={
-                "models/lgbrank_latest.txt": "3" * 64,
-                "models/feature_list.json": "4" * 64,
+                "models/v20/lgbrank_latest.txt": "3" * 64,
+                "models/v20/feature_list.json": "4" * 64,
             },
         ),
     )
@@ -563,8 +563,8 @@ async def test_terminal_without_artifact_fails_closed_but_no_terminal_can_still_
         config=SimpleNamespace(
             official_stream_id="shadow",
             strategy_dependency_hashes={
-                "models/lgbrank_latest.txt": "3" * 64,
-                "models/feature_list.json": "4" * 64,
+                "models/v20/lgbrank_latest.txt": "3" * 64,
+                "models/v20/feature_list.json": "4" * 64,
             },
         ),
     )
@@ -628,8 +628,8 @@ async def test_input_invalid_ignores_legacy_artifact_and_keeps_comparison_unavai
         config=SimpleNamespace(
             official_stream_id="shadow",
             strategy_dependency_hashes={
-                "models/lgbrank_latest.txt": "3" * 64,
-                "models/feature_list.json": "4" * 64,
+                "models/v20/lgbrank_latest.txt": "3" * 64,
+                "models/v20/feature_list.json": "4" * 64,
             },
         ),
     )
@@ -822,8 +822,8 @@ async def _replay_with_market_fact_hashes(
         config=SimpleNamespace(
             official_stream_id="shadow",
             strategy_dependency_hashes={
-                "models/lgbrank_latest.txt": "3" * 64,
-                "models/feature_list.json": "4" * 64,
+                "models/v20/lgbrank_latest.txt": "3" * 64,
+                "models/v20/feature_list.json": "4" * 64,
             },
         ),
     )
@@ -1047,8 +1047,8 @@ async def test_postcutoff_model_feature_and_scanner_output_change_is_success_dif
         check_only.config,
         strategy_dependency_hashes={
             **check_only.config.strategy_dependency_hashes,
-            "models/lgbrank_latest.txt": changed_model_hash,
-            "models/feature_list.json": changed_feature_hash,
+            "models/v20/lgbrank_latest.txt": changed_model_hash,
+            "models/v20/feature_list.json": changed_feature_hash,
         },
     )
     observed_contexts: list[_DayContext] = []

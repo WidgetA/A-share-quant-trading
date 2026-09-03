@@ -103,9 +103,9 @@ def _canonical_for(service: V20Service) -> Any:
     return _rehash(
         replace(
             _canonical_master(),
-            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
             feature_list_sha256=service.config.strategy_dependency_hashes[
-                "models/feature_list.json"
+                "models/v20/feature_list.json"
             ],
         )
     )

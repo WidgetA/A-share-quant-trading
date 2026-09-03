@@ -12,8 +12,8 @@ import pytest
 
 from src.data.clients.tushare_realtime import TushareQuote
 from src.data.database.v20_repository import StateRecord, V20SemanticConflict, sha256_json
-from src.strategy.lgbrank_scorer import ScoredStock
-from src.strategy.strategies.v16_scanner import V16ScanResult, V16StockData
+from src.strategy.v20.selection_scorer import ScoredStock
+from src.strategy.v20.selection_scanner import V16ScanResult, V16StockData
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import (
     CompletedRolling,

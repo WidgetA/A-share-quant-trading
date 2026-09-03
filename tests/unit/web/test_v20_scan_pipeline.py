@@ -9,7 +9,7 @@ import pytest
 
 from src.data.clients.tushare_realtime import TushareQuote
 from src.data.clients.v20_market_data import ExactEarlySnapshot
-from src.strategy.strategies.v16_scanner import V16ScanResult
+from src.strategy.v20.selection_scanner import V16ScanResult
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
 from src.web.v20_canonical_selection import LOOKBACK_DAYS, V20CanonicalSelectionState
 from src.web.v20_scan_pipeline import (

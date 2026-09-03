@@ -11,9 +11,9 @@ from typing import Any, Mapping, Sequence
 
 from src.data.clients.tushare_realtime import TushareDailyBar, TushareQuote
 from src.data.clients.v20_market_data import ExactEarlySnapshot
-from src.strategy.lgbrank_scorer import LGBRankScorer
-from src.strategy.strategies.v16_scanner import V16Scanner, V16ScanResult, V16StockData
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
+from src.strategy.v20.selection_scanner import V16Scanner, V16ScanResult, V16StockData
+from src.strategy.v20.selection_scorer import LGBRankScorer
 from src.web.v20_canonical_selection import (
     BEIJING_TZ,
     LOOKBACK_DAYS,
@@ -199,8 +199,8 @@ class V20ScanPipeline:
         if not state.initialized:
             raise V20ScanPipelineError("scan resources are not initialized")
         scorer = LGBRankScorer(
-            self._project_root / "models" / "lgbrank_latest.txt",
-            self._project_root / "models" / "feature_list.json",
+            self._project_root / "models" / "v20" / "lgbrank_latest.txt",
+            self._project_root / "models" / "v20" / "feature_list.json",
         )
         scanner = V16Scanner(
             fundamentals_db=state.fundamentals_db,

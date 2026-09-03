@@ -477,8 +477,8 @@ def _service_and_artifact(
     canonical = _rehash(
         replace(
             _canonical_master(),
-            model_sha256=config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
-            feature_list_sha256=config.strategy_dependency_hashes["models/feature_list.json"],
+            model_sha256=config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
+            feature_list_sha256=config.strategy_dependency_hashes["models/v20/feature_list.json"],
         )
     )
     projected = service._project_canonical_v16(
@@ -533,9 +533,9 @@ async def test_one_automatic_slot_calls_shared_scanner_and_prepare_once(
     canonical = _rehash(
         replace(
             _canonical_master(),
-            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
             feature_list_sha256=service.config.strategy_dependency_hashes[
-                "models/feature_list.json"
+                "models/v20/feature_list.json"
             ],
         )
     )
@@ -598,9 +598,9 @@ async def test_full_service_calendar_wins_over_short_artifact_calendar(
     canonical = _rehash(
         replace(
             _canonical_master(),
-            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
             feature_list_sha256=service.config.strategy_dependency_hashes[
-                "models/feature_list.json"
+                "models/v20/feature_list.json"
             ],
         )
     )
@@ -633,9 +633,9 @@ async def test_automatic_commit_is_not_vetoed_by_comparison_artifact_mismatch(
     canonical = _rehash(
         replace(
             _canonical_master(),
-            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
             feature_list_sha256=service.config.strategy_dependency_hashes[
-                "models/feature_list.json"
+                "models/v20/feature_list.json"
             ],
         )
     )

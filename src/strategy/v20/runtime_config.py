@@ -120,8 +120,8 @@ _ROUTE_BINDING_KEYS = {
 # Python source, lockfiles, and project manifests are intentionally excluded:
 # runtime authorization is declarative and cannot depend on source formatting.
 _STRATEGY_DEPENDENCY_FILES = (
-    "models/lgbrank_latest.txt",
-    "models/feature_list.json",
+    "models/v20/lgbrank_latest.txt",
+    "models/v20/feature_list.json",
     "data/sectors.json",
     "data/board_constituents.json",
     "data/v20_mews_bootstrap.json.gz",

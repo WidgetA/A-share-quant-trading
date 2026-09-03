@@ -19,7 +19,16 @@ from src.data.clients.tushare_realtime import BEIJING_TZ, TushareMinuteBar, Tush
 ENTRY_END_LABEL = "09:39"
 REFERENCE_END_LABEL = "09:41"
 REFERENCE_PROFILE_ID = "CALENDAR_0940_OPEN_END_LABEL_0941_V1"
-ENTRY_REQUIRED_LABELS = tuple(f"09:{minute:02d}" for minute in range(31, 40))
+# V16's live ``rt_min_daily`` aggregation includes both call-auction rows
+# before continuous trading when the provider returns them. V20 owns this
+# frozen copy of the selection window so a later V20 change cannot alter V16.
+ENTRY_AUCTION_LABELS = ("09:25", "09:30")
+ENTRY_CONTINUOUS_LABELS = tuple(f"09:{minute:02d}" for minute in range(31, 40))
+ENTRY_SELECTION_LABELS = ENTRY_AUCTION_LABELS + ENTRY_CONTINUOUS_LABELS
+# Exact readiness remains aligned with V16: auction rows are consumed when
+# present, while 09:39 is the terminal gate. This collector additionally
+# requires the continuous path because it calculates cumulative minute volume.
+ENTRY_REQUIRED_LABELS = ENTRY_CONTINUOUS_LABELS
 
 
 class V20MarketDataError(RuntimeError):
@@ -126,10 +135,11 @@ class V20EarlyBarCollector:
     ) -> tuple[str, ...]:
         """Return codes whose exact early-minute path is not fully proven.
 
-        V16 uses both the 09:39 price and accumulated early volume.  Merely
-        having the terminal bar would make a dropped polling minute silently
-        change those volume features, so production requires every raw label
-        from 09:31 through 09:39 for each usable code.
+        V16 consumes call-auction rows when present and uses the 09:39 price
+        plus accumulated early volume. Merely having the terminal bar would
+        make a dropped continuous-trading minute silently change those volume
+        features, so this collector requires 09:31 through 09:39 and preserves
+        09:25/09:30 in the frozen selection input.
         """
 
         labels = tuple(required_labels)
@@ -171,7 +181,7 @@ class V20EarlyBarCollector:
                 (
                     bar
                     for (bar_code, label), bar in self._bars.items()
-                    if bar_code == code and label in ENTRY_REQUIRED_LABELS
+                    if bar_code == code and label in ENTRY_SELECTION_LABELS
                 ),
                 key=lambda bar: bar.bar_end,
             )

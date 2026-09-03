@@ -16,8 +16,8 @@ from src.data.database.v20_repository import (
     V20SemanticConflict,
     sha256_json,
 )
-from src.strategy.lgbrank_scorer import ScoredStock
-from src.strategy.strategies.v16_scanner import V16ScanResult
+from src.strategy.v20.selection_scorer import ScoredStock
+from src.strategy.v20.selection_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import CompletedRolling, genesis_state, prepare_entry
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA

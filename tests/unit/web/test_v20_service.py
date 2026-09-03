@@ -39,8 +39,8 @@ from src.data.database.v20_repository import (
     V20StateConflict,
     sha256_json,
 )
-from src.strategy.lgbrank_scorer import ScoredStock
-from src.strategy.strategies.v16_scanner import V16ScanResult
+from src.strategy.v20.selection_scorer import ScoredStock
+from src.strategy.v20.selection_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import genesis_state
 from src.strategy.v20.identity import named_hash, official_slot_id
@@ -4561,9 +4561,9 @@ def _install_late_replay_canonical(
             failed_no_history=(),
             failed_build=(),
             skipped_new_listings=(),
-            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
             feature_list_sha256=service.config.strategy_dependency_hashes[
-                "models/feature_list.json"
+                "models/v20/feature_list.json"
             ],
             computed_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
             input_hash="c" * 64,
@@ -6018,8 +6018,8 @@ async def test_scan_cleanup_closes_fundamentals_even_when_realtime_stop_fails() 
 @pytest.mark.parametrize(
     "field,logical_path",
     [
-        ("scorer_model_sha256", "models/lgbrank_latest.txt"),
-        ("scorer_feature_sha256", "models/feature_list.json"),
+        ("scorer_model_sha256", "models/v20/lgbrank_latest.txt"),
+        ("scorer_feature_sha256", "models/v20/feature_list.json"),
     ],
 )
 def test_runtime_model_or_feature_drift_is_rejected(
@@ -6029,8 +6029,8 @@ def test_runtime_model_or_feature_drift_is_rejected(
 ) -> None:
     service = _service(monkeypatch, SimpleNamespace())
     prewarmed = SimpleNamespace(
-        scorer_model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
-        scorer_feature_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
+        scorer_model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
+        scorer_feature_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
     )
     setattr(prewarmed, field, "0" * 64)
 

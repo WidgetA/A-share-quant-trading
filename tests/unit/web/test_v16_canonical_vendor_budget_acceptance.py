@@ -171,9 +171,9 @@ class VendorBudgetHarness:
             stock_filter=object(),
             tushare_cache=None,
         )
-        from src.strategy.strategies import v16_scanner
+        from src.strategy.v20 import selection_scanner
 
-        monkeypatch.setattr(v16_scanner, "V16Scanner", BudgetScanner)
+        monkeypatch.setattr(selection_scanner, "V16Scanner", BudgetScanner)
 
         async def no_name_refresh(*_args: Any, **_kwargs: Any) -> None:
             return None

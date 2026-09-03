@@ -3,9 +3,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.data.clients.tushare_realtime import TushareMinuteBar
+from src.data.clients.tushare_realtime import TushareMinuteBar, TushareRealtimeClient
 from src.data.clients.v20_market_data import (
-    ENTRY_REQUIRED_LABELS,
+    ENTRY_SELECTION_LABELS,
     V20EarlyBarCollector,
     V20MarketDataError,
     exact_reference_prices,
@@ -29,7 +29,7 @@ def _bar(code: str, label: str, *, close: float = 10.0) -> TushareMinuteBar:
 
 
 def _early_path(code: str) -> list[TushareMinuteBar]:
-    return [_bar(code, label) for label in ENTRY_REQUIRED_LABELS]
+    return [_bar(code, label) for label in ENTRY_SELECTION_LABELS]
 
 
 def test_freeze_requires_exact_0939_and_never_falls_back() -> None:
@@ -43,7 +43,41 @@ def test_freeze_requires_exact_0939_and_never_falls_back() -> None:
     assert snapshot.missing_codes == ("600000",)
     assert snapshot.last_complete_label == "09:39"
     assert snapshot.quotes["000001"].early_close == 10.0
-    assert snapshot.quotes["000001"].early_volume == 900.0
+    assert snapshot.quotes["000001"].early_volume == 1100.0
+    assert snapshot.quotes["000001"].volume_937 == 900.0
+
+
+@pytest.mark.parametrize("missing_label", ["09:25", "09:30"])
+def test_missing_optional_call_auction_bar_keeps_v16_readiness_semantics(
+    missing_label: str,
+) -> None:
+    collector = V20EarlyBarCollector(date(2026, 8, 31), ["000001"])
+    collector.ingest(
+        bar for bar in _early_path("000001") if bar.end_label != missing_label
+    )
+
+    snapshot = collector.freeze()
+
+    assert tuple(snapshot.quotes) == ("000001",)
+    assert snapshot.missing_codes == ()
+    assert collector.incomplete_codes() == ()
+    assert snapshot.quotes["000001"].early_volume == 1000.0
+
+
+def test_call_auction_fields_match_v16_aggregation_exactly() -> None:
+    bars = tuple(_early_path("000001"))
+    legacy_v16_quote = TushareRealtimeClient._aggregate_quote_from_bars("000001", bars)
+    collector = V20EarlyBarCollector(date(2026, 8, 31), ["000001"])
+    collector.ingest(bars)
+
+    v20_quote = collector.freeze().quotes["000001"]
+
+    assert v20_quote.open_price == legacy_v16_quote.open_price
+    assert v20_quote.early_close == legacy_v16_quote.early_close
+    assert v20_quote.early_high == legacy_v16_quote.early_high
+    assert v20_quote.early_low == legacy_v16_quote.early_low
+    assert v20_quote.early_volume == legacy_v16_quote.early_volume
+    assert v20_quote.volume_937 == legacy_v16_quote.volume_937
 
 
 def test_terminal_0939_without_full_volume_path_is_not_usable() -> None:

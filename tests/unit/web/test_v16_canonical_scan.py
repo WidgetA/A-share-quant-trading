@@ -22,7 +22,7 @@ from src.data.clients.tushare_realtime import (
     TushareQuote,
     tushare_minute_bars_to_early_market_data,
 )
-from src.strategy.strategies.v16_scanner import V16Scanner as RealV16Scanner
+from src.strategy.v20.selection_scanner import V16Scanner as RealV16Scanner
 from src.web import v20_canonical_selection as v15_scan_service
 
 
@@ -199,8 +199,8 @@ def fakes(monkeypatch):
     def record_daygate(snapshot, runtime):  # noqa: ARG001
         daygate_calls.append((snapshot, runtime))
 
-    monkeypatch.setattr("src.strategy.lgbrank_scorer.LGBRankScorer", FakeScorer)
-    monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", FakeScanner)
+    monkeypatch.setattr("src.strategy.v20.selection_scorer.LGBRankScorer", FakeScorer)
+    monkeypatch.setattr("src.strategy.v20.selection_scanner.V16Scanner", FakeScanner)
 
     async def fake_calendar():
         return sorted(
@@ -476,7 +476,7 @@ async def test_cross_date_singleflight_keeps_running_master_and_shares_waiters(
         return await real_compute(scan_state, trade_date, **kwargs)
 
     monkeypatch.setattr(v15_scan_service, "get_v20_trade_calendar", calendar_with_both_dates)
-    monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", SequenceGatedScanner)
+    monkeypatch.setattr("src.strategy.v20.selection_scanner.V16Scanner", SequenceGatedScanner)
     monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", counting_compute)
 
     first_a_waiter = asyncio.create_task(
@@ -2030,13 +2030,13 @@ async def test_real_scanner_st_evidence_changes_input_hash_once(fakes, monkeypat
         return scanner
 
     monkeypatch.setattr(
-        "src.strategy.strategies.v16_scanner.V16Scanner",
+        "src.strategy.v20.selection_scanner.V16Scanner",
         lambda *_args, **_kwargs: install(set(codes)),
     )
     full = await v15_scan_service.compute_canonical_v16_scan(fakes.state, fakes.trade_date)
 
     monkeypatch.setattr(
-        "src.strategy.strategies.v16_scanner.V16Scanner",
+        "src.strategy.v20.selection_scanner.V16Scanner",
         lambda *_args, **_kwargs: install({"600000"}),
     )
     filtered_state = v15_scan_service.V20CanonicalSelectionState(
@@ -3053,7 +3053,7 @@ async def test_origin_low_row_history_still_builds_scanner_input(fakes, monkeypa
 
     monkeypatch.setattr(real_scanner, "scan", recording_real_scan)
     monkeypatch.setattr(
-        "src.strategy.strategies.v16_scanner.V16Scanner",
+        "src.strategy.v20.selection_scanner.V16Scanner",
         lambda *_args, **_kwargs: real_scanner,
     )
 
