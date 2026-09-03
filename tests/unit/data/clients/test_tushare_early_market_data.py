@@ -556,6 +556,35 @@ async def test_early_quotes_wrapper_keeps_failure_semantics(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_v16_wrapper_fails_fast_when_one_request_fails_but_v20_keeps_siblings(
+    monkeypatch,
+) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+
+    async def mixed_call(_api_name, params, fields=""):
+        del fields
+        code = params["ts_code"].split(".")[0]
+        if code == "600000":
+            raise TushareRealtimeError("one symbol failed")
+        return _full_day_payload(10.0)
+
+    monkeypatch.setattr(client, "_api_call", mixed_call)
+
+    with pytest.raises(TushareRealtimeError, match="one symbol failed"):
+        await client.batch_get_early_quotes(
+            ["000001", "600000"],
+            expected_trade_date=TRADE_DATE,
+        )
+
+    early_data = await client.batch_get_early_market_data(
+        ["000001", "600000"],
+        expected_trade_date=TRADE_DATE,
+    )
+    assert set(early_data) == {"000001"}
+
+
+@pytest.mark.asyncio
 async def test_empty_response_code_is_dropped_with_warning(monkeypatch, caplog) -> None:
     empty = {"data": {"fields": list(_FIELDS), "items": []}}
     responses = {"000001": _full_day_payload(10.0), "600000": empty}

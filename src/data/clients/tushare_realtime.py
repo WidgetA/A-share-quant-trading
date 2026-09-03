@@ -1001,6 +1001,8 @@ class TushareRealtimeClient:
         self,
         stock_codes: list[str],
         expected_trade_date: date | None = None,
+        *,
+        _fail_fast_request_errors: bool = False,
     ) -> dict[str, TushareEarlyMarketData]:
         """Fetch one frozen ``TushareEarlyMarketData`` per unique stock via rt_min_daily.
 
@@ -1062,7 +1064,7 @@ class TushareRealtimeClient:
                 continue
             all_data[bare_code] = data
 
-        if not all_data and exceptions and len(failed_codes) == len(unique_codes):
+        if exceptions and (_fail_fast_request_errors or not all_data):
             first = exceptions[0]
             if isinstance(first, TushareRealtimeError):
                 raise first
@@ -1089,7 +1091,9 @@ class TushareRealtimeClient:
         real-time callers should leave it as ``None`` (defaults to today in Shanghai).
         """
         early_data = await self.batch_get_early_market_data(
-            stock_codes, expected_trade_date=expected_trade_date
+            stock_codes,
+            expected_trade_date=expected_trade_date,
+            _fail_fast_request_errors=True,
         )
         return {code: data.quote for code, data in early_data.items()}
 
