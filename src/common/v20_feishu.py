@@ -397,6 +397,127 @@ _FROZEN_REPLAY_SOURCE_BEGIN = "----- 早盘封存原文开始（逐字节未改�
 _FROZEN_REPLAY_SOURCE_END = "----- 早盘封存原文结束 -----"
 
 
+def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
+    """Render the one canonical strategy-output body for every entry surface."""
+
+    action = str(semantic.get("action", "INPUT_INVALID"))
+    multiplier = float(semantic.get("final_multiplier", 0.0))
+    lines = [
+        f"计算结论：{action}｜最终倍率 {_pct(multiplier, 0)}",
+        (
+            f"BASE: {semantic.get('health_state', '-')} / "
+            f"基础倍率 {_pct(semantic.get('base_multiplier'), 0)}"
+        ),
+        _rolling7_line(semantic),
+        (
+            f"极端门G: {semantic.get('g_state', 'NOT_EVALUATED')} | "
+            f"防御倍率 {_pct(semantic.get('defense_multiplier'), 0)} | "
+            f"最终 {_pct(multiplier, 0)}"
+        ),
+    ]
+    reasons = semantic.get("reason_codes") or []
+    if reasons:
+        lines.append("原因: " + " / ".join(str(item) for item in reasons))
+
+    funnel = semantic.get("v16_funnel") or {}
+    if isinstance(funnel, Mapping) and funnel:
+        lines.append(
+            "V16扫描: "
+            f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
+            f"热门板块 {funnel.get('step2_hot_board_count', '-')}个 | "
+            f"最终 {funnel.get('final_candidates', '-')}只"
+        )
+
+    symbols = semantic.get("symbols") or []
+    if isinstance(symbols, list) and symbols:
+        from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS
+
+        board_gains = semantic.get("v16_board_avg_gains") or {}
+        broad_shown = False
+        driver_tag_shown = False
+
+        def format_boards(item: Mapping[str, Any]) -> str:
+            nonlocal broad_shown
+            boards = item.get("boards") or []
+            if not boards and item.get("best_board"):
+                boards = [item["best_board"]]
+            if not boards:
+                return "-"
+            parts: list[str] = []
+            for board in boards:
+                board_text = str(board)
+                star = "⭐" if board_text in BROAD_CONCEPT_BOARDS else ""
+                broad_shown = broad_shown or bool(star)
+                gain = board_gains.get(board_text, 0.0)
+                parts.append(f"{star}{board_text}({float(gain):+.2f}%)")
+            return "、".join(parts)
+
+        def driver_tag(item: Mapping[str, Any]) -> str:
+            nonlocal driver_tag_shown
+            is_driver = item.get("is_driver")
+            if is_driver is None:
+                return ""
+            driver_tag_shown = True
+            return "[带动]" if is_driver is True else "[扩增]"
+
+        def optional_metrics(item: Mapping[str, Any]) -> str:
+            cci = item.get("cci")
+            volume_937 = item.get("volume_937")
+            cci_part = f"  CCI={float(cci):.0f}" if cci is not None else ""
+            volume_part = f"  7min={float(volume_937) / 10000:.0f}万" if volume_937 else ""
+            return cci_part + volume_part
+
+        top1 = symbols[0]
+        lines.extend(
+            [
+                "",
+                f"V16完整推荐（{len(symbols)}只）:",
+                f"推荐 Top-1: {top1['code']} {top1.get('name', '')}",
+                (
+                    f"  板块: {driver_tag(top1)}{format_boards(top1)} | "
+                    f"LGB: {float(top1['score']):.4f} | "
+                    f"09:39快照: {float(top1['snapshot_price']):.2f}"
+                    f"{optional_metrics(top1)}"
+                ),
+                "",
+                "评分前10:",
+            ]
+        )
+        for item in symbols:
+            lines.append(
+                f"{int(item['rank'])}. {item['code']} {item.get('name', '')}  "
+                f"LGB={float(item['score']):.4f}  "
+                f"09:39快照:{float(item['snapshot_price']):.2f}  "
+                f"{driver_tag(item)}{format_boards(item)}"
+                f"{optional_metrics(item)}"
+            )
+        if broad_shown:
+            lines.extend(["", "⭐=宽泛板块(成分≥400,题材偏泛,仅供参考)"])
+        if driver_tag_shown:
+            lines.append(
+                "[带动]=个股自身涨幅已达热门板块门槛(0.8%),自己就能带火板块 | "
+                "[扩增]=仅个股涨幅未到0.8%,靠板块内其他股票拉高均值才被纳入"
+            )
+        if multiplier > 0:
+            per_leg = multiplier / len(symbols)
+            lines.append(f"每只模型腿相对份额: {_pct(per_leg)}（不代表账户金额或股数）")
+            lines.append("参考价规则: 使用原始09:41结束标签的bar.open锁定09:40参考价")
+    else:
+        lines.append("今日V16完整扫描合法无票，不建立新模型批次")
+
+    scheduled_exits = semantic.get("scheduled_exits_today") or []
+    if scheduled_exits:
+        lines.extend(["", f"今天已有模型腿计划退出（{len(scheduled_exits)}只）:"])
+        for item in scheduled_exits:
+            lines.append(
+                f"- {item['code']} {item.get('stock_name', '')}  "
+                f"D0={item.get('signal_date', '-')} / rank={item.get('rank', '-')} / "
+                f"腿份额={_pct(item.get('relative_weight'))}；"
+                f"最迟{item.get('plan_time', '14:57')}整腿退出，保护线命中则提前通知"
+            )
+    return "\n".join(lines)
+
+
 def _render_manual_entry_check_for_operator(
     semantic: Mapping[str, Any],
     *,
@@ -405,63 +526,38 @@ def _render_manual_entry_check_for_operator(
 ) -> str:
     """Render a fresh post-cutoff recomputation as check-only, never as a decision.
 
-    The recomputation runs the same formal computation chain as the morning;
-    being past the entry point changes only actionability, not the algorithm
-    or its result.  The visible message therefore leads with the current
-    operator action and shows the computed result in a dedicated section.
+    The wrapper changes actionability only.  The embedded strategy body is
+    rendered by the same helper used for the automatic morning message.
     """
 
     entry = semantic["entry_render_semantic"]
     assert isinstance(entry, Mapping)
     trade_date = str(semantic.get("event_trade_date", "-"))
     computed_at = datetime.fromisoformat(str(semantic["computed_at"])).astimezone(SHANGHAI)
-    action = str(entry.get("action", semantic.get("v20_action", "-")))
-    multiplier = float(entry.get("final_multiplier", 0.0))
     lines = [
         f"{title_prefix} 手工触发结果｜仅核查",
         "",
         _MANUAL_CHECK_CURRENT_ACTION,
         _MANUAL_CHECK_CURRENT_REASON,
-        "",
-        "策略计算结果（与早盘正式计算链相同；时间只影响可操作性，不影响算法与结果）：",
-        f"计算结论：{action}｜最终倍率 {_pct(multiplier, 0)}",
-        (
-            f"BASE: {entry.get('health_state', '-')} / "
-            f"基础倍率 {_pct(entry.get('base_multiplier'), 0)}"
-        ),
-        _rolling7_line(entry),
-        (
-            f"极端门G: {entry.get('g_state', 'NOT_EVALUATED')} | "
-            f"防御倍率 {_pct(entry.get('defense_multiplier'), 0)} | "
-            f"最终 {_pct(multiplier, 0)}"
-        ),
     ]
-    funnel = entry.get("v16_funnel") or {}
-    if isinstance(funnel, Mapping) and funnel:
-        lines.append(
-            "V16扫描: "
-            f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
-            f"热门板块 {funnel.get('step2_hot_board_count', '-')}个 | "
-            f"最终 {funnel.get('final_candidates', '-')}只"
-        )
-    symbols = entry.get("symbols") or semantic.get("symbols") or []
-    if isinstance(symbols, list) and symbols:
-        lines.extend(["", f"V16完整推荐（{len(symbols)}只）:"])
-        for item in symbols:
-            if not isinstance(item, Mapping):
-                continue
-            parts = [
-                f"{item.get('rank', '-')}. {item.get('code', '-')} {item.get('name', '')}".rstrip()
+    if semantic.get("probe_result") == "FAIL":
+        mismatch_fields = semantic.get("probe_mismatch_fields") or []
+        lines.extend(
+            [
+                "",
+                "核查结论：FAIL（重算结果与冻结证据不一致）",
+                "差异字段：" + " / ".join(str(item) for item in mismatch_fields),
             ]
-            score: Any = item.get("score")
-            if _finite_number(score):
-                parts.append(f"LGB={float(score):.4f}")
-            snapshot: Any = item.get("snapshot_price")
-            if _finite_number(snapshot):
-                parts.append(f"09:39快照:{float(snapshot):.2f}")
-            lines.append("  ".join(parts))
+        )
     else:
-        lines.append("票单：无")
+        lines.extend(["", "核查结论：PASS"])
+    lines.extend(
+        [
+            "",
+            "策略计算结果（当前V20代码基于同一份持久化canonical事实重新计算）：",
+            _render_entry_strategy_body(entry),
+        ]
+    )
     lines.extend(
         [
             "",
@@ -632,124 +728,9 @@ def render_entry_message(
     lines = [f"{title} ({trade_date} 09:40)"]
     if shadow:
         lines.append("⚪ 前向观察：不替代当前正式策略建议")
-    if action == "NO_SIGNAL":
-        lines.append("今日V16完整扫描合法无票，不建立新模型批次")
-    else:
+    if action != "NO_SIGNAL":
         lines.append(_entry_action_text(multiplier, on_time=on_time))
-
-    lines.extend(
-        [
-            "",
-            (
-                f"BASE: {semantic.get('health_state', '-')} / "
-                f"基础倍率 {_pct(semantic.get('base_multiplier'), 0)}"
-            ),
-            _rolling7_line(semantic),
-            (
-                f"极端门G: {semantic.get('g_state', 'NOT_EVALUATED')} | "
-                f"防御倍率 {_pct(semantic.get('defense_multiplier'), 0)} | "
-                f"最终 {_pct(multiplier, 0)}"
-            ),
-        ]
-    )
-    reasons = semantic.get("reason_codes") or []
-    if reasons:
-        lines.append("原因: " + " / ".join(str(item) for item in reasons))
-
-    funnel = semantic.get("v16_funnel") or {}
-    if funnel:
-        lines.append(
-            "V16扫描: "
-            f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
-            f"热门板块 {funnel.get('step2_hot_board_count', '-')}个 | "
-            f"最终 {funnel.get('final_candidates', '-')}只"
-        )
-
-    symbols = semantic.get("symbols") or []
-    if symbols:
-        from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS
-
-        board_gains = semantic.get("v16_board_avg_gains") or {}
-        broad_shown = False
-        driver_tag_shown = False
-
-        def format_boards(item: Mapping[str, Any]) -> str:
-            nonlocal broad_shown
-            boards = item.get("boards") or []
-            if not boards and item.get("best_board"):
-                boards = [item["best_board"]]
-            if not boards:
-                return "-"
-            parts: list[str] = []
-            for board in boards:
-                board_text = str(board)
-                star = "⭐" if board_text in BROAD_CONCEPT_BOARDS else ""
-                broad_shown = broad_shown or bool(star)
-                gain = board_gains.get(board_text, 0.0)
-                parts.append(f"{star}{board_text}({float(gain):+.2f}%)")
-            return "、".join(parts)
-
-        def driver_tag(item: Mapping[str, Any]) -> str:
-            nonlocal driver_tag_shown
-            is_driver = item.get("is_driver")
-            if is_driver is None:
-                return ""
-            driver_tag_shown = True
-            return "[带动]" if is_driver is True else "[扩增]"
-
-        def optional_metrics(item: Mapping[str, Any]) -> str:
-            cci = item.get("cci")
-            volume_937 = item.get("volume_937")
-            cci_part = f"  CCI={float(cci):.0f}" if cci is not None else ""
-            volume_part = f"  7min={float(volume_937) / 10000:.0f}万" if volume_937 else ""
-            return cci_part + volume_part
-
-        top1 = symbols[0]
-        lines.extend(
-            [
-                "",
-                f"V16完整推荐（{len(symbols)}只）:",
-                f"推荐 Top-1: {top1['code']} {top1.get('name', '')}",
-                (
-                    f"  板块: {driver_tag(top1)}{format_boards(top1)} | "
-                    f"LGB: {float(top1['score']):.4f} | "
-                    f"09:39快照: {float(top1['snapshot_price']):.2f}"
-                    f"{optional_metrics(top1)}"
-                ),
-                "",
-                "评分前10:",
-            ]
-        )
-        for item in symbols:
-            lines.append(
-                f"{int(item['rank'])}. {item['code']} {item.get('name', '')}  "
-                f"LGB={float(item['score']):.4f}  "
-                f"09:39快照:{float(item['snapshot_price']):.2f}  "
-                f"{driver_tag(item)}{format_boards(item)}"
-                f"{optional_metrics(item)}"
-            )
-        if broad_shown:
-            lines.extend(["", "⭐=宽泛板块(成分≥400,题材偏泛,仅供参考)"])
-        if driver_tag_shown:
-            lines.append(
-                "[带动]=个股自身涨幅已达热门板块门槛(0.8%),自己就能带火板块 | "
-                "[扩增]=仅个股涨幅未到0.8%,靠板块内其他股票拉高均值才被纳入"
-            )
-        if on_time and multiplier > 0:
-            per_leg = multiplier / len(symbols)
-            lines.append(f"每只模型腿相对份额: {_pct(per_leg)}（不代表账户金额或股数）")
-            lines.append("09:40参考价将在原始09:41结束标签出现后单独锁定")
-
-    scheduled_exits = semantic.get("scheduled_exits_today") or []
-    if scheduled_exits:
-        lines.extend(["", f"今天已有模型腿计划退出（{len(scheduled_exits)}只）:"])
-        for item in scheduled_exits:
-            lines.append(
-                f"- {item['code']} {item.get('stock_name', '')}  "
-                f"D0={item.get('signal_date', '-')} / rank={item.get('rank', '-')} / "
-                f"腿份额={_pct(item.get('relative_weight'))}；"
-                f"最迟{item.get('plan_time', '14:57')}整腿退出，保护线命中则提前通知"
-            )
+    lines.extend(["", _render_entry_strategy_body(semantic)])
 
     lines.extend(
         [
@@ -1153,8 +1134,9 @@ def _validate_manual_0939_chain_probe(
     ):
         raise ValueError("V20 chain probe computed_at precedes the frozen 09:39 window")
 
-    if result == "PASS":
-        if semantic["current_version_recomputed"] is not True:
+    recomputation_completed = semantic["current_version_recomputed"] is True
+    if result == "PASS" or recomputation_completed:
+        if not recomputation_completed:
             raise ValueError("a passing V20 chain probe must be recomputed by the current version")
         action = semantic["v20_action"]
         multiplier = semantic["final_multiplier"]
@@ -1195,9 +1177,21 @@ def _validate_manual_0939_chain_probe(
             or entry_semantic.get("symbols") != symbols
         ):
             raise ValueError("V20 chain probe entry formatter evidence differs from its result")
+        if result == "FAIL":
+            mismatch_fields = semantic.get("probe_mismatch_fields")
+            if (
+                not isinstance(mismatch_fields, list)
+                or not mismatch_fields
+                or any(not isinstance(item, str) or not item for item in mismatch_fields)
+            ):
+                raise ValueError("failed comparison probe requires mismatch fields")
+            if semantic.get("failure_stage") != "OFFICIAL_RESULT_COMPARISON":
+                raise ValueError("failed comparison probe has an invalid failure stage")
+            if not isinstance(semantic.get("failure_reason"), str) or not semantic.get(
+                "failure_reason"
+            ):
+                raise ValueError("failed comparison probe requires a failure reason")
     else:
-        if semantic["current_version_recomputed"] is not False:
-            raise ValueError("a failed V20 chain probe cannot claim completed recomputation")
         if semantic["v20_action"] is not None or semantic["final_multiplier"] is not None:
             raise ValueError("a failed V20 chain probe cannot reuse an old decision result")
         for field in ("failure_stage", "failure_reason"):
@@ -1527,7 +1521,10 @@ def seal_v20_payload(
         record.event_type == "DATA_ALERT"
         and semantic.get("alert_code") == "MANUAL_0939_CHAIN_PROBE_RESULT"
     ):
-        if semantic.get("probe_result") == "PASS":
+        if semantic.get("probe_result") == "PASS" or (
+            semantic.get("current_version_recomputed") is True
+            and isinstance(semantic.get("entry_render_semantic"), Mapping)
+        ):
             # A passing post-cutoff recomputation runs the same formal
             # computation chain as the morning, but the visible message must
             # stay a dedicated manual check-only render.  Calling

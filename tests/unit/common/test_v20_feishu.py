@@ -17,6 +17,7 @@ from src.common.v20_feishu import (
     V20OutboxPublisher,
     V20RelayClient,
     V20RelayContractError,
+    _render_entry_strategy_body,
     load_legacy_embedded_v20_route,
     load_v20_feishu_routes,
     render_entry_message,
@@ -833,6 +834,32 @@ def test_manual_0939_chain_probe_pass_message_is_check_only_manual_render() -> N
     assert "hypothetical-entry-event" not in message
     for banned in ("理论复盘", "当时本应", "复盘已过期"):
         assert banned not in message
+
+
+def test_formal_and_manual_messages_embed_byte_identical_strategy_body() -> None:
+    semantic = _manual_0939_chain_probe_semantic()
+    entry = semantic["entry_render_semantic"]
+    generated_at = datetime(2026, 8, 31, 9, 39, 30, tzinfo=TZ)
+    body = _render_entry_strategy_body(entry)
+    formal = render_entry_message(
+        entry,
+        generated_at=generated_at,
+        commit_marker=20,
+        on_time=True,
+    )
+    manual_payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        21,
+        True,
+    )
+    manual = str(manual_payload["message"])
+
+    formal_start = formal.index(body)
+    manual_start = manual.index(body)
+    formal_body = formal[formal_start : formal_start + len(body)].encode("utf-8")
+    manual_body = manual[manual_start : manual_start + len(body)].encode("utf-8")
+    assert formal_body == manual_body == body.encode("utf-8")
 
 
 def test_manual_0939_chain_probe_can_verify_previous_session_after_midnight() -> None:

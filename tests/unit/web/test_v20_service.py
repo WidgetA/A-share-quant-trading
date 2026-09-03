@@ -2056,23 +2056,13 @@ async def test_resource_waiter_cancellation_does_not_cancel_owner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_entry_collection_never_touches_old_scan_pipeline_or_vendor(
+async def test_entry_collection_does_not_run_the_selection_calculation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def bomb(*_args: object, **_kwargs: object):
         raise AssertionError("old V20 scan path must not run")
 
     trade_date = date(2026, 8, 31)
-    canonical = _strict_barrier_canonical(trade_date)
-
-    async def canonical_once(state, requested_date):
-        assert state is service._scan_state
-        assert requested_date is trade_date
-        assert state.canonical_sink is not None
-        await state.canonical_sink(canonical)
-        return canonical
-
-    monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", canonical_once)
     service = V20Service.__new__(V20Service)
     service._scan_state = V15ScanState(
         realtime_client=SimpleNamespace(batch_get_minute_history=bomb)
@@ -2089,6 +2079,8 @@ async def test_entry_collection_never_touches_old_scan_pipeline_or_vendor(
     service.config = SimpleNamespace(
         official_stream_id="stream",
         clock=SimpleNamespace(
+            prewarm=time(9, 30),
+            minute_collection_start=time(9, 31),
             decision_bar_label="09:39",
             publish_deadline=time(9, 40),
             decision_finalization_deadline=time(9, 45),
@@ -2103,25 +2095,14 @@ async def test_entry_collection_never_touches_old_scan_pipeline_or_vendor(
             date(2026, 9, 2),
         ),
     )
-    timeline: list[str] = []
-    store = _install_strict_durable_barrier(monkeypatch, service, repository, timeline)
+    service._scan_pipeline = SimpleNamespace(prewarm=bomb)
+    service._record_lane_error = lambda *_args: None
 
     await service._run_entry_collection_cycle(context, datetime(2026, 8, 31, 9, 31, tzinfo=TZ))
     assert context.canonical_bundle is None
 
     await service._run_entry_collection_cycle(context, datetime(2026, 8, 31, 9, 39, tzinfo=TZ))
-    assert context.canonical_bundle is not None
-    assert context.canonical_bundle.snapshot_hash == store.record.payload["v20_snapshot_hash"]
-    assert timeline == [
-        "artifact-load-miss",
-        "durable-raw",
-        "artifact-load-miss",
-        "artifact-save",
-        "artifact-load-hit",
-        "artifact-hydrate",
-        "artifact-load-hit",
-        "artifact-hydrate",
-    ]
+    assert context.canonical_bundle is None
 
 
 @pytest.mark.asyncio
@@ -2723,7 +2704,7 @@ def _entry_cycle_service(
 
 
 @pytest.mark.asyncio
-async def test_entry_collection_kicks_mews_without_blocking_canonical(
+async def test_entry_collection_kicks_mews_without_running_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = asyncio.Event()
@@ -2770,10 +2751,8 @@ async def test_entry_collection_kicks_mews_without_blocking_canonical(
     )
     await asyncio.wait_for(source.entered.wait(), timeout=1.0)
 
-    assert context.canonical_bundle is not None
-    assert context.last_phase == "CANONICAL_0939_READY"
-    assert service._lane_health["decision"].last_error is None
-    assert order.count("canonical-compute") == 1
+    assert context.canonical_bundle is None
+    assert order.count("canonical-compute") == 0
     assert source.calls == 1
     assert repository.payloads == []
     master = service._mews_singleflight_task
@@ -2836,13 +2815,11 @@ async def test_entry_collection_continues_after_genuine_mews_failure(
         timeout=1.0,
     )
     await asyncio.wait_for(source.entered.wait(), timeout=1.0)
-    assert order == ["canonical-compute"]
+    assert order == []
     assert source.calls == 1
     assert repository.payloads == []
     assert alerts == []
-    assert context.canonical_bundle is not None
-    assert context.last_phase == "CANONICAL_0939_READY"
-    assert service._lane_health["decision"].last_error is None
+    assert context.canonical_bundle is None
     trigger_tasks = tuple(service._mews_trigger_tasks)
     assert len(trigger_tasks) == 1
     assert service._mews_singleflight_task is not None
@@ -2897,8 +2874,8 @@ async def test_entry_collection_cycles_share_one_mews_attempt(
     # raw MEWS attempt.
     await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0)
     assert source.calls == 1
-    assert first_context.canonical_bundle is not None
-    assert second_context.canonical_bundle is not None
+    assert first_context.canonical_bundle is None
+    assert second_context.canonical_bundle is None
     assert repository.payloads == []
     trigger_tasks = tuple(service._mews_trigger_tasks)
     assert len(trigger_tasks) == 2
@@ -2913,7 +2890,7 @@ async def test_entry_collection_cycles_share_one_mews_attempt(
     # Exactly one overlapping raw MEWS attempt fed both entry cycles.
     assert source.calls == 1
     assert len(repository.payloads) == 1
-    assert order == ["canonical-compute", "canonical-compute"]
+    assert order == []
     assert service._mews_cached_for == _ENTRY_CYCLE_DATE
     assert service._mews_singleflight_task is None
     assert service._mews_trigger_tasks == set()
@@ -4304,8 +4281,10 @@ def _install_late_replay_canonical(
             failed_no_history=(),
             failed_build=(),
             skipped_new_listings=(),
-            model_sha256="a" * 64,
-            feature_list_sha256="b" * 64,
+            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            feature_list_sha256=service.config.strategy_dependency_hashes[
+                "models/feature_list.json"
+            ],
             computed_at=datetime(2026, 8, 31, 15, 30, 2, tzinfo=TZ),
             input_hash="c" * 64,
             _integrity_hash="",
@@ -5356,8 +5335,8 @@ def test_fold_raw_records_freezes_first_0939_receipt() -> None:
     assert all(bar.close_price == 10.0 for bar in usable[code])
 
 
-def test_fold_0939_anchor_blocks_later_early_minute_backfill() -> None:
-    """Minutes arriving after the first 09:39 receipt never enter that snapshot."""
+def test_fold_0939_anchor_allows_one_late_fill_for_labels_missing_at_anchor() -> None:
+    """A delayed full-minute response may fill labels absent at the 09:39 anchor."""
     code = "000001"
     anchor_receipt = datetime(2026, 8, 31, 21, 23, tzinfo=TZ)
     later_receipt = datetime(2026, 9, 1, 2, 57, tzinfo=TZ)
@@ -5377,11 +5356,13 @@ def test_fold_0939_anchor_blocks_later_early_minute_backfill() -> None:
 
     assert missing == frozenset()
     assert conflicted == frozenset()
-    assert [bar.end_label for bar in usable[code]] == ["09:39"]
+    assert [bar.end_label for bar in usable[code]] == list(_LEGACY_LABELS)
+    assert usable[code][-1].close_price == 10.0
+    assert all(bar.close_price == 99.0 for bar in usable[code][:-1])
 
 
-def test_fold_0939_anchor_ignores_later_invalid_and_misbound_revisions() -> None:
-    """Post-anchor garbage cannot poison an already frozen market snapshot."""
+def test_fold_0939_anchor_rejects_invalid_first_fill_for_missing_labels() -> None:
+    """The first late fill for an absent label remains fail-closed."""
     code = "000001"
     anchor_receipt = datetime(2026, 8, 31, 21, 23, tzinfo=TZ)
     later_receipt = datetime(2026, 9, 1, 2, 57, tzinfo=TZ)
@@ -5416,8 +5397,8 @@ def test_fold_0939_anchor_ignores_later_invalid_and_misbound_revisions() -> None
     )
 
     assert missing == frozenset()
-    assert conflicted == frozenset()
-    assert [bar.end_label for bar in usable[code]] == ["09:39"]
+    assert usable == {}
+    assert conflicted == frozenset({code})
 
 
 async def test_historical_seed_reuses_first_snapshot_despite_later_full_day_revision(
@@ -6827,6 +6808,21 @@ async def test_late_normal_v16_candidate_becomes_gap_without_consumable_batches(
 
     service = _service(monkeypatch, repository)
     service._clock = lambda: observed_at
+    resolved_bundle = SimpleNamespace(
+        frozen_at=formed_at,
+        snapshot_hash="frozen-snapshot",
+        scan_result=SimpleNamespace(recommended=[SimpleNamespace(code="000001")]),
+    )
+
+    async def completed_calculation(_trade_date: date) -> Any:
+        return SimpleNamespace(
+            bundle=resolved_bundle,
+            prepared=None,
+            canonical_first_received_at=formed_at,
+            canonical_artifact_matches=True,
+        )
+
+    monkeypatch.setattr(service, "_compute_morning_selection", completed_calculation)
     collector = SimpleNamespace(
         complete_codes=lambda: {"000001"},
         codes_with_label=lambda label: {"000001"},
@@ -6842,7 +6838,7 @@ async def test_late_normal_v16_candidate_becomes_gap_without_consumable_batches(
             date(2026, 9, 1),
             date(2026, 9, 2),
         ),
-        canonical_bundle=SimpleNamespace(frozen_at=formed_at),
+        canonical_bundle=None,
         prewarmed=SimpleNamespace(
             required_minute_codes=("000001", "600000"),
             universe_codes=("000001",),
@@ -6939,12 +6935,12 @@ async def test_missing_0939_coverage_finalizes_no_buy_at_0940_idempotently(
     assert commit.semantic["schema_version"] == V20_ENTRY_SEMANTIC_SCHEMA
     assert commit.semantic["feishu_formatter_profile"] == V20_FEISHU_FORMATTER_PROFILE
     assert commit.semantic["reason_codes"] == ["ENTRY_INPUT_UNAVAILABLE_BY_0940"]
-    assert "canonical V16 09:39 result is unavailable" in commit.semantic["failure_detail"]
+    assert "no durable normal V16 decision existed" in commit.semantic["failure_detail"]
     assert commit.invalid_commit_not_before_ts == cutoff
     assert repository.sealed == [commit.event_id]
 
 
-async def test_entry_collection_computes_canonical_only_at_or_after_0939(
+async def test_entry_collection_never_precomputes_canonical_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(monkeypatch)
@@ -6964,23 +6960,13 @@ async def test_entry_collection_computes_canonical_only_at_or_after_0939(
         ),
     )
     compute_calls: list[date] = []
-    canonical = _strict_barrier_canonical(context.trade_date)
 
     async def compute(state: V15ScanState, requested_date: date):
         assert state is service._scan_state
         compute_calls.append(requested_date)
-        assert state.canonical_sink is not None
-        await state.canonical_sink(canonical)
-        return canonical
+        raise AssertionError("collection must not execute the selection scanner")
 
     monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", compute)
-    timeline: list[str] = []
-    store = _install_strict_durable_barrier(
-        monkeypatch,
-        service,
-        service._repository,
-        timeline,
-    )
 
     await service._run_entry_collection_cycle(
         context,
@@ -6993,23 +6979,11 @@ async def test_entry_collection_computes_canonical_only_at_or_after_0939(
         context,
         datetime(2026, 8, 31, 9, 39, 30, tzinfo=TZ),
     )
-    assert compute_calls == [context.trade_date]
-    assert context.canonical_bundle is not None
-    assert context.canonical_bundle.snapshot_hash == store.record.payload["v20_snapshot_hash"]
-    assert timeline == [
-        "artifact-load-miss",
-        "durable-raw",
-        "artifact-load-miss",
-        "artifact-save",
-        "artifact-load-hit",
-        "artifact-hydrate",
-        "artifact-load-hit",
-        "artifact-hydrate",
-    ]
-    assert context.last_phase == "CANONICAL_0939_READY"
+    assert compute_calls == []
+    assert context.canonical_bundle is None
 
 
-async def test_decision_watchdog_preempts_blocked_reconciliation_at_0940(
+async def test_decision_watchdog_does_not_cancel_work_started_before_0940(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def assert_leader() -> None:
@@ -7067,9 +7041,15 @@ async def test_decision_watchdog_preempts_blocked_reconciliation_at_0940(
     monkeypatch.setattr(service, "_refresh_entry_status", no_status)
     monkeypatch.setattr(service, "_finalize_invalid_entry", finalize)
 
-    await service._run_decision_iteration_with_cutoff(datetime(2026, 8, 31, 9, 39, 50, tzinfo=TZ))
+    watchdog = asyncio.create_task(
+        service._run_decision_iteration_with_cutoff(datetime(2026, 8, 31, 9, 39, 50, tzinfo=TZ))
+    )
+    await asyncio.sleep(0)
+    assert watchdog.done() is False
+    blocked.set()
+    await watchdog
 
-    assert cancelled is True
+    assert cancelled is False
     assert len(finalized) == 1
     assert finalized[0]["context"] is context
     assert finalized[0]["now"] == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
@@ -7077,7 +7057,7 @@ async def test_decision_watchdog_preempts_blocked_reconciliation_at_0940(
     assert finalized[0]["invalid_commit_not_before_ts"] == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
 
 
-async def test_decision_watchdog_cancels_only_canonical_waiter_and_master_is_reusable(
+async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def assert_leader() -> None:
@@ -7148,7 +7128,8 @@ async def test_decision_watchdog_cancels_only_canonical_waiter_and_master_is_reu
     monkeypatch.setattr(service, "run_once", run_once)
     monkeypatch.setattr(service, "_enforce_or_alert_entry_cutoff", enforce)
 
-    await service._run_decision_iteration_with_cutoff(before)
+    watchdog = asyncio.create_task(service._run_decision_iteration_with_cutoff(before))
+    await asyncio.wait_for(master_started.wait(), timeout=1.0)
 
     assert master_started.is_set()
     assert master_cancelled is False
@@ -7156,9 +7137,10 @@ async def test_decision_watchdog_cancels_only_canonical_waiter_and_master_is_reu
     assert coordinator is not None
     master = coordinator.inflight[trade_date]
     assert master.done() is False
-    assert cutoff_calls == [cutoff]
+    assert cutoff_calls == []
 
     release_master.set()
+    await asyncio.wait_for(watchdog, timeout=1.0)
     reused = await v15_scan_service.get_or_compute_canonical_v16(
         service._scan_state,
         trade_date,
@@ -7166,6 +7148,7 @@ async def test_decision_watchdog_cancels_only_canonical_waiter_and_master_is_reu
     assert reused.trade_date == trade_date
     assert compute_calls == 1
     assert master_cancelled is False
+    assert cutoff_calls == [cutoff]
     assert not any(
         task.get_name().startswith("v20-decision-")
         for task in asyncio.all_tasks()
@@ -7249,7 +7232,7 @@ async def test_decision_watchdog_boundary_completion_never_duplicates_terminal_e
         (date(2026, 8, 30), 0),  # Sunday: cannot be an A-share trading day.
     ),
 )
-async def test_decision_watchdog_fails_closed_when_first_calendar_load_crosses_cutoff(
+async def test_decision_watchdog_finishes_calendar_load_then_enforces_cutoff(
     monkeypatch: pytest.MonkeyPatch,
     trade_date: date,
     expected_alerts: int,
@@ -7303,9 +7286,13 @@ async def test_decision_watchdog_fails_closed_when_first_calendar_load_crosses_c
     monkeypatch.setattr(service, "_safe_alert", capture_alert)
     error_revision_before = service._lane_health["decision"].error_revision
 
-    await service._run_decision_iteration_with_cutoff(before)
+    watchdog = asyncio.create_task(service._run_decision_iteration_with_cutoff(before))
+    await asyncio.sleep(0)
+    assert watchdog.done() is False
+    never.set()
+    await watchdog
 
-    assert calendar_cancelled is True
+    assert calendar_cancelled is False
     assert len(alerts) == expected_alerts
     if alerts:
         assert alerts[0]["code"] == "ENTRY_CUTOFF_NO_BUY"

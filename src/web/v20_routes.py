@@ -1125,7 +1125,12 @@ def create_v20_router() -> APIRouter:
         request: Request,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> Any:
-        """Run/replay morning selection with the exact automatic Feishu text."""
+        """Run the morning calculation and expose its result with the proper actionability.
+
+        Before cutoff this can commit the ordinary automatic entry message.
+        After cutoff it reuses the same strategy-output renderer inside a
+        clearly non-actionable, read-only operator wrapper.
+        """
 
         async for chunk in request.stream():
             if chunk:

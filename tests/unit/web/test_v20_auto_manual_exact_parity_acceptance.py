@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import src.web.v20_service as service_module
 from src.data.clients.tushare_realtime import TushareMinuteBar
 from src.data.database.v16_canonical_artifact_store import (
     SNAPSHOT_TYPE,
@@ -22,6 +23,7 @@ from src.data.database.v20_repository import (
     OutboxRecord,
     StateRecord,
     V20SemanticConflict,
+    V20StateConflict,
     sha256_json,
 )
 from src.strategy.v20.artifacts import load_g_artifacts
@@ -34,10 +36,9 @@ from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.web.v15_scan_service import (
     V15ScanState,
     _CanonicalV16Coordinator,
-    get_or_compute_canonical_v16,
 )
 from src.web.v20_routes import _dispatch_manual_trigger
-from src.web.v20_service import V20Service, _bar_payload
+from src.web.v20_service import V20Service, _bar_payload, _DayContext
 from src.web.v20_v16_canonical_artifact import encode
 from tests.unit.web.test_v20_canonical_projection_acceptance import (
     ARTIFACT_CALENDAR,
@@ -472,7 +473,13 @@ def _service_and_artifact(
         calendar_provider=_calendar,
         mews_source=_NoMewsFetch(),
     )
-    canonical = _canonical_master()
+    canonical = _rehash(
+        replace(
+            _canonical_master(),
+            model_sha256=config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            feature_list_sha256=config.strategy_dependency_hashes["models/feature_list.json"],
+        )
+    )
     projected = service._project_canonical_v16(
         canonical,
         calendar=FULL_EXCHANGE_CALENDAR,
@@ -501,11 +508,153 @@ def _service_and_artifact(
     monkeypatch.setattr(service, "_run_reference_cycle", _no_op)
     monkeypatch.setattr(service, "_run_reminders", _no_op)
 
+    async def compute_from_persisted_raw(_context: Any) -> Any:
+        return canonical
+
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        compute_from_persisted_raw,
+    )
+
     async def ready() -> None:
         return None
 
     monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
     return service, repository, artifact_reader
+
+
+@pytest.mark.asyncio
+async def test_one_automatic_slot_calls_shared_scanner_and_prepare_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _artifact = _service_and_artifact(monkeypatch)
+    canonical = _rehash(
+        replace(
+            _canonical_master(),
+            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            feature_list_sha256=service.config.strategy_dependency_hashes[
+                "models/feature_list.json"
+            ],
+        )
+    )
+    frozen = SimpleNamespace(
+        early_data_seed={},
+        universe=tuple(canonical.universe),
+        clean_boards=canonical.clean_boards,
+        prev_closes=canonical.prev_closes,
+        history_raw=canonical.history_raw,
+        names={},
+        calendar=FULL_EXCHANGE_CALENDAR,
+        prior_daily={},
+        st_eligible_codes=tuple(canonical.universe),
+    )
+    scanner_calls = 0
+    prepare_calls = 0
+
+    async def historical_inputs(_context: _DayContext) -> Any:
+        return frozen
+
+    async def scanner(_state: Any, requested: date, **kwargs: Any) -> Any:
+        nonlocal scanner_calls
+        scanner_calls += 1
+        assert requested == TRADE_DATE
+        assert kwargs["allow_realtime_fetch"] is False
+        return canonical
+
+    original_prepare = service_module.prepare_entry
+
+    def counted_prepare(*args: Any, **kwargs: Any) -> Any:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_historical_canonical_inputs", historical_inputs)
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        V20Service._compute_canonical_v16_from_persisted_raw.__get__(service),
+    )
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", scanner)
+    monkeypatch.setattr(service_module, "prepare_entry", counted_prepare)
+
+    await service._run_decision_iteration_with_cutoff(RUN_AT)
+
+    assert repository.commit is not None
+    assert scanner_calls == 1
+    assert prepare_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_full_service_calendar_wins_over_short_artifact_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _repository, _artifact = _service_and_artifact(monkeypatch)
+    service._context = _DayContext(
+        trade_date=TRADE_DATE,
+        calendar=FULL_EXCHANGE_CALENDAR,
+    )
+    canonical = _rehash(
+        replace(
+            _canonical_master(),
+            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            feature_list_sha256=service.config.strategy_dependency_hashes[
+                "models/feature_list.json"
+            ],
+        )
+    )
+    observed_calendars: list[tuple[date, ...]] = []
+
+    async def capture_context(context: _DayContext) -> Any:
+        observed_calendars.append(tuple(context.calendar))
+        return canonical
+
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        capture_context,
+    )
+
+    _bundle, _received_at, calendar, *_comparison = await service._resolve_canonical_morning_bundle(
+        TRADE_DATE
+    )
+
+    assert ARTIFACT_CALENDAR != FULL_EXCHANGE_CALENDAR
+    assert observed_calendars == [FULL_EXCHANGE_CALENDAR]
+    assert calendar == FULL_EXCHANGE_CALENDAR
+
+
+@pytest.mark.asyncio
+async def test_automatic_commit_is_not_vetoed_by_comparison_artifact_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _artifact = _service_and_artifact(monkeypatch)
+    canonical = _rehash(
+        replace(
+            _canonical_master(),
+            model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+            feature_list_sha256=service.config.strategy_dependency_hashes[
+                "models/feature_list.json"
+            ],
+        )
+    )
+    projected = service._project_canonical_v16(
+        canonical,
+        calendar=FULL_EXCHANGE_CALENDAR,
+    )
+    comparison_only = replace(projected, snapshot_hash="f" * 64)
+
+    async def load_comparison(_trade_date: date) -> tuple[Any, datetime]:
+        # Even a late comparison artifact cannot become the fresh scanner's
+        # receipt clock or veto the otherwise timely formal decision.
+        return comparison_only, POST_CUTOFF_AT
+
+    monkeypatch.setattr(service, "_load_canonical_artifact", load_comparison)
+
+    await service._run_decision_iteration_with_cutoff(RUN_AT)
+
+    assert repository.commit is not None
+    assert repository.commit_entry_calls == 1
 
 
 @pytest.mark.asyncio
@@ -656,6 +805,8 @@ async def test_check_only_terminal_compares_old_official_and_current_canonical_h
     )
 
     assert result["current_version_recomputed"] is True
+    assert result["probe_result"] == "FAIL"
+    assert "v16_snapshot_hash" in result["probe_mismatch_fields"]
     assert result["official_entry_action"] == status_before.action
     assert result["official_entry_event_id"] == status_before.event_id
     assert result["official_v16_snapshot_hash"] == old_v16_hash
@@ -675,7 +826,7 @@ async def test_check_only_terminal_compares_old_official_and_current_canonical_h
 
 
 @pytest.mark.asyncio
-async def test_check_only_refreshes_rolling7_after_same_service_background_backfill(
+async def test_check_only_uses_terminal_frozen_rolling7_after_background_backfill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository, _artifact = _service_and_artifact(monkeypatch)
@@ -730,12 +881,13 @@ async def test_check_only_refreshes_rolling7_after_same_service_background_backf
 
     alert = repository.alerts[result["operator_event_id"]]
     current_prepare = alert.semantic["entry_render_semantic"]
-    assert current_prepare["rolling7_state"] == "NON_BAD"
-    assert current_prepare["rolling7_reason"] is None
-    assert current_prepare["rolling7_window_ids"] == expected_window_ids
-    assert current_prepare["rolling7_r7"] == pytest.approx(0.07)
-    assert current_prepare["rolling7_l7"] == 0
-    assert repository.rolling7_read_calls == reads_before_backfill + 1
+    assert current_prepare["rolling7_state"] == "WARMUP"
+    assert current_prepare["rolling7_reason"] == "WARMUP:0/7"
+    assert current_prepare["rolling7_window_ids"] == []
+    assert current_prepare["rolling7_r7"] is None
+    assert current_prepare["rolling7_l7"] is None
+    assert repository.rolling7_read_calls == reads_before_backfill
+    assert result["probe_result"] == "PASS"
 
     # The operator event is non-actionable.  Refreshing the prepared result
     # cannot rewrite the already committed morning state or terminal slot.
@@ -748,7 +900,37 @@ async def test_check_only_refreshes_rolling7_after_same_service_background_backf
 
 
 @pytest.mark.asyncio
-async def test_check_only_artifact_miss_joins_one_shared_master_then_consumes_barrier(
+async def test_terminal_check_fails_closed_if_official_state_has_moved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _artifact = _service_and_artifact(monkeypatch)
+    await service._run_decision_iteration_with_cutoff(RUN_AT)
+    assert repository.status is not None
+
+    moved_payload = {
+        **dict(repository.state.payload),
+        "state_revision": repository.state.revision + 1,
+    }
+    repository.state = replace(
+        repository.state,
+        revision=repository.state.revision + 1,
+        state_hash=sha256_json(moved_payload),
+        payload=moved_payload,
+    )
+    repository.seal_at = POST_CUTOFF_AT
+
+    with pytest.raises(V20StateConflict, match="moved beyond the terminal"):
+        await service.trigger_canonical_selection_check_only(
+            "check-only-state-moved-001",
+            POST_CUTOFF_AT,
+        )
+
+    assert repository.alert_write_calls == 0
+    assert repository.commit_entry_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_check_only_artifact_miss_computes_independently_and_persists_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository, artifact = _service_and_artifact(
@@ -761,62 +943,18 @@ async def test_check_only_artifact_miss_joins_one_shared_master_then_consumes_ba
     coordinator = _CanonicalV16Coordinator()
     coordinator.pending_persist[TRADE_DATE] = canonical
     service._scan_state.canonical_coordinator = coordinator
-    sink_entered = asyncio.Event()
-    release_sink = asyncio.Event()
-    sink_calls = 0
-    production_sink = service._persist_canonical_artifact_barrier
-
-    async def gated_production_sink(bundle: Any) -> None:
-        nonlocal sink_calls
-        sink_calls += 1
-        sink_entered.set()
-        await release_sink.wait()
-        await production_sink(bundle)
-
-    service._scan_state.canonical_sink = gated_production_sink
-    owner_waiter = asyncio.create_task(
-        get_or_compute_canonical_v16(service._scan_state, TRADE_DATE),
-        name="canonical-owner-waiter",
+    check_result = await service.trigger_canonical_selection_check_only(
+        "check-only-artifact-miss-001",
+        POST_CUTOFF_AT,
     )
-    await asyncio.wait_for(sink_entered.wait(), timeout=1)
-    master = coordinator.inflight[TRADE_DATE]
 
-    check_waiter = asyncio.create_task(
-        service.trigger_canonical_selection_check_only(
-            "check-only-artifact-miss-001",
-            POST_CUTOFF_AT,
-        ),
-        name="canonical-check-only-waiter",
-    )
-    for _ in range(100):
-        if artifact.load_calls:
-            break
-        await asyncio.sleep(0)
-    else:
-        raise AssertionError("check-only path did not probe the missing artifact")
-
-    assert coordinator.inflight[TRADE_DATE] is master
-    assert master.cancelled() is False
-    assert check_waiter.done() is False
-    assert artifact.record is None
-    release_sink.set()
-
-    owner_result, check_result = await asyncio.wait_for(
-        asyncio.gather(owner_waiter, check_waiter),
-        timeout=2,
-    )
-    await asyncio.sleep(0)
-
-    assert owner_result.trade_date == canonical.trade_date
-    assert owner_result._integrity_hash == canonical._integrity_hash
     assert check_result["created"] is True
     assert check_result["non_actionable"] is True
-    assert sink_calls == 1
     assert len(artifact.save_calls) == 1
     assert artifact.record is not None
     assert repository.raw_write_calls == 1
-    assert coordinator.inflight == {}
-    assert coordinator.cache[TRADE_DATE]._integrity_hash == canonical._integrity_hash
+    assert coordinator.pending_persist[TRADE_DATE] is canonical
+    assert coordinator.cache == {}
 
     alert = repository.alerts[check_result["operator_event_id"]]
     assert check_result["symbols"] == alert.semantic["entry_render_semantic"]["symbols"]

@@ -1,10 +1,9 @@
-"""Single rt_min_daily pull must yield quote + expected-date early bars together."""
+"""Batched stk_mins pulls yield quote + expected-date early bars together."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections import Counter
 from datetime import date, datetime, timezone
 
 import pytest
@@ -83,22 +82,46 @@ def _payload(
 
 
 def _make_client(monkeypatch: pytest.MonkeyPatch, responses: dict[str, dict]):
-    """Fake transport keyed by ts_code; returns (client, recorded_calls)."""
+    """Fake batched stk_mins transport keyed by bare code."""
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
     calls: list[tuple[str, str]] = []
 
     async def fake_api_call(api_name, params, fields=""):
-        ts_code = params["ts_code"]
-        calls.append((api_name, ts_code))
-        return responses[ts_code.split(".")[0]]
+        del fields
+        ts_codes = str(params["ts_code"]).split(",")
+        calls.append((api_name, str(params["ts_code"])))
+        assert api_name == "stk_mins"
+
+        output_fields: list[str] | None = None
+        output_items: list[list[object]] = []
+        for ts_code in ts_codes:
+            source = responses[ts_code.split(".")[0]]
+            raw = source.get("data", {})
+            source_fields = list(raw.get("fields", []))
+            renamed = ["trade_time" if field == "time" else field for field in source_fields]
+            candidate_fields = [
+                "ts_code",
+                *(field for field in renamed if field != "ts_code"),
+            ]
+            if output_fields is None:
+                output_fields = candidate_fields
+            elif set(candidate_fields) != set(output_fields):
+                raise AssertionError("test payload schemas differ inside one physical batch")
+
+            for item in raw.get("items", []):
+                mapped = dict(zip(renamed, item, strict=False))
+                mapped.setdefault("ts_code", ts_code)
+                output_items.append([mapped[field] for field in output_fields])
+
+        return {"data": {"fields": output_fields or [], "items": output_items}}
 
     monkeypatch.setattr(client, "_api_call", fake_api_call)
     return client, calls
 
 
 @pytest.mark.asyncio
-async def test_one_api_call_per_code_yields_quote_and_bars_from_same_response(
+async def test_one_batched_api_call_yields_quote_and_bars_for_all_codes(
     monkeypatch,
 ) -> None:
     responses = {
@@ -111,8 +134,7 @@ async def test_one_api_call_per_code_yields_quote_and_bars_from_same_response(
         ["000001", "600000"], expected_trade_date=TRADE_DATE
     )
 
-    # Exactly one rt_min_daily call per stock code — no double pull.
-    assert sorted(calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
+    assert calls == [("stk_mins", "000001.SZ,600000.SH")]
 
     data = result["000001"]
     assert isinstance(data, TushareEarlyMarketData)
@@ -134,10 +156,53 @@ async def test_one_api_call_per_code_yields_quote_and_bars_from_same_response(
 
 
 @pytest.mark.asyncio
-async def test_rt_min_daily_mixed_instrument_response_fails_closed(monkeypatch) -> None:
+async def test_large_universe_has_bounded_physical_calls_and_full_histories(
+    monkeypatch,
+) -> None:
+    """The live fallback is O(batches), while every symbol keeps all early bars."""
+    codes = [f"{number:06d}" for number in range(801)]
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
-    fields = ["ts_code", *_FIELDS]
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_api_call(api_name, params, fields=""):
+        del fields
+        calls.append((api_name, dict(params)))
+        ts_codes = str(params["ts_code"]).split(",")
+        return {
+            "data": {
+                "fields": ["ts_code", "trade_time", *_FIELDS[1:]],
+                "items": [
+                    [ts_code, *_row(f"09:{minute:02d}", 10.0 + minute / 100)]
+                    for ts_code in ts_codes
+                    for minute in range(31, 40)
+                ],
+            }
+        }
+
+    monkeypatch.setattr(client, "_api_call", fake_api_call)
+    result = await client.batch_get_early_market_data(
+        codes,
+        expected_trade_date=TRADE_DATE,
+    )
+
+    assert len(calls) == 3
+    assert {api_name for api_name, _params in calls} == {"stk_mins"}
+    assert sorted(len(str(params["ts_code"]).split(",")) for _, params in calls) == [1, 400, 400]
+    assert all(params["start_date"] == f"{TRADE_DATE.isoformat()} 09:24:00" for _, params in calls)
+    assert all(params["end_date"] == f"{TRADE_DATE.isoformat()} 09:40:00" for _, params in calls)
+    assert list(result) == codes
+    expected_labels = [f"09:{minute:02d}" for minute in range(31, 40)]
+    assert all(
+        [bar.end_label for bar in result[code].early_bars] == expected_labels for code in codes
+    )
+
+
+@pytest.mark.asyncio
+async def test_stk_mins_unrequested_instrument_response_fails_closed(monkeypatch) -> None:
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    fields = ["ts_code", "trade_time", *_FIELDS[1:]]
     good = ["000001.SZ", *_row("09:38", 10.0)]
     wrong = ["600000.SH", *_row("09:39", 10.1)]
 
@@ -146,47 +211,24 @@ async def test_rt_min_daily_mixed_instrument_response_fails_closed(monkeypatch) 
 
     monkeypatch.setattr(client, "_api_call", mixed_api_call)
 
-    with pytest.raises(TushareRealtimeError, match="does not match requested"):
+    with pytest.raises(TushareRealtimeError, match="was not requested"):
         await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
 
 
 @pytest.mark.asyncio
-async def test_duplicates_and_reverse_completion_preserve_unique_input_order(
+async def test_duplicates_are_deduplicated_and_preserve_input_order(
     monkeypatch,
 ) -> None:
     codes = ["000001", "600000", "000001", "300750"]
-    unique_order = ["000001", "600000", "300750"]
     responses = {
         "000001": _full_day_payload(10.0),
         "600000": _full_day_payload(20.0),
         "300750": _full_day_payload(30.0),
     }
-    client = TushareRealtimeClient("token")
-    client._client = object()  # type: ignore[assignment]
-    calls: list[tuple[str, str]] = []
-    completions: list[str] = []
-
-    async def fake_api_call(api_name, params, fields=""):
-        bare_code = params["ts_code"].split(".")[0]
-        # Reverse completion: 300750 first, then 600000, then 000001.
-        delay = (len(unique_order) - 1 - unique_order.index(bare_code)) * 0.02
-        await asyncio.sleep(delay)
-        completions.append(bare_code)
-        calls.append((api_name, params["ts_code"]))
-        return responses[bare_code]
-
-    monkeypatch.setattr(client, "_api_call", fake_api_call)
+    client, calls = _make_client(monkeypatch, responses)
     result = await client.batch_get_early_market_data(codes, expected_trade_date=TRADE_DATE)
 
-    assert completions == ["300750", "600000", "000001"]
-    assert Counter(calls) == Counter(
-        [
-            ("rt_min_daily", "000001.SZ"),
-            ("rt_min_daily", "600000.SH"),
-            ("rt_min_daily", "300750.SZ"),
-        ]
-    )
-    assert len(calls) == 3
+    assert calls == [("stk_mins", "000001.SZ,600000.SH,300750.SZ")]
     assert list(result) == ["000001", "600000", "300750"]
 
 
@@ -459,8 +501,7 @@ async def test_early_quotes_wrapper_returns_same_quotes(monkeypatch) -> None:
     assert set(quotes) == {"000001", "600000"}
     assert quotes["000001"].early_close == pytest.approx(10.8)
     assert quotes["600000"].latest_price == pytest.approx(20.8)
-    # Wrapper still performs exactly one API call per code.
-    assert sorted(calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
+    assert calls == [("stk_mins", "000001.SZ,600000.SH")]
 
 
 @pytest.mark.asyncio
@@ -503,16 +544,13 @@ async def test_bars_come_from_same_response_not_a_second_pull(monkeypatch) -> No
 
     result = await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
 
-    assert calls == [("rt_min_daily", "000001.SZ")]
+    assert calls == [("stk_mins", "000001.SZ")]
     assert [bar.end_label for bar in result["000001"].early_bars] == labels
     assert result["000001"].quote.latest_price == pytest.approx(10.0)
 
 
-@pytest.mark.asyncio
-async def test_legacy_response_without_time_returns_quote_and_empty_bars(
-    monkeypatch,
-) -> None:
-    """Origin/main compatibility: valid OHLCV without time still yields a quote."""
+def test_legacy_parser_without_time_returns_quote_and_empty_bars() -> None:
+    """The retained rt_min_daily parser still accepts its legacy payload."""
     items = [[9.95, 10.0, 10.1, 9.9, 1000.0, 10000.0]]
     no_time = {
         "data": {
@@ -520,12 +558,12 @@ async def test_legacy_response_without_time_returns_quote_and_empty_bars(
             "items": items,
         }
     }
-    client, calls = _make_client(monkeypatch, {"000001": no_time})
-
-    result = await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-
-    assert calls == [("rt_min_daily", "000001.SZ")]
-    data = result["000001"]
+    data = TushareRealtimeClient._parse_early_market_data(
+        "000001",
+        no_time,
+        expected_trade_date=TRADE_DATE,
+    )
+    assert data is not None
     assert data.quote.stock_code == "000001"
     assert data.quote.open_price == pytest.approx(9.95)
     assert data.quote.latest_price == pytest.approx(10.0)
@@ -572,22 +610,26 @@ def _assert_same_three_piece(
 
 
 @pytest.mark.asyncio
-async def test_mixed_code_tushare_error_keeps_healthy_siblings(monkeypatch) -> None:
-    """One failed rt_min_daily code must not discard successful siblings."""
-    responses = {
-        "000001": _full_day_payload(10.0),
-        "600000": _full_day_payload(20.0),
-    }
+async def test_failed_physical_batch_keeps_healthy_sibling_batches(monkeypatch) -> None:
+    """One failed stk_mins batch must not discard successful sibling batches."""
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
+    client.HISTORICAL_EARLY_BATCH_SIZE = 1
     calls: list[str] = []
 
     async def fake_api_call(api_name, params, fields=""):
-        bare = params["ts_code"].split(".")[0]
-        calls.append(bare)
-        if bare == "600000":
+        del fields
+        assert api_name == "stk_mins"
+        ts_code = str(params["ts_code"])
+        calls.append(ts_code)
+        if ts_code == "600000.SH":
             raise TushareRealtimeError("vendor 600000 down")
-        return responses[bare]
+        return {
+            "data": {
+                "fields": ["ts_code", "trade_time", *_FIELDS[1:]],
+                "items": [[ts_code, *_row("09:39", 10.0)]],
+            }
+        }
 
     monkeypatch.setattr(client, "_api_call", fake_api_call)
     result = await client.batch_get_early_market_data(
@@ -596,12 +638,12 @@ async def test_mixed_code_tushare_error_keeps_healthy_siblings(monkeypatch) -> N
 
     assert "000001" in result
     assert "600000" not in result
-    assert calls == ["000001", "600000"]
+    assert calls == ["000001.SZ", "600000.SH"]
 
 
 @pytest.mark.asyncio
 async def test_all_codes_failed_raises_original_exception_object(monkeypatch) -> None:
-    """When every rt_min_daily code fails, the original exception object is raised."""
+    """When every stk_mins batch fails, the original exception object is raised."""
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
     original = TushareRealtimeError("vendor down")
@@ -864,8 +906,7 @@ async def test_valid_plus_date_only_equals_baseline(monkeypatch) -> None:
     _assert_same_three_piece(base_data, mixed_data)
 
 
-@pytest.mark.asyncio
-async def test_no_time_legacy_quote_has_all_early_fields(monkeypatch) -> None:
+def test_no_time_legacy_quote_has_all_early_fields() -> None:
     """Legacy no-time payload must set early_* fields from full-day aggregates."""
     items = [[9.95, 10.0, 10.1, 9.9, 1000.0, 10000.0]]
     no_time = {
@@ -874,13 +915,12 @@ async def test_no_time_legacy_quote_has_all_early_fields(monkeypatch) -> None:
             "items": items,
         }
     }
-    client, calls = _make_client(monkeypatch, {"000001": no_time})
-
-    data = (await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE))[
-        "000001"
-    ]
-
-    assert calls == [("rt_min_daily", "000001.SZ")]
+    data = TushareRealtimeClient._parse_early_market_data(
+        "000001",
+        no_time,
+        expected_trade_date=TRADE_DATE,
+    )
+    assert data is not None
     q = data.quote
     assert q.stock_code == "000001"
     assert q.open_price == pytest.approx(9.95)
@@ -1034,11 +1074,10 @@ _INVALID_NO_TIME_VALUES: list[tuple[object, str]] = [
 
 @pytest.mark.parametrize("field", ["open", "high", "low", "close", "vol", "amount"])
 @pytest.mark.parametrize("bad_value, label", _INVALID_NO_TIME_VALUES)
-@pytest.mark.asyncio
-async def test_no_time_invalid_value_rejects_whole_symbol(
-    field: str, bad_value: object, label: str, monkeypatch
+def test_no_time_invalid_value_rejects_whole_symbol(
+    field: str, bad_value: object, label: str
 ) -> None:
-    """Any invalid OHLCV value in any no-time row rejects that symbol, not siblings."""
+    """Any invalid OHLCV value rejects a legacy no-time symbol."""
     rows = [
         _no_time_row(),
         _no_time_row(close_price=10.1),
@@ -1048,15 +1087,10 @@ async def test_no_time_invalid_value_rejects_whole_symbol(
     rows[1][field_pos[field]] = bad_value  # type: ignore[index]
     bad_payload = _no_time_payload(rows)
 
-    responses = {"000001": bad_payload, "600000": _no_time_payload()}
-    client, _ = _make_client(monkeypatch, responses)
-
-    result = await client.batch_get_early_market_data(
-        ["000001", "600000"], expected_trade_date=TRADE_DATE
+    parsed = TushareRealtimeClient._parse_early_market_data(
+        "000001", bad_payload, expected_trade_date=TRADE_DATE
     )
-
-    assert "000001" not in result, f"{label} in {field} should reject the symbol"
-    assert "600000" in result
+    assert parsed is None, f"{label} in {field} should reject the symbol"
 
     # Direct alias must return None for both two-argument and three-argument forms.
     assert TushareRealtimeClient._parse_rt_min_daily("000001", bad_payload) is None
@@ -1068,21 +1102,17 @@ async def test_no_time_invalid_value_rejects_whole_symbol(
     )
 
 
-@pytest.mark.asyncio
-async def test_no_time_short_row_rejects_whole_symbol(monkeypatch) -> None:
+def test_no_time_short_row_rejects_whole_symbol() -> None:
     """A no-time row missing columns must reject the whole symbol."""
     bad_rows = [_no_time_row(), [9.95, 10.0, 10.1, 9.9, 1000.0]]  # missing amount
     bad_payload = _no_time_payload(bad_rows)
 
-    responses = {"000001": bad_payload, "600000": _no_time_payload()}
-    client, _ = _make_client(monkeypatch, responses)
-
-    result = await client.batch_get_early_market_data(
-        ["000001", "600000"], expected_trade_date=TRADE_DATE
+    assert (
+        TushareRealtimeClient._parse_early_market_data(
+            "000001", bad_payload, expected_trade_date=TRADE_DATE
+        )
+        is None
     )
-
-    assert "000001" not in result
-    assert "600000" in result
     assert TushareRealtimeClient._parse_rt_min_daily("000001", bad_payload) is None
     assert (
         TushareRealtimeClient._parse_rt_min_daily(
@@ -1101,9 +1131,8 @@ async def test_no_time_short_row_rejects_whole_symbol(monkeypatch) -> None:
         (2, "close", False),
     ],
 )
-@pytest.mark.asyncio
-async def test_no_time_invalid_value_at_row_ends_rejects_symbol(
-    row_index: int, field: str, bad_value: object, monkeypatch
+def test_no_time_invalid_value_at_row_ends_rejects_symbol(
+    row_index: int, field: str, bad_value: object
 ) -> None:
     """Invalid values at the first/last row endpoints must still reject the symbol."""
     rows = [
@@ -1115,15 +1144,12 @@ async def test_no_time_invalid_value_at_row_ends_rejects_symbol(
     rows[row_index][field_pos[field]] = bad_value  # type: ignore[index]
     bad_payload = _no_time_payload(rows)
 
-    responses = {"000001": bad_payload, "600000": _no_time_payload()}
-    client, _ = _make_client(monkeypatch, responses)
-
-    result = await client.batch_get_early_market_data(
-        ["000001", "600000"], expected_trade_date=TRADE_DATE
+    assert (
+        TushareRealtimeClient._parse_early_market_data(
+            "000001", bad_payload, expected_trade_date=TRADE_DATE
+        )
+        is None
     )
-
-    assert "000001" not in result
-    assert "600000" in result
     assert TushareRealtimeClient._parse_rt_min_daily("000001", bad_payload) is None
     assert (
         TushareRealtimeClient._parse_rt_min_daily(
@@ -1183,19 +1209,17 @@ async def test_only_late_rows_ignore_field_order_and_metadata(monkeypatch) -> No
     assert result_a == result_b == {}
 
 
-@pytest.mark.asyncio
-async def test_legacy_source_hash_differs_per_code(monkeypatch) -> None:
+def test_legacy_source_hash_differs_per_code() -> None:
     """No-time legacy hash with identical facts must still encode the stock code."""
     payload = _no_time_payload([_no_time_row()])
 
-    client_a, _ = _make_client(monkeypatch, {"000001": payload})
-    client_b, _ = _make_client(monkeypatch, {"000002": payload})
+    data_a = TushareRealtimeClient._parse_early_market_data(
+        "000001", payload, expected_trade_date=TRADE_DATE
+    )
+    data_b = TushareRealtimeClient._parse_early_market_data(
+        "000002", payload, expected_trade_date=TRADE_DATE
+    )
+    assert data_a is not None
+    assert data_b is not None
 
-    hash_a = (
-        await client_a.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
-    )["000001"].source_hash
-    hash_b = (
-        await client_b.batch_get_early_market_data(["000002"], expected_trade_date=TRADE_DATE)
-    )["000002"].source_hash
-
-    assert hash_a != hash_b
+    assert data_a.source_hash != data_b.source_hash

@@ -257,7 +257,7 @@ async def test_thirty_six_callers_share_one_union_early_one_scanner_and_one_dail
     assert set(harness.state.canonical_coordinator.daily_bars) == {PRIOR_DATE}
 
 
-async def test_thirty_six_callers_share_physical_rt_min_daily_once_per_unique_code(
+async def test_thirty_six_callers_share_one_physical_batched_stk_mins_pull(
     harness: VendorBudgetHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,14 +285,13 @@ async def test_thirty_six_callers_share_physical_rt_min_daily_once_per_unique_co
                     ],
                 }
             }
-        assert api_name == "rt_min_daily"
-        ts_code = str(params["ts_code"])
-        base = 11.0 if ts_code.startswith("000001") else 12.0
+        assert api_name == "stk_mins"
+        ts_codes = str(params["ts_code"]).split(",")
         return {
             "data": {
                 "fields": [
                     "ts_code",
-                    "time",
+                    "trade_time",
                     "open",
                     "close",
                     "high",
@@ -304,13 +303,14 @@ async def test_thirty_six_callers_share_physical_rt_min_daily_once_per_unique_co
                     [
                         ts_code,
                         f"{TRADE_DATE.isoformat()} 09:{minute:02d}:00",
-                        base,
-                        base + 0.1,
-                        base + 0.2,
-                        base - 0.1,
+                        11.0 if ts_code.startswith("000001") else 12.0,
+                        11.1 if ts_code.startswith("000001") else 12.1,
+                        11.2 if ts_code.startswith("000001") else 12.2,
+                        10.9 if ts_code.startswith("000001") else 11.9,
                         2_000.0,
                         24_000.0,
                     ]
+                    for ts_code in ts_codes
                     for minute in range(31, 40)
                 ],
             }
@@ -328,12 +328,9 @@ async def test_thirty_six_callers_share_physical_rt_min_daily_once_per_unique_co
 
     assert len(bundles) == 36
     assert physical_calls.count(("daily", "")) == 1
-    early_calls = [call for call in physical_calls if call[0] == "rt_min_daily"]
-    assert sorted(early_calls) == [
-        ("rt_min_daily", "000001.SZ"),
-        ("rt_min_daily", "600000.SH"),
-    ]
-    assert len({ts_code for _api_name, ts_code in early_calls}) == len(early_calls)
+    early_calls = [call for call in physical_calls if call[0] == "stk_mins"]
+    assert early_calls == [("stk_mins", "000001.SZ,600000.SH")]
+    assert not [call for call in physical_calls if call[0] == "rt_min_daily"]
     assert harness.scanner_calls == [("600000",)]
 
 

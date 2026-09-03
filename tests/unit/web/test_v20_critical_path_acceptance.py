@@ -380,7 +380,14 @@ def _v20_config(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("V20_STATUS_API_KEY", "s" * 32)
     from src.strategy.v20 import runtime_config
 
-    monkeypatch.setattr(runtime_config, "_dependency_hashes", lambda _root: {})
+    monkeypatch.setattr(
+        runtime_config,
+        "_dependency_hashes",
+        lambda _root: {
+            "models/lgbrank_latest.txt": "1" * 64,
+            "models/feature_list.json": "2" * 64,
+        },
+    )
     monkeypatch.setattr(
         runtime_config, "_state_semantics_source", lambda _payload: {"accepted": True}
     )
@@ -627,8 +634,8 @@ def _portable_canonical(
         failed_no_history=(),
         failed_build=(),
         skipped_new_listings=(),
-        model_sha256="1" * 64,
-        feature_list_sha256="2" * 64,
+        model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+        feature_list_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
         computed_at=datetime.combine(trade_date, time(9, 39, 20), TZ),
         input_hash=sha256_json({"trade_date": trade_date.isoformat(), "codes": codes}),
         _integrity_hash="",
@@ -1006,7 +1013,7 @@ async def test_real_factories_and_app_lifecycle_have_no_scan_pipeline(
 
 
 @pytest.mark.asyncio
-async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
+async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _canonical_fixture(monkeypatch)
@@ -1173,8 +1180,7 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
     )
     service._canonical_artifact_store = artifact_store
     service._canonical_callbacks_open = True
-    service._canonical_sink_callback = service._persist_canonical_artifact_barrier
-    state.canonical_sink = service._canonical_sink_callback
+    assert state.canonical_sink is None
     service._started = True
     service._repository_started = True
     service._clock = lambda: pre_cutoff
@@ -1414,21 +1420,51 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
 
     release.set()
 
-    automatic_result = await automatic_task
-    # Manual pre/post-cutoff triggers share this same service and scan state,
-    # in order; only a restart would build a new state.
-    manual_pre_result = await _dispatch_manual_trigger(service, "modes-manual-pre")
-    service._clock = lambda: post_cutoff
-    check_only_result = await _dispatch_manual_trigger(service, "modes-check-only")
+    automatic_context = await automatic_task
     for _ in range(100):
         if state.scan_done_date == today.isoformat():
             break
         await asyncio.sleep(0)
+    master = state.canonical_coordinator.cache[today]
+    configured_master = dataclasses_replace(
+        master,
+        model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+        feature_list_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
+        _integrity_hash="",
+    )
+    v20_master = dataclasses_replace(
+        configured_master,
+        _integrity_hash=v15_scan_service._bundle_fingerprint(configured_master),
+    )
+    v20_compute_calls = 0
+
+    async def independent_v20_compute(_context: _DayContext) -> CanonicalV16ScanBundle:
+        nonlocal v20_compute_calls
+        v20_compute_calls += 1
+        return v20_master
+
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        independent_v20_compute,
+    )
+
+    async def no_scheduled_exits(_trade_date: date) -> tuple[Any, ...]:
+        return ()
+
+    monkeypatch.setattr(service, "_scheduled_exits_today", no_scheduled_exits)
+    automatic_result = await service._compute_morning_selection(today)
+
+    # The pre-cutoff manual route only drives the normal scheduler.  The
+    # post-cutoff check is read-only but deliberately runs V20's own calculator
+    # again instead of joining or replaying the independent V16 runtime.
+    manual_pre_result = await _dispatch_manual_trigger(service, "modes-manual-pre")
+    service._clock = lambda: post_cutoff
+    check_only_result = await _dispatch_manual_trigger(service, "modes-check-only")
     scheduler_task.cancel()
     await asyncio.gather(scheduler_task, return_exceptions=True)
 
-    master = state.canonical_coordinator.cache[today]
-    assert automatic_result.last_phase == "CANONICAL_0939_READY"
+    assert automatic_context.canonical_bundle is None
     assert manual_pre_result["accepted"] is True
     assert check_only_result["accepted"] is True
     assert check_only_result["current_version_recomputed"] is True
@@ -1438,17 +1474,14 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
         for item in master.scan_result.recommended
     ]
     assert [item["code"] for item in canonical_symbols] == list(FRESH_CODES)
-    assert [item["code"] for item in automatic_result.canonical_bundle.snapshot["symbols"]] == list(
-        FRESH_CODES
-    )
-    assert [item["code"] for item in service._context.canonical_bundle.snapshot["symbols"]] == list(
+    assert [item["code"] for item in automatic_result.bundle.snapshot["symbols"]] == list(
         FRESH_CODES
     )
     assert [item["code"] for item in check_only_result["symbols"]] == list(FRESH_CODES)
-    # The morning ran one canonical scan.  Post-cutoff hydrates the immutable
-    # durable artifact and its raw barrier; it never starts a second scanner,
-    # realtime pull, or history fetch.
+    # V16 and V20 are allowed to duplicate selection work.  Within V20, both
+    # paths enter the same calculation boundary exactly once per trigger.
     assert FakeV16Scanner.scan_calls == 1
+    assert v20_compute_calls == 2
     assert FakeRealtimeClient.early_calls == 1
     assert FakeHistoryAdapter.history_calls == 1
     assert artifact_store.save_calls == 1
@@ -1469,19 +1502,14 @@ async def test_all_v20_trigger_modes_reuse_canonical_raw_0939(
     }
     assert master.early_source_hashes == expected_selection_sources
     assert all(item["snapshot_price"] != 999.0 for item in check_only_result["symbols"])
-    assert check_only_result["current_v16_snapshot_hash"] == (
-        automatic_result.canonical_bundle.snapshot_hash
-    )
+    assert check_only_result["current_v16_snapshot_hash"] == (automatic_result.bundle.snapshot_hash)
     assert check_only_result["official_v16_snapshot_hash"] is None
     assert state.canonical_coordinator.inflight == {}
+    # The automatic calculation reads live policy inputs once.  The later
+    # terminal probe reuses its frozen official policy snapshot and adds no
+    # second pair of reads.
     assert repository.policy_reads == [("health", today), ("rolling7", today)]
-    assert all(
-        result.snapshot_hash == automatic_result.canonical_bundle.snapshot_hash
-        for result in (
-            automatic_result.canonical_bundle,
-            service._context.canonical_bundle,
-        )
-    )
+    assert automatic_result.bundle.snapshot_hash == check_only_result["current_v16_snapshot_hash"]
     assert repository.raw_reads
 
 
@@ -2006,6 +2034,15 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     service._calendar_provider = calendar
     monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
 
+    async def independent_v20_compute(_context: _DayContext) -> CanonicalV16ScanBundle:
+        return canonical
+
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        independent_v20_compute,
+    )
+
     # No artificial outer budget cuts the attempt off: the hanging source is
     # released into a genuine failure, which settles the daily idempotent
     # MEWS_CALCULATION_FAILED before the independent manual entry continues.
@@ -2024,7 +2061,7 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
     assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
     assert result["official_v16_snapshot_hash"] == current_bundle.snapshot_hash
     assert [item["code"] for item in result["symbols"]] == ["603068"]
-    assert repository.policy_reads == [("health", today), ("rolling7", today)]
+    assert repository.policy_reads == []
     assert selection_source.calls == 1
     assert service._mews_singleflight_task is None
     mews_alerts = [
@@ -3330,6 +3367,15 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
         return None
 
     monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
+
+    async def independent_v20_compute(_context: _DayContext) -> CanonicalV16ScanBundle:
+        return canonical
+
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        independent_v20_compute,
+    )
     result = await _dispatch_manual_trigger(service, "terminal-current-artifact-001")
 
     assert result["accepted"] is True
@@ -3362,7 +3408,7 @@ async def test_post_cutoff_terminal_enter_still_fresh_recomputes_check_only(
     assert artifact_store.save_calls == 0
     assert artifact_store.load_calls == 1
     assert repository.raw_reads >= 2
-    assert repository.policy_reads == [("health", today), ("rolling7", today)]
+    assert repository.policy_reads == []
 
 
 @pytest.mark.asyncio
@@ -3844,12 +3890,23 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
     monkeypatch.setattr(service, "_policy_inputs", policy_inputs)
     monkeypatch.setattr(service, "_scheduled_exits_today", scheduled)
 
+    async def independent_v20_compute(_context: _DayContext) -> CanonicalV16ScanBundle:
+        return canonical
+
+    monkeypatch.setattr(
+        service,
+        "_compute_canonical_v16_from_persisted_raw",
+        independent_v20_compute,
+    )
+
     result = await _dispatch_manual_trigger(service, "durable-artifact-current-001")
 
     assert result["accepted"] is True
     assert result["current_version_recomputed"] is True
     assert result["replay_reused"] is False
     assert result["formal_decision_available"] is False
+    assert result["probe_result"] == "FAIL"
+    assert "official_entry_missing" in result["probe_mismatch_fields"]
     assert result["current_v16_snapshot_hash"] == current_bundle.snapshot_hash
     assert result["official_v16_snapshot_hash"] is None
     assert [item["code"] for item in result["symbols"]] == ["603068"]

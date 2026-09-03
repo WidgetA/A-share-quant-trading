@@ -10,7 +10,7 @@ import pytest
 
 import src.web.v15_scan_service as scan_module
 import src.web.v20_service as service_module
-from src.data.database.v20_repository import V20RepositoryError, V20SemanticConflict, sha256_json
+from src.data.database.v20_repository import V20SemanticConflict, sha256_json
 from src.strategy.v20.decision_engine import genesis_state
 from src.web.v15_scan_service import CanonicalV16ScanBundle, _bundle_fingerprint
 from src.web.v20_routes import _dispatch_manual_trigger
@@ -298,19 +298,20 @@ async def _stop_started_service(service: Any) -> None:
     service._started = False
 
 
-async def test_repo_ready_attaches_shared_canonical_sink_that_verifies_before_return(
+async def test_repo_ready_keeps_v16_runtime_detached_and_v20_can_persist_its_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
     service = await _start_service(monkeypatch, repository)
     try:
         assert service._repository_started is True
-        assert service._scan_state.canonical_sink is not None
+        assert service._scan_state.canonical_sink is None
+        assert service._scan_state.canonical_artifact_probe is None
         assert FakeArtifactStore.instances
         store = FakeArtifactStore.instances[0]
 
         canonical = _canonical()
-        await asyncio.wait_for(service._scan_state.canonical_sink(canonical), timeout=1.0)
+        await asyncio.wait_for(service._persist_canonical_artifact_barrier(canonical), timeout=1.0)
         assert repository.timeline[-1] == "durable-raw"
         assert repository.raw_rows[TRADE_DATE]
         assert store.save_calls == [
@@ -358,7 +359,7 @@ async def test_real_raw_persistence_accepts_zero_one_and_sub_ten_recommendations
         await _stop_started_service(service)
 
 
-async def test_entry_auto_consumes_durable_artifact_before_joining_canonical_master(
+async def test_entry_collection_does_not_consume_v16_runtime_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
@@ -403,21 +404,15 @@ async def test_entry_auto_consumes_durable_artifact_before_joining_canonical_mas
             timeout=1.0,
         )
 
-        assert FakeArtifactStore.instances[0].load_calls == [
-            {
-                "official_stream_id": service.config.official_stream_id,
-                "trade_date": TRADE_DATE,
-                "event": "V16_CANONICAL_MASTER_V1",
-            }
-        ]
-        assert store.calls == ["load", "hydrate"]
+        assert FakeArtifactStore.instances[0].load_calls == []
+        assert store.calls == []
         assert store.record.payload == _portable_payload(canonical)
-        assert context.canonical_bundle is projected
+        assert context.canonical_bundle is None
     finally:
         await _stop_started_service(service)
 
 
-async def test_same_semantic_artifact_reuses_slot_when_computed_at_changes(
+async def test_entry_collection_ignores_artifact_timestamp_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
@@ -464,26 +459,25 @@ async def test_same_semantic_artifact_reuses_slot_when_computed_at_changes(
             timeout=1.0,
         )
 
-        assert store.calls == ["load", "hydrate"]
+        assert store.calls == []
         assert store.record.payload == _portable_payload(original)
         assert _portable_payload(recomputed) == _portable_payload(original)
-        assert context.canonical_bundle is projected
+        assert context.canonical_bundle is None
     finally:
         await _stop_started_service(service)
 
 
 @pytest.mark.parametrize(
-    ("delta", "expected_mode"),
+    "delta",
     [
-        (timedelta(milliseconds=-1), "ACTIONABLE"),
-        (timedelta(0), "CHECK_ONLY"),
-        (timedelta(milliseconds=1), "CHECK_ONLY"),
+        timedelta(milliseconds=-1),
+        timedelta(0),
+        timedelta(milliseconds=1),
     ],
 )
-async def test_canonical_receipt_boundary_controls_actionability_without_dropping_ticket(
+async def test_collection_does_not_derive_actionability_from_artifact_receipt(
     monkeypatch: pytest.MonkeyPatch,
     delta: timedelta,
-    expected_mode: str,
 ) -> None:
     repository = StartupRepository()
     service = await _start_service(monkeypatch, repository)
@@ -525,16 +519,14 @@ async def test_canonical_receipt_boundary_controls_actionability_without_droppin
             timeout=1.0,
         )
 
-        assert context.canonical_entry_mode == expected_mode
-        assert context.canonical_first_received_at == CUTOFF + delta
-        assert context.canonical_bundle is projected
-        assert context.canonical_bundle.symbols == symbols
-        assert context.canonical_bundle.metrics == {"input_hash": "c" * 64}
+        assert context.canonical_entry_mode is None
+        assert context.canonical_first_received_at is None
+        assert context.canonical_bundle is None
     finally:
         await _stop_started_service(service)
 
 
-async def test_artifact_without_durable_raw_barrier_fails_closed(
+async def test_collection_does_not_treat_artifact_as_a_raw_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
@@ -566,24 +558,23 @@ async def test_artifact_without_durable_raw_barrier_fails_closed(
         monkeypatch.setattr(service_module, "get_or_compute_canonical_v16", coordinator_bomb)
         monkeypatch.setattr(service, "_persist_canonical_raw_minute_bars", persist_missing_raw)
 
-        with pytest.raises((V20RepositoryError, V20SemanticConflict)):
-            await asyncio.wait_for(
-                service._run_entry_collection_cycle(
-                    context,
-                    datetime.combine(TRADE_DATE, time(9, 39), tzinfo=TZ),
-                ),
-                timeout=1.0,
-            )
+        await asyncio.wait_for(
+            service._run_entry_collection_cycle(
+                context,
+                datetime.combine(TRADE_DATE, time(9, 39), tzinfo=TZ),
+            ),
+            timeout=1.0,
+        )
 
         assert TRADE_DATE not in repository.raw_barriers
         assert context.canonical_bundle is None
         assert context.canonical_entry_mode is None
-        assert store.calls == ["load", "hydrate"]
+        assert store.calls == []
     finally:
         await _stop_started_service(service)
 
 
-async def test_zero_recommendations_remain_legal_durable_no_signal(
+async def test_collection_does_not_replay_zero_recommendation_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
@@ -630,18 +621,17 @@ async def test_zero_recommendations_remain_legal_durable_no_signal(
         )
 
         assert store.record.payload["recommended"] == ()
-        assert context.canonical_entry_mode == "ACTIONABLE"
-        assert context.canonical_entry_action == "NO_SIGNAL"
-        assert context.canonical_first_received_at == receipt
-        assert context.canonical_bundle is projected
-        assert context.canonical_bundle.symbols == []
+        assert context.canonical_entry_mode is None
+        assert context.canonical_entry_action is None
+        assert context.canonical_first_received_at is None
+        assert context.canonical_bundle is None
         assert TRADE_DATE in repository.raw_barriers
     finally:
         await _stop_started_service(service)
 
 
 @pytest.mark.asyncio
-async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
+async def test_post_cutoff_manual_calculation_is_independent_of_v16_master(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _DecisionRepository(_raw_records(), seal_at=POST_CUTOFF_AT)
@@ -650,6 +640,7 @@ async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
     service._clock = lambda: POST_CUTOFF_AT
     service._calendar_provider = lambda: FULL_EXCHANGE_CALENDAR
     service._calendar_loaded_for = POST_CUTOFF_AT.date()
+    service._calendar_cache = FULL_EXCHANGE_CALENDAR
     service._mews_cached_for = POST_CUTOFF_AT.date()
     artifact = _ImmutableArtifactReader(
         None,
@@ -660,7 +651,16 @@ async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
     service._scan_state.canonical_sink = service._persist_canonical_artifact_barrier
     service._repository_started = True
     service._started = True
-    canonical = _canonical_master()
+    configured_canonical = replace(
+        _canonical_master(),
+        model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
+        feature_list_sha256=service.config.strategy_dependency_hashes["models/feature_list.json"],
+        _integrity_hash="",
+    )
+    canonical = replace(
+        configured_canonical,
+        _integrity_hash=_bundle_fingerprint(configured_canonical),
+    )
     expected = service._project_canonical_v16(
         canonical,
         calendar=FULL_EXCHANGE_CALENDAR,
@@ -678,27 +678,53 @@ async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
     monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
     compute_entered = asyncio.Event()
     release_compute = asyncio.Event()
-    compute_calls = 0
+    v16_compute_calls = 0
+    v20_compute_calls = 0
     state_before = repository.state
 
-    async def one_canonical_computation(
+    async def blocked_v16_computation(
         _state: Any,
         requested: date,
         *_args: Any,
         **_kwargs: Any,
     ) -> Any:
-        nonlocal compute_calls
+        nonlocal v16_compute_calls
         assert requested == POST_CUTOFF_AT.date()
-        compute_calls += 1
+        v16_compute_calls += 1
         compute_entered.set()
         await release_compute.wait()
         return canonical
 
+    async def independent_v20_computation(
+        _state: Any,
+        requested: date,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        nonlocal v20_compute_calls
+        assert requested == POST_CUTOFF_AT.date()
+        v20_compute_calls += 1
+        return canonical
+
+    async def frozen_inputs(_context: Any) -> Any:
+        return SimpleNamespace(
+            early_data_seed={},
+            universe=tuple(sorted(canonical.universe)),
+            clean_boards={},
+            prev_closes={},
+            history_raw={},
+            names={},
+            calendar=FULL_EXCHANGE_CALENDAR,
+            prior_daily={},
+            st_eligible_codes=tuple(sorted(canonical.universe)),
+        )
+
     async def legacy_scan_duplicate(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("manual artifact recovery must not use the legacy scan path")
 
-    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", one_canonical_computation)
-    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", one_canonical_computation)
+    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", blocked_v16_computation)
+    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", independent_v20_computation)
+    monkeypatch.setattr(service, "_historical_canonical_inputs", frozen_inputs)
     monkeypatch.setattr(scan_module, "run_v16_scan", legacy_scan_duplicate)
 
     canonical_owner = asyncio.create_task(
@@ -727,12 +753,14 @@ async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
         raise AssertionError("manual trigger did not probe the missing durable artifact")
 
     assert coordinator.inflight[POST_CUTOFF_AT.date()] is master
-    assert manual_waiter.done() is False
-    release_compute.set()
     result = await asyncio.wait_for(manual_waiter, timeout=2.0)
+    assert coordinator.inflight[POST_CUTOFF_AT.date()] is master
+    assert master.done() is False
+    release_compute.set()
     await canonical_owner
 
-    assert compute_calls == 1
+    assert v16_compute_calls == 1
+    assert v20_compute_calls == 1
     assert len(artifact.save_calls) == 1
     assert artifact.record is not None
     expected_load = (
@@ -740,9 +768,8 @@ async def test_post_cutoff_manual_route_miss_joins_one_canonical_master(
         POST_CUTOFF_AT.date(),
         "V16_CANONICAL_MASTER_V1",
     )
-    assert len(artifact.load_calls) == 4
-    assert artifact.load_calls[0] == expected_load
-    assert artifact.load_calls[-1] == expected_load
+    assert len(artifact.load_calls) >= 2
+    assert set(artifact.load_calls) == {expected_load}
     assert result["current_v16_snapshot_hash"] == expected.snapshot_hash
     assert result["symbols"] == expected.snapshot["symbols"]
     assert result["non_actionable"] is True
@@ -863,7 +890,7 @@ class CutoffRepository:
         return []
 
 
-async def test_cutoff_action_waiter_cancellation_shields_canonical_master_and_sink(
+async def test_cutoff_waits_for_started_calculation_then_applies_fresh_clock_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = CutoffRepository()
@@ -880,55 +907,46 @@ async def test_cutoff_action_waiter_cancellation_shields_canonical_master_and_si
     service._stop_event.clear()
     now = datetime.combine(TRADE_DATE, time(9, 39, 59, 990000), tzinfo=TZ)
     service._clock = lambda: now
-    compute_entered = asyncio.Event()
-    release_compute = asyncio.Event()
-    sink_entered = asyncio.Event()
-    release_sink = asyncio.Event()
-    calls = 0
+    calculation_entered = asyncio.Event()
+    release_calculation = asyncio.Event()
+    cutoff_calls: list[datetime] = []
 
-    async def blocked_compute(_state: Any, requested: date, *_args: Any, **_kwargs: Any) -> Any:
-        nonlocal calls
+    async def blocked_run_once(
+        sampled: datetime,
+        *,
+        include_exit_cycles: bool,
+        include_outbox_recovery: bool,
+    ) -> None:
+        assert sampled < CUTOFF
+        assert include_exit_cycles is False
+        assert include_outbox_recovery is False
+        calculation_entered.set()
+        await release_calculation.wait()
+
+    async def record_cutoff(
+        requested: date,
+        *,
+        now: datetime,
+    ) -> bool:
         assert requested == TRADE_DATE
-        calls += 1
-        compute_entered.set()
-        await release_compute.wait()
-        return _canonical()
+        cutoff_calls.append(now)
+        return True
 
-    async def shielded_sink(_bundle: Any) -> None:
-        sink_entered.set()
-        await release_sink.wait()
-
-    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", blocked_compute)
-    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", blocked_compute)
-    monkeypatch.setattr(
-        service_module,
-        "derive_canonical_v16_universe",
-        lambda _state: (
-            None,
-            None,
-            {"board-a": (("000001", "bank"), ("600000", "bank"))},
-            ("000001", "600000"),
-        ),
-    )
-    service._scan_state.canonical_sink = shielded_sink
+    monkeypatch.setattr(service, "run_once", blocked_run_once)
+    monkeypatch.setattr(service, "_enforce_or_alert_entry_cutoff", record_cutoff)
 
     watchdog = asyncio.create_task(service._run_decision_iteration_with_cutoff(now))
-    await asyncio.wait_for(compute_entered.wait(), timeout=1.0)
+    await asyncio.wait_for(calculation_entered.wait(), timeout=1.0)
     now = datetime.combine(TRADE_DATE, time(9, 40, 0, 10000), tzinfo=TZ)
+    await asyncio.sleep(0)
+    assert watchdog.done() is False
+    release_calculation.set()
     await asyncio.wait_for(watchdog, timeout=1.0)
 
-    coordinator = service._scan_state.canonical_coordinator
-    assert coordinator is not None
-    master = coordinator.inflight[TRADE_DATE]
-    assert master.cancelled() is False
-    assert calls == 1
-    release_compute.set()
-    await asyncio.wait_for(sink_entered.wait(), timeout=1.0)
-    release_sink.set()
-    assert await asyncio.wait_for(master, timeout=1.0) == _canonical()
+    assert cutoff_calls == [now]
 
 
-async def test_stop_drains_master_detaches_sink_then_closes_repository(
+async def test_stop_does_not_detach_callbacks_from_independent_v16_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
@@ -966,5 +984,5 @@ async def test_stop_drains_master_detaches_sink_then_closes_repository(
 
     assert timeline == ["master-cancelled", "repository-closed"]
     assert repository.timeline == ["repository-closed"]
-    assert service._scan_state.canonical_sink is None
+    assert service._scan_state.canonical_sink is sink
     assert service._scan_state.canonical_coordinator is None

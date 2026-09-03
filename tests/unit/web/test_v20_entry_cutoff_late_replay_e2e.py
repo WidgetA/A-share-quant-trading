@@ -8,8 +8,6 @@ import pytest
 
 from src.data.database.v20_repository import OutboxRecord, StateRecord, sha256_json
 from src.strategy.v20.decision_engine import genesis_state
-from src.web import v15_scan_service as scan_module
-from src.web import v20_service as service_module
 from src.web.v15_scan_service import CanonicalV16ScanBundle, _bundle_fingerprint
 from src.web.v20_service import _DayContext
 from tests.unit.web.test_v20_service import (
@@ -240,7 +238,7 @@ def bundle(early_bars, computed_at):
 
 
 @pytest.mark.asyncio
-async def test_cutoff_shields_master_then_terminal_run_never_schedules_replay(monkeypatch):
+async def test_cutoff_waits_for_started_v20_calculation_and_never_schedules_replay(monkeypatch):
     repository = Repository()
     historical_client = HistoricalClient()
     service = _service(monkeypatch, repository, historical_client)
@@ -257,126 +255,44 @@ async def test_cutoff_shields_master_then_terminal_run_never_schedules_replay(mo
     service._clock = lambda: now
     entered = asyncio.Event()
     release = asyncio.Event()
-    state = {"master": 0, "replay": 0}
-    attestation_calls = []
+    cutoff_calls: list[datetime] = []
 
-    async def master_compute(_state, requested, partial=None, **_kwargs):
-        assert requested == TRADE_DATE
-        assert not partial
-        state["master"] += 1
+    async def blocked_run_once(
+        sampled: datetime,
+        *,
+        include_exit_cycles: bool,
+        include_outbox_recovery: bool,
+    ) -> None:
+        assert sampled < datetime.combine(TRADE_DATE, time(9, 40), tzinfo=TZ)
+        assert include_exit_cycles is False
+        assert include_outbox_recovery is False
         entered.set()
         await release.wait()
-        bars = {
-            code: tuple(
-                _bar(code, label, close=10 + index / 100) for index, label in enumerate(LABELS)
-            )
-            for code in CODES
-        }
-        return bundle(bars, datetime.combine(TRADE_DATE, time(9, 40), tzinfo=TZ))
 
-    async def replay_compute(_state, requested, partial=None, **kwargs):
+    async def record_cutoff(requested: date, *, now: datetime) -> bool:
         assert requested == TRADE_DATE
-        assert partial is None
-        assert kwargs["allow_realtime_fetch"] is False
-        state["replay"] += 1
-        seed = kwargs["early_data_seed"]
-        return bundle({code: seed[code].early_bars for code in CODES}, service._aware_now())
+        cutoff_calls.append(now)
+        return True
 
-    async def compute(_state, requested, partial=None, **kwargs):
-        if kwargs.get("allow_realtime_fetch") is False:
-            return await replay_compute(_state, requested, partial, **kwargs)
-        return await master_compute(_state, requested, partial, **kwargs)
-
-    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", compute)
-    monkeypatch.setattr(service_module, "compute_canonical_v16_scan", replay_compute)
-    monkeypatch.setattr(
-        service_module,
-        "derive_canonical_v16_universe",
-        lambda _state: (
-            None,
-            None,
-            {"board-a": tuple((code, f"name-{code}") for code in CODES)},
-            CODES,
-        ),
-    )
-
-    def daygate_attestation(_project_root, canonical, trade_date, current_date):
-        attestation_calls.append((canonical, trade_date, current_date))
-        assert canonical.trade_date == TRADE_DATE
-        assert trade_date == TRADE_DATE
-        return {
-            "status": "PASS",
-            "schema_version": "v16-day-gate-attestation/v1",
-            "trade_date": TRADE_DATE.isoformat(),
-            "evidence_content_sha256": "e" * 64,
-            "frozen_at": "2026-08-31T09:39:00+08:00",
-            "evaluated_at": "2026-08-31T09:39:00+08:00",
-            "evidence_relative_path": "daygate/2026-08-31.json",
-            "limitation": {
-                "code": ("V16_DAY_GATE_EVIDENCE_ATTESTS_ORDERED_OUTPUT_NOT_FULL_READY_UNIVERSE"),
-                "text": "ordered output attestation fixture",
-            },
-        }
-
-    monkeypatch.setattr(
-        service_module,
-        "attest_post_cutoff_v16_day_gate",
-        daygate_attestation,
-    )
+    monkeypatch.setattr(service, "run_once", blocked_run_once)
+    monkeypatch.setattr(service, "_enforce_or_alert_entry_cutoff", record_cutoff)
 
     watchdog = asyncio.create_task(service._run_decision_iteration_with_cutoff(now))
     await asyncio.wait_for(entered.wait(), timeout=1.0)
     now = datetime.combine(TRADE_DATE, time(9, 40, 0, 10000), tzinfo=TZ)
-    await asyncio.wait_for(watchdog, timeout=1.0)
-    assert repository.cutoff_checks[-1] == datetime.combine(TRADE_DATE, time(9, 40), tzinfo=TZ)
-    assert context.entry_status is not None
-    assert context.entry_status.action == "INPUT_INVALID"
-    assert context.entry_status.slot_status == "FAILED"
-    assert len(repository.commit_entry_calls) == 1
-    assert repository.commit_entry_calls[0].action == "INPUT_INVALID"
-    assert repository.commit_exit_calls == []
-    assert repository.model_write_calls == []
-    terminal_status = repository.status
-    terminal_state = repository.state
-    terminal_event_ids = set(repository.events)
-    coordinator = service._scan_state.canonical_coordinator
-    assert coordinator is not None
-    master = coordinator.inflight[TRADE_DATE]
-    assert not master.done()
-    replay_probe = asyncio.create_task(
-        service._run_decision_iteration_with_cutoff(
-            datetime.combine(TRADE_DATE, time(9, 40), tzinfo=TZ)
-        )
-    )
     await asyncio.sleep(0)
+    assert watchdog.done() is False
     assert service._late_0939_replay_task is None
     release.set()
-    completed = await asyncio.wait_for(master, timeout=1.0)
-    assert state["master"] == 1
-    assert coordinator.cache[TRADE_DATE] is completed
-    await asyncio.wait_for(replay_probe, timeout=1.0)
-    # A terminal slot is final for the automatic scheduler.  Completing the
-    # shielded 09:39 master later must not schedule a retrospective selection,
-    # read/backfill raw evidence, or create another public event.
+    await asyncio.wait_for(watchdog, timeout=1.0)
+
+    assert cutoff_calls == [now]
     assert service._late_0939_replay_task is None
     assert context.late_0939_replay_completed is False
     assert context.late_0939_replay_automatic_attempts == 0
-    assert state["replay"] == 0
-    assert attestation_calls == []
     assert repository.raw_reads == []
     assert historical_client.calls == []
-    replay_alerts = [
-        event
-        for event in repository.events.values()
-        if event.event_type == "DATA_ALERT"
-        and event.semantic.get("alert_code") == "LATE_0939_REPLAY_RESULT"
-    ]
-    assert replay_alerts == []
-    assert repository.status == terminal_status
-    assert repository.state == terminal_state
-    assert set(repository.events) == terminal_event_ids
-    assert len(repository.commit_entry_calls) == 1
-    assert repository.commit_entry_calls[0].action == "INPUT_INVALID"
+    assert repository.commit_entry_calls == []
     assert repository.commit_exit_calls == []
     assert repository.model_write_calls == []
     current = asyncio.current_task()

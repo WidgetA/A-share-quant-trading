@@ -269,7 +269,7 @@ async def test_alert_persistence_failure_does_not_latch_away_the_retry(
     assert event.payload is not None
 
 
-async def test_cutoff_waiter_cancellation_shields_and_preserves_mews_master(
+async def test_cutoff_waits_for_and_preserves_started_mews_master(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _mews_repository()
@@ -287,8 +287,10 @@ async def test_cutoff_waiter_cancellation_shields_and_preserves_mews_master(
 
     service = _start_mews_service(monkeypatch, repository, _SlowSource())
     before = datetime(2026, 9, 1, 9, 39, 59, 990000, tzinfo=TZ)
-    service._clock = lambda: before
+    current = before
+    service._clock = lambda: current
     joins: list[asyncio.Task[bool]] = []
+    cutoff_calls: list[datetime] = []
     real_join = service._mews_singleflight_join
 
     async def join_master(current: datetime, *, stage: str) -> asyncio.Task[bool]:
@@ -301,23 +303,29 @@ async def test_cutoff_waiter_cancellation_shields_and_preserves_mews_master(
     async def run_once(*_args: Any, **_kwargs: Any) -> None:
         await service.ensure_mews_for_selection_trigger(before)
 
-    async def enforce_cutoff(*_args: Any, **_kwargs: Any) -> bool:
+    async def enforce_cutoff(*_args: Any, **kwargs: Any) -> bool:
+        cutoff_calls.append(kwargs["now"])
         return True
 
     monkeypatch.setattr(service, "run_once", run_once)
     monkeypatch.setattr(service, "_enforce_or_alert_entry_cutoff", enforce_cutoff)
 
-    await service._run_decision_iteration_with_cutoff(before)
+    watchdog = asyncio.create_task(service._run_decision_iteration_with_cutoff(before))
+    await asyncio.wait_for(master_started.wait(), timeout=1.0)
 
     master = service._mews_singleflight_task
     assert master is not None
     assert master.done() is False
     assert master.cancelled() is False
-    assert master_started.is_set()
+    current = datetime(2026, 9, 1, 9, 40, 0, 10000, tzinfo=TZ)
+    await asyncio.sleep(0)
+    assert watchdog.done() is False
 
     release_master.set()
+    await asyncio.wait_for(watchdog, timeout=1.0)
     assert await service.ensure_mews_for_selection_trigger(before) is True
-    assert joins == [master, master]
+    assert joins == [master]
+    assert cutoff_calls == [current]
     assert service._mews_singleflight_task is None
     assert calls == 1
     assert len(repository.payloads) == 1

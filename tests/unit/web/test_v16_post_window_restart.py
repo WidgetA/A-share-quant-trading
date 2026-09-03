@@ -478,7 +478,7 @@ async def test_existing_shared_completion_skips_scan_and_probe(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v20_probe_carries_receipt_and_exact_callback_identity(monkeypatch):
+async def test_v20_probe_carries_receipt_without_attaching_to_v16_runtime(monkeypatch):
     bundle = _frozen()
 
     class FakeStore:
@@ -515,22 +515,19 @@ async def test_v20_probe_carries_receipt_and_exact_callback_identity(monkeypatch
     service._canonical_callbacks_open = False
     service._canonical_barrier_completed_at = {}
 
-    async def reconcile() -> None:
-        return None
-
-    monkeypatch.setattr(service, "_reconcile_canonical_artifact_boundary", reconcile)
     await service._initialize_canonical_artifact_boundary()
-    attached_probe = service._canonical_artifact_probe_callback
-    assert attached_probe is not None
-    assert service._scan_state.canonical_artifact_probe is attached_probe
+    assert service._canonical_artifact_store is not None
+    assert service._canonical_callbacks_open is True
+    assert service._scan_state.canonical_artifact_probe is None
+    assert service._scan_state.canonical_sink is None
 
     service._detach_canonical_artifact_boundary()
-    assert service._canonical_artifact_probe_callback is None
+    assert service._canonical_callbacks_open is False
     assert service._scan_state.canonical_artifact_probe is None
 
 
 @pytest.mark.asyncio
-async def test_v20_foreign_probe_conflict_leaves_boundary_unchanged(monkeypatch):
+async def test_v20_private_artifact_boundary_ignores_foreign_v16_callbacks(monkeypatch):
     class StoreFactory:
         def __init__(self, _repository):
             pass
@@ -559,10 +556,9 @@ async def test_v20_foreign_probe_conflict_leaves_boundary_unchanged(monkeypatch)
     service._scan_state.canonical_sink = old_sink
     service._scan_state.canonical_artifact_probe = foreign_probe
 
-    with pytest.raises(v20_service.V20StateConflict, match="artifact probe is already owned"):
-        await service._initialize_canonical_artifact_boundary()
+    await service._initialize_canonical_artifact_boundary()
 
-    assert service._canonical_artifact_store is old_store
+    assert isinstance(service._canonical_artifact_store, StoreFactory)
     assert service._canonical_callbacks_open is True
     assert service._canonical_sink_callback is old_sink
     assert service._canonical_artifact_probe_callback is owned_probe
