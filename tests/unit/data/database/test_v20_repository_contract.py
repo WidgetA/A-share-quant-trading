@@ -1957,6 +1957,360 @@ async def test_post_commit_late_seal_cannot_mutate_the_committed_model_batch() -
     assert connection.calls[0][0] == "transaction"
 
 
+def _seal_outbox_row(
+    *,
+    seal_status: str = "PENDING",
+    payload: dict[str, object] | None = None,
+    generated_at: datetime | None = None,
+    commit_marker: int | None = None,
+) -> dict[str, object]:
+    semantic = {"action": "ENTER", "final_multiplier": 1.0}
+    return {
+        "event_id": "event-1",
+        "event_type": "ENTRY_DECISION",
+        "route_id": "route-1",
+        "official_stream_id": "official",
+        "lineage_id": "lineage-1",
+        "semantic_json": canonical_json(semantic),
+        "semantic_content_hash": sha256_json(semantic),
+        "payload_json": canonical_json(payload) if payload is not None else None,
+        "payload_hash": sha256_json(payload) if payload is not None else None,
+        "generated_at": generated_at,
+        "commit_marker": commit_marker,
+        "action_expiry_ts": datetime(2026, 8, 31, 9, 40, tzinfo=BEIJING_TZ),
+        "delivery_status": "PENDING",
+        "attempt_count": 0,
+        "seal_status": seal_status,
+    }
+
+
+def _seal_payload_builder(_record, durable_at, marker, on_time):
+    return {
+        "generated_at": durable_at.isoformat(),
+        "durable_commit_marker": marker,
+        "timeliness_status": "ON_TIME" if on_time else "LATE",
+    }
+
+
+def _pg_failure(message: str, pgcode: str | None) -> RuntimeError:
+    failure = RuntimeError(message)
+    if pgcode is not None:
+        failure.pgcode = pgcode  # type: ignore[attr-defined]
+    return failure
+
+
+class _FlakySealConnection(_FakeConnection):
+    """Fail the leading ``fetchrow`` calls with scripted errors."""
+
+    def __init__(self, *, fetchrow_errors=(), **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.fetchrow_errors = list(fetchrow_errors)
+
+    async def fetchrow(self, sql, *args):
+        if self.fetchrow_errors:
+            raise self.fetchrow_errors.pop(0)
+        return await super().fetchrow(sql, *args)
+
+
+def _record_seal_backoff(monkeypatch) -> list[float]:
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async def _recorded_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(v20_repository_module.asyncio, "sleep", _recorded_sleep)
+    return sleeps
+
+
+def _transaction_call_count(connection: _FakeConnection) -> int:
+    return len([call for call in connection.calls if call[0] == "transaction"])
+
+
+@pytest.mark.asyncio
+async def test_seal_event_retries_serialization_failure_in_a_fresh_transaction(
+    monkeypatch,
+) -> None:
+    expiry = datetime(2026, 8, 31, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FlakySealConnection(
+        fetchrow_errors=[
+            _pg_failure("could not serialize access due to concurrent update", "40001")
+        ],
+        fetchrows=[_seal_outbox_row(), {"durable_at": expiry, "marker": 7}],
+        executes=["UPDATE 1"],
+    )
+    sleeps = _record_seal_backoff(monkeypatch)
+
+    record = await _repository(connection).seal_event("event-1", _seal_payload_builder)
+
+    assert record.payload is not None
+    assert record.payload["timeliness_status"] == "LATE"
+    assert record.payload_hash == sha256_json(record.payload)
+    assert record.commit_marker == 7
+    assert _transaction_call_count(connection) == 2
+    assert sleeps == [v20_repository_module._OUTBOX_SEAL_RETRY_BACKOFF_SECONDS[0]]
+
+
+@pytest.mark.asyncio
+async def test_seal_event_serialization_failure_exhaustion_propagates(monkeypatch) -> None:
+    connection = _FlakySealConnection(
+        fetchrow_errors=[
+            _pg_failure("could not serialize access due to concurrent update", "40001")
+            for _ in range(v20_repository_module._OUTBOX_SEAL_MAX_ATTEMPTS)
+        ],
+    )
+    sleeps = _record_seal_backoff(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="could not serialize access"):
+        await _repository(connection).seal_event("event-1", _seal_payload_builder)
+
+    assert _transaction_call_count(connection) == v20_repository_module._OUTBOX_SEAL_MAX_ATTEMPTS
+    assert sleeps == list(v20_repository_module._OUTBOX_SEAL_RETRY_BACKOFF_SECONDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pgcode", ["40P01", "23505", None])
+async def test_seal_event_does_not_retry_non_serialization_failures(monkeypatch, pgcode) -> None:
+    connection = _FlakySealConnection(
+        fetchrow_errors=[_pg_failure("database rejected the seal", pgcode)],
+    )
+    sleeps = _record_seal_backoff(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="database rejected the seal"):
+        await _repository(connection).seal_event("event-1", _seal_payload_builder)
+
+    assert _transaction_call_count(connection) == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_seal_event_does_not_retry_semantic_or_cas_conflicts() -> None:
+    expiry = datetime(2026, 8, 31, 9, 40, tzinfo=BEIJING_TZ)
+    semantic_connection = _FakeConnection(
+        fetchrows=[_seal_outbox_row(), {"durable_at": expiry, "marker": 7}],
+    )
+
+    with pytest.raises(V20SemanticConflict, match="timeliness_status"):
+        await _repository(semantic_connection).seal_event(
+            "event-1",
+            lambda _record, _durable_at, _marker, _on_time: {"timeliness_status": "WRONG"},
+        )
+
+    assert _transaction_call_count(semantic_connection) == 1
+
+    cas_connection = _FakeConnection(
+        fetchrows=[
+            _seal_outbox_row(),
+            {"durable_at": expiry - timedelta(minutes=1), "marker": 7},
+        ],
+        executes=["UPDATE 0"],
+    )
+
+    with pytest.raises(V20StateConflict, match="outbox seal CAS lost"):
+        await _repository(cas_connection).seal_event("event-1", _seal_payload_builder)
+
+    assert _transaction_call_count(cas_connection) == 1
+
+
+@pytest.mark.asyncio
+async def test_seal_event_does_not_retry_cancellation() -> None:
+    connection = _FlakySealConnection(fetchrow_errors=[asyncio.CancelledError()])
+
+    with pytest.raises(asyncio.CancelledError):
+        await _repository(connection).seal_event("event-1", _seal_payload_builder)
+
+    assert _transaction_call_count(connection) == 1
+
+
+@pytest.mark.asyncio
+async def test_seal_event_returns_an_already_sealed_record_without_another_attempt() -> None:
+    payload = {
+        "generated_at": "2026-08-31T09:35:00+08:00",
+        "durable_commit_marker": 3,
+        "timeliness_status": "ON_TIME",
+    }
+    connection = _FakeConnection(
+        fetchrows=[
+            _seal_outbox_row(
+                seal_status="SEALED",
+                payload=payload,
+                generated_at=datetime(2026, 8, 31, 9, 35, tzinfo=BEIJING_TZ),
+                commit_marker=3,
+            )
+        ],
+    )
+
+    def _forbidden_builder(*_args):
+        raise AssertionError("payload builder must not run for a sealed event")
+
+    record = await _repository(connection).seal_event("event-1", _forbidden_builder)
+
+    assert record.payload == payload
+    assert record.payload_hash == sha256_json(payload)
+    assert record.commit_marker == 3
+    assert _transaction_call_count(connection) == 1
+    assert not any(call[0] == "execute" for call in connection.calls)
+
+
+class _SequencePool:
+    """Hand out a fresh fake connection per acquire, recording the order."""
+
+    def __init__(self, connections) -> None:
+        self._connections = list(connections)
+        self.acquired: list[_FakeConnection] = []
+
+    def acquire(self):
+        connection = self._connections[len(self.acquired)]
+        self.acquired.append(connection)
+        return _AsyncContext(connection)
+
+
+def _pool_repository(pool: _SequencePool) -> V20Repository:
+    repository = V20Repository(V20DatabaseConfig())
+    repository._pool = pool  # type: ignore[assignment]
+    return repository
+
+
+class _FailingCommitContext:
+    """Transaction context whose commit phase (__aexit__) raises scripted errors."""
+
+    def __init__(self, errors) -> None:
+        self._errors = errors
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, exc_type, _exc, _tb):
+        if exc_type is None and self._errors:
+            raise self._errors.pop(0)
+        return None
+
+
+class _CommitFlakySealConnection(_FakeConnection):
+    """Fail the leading transaction commits with scripted errors."""
+
+    def __init__(self, *, commit_errors=(), **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.commit_errors = list(commit_errors)
+
+    def transaction(self, **kwargs):
+        super().transaction(**kwargs)
+        return _FailingCommitContext(self.commit_errors)
+
+
+def _chained_seal_failure(link: str) -> RuntimeError:
+    inner = _pg_failure("could not serialize access due to concurrent update", "40001")
+    outer = RuntimeError("seal transaction failed")
+    if link == "cause":
+        outer.__cause__ = inner
+    else:
+        outer.__context__ = inner
+    return outer
+
+
+def test_serialization_failure_detection_walks_chains_with_cycle_protection() -> None:
+    detect = v20_repository_module._is_outbox_seal_serialization_failure
+    first = RuntimeError("outer")
+    second = RuntimeError("inner")
+    first.__cause__ = second
+    second.__context__ = first  # an exception cycle must not hang detection
+    assert not detect(first)
+    second.pgcode = "40001"  # type: ignore[attr-defined]
+    assert detect(first)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link", ["cause", "context"])
+async def test_seal_event_retries_serialization_failure_from_an_exception_chain(
+    monkeypatch, link
+) -> None:
+    expiry = datetime(2026, 8, 31, 9, 40, tzinfo=BEIJING_TZ)
+    connection = _FlakySealConnection(
+        fetchrow_errors=[_chained_seal_failure(link)],
+        fetchrows=[_seal_outbox_row(), {"durable_at": expiry, "marker": 7}],
+        executes=["UPDATE 1"],
+    )
+    sleeps = _record_seal_backoff(monkeypatch)
+
+    record = await _repository(connection).seal_event("event-1", _seal_payload_builder)
+
+    assert record.commit_marker == 7
+    assert _transaction_call_count(connection) == 2
+    assert sleeps == [v20_repository_module._OUTBOX_SEAL_RETRY_BACKOFF_SECONDS[0]]
+
+
+@pytest.mark.asyncio
+async def test_seal_event_retries_commit_phase_failure_on_a_fresh_pool_connection(
+    monkeypatch,
+) -> None:
+    expiry = datetime(2026, 8, 31, 9, 40, tzinfo=BEIJING_TZ)
+    first = _CommitFlakySealConnection(
+        commit_errors=[_pg_failure("could not serialize access due to concurrent update", "40001")],
+        fetchrows=[_seal_outbox_row(), {"durable_at": expiry, "marker": 7}],
+        executes=["UPDATE 1"],
+    )
+    second = _FakeConnection(
+        fetchrows=[_seal_outbox_row(), {"durable_at": expiry, "marker": 7}],
+        executes=["UPDATE 1"],
+    )
+    pool = _SequencePool([first, second])
+    sleeps = _record_seal_backoff(monkeypatch)
+
+    record = await _pool_repository(pool).seal_event("event-1", _seal_payload_builder)
+
+    assert record.commit_marker == 7
+    assert pool.acquired == [first, second]
+    assert _transaction_call_count(first) == 1
+    assert _transaction_call_count(second) == 1
+    assert all(
+        "serializable" in call[1]
+        for connection in (first, second)
+        for call in connection.calls
+        if call[0] == "transaction"
+    )
+    assert sleeps == [v20_repository_module._OUTBOX_SEAL_RETRY_BACKOFF_SECONDS[0]]
+
+
+@pytest.mark.asyncio
+async def test_seal_event_retry_returns_an_already_sealed_row_without_rebuilding(
+    monkeypatch,
+) -> None:
+    payload = {
+        "generated_at": "2026-08-31T09:35:00+08:00",
+        "durable_commit_marker": 3,
+        "timeliness_status": "ON_TIME",
+    }
+    first = _FlakySealConnection(
+        fetchrow_errors=[
+            _pg_failure("could not serialize access due to concurrent update", "40001")
+        ]
+    )
+    second = _FakeConnection(
+        fetchrows=[
+            _seal_outbox_row(
+                seal_status="SEALED",
+                payload=payload,
+                generated_at=datetime(2026, 8, 31, 9, 35, tzinfo=BEIJING_TZ),
+                commit_marker=3,
+            )
+        ],
+    )
+    pool = _SequencePool([first, second])
+    _record_seal_backoff(monkeypatch)
+
+    def _forbidden_builder(*_args):
+        raise AssertionError("payload builder must not run for a sealed event")
+
+    record = await _pool_repository(pool).seal_event("event-1", _forbidden_builder)
+
+    assert record.payload == payload
+    assert record.payload_hash == sha256_json(payload)
+    assert record.commit_marker == 3
+    assert pool.acquired == [first, second]
+    assert not any(call[0] == "execute" for call in second.calls)
+
+
 @pytest.mark.asyncio
 async def test_reference_lock_is_exactly_idempotent_and_profile_bound() -> None:
     snapshot_hash = "b" * 64

@@ -54,6 +54,33 @@ _BOOTSTRAP_CHECKPOINT_SCHEMA = "v20-bootstrap-checkpoint/v3"
 _BOOTSTRAP_BATCH_ID_PROFILE = "V20_BOOTSTRAP_TARGET_BATCH_ID_V1"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _OUTBOX_002_CHECKSUM_DECLARATION = re.compile(r"migration_checksum text := '[^']*';")
+_OUTBOX_SEAL_SERIALIZATION_SQLSTATE = "40001"
+_OUTBOX_SEAL_MAX_ATTEMPTS = 3
+_OUTBOX_SEAL_RETRY_BACKOFF_SECONDS = (0.05, 0.1)
+
+
+def _is_outbox_seal_serialization_failure(exc: BaseException) -> bool:
+    """Recognize only PostgreSQL serialization failures (SQLSTATE 40001).
+
+    The server error may surface underneath driver or caller wrappers, so the
+    ``__cause__``/``__context__`` chains are searched as well; a visited set
+    keeps pathological exception cycles from hanging the retry decision.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        code = getattr(current, "pgcode", None) or getattr(current, "sqlstate", None)
+        if code == _OUTBOX_SEAL_SERIALIZATION_SQLSTATE:
+            return True
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
 
 
 def _outbox_002_contract_checksum(standalone: str) -> str:
@@ -3297,7 +3324,35 @@ class V20Repository:
         event_id: str,
         payload_builder: Callable[[OutboxRecord, datetime, int, bool], Mapping[str, Any]],
     ) -> OutboxRecord:
-        """Seal an outbox event using a clock sampled after core commit visibility."""
+        """Seal an outbox event using a clock sampled after core commit visibility.
+
+        A transient PostgreSQL serialization failure (SQLSTATE 40001) is
+        retried in a fresh pool connection and serializable transaction with a
+        tiny bounded backoff, so a concurrent-commit race does not surface as a
+        seal failure.  The 40001 is recognized anywhere on the exception
+        ``__cause__``/``__context__`` chain, including a failure raised while
+        committing the transaction.  A retry that finds the row already sealed
+        returns it unchanged.  Semantic and CAS conflicts, arbitrary errors,
+        and cancellation are never retried; exhaustion re-raises the last
+        failure unchanged.
+        """
+        for attempt in range(_OUTBOX_SEAL_MAX_ATTEMPTS):
+            try:
+                return await self._seal_event_once(event_id, payload_builder)
+            except Exception as exc:
+                if attempt + 1 >= _OUTBOX_SEAL_MAX_ATTEMPTS or not (
+                    _is_outbox_seal_serialization_failure(exc)
+                ):
+                    raise
+                await asyncio.sleep(_OUTBOX_SEAL_RETRY_BACKOFF_SECONDS[attempt])
+        raise AssertionError("unreachable outbox seal retry loop")
+
+    async def _seal_event_once(
+        self,
+        event_id: str,
+        payload_builder: Callable[[OutboxRecord, datetime, int, bool], Mapping[str, Any]],
+    ) -> OutboxRecord:
+        """Attempt one seal inside a single serializable transaction."""
         async with self.pool.acquire() as connection:
             async with connection.transaction(isolation="serializable"):
                 row = await connection.fetchrow(
