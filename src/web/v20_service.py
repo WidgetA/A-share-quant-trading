@@ -3427,9 +3427,9 @@ class V20Service:
             self._last_success_at = current
             return
         try:
-            # Raw market collection is independent of the previous state and
-            # mature-shadow gates.  It must run from 09:15/09:31 even while a
-            # D3 HEALTH label or a missed-slot predecessor is still pending.
+            # Trigger-side entry housekeeping is independent of the previous
+            # state and mature-shadow gates.  Its own 09:39 boundary decides
+            # when the independent MEWS repair may be scheduled.
             await self._run_phase_isolated(
                 context,
                 current,
@@ -7415,7 +7415,7 @@ class V20Service:
         context: _DayContext,
         now: datetime,
     ) -> None:
-        """Prewarm and persist early (<=09:39) facts without consuming state."""
+        """Schedule the independent MEWS repair without precomputing selection."""
 
         if callable(getattr(self._repository, "get_entry_status", None)):
             await self._refresh_entry_status(context)
@@ -7423,60 +7423,9 @@ class V20Service:
             return
         wall = now.timetz().replace(tzinfo=None)
         if (
-            wall < self.config.clock.prewarm
+            wall < time.fromisoformat(self.config.clock.decision_bar_label)
             or wall >= self.config.clock.decision_finalization_deadline
         ):
-            return
-        if context.prewarmed is None:
-            try:
-                context.last_phase = "PREWARMING"
-                prewarmed = await asyncio.wait_for(
-                    self._scan_pipeline.prewarm(
-                        context.trade_date,
-                        calendar=context.calendar,
-                    ),
-                    timeout=PREWARM_ATTEMPT_TIMEOUT_SECONDS,
-                )
-                self._verify_prewarm_dependencies(prewarmed)
-                context.prewarmed = prewarmed
-                context.collector = V20EarlyBarCollector(
-                    context.trade_date,
-                    prewarmed.universe_codes,
-                )
-                context.breadth_collector = V20EarlyBarCollector(
-                    context.trade_date,
-                    prewarmed.breadth_codes,
-                )
-                context.collector_created_at = self._aware_now()
-                context.last_phase = "COLLECTING_0939"
-            except Exception as exc:
-                context.last_phase = "PREWARM_RETRY"
-                context.last_entry_failure_detail = f"PREWARM_RETRY: {type(exc).__name__}: {exc}"
-                self._record_lane_error(
-                    "decision",
-                    f"PREWARM_RETRY: {type(exc).__name__}: {exc}",
-                    now,
-                )
-                logger.warning("V20 prewarm will retry: %s", exc)
-
-        if self.config.clock.minute_collection_start <= wall < self.config.clock.publish_deadline:
-            try:
-                await self._poll_entry_market(context, now)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                context.last_phase = "ENTRY_MARKET_RETRY"
-                context.last_entry_failure_detail = (
-                    f"ENTRY_MARKET_RETRY: {type(exc).__name__}: {exc}"
-                )
-                self._record_lane_error(
-                    "decision",
-                    f"ENTRY_MARKET_RETRY: {type(exc).__name__}: {exc}",
-                    now,
-                )
-                logger.warning("V20 entry market collection will retry: %s", exc)
-
-        if wall < time.fromisoformat(self.config.clock.decision_bar_label):
             return
         # MEWS is deliberately not an entry input.  Kick its independent
         # singleflight, then leave the complete V16 -> V20 calculation to
@@ -7704,9 +7653,9 @@ class V20Service:
             )
             return
 
-        # The collection phase is also invoked independently before maturity
-        # and predecessor reconciliation.  Repeating it here is idempotent and
-        # covers direct unit/manual invocations of the decision phase.
+        # Trigger-side MEWS repair is also invoked independently before
+        # maturity and predecessor reconciliation.  Repeating the idempotent
+        # check here covers direct unit/manual invocations of the decision lane.
         await self._run_entry_collection_cycle(context, now)
 
         if (

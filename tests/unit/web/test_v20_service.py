@@ -2059,33 +2059,35 @@ async def test_resource_waiter_cancellation_does_not_cancel_owner() -> None:
 async def test_entry_collection_does_not_run_the_selection_calculation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def bomb(*_args: object, **_kwargs: object):
+    forbidden_calls: list[str] = []
+
+    async def bomb(*_args: object, **_kwargs: object):
+        forbidden_calls.append("legacy_scan_or_realtime_collection")
         raise AssertionError("old V20 scan path must not run")
 
     trade_date = date(2026, 8, 31)
-    service = V20Service.__new__(V20Service)
-    service._scan_state = V15ScanState(
-        realtime_client=SimpleNamespace(batch_get_minute_history=bomb)
-    )
 
     async def get_entry_status(*_args: object, **_kwargs: object) -> None:
         return None
 
     repository = SimpleNamespace(get_entry_status=get_entry_status)
-    service._repository = repository
-    # Today's MEWS cache is already present, so the cycle skips the join.
-    service._mews_cached_for = trade_date
-    service._clock = lambda: datetime(2026, 8, 31, 9, 39, 30, tzinfo=TZ)
-    service.config = SimpleNamespace(
-        official_stream_id="stream",
-        clock=SimpleNamespace(
-            prewarm=time(9, 30),
-            minute_collection_start=time(9, 31),
-            decision_bar_label="09:39",
-            publish_deadline=time(9, 40),
-            decision_finalization_deadline=time(9, 45),
-        ),
+    service = _service(
+        monkeypatch,
+        repository,
+        client=SimpleNamespace(batch_get_minute_history=bomb),
     )
+    assert not hasattr(service, "_scan_pipeline")
+    # Install a tripwire after real construction.  The assertion below catches
+    # a forbidden call even if production accidentally wraps it in a broad
+    # ``except Exception`` again.
+    service._scan_pipeline = SimpleNamespace(prewarm=bomb)  # type: ignore[attr-defined]
+    mews_triggers: list[datetime] = []
+    monkeypatch.setattr(
+        service,
+        "kick_mews_for_selection_trigger",
+        lambda observed_at: mews_triggers.append(observed_at),
+    )
+    service._mews_cached_for = None
     context = _DayContext(
         trade_date=trade_date,
         calendar=(
@@ -2095,14 +2097,19 @@ async def test_entry_collection_does_not_run_the_selection_calculation(
             date(2026, 9, 2),
         ),
     )
-    service._scan_pipeline = SimpleNamespace(prewarm=bomb)
-    service._record_lane_error = lambda *_args: None
 
-    await service._run_entry_collection_cycle(context, datetime(2026, 8, 31, 9, 31, tzinfo=TZ))
+    before_decision_bar = datetime(2026, 8, 31, 9, 31, tzinfo=TZ)
+    at_decision_bar = datetime(2026, 8, 31, 9, 39, tzinfo=TZ)
+    await service._run_entry_collection_cycle(context, before_decision_bar)
     assert context.canonical_bundle is None
+    assert mews_triggers == []
 
-    await service._run_entry_collection_cycle(context, datetime(2026, 8, 31, 9, 39, tzinfo=TZ))
+    await service._run_entry_collection_cycle(context, at_decision_bar)
     assert context.canonical_bundle is None
+    assert forbidden_calls == []
+    assert context.last_entry_failure_detail is None
+    assert context.last_phase == "WAITING"
+    assert mews_triggers == [at_decision_bar]
 
 
 @pytest.mark.asyncio

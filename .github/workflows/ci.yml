@@ -37,8 +37,6 @@ jobs:
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
-    # Allow type errors for now (gradual type adoption)
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -122,7 +120,7 @@ jobs:
           --tb=short
 
   build-and-push:
-    needs: [lint, test, postgres-integration]
+    needs: [lint, typecheck, test, postgres-integration]
     # Only run when pushing to main AND ACR secrets are configured
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
     runs-on: ubuntu-latest
