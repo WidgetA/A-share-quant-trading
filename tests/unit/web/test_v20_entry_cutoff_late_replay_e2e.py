@@ -8,7 +8,7 @@ import pytest
 
 from src.data.database.v20_repository import OutboxRecord, StateRecord, sha256_json
 from src.strategy.v20.decision_engine import genesis_state
-from src.web.v15_scan_service import CanonicalV16ScanBundle, _bundle_fingerprint
+from src.web.v20_canonical_selection import CanonicalV16ScanBundle, _bundle_fingerprint
 from src.web.v20_service import _DayContext
 from tests.unit.web.test_v20_service import (
     TZ,

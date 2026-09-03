@@ -22,11 +22,7 @@ from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import CompletedRolling, genesis_state, prepare_entry
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
 from src.strategy.v20.runtime_config import load_v20_runtime_config
-from src.web.v15_scan_service import (
-    V15ScanState,
-    _build_v16_recommendation_payload,
-    _restore_canonical_artifact,
-)
+from src.web.v20_canonical_selection import _build_v16_recommendation_payload
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_v16_canonical_artifact import (
     PORTABLE_FROZEN_V16_SCHEMA_V1,
@@ -337,17 +333,8 @@ def test_v2_restart_restores_the_exact_computed_legacy_projection() -> None:
             canonical_integrity_hash=CANONICAL_INTEGRITY_HASH,
         )
     )
-    state = V15ScanState(today_recommendation={"stock_code": "stale"})
-
-    _restore_canonical_artifact(
-        state,
-        D0,
-        hydrated.bundle,
-        datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
-    )
-
-    assert state.today_recommendation == expected
-    assert state.today_recommendation is not hydrated.bundle.legacy_recommendation
+    assert dict(hydrated.bundle.legacy_recommendation or {}) == expected
+    assert hydrated.bundle.legacy_recommendation is not original.legacy_recommendation
 
 
 def test_encode_rejects_legacy_projection_different_from_canonical_stock_data() -> None:

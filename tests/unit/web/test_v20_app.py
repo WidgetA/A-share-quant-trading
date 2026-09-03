@@ -145,7 +145,7 @@ import src.data.sources.local_concept_mapper as concept_module
 import src.strategy.filters.stock_filter as stock_filter_module
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.runtime_config import V20RouteBinding, load_v20_runtime_config
-from src.web.v15_scan_service import V15ScanState
+from src.web.v20_canonical_selection import V20CanonicalSelectionState
 from src.web.v20_app import create_v20_app
 from src.web.v20_service import V20Service, _cleanup_v20_scan_resources, _init_v20_scan_resources
 
@@ -278,7 +278,7 @@ route = SimpleNamespace(
     is_configured=lambda: True,
 )
 repository = FakeRepository()
-scan_state = V15ScanState(fundamentals_db=FakeFundamentals())
+scan_state = V20CanonicalSelectionState(fundamentals_db=FakeFundamentals())
 service = V20Service(
     config=config,
     repository=repository,

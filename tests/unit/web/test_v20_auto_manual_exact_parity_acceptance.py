@@ -33,8 +33,8 @@ from src.strategy.v20.rolling7_market_health import (
     make_batch,
 )
 from src.strategy.v20.runtime_config import load_v20_runtime_config
-from src.web.v15_scan_service import (
-    V15ScanState,
+from src.web.v20_canonical_selection import (
+    V20CanonicalSelectionState,
     _CanonicalV16Coordinator,
 )
 from src.web.v20_routes import _dispatch_manual_trigger
@@ -465,7 +465,9 @@ def _service_and_artifact(
     service = V20Service(
         config=config,
         repository=repository,
-        scan_state=V15ScanState(initialized=True, realtime_client=_NoRealtimeFallback()),
+        scan_state=V20CanonicalSelectionState(
+            initialized=True, realtime_client=_NoRealtimeFallback()
+        ),
         artifacts=artifacts,
         publisher=SimpleNamespace(),
         routes={},

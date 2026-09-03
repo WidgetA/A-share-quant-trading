@@ -23,7 +23,7 @@ from src.strategy.v16_day_gate_shadow import (
     prepared_to_metadata,
 )
 from src.web import v20_v16_daygate_attestation as attestation
-from src.web.v15_scan_service import (
+from src.web.v20_canonical_selection import (
     CanonicalV16ScanBundle,
     _build_v16_recommendation_payload,
 )

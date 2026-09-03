@@ -389,7 +389,7 @@ def _legacy_recommendation_from_live_bundle(
 ) -> dict[str, Any] | None:
     """Freeze the exact legacy payload while full canonical stock data exists."""
 
-    from src.web.v15_scan_service import _build_v16_recommendation_payload
+    from src.web.v20_canonical_selection import _build_v16_recommendation_payload
 
     try:
         return _build_v16_recommendation_payload(

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from src.strategy.v16_day_gate_evidence import read_v16_day_gate_evidence
 from src.strategy.v16_day_gate_shadow import SNAPSHOT_SCHEMA_VERSION, load_shadow_config
-from src.web.v15_scan_service import (
+from src.web.v20_canonical_selection import (
     CanonicalV16ScanBundle,
     _build_v16_recommendation_payload,
 )

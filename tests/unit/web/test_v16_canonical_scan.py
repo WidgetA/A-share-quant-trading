@@ -23,7 +23,7 @@ from src.data.clients.tushare_realtime import (
     tushare_minute_bars_to_early_market_data,
 )
 from src.strategy.strategies.v16_scanner import V16Scanner as RealV16Scanner
-from src.web import v15_scan_service
+from src.web import v20_canonical_selection as v15_scan_service
 
 
 def _clean_board(*codes: str) -> list[tuple[str, str]]:
@@ -212,11 +212,9 @@ def fakes(monkeypatch):
             }
         )
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", fake_calendar)
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", record_top10)
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_error", record_error)
+    monkeypatch.setattr(v15_scan_service, "get_v20_trade_calendar", fake_calendar)
+    monkeypatch.setattr(v15_scan_service, "_notify_canonical_error", record_error)
     monkeypatch.setattr(v15_scan_service, "_refresh_top10_names", no_refresh)
-    monkeypatch.setattr(v15_scan_service, "_schedule_v16_day_gate_shadow", record_daygate)
     monkeypatch.setattr(
         "src.strategy.v16_day_gate_shadow.freeze_v16_day_gate_runtime",
         lambda *args, **kwargs: object(),
@@ -227,7 +225,7 @@ def fakes(monkeypatch):
     )
 
     rt = FakeRTClient()
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=rt,
         fundamentals_db=FakeFDB(),
@@ -450,7 +448,7 @@ async def test_cross_date_singleflight_keeps_running_master_and_shares_waiters(
                 )
             return {"tables": tables}
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=TradeDateRTClient(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -477,7 +475,7 @@ async def test_cross_date_singleflight_keeps_running_master_and_shares_waiters(
         compute_calls[trade_date] = compute_calls.get(trade_date, 0) + 1
         return await real_compute(scan_state, trade_date, **kwargs)
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", calendar_with_both_dates)
+    monkeypatch.setattr(v15_scan_service, "get_v20_trade_calendar", calendar_with_both_dates)
     monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", SequenceGatedScanner)
     monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", counting_compute)
 
@@ -715,7 +713,7 @@ async def test_cleanup_cancels_durable_master_and_clears_pending(fakes):
     coordinator = fakes.state.canonical_coordinator
     master = coordinator.inflight[fakes.trade_date]
 
-    await asyncio.wait_for(v15_scan_service.cleanup_scan_resources(fakes.state), timeout=1)
+    await asyncio.wait_for(v15_scan_service.cleanup_v20_selection_resources(fakes.state), timeout=1)
 
     assert master.cancelled() is True
     assert coordinator.pending_persist == {}
@@ -749,7 +747,7 @@ async def test_cached_canonical_accessor_returns_isolated_verified_master(fakes,
 async def test_cached_canonical_accessor_reports_missing_and_inflight_without_cold_start(
     fakes, monkeypatch
 ):
-    empty_state = v15_scan_service.V15ScanState()
+    empty_state = v15_scan_service.V20CanonicalSelectionState()
     missing = await v15_scan_service.get_cached_canonical_v16(empty_state, fakes.trade_date)
     assert missing.status is v15_scan_service.CachedCanonicalV16Status.NOT_CACHED
     assert missing.available is False
@@ -962,7 +960,7 @@ async def test_prev_close_history_board_changes_alter_input_hash(fakes, monkeypa
     """Changing selection-relevant inputs changes input_hash; completion order does not."""
 
     def make_state(adapter=None):
-        state = v15_scan_service.V15ScanState(
+        state = v15_scan_service.V20CanonicalSelectionState(
             initialized=True,
             realtime_client=type(fakes.rt)(),
             fundamentals_db=fakes.state.fundamentals_db,
@@ -1135,7 +1133,7 @@ async def test_insertion_order_does_not_affect_input_hash(fakes, monkeypatch):
     async def prev_for_codes(ts_date):  # noqa: ARG001
         return {code: 10.5 for code in codes}
 
-    state_a = v15_scan_service.V15ScanState(
+    state_a = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=fakes.rt,
         fundamentals_db=fakes.state.fundamentals_db,
@@ -1148,7 +1146,7 @@ async def test_insertion_order_does_not_affect_input_hash(fakes, monkeypatch):
     state_a.realtime_client.fetch_prev_closes = prev_for_codes
     bundle_a = await v15_scan_service.compute_canonical_v16_scan(state_a, fakes.trade_date)
 
-    state_b = v15_scan_service.V15ScanState(
+    state_b = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=fakes.rt,
         fundamentals_db=fakes.state.fundamentals_db,
@@ -1234,7 +1232,7 @@ async def test_shared_task_cancellation_no_loop_callback_error_and_retry(fakes):
 
 @pytest.mark.asyncio
 async def test_cleanup_cancels_and_awaits_coordinator_tasks(fakes):
-    """cleanup_scan_resources must cancel/await in-flight compute before stopping resources."""
+    """V20 cleanup cancels and awaits in-flight compute before stopping resources."""
     gate = asyncio.Event()
     fakes.scanner.gate = gate
 
@@ -1243,7 +1241,7 @@ async def test_cleanup_cancels_and_awaits_coordinator_tasks(fakes):
     )
     await asyncio.sleep(0.05)
 
-    await v15_scan_service.cleanup_scan_resources(fakes.state)
+    await v15_scan_service.cleanup_v20_selection_resources(fakes.state)
 
     assert task.cancelled()
     assert fakes.state.canonical_coordinator is None
@@ -1546,44 +1544,13 @@ async def test_partial_evidence_via_coordinator(fakes, monkeypatch):
     assert daily_calls == [(fakes.trade_date - timedelta(days=1)).strftime("%Y%m%d")]
 
 
-@pytest.mark.asyncio
-async def test_not_ready_deadline_clears_recommendation_and_alerts_once(fakes):
-    """At 10:00, NOT_READY becomes a single fatal audit alert and clears recs."""
-    fakes.state.today_recommendation = {"stock_code": "stale"}
-    deadline = datetime.combine(fakes.trade_date, datetime.min.time()).replace(
-        hour=10, minute=1, tzinfo=BEIJING_TZ
-    )
-    evidence = v15_scan_service._CanonicalV16NotReadyEvidence(
-        fakes.trade_date,
-        datetime.combine(fakes.trade_date, datetime.min.time()).replace(
-            hour=9,
-            minute=59,
-            tzinfo=BEIJING_TZ,
-        ),
-    )
+def test_v20_canonical_state_has_no_v16_runtime_publication_fields(fakes):
+    """Canonical computation cannot mutate V16 recommendation/scheduler state."""
 
-    await v15_scan_service._fail_not_ready_deadline(
-        fakes.state,
-        fakes.trade_date,
-        deadline,
-        evidence,
-    )
-
-    assert fakes.state.today_recommendation is None
-    assert fakes.state.scan_error is not None
-    assert len(fakes.error_calls) == 1
-    title, detail = fakes.error_calls[0]
-    assert title == "9:39数据未就绪截止"
-    assert "10:01" in detail
-
-    # Second call is deduplicated.
-    await v15_scan_service._fail_not_ready_deadline(
-        fakes.state,
-        fakes.trade_date,
-        deadline,
-        evidence,
-    )
-    assert len(fakes.error_calls) == 1
+    assert not hasattr(fakes.state, "today_recommendation")
+    assert not hasattr(fakes.state, "scan_error")
+    assert not hasattr(fakes.state, "scan_done_date")
+    assert not hasattr(fakes.state, "scheduler_task")
 
 
 @pytest.mark.asyncio
@@ -1660,7 +1627,7 @@ async def test_cancellation_of_waiter_does_not_duplicate_fatal_alert(fakes, monk
         fakes.error_calls.append((title, detail))
         await gate.wait()
 
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_error", slow_error)
+    monkeypatch.setattr(v15_scan_service, "_notify_canonical_error", slow_error)
 
     async def slow_empty(codes, expected_trade_date=None):  # noqa: ARG001
         await asyncio.sleep(0.05)
@@ -1822,7 +1789,7 @@ async def test_clean_board_and_member_order_are_canonicalized(fakes, monkeypatch
             "get_universe",
             lambda self: (order, set(codes)),
         )
-        state = v15_scan_service.V15ScanState(
+        state = v15_scan_service.V20CanonicalSelectionState(
             initialized=True,
             realtime_client=fakes.rt,
             fundamentals_db=fakes.state.fundamentals_db,
@@ -1950,7 +1917,7 @@ async def test_input_hash_covers_stock_data_scalars(fakes, monkeypatch):
             for code in codes
         }
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=fakes.rt,
         fundamentals_db=fakes.state.fundamentals_db,
@@ -2072,7 +2039,7 @@ async def test_real_scanner_st_evidence_changes_input_hash_once(fakes, monkeypat
         "src.strategy.strategies.v16_scanner.V16Scanner",
         lambda *_args, **_kwargs: install({"600000"}),
     )
-    filtered_state = v15_scan_service.V15ScanState(
+    filtered_state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=type(fakes.rt)(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -2127,7 +2094,7 @@ async def test_history_normalization_before_scanner(fakes, monkeypatch):
             }
 
     def state(adapter):
-        result = v15_scan_service.V15ScanState(
+        result = v15_scan_service.V20CanonicalSelectionState(
             initialized=True,
             realtime_client=type(fakes.rt)(),
             fundamentals_db=fakes.state.fundamentals_db,
@@ -2232,7 +2199,7 @@ async def test_old_stock_short_timestamp_history_fails_structured(fakes, monkeyp
                 ]
             }
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=type(fakes.rt)(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -2297,7 +2264,7 @@ async def test_history_none_nan_np_timestamp_are_canonicalized(fakes, monkeypatc
     async def prev_for_weird(ts_date):  # noqa: ARG001
         return {"600000": 10.5}
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=fakes.rt,
         fundamentals_db=fakes.state.fundamentals_db,
@@ -2485,7 +2452,7 @@ async def test_history_none_values_are_skipped_successfully(fakes, monkeypatch):
                 ]
             }
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=type(fakes.rt)(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -2541,7 +2508,7 @@ async def test_history_nan_inf_nat_structured_error_has_notification(fakes, monk
                     ]
                 }
 
-        state = v15_scan_service.V15ScanState(
+        state = v15_scan_service.V20CanonicalSelectionState(
             initialized=True,
             realtime_client=type(fakes.rt)(),
             fundamentals_db=fakes.state.fundamentals_db,
@@ -2695,7 +2662,7 @@ async def _compute_whole_ticket_history_case(fakes, monkeypatch, total_tickets, 
                 )
             return {"tables": tables}
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=type(fakes.rt)(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -2798,7 +2765,7 @@ async def test_full_compute_rejects_mixed_none_and_non_finite_old_history(
                 ]
             }
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=type(fakes.rt)(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -3010,7 +2977,7 @@ async def test_origin_low_row_history_still_builds_scanner_input(fakes, monkeypa
                 ]
             }
 
-    state = v15_scan_service.V15ScanState(
+    state = v15_scan_service.V20CanonicalSelectionState(
         initialized=True,
         realtime_client=type(fakes.rt)(),
         fundamentals_db=fakes.state.fundamentals_db,
@@ -3338,8 +3305,8 @@ async def test_seeded_historical_compute_reproduces_live_normalized_canonical_sc
 
     monkeypatch.setattr(v15_scan_service, "_refresh_top10_names", no_name_refresh)
 
-    def make_state(rt_client) -> v15_scan_service.V15ScanState:
-        return v15_scan_service.V15ScanState(
+    def make_state(rt_client) -> v15_scan_service.V20CanonicalSelectionState:
+        return v15_scan_service.V20CanonicalSelectionState(
             initialized=True,
             realtime_client=rt_client,
             fundamentals_db=_RealSeedFundamentals(),

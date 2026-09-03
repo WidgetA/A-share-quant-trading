@@ -15,7 +15,7 @@ from src.data.clients.tushare_realtime import (
     TushareQuote,
     TushareRealtimeClient,
 )
-from src.web import v15_scan_service
+from src.web import v20_canonical_selection as v15_scan_service
 
 TZ = ZoneInfo("Asia/Shanghai")
 TRADE_DATE = date(2026, 9, 1)
@@ -162,7 +162,7 @@ class VendorBudgetHarness:
         self.prev_closes = {code: 10.5 for code in codes}
         # Breadth deliberately adds a code outside the scanner ticket universe.
         self.prev_closes.setdefault("000001", 9.5)
-        self.state = v15_scan_service.V15ScanState(
+        self.state = v15_scan_service.V20CanonicalSelectionState(
             initialized=True,
             realtime_client=self.rt,
             fundamentals_db=BudgetFundamentals(),
@@ -228,7 +228,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> VendorBudgetHarness:
     async def calendar() -> list[date]:
         return list(CALENDAR)
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", calendar)
+    monkeypatch.setattr(v15_scan_service, "get_v20_trade_calendar", calendar)
     return VendorBudgetHarness(monkeypatch, codes=("600000",))
 
 
@@ -432,7 +432,7 @@ async def test_empty_calendar_override_fails_closed_without_network(
         harness.network_calls.append("trade_calendar")
         raise AssertionError("empty calendar override must not fall back to network")
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", network_bomb)
+    monkeypatch.setattr(v15_scan_service, "get_v20_trade_calendar", network_bomb)
 
     with pytest.raises(
         (v15_scan_service.CanonicalV16ScanError, RuntimeError),
@@ -474,7 +474,9 @@ async def test_cleanup_cancels_and_awaits_daily_singleflight_task(
     assert not master.done()
 
     try:
-        await asyncio.wait_for(v15_scan_service.cleanup_scan_resources(harness.state), timeout=1.0)
+        await asyncio.wait_for(
+            v15_scan_service.cleanup_v20_selection_resources(harness.state), timeout=1.0
+        )
         assert daily_task.done()
         assert daily_task.cancelled()
         assert master.done()

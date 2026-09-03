@@ -14,10 +14,10 @@ from src.data.clients.v20_market_data import ExactEarlySnapshot
 from src.strategy.lgbrank_scorer import LGBRankScorer
 from src.strategy.strategies.v16_scanner import V16Scanner, V16ScanResult, V16StockData
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
-from src.web.v15_scan_service import (
+from src.web.v20_canonical_selection import (
     BEIJING_TZ,
     LOOKBACK_DAYS,
-    V15ScanState,
+    V20CanonicalSelectionState,
     _build_stock_data,
     _fetch_history_ohlcv,
     _fetch_prev_closes,
@@ -185,7 +185,7 @@ class FrozenV16ScanBundle:
 
 
 class V20ScanPipeline:
-    def __init__(self, scan_state: V15ScanState, project_root: Any) -> None:
+    def __init__(self, scan_state: V20CanonicalSelectionState, project_root: Any) -> None:
         self._scan_state = scan_state
         self._project_root = project_root
 

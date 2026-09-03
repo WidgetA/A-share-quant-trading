@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.web.v15_scan_service as v15_scan_service
+import src.web.v20_canonical_selection as canonical_selection
 import src.web.v20_service as service_module
 from src.common.v20_feishu import V20FeishuRoute
 from src.data.clients.mews_snapshot import MewsSnapshotSourceError
@@ -59,11 +59,15 @@ from src.strategy.v20.runtime_config import (
     load_v20_runtime_config,
 )
 from src.web.v15_scan_service import (
-    CanonicalV16ScanBundle,
     V15ScanState,
-    _bundle_fingerprint,
-    _initialize_scan_resources_once,
     cleanup_scan_resources,
+)
+from src.web.v20_canonical_selection import (
+    CanonicalV16ScanBundle,
+    V20CanonicalSelectionState,
+    _bundle_fingerprint,
+    _initialize_v20_selection_resources_once,
+    cleanup_v20_selection_resources,
 )
 from src.web.v20_service import (
     FULL_EXIT_LABELS,
@@ -71,11 +75,9 @@ from src.web.v20_service import (
     V20Service,
     _bar_payload,
     _bootstrap_bundle,
-    _cleanup_embedded_v20_scan_resources,
     _cleanup_v20_scan_resources,
     _DayContext,
     _embedded_runtime_config,
-    _init_embedded_v20_scan_resources,
     _init_owned_embedded_v20_scan_resources,
     _init_v20_scan_resources,
 )
@@ -119,7 +121,7 @@ def _service(monkeypatch: pytest.MonkeyPatch, repository: Any, client: Any = Non
         config.artifact_manifest_path.parent,
         expected_manifest_sha256=config.artifact_manifest_sha256,
     )
-    scan_state = V15ScanState(initialized=True, realtime_client=client)
+    scan_state = V20CanonicalSelectionState(initialized=True, realtime_client=client)
     return V20Service(
         config=config,
         repository=repository,
@@ -890,7 +892,7 @@ def test_legacy_runtime_factory_owns_v20_resources_and_accepts_no_shared_state(
     with pytest.raises(TypeError, match="fundamentals_db"):
         V20Service.from_legacy_runtime(fundamentals_db=object())
     with pytest.raises(TypeError, match="scan_state"):
-        V20Service.from_legacy_runtime(scan_state=V15ScanState())
+        V20Service.from_legacy_runtime(scan_state=V20CanonicalSelectionState())
     assert repository_pools == [None]
 
 
@@ -1138,7 +1140,7 @@ async def test_v20_scan_resources_use_explicit_environment_token_for_all_clients
     monkeypatch.setattr(historical_module, "IQuantHistoricalAdapter", _Historical)
     monkeypatch.setattr(concept_module, "LocalConceptMapper", lambda: object())
     monkeypatch.setattr(stock_filter_module, "StockFilter", lambda _config: object())
-    state = V15ScanState(fundamentals_db=_Fundamentals())
+    state = V20CanonicalSelectionState(fundamentals_db=_Fundamentals())
 
     await _init_v20_scan_resources(state)
 
@@ -1193,9 +1195,9 @@ async def test_embedded_v20_scan_resources_use_the_same_persisted_token_path_as_
     monkeypatch.setattr(historical_module, "IQuantHistoricalAdapter", _Historical)
     monkeypatch.setattr(concept_module, "LocalConceptMapper", lambda: object())
     monkeypatch.setattr(stock_filter_module, "StockFilter", lambda _config: object())
-    state = V15ScanState(fundamentals_db=_Fundamentals())
+    state = V20CanonicalSelectionState(fundamentals_db=_Fundamentals())
 
-    await _init_embedded_v20_scan_resources(state)
+    await _init_owned_embedded_v20_scan_resources(state)
 
     assert captured == {
         "realtime": "persisted-v16-token",
@@ -1203,7 +1205,7 @@ async def test_embedded_v20_scan_resources_use_the_same_persisted_token_path_as_
     }
 
 
-async def test_embedded_cleanup_preserves_main_shared_fundamentals_pool() -> None:
+async def test_embedded_cleanup_closes_its_owned_fundamentals_pool() -> None:
     class _Realtime:
         stop_calls = 0
 
@@ -1221,21 +1223,22 @@ async def test_embedded_cleanup_preserves_main_shared_fundamentals_pool() -> Non
 
     realtime = _Realtime()
     fundamentals = _SharedFundamentals()
-    state = V15ScanState(
+    state = V20CanonicalSelectionState(
         initialized=True,
         realtime_client=realtime,
         fundamentals_db=fundamentals,
     )
 
-    await _cleanup_embedded_v20_scan_resources(state)
+    await _cleanup_v20_scan_resources(state)
 
     assert realtime.stop_calls == 1
-    assert fundamentals.close_calls == 0
+    assert fundamentals.close_calls == 1
+    assert state.fundamentals_db is None
     assert state.initialized is False
 
 
 @pytest.mark.asyncio
-async def test_v20_retry_reuses_resources_and_cleanup_enables_v16_takeover() -> None:
+async def test_v20_retry_reuses_and_cleans_only_its_own_resources() -> None:
     class Realtime:
         def __init__(self) -> None:
             self.stop_calls = 0
@@ -1252,7 +1255,7 @@ async def test_v20_retry_reuses_resources_and_cleanup_enables_v16_takeover() -> 
             self.close_calls += 1
 
     fundamentals = Fundamentals()
-    state = V15ScanState(fundamentals_db=fundamentals)
+    state = V20CanonicalSelectionState(fundamentals_db=fundamentals)
     constructions = 0
 
     async def initialize() -> None:
@@ -1261,27 +1264,19 @@ async def test_v20_retry_reuses_resources_and_cleanup_enables_v16_takeover() -> 
         state.realtime_client = realtime
         state.initialized = True
 
-    await _initialize_scan_resources_once(state, "V20", initialize)
-    await _initialize_scan_resources_once(state, "V20", initialize)
+    await _initialize_v20_selection_resources_once(state, initialize)
+    await _initialize_v20_selection_resources_once(state, initialize)
     assert constructions == 1
     assert state.resource_owner == "V20"
 
-    await cleanup_scan_resources(state, owner="V20", close_fundamentals=False)
+    await cleanup_v20_selection_resources(state)
     assert realtime.stop_calls == 1
     assert state.realtime_client is None
     assert state.resource_owner is None
 
-    replacement = Realtime()
-
-    async def initialize_v16() -> None:
-        state.realtime_client = replacement
-        state.initialized = True
-
-    await _initialize_scan_resources_once(state, "V16", initialize_v16)
-    assert state.resource_owner == "V16"
-    await cleanup_scan_resources(state, owner="V16")
-    assert replacement.stop_calls == 1
     assert fundamentals.close_calls == 1
+    assert state.fundamentals_db is None
+    assert not hasattr(state, "scheduler_task")
 
 
 @pytest.mark.asyncio
@@ -1289,7 +1284,7 @@ async def test_v20_public_initializer_retry_is_singleflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
-    state = V15ScanState(fundamentals_db=object())
+    state = V20CanonicalSelectionState(fundamentals_db=object())
     calls = 0
 
     async def initialize_once(*_args: object, **_kwargs: object) -> None:
@@ -1303,10 +1298,10 @@ async def test_v20_public_initializer_retry_is_singleflight(
     )
 
     await asyncio.gather(
-        _init_embedded_v20_scan_resources(state),
-        _init_embedded_v20_scan_resources(state),
+        _init_owned_embedded_v20_scan_resources(state),
+        _init_owned_embedded_v20_scan_resources(state),
     )
-    await _init_embedded_v20_scan_resources(state)
+    await _init_owned_embedded_v20_scan_resources(state)
 
     assert calls == 1
     assert state.resource_owner == "V20"
@@ -1656,14 +1651,7 @@ async def test_cleanup_runs_when_initialized_false_and_tasks_remain() -> None:
             self.stop_calls += 1
 
     realtime = Realtime()
-    scheduler_started = asyncio.Event()
-
-    async def scheduler() -> None:
-        scheduler_started.set()
-        await asyncio.Event().wait()
-
-    state = V15ScanState(initialized=False, realtime_client=realtime)
-    state.scheduler_task = asyncio.create_task(scheduler())
+    state = V20CanonicalSelectionState(initialized=False, realtime_client=realtime)
     canonical_started = asyncio.Event()
 
     async def canonical_compute() -> None:
@@ -1675,13 +1663,14 @@ async def test_cleanup_runs_when_initialized_false_and_tasks_remain() -> None:
         inflight={"scan": canonical_task},
         publish={},
         pending_persist={},
+        daily_tasks={},
+        daily_bars={},
+        daily_owners={},
     )
-    await asyncio.wait_for(scheduler_started.wait(), timeout=1.0)
     await asyncio.wait_for(canonical_started.wait(), timeout=1.0)
 
-    await cleanup_scan_resources(state, owner="V16")
+    await cleanup_v20_selection_resources(state)
 
-    assert state.scheduler_task is None
     assert canonical_task.cancelled() is True
     assert state.canonical_coordinator is None
     assert realtime.stop_calls == 1
@@ -1780,7 +1769,7 @@ def test_canonical_v20_projection_is_lossless_and_bypasses_old_pipeline() -> Non
     )
     service = V20Service.__new__(V20Service)
     service.config = SimpleNamespace(clock=SimpleNamespace(decision_bar_label="09:39"))
-    service._scan_state = V15ScanState(
+    service._scan_state = V20CanonicalSelectionState(
         realtime_client=Bomb(),
         historical_adapter=Bomb(),
     )
@@ -2023,7 +2012,7 @@ def _install_strict_durable_barrier(
 async def test_resource_waiter_cancellation_does_not_cancel_owner() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
-    state = V15ScanState()
+    state = V20CanonicalSelectionState()
     constructions = 0
 
     async def initialize() -> None:
@@ -2033,9 +2022,9 @@ async def test_resource_waiter_cancellation_does_not_cancel_owner() -> None:
         await release.wait()
         state.initialized = True
 
-    owner = asyncio.create_task(_initialize_scan_resources_once(state, "V20", initialize))
+    owner = asyncio.create_task(_initialize_v20_selection_resources_once(state, initialize))
     await asyncio.wait_for(started.wait(), timeout=1.0)
-    borrower = asyncio.create_task(_initialize_scan_resources_once(state, "V20", initialize))
+    borrower = asyncio.create_task(_initialize_v20_selection_resources_once(state, initialize))
     await asyncio.sleep(0)
     borrower.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -2045,6 +2034,141 @@ async def test_resource_waiter_cancellation_does_not_cancel_owner() -> None:
     await owner
     assert constructions == 1
     assert state.initialized is True
+
+
+@pytest.mark.asyncio
+async def test_v20_cleanup_serializes_replacement_init_behind_close() -> None:
+    first_started = asyncio.Event()
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    replacement_started = asyncio.Event()
+    state = V20CanonicalSelectionState()
+
+    class Resource:
+        async def stop(self) -> None:
+            close_started.set()
+            await release_close.wait()
+
+    state.realtime_client = Resource()
+
+    async def first_initializer() -> None:
+        first_started.set()
+        await asyncio.Event().wait()
+
+    async def replacement_initializer() -> None:
+        replacement_started.set()
+        state.initialized = True
+
+    owner = asyncio.create_task(_initialize_v20_selection_resources_once(state, first_initializer))
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+    first_master = state.resource_init_task
+    assert first_master is not None
+    replacements: list[asyncio.Task[None]] = []
+
+    def schedule_replacement(_finished: asyncio.Task[None]) -> None:
+        replacements.append(
+            asyncio.create_task(
+                _initialize_v20_selection_resources_once(
+                    state,
+                    replacement_initializer,
+                )
+            )
+        )
+
+    first_master.add_done_callback(schedule_replacement)
+    cleanup = asyncio.create_task(cleanup_v20_selection_resources(state))
+    await asyncio.wait_for(close_started.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+
+    assert replacements
+    assert replacement_started.is_set() is False
+    assert cleanup.done() is False
+
+    release_close.set()
+    await asyncio.wait_for(cleanup, timeout=1.0)
+    await asyncio.wait_for(replacements[0], timeout=1.0)
+    await asyncio.gather(owner, return_exceptions=True)
+
+    assert replacement_started.is_set() is True
+    assert state.initialized is True
+    assert state.resource_owner == "V20"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_v20_cleanup_callers_join_one_master(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cleanup_calls = 0
+    original_cleanup = canonical_selection._cleanup_v20_selection_resources_once
+
+    async def gated_cleanup(state: V20CanonicalSelectionState) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        entered.set()
+        await release.wait()
+        await original_cleanup(state)
+
+    monkeypatch.setattr(
+        canonical_selection,
+        "_cleanup_v20_selection_resources_once",
+        gated_cleanup,
+    )
+    state = V20CanonicalSelectionState(initialized=True, resource_owner="V20")
+    first = asyncio.create_task(cleanup_v20_selection_resources(state))
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    second = asyncio.create_task(cleanup_v20_selection_resources(state))
+    await asyncio.sleep(0)
+
+    assert cleanup_calls == 1
+    assert state.resource_cleanup_task is not None
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0)
+    assert cleanup_calls == 1
+    assert state.initialized is False
+    assert state.resource_cleanup_task is None
+
+
+@pytest.mark.asyncio
+async def test_cancelling_v20_cleanup_waiter_does_not_cancel_master() -> None:
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class Resource:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            stop_entered.set()
+            await release_stop.wait()
+
+    resource = Resource()
+    state = V20CanonicalSelectionState(
+        initialized=True,
+        resource_owner="V20",
+        realtime_client=resource,
+    )
+    waiter = asyncio.create_task(cleanup_v20_selection_resources(state))
+    await asyncio.wait_for(stop_entered.wait(), timeout=1.0)
+    master = state.resource_cleanup_task
+    assert master is not None and not master.done()
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert master.cancelled() is False
+    assert master.done() is False
+
+    release_stop.set()
+    await asyncio.wait_for(master, timeout=1.0)
+    await asyncio.sleep(0)
+    assert resource.stop_calls == 1
+    assert state.realtime_client is None
+    assert state.initialized is False
+    assert state.resource_cleanup_task is None
 
 
 @pytest.mark.asyncio
@@ -2111,14 +2235,14 @@ def test_v20_has_no_scan_state_rebinding_api() -> None:
     service = V20Service.__new__(V20Service)
     service._resources_started = False
     service._started = False
-    service._scan_state = V15ScanState(
+    service._scan_state = V20CanonicalSelectionState(
         initialized=True,
         realtime_client=realtime,
         fundamentals_db=owned_fundamentals,
         historical_adapter=historical,
         resource_owner="V20",
     )
-    foreign_v16_state = V15ScanState()
+    foreign_v16_state = V20CanonicalSelectionState()
 
     assert not hasattr(service, "bind_shared_v15_scan_state")
     assert service._scan_state is not foreign_v16_state
@@ -3024,15 +3148,15 @@ async def test_embedded_initializer_failure_preserves_shared_fundamentals_pool(
     monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
     monkeypatch.setattr(historical_module, "IQuantHistoricalAdapter", _BrokenHistorical)
     fundamentals = _SharedFundamentals()
-    state = V15ScanState(fundamentals_db=fundamentals)
+    state = V20CanonicalSelectionState(fundamentals_db=fundamentals)
 
     with pytest.raises(RuntimeError, match="historical adapter failed"):
-        await _init_embedded_v20_scan_resources(state)
+        await _init_owned_embedded_v20_scan_resources(state)
 
     assert _Realtime.instance is not None
     assert _Realtime.instance.stop_calls == 1
-    assert fundamentals.connect_calls == 0
-    assert fundamentals.close_calls == 0
+    assert fundamentals.connect_calls == 1
+    assert fundamentals.close_calls == 1
     assert state.realtime_client is None
     assert state.initialized is False
 
@@ -3078,10 +3202,10 @@ async def test_cancelling_embedded_initializer_waiter_does_not_cancel_owner(
 
     monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
     fundamentals = _SharedFundamentals()
-    state = V15ScanState(fundamentals_db=fundamentals)
-    owner = asyncio.create_task(_init_embedded_v20_scan_resources(state))
+    state = V20CanonicalSelectionState(fundamentals_db=fundamentals)
+    owner = asyncio.create_task(_init_owned_embedded_v20_scan_resources(state))
     await asyncio.wait_for(start_entered.wait(), timeout=1.0)
-    borrower = asyncio.create_task(_init_embedded_v20_scan_resources(state))
+    borrower = asyncio.create_task(_init_owned_embedded_v20_scan_resources(state))
     await asyncio.sleep(0)
 
     borrower.cancel()
@@ -3131,14 +3255,14 @@ async def test_embedded_tushare_start_failure_is_rolled_back_without_shared_pool
 
     monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
     fundamentals = _SharedFundamentals()
-    state = V15ScanState(fundamentals_db=fundamentals)
+    state = V20CanonicalSelectionState(fundamentals_db=fundamentals)
 
     with pytest.raises(RuntimeError, match="Tushare start failed"):
-        await _init_embedded_v20_scan_resources(state)
+        await _init_owned_embedded_v20_scan_resources(state)
 
     assert _Realtime.instance is not None
     assert _Realtime.instance.stop_calls == 1
-    assert fundamentals.close_calls == 0
+    assert fundamentals.close_calls == 1
     assert state.realtime_client is None
     assert state.initialized is False
 
@@ -3357,7 +3481,7 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
     service = V20Service(
         config=config,
         repository=repository,
-        scan_state=V15ScanState(),
+        scan_state=V20CanonicalSelectionState(),
         artifacts=artifacts,
         publisher=_Publisher(),
         routes={config.route_id: route},
@@ -3400,6 +3524,149 @@ async def test_enabled_start_wires_all_runtime_lanes_and_stop_releases_resources
     assert repository.closed is True
     assert service._tasks == []
     assert service.startup_stage == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_start_converges_shielded_resource_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Repository:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def connect(self) -> None:
+            return None
+
+        async def acquire_runtime_leader(self, **_kwargs: object) -> None:
+            return None
+
+        async def register_config(self, **_kwargs: object) -> None:
+            return None
+
+        async def ensure_genesis_state(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def load_state(self, lineage_id: str) -> StateRecord:
+            return StateRecord(
+                lineage_id=lineage_id,
+                revision=0,
+                state_hash="a" * 64,
+                payload={},
+            )
+
+        async def get_outbox_health(self, **_kwargs: object) -> dict[str, int]:
+            return {"delivery_error_n": 0}
+
+        async def close(self) -> None:
+            self.closed = True
+
+    connect_entered = asyncio.Event()
+    release_connect = asyncio.Event()
+
+    class Realtime:
+        def __init__(self) -> None:
+            self.start_calls = 0
+            self.stop_calls = 0
+
+        async def start(self) -> None:
+            self.start_calls += 1
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    class Fundamentals:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+            self.connect_cancelled = False
+            self.close_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+            connect_entered.set()
+            try:
+                await release_connect.wait()
+            except asyncio.CancelledError:
+                self.connect_cancelled = True
+                raise
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    repository = Repository()
+    realtime = Realtime()
+    fundamentals = Fundamentals()
+    scan_state = V20CanonicalSelectionState(fundamentals_db=fundamentals)
+
+    async def initialize(state: V20CanonicalSelectionState) -> None:
+        async def master() -> None:
+            try:
+                await realtime.start()
+                await fundamentals.connect()
+            except BaseException:
+                await asyncio.gather(
+                    realtime.stop(),
+                    fundamentals.close(),
+                    return_exceptions=True,
+                )
+                raise
+            state.realtime_client = realtime
+            state.initialized = True
+
+        await _initialize_v20_selection_resources_once(state, master)
+
+    config = _config(monkeypatch)
+    artifacts = load_g_artifacts(
+        config.artifact_manifest_path.parent,
+        expected_manifest_sha256=config.artifact_manifest_sha256,
+    )
+    route = SimpleNamespace(
+        chat_id="shadow-chat",
+        app_id="shadow-app",
+        app_secret="shadow-secret",
+        destination_fingerprint=config.route_binding.destination_fingerprint,
+        is_configured=lambda: True,
+    )
+    service = V20Service(
+        config=config,
+        repository=repository,
+        scan_state=scan_state,
+        artifacts=artifacts,
+        publisher=SimpleNamespace(),
+        routes={config.route_id: route},
+        initialize_resources=initialize,
+        cleanup_resources=cleanup_v20_selection_resources,
+        mews_source=_UnusedMewsSource(),
+    )
+
+    startup = asyncio.create_task(service.start())
+    await asyncio.wait_for(connect_entered.wait(), timeout=1.0)
+    init_master = scan_state.resource_init_task
+    assert init_master is not None and not init_master.done()
+
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(startup, timeout=1.0)
+
+    assert init_master.done()
+    assert fundamentals.connect_cancelled is True
+    assert realtime.start_calls == 1
+    assert realtime.stop_calls >= 1
+    assert fundamentals.close_calls >= 1
+    assert repository.closed is True
+    assert scan_state.initialized is False
+    assert scan_state.resource_owner is None
+    assert scan_state.realtime_client is None
+    assert scan_state.fundamentals_db is None
+    assert scan_state.resource_init_task is None
+    assert scan_state.resource_cleanup_task is None
+    assert service._resources_started is False
+    assert service._repository_started is False
+    assert service._started is False
+
+    release_connect.set()
+    await asyncio.sleep(0)
+    assert scan_state.initialized is False
+    assert scan_state.realtime_client is None
 
 
 async def test_enabled_start_requires_local_mews_calculator_before_database_connect(
@@ -5738,7 +6005,7 @@ async def test_scan_cleanup_closes_fundamentals_even_when_realtime_stop_fails() 
             self.closed = True
 
     fundamentals = _Fundamentals()
-    state = V15ScanState(
+    state = V20CanonicalSelectionState(
         initialized=True,
         realtime_client=_Realtime(),
         fundamentals_db=fundamentals,
@@ -6959,11 +7226,6 @@ async def test_missing_0939_coverage_finalizes_no_buy_at_0940_idempotently(
         "get_or_compute_canonical_v16",
         scan_must_not_run,
     )
-    monkeypatch.setattr(
-        v15_scan_service,
-        "get_or_compute_canonical_v16",
-        scan_must_not_run,
-    )
     monkeypatch.setattr(service, "_run_entry_collection_cycle", no_collection)
     monkeypatch.setattr(service, "_safe_alert", no_alert)
     collector = SimpleNamespace(
@@ -7187,7 +7449,7 @@ async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutof
         return canonical
 
     async def run_once(*_args, **_kwargs) -> None:
-        await v15_scan_service.get_or_compute_canonical_v16(service._scan_state, trade_date)
+        await canonical_selection.get_or_compute_canonical_v16(service._scan_state, trade_date)
 
     cutoff_calls: list[datetime] = []
 
@@ -7195,7 +7457,7 @@ async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutof
         cutoff_calls.append(now)
         return True
 
-    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", compute)
+    monkeypatch.setattr(canonical_selection, "compute_canonical_v16_scan", compute)
     monkeypatch.setattr(service, "run_once", run_once)
     monkeypatch.setattr(service, "_enforce_or_alert_entry_cutoff", enforce)
 
@@ -7212,7 +7474,7 @@ async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutof
 
     release_master.set()
     await asyncio.wait_for(watchdog, timeout=1.0)
-    reused = await v15_scan_service.get_or_compute_canonical_v16(
+    reused = await canonical_selection.get_or_compute_canonical_v16(
         service._scan_state,
         trade_date,
     )

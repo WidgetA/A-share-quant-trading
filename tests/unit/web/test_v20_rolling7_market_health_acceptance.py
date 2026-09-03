@@ -51,7 +51,7 @@ from src.strategy.v20.rolling7_market_health import (
     make_missing_canonical_batch,
 )
 from src.strategy.v20.runtime_config import load_v20_runtime_config
-from src.web.v15_scan_service import CanonicalV16ScanBundle
+from src.web.v20_canonical_selection import CanonicalV16ScanBundle
 from src.web.v20_service import SHANGHAI, V20Service, _bar_payload
 from tests.unit.web.test_v20_canonical_projection_acceptance import _canonical
 from tests.unit.web.test_v20_v16_canonical_artifact import CALENDAR as ENTRY_CALENDAR

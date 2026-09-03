@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 
-import src.web.v15_scan_service as scan_module
+import src.web.v20_canonical_selection as scan_module
 import src.web.v20_service as service_module
 from src.data.database.v20_repository import V20SemanticConflict, sha256_json
 from src.strategy.v20.decision_engine import genesis_state
-from src.web.v15_scan_service import CanonicalV16ScanBundle, _bundle_fingerprint
+from src.web.v20_canonical_selection import CanonicalV16ScanBundle, _bundle_fingerprint
 from src.web.v20_routes import _dispatch_manual_trigger
 from src.web.v20_service import _DayContext
 from src.web.v20_v16_canonical_artifact import encode
@@ -306,7 +306,8 @@ async def test_repo_ready_keeps_v16_runtime_detached_and_v20_can_persist_its_evi
     try:
         assert service._repository_started is True
         assert service._scan_state.canonical_sink is None
-        assert service._scan_state.canonical_artifact_probe is None
+        assert not hasattr(service._scan_state, "canonical_artifact_probe")
+        assert not hasattr(service, "_canonical_artifact_probe_callback")
         assert FakeArtifactStore.instances
         store = FakeArtifactStore.instances[0]
 
@@ -631,7 +632,7 @@ async def test_collection_does_not_replay_zero_recommendation_artifact(
 
 
 @pytest.mark.asyncio
-async def test_post_cutoff_manual_calculation_is_independent_of_v16_master(
+async def test_post_cutoff_manual_calculation_is_independent_of_live_coordinator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _DecisionRepository(_raw_records(), seal_at=POST_CUTOFF_AT)
@@ -678,19 +679,19 @@ async def test_post_cutoff_manual_calculation_is_independent_of_v16_master(
     monkeypatch.setattr(service, "_require_manual_trigger_ready", ready)
     compute_entered = asyncio.Event()
     release_compute = asyncio.Event()
-    v16_compute_calls = 0
+    live_compute_calls = 0
     v20_compute_calls = 0
     state_before = repository.state
 
-    async def blocked_v16_computation(
+    async def blocked_live_computation(
         _state: Any,
         requested: date,
         *_args: Any,
         **_kwargs: Any,
     ) -> Any:
-        nonlocal v16_compute_calls
+        nonlocal live_compute_calls
         assert requested == POST_CUTOFF_AT.date()
-        v16_compute_calls += 1
+        live_compute_calls += 1
         compute_entered.set()
         await release_compute.wait()
         return canonical
@@ -719,13 +720,9 @@ async def test_post_cutoff_manual_calculation_is_independent_of_v16_master(
             st_eligible_codes=tuple(sorted(canonical.universe)),
         )
 
-    async def legacy_scan_duplicate(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("manual artifact recovery must not use the legacy scan path")
-
-    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", blocked_v16_computation)
+    monkeypatch.setattr(scan_module, "compute_canonical_v16_scan", blocked_live_computation)
     monkeypatch.setattr(service_module, "compute_canonical_v16_scan", independent_v20_computation)
     monkeypatch.setattr(service, "_historical_canonical_inputs", frozen_inputs)
-    monkeypatch.setattr(scan_module, "run_v16_scan", legacy_scan_duplicate)
 
     canonical_owner = asyncio.create_task(
         scan_module.get_or_compute_canonical_v16(
@@ -759,7 +756,7 @@ async def test_post_cutoff_manual_calculation_is_independent_of_v16_master(
     release_compute.set()
     await canonical_owner
 
-    assert v16_compute_calls == 1
+    assert live_compute_calls == 1
     assert v20_compute_calls == 1
     assert len(artifact.save_calls) == 1
     assert artifact.record is not None
@@ -774,8 +771,8 @@ async def test_post_cutoff_manual_calculation_is_independent_of_v16_master(
     assert result["symbols"] == expected.snapshot["symbols"]
     assert result["non_actionable"] is True
     assert result["retrospective_expired"] is True
-    assert service._scan_state.scan_done_date == ""
-    assert service._scan_state.today_recommendation is None
+    assert not hasattr(service._scan_state, "scan_done_date")
+    assert not hasattr(service._scan_state, "today_recommendation")
     assert repository.state == state_before
     assert repository.status is None
     assert repository.commit is None
@@ -946,7 +943,7 @@ async def test_cutoff_waits_for_started_calculation_then_applies_fresh_clock_fen
     assert cutoff_calls == [now]
 
 
-async def test_stop_does_not_detach_callbacks_from_independent_v16_state(
+async def test_stop_cancels_v20_canonical_master_before_repository_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = StartupRepository()
@@ -984,5 +981,5 @@ async def test_stop_does_not_detach_callbacks_from_independent_v16_state(
 
     assert timeline == ["master-cancelled", "repository-closed"]
     assert repository.timeline == ["repository-closed"]
-    assert service._scan_state.canonical_sink is sink
+    assert service._scan_state.canonical_sink is None
     assert service._scan_state.canonical_coordinator is None

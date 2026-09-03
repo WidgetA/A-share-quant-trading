@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import src.web.v15_scan_service as v15_scan_service
+import src.web.v20_canonical_selection as canonical_selection
 import src.web.v20_service as service_module
 from src.data.database.v20_repository import EntryStatus, V20SemanticConflict, sha256_json
 from src.strategy.v20.artifacts import load_g_artifacts
@@ -115,7 +115,7 @@ def _service(repository: _Repository) -> V20Service:
     service = V20Service(
         config=config,
         repository=repository,
-        scan_state=v15_scan_service.V15ScanState(initialized=True),
+        scan_state=canonical_selection.V20CanonicalSelectionState(initialized=True),
         artifacts=load_g_artifacts(
             config.artifact_manifest_path.parent,
             expected_manifest_sha256=config.artifact_manifest_sha256,
@@ -221,8 +221,8 @@ async def test_calendar_failure_then_success_emits_one_stable_no_buy(
             raise TimeoutError("provider bounded timeout")
         return list(VALID_CALENDAR)
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", provider)
-    service._calendar_provider = v15_scan_service.get_trade_calendar
+    monkeypatch.setattr(canonical_selection, "get_v20_trade_calendar", provider)
+    service._calendar_provider = canonical_selection.get_v20_trade_calendar
 
     assert await service._enforce_or_alert_entry_cutoff(TRADE_DATE, now=CUTOFF) is True
     assert attempts == 1
@@ -276,8 +276,8 @@ async def test_terminal_entry_wins_calendar_failure_race_before_public_alert(
     async def provider() -> list[date]:
         raise TimeoutError("provider bounded timeout")
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", provider)
-    service._calendar_provider = v15_scan_service.get_trade_calendar
+    monkeypatch.setattr(canonical_selection, "get_v20_trade_calendar", provider)
+    service._calendar_provider = canonical_selection.get_v20_trade_calendar
 
     assert await service._enforce_or_alert_entry_cutoff(TRADE_DATE, now=CUTOFF) is True
 
@@ -297,9 +297,9 @@ async def test_two_service_restarts_keep_one_stable_no_buy_event(
     async def provider() -> list[date]:
         raise TimeoutError("provider bounded timeout")
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", provider)
-    first._calendar_provider = v15_scan_service.get_trade_calendar
-    second._calendar_provider = v15_scan_service.get_trade_calendar
+    monkeypatch.setattr(canonical_selection, "get_v20_trade_calendar", provider)
+    first._calendar_provider = canonical_selection.get_v20_trade_calendar
+    second._calendar_provider = canonical_selection.get_v20_trade_calendar
 
     assert await first._enforce_or_alert_entry_cutoff(TRADE_DATE, now=CUTOFF) is True
     assert (

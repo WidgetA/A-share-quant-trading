@@ -20,7 +20,7 @@ from src.strategy.v20.decision_engine import (
     genesis_state,
     prepare_entry,
 )
-from src.web.v15_scan_service import CanonicalV16ScanBundle, _bundle_fingerprint
+from src.web.v20_canonical_selection import CanonicalV16ScanBundle, _bundle_fingerprint
 from src.web.v20_v16_canonical_artifact import encode, hydrate
 from tests.unit.web.test_v20_service import PROJECT_ROOT, _service
 

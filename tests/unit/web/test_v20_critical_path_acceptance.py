@@ -54,9 +54,13 @@ from src.strategy.v20.models import (
 from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.web import app as web_app
 from src.web import v15_scan_service
+from src.web import v20_canonical_selection as canonical_selection
 from src.web.v15_scan_service import (
-    CanonicalV16ScanBundle,
     V15ScanState,
+)
+from src.web.v20_canonical_selection import (
+    CanonicalV16ScanBundle,
+    V20CanonicalSelectionState,
     get_or_compute_canonical_v16,
 )
 from src.web.v20_routes import _dispatch_manual_trigger, create_v20_router
@@ -65,7 +69,7 @@ from src.web.v20_service import (
     V20Service,
     _bar_payload,
     _DayContext,
-    _init_embedded_v20_scan_resources,
+    _init_owned_embedded_v20_scan_resources,
 )
 from src.web.v20_v16_canonical_artifact import encode as encode_v16_canonical_artifact
 
@@ -340,7 +344,7 @@ class FakeStartupFundamentals:
         self.closed = True
 
 
-def _canonical_fixture(monkeypatch: pytest.MonkeyPatch) -> V15ScanState:
+def _canonical_fixture(monkeypatch: pytest.MonkeyPatch) -> V20CanonicalSelectionState:
     FakeV16Scanner.scan_calls = 0
     FakeRealtimeClient.early_calls = 0
     FakeHistoryAdapter.history_calls = 0
@@ -356,15 +360,13 @@ def _canonical_fixture(monkeypatch: pytest.MonkeyPatch) -> V15ScanState:
             today + timedelta(days=2),
         ]
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", fake_calendar)
+    monkeypatch.setattr(canonical_selection, "get_v20_trade_calendar", fake_calendar)
 
     async def no_notification(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", no_notification)
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_signal", no_notification)
-    monkeypatch.setattr(v15_scan_service, "_schedule_v16_day_gate_shadow", lambda *_args: None)
-    return V15ScanState(
+    monkeypatch.setattr(canonical_selection, "_notify_canonical_error", no_notification)
+    return V20CanonicalSelectionState(
         initialized=True,
         realtime_client=FakeRealtimeClient(),
         fundamentals_db=FakeFundamentalsDB(),
@@ -404,10 +406,10 @@ def _v20_config(monkeypatch: pytest.MonkeyPatch) -> Any:
 def _v20_service(
     monkeypatch: pytest.MonkeyPatch,
     repository: Any = None,
-    scan_state: V15ScanState | None = None,
+    scan_state: V20CanonicalSelectionState | None = None,
 ) -> V20Service:
     config = _v20_config(monkeypatch)
-    state = scan_state or V15ScanState(initialized=True)
+    state = scan_state or V20CanonicalSelectionState(initialized=True)
     return V20Service(
         config=config,
         repository=repository or SimpleNamespace(),
@@ -650,7 +652,7 @@ def _portable_canonical(
         history_date_valid_counts={day.isoformat(): len(codes) for day in history_dates},
         history_min_date_coverage=1.0,
     )
-    return dataclasses_replace(base, _integrity_hash=v15_scan_service._bundle_fingerprint(base))
+    return dataclasses_replace(base, _integrity_hash=canonical_selection._bundle_fingerprint(base))
 
 
 def _portable_payload(
@@ -770,7 +772,7 @@ async def test_app_startup_keeps_v16_and_v20_scan_states_separate(
     created: list[Any] = []
 
     def factory() -> Any:
-        scan_state = V15ScanState()
+        scan_state = V20CanonicalSelectionState()
         service = SimpleNamespace(
             config=SimpleNamespace(enabled=True, deployment_mode="forward_shadow"),
             scan_state=scan_state,
@@ -787,7 +789,7 @@ async def test_app_startup_keeps_v16_and_v20_scan_states_separate(
     assert app.state.v20_service_started is True
     assert created[0].scan_state is not app.state.v15_scan_state
     created[0].scan_state.canonical_coordinator = object()
-    assert app.state.v15_scan_state.canonical_coordinator is None
+    assert not hasattr(app.state.v15_scan_state, "canonical_coordinator")
 
 
 @pytest.mark.asyncio
@@ -802,16 +804,16 @@ async def test_app_injection_does_not_rebind_v20_resources_to_v16(
         async def close(self) -> None:
             return None
 
-    shared = V15ScanState(
+    owned = V20CanonicalSelectionState(
         initialized=True,
         fundamentals_db=SharedFundamentals(),
     )
-    service = _v20_service(monkeypatch, scan_state=shared)
+    service = _v20_service(monkeypatch, scan_state=owned)
     app = web_app.create_app(v20_service=service)
 
     assert service._scan_state is not app.state.v15_scan_state
     assert app.state.v15_scan_state.fundamentals_db is None
-    assert service._scan_state.fundamentals_db is shared.fundamentals_db
+    assert service._scan_state.fundamentals_db is owned.fundamentals_db
     assert service._scan_state.fundamentals_db.connection_pool is pool
     assert not hasattr(service, "_scan_pipeline")
 
@@ -1011,6 +1013,14 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _canonical_fixture(monkeypatch)
+    v16_state = V15ScanState(
+        initialized=True,
+        realtime_client=FakeRealtimeClient(),
+        fundamentals_db=FakeFundamentalsDB(),
+        historical_adapter=FakeHistoryAdapter(),
+        concept_mapper=object(),
+        stock_filter=object(),
+    )
     today = datetime.now(BEIJING_TZ).date()
     pre_cutoff = datetime.combine(today, time(9, 39, 30), TZ)
     post_cutoff = datetime.combine(today, time(9, 40, 1), TZ)
@@ -1309,10 +1319,16 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
 
     release = asyncio.Event()
     scanner_entered = asyncio.Event()
+    both_scanners_entered = asyncio.Event()
+    scan_entries = 0
     original_scan = FakeV16Scanner.scan
 
     async def gated_scan(self: FakeV16Scanner, stock_data: Any, boards: Any) -> Any:
+        nonlocal scan_entries
+        scan_entries += 1
         scanner_entered.set()
+        if scan_entries == 2:
+            both_scanners_entered.set()
         await release.wait()
         return await original_scan(self, stock_data, boards)
 
@@ -1379,10 +1395,21 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
         def now(cls, tz: Any = None) -> datetime:
             return pre_cutoff if tz is BEIJING_TZ or tz is TZ else datetime.now(tz)
 
+    async def v16_calendar() -> list[date]:
+        return list(service_calendar)
+
+    async def no_v16_notification(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(v15_scan_service, "datetime", FixedDateTime)
+    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", v16_calendar)
+    monkeypatch.setattr(v15_scan_service, "_notify_feishu_error", no_v16_notification)
+    monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", no_v16_notification)
+    monkeypatch.setattr(v15_scan_service, "_notify_feishu_signal", no_v16_notification)
+    monkeypatch.setattr(v15_scan_service, "_schedule_v16_day_gate_shadow", lambda *_args: None)
 
     scheduler_task = asyncio.create_task(
-        v15_scan_service._scan_scheduler(state),
+        v15_scan_service._scan_scheduler(v16_state),
         name="real-v16-scheduler",
     )
     automatic_context = _DayContext(trade_date=today, calendar=service_calendar)
@@ -1407,6 +1434,7 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
             break
     else:
         raise AssertionError("concurrent paths did not create one canonical scan task")
+    await asyncio.wait_for(both_scanners_entered.wait(), timeout=1.0)
     master_task = state.canonical_coordinator.inflight[today]
     cancelled_waiter.cancel()
     await asyncio.gather(cancelled_waiter, return_exceptions=True)
@@ -1424,7 +1452,7 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     )
     v20_master = dataclasses_replace(
         configured_master,
-        _integrity_hash=v15_scan_service._bundle_fingerprint(configured_master),
+        _integrity_hash=canonical_selection._bundle_fingerprint(configured_master),
     )
     v20_compute_calls = 0
 
@@ -1468,12 +1496,16 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
         FRESH_CODES
     )
     assert [item["code"] for item in check_only_result["symbols"]] == list(FRESH_CODES)
-    # V16 and V20 are allowed to duplicate selection work.  Within V20, both
-    # paths enter the same calculation boundary exactly once per trigger.
+    # V16 and V20 each run their own scanner once. The check-only V20 path then
+    # independently recomputes from persisted raw evidence.
     assert FakeV16Scanner.scan_calls == 2
     assert v20_compute_calls == 2
     assert FakeRealtimeClient.early_calls == 2
     assert FakeHistoryAdapter.history_calls == 2
+    assert v16_state.today_recommendation is not None
+    assert v16_state.scan_done_date == today.isoformat()
+    assert v16_state.scan_error is None
+    assert not hasattr(state, "today_recommendation")
     assert artifact_store.save_calls == 1
     assert artifact_store.load_calls >= 3
     assert len(repository.persist_calls) == 1
@@ -2123,7 +2155,7 @@ async def test_post_cutoff_manual_selection_has_mews_budget(
 
 
 @pytest.mark.asyncio
-async def test_shared_state_resource_ownership_is_singleflight_and_cleanup_safe(
+async def test_v16_and_v20_resource_ownership_are_independent_and_cleanup_safe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.common import config as common_config
@@ -2134,180 +2166,97 @@ async def test_shared_state_resource_ownership_is_singleflight_and_cleanup_safe(
     from src.data.sources import local_concept_mapper as concept_module
     from src.strategy.filters import stock_filter as stock_filter_module
 
-    monkeypatch.setenv("TUSHARE_TOKEN", "shared-state-token")
-    created = 0
-    started = 0
-    stopped = 0
-    fail_next_start = True
-    start_gate = asyncio.Event()
-    all_waiters_seen = asyncio.Event()
-    waiter_count = 0
+    monkeypatch.setenv("TUSHARE_TOKEN", "isolated-runtime-token")
+    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "isolated-runtime-token")
 
-    class _Realtime:
+    class Realtime:
+        instances: list["Realtime"] = []
+
         def __init__(self, *, token: str) -> None:
-            assert token == "shared-state-token"
-            nonlocal created
-            created += 1
+            assert token == "isolated-runtime-token"
+            self.start_calls = 0
+            self.stop_calls = 0
+            self.instances.append(self)
 
         async def start(self) -> None:
-            nonlocal fail_next_start, started, waiter_count
-            started += 1
-            if fail_next_start:
-                fail_next_start = False
-                raise RuntimeError("first V20 market-client start fails")
-            waiter_count += 1
-            if waiter_count == 1:
-                all_waiters_seen.set()
-            await start_gate.wait()
+            self.start_calls += 1
 
         async def stop(self) -> None:
-            nonlocal stopped
-            stopped += 1
+            self.stop_calls += 1
 
-    class _Fundamentals:
+    class Fundamentals:
         def __init__(self) -> None:
             self.connect_calls = 0
             self.close_calls = 0
-            self.closed = False
 
         async def connect(self) -> None:
-            assert self.closed is False
             self.connect_calls += 1
 
         async def close(self) -> None:
-            assert self.closed is False
             self.close_calls += 1
-            self.closed = True
 
-    class _Historical:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
-
-    class _ScanDB:
+    class ScanDB:
         async def connect(self) -> None:
             return None
 
         async def close(self) -> None:
             return None
 
-    fundamentals = _Fundamentals()
-    fundamentals_factory_calls = 0
-    factory_fundamentals: list[_Fundamentals] = []
-
-    def new_fundamentals() -> _Fundamentals:
-        nonlocal fundamentals_factory_calls
-        fundamentals_factory_calls += 1
-        created_db = _Fundamentals()
-        factory_fundamentals.append(created_db)
-        return created_db
-
-    monkeypatch.setattr(realtime_module, "TushareRealtimeClient", _Realtime)
-    monkeypatch.setattr(historical_module, "IQuantHistoricalAdapter", _Historical)
+    monkeypatch.setattr(realtime_module, "TushareRealtimeClient", Realtime)
+    monkeypatch.setattr(
+        historical_module,
+        "IQuantHistoricalAdapter",
+        lambda *_args, **_kwargs: object(),
+    )
     monkeypatch.setattr(concept_module, "LocalConceptMapper", lambda: object())
     monkeypatch.setattr(stock_filter_module, "StockFilter", lambda _config: object())
+    monkeypatch.setattr(v15_scan_db_module, "create_v15_scan_db_from_config", ScanDB)
+    v16_fundamentals = Fundamentals()
     monkeypatch.setattr(
         fundamentals_module,
         "create_fundamentals_db_from_config",
-        new_fundamentals,
+        lambda: v16_fundamentals,
     )
-    monkeypatch.setattr(v15_scan_db_module, "create_v15_scan_db_from_config", lambda: _ScanDB())
-    monkeypatch.setattr(common_config, "get_tushare_token", lambda: "shared-state-token")
 
-    state = V15ScanState(fundamentals_db=fundamentals)
-    assert state.initialized is False
-    assert state.resource_owner is None
-    with pytest.raises(RuntimeError, match="first V20 market-client start fails"):
-        await _init_embedded_v20_scan_resources(state)
-    assert fundamentals_factory_calls == 0
-    assert factory_fundamentals == []
-    assert state.fundamentals_db is fundamentals
-    assert fundamentals.connect_calls == 0
-    assert state.initialized is False
-    assert state.resource_owner is None
-    assert (created, started, stopped) == (1, 1, 1)
-    assert state.realtime_client is None
-    assert state.initialized is False
+    v16_state = V15ScanState()
+    v20_fundamentals = Fundamentals()
+    v20_state = V20CanonicalSelectionState(fundamentals_db=v20_fundamentals)
 
-    takeover_tasks = [
-        asyncio.create_task(v15_scan_service.init_scan_resources(state)) for _ in range(5)
-    ]
-    for _ in range(100):
-        await asyncio.sleep(0)
-        if all_waiters_seen.is_set() or any(task.done() for task in takeover_tasks):
-            break
-    for waiter in takeover_tasks[1:]:
-        waiter.cancel()
-    await asyncio.gather(*takeover_tasks[1:], return_exceptions=True)
-    start_gate.set()
-    takeover_result = await takeover_tasks[0]
-    assert not isinstance(takeover_result, BaseException), str(takeover_result)
-    assert (created, started) == (2, 2)
-    assert fundamentals_factory_calls == 0
-    assert factory_fundamentals == []
-    assert state.fundamentals_db is fundamentals
-    assert fundamentals.connect_calls == 0
-    assert all(item.connect_calls == 0 for item in factory_fundamentals)
+    await v15_scan_service.init_scan_resources(v16_state)
+    await asyncio.gather(*(_init_owned_embedded_v20_scan_resources(v20_state) for _ in range(5)))
 
-    await _init_embedded_v20_scan_resources(state)
-    await v15_scan_service.init_scan_resources(state)
-    assert (created, started) == (2, 2)
-    assert fundamentals_factory_calls == 0
-    assert state.fundamentals_db is fundamentals
-    assert fundamentals.connect_calls == 0
+    assert v16_state.initialized is True
+    assert v16_state.resource_owner == "V16"
+    assert v20_state.initialized is True
+    assert v20_state.resource_owner == "V20"
+    assert v16_state.realtime_client is Realtime.instances[0]
+    assert v20_state.realtime_client is Realtime.instances[1]
+    assert v16_state.realtime_client is not v20_state.realtime_client
+    assert v16_state.fundamentals_db is v16_fundamentals
+    assert v20_state.fundamentals_db is v20_fundamentals
+    assert len(Realtime.instances) == 2
+    assert [client.start_calls for client in Realtime.instances] == [1, 1]
+    assert v16_fundamentals.connect_calls == 1
+    assert v20_fundamentals.connect_calls == 1
+    assert not hasattr(v16_state, "canonical_coordinator")
+    assert not hasattr(v20_state, "scheduler_task")
+    assert not hasattr(v20_state, "today_recommendation")
 
-    scheduler_cancelled = asyncio.Event()
+    await canonical_selection.cleanup_v20_selection_resources(v20_state)
+    assert v20_state.initialized is False
+    assert v20_state.resource_owner is None
+    assert Realtime.instances[1].stop_calls == 1
+    assert v20_fundamentals.close_calls == 1
+    assert v16_state.initialized is True
+    assert v16_state.resource_owner == "V16"
+    assert Realtime.instances[0].stop_calls == 0
+    assert v16_fundamentals.close_calls == 0
 
-    async def scheduler() -> None:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await asyncio.sleep(0)
-            scheduler_cancelled.set()
-            raise
-
-    state.scheduler_task = asyncio.create_task(scheduler(), name="v16-scheduler-acceptance")
-    captured_scheduler = state.scheduler_task
-    await v15_scan_service.cleanup_scan_resources(state)
-    assert captured_scheduler.done()
-    assert state.scheduler_task is None
-    assert scheduler_cancelled.is_set()
-    assert stopped == 2
-    assert state.initialized is False
-    assert fundamentals.closed is True
-
-    start_gate = asyncio.Event()
-    waiter_count = 0
-    all_waiters_seen.clear()
-    restart_owner = asyncio.create_task(v15_scan_service.init_scan_resources(state))
-    restart_waiters = [
-        asyncio.create_task(v15_scan_service.init_scan_resources(state)) for _ in range(4)
-    ]
-    for _ in range(100):
-        await asyncio.sleep(0)
-        if (
-            all_waiters_seen.is_set()
-            or restart_owner.done()
-            or any(task.done() for task in restart_waiters)
-        ):
-            break
-    for waiter in restart_waiters:
-        waiter.cancel()
-    await asyncio.gather(*restart_waiters, return_exceptions=True)
-    start_gate.set()
-    restart_result = await restart_owner
-    assert not isinstance(restart_result, BaseException), str(restart_result)
-    assert (created, started) == (3, 3)
-    restarted_fundamentals = state.fundamentals_db
-
-    await v15_scan_service.cleanup_scan_resources(state)
-    assert stopped == 3
-    assert state.scheduler_task is None
-    assert fundamentals_factory_calls == 1
-    assert len(factory_fundamentals) == 1
-    assert state.fundamentals_db is not fundamentals
-    assert restarted_fundamentals is factory_fundamentals[0]
-    assert factory_fundamentals[0].connect_calls == 1
-    assert factory_fundamentals[0].closed is True
+    await v15_scan_service.cleanup_scan_resources(v16_state)
+    assert v16_state.initialized is False
+    assert v16_state.resource_owner is None
+    assert Realtime.instances[0].stop_calls == 1
+    assert v16_fundamentals.close_calls == 1
 
 
 @pytest.mark.parametrize("failure", ["rt-start", "historical", "mapper", "filter"])
@@ -2437,7 +2386,7 @@ async def test_cleanup_continues_remaining_resources_when_one_step_fails() -> No
 
 
 @pytest.mark.asyncio
-async def test_cancelling_v20_owner_waiter_preserves_shielded_resource_owner(
+async def test_cancelling_v20_waiter_preserves_v20_resource_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.common import config as common_config
@@ -2465,8 +2414,11 @@ async def test_cancelling_v20_owner_waiter_preserves_shielded_resource_owner(
 
     class Fundamentals:
         def __init__(self) -> None:
+            self.connect_calls = 0
             self.close_calls = 0
-            self.connection_pool = object()
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
 
         async def close(self) -> None:
             self.close_calls += 1
@@ -2488,34 +2440,34 @@ async def test_cancelling_v20_owner_waiter_preserves_shielded_resource_owner(
     monkeypatch.setattr(stock_filter_module, "StockFilter", lambda _config: object())
 
     fundamentals = Fundamentals()
-    state = V15ScanState(fundamentals_db=fundamentals)
-    owner_waiter = asyncio.create_task(_init_embedded_v20_scan_resources(state))
+    state = V20CanonicalSelectionState(fundamentals_db=fundamentals)
+    owner_waiter = asyncio.create_task(_init_owned_embedded_v20_scan_resources(state))
     await asyncio.wait_for(start_entered.wait(), timeout=0.25)
-    borrowers = [asyncio.create_task(_init_embedded_v20_scan_resources(state)) for _ in range(3)]
+    master = state.resource_init_task
+    assert master is not None and not master.done()
+
+    borrowers = [
+        asyncio.create_task(_init_owned_embedded_v20_scan_resources(state)) for _ in range(3)
+    ]
     await asyncio.sleep(0)
     owner_waiter.cancel()
     await asyncio.gather(owner_waiter, return_exceptions=True)
-    release_start.set()
+    assert master.cancelled() is False
 
-    master = state.resource_init_task
-    assert master is not None
+    release_start.set()
     await master
-    assert not master.cancelled()
+    await asyncio.gather(*borrowers)
     assert state.resource_owner == "V20"
     assert state.initialized is True
+    assert fundamentals.connect_calls == 1
+    assert len(realtime_holder) == 1
 
-    await v15_scan_service.cleanup_scan_resources(state, owner="V16")
-    assert realtime_holder[0].stop_calls == 0
-    assert fundamentals.close_calls == 0
-    assert state.resource_owner == "V20"
-
-    await v15_scan_service.cleanup_scan_resources(state, owner="V20", close_fundamentals=False)
+    await canonical_selection.cleanup_v20_selection_resources(state)
     assert realtime_holder[0].stop_calls == 1
-    assert fundamentals.close_calls == 0
+    assert fundamentals.close_calls == 1
     assert state.resource_owner is None
     assert state.initialized is False
     assert state.resource_init_task is None
-    await asyncio.gather(*borrowers, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -2992,7 +2944,7 @@ async def _legacy_post_cutoff_terminal_enter_persisted_raw_contract(
     )
     canonical = dataclasses_replace(
         canonical_pre,
-        _integrity_hash=v15_scan_service._bundle_fingerprint(canonical_pre),
+        _integrity_hash=canonical_selection._bundle_fingerprint(canonical_pre),
     )
     # The committed ENTER slot froze the morning canonical identity; bind the
     # fixture terminal to exactly those values so the recomputation check sees
@@ -3502,7 +3454,7 @@ async def _legacy_deployment_probe_persisted_raw_contract(
     )
     old_canonical = dataclasses_replace(
         old_pre,
-        _integrity_hash=v15_scan_service._bundle_fingerprint(old_pre),
+        _integrity_hash=canonical_selection._bundle_fingerprint(old_pre),
     )
 
     raw_records = []

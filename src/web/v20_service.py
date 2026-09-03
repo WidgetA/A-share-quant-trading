@@ -124,12 +124,12 @@ from src.strategy.v20.runtime_config import (
     validated_v20_tushare_token,
 )
 from src.strategy.v20.shadow_evaluator import evaluate_shadow_batch
-from src.web.v15_scan_service import (
+from src.web.v20_canonical_selection import (
     CanonicalV16ScanBundle,
-    V15ScanState,
+    V20CanonicalSelectionState,
     _fetch_history_ohlcv,
-    _initialize_scan_resources_once,
-    cleanup_scan_resources,
+    _initialize_v20_selection_resources_once,
+    cleanup_v20_selection_resources,
     compute_canonical_v16_scan,
     derive_canonical_v16_universe,
     get_or_compute_canonical_v16,  # noqa: F401 - retained test/adapter compatibility symbol
@@ -234,62 +234,42 @@ MEWS_CACHE_POLL_SECONDS = 30.0
 _MANUAL_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 
 Clock = Callable[[], datetime]
-ResourceInitializer = Callable[[V15ScanState], Awaitable[None]]
-ResourceCleanup = Callable[[V15ScanState], Awaitable[None]]
+ResourceInitializer = Callable[[V20CanonicalSelectionState], Awaitable[None]]
+ResourceCleanup = Callable[[V20CanonicalSelectionState], Awaitable[None]]
 CalendarProvider = Callable[[], Awaitable[list[date]]]
 
 
-async def _init_v20_scan_resources(scan_state: V15ScanState) -> None:
+async def _init_v20_scan_resources(scan_state: V20CanonicalSelectionState) -> None:
     """Initialize the V16 scanner inputs without legacy scheduler side effects."""
     token = validated_v20_tushare_token()
-    await _initialize_scan_resources_once(
+    await _initialize_v20_selection_resources_once(
         scan_state,
-        "V20",
         lambda: _init_v20_scan_resources_with_token(
             scan_state,
             token,
-            manage_fundamentals=True,
         ),
     )
 
 
-async def _init_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
-    """Initialize embedded V20 while borrowing main's connected DB pool."""
+async def _init_owned_embedded_v20_scan_resources(
+    scan_state: V20CanonicalSelectionState,
+) -> None:
+    """Initialize the embedded V20 runtime's private market resources."""
     from src.common.config import get_tushare_token
 
     token = get_tushare_token()
-    await _initialize_scan_resources_once(
+    await _initialize_v20_selection_resources_once(
         scan_state,
-        "V20",
         lambda: _init_v20_scan_resources_with_token(
             scan_state,
             token,
-            manage_fundamentals=False,
-        ),
-    )
-
-
-async def _init_owned_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
-    """Initialize embedded V20 when main has no shared fundamentals pool."""
-    from src.common.config import get_tushare_token
-
-    token = get_tushare_token()
-    await _initialize_scan_resources_once(
-        scan_state,
-        "V20",
-        lambda: _init_v20_scan_resources_with_token(
-            scan_state,
-            token,
-            manage_fundamentals=True,
         ),
     )
 
 
 async def _init_v20_scan_resources_with_token(
-    scan_state: V15ScanState,
+    scan_state: V20CanonicalSelectionState,
     token: str,
-    *,
-    manage_fundamentals: bool,
 ) -> None:
     from src.data.clients.iquant_historical_adapter import IQuantHistoricalAdapter
     from src.data.clients.tushare_realtime import TushareRealtimeClient
@@ -304,8 +284,7 @@ async def _init_v20_scan_resources_with_token(
         # ``start`` may allocate sockets before reporting a failure.  Keep it
         # inside the rollback boundary so every retry owns exactly one client.
         await tushare.start()
-        if manage_fundamentals:
-            await fundamentals.connect()
+        await fundamentals.connect()
         historical_adapter = IQuantHistoricalAdapter(
             tushare,
             cache=scan_state.tushare_cache,
@@ -323,7 +302,6 @@ async def _init_v20_scan_resources_with_token(
         # Publish the resource set only after every constructor has succeeded;
         # a failed retry must not leave stopped/partial objects on shared state.
         scan_state.realtime_client = tushare
-        scan_state.v15_scan_db = None
         scan_state.historical_adapter = historical_adapter
         scan_state.concept_mapper = concept_mapper
         scan_state.stock_filter = stock_filter
@@ -331,9 +309,8 @@ async def _init_v20_scan_resources_with_token(
     except BaseException as initialization_error:
         cleanup_labels: list[str] = ["Tushare"]
         cleanup_operations: list[Awaitable[None]] = [tushare.stop()]
-        if manage_fundamentals:
-            cleanup_labels.insert(0, "fundamentals")
-            cleanup_operations.insert(0, fundamentals.close())
+        cleanup_labels.insert(0, "fundamentals")
+        cleanup_operations.insert(0, fundamentals.close())
         cleanup_results = await asyncio.gather(
             *cleanup_operations,
             return_exceptions=True,
@@ -357,14 +334,9 @@ async def _init_v20_scan_resources_with_token(
         raise
 
 
-async def _cleanup_v20_scan_resources(scan_state: V15ScanState) -> None:
+async def _cleanup_v20_scan_resources(scan_state: V20CanonicalSelectionState) -> None:
     """Close only resources owned by V20; never touch legacy global workers."""
-    await cleanup_scan_resources(scan_state, owner="V20", close_fundamentals=True)
-
-
-async def _cleanup_embedded_v20_scan_resources(scan_state: V15ScanState) -> None:
-    """Close V20's market client while preserving main's shared DB pool."""
-    await cleanup_scan_resources(scan_state, owner="V20", close_fundamentals=False)
+    await cleanup_v20_selection_resources(scan_state)
 
 
 @dataclass
@@ -1312,7 +1284,7 @@ class V20Service:
         *,
         config: V20RuntimeConfig,
         repository: V20Repository,
-        scan_state: V15ScanState,
+        scan_state: V20CanonicalSelectionState,
         artifacts: GArtifactBundle,
         publisher: V20OutboxPublisher,
         routes: Mapping[str, V20FeishuRoute],
@@ -1347,12 +1319,6 @@ class V20Service:
         self._late_0939_replay_lock = asyncio.Lock()
         self._late_0939_replay_task: asyncio.Task[Any] | None = None
         self._canonical_artifact_store: Any | None = None
-        self._canonical_sink_callback: (
-            Callable[[CanonicalV16ScanBundle], Awaitable[None]] | None
-        ) = None
-        self._canonical_artifact_probe_callback: (
-            Callable[[date], Awaitable[tuple[Any, datetime] | None]] | None
-        ) = None
         self._canonical_callbacks_open = False
         self._canonical_artifact_lock = asyncio.Lock()
         self._canonical_barrier_completed_at: dict[date, datetime] = {}
@@ -1432,7 +1398,7 @@ class V20Service:
                 "config/v20.yaml database schema/pool settings do not match "
                 "config/database-config.yaml database.v20"
             )
-        resolved_scan_state = V15ScanState()
+        resolved_scan_state = V20CanonicalSelectionState()
         fundamentals = None
         if config.enabled:
             token = validated_v20_tushare_token()
@@ -1513,7 +1479,7 @@ class V20Service:
 
         database_config_path = project_root / "config" / "database-config.yaml"
         token = get_tushare_token()
-        resolved_scan_state = V15ScanState()
+        resolved_scan_state = V20CanonicalSelectionState()
         fundamentals = create_fundamentals_db_from_config(
             database_config_path,
             tushare_token=token,
@@ -1595,7 +1561,7 @@ class V20Service:
     async def _initialize_canonical_artifact_boundary(self) -> None:
         """Open V20's own optional canonical-evidence store.
 
-        V20 deliberately does not install a sink/probe on ``V15ScanState``.
+        V20 deliberately keeps this boundary on its own selection state.
         The legacy V16 scheduler, cache and in-flight coordinator are an
         independent service and cannot be a prerequisite or veto point for a
         V20 calculation.
@@ -1628,8 +1594,6 @@ class V20Service:
         """Close V20's evidence writer without touching independent V16 state."""
 
         self._canonical_callbacks_open = False
-        self._canonical_sink_callback = None
-        self._canonical_artifact_probe_callback = None
 
     async def start(self) -> None:
         if self._started:
@@ -1640,6 +1604,7 @@ class V20Service:
             self._startup_stage = "DISABLED"
             logger.info("V20 is disabled by configuration")
             return
+        resource_initialization_cancelled = False
         try:
             self._startup_stage = "VALIDATING_RUNTIME"
             if not self._embedded_legacy:
@@ -1714,7 +1679,15 @@ class V20Service:
             self._startup_stage = "REFRESHING_STATUS"
             await self._refresh_status_snapshot()
             self._startup_stage = "INITIALIZING_MARKET_RESOURCES"
-            await self._initialize_resources(self._scan_state)
+            try:
+                await self._initialize_resources(self._scan_state)
+            except asyncio.CancelledError:
+                # The V20 initializer is a shielded singleflight waiter.  Its
+                # master may still own partially opened sockets after this
+                # start task is cancelled, so rollback must converge it even
+                # though the success flag has not yet been published.
+                resource_initialization_cancelled = True
+                raise
             self._resources_started = True
             self._startup_stage = "STARTING_LANES"
             self._tasks = [
@@ -1778,7 +1751,7 @@ class V20Service:
                 mews_task.cancel()
                 cleanup_labels.append("selection-mews")
                 cleanup_operations.append(mews_task)
-            if self._resources_started:
+            if self._resources_started or resource_initialization_cancelled:
                 cleanup_labels.append("resource")
                 cleanup_operations.append(self._cleanup_resources(self._scan_state))
             if self._repository_started:

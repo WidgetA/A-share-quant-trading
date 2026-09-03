@@ -11,7 +11,7 @@ from src.data.clients.tushare_realtime import TushareQuote
 from src.data.clients.v20_market_data import ExactEarlySnapshot
 from src.strategy.strategies.v16_scanner import V16ScanResult
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
-from src.web.v15_scan_service import LOOKBACK_DAYS, V15ScanState
+from src.web.v20_canonical_selection import LOOKBACK_DAYS, V20CanonicalSelectionState
 from src.web.v20_scan_pipeline import (
     V20ScanPipeline,
     V20ScanPipelineError,
@@ -203,7 +203,7 @@ async def test_incomplete_history_never_reaches_the_v16_scanner(
     monkeypatch.setattr(module, "V16Scanner", _Scanner)
     monkeypatch.setattr(module, "_fetch_history_ohlcv", fetch_history)
     monkeypatch.setattr(module, "_fetch_prev_closes", fetch_prev)
-    state = V15ScanState(
+    state = V20CanonicalSelectionState(
         initialized=True,
         realtime_client=_Realtime(),
         historical_adapter=SimpleNamespace(),

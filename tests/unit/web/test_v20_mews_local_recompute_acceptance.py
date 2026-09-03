@@ -35,7 +35,7 @@ from src.data.database.v20_repository import V20SemanticConflict, sha256_json
 from src.strategy.v20 import runtime_config
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.runtime_config import load_v20_runtime_config
-from src.web.v15_scan_service import V15ScanState
+from src.web.v20_canonical_selection import V20CanonicalSelectionState
 from src.web.v20_service import MEWS_CACHE_CUTOFF, V20Service
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -396,7 +396,7 @@ def _build_service(
     service = V20Service(
         config=config,
         repository=repository,
-        scan_state=V15ScanState(initialized=True),
+        scan_state=V20CanonicalSelectionState(initialized=True),
         artifacts=load_g_artifacts(
             config.artifact_manifest_path.parent,
             expected_manifest_sha256=config.artifact_manifest_sha256,

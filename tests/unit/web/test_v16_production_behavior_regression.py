@@ -174,27 +174,15 @@ async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
     async def no_refresh(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def forbidden_canonical(*_args: Any, **_kwargs: Any):
-        pytest.fail("standalone V16 must not enter a canonical coordinator")
-
     monkeypatch.setattr("src.strategy.lgbrank_scorer.LGBRankScorer", FakeScorer)
     monkeypatch.setattr("src.strategy.strategies.v16_scanner.V16Scanner", FakeScanner)
     monkeypatch.setattr(v15_scan_service, "get_trade_calendar", fake_calendar)
     monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", record_top10)
     monkeypatch.setattr(v15_scan_service, "_refresh_top10_names", no_refresh)
-    monkeypatch.setattr(v15_scan_service, "get_or_compute_canonical_v16", forbidden_canonical)
-    monkeypatch.setattr(v15_scan_service, "compute_canonical_v16_scan", forbidden_canonical)
-    monkeypatch.setattr(v15_scan_service, "_fetch_prior_daily_once", forbidden_canonical)
     monkeypatch.setattr(
         "src.strategy.v16_day_gate_shadow.freeze_v16_day_gate_runtime",
         lambda *_args, **_kwargs: None,
     )
-
-    forbidden_callback_calls: list[str] = []
-
-    async def forbidden_callback(*_args: Any, **_kwargs: Any):
-        forbidden_callback_calls.append("called")
-        raise AssertionError("V16 must not call V20 artifact callbacks")
 
     state = v15_scan_service.V15ScanState(
         initialized=True,
@@ -203,8 +191,6 @@ async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
         historical_adapter=FakeHistory(),
         concept_mapper=object(),
         stock_filter=object(),
-        canonical_sink=forbidden_callback,
-        canonical_artifact_probe=forbidden_callback,
     )
 
     first = await v15_scan_service.run_v16_scan(state)
@@ -233,8 +219,9 @@ async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
         "top10": 2,
     }
     assert early_requests == [(("600000",), None), (("600000",), None)]
-    assert forbidden_callback_calls == []
-    assert state.canonical_coordinator is None
+    assert not hasattr(state, "canonical_coordinator")
+    assert not hasattr(state, "canonical_sink")
+    assert not hasattr(state, "canonical_artifact_probe")
 
 
 @pytest.mark.asyncio
@@ -377,12 +364,13 @@ async def test_v16_scheduler_never_probes_v20_artifacts_after_window(
         initialized=True,
         today_recommendation=old_recommendation,
         scan_error="previous-error",
-        canonical_artifact_probe=probe,
     )
 
     await v15_scan_service._scan_scheduler(state)
 
     assert probe_calls == 0
+    assert not hasattr(state, "canonical_artifact_probe")
+    assert not hasattr(state, "canonical_coordinator")
     assert state.scan_done_date == frozen.date().isoformat()
     assert state.today_recommendation is old_recommendation
     assert state.scan_error == "previous-error"
