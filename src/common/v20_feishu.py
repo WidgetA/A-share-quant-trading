@@ -551,6 +551,15 @@ def _render_manual_entry_check_for_operator(
             lines.append("差异字段：" + " / ".join(str(item) for item in mismatch_fields))
         else:
             lines.append("与早盘正式结果对比：无可比较的正式结果")
+        if comparison == "NOT_AVAILABLE":
+            unavailable_reason = semantic.get("official_comparison_unavailable_reason")
+            if isinstance(unavailable_reason, str) and unavailable_reason:
+                reason_text = (
+                    "旧版早盘正式记录未保存计算前状态"
+                    if unavailable_reason == "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
+                    else unavailable_reason
+                )
+                lines.append(f"对比不可用原因：{reason_text}（{unavailable_reason}）")
     elif semantic.get("probe_result") == "FAIL":
         mismatch_fields = semantic.get("probe_mismatch_fields") or []
         lines.extend(
@@ -1124,6 +1133,11 @@ def _validate_manual_0939_chain_probe(
         comparison = semantic["official_comparison_result"]
         if comparison not in {"MATCH", "DIFFERENT", "NOT_AVAILABLE"}:
             raise ValueError("V20 chain probe official comparison result is invalid")
+        unavailable_reason = semantic.get("official_comparison_unavailable_reason")
+        if unavailable_reason not in {None, "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"} or (
+            unavailable_reason is not None and comparison != "NOT_AVAILABLE"
+        ):
+            raise ValueError("V20 chain probe comparison-unavailable reason is invalid")
         mismatch_fields = semantic["official_mismatch_fields"]
         if not isinstance(mismatch_fields, list) or any(
             not isinstance(item, str) or not item for item in mismatch_fields

@@ -504,11 +504,11 @@ def _install_compute_caller_spy(
 ) -> None:
     original = service._compute_morning_selection
 
-    async def spy(trade_date: date) -> Any:
+    async def spy(trade_date: date, **kwargs: Any) -> Any:
         frame = inspect.currentframe()
         assert frame is not None and frame.f_back is not None
         callers.append(frame.f_back.f_code.co_name)
-        return await original(trade_date)
+        return await original(trade_date, **kwargs)
 
     monkeypatch.setattr(service, "_compute_morning_selection", spy)
 
@@ -898,7 +898,7 @@ async def test_current_input_invalid_probe_can_feed_manual_monitor_without_legac
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ("missing", "extra_field", "payload_hash"))
+@pytest.mark.parametrize("corruption", ("present_none", "extra_field", "payload_hash"))
 async def test_terminal_without_valid_canonical_prestate_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     corruption: str,
@@ -911,8 +911,8 @@ async def test_terminal_without_valid_canonical_prestate_fails_closed(
     assert repository.status is not None
 
     snapshot = dict(repository.status.snapshot)
-    if corruption == "missing":
-        snapshot.pop("state_before")
+    if corruption == "present_none":
+        snapshot["state_before"] = None
     else:
         state_before = dict(snapshot["state_before"])
         if corruption == "extra_field":
@@ -933,6 +933,259 @@ async def test_terminal_without_valid_canonical_prestate_fails_closed(
     with pytest.raises(V20SemanticConflict, match="canonical state_before"):
         await service.trigger_canonical_selection_check_only(
             f"manual-at-094000-bad-prestate-{corruption}",
+            AT_CUTOFF,
+        )
+
+    assert repository.alert_write_calls == 0
+    assert repository.commit_entry_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_post_cutoff_manual_accepts_only_legacy_missing_prestate_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [JUST_BEFORE_CUTOFF]
+    service, repository, artifact = _service_and_artifact(
+        monkeypatch,
+        now=JUST_BEFORE_CUTOFF,
+    )
+    service._clock = lambda: now[0]
+    await service._run_decision_iteration_with_cutoff(JUST_BEFORE_CUTOFF)
+    assert repository.status is not None
+
+    snapshot = dict(repository.status.snapshot)
+    snapshot.pop("state_before")
+    repository.status = replace(
+        repository.status,
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    # A later legal state transition may advance the head while retaining the
+    # durable identity of today's last terminal slot.
+    advanced_payload = {
+        **dict(repository.state.payload),
+        "state_revision": repository.state.revision + 1,
+    }
+    repository.state = replace(
+        repository.state,
+        revision=repository.state.revision + 1,
+        state_hash=sha256_json(advanced_payload),
+        payload=advanced_payload,
+    )
+    legacy_status = repository.status
+    official_state = repository.state
+    official_commit = repository.commit
+    commit_calls = repository.commit_entry_calls
+    raw_writes = repository.raw_write_calls
+    artifact_saves = tuple(artifact.save_calls)
+    alert_writes = repository.alert_write_calls
+    seal_calls = repository.seal_calls
+
+    current_input_calls: list[str] = []
+    original_scheduled = service._scheduled_exits_today
+    original_policy = service._policy_inputs
+
+    async def current_scheduled(trade_date: date) -> Any:
+        current_input_calls.append("scheduled")
+        return await original_scheduled(trade_date)
+
+    async def current_policy(trade_date: date) -> Any:
+        current_input_calls.append("policy")
+        return await original_policy(trade_date)
+
+    monkeypatch.setattr(service, "_scheduled_exits_today", current_scheduled)
+    monkeypatch.setattr(service, "_policy_inputs", current_policy)
+    now[0] = AT_CUTOFF
+    repository.seal_at = AT_CUTOFF
+
+    first = await _dispatch_manual_trigger(
+        service,
+        "manual-at-094000-legacy-missing-prestate",
+    )
+    second = await _dispatch_manual_trigger(
+        service,
+        "manual-at-094000-legacy-missing-prestate",
+    )
+    await _drain_mews_kicks(service)
+    alert = repository.alerts[first["operator_event_id"]]
+    recomputed = alert.semantic["entry_render_semantic"]
+
+    assert first["created"] is True
+    assert second == {**first, "created": False}
+    assert first["calculation_result"] == "SUCCESS"
+    assert first["official_comparison_result"] == "NOT_AVAILABLE"
+    assert first["official_comparison_unavailable_reason"] == "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
+    assert first["official_mismatch_fields"] == []
+    assert first["official_v16_snapshot_hash"] is None
+    assert first["canonical_artifact_compared"] is True
+    assert first["canonical_artifact_matches"] is True
+    assert alert.semantic["official_comparison_unavailable_reason"] == (
+        "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
+    )
+    assert alert.payload is not None
+    assert "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE" in alert.payload["message"]
+    assert recomputed["state_before_hash"] == official_state.state_hash
+    assert current_input_calls == ["scheduled", "policy"]
+
+    assert repository.status == legacy_status
+    assert repository.state == official_state
+    assert repository.commit == official_commit
+    assert repository.commit_entry_calls == commit_calls
+    assert repository.raw_write_calls == raw_writes
+    assert tuple(artifact.save_calls) == artifact_saves
+    assert repository.forbidden_write_calls == []
+    assert repository.alert_write_calls == alert_writes + 1
+    assert repository.seal_calls == seal_calls + 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_manual_legacy_input_invalid_uses_existing_fresh_theory_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [JUST_BEFORE_CUTOFF]
+    service, repository, artifact = _service_and_artifact(
+        monkeypatch,
+        now=JUST_BEFORE_CUTOFF,
+    )
+    service._clock = lambda: now[0]
+    baseline = await service._compute_morning_selection(TRADE_DATE)
+    invalid = prepare_invalid_entry(
+        config=service.config,
+        state=repository.state,
+        trade_date=TRADE_DATE,
+        calendar=FULL_EXCHANGE_CALENDAR,
+        reason_code="INPUT_TIME_BOUNDARY_VIOLATION",
+        detail="synthetic legacy INPUT_INVALID terminal",
+        invalid_commit_not_before_ts=AT_CUTOFF,
+        scheduled_exits_today=baseline.scheduled_exits_today,
+    )
+    await repository.commit_entry(invalid.commit)
+    assert repository.status is not None
+    snapshot = dict(repository.status.snapshot)
+    snapshot.pop("state_before")
+    repository.status = replace(
+        repository.status,
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    legacy_status = repository.status
+    official_state = repository.state
+    raw_writes = repository.raw_write_calls
+    artifact_saves = tuple(artifact.save_calls)
+    now[0] = AT_CUTOFF
+    repository.seal_at = AT_CUTOFF
+
+    result = await _dispatch_manual_trigger(
+        service,
+        "manual-at-094000-legacy-input-invalid",
+    )
+    alert = repository.alerts[result["operator_event_id"]]
+
+    assert result["calculation_result"] == "SUCCESS"
+    assert result["official_comparison_result"] == "NOT_AVAILABLE"
+    assert result["official_comparison_unavailable_reason"] == (
+        "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
+    )
+    assert result["official_mismatch_fields"] == []
+    assert result["official_v16_snapshot_hash"] is None
+    assert result["canonical_artifact_compared"] is False
+    assert result["canonical_artifact_matches"] is None
+    assert alert.semantic["entry_render_semantic"]["state_before_hash"] == official_state.state_hash
+    assert repository.status == legacy_status
+    assert repository.state == official_state
+    assert repository.commit_entry_calls == 1
+    assert repository.raw_write_calls == raw_writes
+    assert tuple(artifact.save_calls) == artifact_saves
+    assert repository.forbidden_write_calls == []
+    assert repository.alert_write_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_missing_prestate_remains_strict_outside_explicit_manual_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _ = _service_and_artifact(
+        monkeypatch,
+        now=JUST_BEFORE_CUTOFF,
+    )
+    await service._run_decision_iteration_with_cutoff(JUST_BEFORE_CUTOFF)
+    assert repository.status is not None
+    snapshot = dict(repository.status.snapshot)
+    snapshot.pop("state_before")
+    repository.status = replace(
+        repository.status,
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    context = _DayContext(
+        trade_date=TRADE_DATE,
+        calendar=FULL_EXCHANGE_CALENDAR,
+        entry_status=repository.status,
+    )
+    alerts_before = dict(repository.alerts)
+
+    with pytest.raises(V20SemanticConflict, match="canonical state_before"):
+        await service._compute_morning_selection(TRADE_DATE)
+    with pytest.raises(V20SemanticConflict, match="canonical state_before"):
+        await service._build_late_0939_replay_semantic(
+            context,
+            AT_CUTOFF,
+            replay_event_id="legacy-background-must-not-publish",
+        )
+
+    assert repository.alerts == alerts_before
+    assert repository.alert_write_calls == 0
+    assert repository.commit_entry_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    ("wrong_trade_date", "wrong_slot", "malformed_policy", "unbound_current_state"),
+)
+async def test_legacy_missing_prestate_requires_every_surviving_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    service, repository, _ = _service_and_artifact(
+        monkeypatch,
+        now=JUST_BEFORE_CUTOFF,
+    )
+    await service._run_decision_iteration_with_cutoff(JUST_BEFORE_CUTOFF)
+    assert repository.status is not None
+    snapshot = dict(repository.status.snapshot)
+    snapshot.pop("state_before")
+    if corruption == "malformed_policy":
+        snapshot["policy_inputs"] = {"not": "the frozen policy contract"}
+    repository.status = replace(
+        repository.status,
+        trade_date=(date(2026, 9, 2) if corruption == "wrong_trade_date" else TRADE_DATE),
+        slot_id=("wrong-slot" if corruption == "wrong_slot" else repository.status.slot_id),
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    if corruption == "unbound_current_state":
+        payload = {
+            **dict(repository.state.payload),
+            "last_terminal_slot_id": "unrelated-terminal-slot",
+        }
+        repository.state = replace(
+            repository.state,
+            state_hash=sha256_json(payload),
+            payload=payload,
+        )
+
+    # The production query is keyed by date.  This permissive adapter lets the
+    # service itself prove that a corrupt row cannot cross that repository seam.
+    async def get_corrupt_status(_stream_id: str, _trade_date: date) -> Any:
+        return repository.status
+
+    monkeypatch.setattr(repository, "get_entry_status", get_corrupt_status)
+    repository.seal_at = AT_CUTOFF
+
+    with pytest.raises(V20SemanticConflict):
+        await service.trigger_canonical_selection_check_only(
+            f"manual-at-094000-legacy-binding-{corruption}",
             AT_CUTOFF,
         )
 
@@ -980,8 +1233,8 @@ async def test_current_state_head_is_only_a_readonly_concurrency_fence(
     repository.seal_at = AT_CUTOFF
     original = service._orchestrate_morning_selection
 
-    async def compute_then_advance(trade_date: date) -> Any:
-        calculation = await original(trade_date)
+    async def compute_then_advance(trade_date: date, **kwargs: Any) -> Any:
+        calculation = await original(trade_date, **kwargs)
         advanced_payload = {
             **dict(repository.state.payload),
             "state_revision": repository.state.revision + 1,

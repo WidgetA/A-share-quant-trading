@@ -92,7 +92,7 @@ from src.strategy.v20.exit_policy import (
     evaluate_exit,
     is_valid_complete_minute_bar,
 )
-from src.strategy.v20.identity import event_id, named_hash
+from src.strategy.v20.identity import event_id, named_hash, official_slot_id
 from src.strategy.v20.models import (
     V20_DATA_ALERT_SEMANTIC_SCHEMA,
     V20_DECISION_INPUT_SNAPSHOT_SCHEMA,
@@ -427,6 +427,7 @@ class _MorningSelectionComputation:
     canonical_source: str
     canonical_artifact_compared: bool
     canonical_artifact_matches: bool | None
+    legacy_terminal_fresh_theoretical: bool
 
 
 _ENTRY_BUSINESS_SEMANTIC_FIELDS = (
@@ -3022,6 +3023,9 @@ class V20Service:
                 "policy_recomputed": True,
                 "calculation_result": semantic.get("calculation_result"),
                 "official_comparison_result": semantic.get("official_comparison_result"),
+                "official_comparison_unavailable_reason": semantic.get(
+                    "official_comparison_unavailable_reason"
+                ),
                 "official_mismatch_fields": list(semantic.get("official_mismatch_fields") or ()),
                 "probe_result": semantic.get("probe_result"),
                 "probe_mismatch_fields": list(semantic.get("probe_mismatch_fields") or ()),
@@ -3090,12 +3094,19 @@ class V20Service:
                         "official V20 state payload hash differs before check-only preparation"
                     )
 
-                calculation = await self._orchestrate_morning_selection(trade_date)
+                calculation = await self._orchestrate_morning_selection(
+                    trade_date,
+                    allow_legacy_terminal_fresh_theoretical=True,
+                )
                 calculation_completed_at = max(current, self._aware_now())
                 bundle = calculation.bundle
                 first_received_at = calculation.canonical_first_received_at
                 official_v16_snapshot_hash: str | None = None
-                if status_before is not None and status_before.action != "INPUT_INVALID":
+                if (
+                    status_before is not None
+                    and status_before.action != "INPUT_INVALID"
+                    and not calculation.legacy_terminal_fresh_theoretical
+                ):
                     official_semantic_v16_hash = status_before.semantic.get("v16_snapshot_hash")
                     official_snapshot_v16_hash = status_before.snapshot.get("v16_snapshot_hash")
                     if (
@@ -3121,7 +3132,11 @@ class V20Service:
                 entry_render_semantic = dict(pure)
                 symbols = list(pure.get("symbols") or ())
                 mismatched_business_fields: list[str] = []
-                if status_before is None or status_before.action == "INPUT_INVALID":
+                if (
+                    status_before is None
+                    or status_before.action == "INPUT_INVALID"
+                    or calculation.legacy_terminal_fresh_theoretical
+                ):
                     official_comparison_result = "NOT_AVAILABLE"
                 else:
                     mismatched_business_fields = [
@@ -3183,6 +3198,11 @@ class V20Service:
                 "probe_profile": "CURRENT_DEPLOYED_CODE_EXACT_0939_ENTRY_RENDER_V2",
                 "calculation_result": "SUCCESS",
                 "official_comparison_result": official_comparison_result,
+                "official_comparison_unavailable_reason": (
+                    "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
+                    if calculation.legacy_terminal_fresh_theoretical
+                    else None
+                ),
                 "official_mismatch_fields": mismatched_business_fields,
                 "probe_result": probe_result,
                 "probe_mismatch_fields": [],
@@ -5344,6 +5364,67 @@ class V20Service:
             raise V20SemanticConflict(
                 "terminal slot lacks a valid canonical state_before payload"
             ) from exc
+
+    @staticmethod
+    def _terminal_lacks_canonical_state_before(status: EntryStatus) -> bool:
+        """Recognize only the deployed legacy terminal contract.
+
+        A present-but-invalid value is corruption, not legacy compatibility, and
+        remains fail-closed in ``_state_before_from_terminal_status``.
+        """
+
+        return "state_before" not in status.snapshot
+
+    def _validate_legacy_terminal_without_prestate(
+        self,
+        status: EntryStatus,
+        trade_date: date,
+    ) -> None:
+        """Validate every surviving legacy terminal input before compatibility."""
+
+        trade_date_text = trade_date.isoformat()
+        state_before_hash = status.semantic.get("state_before_hash")
+        state_after_hash = status.semantic.get("state_after_hash")
+        if (
+            status.action not in {"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"}
+            or status.trade_date != trade_date
+            or status.slot_id != official_slot_id(self.config.official_stream_id, trade_date_text)
+            or status.semantic.get("trade_date") != trade_date_text
+            or status.snapshot.get("trade_date") != trade_date_text
+            or not isinstance(state_before_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", state_before_hash) is None
+            or status.snapshot.get("state_before_hash") != state_before_hash
+            or not isinstance(state_after_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", state_after_hash) is None
+        ):
+            raise V20SemanticConflict(
+                "legacy terminal slot without state_before has invalid surviving identity"
+            )
+        # Compatibility changes which policy inputs are used for the fresh
+        # theoretical result; it does not waive validation of the old terminal.
+        self._policy_inputs_from_terminal_status(status)
+
+    def _validate_current_state_for_legacy_terminal(
+        self,
+        state: StateRecord,
+        status: EntryStatus,
+        trade_date: date,
+    ) -> None:
+        """Prove the current state is valid and descends from today's terminal."""
+
+        payload = dict(state.payload)
+        if (
+            state.lineage_id != self.config.state_lineage_id
+            or type(state.revision) is not int
+            or state.revision < 0
+            or payload.get("state_revision") != state.revision
+            or sha256_json(payload) != state.state_hash
+            or payload.get("last_terminal_slot_id") != status.slot_id
+            or payload.get("last_terminal_trade_date") != trade_date.isoformat()
+        ):
+            raise V20SemanticConflict(
+                "current V20 state is not a valid descendant of the legacy terminal slot"
+            )
 
     @staticmethod
     def _verify_terminal_replay_transition(
@@ -7693,6 +7774,8 @@ class V20Service:
     async def _compute_morning_selection(
         self,
         trade_date: date,
+        *,
+        allow_legacy_terminal_fresh_theoretical: bool = False,
     ) -> _MorningSelectionComputation:
         """Run the complete canonical V16 -> V20 policy calculation.
 
@@ -7709,6 +7792,14 @@ class V20Service:
         )
         if status is not None:
             self._verify_entry_binding(status)
+        legacy_terminal_fresh_theoretical = (
+            status is not None
+            and allow_legacy_terminal_fresh_theoretical
+            and self._terminal_lacks_canonical_state_before(status)
+        )
+        if legacy_terminal_fresh_theoretical:
+            assert status is not None
+            self._validate_legacy_terminal_without_prestate(status, trade_date)
         (
             bundle,
             first_received_at,
@@ -7720,7 +7811,7 @@ class V20Service:
             trade_date,
             terminal_status=status,
         )
-        if status is not None:
+        if status is not None and not legacy_terminal_fresh_theoretical:
             scheduled_source = status.semantic.get("scheduled_exits_today") or ()
             completed_health, completed_rolling, maturity_gaps = (
                 self._policy_inputs_from_terminal_status(status)
@@ -7732,6 +7823,13 @@ class V20Service:
                 trade_date
             )
             calculation_state = await self._repository.load_state(self.config.state_lineage_id)
+            if legacy_terminal_fresh_theoretical:
+                assert status is not None
+                self._validate_current_state_for_legacy_terminal(
+                    calculation_state,
+                    status,
+                    trade_date,
+                )
         scheduled = tuple(dict(item) for item in scheduled_source)
         prepared = prepare_entry(
             config=self.config,
@@ -7744,7 +7842,7 @@ class V20Service:
             calendar=calendar,
             scheduled_exits_today=scheduled,
         )
-        if status is not None:
+        if status is not None and not legacy_terminal_fresh_theoretical:
             self._verify_terminal_replay_transition(status, prepared)
         if prepared.commit.semantic.get("action") not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
             raise V20SemanticConflict(
@@ -7759,11 +7857,14 @@ class V20Service:
             canonical_source=canonical_source,
             canonical_artifact_compared=artifact_compared,
             canonical_artifact_matches=artifact_matches,
+            legacy_terminal_fresh_theoretical=legacy_terminal_fresh_theoretical,
         )
 
     async def _orchestrate_morning_selection(
         self,
         trade_date: date,
+        *,
+        allow_legacy_terminal_fresh_theoretical: bool = False,
     ) -> _MorningSelectionComputation:
         """Single high-level entry point for every V20 morning calculation.
 
@@ -7773,6 +7874,11 @@ class V20Service:
         their final fence decides whether it may be committed or merely shown.
         """
 
+        if allow_legacy_terminal_fresh_theoretical:
+            return await self._compute_morning_selection(
+                trade_date,
+                allow_legacy_terminal_fresh_theoretical=True,
+            )
         return await self._compute_morning_selection(trade_date)
 
     async def _run_entry_collection_cycle(
