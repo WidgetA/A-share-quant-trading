@@ -75,11 +75,7 @@ def _v20_start_error_code(exc: BaseException) -> str:
     return "UNCLASSIFIED_STARTUP_FAILURE"
 
 
-def _create_default_v20_service(
-    *,
-    fundamentals_db: object | None = None,
-    scan_state: V15ScanState | None = None,
-) -> object:
+def _create_default_v20_service() -> object:
     """Create V20 lazily so importing the legacy web app stays side-effect free.
 
     Existing main deployments have no dedicated ``V20_*`` secrets because
@@ -97,11 +93,8 @@ def _create_default_v20_service(
     if embedded_value not in {"true", "false"}:
         raise ValueError("V20_EMBEDDED_ENABLED must be true or false")
     if explicit_v20_runtime or embedded_value == "false":
-        return V20Service.from_default_config(scan_state=scan_state)
-    return V20Service.from_legacy_runtime(
-        fundamentals_db=fundamentals_db,
-        scan_state=scan_state,
-    )
+        return V20Service.from_default_config()
+    return V20Service.from_legacy_runtime()
 
 
 def _default_v20_mode_hint() -> str | None:
@@ -203,11 +196,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
     if service is None:
         mode_hint = _default_v20_mode_hint()
         try:
-            scan_state = getattr(app.state, "v15_scan_state", None)
-            service = _create_default_v20_service(
-                fundamentals_db=getattr(app.state, "fundamentals_db", None),
-                scan_state=scan_state,
-            )
+            service = _create_default_v20_service()
             app.state.v20_service = service
         except Exception as exc:
             app.state.v20_deployment_mode = mode_hint
@@ -264,6 +253,13 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
 async def _stop_v20_lifecycle(app: FastAPI) -> None:
     """Stop any enabled V20 service whose lifecycle this app attempted to own."""
 
+    lifecycle_task = getattr(app.state, "v20_lifecycle_task", None)
+    if lifecycle_task is not None and lifecycle_task is not asyncio.current_task():
+        if not lifecycle_task.done():
+            lifecycle_task.cancel()
+        await asyncio.gather(lifecycle_task, return_exceptions=True)
+    app.state.v20_lifecycle_task = None
+
     retry_task = getattr(app.state, "v20_retry_task", None)
     if retry_task is not None and not retry_task.done():
         retry_task.cancel()
@@ -290,8 +286,25 @@ async def _stop_v20_lifecycle(app: FastAPI) -> None:
     app.state.v20_service_started = False
 
 
+async def _run_v20_lifecycle_background(app: FastAPI) -> None:
+    """Run V20 lifecycle work without gating the standalone V16 scheduler."""
+
+    try:
+        await _start_v20_lifecycle(app)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        app.state.v20_start_error = f"{type(exc).__name__}: {exc}"
+        app.state.v20_start_error_code = _v20_start_error_code(exc)
+        logger.exception("Unexpected V20 background lifecycle failure")
+    finally:
+        current = asyncio.current_task()
+        if getattr(app.state, "v20_lifecycle_task", None) is current:
+            app.state.v20_lifecycle_task = None
+
+
 async def _start_strategy_services(app: FastAPI) -> None:
-    """Start iQuant monitoring plus the single permitted scan owner(s)."""
+    """Start V16 immediately and launch the isolated V20 lifecycle in background."""
 
     # iQuant trading monitoring is independent of scan ownership and must
     # remain active in every V20 deployment mode.
@@ -300,14 +313,18 @@ async def _start_strategy_services(app: FastAPI) -> None:
         iquant_router._start_monitoring()
         logger.info("iQuant V15 monitoring scheduler started")
 
-    legacy_scan_allowed = await _start_v20_lifecycle(app)
-    app.state.legacy_v15_scan_allowed = legacy_scan_allowed
     v15_scan_state = getattr(app.state, "v15_scan_state", None)
-    if legacy_scan_allowed and v15_scan_state:
+    if v15_scan_state:
         start_scan_scheduler(v15_scan_state)
-        logger.info("V15 scan scheduler started alongside V20 shadow/disabled mode")
-    elif not legacy_scan_allowed:
-        logger.warning("Legacy V15 scan scheduler disabled by V20 ownership policy")
+        logger.info("V15 scan scheduler started independently of V20")
+    app.state.legacy_v15_scan_allowed = True
+
+    existing = getattr(app.state, "v20_lifecycle_task", None)
+    if existing is None or existing.done():
+        app.state.v20_lifecycle_task = asyncio.create_task(
+            _run_v20_lifecycle_background(app),
+            name="v20-lifecycle-start",
+        )
 
 
 def create_app(
@@ -348,6 +365,7 @@ def create_app(
     app.state.strategy_controller = strategy_controller
     app.state.position_manager = position_manager
     app.state.v20_service = v20_service
+    app.state.v20_lifecycle_task = None
 
     # Set up templates
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -393,8 +411,6 @@ def create_app(
     # V15 scan state (shared between scan service and trading router)
     scan_state = V15ScanState()
     app.state.v15_scan_state = scan_state
-    if v20_service is not None and hasattr(v20_service, "bind_shared_v15_scan_state"):
-        v20_service.bind_shared_v15_scan_state(scan_state)
     # Inject scan state into trading router
     if hasattr(iquant_router, "_inject_scan_state"):
         iquant_router._inject_scan_state(scan_state)

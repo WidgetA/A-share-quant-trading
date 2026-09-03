@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+import src.data.clients.tushare_realtime as tushare_realtime_module
 from src.data.clients.tushare_realtime import (
     BEIJING_TZ,
     TushareEarlyMarketData,
@@ -480,6 +481,62 @@ async def test_early_quotes_wrapper_returns_same_quotes(monkeypatch) -> None:
     assert quotes["000001"].early_close == pytest.approx(10.8)
     assert quotes["600000"].latest_price == pytest.approx(20.8)
     assert sorted(calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
+
+
+@pytest.mark.asyncio
+async def test_v16_wrapper_defaults_to_current_day_and_calls_rt_min_daily_once_per_symbol(
+    monkeypatch,
+) -> None:
+    """Representative universe locks the per-symbol contract used by V16 at scale."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz == BEIJING_TZ
+            return cls(2026, 8, 31, 9, 39, tzinfo=tz)
+
+    monkeypatch.setattr(tushare_realtime_module, "datetime", FrozenDateTime)
+
+    current_payloads = {
+        "000001": _full_day_payload(10.0),
+        "600000": _full_day_payload(20.0),
+    }
+    stale_payload = {
+        "data": {
+            "fields": list(_FIELDS),
+            "items": [["2026-08-30 09:39:00", 29.95, 30.0, 30.1, 29.9, 100.0, 1000.0]],
+        }
+    }
+    responses = {**current_payloads, "300750": stale_payload}
+    client = TushareRealtimeClient("token")
+    client._client = object()  # type: ignore[assignment]
+    calls: list[tuple[str, dict[str, object], str]] = []
+
+    async def fake_api_call(api_name, params, fields=""):
+        calls.append((api_name, dict(params), fields))
+        return responses[params["ts_code"].split(".")[0]]
+
+    monkeypatch.setattr(client, "_api_call", fake_api_call)
+
+    # Production V16 omits expected_trade_date, so exercise that exact wrapper shape.
+    quotes = await client.batch_get_early_quotes(["000001", "600000", "000001", "300750"])
+
+    assert len(calls) == 3
+    assert {api_name for api_name, _params, _fields in calls} == {"rt_min_daily"}
+    assert sorted(params["ts_code"] for _api_name, params, _fields in calls) == [
+        "000001.SZ",
+        "300750.SZ",
+        "600000.SH",
+    ]
+    assert all(params["freq"] == "1MIN" for _api_name, params, _fields in calls)
+    assert all(
+        fields == "ts_code,time,open,close,high,low,vol,amount"
+        for _api_name, _params, fields in calls
+    )
+    assert list(quotes) == ["000001", "600000"]
+    assert quotes["000001"].early_close == pytest.approx(10.8)
+    assert quotes["600000"].early_close == pytest.approx(20.8)
+    assert "300750" not in quotes  # Yesterday's valid-looking 09:39 row is rejected.
 
 
 @pytest.mark.asyncio

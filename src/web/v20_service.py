@@ -1415,33 +1415,8 @@ class V20Service:
             )
         }
 
-    def bind_shared_v15_scan_state(self, scan_state: V15ScanState) -> None:
-        """Bind the process-wide V16 state before V20 resources start."""
-
-        if self._resources_started or self._started:
-            raise V20StateConflict("V20 scan resources have already started")
-        for name in (
-            "fundamentals_db",
-            "realtime_client",
-            "historical_adapter",
-            "concept_mapper",
-            "stock_filter",
-            "v15_scan_db",
-            "tushare_cache",
-        ):
-            if getattr(scan_state, name) is None:
-                setattr(scan_state, name, getattr(self._scan_state, name))
-        if scan_state.resource_owner is None:
-            scan_state.resource_owner = self._scan_state.resource_owner
-        scan_state.initialized = scan_state.initialized or self._scan_state.initialized
-        if scan_state.resource_init_task is None:
-            scan_state.resource_init_task = self._scan_state.resource_init_task
-        if scan_state.resource_cleanup_task is None:
-            scan_state.resource_cleanup_task = self._scan_state.resource_cleanup_task
-        self._scan_state = scan_state
-
     @classmethod
-    def from_default_config(cls, *, scan_state: V15ScanState | None = None) -> V20Service:
+    def from_default_config(cls) -> V20Service:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
         project_root = Path(__file__).resolve().parents[2]
@@ -1457,8 +1432,8 @@ class V20Service:
                 "config/v20.yaml database schema/pool settings do not match "
                 "config/database-config.yaml database.v20"
             )
-        resolved_scan_state = scan_state or V15ScanState()
-        fundamentals = resolved_scan_state.fundamentals_db
+        resolved_scan_state = V15ScanState()
+        fundamentals = None
         if config.enabled:
             token = validated_v20_tushare_token()
             if fundamentals is None:
@@ -1515,22 +1490,17 @@ class V20Service:
         )
 
     @classmethod
-    def from_legacy_runtime(
-        cls,
-        *,
-        fundamentals_db: Any | None = None,
-        scan_state: V15ScanState | None = None,
-    ) -> V20Service:
-        """Embed forward-shadow V20 in the existing main/V16 container.
+    def from_legacy_runtime(cls) -> V20Service:
+        """Embed an isolated forward-shadow V20 runtime in the main process.
 
         Strategy semantics, the ledger, outbox, 09:39 input boundary, and
-        notification rules remain V20.  Only operational credentials and the
-        final relay protocol are adapted to infrastructure already deployed by
-        main.  The dedicated V20 host continues to use ``from_default_config``.
+        notification rules remain V20. V20 owns its state, market clients and
+        database pools; only credentials and the final relay protocol come from
+        the existing main deployment. The dedicated V20 host continues to use
+        ``from_default_config``.
         """
         from src.common.config import get_tushare_token
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
-        from src.web import v15_scan_service
 
         project_root = Path(__file__).resolve().parents[2]
         base_config = load_v20_runtime_config(project_root)
@@ -1543,30 +1513,12 @@ class V20Service:
 
         database_config_path = project_root / "config" / "database-config.yaml"
         token = get_tushare_token()
-        owns_fundamentals = fundamentals_db is None and (
-            scan_state is None or scan_state.fundamentals_db is None
-        )
-        fundamentals = fundamentals_db
-        resolved_scan_state = scan_state or V15ScanState()
-        if fundamentals is None:
-            fundamentals = resolved_scan_state.fundamentals_db
-        if fundamentals is None:
-            fundamentals = create_fundamentals_db_from_config(
-                database_config_path,
-                tushare_token=token,
-            )
-        shared_ledger_pool = None
-        if not owns_fundamentals:
-            try:
-                shared_ledger_pool = fundamentals.connection_pool
-            except (AttributeError, RuntimeError) as exc:
-                raise V20ConfigError(
-                    "embedded V20 requires a connected shared fundamentals pool"
-                ) from exc
-        repository = create_embedded_v20_repository_from_config(
+        resolved_scan_state = V15ScanState()
+        fundamentals = create_fundamentals_db_from_config(
             database_config_path,
-            shared_pool=shared_ledger_pool,
+            tushare_token=token,
         )
+        repository = create_embedded_v20_repository_from_config(database_config_path)
         if (
             repository.config.schema != base_config.database_schema
             or repository.config.pool_min_size != base_config.database_pool_min_size
@@ -1607,22 +1559,8 @@ class V20Service:
             publisher=publisher,
             routes=routes,
             mews_source=mews_source,
-            # Embedded main reuses the exact shared V16 trade-calendar
-            # infrastructure, so a cold 14:04 manual trigger after V16 already
-            # ran never fails merely because V20's own Tushare calendar
-            # adapter/cache is empty.  The dedicated strict V20 host keeps its
-            # validated provider (None here means the runtime default).
-            calendar_provider=v15_scan_service.get_trade_calendar,
-            initialize_resources=(
-                _init_owned_embedded_v20_scan_resources
-                if owns_fundamentals
-                else _init_embedded_v20_scan_resources
-            ),
-            cleanup_resources=(
-                _cleanup_v20_scan_resources
-                if owns_fundamentals
-                else _cleanup_embedded_v20_scan_resources
-            ),
+            initialize_resources=_init_owned_embedded_v20_scan_resources,
+            cleanup_resources=_cleanup_v20_scan_resources,
             embedded_legacy=True,
         )
 

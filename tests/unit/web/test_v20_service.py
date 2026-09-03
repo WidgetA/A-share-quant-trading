@@ -814,7 +814,7 @@ def test_embedded_runtime_config_binds_legacy_destination_without_secrets(
     assert embedded.frozen_payload["integration_profile"] == "legacy_main_embedded/v1"
 
 
-def test_legacy_runtime_factory_wires_existing_main_infrastructure(
+def test_legacy_runtime_factory_owns_v20_resources_and_accepts_no_shared_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.common import config as common_config
@@ -887,23 +887,19 @@ def test_legacy_runtime_factory_wires_existing_main_infrastructure(
     assert captured["database_path"] == captured["fundamentals_path"]
     assert repository_pools == [None]
 
-    shared_pool = object()
-    shared_fundamentals = SimpleNamespace(connection_pool=shared_pool)
-    shared_service = V20Service.from_legacy_runtime(fundamentals_db=shared_fundamentals)
-
-    assert shared_service._scan_state.fundamentals_db is shared_fundamentals
-    assert shared_service._initialize_resources is _init_embedded_v20_scan_resources
-    assert shared_service._cleanup_resources is _cleanup_embedded_v20_scan_resources
-    assert repository_pools == [None, shared_pool]
+    with pytest.raises(TypeError, match="fundamentals_db"):
+        V20Service.from_legacy_runtime(fundamentals_db=object())
+    with pytest.raises(TypeError, match="scan_state"):
+        V20Service.from_legacy_runtime(scan_state=V15ScanState())
+    assert repository_pools == [None]
 
 
-async def test_embedded_runtime_reuses_shared_v16_trade_calendar_provider(
+async def test_embedded_runtime_uses_its_own_tushare_trade_calendar_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cold 14:04 trigger after V16 ran must not fail on an empty V20 calendar."""
+    """Embedded V20 must not read or mutate V16's process-global calendar."""
     from src.common import config as common_config
     from src.data.database import fundamentals_db as fundamentals_module
-    from src.web import v15_scan_service
     from src.web import v20_service as service_module
 
     monkeypatch.delenv("V20_ENABLED", raising=False)
@@ -944,51 +940,47 @@ async def test_embedded_runtime_reuses_shared_v16_trade_calendar_provider(
 
     service = V20Service.from_legacy_runtime()
 
-    # The embedded service is wired to the exact shared V16 provider — not a
-    # separate Tushare calendar adapter (the scan state has no client yet).
-    assert service._calendar_provider is v15_scan_service.get_trade_calendar
+    # The client is created during V20 startup; no V16 provider is captured.
+    assert service._calendar_provider is None
     assert service._scan_state.realtime_client is None
     assert service._calendar_cache == ()
 
     calendar_days = [date(2026, 9, 1) - timedelta(days=offset) for offset in range(9, -1, -1)]
-    monkeypatch.setattr(
-        v15_scan_service,
-        "_trade_calendar_cache",
-        sorted(calendar_days + [date(2026, 9, 2), date(2026, 9, 3)]),
-    )
-    loaded = await service._load_trade_calendar(date(2026, 9, 1))
-    assert date(2026, 9, 1) in loaded
-    assert service._calendar_loaded_for == date(2026, 9, 1)
-
-    # Concurrent cold callers share one provider call through the V20
-    # singleflight wrapper around the shared provider.
     provider_calls = 0
-    real_shared_provider = service._calendar_provider
 
-    async def counted_provider() -> list[date]:
-        nonlocal provider_calls
-        provider_calls += 1
-        await asyncio.sleep(0.05)
-        return sorted(calendar_days + [date(2026, 9, 2), date(2026, 9, 3)])
+    class OwnCalendarClient:
+        async def fetch_trade_calendar(
+            self,
+            start_date: date,
+            end_date: date,
+        ) -> list[date]:
+            nonlocal provider_calls
+            provider_calls += 1
+            assert start_date < date(2026, 9, 1) < end_date
+            await asyncio.sleep(0.05)
+            return sorted(calendar_days + [date(2026, 9, 2), date(2026, 9, 3)])
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", counted_provider)
-    second_service = V20Service.from_legacy_runtime()
-    assert second_service._calendar_provider is counted_provider
-    assert real_shared_provider is not counted_provider
+    service._scan_state.realtime_client = OwnCalendarClient()
     first, second = await asyncio.gather(
-        second_service._load_trade_calendar(date(2026, 9, 1)),
-        second_service._load_trade_calendar(date(2026, 9, 1)),
+        service._load_trade_calendar(date(2026, 9, 1)),
+        service._load_trade_calendar(date(2026, 9, 1)),
     )
     assert first == second
+    assert date(2026, 9, 1) in first
+    assert service._calendar_loaded_for == date(2026, 9, 1)
     assert provider_calls == 1
 
-    # Genuinely invalid shared calendar data still fails closed.
-    async def invalid_provider() -> list[date]:
-        return [date(2026, 9, 1), date(2026, 9, 1)]
+    class InvalidOwnCalendarClient:
+        async def fetch_trade_calendar(
+            self,
+            _start_date: date,
+            _end_date: date,
+        ) -> list[date]:
+            return [date(2026, 9, 1), date(2026, 9, 1)]
 
-    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", invalid_provider)
     third_service = V20Service.from_legacy_runtime()
-    assert third_service._calendar_provider is invalid_provider
+    assert third_service._calendar_provider is None
+    third_service._scan_state.realtime_client = InvalidOwnCalendarClient()
     with pytest.raises(V20RepositoryError, match="unsorted, or duplicated"):
         await third_service._load_trade_calendar(date(2026, 9, 1))
     assert third_service._calendar_cache == ()
@@ -2112,12 +2104,10 @@ async def test_entry_collection_does_not_run_the_selection_calculation(
     assert mews_triggers == [at_decision_bar]
 
 
-@pytest.mark.asyncio
-async def test_bind_preserves_already_owned_scan_resources() -> None:
+def test_v20_has_no_scan_state_rebinding_api() -> None:
     owned_fundamentals = object()
     realtime = object()
     historical = object()
-    owner_task = asyncio.get_running_loop().create_future()
     service = V20Service.__new__(V20Service)
     service._resources_started = False
     service._started = False
@@ -2127,20 +2117,19 @@ async def test_bind_preserves_already_owned_scan_resources() -> None:
         fundamentals_db=owned_fundamentals,
         historical_adapter=historical,
         resource_owner="V20",
-        resource_init_task=owner_task,
     )
-    shared = V15ScanState()
+    foreign_v16_state = V15ScanState()
 
-    service.bind_shared_v15_scan_state(shared)
+    assert not hasattr(service, "bind_shared_v15_scan_state")
+    assert service._scan_state is not foreign_v16_state
 
-    assert service._scan_state is shared
-    assert shared.fundamentals_db is owned_fundamentals
-    assert shared.realtime_client is realtime
-    assert shared.historical_adapter is historical
-    assert shared.resource_owner == "V20"
-    assert shared.resource_init_task is owner_task
-    assert shared.initialized is True
-    owner_task.cancel()
+    foreign_v16_state.fundamentals_db = object()
+    foreign_v16_state.realtime_client = object()
+    assert service._scan_state.fundamentals_db is owned_fundamentals
+    assert service._scan_state.realtime_client is realtime
+    assert service._scan_state.historical_adapter is historical
+    assert service._scan_state.resource_owner == "V20"
+    assert service._scan_state.initialized is True
 
 
 @pytest.mark.asyncio

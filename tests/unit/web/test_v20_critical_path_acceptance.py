@@ -222,6 +222,10 @@ class FakeRealtimeClient:
             )
         return result
 
+    async def batch_get_early_quotes(self, codes: list[str]) -> dict[str, TushareQuote]:
+        early = await self.batch_get_early_market_data(codes)
+        return {code: item.quote for code, item in early.items()}
+
     async def batch_get_minute_history(
         self, codes: list[str]
     ) -> dict[str, tuple[TushareMinuteBar, ...]]:
@@ -760,14 +764,13 @@ async def _no_op_start() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_startup_gives_v16_and_v20_one_scan_state(
+async def test_app_startup_keeps_v16_and_v20_scan_states_separate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: list[Any] = []
 
-    def factory(*, fundamentals_db: object | None = None, scan_state: Any = None) -> Any:
-        assert fundamentals_db is not None
-        assert isinstance(scan_state, V15ScanState)
+    def factory() -> Any:
+        scan_state = V15ScanState()
         service = SimpleNamespace(
             config=SimpleNamespace(enabled=True, deployment_mode="forward_shadow"),
             scan_state=scan_state,
@@ -782,15 +785,13 @@ async def test_app_startup_gives_v16_and_v20_one_scan_state(
     app.state.fundamentals_db = FakeStartupFundamentals()
     await web_app._start_v20_lifecycle(app)
     assert app.state.v20_service_started is True
-    assert created[0].scan_state is app.state.v15_scan_state
-    assert (
-        created[0].scan_state.canonical_coordinator
-        is app.state.v15_scan_state.canonical_coordinator
-    )
+    assert created[0].scan_state is not app.state.v15_scan_state
+    created[0].scan_state.canonical_coordinator = object()
+    assert app.state.v15_scan_state.canonical_coordinator is None
 
 
 @pytest.mark.asyncio
-async def test_app_injection_shares_existing_fundamentals_pool(
+async def test_app_injection_does_not_rebind_v20_resources_to_v16(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = object()
@@ -808,10 +809,10 @@ async def test_app_injection_shares_existing_fundamentals_pool(
     service = _v20_service(monkeypatch, scan_state=shared)
     app = web_app.create_app(v20_service=service)
 
-    assert service._scan_state is app.state.v15_scan_state
-    assert app.state.v15_scan_state.fundamentals_db is shared.fundamentals_db
-    assert app.state.v15_scan_state.fundamentals_db.connection_pool is pool
+    assert service._scan_state is not app.state.v15_scan_state
+    assert app.state.v15_scan_state.fundamentals_db is None
     assert service._scan_state.fundamentals_db is shared.fundamentals_db
+    assert service._scan_state.fundamentals_db.connection_pool is pool
     assert not hasattr(service, "_scan_pipeline")
 
 
@@ -979,18 +980,10 @@ async def test_real_factories_and_app_lifecycle_have_no_scan_pipeline(
         except BaseException as exc:
             return exc
 
-    shared = V15ScanState(
-        initialized=True,
-        fundamentals_db=SimpleNamespace(config=SimpleNamespace(), connection_pool=object()),
-    )
     monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: strict_config)
-    strict = await call_factory(V20Service.from_default_config, scan_state=shared)
+    strict = await call_factory(V20Service.from_default_config)
     monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: embedded_config)
-    embedded = await call_factory(
-        V20Service.from_legacy_runtime,
-        fundamentals_db=SimpleNamespace(connection_pool=object()),
-        scan_state=shared,
-    )
+    embedded = await call_factory(V20Service.from_legacy_runtime)
     app = web_app.create_app()
     app.state.fundamentals_db = SimpleNamespace(connection_pool=object())
     monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: strict_config)
@@ -1006,9 +999,10 @@ async def test_real_factories_and_app_lifecycle_have_no_scan_pipeline(
     _assert_no_legacy_scan_pipeline_construction()
     assert not hasattr(strict, "_scan_pipeline")
     assert not hasattr(embedded, "_scan_pipeline")
-    assert strict._scan_state is shared
-    assert embedded._scan_state is shared
-    assert app.state.v20_service._scan_state is app.state.v15_scan_state
+    assert strict._scan_state is not embedded._scan_state
+    assert strict._scan_state is not app.state.v15_scan_state
+    assert embedded._scan_state is not app.state.v15_scan_state
+    assert app.state.v20_service._scan_state is not app.state.v15_scan_state
     assert not hasattr(app.state.v20_service, "_scan_pipeline")
 
 
@@ -1421,11 +1415,7 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     release.set()
 
     automatic_context = await automatic_task
-    for _ in range(100):
-        if state.scan_done_date == today.isoformat():
-            break
-        await asyncio.sleep(0)
-    master = state.canonical_coordinator.cache[today]
+    master = await master_task
     configured_master = dataclasses_replace(
         master,
         model_sha256=service.config.strategy_dependency_hashes["models/lgbrank_latest.txt"],
@@ -1480,10 +1470,10 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     assert [item["code"] for item in check_only_result["symbols"]] == list(FRESH_CODES)
     # V16 and V20 are allowed to duplicate selection work.  Within V20, both
     # paths enter the same calculation boundary exactly once per trigger.
-    assert FakeV16Scanner.scan_calls == 1
+    assert FakeV16Scanner.scan_calls == 2
     assert v20_compute_calls == 2
-    assert FakeRealtimeClient.early_calls == 1
-    assert FakeHistoryAdapter.history_calls == 1
+    assert FakeRealtimeClient.early_calls == 2
+    assert FakeHistoryAdapter.history_calls == 2
     assert artifact_store.save_calls == 1
     assert artifact_store.load_calls >= 3
     assert len(repository.persist_calls) == 1

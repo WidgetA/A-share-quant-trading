@@ -424,6 +424,12 @@ def _lifecycle_app(service: object | None) -> FastAPI:
     return app
 
 
+async def _wait_for_background_v20_start(app: FastAPI) -> None:
+    task = getattr(app.state, "v20_lifecycle_task", None)
+    if task is not None:
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def _client(service: StubV20Service | None = None) -> TestClient:
     app = FastAPI()
     app.state.v20_service = service
@@ -485,7 +491,7 @@ def test_app_factory_reserves_service_state_and_mounts_router() -> None:
     assert "/api/v20/status" in {route.path for route in app.routes}
 
 
-def test_app_factory_binds_one_scan_state_instance_to_v20() -> None:
+def test_app_factory_does_not_bind_v16_scan_state_to_v20() -> None:
     class Service:
         def __init__(self) -> None:
             self.scan_state = None
@@ -496,7 +502,8 @@ def test_app_factory_binds_one_scan_state_instance_to_v20() -> None:
     service = Service()
     app = create_app(v20_service=service)
 
-    assert service.scan_state is app.state.v15_scan_state
+    assert service.scan_state is None
+    assert app.state.v15_scan_state is not None
 
 
 def test_legacy_main_factory_selects_embedded_v20_without_dedicated_activation(
@@ -1358,12 +1365,53 @@ async def test_forward_shadow_starts_beside_legacy_and_keeps_iquant(monkeypatch)
     monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
 
     await web_app._start_strategy_services(app)
+    await _wait_for_background_v20_start(app)
 
     assert service.start_calls == 1
     assert app.state.v20_service_started is True
     assert app.state.legacy_v15_scan_allowed is True
     assert legacy_starts == [app.state.v15_scan_state]
     assert app.state.iquant_router.start_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_v16_starts_before_a_blocked_default_v20_factory_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingService(LifecycleV20Service):
+        async def start(self) -> None:
+            self.start_calls += 1
+            entered.set()
+            await release.wait()
+
+    service = BlockingService(enabled=True, deployment_mode="forward_shadow")
+    app = _lifecycle_app(None)
+    legacy_starts: list[object] = []
+    factory_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def factory(*args: object, **kwargs: object) -> object:
+        factory_calls.append((args, kwargs))
+        return service
+
+    monkeypatch.setattr(web_app, "_create_default_v20_service", factory)
+    monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
+
+    await web_app._start_strategy_services(app)
+
+    assert legacy_starts == [app.state.v15_scan_state]
+    assert app.state.legacy_v15_scan_allowed is True
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert factory_calls == [((), {})]
+    assert legacy_starts == [app.state.v15_scan_state]
+    assert app.state.v20_service_started is False
+
+    release.set()
+    await _wait_for_background_v20_start(app)
+    assert app.state.v20_service_started is True
+    await web_app._stop_v20_lifecycle(app)
 
 
 @pytest.mark.asyncio
@@ -1374,12 +1422,13 @@ async def test_legacy_app_refuses_production_v20_but_keeps_platform_iquant(monke
     monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
 
     await web_app._start_strategy_services(app)
+    await _wait_for_background_v20_start(app)
 
     assert service.start_calls == 0
     assert app.state.v20_service_started is False
-    assert app.state.legacy_v15_scan_allowed is False
+    assert app.state.legacy_v15_scan_allowed is True
     assert "dedicated" in app.state.v20_start_error
-    assert legacy_starts == []
+    assert legacy_starts == [app.state.v15_scan_state]
     assert app.state.iquant_router.start_calls == 1
 
 
@@ -1395,12 +1444,13 @@ async def test_legacy_app_never_attempts_a_failing_production_service(monkeypatc
     monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
 
     await web_app._start_strategy_services(app)
+    await _wait_for_background_v20_start(app)
 
     assert service.start_calls == 0
     assert app.state.v20_service_started is False
     assert "dedicated" in app.state.v20_start_error
-    assert app.state.legacy_v15_scan_allowed is False
-    assert legacy_starts == []
+    assert app.state.legacy_v15_scan_allowed is True
+    assert legacy_starts == [app.state.v15_scan_state]
     assert app.state.iquant_router.start_calls == 1
 
     await web_app._stop_v20_lifecycle(app)
@@ -1419,6 +1469,7 @@ async def test_shadow_start_failure_retains_legacy_scan(monkeypatch) -> None:
     monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
 
     await web_app._start_strategy_services(app)
+    await _wait_for_background_v20_start(app)
 
     assert service.start_calls == 1
     assert app.state.v20_service_started is False
@@ -1446,8 +1497,9 @@ async def test_shadow_startup_retry_recovers_without_restarting_v16(monkeypatch)
     monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
 
     await web_app._start_strategy_services(app)
+    await _wait_for_background_v20_start(app)
     for _ in range(20):
-        if app.state.v20_service_started:
+        if getattr(app.state, "v20_service_started", False):
             break
         await asyncio.sleep(0)
 
@@ -1514,14 +1566,10 @@ async def test_repeated_lifecycle_keeps_retry_owner_and_shutdown_cannot_revive_v
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "legacy_allowed"),
-    [("forward_shadow", True), ("production_push", False)],
-)
-async def test_disabled_service_does_not_start_and_mode_still_controls_ownership(
+@pytest.mark.parametrize("mode", ["forward_shadow", "production_push"])
+async def test_disabled_v20_never_disables_standalone_v16(
     monkeypatch,
     mode: str,
-    legacy_allowed: bool,
 ) -> None:
     service = LifecycleV20Service(enabled=False, deployment_mode=mode)
     app = _lifecycle_app(service)
@@ -1533,8 +1581,8 @@ async def test_disabled_service_does_not_start_and_mode_still_controls_ownership
 
     assert service.start_calls == 0
     assert service.stop_calls == 0
-    assert app.state.legacy_v15_scan_allowed is legacy_allowed
-    assert len(legacy_starts) == int(legacy_allowed)
+    assert app.state.legacy_v15_scan_allowed is True
+    assert legacy_starts == [app.state.v15_scan_state]
     assert app.state.iquant_router.start_calls == 1
 
 
@@ -1559,8 +1607,7 @@ async def test_default_factory_result_is_injected_and_lifecycle_managed(monkeypa
     assert await web_app._start_v20_lifecycle(app) is True
     assert app.state.v20_service is service
     assert service.start_calls == 1
-    assert captured["fundamentals_db"] is shared_fundamentals
-    assert captured["scan_state"] is app.state.v15_scan_state
+    assert captured == {}
 
     await web_app._stop_v20_lifecycle(app)
     assert service.stop_calls == 1

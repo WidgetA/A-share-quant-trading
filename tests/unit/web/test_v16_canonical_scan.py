@@ -570,29 +570,6 @@ async def test_blocked_durable_sink_holds_cache_return_and_publish(fakes):
 
 
 @pytest.mark.asyncio
-async def test_thirty_six_callers_compute_persist_and_publish_once(fakes):
-    sink_calls = 0
-
-    async def counting_sink(_bundle):
-        nonlocal sink_calls
-        sink_calls += 1
-
-    fakes.state.canonical_sink = counting_sink
-    recommendations = await asyncio.wait_for(
-        asyncio.gather(*(v15_scan_service.run_v16_scan(fakes.state) for _ in range(36))),
-        timeout=1,
-    )
-
-    assert len(recommendations) == 36
-    assert all(item == recommendations[0] for item in recommendations[1:])
-    assert sink_calls == 1
-    assert fakes.rt.early_pull_calls == 1
-    assert fakes.scanner.scan_calls == 1
-    assert len(fakes.top10_calls) == 1
-    assert len(fakes.daygate_calls) == 1
-
-
-@pytest.mark.asyncio
 async def test_waiter_cancellation_does_not_cancel_master_or_sink(fakes):
     sink_entered = asyncio.Event()
     release_sink = asyncio.Event()
@@ -748,54 +725,6 @@ async def test_cleanup_cancels_durable_master_and_clears_pending(fakes):
 
 
 @pytest.mark.asyncio
-async def test_scheduler_retries_pending_durable_sink_without_computing_again(
-    fakes,
-    monkeypatch,
-):
-    sink_calls = 0
-
-    async def failing_once_sink(_bundle):
-        nonlocal sink_calls
-        sink_calls += 1
-        if sink_calls == 1:
-            raise RuntimeError("scheduler durable store unavailable")
-
-    fakes.state.canonical_sink = failing_once_sink
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime.combine(fakes.trade_date, time(9, 39), tzinfo=BEIJING_TZ)
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(_delay):
-        await real_sleep(0)
-
-    async def no_signal(_signal):
-        return None
-
-    monkeypatch.setattr(v15_scan_service, "datetime", FixedDateTime)
-    monkeypatch.setattr(v15_scan_service.asyncio, "sleep", fast_sleep)
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_signal", no_signal)
-    scheduler = asyncio.create_task(v15_scan_service._scan_scheduler(fakes.state))
-
-    async def recommendation_set():
-        while fakes.state.today_recommendation is None:
-            await real_sleep(0)
-
-    await asyncio.wait_for(recommendation_set(), timeout=1)
-    scheduler.cancel()
-    await asyncio.wait_for(scheduler, timeout=1)
-
-    assert sink_calls == 2
-    assert fakes.rt.early_pull_calls == 1
-    assert fakes.scanner.scan_calls == 1
-    assert fakes.state.scan_done_date == fakes.trade_date.isoformat()
-    assert fakes.state.scan_error is None
-
-
-@pytest.mark.asyncio
 async def test_cached_canonical_accessor_returns_isolated_verified_master(fakes, monkeypatch):
     master = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
     cached_master = fakes.state.canonical_coordinator.cache[fakes.trade_date]
@@ -907,34 +836,12 @@ async def test_failed_compute_is_not_cached_and_retry_succeeds(fakes):
 
 
 @pytest.mark.asyncio
-async def test_consumer_first_then_wrapper_sends_top10_and_day_gate_once(fakes):
-    consumer_bundle = await v15_scan_service.get_or_compute_canonical_v16(
-        fakes.state, fakes.trade_date
-    )
-
-    assert len(fakes.top10_calls) == 0
-    assert len(fakes.daygate_calls) == 0
-
-    rec1 = await v15_scan_service.run_v16_scan(fakes.state)
-    assert len(fakes.top10_calls) == 1
-    assert len(fakes.daygate_calls) == 1
-    assert rec1 is not None
-
-    rec2 = await v15_scan_service.run_v16_scan(fakes.state)
-    assert len(fakes.top10_calls) == 1
-    assert len(fakes.daygate_calls) == 1
-    assert rec1 == rec2
-
-    assert fakes.rt.early_pull_calls == 1
-    assert fakes.scanner.scan_calls == 1
-    # The wrapper returns the legacy top-1 payload, not the bundle itself.
-    assert isinstance(rec1, dict)
-    assert rec1["stock_code"] == consumer_bundle.scan_result.recommended[0].code
-
-
-@pytest.mark.asyncio
 async def test_legacy_top1_payload_fields_are_compatible(fakes):
-    rec = await v15_scan_service.run_v16_scan(fakes.state)
+    bundle = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
+    rec = v15_scan_service._build_v16_recommendation_payload(
+        bundle.scan_result,
+        bundle.stock_data,
+    )
 
     assert rec == {
         "stock_code": "600000",
@@ -975,13 +882,13 @@ async def test_waiter_cancellation_does_not_cancel_shared_compute(fakes):
 
 
 @pytest.mark.asyncio
-async def test_wrapper_sends_structured_error_notification(fakes):
+async def test_canonical_compute_sends_structured_error_notification(fakes):
     fakes.rt.batch_get_early_market_data = lambda codes, expected_trade_date=None: asyncio.sleep(
         0, result={}
     )
 
     with pytest.raises(v15_scan_service.CanonicalV16ScanError, match="0 quotes"):
-        await v15_scan_service.run_v16_scan(fakes.state)
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
 
     assert len(fakes.error_calls) == 1
     title, _ = fakes.error_calls[0]
@@ -990,7 +897,7 @@ async def test_wrapper_sends_structured_error_notification(fakes):
 
 @pytest.mark.asyncio
 async def test_bundle_captures_data_error_codes_without_sending_them(fakes, monkeypatch):
-    """When build skips codes, wrapper sends the notification exactly once."""
+    """The V20-only canonical bundle records nonfatal ticket data gaps."""
     # Use a six-stock universe so one missing prev_close is below the 20% halt.
     codes = ["600000", "000001", "000002", "000003", "000004", "000005"]
     monkeypatch.setattr(
@@ -1029,61 +936,10 @@ async def test_bundle_captures_data_error_codes_without_sending_them(fakes, monk
     assert "600000" in bundle.failed_no_prev_close
     assert bundle.data_error_notification is not None
 
-    # First wrapper send.
-    await v15_scan_service.run_v16_scan(fakes.state)
-    assert len(fakes.error_calls) == 1
-
-    # Second wrapper must not resend the data-error notification.
-    await v15_scan_service.run_v16_scan(fakes.state)
-    assert len(fakes.error_calls) == 1
-
 
 @pytest.mark.asyncio
-async def test_concurrent_wrappers_share_publication_even_when_notifier_yields(fakes, monkeypatch):
-    """Concurrent run_v16_scan calls must produce exactly one of each side effect."""
-    gate = asyncio.Event()
-    calls = []
-
-    async def yielding_top10(scan_result):  # noqa: ARG001
-        calls.append("top10")
-        await asyncio.sleep(0.05)
-        gate.set()
-
-    async def yielding_error(title, detail):  # noqa: ARG001
-        calls.append("error")
-        await asyncio.sleep(0.05)
-
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", yielding_top10)
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_error", yielding_error)
-
-    # Trigger a nonfatal data error so the data-error alert is also exercised.
-    codes = ["600000", "000001", "000002", "000003", "000004", "000005"]
-
-    async def fake_prev(ts_date):  # noqa: ARG001
-        return {code: 10.5 for code in codes if code != "000001"}
-
-    monkeypatch.setattr(
-        fakes.scanner,
-        "get_universe",
-        lambda self: ({"board-a": _clean_board(*codes)}, set(codes)),
-    )
-    fakes.state.realtime_client.fetch_prev_closes = fake_prev
-
-    results = await asyncio.gather(
-        v15_scan_service.run_v16_scan(fakes.state),
-        v15_scan_service.run_v16_scan(fakes.state),
-    )
-
-    await gate.wait()
-    assert results[0] == results[1]
-    assert calls.count("top10") == 1
-    assert calls.count("error") == 1
-    assert len(fakes.daygate_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_concurrent_fatal_error_notification_sent_once(fakes):
-    """Concurrent wrappers sharing one fatal error must notify exactly once."""
+async def test_concurrent_canonical_fatal_error_notification_sent_once(fakes):
+    """Concurrent V20 canonical consumers sharing one fatal notify exactly once."""
 
     async def empty_early(*_args, **_kwargs):
         return {}
@@ -1091,7 +947,7 @@ async def test_concurrent_fatal_error_notification_sent_once(fakes):
     fakes.state.realtime_client.batch_get_early_market_data = empty_early
 
     async def run():
-        return await v15_scan_service.run_v16_scan(fakes.state)
+        return await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
 
     results = await asyncio.gather(*[run() for _ in range(3)], return_exceptions=True)
 
@@ -1412,7 +1268,7 @@ async def test_scanner_failure_after_nonfatal_data_errors_reports_data_alert(fak
     fakes.state.realtime_client.fetch_prev_closes = fake_prev
 
     with pytest.raises(v15_scan_service.CanonicalV16ScanError, match="scan boom"):
-        await v15_scan_service.run_v16_scan(fakes.state)
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
 
     # Data-error alert is emitted unchanged, followed by the scanner fatal alert.
     assert len(fakes.error_calls) == 2
@@ -1744,25 +1600,6 @@ async def test_consumer_mutation_does_not_corrupt_master(fakes):
 
 
 @pytest.mark.asyncio
-async def test_publish_uses_isolated_artifact(fakes, monkeypatch):
-    """The publication task works on its own deep copy of the bundle."""
-    gate = asyncio.Event()
-
-    async def mutating_top10(scan_result):  # noqa: ARG001
-        scan_result.recommended[0].buy_price = 999.0
-        await asyncio.sleep(0.01)
-        gate.set()
-
-    monkeypatch.setattr(v15_scan_service, "_notify_feishu_v16_top10", mutating_top10)
-
-    await v15_scan_service.run_v16_scan(fakes.state)
-    await gate.wait()
-
-    bundle = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
-    assert bundle.scan_result.recommended[0].buy_price == pytest.approx(12.345678)
-
-
-@pytest.mark.asyncio
 async def test_fingerprint_detects_stock_data_history_scan_result_changes(fakes):
     """Integrity check covers stock_data, history_df, and full scan_result."""
     bundle = await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
@@ -1798,7 +1635,7 @@ async def test_same_date_different_fatals_are_both_sent(fakes, monkeypatch):
     fakes.state.realtime_client.batch_get_early_market_data = empty_early
 
     with pytest.raises(v15_scan_service.CanonicalV16ScanError):
-        await v15_scan_service.run_v16_scan(fakes.state)
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
 
     assert len(fakes.error_calls) == 1
     assert fakes.error_calls[0][0] == "9:40行情全空"
@@ -1808,7 +1645,7 @@ async def test_same_date_different_fatals_are_both_sent(fakes, monkeypatch):
     fakes.scanner.fail_times = 1
 
     with pytest.raises(v15_scan_service.CanonicalV16ScanError, match="scan boom"):
-        await v15_scan_service.run_v16_scan(fakes.state)
+        await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
 
     assert len(fakes.error_calls) == 2
     assert fakes.error_calls[1][0] == "V16扫描失败"
@@ -1832,7 +1669,7 @@ async def test_cancellation_of_waiter_does_not_duplicate_fatal_alert(fakes, monk
     fakes.state.realtime_client.batch_get_early_market_data = slow_empty
 
     async def run():
-        return await v15_scan_service.run_v16_scan(fakes.state)
+        return await v15_scan_service.get_or_compute_canonical_v16(fakes.state, fakes.trade_date)
 
     t1 = asyncio.create_task(run())
     t2 = asyncio.create_task(run())

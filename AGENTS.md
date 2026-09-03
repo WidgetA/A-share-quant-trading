@@ -13,3 +13,10 @@
 ## V20 morning-selection parity
 
 - The scheduled 09:39 V20 run and a manual trigger must call the same canonical strategy-calculation entry point. Time may change actionability or message wrapping after the calculation, but must not select a different data or strategy algorithm.
+
+## V16/V20 runtime isolation
+
+- V16 and V20 may share only pure, stateless stock-selection code.
+- V16 and V20 must never share a `V15ScanState` instance, market-data client, historical adapter, cache object, database object or connection pool, calendar provider, scheduler, lifecycle owner, initialization task, or cleanup task.
+- Embedded and forward-shadow modes may reuse configuration values or credentials, but every mutable runtime resource must be constructed, owned, and closed independently.
+- Every V20 runtime-resource change must include a fault-isolation test proving that V20 initialization failure or shutdown cannot mutate or stop V16 state/resources, and that V16 shutdown cannot mutate or stop V20 state/resources.

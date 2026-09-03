@@ -952,7 +952,7 @@ async def _fetch_prev_closes(
     *,
     owner_date: date | None = None,
 ) -> dict[str, float]:
-    """Fetch prev_close for all stocks. Returns code → prev_close."""
+    """Fetch canonical prev_close inputs used by the V20 pipeline."""
     prev_dates = [d for d in calendar if d < today]
     if not prev_dates:
         raise RuntimeError("V16 scan: no previous trading day found in calendar")
@@ -1002,6 +1002,47 @@ async def _fetch_prev_closes(
             f"from both OSS cache and Tushare API"
         )
     logger.info(f"V16: prev_close ({prev_trade_date}): {len(prev_closes)} stocks")
+    return prev_closes
+
+
+async def _fetch_v16_prev_closes(
+    scan_state: V15ScanState,
+    today: date,
+    calendar: Sequence[date],
+) -> dict[str, float]:
+    """Load V16 previous closes without using V20's canonical coordinator."""
+
+    prev_dates = [day for day in calendar if day < today]
+    if not prev_dates:
+        raise RuntimeError("V16 scan: no previous trading day found in calendar")
+    prev_trade_date = prev_dates[-1].strftime("%Y-%m-%d")
+
+    prev_closes: dict[str, float] = {}
+    cache = scan_state.tushare_cache
+    if cache and cache.is_ready:
+        for code, daily in cache.get_all_codes_with_daily(prev_trade_date).items():
+            close_value = daily.get("close")
+            if close_value and close_value > 0:
+                prev_closes[code] = float(close_value)
+
+    if len(prev_closes) < 100:
+        rt_client = scan_state.realtime_client
+        if rt_client is None:
+            raise RuntimeError(
+                f"V16 scan: prev_close cache miss for {prev_trade_date} and no "
+                "Tushare client available to fall back to."
+            )
+        api_closes = await rt_client.fetch_prev_closes(prev_trade_date.replace("-", ""))
+        for code, close_value in api_closes.items():
+            if code and len(code) == 6 and close_value:
+                prev_closes.setdefault(code, float(close_value))
+
+    if not prev_closes:
+        raise RuntimeError(
+            f"V16 scan: failed to get prev_close for {prev_trade_date} "
+            "from both OSS cache and Tushare API"
+        )
+    logger.info("V16: prev_close (%s): %d stocks", prev_trade_date, len(prev_closes))
     return prev_closes
 
 
@@ -2586,82 +2627,242 @@ async def compute_canonical_v16_scan(
 
 
 async def run_v16_scan(scan_state: V15ScanState) -> dict[str, Any] | None:
-    """Compatibility wrapper: consume a canonical bundle and emit legacy artifacts.
+    """Run one fresh, standalone V16 scan and publish its Top-10 report.
 
-    Returns the same legacy top-1 payload and preserves the original Top10/day-gate
-    side effects. The canonical core is computed at most once per trade_date;
-    repeated wrapper calls reuse the cached master bundle. Concurrent wrapper calls
-    share exactly one publication task (data-error alert, Top10 send, DayGate schedule).
-    Fatal notifications are handled by the shared compute done callback, not here.
+    Every invocation deliberately repeats the original V16 production path:
+    build the V16 universe, fetch today's ``rt_min_daily`` evidence, load the
+    previous close and history, run the scanner, and publish Top-10.  V20's
+    canonical coordinator and durable artifacts are separate consumers and do
+    not cache, widen, veto, or restore this V16 result.
+
+    The returned ``latest_price`` is the close of the latest current-day minute
+    bar at or before 09:39, never the price at invocation time.
     """
-    trade_date = datetime.now(BEIJING_TZ).date()
-    if scan_state.canonical_coordinator is None:
-        scan_state.canonical_coordinator = _CanonicalV16Coordinator()
-    coord = scan_state.canonical_coordinator
-    key = _canonical_key(scan_state, trade_date)
+    from src.strategy.lgbrank_scorer import LGBRankScorer
+    from src.strategy.strategies.v16_scanner import V16Scanner, V16StockData
 
-    # get_or_compute returns an isolated consumer artifact; the master stays cached.
-    bundle = await get_or_compute_canonical_v16(scan_state, trade_date)
-    _verify_bundle_integrity(bundle)
+    today = datetime.now(BEIJING_TZ).date()
 
-    async def _publish() -> None:
-        # Data-error notification (non-fatal) is sent once per key.
-        if bundle.data_error_notification and key not in coord.data_errors_sent:
-            title, detail = bundle.data_error_notification
-            await _notify_feishu_error(title, detail)
-            coord.data_errors_sent.add(key)
+    scorer = LGBRankScorer(
+        _PROJECT_ROOT / "models" / "lgbrank_latest.txt",
+        _PROJECT_ROOT / "models" / "feature_list.json",
+    )
+    scanner = V16Scanner(
+        fundamentals_db=scan_state.fundamentals_db,
+        concept_mapper=scan_state.concept_mapper,
+        stock_filter=scan_state.stock_filter,
+        scorer=scorer,
+    )
 
-        # Top10 report and day-gate scheduling are sent exactly once per key.
-        if key not in coord.published:
-            await _notify_feishu_v16_top10(bundle.scan_result)
+    clean_boards, universe_codes = scanner.get_universe()
+    if not universe_codes:
+        raise RuntimeError("V16 scan: universe is empty after board cleaning")
+    logger.info("V16 scan: universe = %d stocks", len(universe_codes))
 
-            recommendation_payload = _build_v16_recommendation_payload(
-                bundle.scan_result, bundle.stock_data
+    rt_client = scan_state.realtime_client
+    if rt_client is None:
+        raise RuntimeError("V16 scan: Tushare realtime client is unavailable")
+    universe_list = sorted(universe_codes)
+    quotes = await rt_client.batch_get_early_quotes(universe_list)
+    quote_coverage = len(quotes) / len(universe_list) if universe_list else 0
+    logger.info(
+        "V16 scan: Tushare returned %d/%d quotes (coverage=%.1f%%)",
+        len(quotes),
+        len(universe_list),
+        quote_coverage * 100,
+    )
+
+    if not quotes:
+        await _notify_feishu_error(
+            "9:40行情全空",
+            f"Tushare batch_get_early_quotes 返回空\n请求股票数: {len(universe_list)}\n扫描中止",
+        )
+        raise RuntimeError(f"V16 scan: Tushare returned 0 quotes for {len(universe_list)} stocks")
+
+    if quote_coverage < 0.8:
+        await _notify_feishu_error(
+            "行情覆盖率不足",
+            f"请求: {len(universe_list)} 只\n"
+            f"返回: {len(quotes)} 只\n"
+            f"覆盖率: {quote_coverage:.1%} (阈值80%)\n"
+            "Tushare API 可能异常，扫描中止",
+        )
+        raise RuntimeError(
+            f"V16 scan: quote coverage {len(quotes)}/{len(universe_list)} "
+            f"({quote_coverage:.1%}) below 80% threshold — halting"
+        )
+
+    calendar = await get_trade_calendar()
+    prev_closes = await _fetch_v16_prev_closes(scan_state, today, calendar)
+
+    trading_codes = [code for code, quote in quotes.items() if quote.is_trading]
+    logger.info("V16 scan: %d stocks trading, fetching history...", len(trading_codes))
+
+    if len(trading_codes) < len(quotes) * 0.5:
+        await _notify_feishu_error(
+            "交易中股票过少",
+            f"行情返回: {len(quotes)} 只\n"
+            f"标记交易中: {len(trading_codes)} 只\n"
+            f"占比: {len(trading_codes) / len(quotes):.1%} (阈值50%)\n"
+            "数据可能异常，扫描中止",
+        )
+        raise RuntimeError(
+            f"V16 scan: only {len(trading_codes)}/{len(quotes)} stocks marked trading "
+            f"({len(trading_codes) / len(quotes):.1%}) — halting"
+        )
+
+    hist_raw = await _fetch_history_ohlcv(
+        scan_state.historical_adapter,
+        trading_codes,
+        today,
+    )
+    hist_coverage = len(hist_raw) / len(trading_codes) if trading_codes else 0
+    logger.info(
+        "V16 scan: history fetched for %d/%d stocks (coverage=%.1f%%)",
+        len(hist_raw),
+        len(trading_codes),
+        hist_coverage * 100,
+    )
+
+    if hist_coverage < 0.8:
+        await _notify_feishu_error(
+            "历史数据覆盖率不足",
+            f"请求: {len(trading_codes)} 只\n"
+            f"返回: {len(hist_raw)} 只\n"
+            f"覆盖率: {hist_coverage:.1%} (阈值80%)\n"
+            "历史数据源可能异常，扫描中止",
+        )
+        raise RuntimeError(
+            f"V16 scan: history coverage {len(hist_raw)}/{len(trading_codes)} "
+            f"({hist_coverage:.1%}) below 80% threshold — halting"
+        )
+
+    name_map: dict[str, str] = {}
+    if scan_state.fundamentals_db:
+        try:
+            fund_data = await scan_state.fundamentals_db.batch_get_fundamentals(trading_codes)
+            name_map = {code: item.company_name for code, item in fund_data.items()}
+        except Exception as exc:
+            logger.warning("V16 scan: failed to fetch company names: %s", exc)
+
+    stock_data: dict[str, V16StockData] = {}
+    errors_no_prev_close: list[str] = []
+    errors_no_hist: list[str] = []
+    errors_build: list[str] = []
+    skipped_new = 0
+
+    for code in trading_codes:
+        quote = quotes.get(code)
+        if not quote or not quote.is_trading:
+            continue
+
+        prev_close = prev_closes.get(code)
+        if not prev_close or prev_close <= 0:
+            errors_no_prev_close.append(code)
+            continue
+
+        history = hist_raw.get(code)
+        if not history:
+            errors_no_hist.append(code)
+            continue
+
+        try:
+            built = _build_stock_data(
+                code,
+                name_map.get(code, ""),
+                quote,
+                prev_close,
+                history,
+                today,
             )
+        except RuntimeError as exc:
+            errors_build.append(f"{code}: {exc}")
+            continue
 
-            try:
-                from src.strategy.v16_day_gate_shadow import (
-                    freeze_v16_day_gate_runtime,
-                    freeze_v16_scan_snapshot,
-                )
+        if built is None:
+            skipped_new += 1
+            continue
+        stock_data[code] = built
 
-                shadow_cutoff = datetime.now(BEIJING_TZ)
-                frozen_runtime = freeze_v16_day_gate_runtime(
-                    _PROJECT_ROOT,
-                    ranking_model_sha256=bundle.model_sha256,
-                    ranking_feature_list_sha256=bundle.feature_list_sha256,
-                    captured_at=shadow_cutoff,
-                )
-                if frozen_runtime is not None:
-                    frozen_snapshot = freeze_v16_scan_snapshot(
-                        bundle.scan_result,
-                        bundle.stock_data,
-                        recommendation_payload,
-                        frozen_at=shadow_cutoff,
-                    )
-                    _schedule_v16_day_gate_shadow(frozen_snapshot, frozen_runtime)
-            except Exception:
-                logger.warning(
-                    "V16 DayGate shadow snapshot/scheduling failed; recommendation unchanged",
-                    exc_info=True,
-                )
+    total_errors = len(errors_no_prev_close) + len(errors_no_hist) + len(errors_build)
+    if total_errors > 0:
+        detail_lines: list[str] = []
+        if errors_no_prev_close:
+            detail_lines.append(
+                f"缺昨收({len(errors_no_prev_close)}): " + ", ".join(errors_no_prev_close[:20])
+            )
+        if errors_no_hist:
+            detail_lines.append(f"缺历史({len(errors_no_hist)}): " + ", ".join(errors_no_hist[:20]))
+        if errors_build:
+            detail_lines.append(f"构建失败({len(errors_build)}): " + "\n".join(errors_build[:10]))
+        detail = "\n".join(detail_lines)
+        logger.error(
+            "V16 scan: %d stocks with data errors (no_prev_close=%d, no_hist=%d, build_fail=%d)",
+            total_errors,
+            len(errors_no_prev_close),
+            len(errors_no_hist),
+            len(errors_build),
+        )
+        await _notify_feishu_error(
+            "数据缺失报警",
+            f"交易中股票: {len(trading_codes)}\n"
+            f"数据错误: {total_errors} 只\n"
+            f"新股跳过: {skipped_new} 只\n"
+            f"成功构建: {len(stock_data)} 只\n\n{detail}",
+        )
 
-            coord.published.add(key)
+    if total_errors > 0 and total_errors > len(trading_codes) * 0.2:
+        raise RuntimeError(
+            f"V16 scan: data error rate {total_errors}/{len(trading_codes)} "
+            "exceeds 20% threshold — data source likely broken, halting"
+        )
 
-    async with coord.lock:
-        publish_task = coord.publish.get(key)
-        if publish_task is None:
-            publish_task = asyncio.create_task(_publish())
-            coord.publish[key] = publish_task
+    logger.info(
+        "V16 scan: built %d V16StockData (errors=%d, new_listing=%d)",
+        len(stock_data),
+        total_errors,
+        skipped_new,
+    )
+    if not stock_data:
+        await _notify_feishu_error(
+            "无有效股票数据",
+            f"交易中股票: {len(trading_codes)}\n全部数据缺失或为新股, 无法执行扫描",
+        )
+        raise RuntimeError("V16 scan: no valid stock data after building")
 
-            def _cleanup(t: asyncio.Task) -> None:
-                coord.publish.pop(key, None)
+    scan_result = await scanner.scan(stock_data, clean_boards)
+    await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
+    await _notify_feishu_v16_top10(scan_result)
 
-            publish_task.add_done_callback(_cleanup)
+    recommendation_payload = _build_v16_recommendation_payload(scan_result, stock_data)
+    try:
+        from src.strategy.v16_day_gate_shadow import (
+            freeze_v16_day_gate_runtime,
+            freeze_v16_scan_snapshot,
+        )
 
-    # Cancellation of a waiter must not cancel the shared publication work.
-    await asyncio.shield(publish_task)
-    return _build_v16_recommendation_payload(bundle.scan_result, bundle.stock_data)
+        shadow_cutoff = datetime.now(BEIJING_TZ)
+        frozen_runtime = freeze_v16_day_gate_runtime(
+            _PROJECT_ROOT,
+            ranking_model_sha256=scorer.model_sha256,
+            ranking_feature_list_sha256=scorer.feature_list_sha256,
+            captured_at=shadow_cutoff,
+        )
+        if frozen_runtime is not None:
+            frozen_snapshot = freeze_v16_scan_snapshot(
+                scan_result,
+                stock_data,
+                recommendation_payload,
+                frozen_at=shadow_cutoff,
+            )
+            _schedule_v16_day_gate_shadow(frozen_snapshot, frozen_runtime)
+    except Exception:
+        logger.warning(
+            "V16 DayGate shadow snapshot/scheduling failed; recommendation unchanged",
+            exc_info=True,
+        )
+
+    return recommendation_payload
 
 
 def _restore_canonical_artifact(
@@ -2719,18 +2920,14 @@ def _restore_canonical_artifact(
 async def _scan_scheduler(scan_state: V15ScanState) -> None:
     """Autonomous scan scheduler. Runs from app startup, independent of iQuant.
 
-    Time window: 09:39-10:00
+    Time window: 09:38-10:00
     - Always runs V16 scan
     - Always pushes Feishu top-10 report + recommendation
     - Writes result to scan_state.today_recommendation
     - Does NOT check holdings or push trading signals
     """
-    SCAN_WINDOW = (time(9, 39), time(10, 0))
-    scheduler_date: date | None = None
-    scheduler_done_dates: set[date] = set()
-    not_ready_evidence: dict[date, _CanonicalV16NotReadyEvidence] = {}
-    post_window_probe_dates: set[date] = set()
-    artifact_recovery_error: str | None = None
+    SCAN_WINDOW = (time(9, 38), time(10, 0))
+    scan_done_date = ""
 
     logger.info("V16 scan scheduler started (autonomous)")
 
@@ -2757,26 +2954,16 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
             now_bj = datetime.now(BEIJING_TZ)
             ex_date = now_bj.strftime("%Y-%m-%d")
             ex_time = now_bj.time().replace(second=0, microsecond=0)
-            trade_date = now_bj.date()
-            if scheduler_date != trade_date:
-                scheduler_date = trade_date
-                scheduler_done_dates.clear()
-                not_ready_evidence.clear()
-                post_window_probe_dates.clear()
 
-            # --- SCAN: 09:39-10:00 ---
-            shared_scan_done = scan_state.scan_done_date == ex_date
-            if (
-                not shared_scan_done
-                and trade_date not in scheduler_done_dates
-                and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]
-            ):
+            # --- SCAN: 09:38-10:00 ---
+            if scan_done_date != ex_date and SCAN_WINDOW[0] <= ex_time <= SCAN_WINDOW[1]:
+                scan_done_date = ex_date
+                scan_state.scan_done_date = ex_date
+
                 try:
                     rec = await run_v16_scan(scan_state)
                     scan_state.today_recommendation = rec
                     scan_state.scan_error = None
-                    scheduler_done_dates.add(trade_date)
-                    scan_state.scan_done_date = ex_date
 
                     if rec:
                         now_str = datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
@@ -2798,107 +2985,20 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                             "V16扫描结果",
                             "今日V16扫描完成，无符合条件的推荐股票",
                         )
-                except CanonicalV16NotReadyError:
-                    # 09:39 data not yet ready; retry within the window.
-                    not_ready_evidence[trade_date] = _CanonicalV16NotReadyEvidence(
-                        trade_date,
-                        now_bj,
-                    )
-                    logger.info("V16 scan not ready at %s, will retry", ex_time)
-                except CanonicalV16PersistencePendingError as e:
-                    # The canonical master is retained; only the durable write retries.
-                    scan_state.today_recommendation = None
-                    scan_state.scan_error = f"{type(e).__name__}: {e}"
-                    logger.warning("V16 canonical persistence pending; will retry")
-                except CanonicalV16ScanError as e:
-                    # Fatal was already emitted once by the compute done callback.
-                    # Just record state so trading knows today's scan is done.
-                    error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                    scan_state.scan_error = error_detail
-                    scan_state.today_recommendation = None
-                    scheduler_done_dates.add(trade_date)
-                    scan_state.scan_done_date = ex_date
-                    logger.error(f"V16 scan failed: {error_detail}")
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                     scan_state.scan_error = error_detail
                     scan_state.today_recommendation = None
-                    scheduler_done_dates.add(trade_date)
-                    scan_state.scan_done_date = ex_date
                     logger.error(f"V16 scan failed: {error_detail}")
                     await _notify_feishu_error("V16扫描失败", error_detail)
 
-            # Scan deadline: after 10:00, NOT_READY becomes a fatal single audit alert
-            # and the previous recommendation is cleared.
-            if (
-                not shared_scan_done
-                and trade_date not in scheduler_done_dates
-                and ex_time > SCAN_WINDOW[1]
-            ):
-                probe = scan_state.canonical_artifact_probe
-                if probe is None:
-                    if trade_date in not_ready_evidence:
-                        scheduler_done_dates.add(trade_date)
-                        await _fail_not_ready_deadline(
-                            scan_state,
-                            trade_date,
-                            now_bj,
-                            not_ready_evidence.get(trade_date),
-                        )
-                    else:
-                        scheduler_done_dates.add(trade_date)
-                elif trade_date not in post_window_probe_dates:
-                    post_window_probe_dates.add(trade_date)
-                    try:
-                        loaded = await probe(trade_date)
-                        if loaded is not None:
-                            if not isinstance(loaded, tuple) or len(loaded) != 2:
-                                raise RuntimeError("probe result must be a two-item tuple")
-                            bundle, first_received_at = loaded
-                            _restore_canonical_artifact(
-                                scan_state,
-                                trade_date,
-                                bundle,
-                                first_received_at,
-                            )
-                            if (
-                                artifact_recovery_error is not None
-                                and scan_state.scan_error == artifact_recovery_error
-                            ):
-                                scan_state.scan_error = None
-                            artifact_recovery_error = None
-                            scheduler_done_dates.add(trade_date)
-                        elif trade_date in not_ready_evidence:
-                            scheduler_done_dates.add(trade_date)
-                            await _fail_not_ready_deadline(
-                                scan_state,
-                                trade_date,
-                                now_bj,
-                                not_ready_evidence.get(trade_date),
-                            )
-                        else:
-                            if (
-                                artifact_recovery_error is not None
-                                and scan_state.scan_error == artifact_recovery_error
-                            ):
-                                scan_state.scan_error = None
-                            artifact_recovery_error = None
-                            scheduler_done_dates.add(trade_date)
-                    except Exception as exc:
-                        post_window_probe_dates.remove(trade_date)
-                        artifact_recovery_error = (
-                            f"CanonicalV16ArtifactProbeError: {type(exc).__name__}: {exc}"
-                        )
-                        scan_state.scan_error = artifact_recovery_error
-                        logger.warning(
-                            "V16 durable artifact recovery failed; will retry",
-                            exc_info=True,
-                        )
+            # Scan deadline
+            if scan_done_date != ex_date and ex_time > SCAN_WINDOW[1]:
+                scan_done_date = ex_date
+                scan_state.scan_done_date = ex_date
 
             # Adaptive sleep
-            await asyncio.sleep(
-                30 if shared_scan_done or trade_date in scheduler_done_dates else 15
-            )
+            await asyncio.sleep(30 if scan_done_date == ex_date else 15)
 
     except asyncio.CancelledError:
         logger.info("V16 scan scheduler stopped")
