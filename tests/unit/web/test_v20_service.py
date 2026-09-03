@@ -4122,12 +4122,10 @@ class _LateReplayRepository(_ManualTriggerRepository):
 class _LateReplayClient:
     def __init__(self, *, missing_label: str | None = None) -> None:
         self.missing_label = missing_label
-        # Current-day live endpoints (rt_min_daily & friends); a post-cutoff
-        # replay must never touch them.
+        # Same-day post-cutoff gaps may use canonical rt_min_daily, but must
+        # not use other live/current snapshot paths.
         self.calls: list[tuple[str, ...]] = []
-        # Bounded historical stk_mins backfill — the only vendor path a replay
-        # may use, and only for codes without qualified persisted evidence.
-        self.stk_mins_calls: list[tuple[tuple[str, ...], date]] = []
+        self.rt_min_daily_calls: list[tuple[tuple[str, ...], date]] = []
 
     async def batch_get_minute_history(self, codes):
         self.calls.append(tuple(codes))
@@ -4141,14 +4139,16 @@ class _LateReplayClient:
             for code in codes
         }
 
-    async def batch_get_early_minute_history_for_date(self, codes, trade_date):
-        self.stk_mins_calls.append((tuple(codes), trade_date))
+    async def batch_get_early_market_data(self, codes, expected_trade_date=None):
+        assert expected_trade_date is not None
+        trade_date = expected_trade_date
+        self.rt_min_daily_calls.append((tuple(codes), expected_trade_date))
         labels = ["09:25", "09:30"] + [f"09:{minute:02d}" for minute in range(31, 40)]
         # The vendor restates the same facts the morning persisted.
         close_by_label = {"09:25": 10.0, "09:30": 10.0} | {
             f"09:{minute:02d}": 10.0 + (minute - 30) / 100 for minute in range(31, 40)
         }
-        return {
+        bars = {
             code: tuple(
                 _bar(code, label, close=close_by_label[label], trade_date=trade_date)
                 for label in labels
@@ -4156,6 +4156,19 @@ class _LateReplayClient:
             )
             for code in codes
         }
+        return {
+            code: early
+            for code in codes
+            if (
+                early := tushare_minute_bars_to_early_market_data(
+                    code, bars[code], expected_trade_date
+                )
+            )
+            is not None
+        }
+
+    async def batch_get_early_minute_history_for_date(self, *_args, **_kwargs):
+        raise AssertionError("current-day replay crossed into stk_mins")
 
     async def fetch_daily_bars(self, trade_date):
         return {
@@ -4268,6 +4281,8 @@ def _install_late_replay_canonical(
         assert set(seed) <= set(_LATE_REPLAY_CODES)
         compute_calls.append(requested_date)
         early_bars = {code: seed[code].early_bars for code in seed}
+        if "603068" not in early_bars:
+            raise V20RepositoryError("canonical V16 readiness is below 80%")
         observed["early_volume"] = sum(bar.volume for bar in early_bars["603068"])
         observed["early_close"] = early_bars["603068"][-1].close_price
         return CanonicalV16ScanBundle(
@@ -4531,7 +4546,7 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     # The replay lane never pulls from the vendor; it recomputes once from
     # durable raw facts through the shared canonical V16 contract.
     assert client.calls == []
-    assert client.stk_mins_calls == []
+    assert client.rt_min_daily_calls == []
     assert compute_calls == [context.trade_date]
     assert observed["early_volume"] == 1100.0
     assert observed["early_close"] == pytest.approx(10.09)
@@ -4587,7 +4602,7 @@ async def test_late_0939_replay_can_recover_entirely_from_durable_raw_facts(
 
     assert record.semantic["raw_fact_n"] == 110
     assert client.calls == []
-    assert client.stk_mins_calls == []
+    assert client.rt_min_daily_calls == []
     assert compute_calls == [context.trade_date]
     assert repository.official_write_calls == 0
 
@@ -4609,7 +4624,7 @@ async def test_late_0939_replay_missing_nonterminal_early_bar_still_replays(
     assert record.semantic["replay_action"] == "ENTER"
     assert record.semantic["raw_fact_n"] == 100
     assert client.calls == []
-    assert client.stk_mins_calls == []
+    assert client.rt_min_daily_calls == []
     assert compute_calls == [context.trade_date]
     assert len(repository.raw) == 100
     assert {label for _code, label in repository.raw} == {
@@ -4625,24 +4640,23 @@ async def test_late_0939_replay_missing_terminal_0939_bar_fails_without_official
 ) -> None:
     """Canonical readiness owns 09:39: a ready code without it fails closed.
 
-    The persisted evidence and one bounded stk_mins backfill both lack the
-    09:39 bar, so the replay fails before compute — and never touches a
-    current-day live endpoint.
+    The persisted evidence and the current-day rt_min_daily backfill both lack
+    the 09:39 bar, so the canonical 80% readiness gate fails during compute.
     """
     service, repository, client, compute_calls, _observed, context = _late_replay_service(
         monkeypatch,
         missing_label="09:39",
     )
 
-    with pytest.raises(V20RepositoryError, match="backfill is incomplete"):
+    with pytest.raises(V20RepositoryError, match="readiness is below 80%"):
         await service._ensure_late_0939_replay(
             context,
             datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
         )
 
     assert client.calls == []
-    assert client.stk_mins_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
-    assert compute_calls == []
+    assert client.rt_min_daily_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
+    assert compute_calls == [context.trade_date]
     assert repository.events == {}
     assert repository.official_write_calls == 0
 
@@ -4733,6 +4747,7 @@ class _HistoricalSeedClient:
         self.calls: list[tuple[tuple[str, ...], date]] = []
         self.daily_calls: list[str] = []
         self.name_calls: list[str] = []
+        self.rt_attempts: list[str] = []
 
     async def batch_get_early_minute_history_for_date(self, codes, trade_date):
         self.calls.append((tuple(codes), trade_date))
@@ -4755,6 +4770,8 @@ class _HistoricalSeedClient:
         return {code: f"fresh-{code}" for code in _LATE_REPLAY_CODES}
 
     def __getattr__(self, name: str) -> Any:
+        if name.startswith("rt_"):
+            self.rt_attempts.append(name)
         raise AssertionError(f"past-date replay touched a live/vendor boundary: {name}")
 
 
@@ -5003,6 +5020,64 @@ async def test_past_date_seed_reads_back_even_when_bootstrap_seals_nothing(
     assert client.calls == [(tuple(sorted(universe)), _HIST_TRADE_DATE)]
     assert repository.persist_calls == []
     assert repository.list_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_current_day_seed_preserves_partial_rt_evidence_and_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current-day partial realtime evidence remains available to the 80% gate."""
+    repository = _SeedRepository()
+    ready_code = _LATE_REPLAY_CODES[0]
+    bars = tuple(_bar(ready_code, label) for label in _LEGACY_LABELS)
+    early = tushare_minute_bars_to_early_market_data(bars[0].stock_code, bars, _HIST_TRADE_DATE)
+    assert early is not None
+
+    class _CurrentDayClient:
+        def __init__(self) -> None:
+            self.rt_min_daily_calls = 0
+            self.requested_codes = []
+
+        async def batch_get_early_market_data(self, codes, expected_trade_date=None):
+            assert expected_trade_date == _HIST_TRADE_DATE
+            self.rt_min_daily_calls += 1
+            self.requested_codes.append(tuple(codes))
+            return {code: early for code in codes if code == ready_code}
+
+        async def batch_get_early_minute_history_for_date(self, *_args, **_kwargs):
+            raise AssertionError("current-day seed crossed into stk_mins")
+
+    client = _CurrentDayClient()
+    service = _historical_seed_service(monkeypatch, repository, client)
+    service._clock = lambda: datetime(2026, 8, 31, 15, 30, 3, tzinfo=TZ)
+
+    seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert set(seed) == {ready_code}
+    assert client.rt_min_daily_calls == 1
+    assert client.requested_codes == [tuple(sorted(universe))]
+    assert repository.list_calls == 2
+    assert repository.persist_calls
+    assert set(universe) >= {ready_code}
+
+
+@pytest.mark.asyncio
+async def test_t2_or_earlier_seed_uses_stk_mins_and_never_rt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _SeedRepository()
+    bars = {
+        code: tuple(_bar(code, label) for label in _LEGACY_LABELS) for code in _LATE_REPLAY_CODES
+    }
+    client = _HistoricalSeedClient(bars)
+    service = _historical_seed_service(monkeypatch, repository, client)
+    service._clock = lambda: datetime(2026, 9, 2, 15, 30, 3, tzinfo=TZ)
+
+    seed, universe, _boards = await service._historical_early_evidence_seed(_HIST_TRADE_DATE)
+
+    assert set(seed) == set(universe)
+    assert client.calls == [(tuple(sorted(universe)), _HIST_TRADE_DATE)]
+    assert client.rt_attempts == []
 
 
 async def test_past_date_seed_uses_25_physical_batch_calls_for_3195_symbols(

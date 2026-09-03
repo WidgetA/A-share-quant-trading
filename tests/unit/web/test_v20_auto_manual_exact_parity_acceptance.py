@@ -707,6 +707,41 @@ async def test_automatic_scheduler_and_manual_route_commit_exact_same_durable_ar
 
 
 @pytest.mark.asyncio
+async def test_automatic_and_manual_directly_share_morning_selection_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    automatic, automatic_repo, _automatic_artifact = _service_and_artifact(monkeypatch)
+    manual, _manual_repo, _manual_artifact = _service_and_artifact(monkeypatch)
+
+    entry_calls: list[tuple[V20Service, date]] = []
+
+    def install_spy(service: V20Service) -> None:
+        original = service._compute_morning_selection
+
+        async def spy(trade_date: date) -> Any:
+            entry_calls.append((service, trade_date))
+            return await original(trade_date)
+
+        monkeypatch.setattr(service, "_compute_morning_selection", spy)
+
+    install_spy(automatic)
+    install_spy(manual)
+
+    await automatic._run_decision_iteration_with_cutoff(RUN_AT)
+    manual_result = await _dispatch_manual_trigger(manual, "manual-entry-point-parity-001")
+
+    assert entry_calls == [
+        (automatic, TRADE_DATE),
+        (manual, TRADE_DATE),
+    ]
+    assert automatic_repo.commit is not None
+    assert manual_result["entry_event_id"] == automatic_repo.commit.event_id
+    assert manual_result["entry_action"] == automatic_repo.commit.action
+    assert isinstance(automatic_repo.commit.semantic, dict)
+    assert isinstance(manual_result, dict)
+
+
+@pytest.mark.asyncio
 async def test_check_only_artifact_hit_is_read_only_and_binds_exact_automatic_prepare(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -71,10 +71,10 @@ async def test_optional_preopen_labels_are_preserved_without_becoming_a_gate(
     )
 
 
-async def test_same_day_post_cutoff_uses_historical_adapter_only(
+async def test_same_day_post_cutoff_uses_realtime_adapter_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same-day replay backfills with stk_mins and never current-day history."""
+    """Same-day replay backfills with rt_min_daily and never stk_mins."""
     service, repository, client, calls, _observed, context = _late_replay_service(monkeypatch)
     for code in _LATE_REPLAY_CODES:
         repository.raw.pop((code, "09:39"))
@@ -83,7 +83,7 @@ async def test_same_day_post_cutoff_uses_historical_adapter_only(
 
     assert context.trade_date == date(2026, 8, 31)
     assert client.calls == []
-    assert client.stk_mins_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
+    assert client.rt_min_daily_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
     assert calls == [context.trade_date]
     assert bundle.trade_date == context.trade_date
     assert {label for _code, label in repository.raw} == set(_ENRICHED_LABELS)

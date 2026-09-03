@@ -257,11 +257,11 @@ async def test_thirty_six_callers_share_one_union_early_one_scanner_and_one_dail
     assert set(harness.state.canonical_coordinator.daily_bars) == {PRIOR_DATE}
 
 
-async def test_thirty_six_callers_share_one_physical_batched_stk_mins_pull(
+async def test_thirty_six_callers_share_current_day_rt_min_daily_pulls(
     harness: VendorBudgetHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Count physical Tushare calls, not only the canonical adapter invocation."""
+    """Current-day calculation uses rt_min_daily and never stk_mins."""
 
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
@@ -285,23 +285,13 @@ async def test_thirty_six_callers_share_one_physical_batched_stk_mins_pull(
                     ],
                 }
             }
-        assert api_name == "stk_mins"
-        ts_codes = str(params["ts_code"]).split(",")
+        assert api_name == "rt_min_daily"
+        ts_code = str(params["ts_code"])
         return {
             "data": {
-                "fields": [
-                    "ts_code",
-                    "trade_time",
-                    "open",
-                    "close",
-                    "high",
-                    "low",
-                    "vol",
-                    "amount",
-                ],
+                "fields": ["time", "open", "close", "high", "low", "vol", "amount"],
                 "items": [
                     [
-                        ts_code,
                         f"{TRADE_DATE.isoformat()} 09:{minute:02d}:00",
                         11.0 if ts_code.startswith("000001") else 12.0,
                         11.1 if ts_code.startswith("000001") else 12.1,
@@ -310,7 +300,6 @@ async def test_thirty_six_callers_share_one_physical_batched_stk_mins_pull(
                         2_000.0,
                         24_000.0,
                     ]
-                    for ts_code in ts_codes
                     for minute in range(31, 40)
                 ],
             }
@@ -328,9 +317,9 @@ async def test_thirty_six_callers_share_one_physical_batched_stk_mins_pull(
 
     assert len(bundles) == 36
     assert physical_calls.count(("daily", "")) == 1
-    early_calls = [call for call in physical_calls if call[0] == "stk_mins"]
-    assert early_calls == [("stk_mins", "000001.SZ,600000.SH")]
-    assert not [call for call in physical_calls if call[0] == "rt_min_daily"]
+    early_calls = [call for call in physical_calls if call[0] == "rt_min_daily"]
+    assert sorted(early_calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
+    assert not [call for call in physical_calls if call[0] == "stk_mins"]
     assert harness.scanner_calls == [("600000",)]
 
 

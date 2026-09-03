@@ -1,4 +1,4 @@
-"""Batched stk_mins pulls yield quote + expected-date early bars together."""
+"""Current-day rt_min_daily pulls yield quote + expected-date early bars."""
 
 from __future__ import annotations
 
@@ -82,46 +82,24 @@ def _payload(
 
 
 def _make_client(monkeypatch: pytest.MonkeyPatch, responses: dict[str, dict]):
-    """Fake batched stk_mins transport keyed by bare code."""
+    """Fake rt_min_daily transport keyed by bare code."""
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
     calls: list[tuple[str, str]] = []
 
     async def fake_api_call(api_name, params, fields=""):
         del fields
-        ts_codes = str(params["ts_code"]).split(",")
-        calls.append((api_name, str(params["ts_code"])))
-        assert api_name == "stk_mins"
-
-        output_fields: list[str] | None = None
-        output_items: list[list[object]] = []
-        for ts_code in ts_codes:
-            source = responses[ts_code.split(".")[0]]
-            raw = source.get("data", {})
-            source_fields = list(raw.get("fields", []))
-            renamed = ["trade_time" if field == "time" else field for field in source_fields]
-            candidate_fields = [
-                "ts_code",
-                *(field for field in renamed if field != "ts_code"),
-            ]
-            if output_fields is None:
-                output_fields = candidate_fields
-            elif set(candidate_fields) != set(output_fields):
-                raise AssertionError("test payload schemas differ inside one physical batch")
-
-            for item in raw.get("items", []):
-                mapped = dict(zip(renamed, item, strict=False))
-                mapped.setdefault("ts_code", ts_code)
-                output_items.append([mapped[field] for field in output_fields])
-
-        return {"data": {"fields": output_fields or [], "items": output_items}}
+        ts_code = params["ts_code"]
+        calls.append((api_name, ts_code))
+        assert api_name == "rt_min_daily"
+        return responses[ts_code.split(".")[0]]
 
     monkeypatch.setattr(client, "_api_call", fake_api_call)
     return client, calls
 
 
 @pytest.mark.asyncio
-async def test_one_batched_api_call_yields_quote_and_bars_for_all_codes(
+async def test_one_api_call_per_code_yields_quote_and_bars_from_same_response(
     monkeypatch,
 ) -> None:
     responses = {
@@ -134,7 +112,7 @@ async def test_one_batched_api_call_yields_quote_and_bars_for_all_codes(
         ["000001", "600000"], expected_trade_date=TRADE_DATE
     )
 
-    assert calls == [("stk_mins", "000001.SZ,600000.SH")]
+    assert sorted(calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
 
     data = result["000001"]
     assert isinstance(data, TushareEarlyMarketData)
@@ -156,10 +134,10 @@ async def test_one_batched_api_call_yields_quote_and_bars_for_all_codes(
 
 
 @pytest.mark.asyncio
-async def test_large_universe_has_bounded_physical_calls_and_full_histories(
+async def test_large_universe_has_one_call_per_code_and_full_histories(
     monkeypatch,
 ) -> None:
-    """The live fallback is O(batches), while every symbol keeps all early bars."""
+    """Current-day acquisition never batches into stk_mins."""
     codes = [f"{number:06d}" for number in range(801)]
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
@@ -168,14 +146,12 @@ async def test_large_universe_has_bounded_physical_calls_and_full_histories(
     async def fake_api_call(api_name, params, fields=""):
         del fields
         calls.append((api_name, dict(params)))
-        ts_codes = str(params["ts_code"]).split(",")
+        assert api_name == "rt_min_daily"
         return {
             "data": {
-                "fields": ["ts_code", "trade_time", *_FIELDS[1:]],
+                "fields": list(_FIELDS),
                 "items": [
-                    [ts_code, *_row(f"09:{minute:02d}", 10.0 + minute / 100)]
-                    for ts_code in ts_codes
-                    for minute in range(31, 40)
+                    _row(f"09:{minute:02d}", 10.0 + minute / 100) for minute in range(31, 40)
                 ],
             }
         }
@@ -186,11 +162,8 @@ async def test_large_universe_has_bounded_physical_calls_and_full_histories(
         expected_trade_date=TRADE_DATE,
     )
 
-    assert len(calls) == 3
-    assert {api_name for api_name, _params in calls} == {"stk_mins"}
-    assert sorted(len(str(params["ts_code"]).split(",")) for _, params in calls) == [1, 400, 400]
-    assert all(params["start_date"] == f"{TRADE_DATE.isoformat()} 09:24:00" for _, params in calls)
-    assert all(params["end_date"] == f"{TRADE_DATE.isoformat()} 09:40:00" for _, params in calls)
+    assert len(calls) == len(codes)
+    assert {api_name for api_name, _params in calls} == {"rt_min_daily"}
     assert list(result) == codes
     expected_labels = [f"09:{minute:02d}" for minute in range(31, 40)]
     assert all(
@@ -199,20 +172,21 @@ async def test_large_universe_has_bounded_physical_calls_and_full_histories(
 
 
 @pytest.mark.asyncio
-async def test_stk_mins_unrequested_instrument_response_fails_closed(monkeypatch) -> None:
+async def test_current_day_never_calls_stk_mins(monkeypatch) -> None:
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
-    fields = ["ts_code", "trade_time", *_FIELDS[1:]]
-    good = ["000001.SZ", *_row("09:38", 10.0)]
-    wrong = ["600000.SH", *_row("09:39", 10.1)]
+    calls: list[str] = []
 
-    async def mixed_api_call(*_args, **_kwargs):
-        return {"data": {"fields": fields, "items": [good, wrong]}}
+    async def fake_api_call(api_name, *_args, **_kwargs):
+        calls.append(api_name)
+        return {"data": {"fields": list(_FIELDS), "items": [_row("09:39", 10.0)]}}
 
-    monkeypatch.setattr(client, "_api_call", mixed_api_call)
+    monkeypatch.setattr(client, "_api_call", fake_api_call)
 
-    with pytest.raises(TushareRealtimeError, match="was not requested"):
-        await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
+    result = await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
+
+    assert calls == ["rt_min_daily"]
+    assert result["000001"].early_bars[-1].end_label == "09:39"
 
 
 @pytest.mark.asyncio
@@ -228,7 +202,11 @@ async def test_duplicates_are_deduplicated_and_preserve_input_order(
     client, calls = _make_client(monkeypatch, responses)
     result = await client.batch_get_early_market_data(codes, expected_trade_date=TRADE_DATE)
 
-    assert calls == [("stk_mins", "000001.SZ,600000.SH,300750.SZ")]
+    assert sorted(calls) == [
+        ("rt_min_daily", "000001.SZ"),
+        ("rt_min_daily", "300750.SZ"),
+        ("rt_min_daily", "600000.SH"),
+    ]
     assert list(result) == ["000001", "600000", "300750"]
 
 
@@ -501,7 +479,7 @@ async def test_early_quotes_wrapper_returns_same_quotes(monkeypatch) -> None:
     assert set(quotes) == {"000001", "600000"}
     assert quotes["000001"].early_close == pytest.approx(10.8)
     assert quotes["600000"].latest_price == pytest.approx(20.8)
-    assert calls == [("stk_mins", "000001.SZ,600000.SH")]
+    assert sorted(calls) == [("rt_min_daily", "000001.SZ"), ("rt_min_daily", "600000.SH")]
 
 
 @pytest.mark.asyncio
@@ -544,7 +522,7 @@ async def test_bars_come_from_same_response_not_a_second_pull(monkeypatch) -> No
 
     result = await client.batch_get_early_market_data(["000001"], expected_trade_date=TRADE_DATE)
 
-    assert calls == [("stk_mins", "000001.SZ")]
+    assert calls == [("rt_min_daily", "000001.SZ")]
     assert [bar.end_label for bar in result["000001"].early_bars] == labels
     assert result["000001"].quote.latest_price == pytest.approx(10.0)
 
@@ -610,24 +588,23 @@ def _assert_same_three_piece(
 
 
 @pytest.mark.asyncio
-async def test_failed_physical_batch_keeps_healthy_sibling_batches(monkeypatch) -> None:
-    """One failed stk_mins batch must not discard successful sibling batches."""
+async def test_failed_code_keeps_healthy_sibling_codes(monkeypatch) -> None:
+    """One failed rt_min_daily call must not discard successful siblings."""
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
-    client.HISTORICAL_EARLY_BATCH_SIZE = 1
     calls: list[str] = []
 
     async def fake_api_call(api_name, params, fields=""):
         del fields
-        assert api_name == "stk_mins"
+        assert api_name == "rt_min_daily"
         ts_code = str(params["ts_code"])
         calls.append(ts_code)
         if ts_code == "600000.SH":
             raise TushareRealtimeError("vendor 600000 down")
         return {
             "data": {
-                "fields": ["ts_code", "trade_time", *_FIELDS[1:]],
-                "items": [[ts_code, *_row("09:39", 10.0)]],
+                "fields": list(_FIELDS),
+                "items": [_row("09:39", 10.0)],
             }
         }
 
@@ -643,7 +620,7 @@ async def test_failed_physical_batch_keeps_healthy_sibling_batches(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_all_codes_failed_raises_original_exception_object(monkeypatch) -> None:
-    """When every stk_mins batch fails, the original exception object is raised."""
+    """When every rt_min_daily call fails, the original exception object is raised."""
     client = TushareRealtimeClient("token")
     client._client = object()  # type: ignore[assignment]
     original = TushareRealtimeError("vendor down")

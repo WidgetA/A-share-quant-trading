@@ -6497,7 +6497,7 @@ class V20Service:
         tuple[str, ...],
         Mapping[str, tuple[tuple[str, str], ...]],
     ]:
-        """Rebuild the canonical early-data seed for a past Shanghai trade date.
+        """Rebuild the canonical early-data seed for a non-future trade date.
 
         The exact canonical universe is resolved through the shared V16 universe
         semantics.  Every persisted raw revision for that universe is read with
@@ -6512,21 +6512,13 @@ class V20Service:
         decides scan readiness and never stops fetching.
         A present response key is a successful per-code answer — an empty
         tuple explicitly confirms no bars — while a missing key is a failure.
-        The live ``rt_min_daily`` early path is never touched for a past date.
-        Backfilled bars are truncated to the exact target date and known early
-        end labels *before* they enter the single shared normalizer
-        (``tushare_minute_bars_to_early_market_data``), persisted per completed
-        128-code chunk with ``record_minute_bars``, and the database is then
-        always read back so the seed is hydrated exclusively from persisted evidence through the
-        same normalizer.  Any conflicted universe code — in the initial fold
-        or in the mandatory readback fold — raises ``V20SemanticConflict``
-        with the total and a bounded sorted sample before any vendor fetch or
-        V16 compute.  An empty tuple confirms "no data" for a requested
-        missing code.  Any unresolved initial target after the readback fails
-        before the actual compute; a cancelled attempt simply keeps its
-        completed chunks and re-derives
-        the pending set from the database on the next call.  Hash corruption
-        stays fatal inside the repository.
+        Current-day gaps use one bounded-concurrency ``rt_min_daily``
+        acquisition for the complete missing set; past-day gaps use chunked
+        ``stk_mins`` requests.  Successful bars are persisted and the database
+        is always read back so the seed is hydrated exclusively from persisted
+        evidence.  Any conflicted universe code raises
+        ``V20SemanticConflict``.  Missing current-day keys remain visible to
+        the canonical 80% readiness gate; unresolved historical targets fail.
         """
         _scanner, _scorer, clean_boards, universe = derive_canonical_v16_universe(
             self._scan_state,
@@ -6549,70 +6541,77 @@ class V20Service:
         # A legal target-date 09:39 bar is the one canonical V16 per-symbol
         # readiness boundary.  Earlier labels are preserved when present but
         # never become a second, historical-only admission rule.
+        today = self._aware_now().astimezone(SHANGHAI).date()
         targets = sorted(missing)
         if targets:
             client = self._scan_state.realtime_client
-            batched_early_loader = (
-                None
-                if client is None
-                else getattr(client, "batch_get_early_minute_history_for_date", None)
-            )
-            if not callable(batched_early_loader):
-                raise V20RepositoryError(
-                    "canonical V16 historical replay batched early-minute adapter is unavailable"
-                )
-            # Deterministic 128-code chunks; each finished chunk is normalized
-            # and persisted immediately.  Cancellation propagates naturally,
-            # completed chunks stay durable, and the next attempt re-derives
-            # pending codes from the database rather than re-requesting them.
-            # Response contract: a present key means the API call succeeded for
-            # that code — an empty tuple is an explicit "no bars" (e.g.
-            # suspended), while a missing key means failure/incomplete.
+            if trade_date > today:
+                raise V20StateConflict("canonical V16 replay cannot target a future trade date")
             confirmed_empty: set[str] = set()
-            for start in range(0, len(targets), HISTORICAL_SEED_BACKFILL_CHUNK):
-                chunk = targets[start : start + HISTORICAL_SEED_BACKFILL_CHUNK]
-                history = await batched_early_loader(chunk, trade_date)
-                payloads: list[dict[str, Any]] = []
-                for code in chunk:
-                    if code not in history:
-                        continue
-                    rows = history[code]
-                    if not rows:
-                        confirmed_empty.add(code)
-                        continue
-                    # Truncate to the exact target date and known early end
-                    # labels (<=09:39) BEFORE the normalizer and persistence,
-                    # so a vendor response can never leak later or wrong-date
-                    # rows into the evidence.
-                    truncated = tuple(
-                        bar
-                        for bar in rows
-                        if bar.bar_end.astimezone(SHANGHAI).date() == trade_date
-                        and bar.end_label in EARLY_RAW_BAR_LABELS
+            if trade_date == today:
+                current_loader = getattr(client, "batch_get_early_market_data", None)
+                if client is None or not callable(current_loader):
+                    raise V20RepositoryError(
+                        "canonical V16 current-day early-minute adapter is unavailable"
                     )
-                    early = tushare_minute_bars_to_early_market_data(code, truncated, trade_date)
-                    if early is None:
-                        continue
-                    payloads.extend(_bar_payload(bar) for bar in early.early_bars)
+                early_response = await current_loader(targets, today)
+                payloads = [
+                    _bar_payload(bar)
+                    for code in targets
+                    if (early := early_response.get(code)) is not None
+                    for bar in early.early_bars
+                ]
                 if payloads:
                     sealed_hashes = await self._repository.record_minute_bars(payloads)
                     expected_hashes = frozenset(sha256_json(payload) for payload in payloads)
                     if frozenset(sealed_hashes) != expected_hashes:
                         raise V20RepositoryError(
-                            "canonical V16 replay minute-history persistence is incomplete: "
+                            "canonical V16 current-day realtime persistence is incomplete: "
                             f"{len(set(sealed_hashes) & expected_hashes)}/{len(payloads)} sealed"
                         )
-                if not any(code in history for code in chunk):
-                    # Only a chunk whose response lacks every requested key is
-                    # a wholesale vendor failure worth stopping for; a chunk
-                    # that answered each code (even all-empty) is a successful
-                    # response and later chunks must still be fetched.  The
-                    # mandatory readback and the completeness check below still
-                    # run, so this fails closed instead of pretending PASS.
-                    break
+            else:
+                historical_loader = getattr(client, "batch_get_early_minute_history_for_date", None)
+                if client is None or not callable(historical_loader):
+                    raise V20RepositoryError(
+                        "canonical V16 historical replay batched early-minute adapter "
+                        "is unavailable"
+                    )
+                for start in range(0, len(targets), HISTORICAL_SEED_BACKFILL_CHUNK):
+                    chunk = targets[start : start + HISTORICAL_SEED_BACKFILL_CHUNK]
+                    history = await historical_loader(chunk, trade_date)
+                    payloads = []
+                    for code in chunk:
+                        if code not in history:
+                            continue
+                        rows = history[code]
+                        if not rows:
+                            confirmed_empty.add(code)
+                            continue
+                        truncated = tuple(
+                            bar
+                            for bar in rows
+                            if bar.bar_end.astimezone(SHANGHAI).date() == trade_date
+                            and bar.end_label in EARLY_RAW_BAR_LABELS
+                        )
+                        early = tushare_minute_bars_to_early_market_data(
+                            code, truncated, trade_date
+                        )
+                        if early is not None:
+                            payloads.extend(_bar_payload(bar) for bar in early.early_bars)
+                    if payloads:
+                        sealed_hashes = await self._repository.record_minute_bars(payloads)
+                        expected_hashes = frozenset(sha256_json(payload) for payload in payloads)
+                        if frozenset(sealed_hashes) != expected_hashes:
+                            raise V20RepositoryError(
+                                "canonical V16 replay minute-history persistence is incomplete: "
+                                f"{len(set(sealed_hashes) & expected_hashes)}/{len(payloads)} "
+                                "sealed"
+                            )
+                    if not any(code in history for code in chunk):
+                        break
             # The seed must be hydrated from persisted evidence, never from the
-            # vendor response that was just written — the database readback is
-            # mandatory after any stk_mins attempt, even if nothing was sealed.
+            # vendor response that was just written; current-day misses remain
+            # visible to the canonical readiness gate.
             records = await self._repository.list_raw_minute_bar_records(
                 evidence_universe,
                 trade_date=trade_date,
@@ -6628,7 +6627,7 @@ class V20Service:
             unrecovered = [
                 code for code in targets if code not in usable and code not in confirmed_empty
             ]
-            if unrecovered:
+            if trade_date < today and unrecovered:
                 raise V20RepositoryError(
                     "canonical V16 historical backfill is incomplete: "
                     f"{len(unrecovered)}/{len(targets)} targets lack qualified "
@@ -6719,10 +6718,13 @@ class V20Service:
                 if len(code) == 6 and code.startswith(("00", "60")) and previous_close > 0
             )
         )
+        today = self._aware_now().astimezone(SHANGHAI).date()
+        minute_source = "rt_min_daily" if trade_date == today else "stk_mins"
         logger.info(
-            "V20 Rolling7 bootstrap %s stage=EARLY_STK_MINS source=tushare.stk_mins "
+            "V20 Rolling7 bootstrap %s stage=EARLY_MINUTE_BACKFILL source=tushare.%s "
             "universe=%d breadth=%d start",
             trade_date.isoformat(),
+            minute_source,
             len(universe),
             len(breadth_codes),
         )
@@ -6733,12 +6735,12 @@ class V20Service:
             evidence_codes=breadth_codes,
         )
         logger.info(
-            "V20 Rolling7 bootstrap %s stage=EARLY_STK_MINS complete ready=%d",
+            "V20 Rolling7 bootstrap %s stage=EARLY_MINUTE_BACKFILL source=tushare.%s "
+            "complete ready=%d",
             trade_date.isoformat(),
+            minute_source,
             len(seed),
         )
-
-        today = self._aware_now().date()
         if trade_date == today:
             fundamentals = self._scan_state.fundamentals_db
             if fundamentals is None or not callable(
@@ -6842,20 +6844,19 @@ class V20Service:
         self,
         context: _DayContext,
     ) -> CanonicalV16ScanBundle:
-        """Recompute the canonical V16 for the post-cutoff replay from durable evidence.
+        """Recompute canonical V16 for every automatic and manual calculation path.
 
         There is no second algorithm rebuilt from persisted rows: the same
-        ``compute_canonical_v16_scan`` serves every path, and this replay
-        context is always post-cutoff.  Same-day or past, the seed is rebuilt
-        from persisted early (<=09:39) raw evidence with a bounded ``stk_mins``
-        backfill for missing nonconflicted codes, and
+        ``compute_canonical_v16_scan`` serves the live slot and post-cutoff
+        checks.  Same-day or past, the seed is rebuilt
+        from persisted early (<=09:39) raw evidence with a date-bound vendor
+        backfill for missing nonconflicted codes (today through rt_min_daily,
+        T-1 and earlier through stk_mins), and
         ``compute_canonical_v16_scan`` is called directly with realtime early
         fetches forbidden, so the canonical 80% readiness gate stays
         authoritative.  The canonical coordinator and its cache are never
-        inspected or mutated here, and ``batch_get_early_market_data``
-        (``rt_min_daily``) or any other current-day bars endpoint is never
-        cold-started for a replay — a post-cutoff replay must stand on
-        persisted/``stk_mins`` evidence alone.  A future trade date is
+        inspected or mutated here, and the date-bound vendor path never crosses
+        the current-day/historical boundary.  A future trade date is
         rejected outright.
         """
 
