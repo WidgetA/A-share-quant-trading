@@ -656,7 +656,9 @@ async def test_post_cutoff_manual_calculation_is_independent_of_live_coordinator
     configured_canonical = replace(
         _canonical_master(),
         model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
-        feature_list_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
+        feature_list_sha256=service.config.strategy_dependency_hashes[
+            "models/v20/feature_list.json"
+        ],
         _integrity_hash="",
     )
     canonical = replace(

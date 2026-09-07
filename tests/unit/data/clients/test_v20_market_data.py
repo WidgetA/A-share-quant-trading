@@ -52,9 +52,7 @@ def test_missing_optional_call_auction_bar_keeps_v16_readiness_semantics(
     missing_label: str,
 ) -> None:
     collector = V20EarlyBarCollector(date(2026, 8, 31), ["000001"])
-    collector.ingest(
-        bar for bar in _early_path("000001") if bar.end_label != missing_label
-    )
+    collector.ingest(bar for bar in _early_path("000001") if bar.end_label != missing_label)
 
     snapshot = collector.freeze()
 

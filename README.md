@@ -1,5 +1,11 @@
 # A-share-quant-trading
 
+V20 has an independent runtime supervisor. A database disconnect stops unsafe
+work, sends a Feishu operational alert directly (without the database/outbox),
+and retries a fresh V20 runtime after cleanup. Recovery rechecks the exclusive
+database lock and existing time limits; it never resumes expired buy advice or
+restarts V16. Recovery and alert delivery status are exposed for monitoring.
+
 A quantitative trading system for China A-share market.
 
 ## Quick Start

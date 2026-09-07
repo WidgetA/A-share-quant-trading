@@ -16,12 +16,12 @@ from src.data.database.v20_repository import (
     V20SemanticConflict,
     sha256_json,
 )
-from src.strategy.v20.selection_scorer import ScoredStock
-from src.strategy.v20.selection_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import CompletedRolling, genesis_state, prepare_entry
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
 from src.strategy.v20.runtime_config import load_v20_runtime_config
+from src.strategy.v20.selection_scanner import V16ScanResult
+from src.strategy.v20.selection_scorer import ScoredStock
 from src.web.v20_canonical_selection import _build_v16_recommendation_payload
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_v16_canonical_artifact import (

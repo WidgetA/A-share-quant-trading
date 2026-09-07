@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from src.web.v20_routes import create_v20_router
+from src.web.v20_runtime_supervisor import attach_v20_supervisor
 
 ServiceFactory = Callable[[], Any]
 
@@ -51,10 +52,14 @@ def create_v20_app(
         if _service_enabled(service):
             await service.start()
             started = True
+            attach_v20_supervisor(app, service, factory)
         try:
             yield
         finally:
-            if started:
+            supervisor = getattr(app.state, "v20_supervisor", None)
+            if supervisor is not None:
+                await supervisor.stop()
+            elif started:
                 await service.stop()
 
     app = FastAPI(

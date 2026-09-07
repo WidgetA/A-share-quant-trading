@@ -34,6 +34,7 @@ from src.web.routes import (
 )
 from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
 from src.web.v20_routes import create_v20_router
+from src.web.v20_runtime_supervisor import attach_v20_supervisor
 
 if TYPE_CHECKING:
     from src.common.strategy_controller import StrategyController
@@ -154,6 +155,7 @@ async def _retry_v20_shadow_start(app: FastAPI, service: Any) -> None:
             app.state.v20_start_error = None
             app.state.v20_start_error_code = None
             logger.info("V20 forward-shadow service recovered on startup retry")
+            attach_v20_supervisor(app, service, _create_default_v20_service)
             return
     finally:
         app.state.v20_retry_task = None
@@ -246,6 +248,7 @@ async def _start_v20_lifecycle(app: FastAPI) -> bool:
         return legacy_scan_allowed
 
     app.state.v20_service_started = True
+    attach_v20_supervisor(app, service, _create_default_v20_service)
     logger.info("V20 service started (mode=%s)", mode)
     return legacy_scan_allowed
 
@@ -265,6 +268,13 @@ async def _stop_v20_lifecycle(app: FastAPI) -> None:
         retry_task.cancel()
         await asyncio.gather(retry_task, return_exceptions=True)
     app.state.v20_retry_task = None
+
+    supervisor = getattr(app.state, "v20_supervisor", None)
+    if supervisor is not None:
+        await supervisor.stop()
+        app.state.v20_supervisor = None
+        app.state.v20_service_started = False
+        return
 
     if not getattr(app.state, "v20_service_lifecycle_owned", False):
         return

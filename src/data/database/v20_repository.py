@@ -1944,15 +1944,28 @@ class V20Repository:
         try:
             if leader is not None:
                 try:
-                    if leader_key is not None and not leader.is_closed():
-                        await leader.fetchval("SELECT pg_advisory_unlock($1::bigint)", leader_key)
+                    try:
+                        if leader_key is not None and not leader.is_closed():
+                            await leader.fetchval(
+                                "SELECT pg_advisory_unlock($1::bigint)", leader_key
+                            )
+                    except (asyncpg.InterfaceError, asyncpg.PostgresConnectionError, OSError):
+                        # A disconnected asyncpg PoolConnectionProxy can reject
+                        # even is_closed(). Its session lock died with the socket.
+                        logger.warning("V20 leader session was already lost during cleanup")
                 finally:
                     await pool.release(leader)
         finally:
             self._connection_ready = False
             if self._owns_pool:
                 try:
-                    await pool.close()
+                    try:
+                        async with asyncio.timeout(10.0):
+                            await pool.close()
+                    except TimeoutError:
+                        # All V20 tasks have already settled. Terminate only the
+                        # private pool so a dead socket cannot wedge recovery.
+                        pool.terminate()
                 finally:
                     self._pool = None
 
@@ -1998,9 +2011,9 @@ class V20Repository:
             connection = self._leader_connection
             if connection is None or self._leader_scope is None:
                 raise V20LeadershipLost("V20 runtime leader lock is not held")
-            if connection.is_closed():
-                raise V20LeadershipLost("V20 runtime leader connection was lost")
             try:
+                if connection.is_closed():
+                    raise V20LeadershipLost("V20 runtime leader connection was lost")
                 await connection.fetchval("SELECT 1")
             except Exception as exc:
                 raise V20LeadershipLost("V20 runtime leader session probe failed") from exc

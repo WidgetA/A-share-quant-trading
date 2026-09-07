@@ -343,6 +343,15 @@ def create_router() -> APIRouter:
                 "retrying": bool(
                     (retry_task := getattr(request.app.state, "v20_retry_task", None)) is not None
                     and not retry_task.done()
+                )
+                or bool(
+                    getattr(getattr(request.app.state, "v20_supervisor", None), "recovering", False)
+                ),
+                "supervisor": (
+                    supervisor.status()
+                    if (supervisor := getattr(request.app.state, "v20_supervisor", None))
+                    is not None
+                    else None
                 ),
                 # Never return database/credential exception text publicly.
                 "start_error_type": v20_error_type,
