@@ -39,8 +39,6 @@ from src.data.database.v20_repository import (
     V20StateConflict,
     sha256_json,
 )
-from src.strategy.v20.selection_scorer import ScoredStock
-from src.strategy.v20.selection_scanner import V16ScanResult
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import genesis_state
 from src.strategy.v20.identity import named_hash, official_slot_id
@@ -58,6 +56,8 @@ from src.strategy.v20.runtime_config import (
     V20RouteBinding,
     load_v20_runtime_config,
 )
+from src.strategy.v20.selection_scanner import V16ScanResult
+from src.strategy.v20.selection_scorer import ScoredStock
 from src.web.v15_scan_service import (
     V15ScanState,
     cleanup_scan_resources,
@@ -6029,8 +6029,12 @@ def test_runtime_model_or_feature_drift_is_rejected(
 ) -> None:
     service = _service(monkeypatch, SimpleNamespace())
     prewarmed = SimpleNamespace(
-        scorer_model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
-        scorer_feature_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
+        scorer_model_sha256=service.config.strategy_dependency_hashes[
+            "models/v20/lgbrank_latest.txt"
+        ],
+        scorer_feature_sha256=service.config.strategy_dependency_hashes[
+            "models/v20/feature_list.json"
+        ],
     )
     setattr(prewarmed, field, "0" * 64)
 
@@ -6288,6 +6292,19 @@ async def test_fatal_runtime_lane_cancels_blocked_siblings_even_after_stop_is_se
     assert sibling_cancelled.is_set()
     assert service._stop_event.is_set()
     assert service.startup_stage == "RUNTIME_FAILED"
+    assert await service.wait_runtime_failure() == "fatal-exit:V20LeadershipLost"
+
+
+async def test_unexpected_lane_cancellation_notifies_supervisor(monkeypatch) -> None:
+    service = _service(monkeypatch, SimpleNamespace())
+    lane = asyncio.create_task(asyncio.Event().wait(), name="v20-decision-scheduler")
+    service._tasks = [lane]
+    lane.add_done_callback(service._runtime_task_finished)
+    lane.cancel()
+    await asyncio.gather(lane, return_exceptions=True)
+    assert await asyncio.wait_for(service.wait_runtime_failure(), 1) == (
+        "v20-decision-scheduler:CancelledError"
+    )
 
 
 async def test_outbox_recovery_lane_reseals_exit_while_decision_is_unavailable(

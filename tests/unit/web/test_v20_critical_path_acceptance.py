@@ -646,7 +646,9 @@ def _portable_canonical(
         failed_build=(),
         skipped_new_listings=(),
         model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
-        feature_list_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
+        feature_list_sha256=service.config.strategy_dependency_hashes[
+            "models/v20/feature_list.json"
+        ],
         computed_at=datetime.combine(trade_date, time(9, 39, 20), TZ),
         input_hash=sha256_json({"trade_date": trade_date.isoformat(), "codes": codes}),
         external_market_fact_hash="f" * 64,
@@ -1489,7 +1491,9 @@ async def test_v20_recomputes_independently_from_v16_runtime_for_each_trigger(
     configured_master = dataclasses_replace(
         master,
         model_sha256=service.config.strategy_dependency_hashes["models/v20/lgbrank_latest.txt"],
-        feature_list_sha256=service.config.strategy_dependency_hashes["models/v20/feature_list.json"],
+        feature_list_sha256=service.config.strategy_dependency_hashes[
+            "models/v20/feature_list.json"
+        ],
         _integrity_hash="",
     )
     v20_master = dataclasses_replace(

@@ -1322,6 +1322,8 @@ class V20Service:
         self._calendar_tasks: dict[date, asyncio.Task[tuple[date, ...]]] = {}
         self._calendar_tasks_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
+        self._runtime_failure = asyncio.Event()
+        self._runtime_failure_code = "RUNTIME_TASK_FAILED"
         self._tasks: list[asyncio.Task[Any]] = []
         self._decision_cycle_lock = asyncio.Lock()
         self._manual_trigger_lock = asyncio.Lock()
@@ -1623,6 +1625,7 @@ class V20Service:
             return
         self._started = True
         self._stop_event.clear()
+        self._runtime_failure.clear()
         if not self.config.enabled:
             self._startup_stage = "DISABLED"
             logger.info("V20 is disabled by configuration")
@@ -1894,12 +1897,9 @@ class V20Service:
     def _runtime_task_finished(self, finished: asyncio.Task[Any]) -> None:
         """Fail the whole runtime when any production lane terminates unexpectedly."""
 
-        if finished.cancelled():
+        if finished not in self._tasks or self._runtime_failure.is_set():
             return
-        try:
-            failure = finished.exception()
-        except asyncio.CancelledError:
-            return
+        failure = asyncio.CancelledError() if finished.cancelled() else finished.exception()
         if failure is None and self._stop_event.is_set():
             return
         detail = (
@@ -1908,12 +1908,37 @@ class V20Service:
             else f"RUNTIME_TASK_STOPPED:{finished.get_name()}"
         )
         self._startup_stage = "RUNTIME_FAILED"
+        self._runtime_failure_code = (
+            f"{finished.get_name()}:{type(failure).__name__}" if failure else finished.get_name()
+        )
+        self._runtime_failure.set()
         self._record_error(detail)
         self._stop_event.set()
         for sibling in self._tasks:
             if sibling is not finished and not sibling.done():
                 sibling.cancel()
         logger.critical("V20 runtime lane terminated; cancelling sibling lanes: %s", detail)
+
+    async def wait_runtime_failure(self) -> str:
+        """Host supervision survives cancellation of every strategy lane."""
+        await self._runtime_failure.wait()
+        return self._runtime_failure_code
+
+    async def assert_runtime_ready(self) -> None:
+        await self._repository.assert_runtime_leader()
+        if (
+            not self._started
+            or self._stop_event.is_set()
+            or not self._tasks
+            or any(task.done() for task in self._tasks)
+        ):
+            raise V20RepositoryError("replacement V20 runtime did not remain running")
+
+    def runtime_alerts(self) -> Any:
+        from src.common.v20_runtime_alerts import V20RuntimeAlerts
+
+        route = self._routes[self.config.route_id]
+        return V20RuntimeAlerts(route.app_id, route.app_secret, route.chat_id)
 
     async def status(self) -> Mapping[str, Any]:
         context = self._context

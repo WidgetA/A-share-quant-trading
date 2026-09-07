@@ -5,6 +5,14 @@
 
 ## Version History
 
+V20 runtime recovery (2026-09-07): an independent host supervisor observes fatal
+V20 task termination, reports the incident directly to Feishu without PostgreSQL
+or the strategy outbox, closes the failed V20 generation, and retries a fresh
+generation with bounded backoff. Recovery reacquires the exclusive runtime lock
+and retains the existing ledger, cutoff and delivery-idempotency rules. V16
+resources and schedules remain independent. Intentional shutdown disables
+recovery. Alert delivery failures remain visible and retry independently.
+
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-01-27 | - | Initial document structure |

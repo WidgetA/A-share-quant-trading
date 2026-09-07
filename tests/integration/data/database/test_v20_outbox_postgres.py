@@ -13,6 +13,7 @@ import pytest
 
 from src.data.database.v20_repository import (
     V20DatabaseConfig,
+    V20LeadershipLost,
     V20Repository,
     V20StateConflict,
     migration_sql,
@@ -74,6 +75,39 @@ async def repository():
     finally:
         await _drop_schema(pool, schema)
         await pool.close()
+
+
+async def test_disconnected_leader_can_be_replaced_without_duplicate_runtime(repository):
+    """Reproduce asyncpg's released proxy using only this isolated test session."""
+    instance, pool, schema = repository
+    scope = dict(route_id=f"outage-test-{schema}", official_stream_id="test", lineage_id="test")
+    await instance.acquire_runtime_leader(**scope)
+    connection = instance._leader_connection
+    backend_pid = await connection.fetchval("SELECT pg_backend_pid()")
+    # This PID belongs to the leader connection acquired above, never another
+    # database user/session or the production database.
+    async with pool.acquire() as killer:
+        assert await killer.fetchval("SELECT pg_terminate_backend($1)", backend_pid)
+    async with asyncio.timeout(5):
+        while True:
+            try:
+                await instance.assert_runtime_leader()
+            except V20LeadershipLost:
+                break
+            await asyncio.sleep(0.01)
+    await instance.close()
+    replacement = V20Repository(_config(schema), shared_pool=pool)
+    contender = V20Repository(_config(schema), shared_pool=pool)
+    try:
+        await replacement.connect(migrate=False)
+        await replacement.acquire_runtime_leader(**scope)
+        await replacement.assert_runtime_leader()
+        await contender.connect(migrate=False)
+        with pytest.raises(V20StateConflict, match="another V20 worker"):
+            await contender.acquire_runtime_leader(**scope)
+    finally:
+        await contender.close()
+        await replacement.close()
 
 
 async def _insert_outbox(

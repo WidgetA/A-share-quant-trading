@@ -918,6 +918,40 @@ async def test_concurrent_runtime_leader_probes_are_serialized_on_held_connectio
 
 
 @pytest.mark.asyncio
+async def test_released_pool_proxy_is_leadership_loss_and_can_be_cleaned_up() -> None:
+    import asyncpg
+
+    from src.data.database.v20_repository import V20LeadershipLost
+
+    class ReleasedLeader:
+        def is_closed(self):
+            raise asyncpg.InterfaceError("connection has been released back to the pool")
+
+    class Pool:
+        released = False
+        closed = False
+
+        async def release(self, connection):
+            self.released = True
+
+        async def close(self):
+            self.closed = True
+
+    pool = Pool()
+    repository = V20Repository(V20DatabaseConfig())
+    repository._pool = pool
+    repository._leader_connection = ReleasedLeader()
+    repository._leader_key = 42
+    repository._leader_scope = ("route", "stream", "lineage")
+    with pytest.raises(V20LeadershipLost):
+        await repository.assert_runtime_leader()
+    await repository.close()
+    assert pool.released and pool.closed
+    assert repository._leader_connection is None
+    assert repository._pool is None
+
+
+@pytest.mark.asyncio
 async def test_runtime_leader_lock_excludes_new_lineage_on_same_public_route() -> None:
     held_keys: set[int] = set()
 

@@ -1,5 +1,22 @@
 # V20 部署与运维手册
 
+## Runtime failure recovery (2026-09-07)
+
+The host owns a supervisor outside the V20 scheduler task set. Fatal task exit
+causes a direct Feishu operational incident alert, then cleanup and replacement
+of V20 alone, with retry delays of 5, 10, 20, 40, then 60 seconds. Every replacement
+must acquire the normal exclusive PostgreSQL lock and load the existing ledger;
+expired entries remain expired. Shutdown cancels the supervisor before cleanup.
+An unsuccessful cleanup must not start a replacement generation.
+
+Operational alerts use the configured V20 app/chat credentials and Feishu's
+official token/message APIs, without PostgreSQL or the strategy relay. They have
+incident UUIDs, contain no trading instructions or exception secrets, retry with
+bounded backoff, and expose delivery/error state. A recovery notice is sent only
+after the replacement runtime has started and its leader probe succeeds. This
+does not certify all market-data lanes as healthy. Full host/network outages
+still require an external uptime monitor.
+
 本手册只说明 V20 的部署、观察和回滚。策略语义以
 [冻结规则](./strategy-v20.md)为准；历史结果和限制以
 [证据附录](./strategy-v20-evidence.md)为准。
