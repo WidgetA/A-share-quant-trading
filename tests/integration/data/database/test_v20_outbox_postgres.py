@@ -5,8 +5,10 @@ import json
 import os
 import re
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import asyncpg
 import pytest
@@ -78,25 +80,38 @@ async def repository():
 
 
 async def test_disconnected_leader_can_be_replaced_without_duplicate_runtime():
-    """Reproduce asyncpg's released proxy using only this isolated test session."""
+    """Kill an isolated test leader and recover using production-owned pools."""
     schema = _schema()
-    pool = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=4, command_timeout=3)
-    instance = V20Repository(_config(schema), shared_pool=pool)
-    replacement = V20Repository(_config(schema), shared_pool=pool)
-    contender = V20Repository(_config(schema), shared_pool=pool)
+    dsn = urlsplit(DSN)
+    config = replace(
+        _config(schema),
+        host=dsn.hostname or "localhost",
+        port=dsn.port or 5432,
+        user=unquote(dsn.username or ""),
+        password=unquote(dsn.password or ""),
+        database=unquote(dsn.path.lstrip("/")),
+        command_timeout_seconds=3,
+    )
+    instance = V20Repository(config)
+    replacement = V20Repository(config)
+    contender = V20Repository(config)
     scope = dict(route_id=f"outage-test-{schema}", official_stream_id="test", lineage_id="test")
     try:
-        async with asyncio.timeout(15):
+        async with asyncio.timeout(30):
             await instance.connect(migrate=False)
             await instance.acquire_runtime_leader(**scope)
             connection = instance._leader_connection
             backend_pid = await connection.fetchval("SELECT pg_backend_pid()")
             # Only terminate the PID acquired above in the disposable CI DB.
-            async with pool.acquire() as killer:
+            killer = await asyncpg.connect(DSN, command_timeout=3)
+            try:
                 assert await killer.fetchval("SELECT pg_terminate_backend($1)", backend_pid)
+            finally:
+                await killer.close()
             with pytest.raises(V20LeadershipLost):
                 await instance.assert_runtime_leader()
             await instance.close()
+            assert instance._pool is None
             await replacement.connect(migrate=False)
             await replacement.acquire_runtime_leader(**scope)
             await replacement.assert_runtime_leader()
@@ -104,16 +119,11 @@ async def test_disconnected_leader_can_be_replaced_without_duplicate_runtime():
             with pytest.raises(V20StateConflict, match="another V20 worker"):
                 await contender.acquire_runtime_leader(**scope)
     finally:
-        # No schema or strategy rows were needed. Always release these test
-        # sessions even when an assertion fails so teardown cannot hide it.
-        try:
-            async with asyncio.timeout(5):
-                await contender.close()
-                await replacement.close()
-                await instance.close()
-                await pool.close()
-        finally:
-            pool.terminate()
+        # Each runtime owns a distinct pool, exactly as in production. Closing
+        # a dead generation must not close any replacement's connection pool.
+        await contender.close()
+        await replacement.close()
+        await instance.close()
 
 
 async def _insert_outbox(
