@@ -424,7 +424,6 @@ Limit-up (skipped):
     ) -> bool:
         """Send V16 scanner top-10 scored candidates to Feishu."""
         now = scan_time or datetime.now(BEIJING_TZ)
-        time_str = now.strftime("%Y-%m-%d %H:%M")
         board_gains = scan_result.step2_board_avg_gains
 
         # ⭐ flags picks whose best-board is a broad concept board (≥400
@@ -460,7 +459,8 @@ Limit-up (skipped):
             return "[带动]" if is_driver else "[扩增]"
 
         lines = [
-            f"[V16] 每日扫描报告 ({time_str})",
+            "[V16] 每日扫描报告",
+            f"报告生成时间: {now.strftime('%Y-%m-%d %H:%M:%S')}",
             (
                 f"股票池: {scan_result.step0_universe_count}只 | "
                 f"热门板块: {scan_result.step2_hot_board_count}个 | "
@@ -484,7 +484,8 @@ Limit-up (skipped):
             lines.append(
                 f"  板块: {_driver_tag(top1.code)}{board_str} | "
                 f"LGB: {top1.score:.4f} | "
-                f"买入价: {top1.buy_price:.2f} (9:40)"
+                f"计算用价: {top1.buy_price:.2f} "
+                f"(行情时间: {scan_result.stock_price_times.get(top1.code) or '未知'})"
                 f"{cci_str}{evol_str}"
             )
 
@@ -500,7 +501,8 @@ Limit-up (skipped):
                 lines.append(
                     f"{s.rank}. {s.code} {s.name}  "
                     f"LGB={s.score:.4f}  "
-                    f"买入:{s.buy_price:.2f}  "
+                    f"计算用价:{s.buy_price:.2f} "
+                    f"(行情时间: {scan_result.stock_price_times.get(s.code) or '未知'})  "
                     f"{_driver_tag(s.code)}{board_str}"
                     f"{cci_part}{evol_part}"
                 )

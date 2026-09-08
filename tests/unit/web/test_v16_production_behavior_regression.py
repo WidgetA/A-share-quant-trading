@@ -106,6 +106,9 @@ async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
                     early_low=9.9,
                     early_volume=10_000.0,
                     volume_937=8_000.0,
+                    early_bar_end=datetime.combine(
+                        today, time(9, 38), tzinfo=v15_scan_service.BEIJING_TZ
+                    ),
                 )
             }
 
@@ -170,6 +173,7 @@ async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
 
     async def record_top10(_scan_result):
         counters["top10"] += 1
+        assert _scan_result.stock_price_times == {"600000": f"{today} 09:38"}
 
     async def no_refresh(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -204,6 +208,7 @@ async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
         "open_price": 10.0,
         "prev_close": 9.8,
         "latest_price": 10.2,
+        "price_time": f"{today} 09:38",
         "lgb_score": 0.12,
         "hot_board_count": 1,
         "final_candidates": 1,

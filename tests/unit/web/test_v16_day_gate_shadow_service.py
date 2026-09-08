@@ -19,7 +19,7 @@ from src.strategy.v16_day_gate_shadow import (
 from src.web import v15_scan_service
 
 
-def test_legacy_recommendation_payload_is_unchanged_and_has_no_gate_fields():
+def test_recommendation_preserves_values_with_source_time_and_no_gate_fields():
     top1 = SimpleNamespace(
         code="600000",
         name="example",
@@ -29,6 +29,7 @@ def test_legacy_recommendation_payload_is_unchanged_and_has_no_gate_fields():
     result = SimpleNamespace(
         recommended=[top1],
         stock_best_board={"600000": "board-a"},
+        stock_price_times={"600000": "2026-09-08 09:38"},
         step2_hot_board_count=7,
         final_candidates=19,
     )
@@ -43,6 +44,7 @@ def test_legacy_recommendation_payload_is_unchanged_and_has_no_gate_fields():
         "open_price": 11.1112,
         "prev_close": 10.9877,
         "latest_price": 12.3457,
+        "price_time": "2026-09-08 09:38",
         "lgb_score": 0.123457,
         "hot_board_count": 7,
         "final_candidates": 19,
