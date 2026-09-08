@@ -125,6 +125,7 @@ from src.strategy.v20.runtime_config import (
 )
 from src.strategy.v20.shadow_evaluator import evaluate_shadow_batch
 from src.web.v20_canonical_selection import (
+    LOOKBACK_DAYS,
     CanonicalV16ScanBundle,
     V20CanonicalSelectionState,
     _fetch_history_ohlcv,
@@ -345,6 +346,7 @@ class _DayContext:
     calendar: tuple[date, ...]
     entry_status: EntryStatus | None = None
     prewarmed: V20PrewarmedScan | None = None
+    canonical_history_warmed: bool = False
     canonical_bundle: FrozenV16ScanBundle | None = None
     canonical_first_received_at: datetime | None = None
     canonical_entry_mode: str | None = None
@@ -6991,6 +6993,11 @@ class V20Service:
                 "Rolling7 canonical bootstrap OHLCV-history adapter is unavailable"
             )
 
+        # Only a calendar covering the entire requested history window may
+        # classify an empty weekday as closed. Artifact replay can carry a
+        # narrower calendar; do not reinterpret older dates from that subset.
+        self._configure_canonical_history_calendar(historical_adapter, calendar, trade_date)
+
         logger.info(
             "V20 Rolling7 bootstrap %s stage=D1_DAILY source=tushare.daily date=%s start",
             trade_date.isoformat(),
@@ -7900,17 +7907,53 @@ class V20Service:
             )
         return await self._compute_morning_selection(trade_date)
 
+    @staticmethod
+    def _configure_canonical_history_calendar(
+        adapter: Any, calendar: tuple[date, ...], trade_date: date
+    ) -> None:
+        configure = getattr(adapter, "set_exchange_trade_calendar", None)
+        history_start = trade_date - timedelta(days=LOOKBACK_DAYS * 2 + 15)
+        if callable(configure) and calendar and calendar[0] <= history_start:
+            configure(calendar)
+
+    async def _prewarm_canonical_history(self, context: _DayContext) -> None:
+        """Warm V20's existing date-scoped adapter without computing selection."""
+
+        current = self._aware_now()
+        deadline = _local(context.trade_date, time(9, 38))
+        if context.canonical_history_warmed or current.date() != context.trade_date:
+            return
+        if not _local(context.trade_date, self.config.clock.prewarm) <= current < deadline:
+            return
+        adapter = self._scan_state.historical_adapter
+        if adapter is None:
+            raise V20RepositoryError("canonical history prewarm adapter is unavailable")
+        self._configure_canonical_history_calendar(adapter, context.calendar, context.trade_date)
+        _scanner, _scorer, _boards, universe = derive_canonical_v16_universe(self._scan_state)
+        logger.info(
+            "V20 canonical history prewarm %s start codes=%d", context.trade_date, len(universe)
+        )
+        async with asyncio.timeout((deadline - self._aware_now()).total_seconds()):
+            history = await _fetch_history_ohlcv(adapter, list(universe), context.trade_date)
+        if not history:
+            raise V20RepositoryError("canonical history prewarm returned empty history")
+        context.canonical_history_warmed = True
+        logger.info(
+            "V20 canonical history prewarm %s complete rows=%d", context.trade_date, len(history)
+        )
+
     async def _run_entry_collection_cycle(
         self,
         context: _DayContext,
         now: datetime,
     ) -> None:
-        """Schedule the independent MEWS repair without precomputing selection."""
+        """Prepare historical data and schedule MEWS without computing selection."""
 
         if callable(getattr(self._repository, "get_entry_status", None)):
             await self._refresh_entry_status(context)
         if context.entry_status is not None:
             return
+        await self._prewarm_canonical_history(context)
         wall = now.timetz().replace(tzinfo=None)
         if (
             wall < time.fromisoformat(self.config.clock.decision_bar_label)

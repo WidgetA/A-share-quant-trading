@@ -1,5 +1,26 @@
 # V20 部署与运维手册
 
+## Morning history preparation (2026-09-08)
+
+The September 8 slot failed with `INPUT_TIME_BOUNDARY_VIOLATION`: the current-day
+minute acquisition finished at 09:40:05, historical daily preparation finished
+at 09:40:43, and selection formed at 09:40:54. The runtime remained healthy.
+The operator check succeeded and did not replace the failed official slot.
+
+V20 prepares its own current-day historical-adapter cache during 09:15–09:38,
+before the two realtime acquisitions. Preparation is bounded by the absolute
+09:38 boundary and is retried only while that preparation window remains open.
+The authoritative exchange calendar is supplied to that adapter so a confirmed
+closed weekday is not requested again for each 50-stock history batch. An empty
+open-day response remains an error. Preparation executes neither the selection
+scanner nor a realtime-minute request. The normal calculation still consumes
+the same history adapter and validates all canonical inputs.
+
+This removes avoidable historical work from the critical minute; it cannot
+guarantee on-time delivery when the minute provider itself takes over a minute.
+The 09:39 acquisition start, 40-request concurrency limit, and 09:40 official
+commit fence remain in force. Late results remain non-actionable diagnostics.
+
 ## Runtime failure recovery (2026-09-07)
 
 The host owns a supervisor outside the V20 scheduler task set. Fatal task exit
