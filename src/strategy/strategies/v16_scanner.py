@@ -124,6 +124,8 @@ class V16ScanResult:
     stock_cci: dict[str, float] = field(default_factory=dict)
     # Early volume (call auction + first 7min) for recommended stocks: code → volume in 股
     stock_early_vol: dict[str, float] = field(default_factory=dict)
+    # Actual source minute of each calculation price, populated by the live caller.
+    stock_price_times: dict[str, str] = field(default_factory=dict)
     # Diagnostic: ALL board avg gains (including non-hot), for debugging Step 2 = 0
     step2_all_board_avg_gains: dict[str, float] = field(default_factory=dict)
 

@@ -1,5 +1,9 @@
 # A-share-quant-trading
 
+V16 notifications show each calculation price with its actual source minute.
+Report generation time is separate. Missing source times are explicitly unknown;
+they are never replaced with 09:39, 09:40, or the notification time.
+
 V20 completes its full 09:39-data calculation even when acquisition, computation,
 or delivery continues after 09:40/09:45. Those times no longer invalidate a
 same-day result. Historical inputs are prepared before realtime acquisition.

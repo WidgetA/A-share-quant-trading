@@ -11,8 +11,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.common.feishu_bot import FeishuBot
+from src.data.clients.tushare_realtime import BEIJING_TZ, TushareRealtimeClient
 from src.strategy.lgbrank_scorer import ScoredStock
 from src.strategy.strategies.v16_scanner import V16ScanResult
+from src.web import iquant_routes, v15_scan_service
 
 
 def _make_result() -> V16ScanResult:
@@ -38,6 +40,78 @@ def _bot() -> FeishuBot:
         app_secret="s",
         chat_id="c",
     )
+
+
+@pytest.mark.asyncio
+async def test_source_minute_stays_paired_with_price_in_mixed_minute_report():
+    result = _make_result()
+    for stock, minute in zip(result.recommended, (38, 39), strict=True):
+        payload = {
+            "data": {
+                "fields": ["time", "open", "close", "high", "low", "vol", "amount"],
+                "items": [
+                    [f"2026-06-01 09:{minute}:00", 20, 21, 22, 19, 100, 2100],
+                    ["2026-06-01 09:45:00", 30, 31, 32, 29, 100, 3100],
+                ],
+            }
+        }
+        data = TushareRealtimeClient._parse_early_market_data(
+            stock.code, payload, expected_trade_date=datetime(2026, 6, 1).date()
+        )
+        assert data is not None
+        assert data.quote.early_close == 21
+        assert data.quote.early_bar_end is not None
+        stock.buy_price = data.quote.early_close
+        result.stock_price_times[stock.code] = data.quote.early_bar_end.astimezone(
+            BEIJING_TZ
+        ).strftime("%Y-%m-%d %H:%M")
+    bot = _bot()
+    bot.send_message = AsyncMock(return_value=True)
+    await bot.send_v16_top10_report(result, scan_time=datetime(2026, 6, 1, 9, 49, 13))
+    msg = bot.send_message.call_args.args[0]
+    assert "报告生成时间: 2026-06-01 09:49:13" in msg
+    assert "计算用价: 21.00 (行情时间: 2026-06-01 09:38)" in msg
+    assert "计算用价:21.00 (行情时间: 2026-06-01 09:39)" in msg
+    assert "9:40" not in msg
+    assert "31.00" not in msg
+
+
+@pytest.mark.asyncio
+async def test_unknown_source_minute_does_not_use_report_time():
+    bot = _bot()
+    bot.send_message = AsyncMock(return_value=True)
+    await bot.send_v16_top10_report(_make_result(), scan_time=datetime(2026, 6, 1, 9, 39))
+    msg = bot.send_message.call_args.args[0]
+    assert msg.count("行情时间: 未知") == 3
+    assert "行情时间: 2026-06-01 09:39" not in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "notify",
+    [
+        v15_scan_service._notify_feishu_signal,
+        iquant_routes._notify_feishu_signal,
+        iquant_routes._notify_feishu_ack,
+    ],
+)
+async def test_signal_and_ack_keep_source_time_separate_from_send_time(monkeypatch, notify):
+    send = AsyncMock(return_value=True)
+    monkeypatch.setattr(FeishuBot, "is_configured", lambda self: True)
+    monkeypatch.setattr(FeishuBot, "send_message", send)
+    await notify(
+        {
+            "type": "buy",
+            "stock_code": "603119",
+            "latest_price": 21.0,
+            "price_time": "2026-06-01 09:38",
+            "created_at": "09:49:13",
+            "acked_at": "09:50:00",
+        }
+    )
+    msg = send.call_args.args[0]
+    assert "计算用价: 21.0 (行情时间: 2026-06-01 09:38)" in msg
+    assert "9:40" not in msg
 
 
 @pytest.mark.asyncio

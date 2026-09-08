@@ -128,7 +128,10 @@ async def _notify_feishu_ack(signal: dict) -> None:
             f"股票: {signal['stock_code']} {signal.get('stock_name', '')}",
         ]
         if signal["type"] == "buy":
-            lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
+            lines.append(
+                f"计算用价: {signal.get('latest_price', '-')} "
+                f"(行情时间: {signal.get('price_time') or '未知'})"
+            )
             lines.append(f"板块: {signal.get('board_name', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
@@ -182,7 +185,10 @@ async def _notify_feishu_signal(signal: dict) -> None:
         ]
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
-            lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
+            lines.append(
+                f"计算用价: {signal.get('latest_price', '-')} "
+                f"(行情时间: {signal.get('price_time') or '未知'})"
+            )
             lines.append(f"LGB评分: {signal.get('lgb_score', signal.get('v3_score', '-'))}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
@@ -713,6 +719,7 @@ def create_iquant_router() -> APIRouter:
                                 "stock_name": rec["stock_name"],
                                 "board_name": rec["board_name"],
                                 "latest_price": rec["latest_price"],
+                                "price_time": rec.get("price_time"),
                                 "lgb_score": rec.get("lgb_score", 0),
                                 "reason": f"V16推荐 (板块={rec['board_name']}, "
                                 f"LGB={rec.get('lgb_score', 0):.4f})",

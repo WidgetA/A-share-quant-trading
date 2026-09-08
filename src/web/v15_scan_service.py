@@ -256,7 +256,7 @@ def _build_v16_recommendation_payload(
     scan_result: Any,
     stock_data: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    """Build the legacy top-1 payload consumed by iQuant, byte-for-byte."""
+    """Preserve top-1 trading values and attach the actual source price time."""
     recommended = scan_result.recommended
     if not recommended:
         return None
@@ -269,6 +269,7 @@ def _build_v16_recommendation_payload(
         "open_price": round(stock_data[top1.code].open_price, 4),
         "prev_close": round(stock_data[top1.code].prev_close, 4),
         "latest_price": round(top1.buy_price, 4),
+        "price_time": scan_result.stock_price_times.get(top1.code),
         "lgb_score": round(top1.score, 6),
         "hot_board_count": scan_result.step2_hot_board_count,
         "final_candidates": scan_result.final_candidates,
@@ -291,7 +292,10 @@ async def _notify_feishu_signal(signal: dict) -> None:
         ]
         if signal["type"] == "buy":
             lines.append(f"板块: {signal.get('board_name', '-')}")
-            lines.append(f"买入参考价(09:40): {signal.get('latest_price', '-')}")
+            lines.append(
+                f"计算用价: {signal.get('latest_price', '-')} "
+                f"(行情时间: {signal.get('price_time') or '未知'})"
+            )
             lines.append(f"LGB评分: {signal.get('lgb_score', '-')}")
         if signal["type"] == "sell":
             lines.append(f"原因: {signal.get('reason', '-')}")
@@ -1179,6 +1183,11 @@ async def run_v16_scan(
         raise RuntimeError("V16 scan: no valid stock data after building")
 
     scan_result = await scanner.scan(stock_data, clean_boards)
+    scan_result.stock_price_times = {
+        code: quote.early_bar_end.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+        for code, quote in quotes.items()
+        if code in stock_data and quote.early_bar_end is not None
+    }
     await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
     await _notify_feishu_v16_top10(scan_result)
 
@@ -1326,6 +1335,7 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
                             "stock_name": rec["stock_name"],
                             "board_name": rec["board_name"],
                             "latest_price": rec["latest_price"],
+                            "price_time": rec.get("price_time"),
                             "lgb_score": rec["lgb_score"],
                             "reason": f"V16推荐 (板块={rec['board_name']}, "
                             f"LGB={rec['lgb_score']:.4f})",

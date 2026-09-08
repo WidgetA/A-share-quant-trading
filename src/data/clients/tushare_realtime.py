@@ -59,12 +59,13 @@ class TushareQuote:
     low_price: float  # day low
     volume: float  # cumulative volume in shares (股)
     amount: float  # cumulative turnover in yuan
-    # 9:30-9:40 snapshot (aggregated from rt_min_daily bars)
-    early_close: float = 0.0  # last early bar's close (= 9:40 price)
+    # Available early bars through raw end label 09:39; may end earlier.
+    early_close: float = 0.0  # close of the actual last early bar
     early_high: float = 0.0  # max high in 9:30-9:40
     early_low: float = 0.0  # min low in 9:30-9:40
     early_volume: float = 0.0  # cumulative volume 9:30-9:40 in shares (股)
     volume_937: float = 0.0  # call auction + first 7min (≤09:37) in shares (股)
+    early_bar_end: datetime | None = None  # source timestamp of early_close
 
     @property
     def is_trading(self) -> bool:
@@ -1139,6 +1140,7 @@ class TushareRealtimeClient:
             early_low=early_low,
             early_volume=early_volume,
             volume_937=volume_937,
+            early_bar_end=(early_bars[-1] if early_bars else bars[-1]).bar_end,
         )
 
     @staticmethod

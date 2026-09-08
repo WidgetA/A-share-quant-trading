@@ -828,12 +828,18 @@ strategy:
 
 **Monitoring & Alerting** (Feishu notifications):
 
+V16 calculation prices carry the actual source bar timestamp per stock, from
+the quote through the report, recommendation, signal, and acknowledgement.
+09:38 data is labelled 09:38 and 09:39 data is labelled 09:39, including mixed
+minutes within one list. Report generation time is separate; unknown source
+times stay unknown. Price values, selection, ranking and acquisition stay unchanged.
+
 | Alert | Trigger | Content |
 |-------|---------|---------|
 | 每日就绪报告 | 09:30 | iQuant连接状态、持仓数、今日计划(扫描/跳过) |
 | 卖出预通知 | 14:55 有待卖持仓 | 股票代码、持仓天数、卖出原因、1分钟后卖出提醒 |
-| 买入/卖出信号推送 | Signal pushed | 股票代码、买入参考价(09:40 early_close)、板块、V3评分 |
-| 信号执行确认 | Signal acked | 股票代码、买入参考价(09:40)、推送→执行时间差 |
+| 买入/卖出信号推送 | Signal pushed | 股票代码、计算用价及实际行情时间、板块、V3评分 |
+| 信号执行确认 | Signal acked | 股票代码、计算用价及实际行情时间、推送→执行时间差 |
 | 信号超时未执行 | Pending > 5min | 股票代码、等待时长、可能原因(QMT掉线) |
 | iQuant未连接 | 09:33 无心跳 | 提示检查QMT是否启动 |
 | iQuant掉线 | Poll间隔 > 3min | 最后心跳时间、失联时长 |
