@@ -204,42 +204,25 @@ async def test_before_prewarm_never_enters_today_terminal_lookup(
 
 
 @pytest.mark.asyncio
-async def test_post_cutoff_terminal_miss_uses_canonical_hook_and_one_durable_event(
+async def test_same_day_terminal_miss_runs_full_morning_lane_after_0940(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     status, source = _source("INPUT_INVALID")
     repository = CanonicalRepository(status, source)
     repository.status_by_date.clear()
     service = CanonicalCheckService(repository)
-    _assert_no_alternate_probe()
-    tasks = [
-        asyncio.create_task(_dispatch_manual_trigger(service, "canonical-check-same-key"))
-        for _ in range(2)
-    ]
-    try:
-        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2.0)
-        assert len(results) == 2
-        assert sorted(result["created"] for result in results) == [False, True]
-        assert {result["operator_event_id"] for result in results} == {
-            "canonical-check-canonical-check-same-key"
-        }
-        assert all(result["non_actionable"] is True for result in results)
-        assert all(result["retrospective_expired"] is True for result in results)
-        assert all(result["official_state_changed"] is False for result in results)
-        assert all(result["orders_changed"] is False for result in results)
-        assert len(service.hook_calls) == 2
-        assert all(call[0] == "canonical-check-same-key" for call in service.hook_calls)
-        assert service.mews_kick_calls == 2
-        assert service.mews_calculation_calls == 2
-        assert repository.operator_enqueues == 1
-        assert len(repository.operator_events) == 1
-        assert repository.official_writes == 0
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(*service.mews_tasks, return_exceptions=True)
+    calls = []
+
+    async def normal(request_id):
+        calls.append(request_id)
+        return {"cycle_result": "DECISION_COMMITTED", "official_state_changed": True}
+
+    service.trigger_morning_selection = normal
+    result = await _dispatch_manual_trigger(service, "complete-after-0940")
+    assert calls == ["complete-after-0940"]
+    assert result["official_state_changed"] is True
+    assert service.hook_calls == []
+    await asyncio.gather(*service.mews_kick_tasks, return_exceptions=True)
 
 
 class _SerializationConflict(RuntimeError):

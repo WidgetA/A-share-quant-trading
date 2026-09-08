@@ -13,7 +13,6 @@ import src.web.v20_service as service_module
 from src.data.database.v20_repository import V20SemanticConflict, sha256_json
 from src.strategy.v20.decision_engine import genesis_state
 from src.web.v20_canonical_selection import CanonicalV16ScanBundle, _bundle_fingerprint
-from src.web.v20_routes import _dispatch_manual_trigger
 from src.web.v20_service import _DayContext
 from src.web.v20_v16_canonical_artifact import encode
 from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
@@ -740,7 +739,7 @@ async def test_post_cutoff_manual_calculation_is_independent_of_live_coordinator
     master = coordinator.inflight[POST_CUTOFF_AT.date()]
 
     manual_waiter = asyncio.create_task(
-        _dispatch_manual_trigger(service, "manual-artifact-miss-001"),
+        service.trigger_canonical_selection_check_only("manual-artifact-miss-001"),
         name="post-cutoff-manual-trigger",
     )
     for _ in range(100):
@@ -943,7 +942,7 @@ async def test_cutoff_waits_for_started_calculation_then_applies_fresh_clock_fen
     release_calculation.set()
     await asyncio.wait_for(watchdog, timeout=1.0)
 
-    assert cutoff_calls == [now]
+    assert cutoff_calls == []
 
 
 async def test_stop_cancels_v20_canonical_master_before_repository_close(

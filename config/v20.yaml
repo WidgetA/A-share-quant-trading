@@ -16,10 +16,11 @@ reference_profile_id: CALENDAR_0940_OPEN_END_LABEL_0941_V1
 state_lineage_id: V20_FORWARD_SHADOW_GENESIS_20260831
 
 clock:
+  entry_completion_policy: SAME_TRADE_DATE_NO_INTRADAY_CUTOFF
   prewarm: "09:15"
   minute_collection_start: "09:31"
   decision_bar_label: "09:39"
-  publish_deadline: "09:40"
+  publish_deadline: "09:40" # Legacy schedule label, not a completion/delivery cutoff.
   decision_finalization_deadline: "09:45"
   reference_bar_label: "09:41"
   reference_lock_deadline_next_day: "09:30"

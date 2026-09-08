@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -591,11 +591,9 @@ def prepare_entry(
             legs=legs,
         )
 
-    expiry = datetime.combine(
-        bundle.trade_date,
-        config.clock.publish_deadline,
-        tzinfo=SHANGHAI,
-    )
+    # Date identity prevents yesterday's advice becoming today's action;
+    # no intraday calculation or delivery deadline is imposed.
+    expiry = datetime.combine(bundle.trade_date + timedelta(days=1), time.min, tzinfo=SHANGHAI)
     return PreparedEntry(
         commit=EntryCommit(
             official_stream_id=config.official_stream_id,
@@ -756,7 +754,7 @@ def prepare_invalid_entry(
         "state_before_hash": state.state_hash,
         "state_after_hash": next_state_hash,
     }
-    expiry = datetime.combine(trade_date, config.clock.publish_deadline, tzinfo=SHANGHAI)
+    expiry = datetime.combine(trade_date + timedelta(days=1), time.min, tzinfo=SHANGHAI)
     return PreparedEntry(
         commit=EntryCommit(
             official_stream_id=config.official_stream_id,

@@ -3899,7 +3899,7 @@ async def test_deployment_probe_rejects_incompatible_cache_without_second_algori
         independent_v20_compute,
     )
 
-    result = await _dispatch_manual_trigger(service, "durable-artifact-current-001")
+    result = await service.trigger_canonical_selection_check_only("durable-artifact-current-001")
 
     assert result["accepted"] is True
     assert result["current_version_recomputed"] is True

@@ -325,7 +325,7 @@ async def test_cutoff_waits_for_and_preserves_started_mews_master(
     await asyncio.wait_for(watchdog, timeout=1.0)
     assert await service.ensure_mews_for_selection_trigger(before) is True
     assert joins == [master]
-    assert cutoff_calls == [current]
+    assert cutoff_calls == []
     assert service._mews_singleflight_task is None
     assert calls == 1
     assert len(repository.payloads) == 1

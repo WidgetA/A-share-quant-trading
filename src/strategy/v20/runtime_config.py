@@ -75,6 +75,7 @@ _TOP_LEVEL_KEYS = {
     "bootstrap",
 }
 _CLOCK_KEYS = {
+    "entry_completion_policy",
     "prewarm",
     "minute_collection_start",
     "decision_bar_label",
@@ -468,6 +469,7 @@ class V20ClockConfig:
     mews_cutoff_d1: time
     plan_exit: time
     reminder_check: time
+    entry_completion_policy: str = "SAME_TRADE_DATE_NO_INTRADAY_CUTOFF"
 
 
 @dataclass(frozen=True)
@@ -687,6 +689,7 @@ def load_v20_runtime_config(
     if policy_raw != _POLICY_VALUES:
         raise V20ConfigError("V20 policy values differ from the frozen implementation")
     frozen_clock_values = {
+        "entry_completion_policy": "SAME_TRADE_DATE_NO_INTRADAY_CUTOFF",
         "prewarm": "09:15",
         "minute_collection_start": "09:31",
         "decision_bar_label": "09:39",
@@ -877,6 +880,7 @@ def load_v20_runtime_config(
         reference_profile_id=str(raw["reference_profile_id"]),
         state_lineage_id=lineage_id,
         clock=V20ClockConfig(
+            entry_completion_policy=str(clock_raw["entry_completion_policy"]),
             prewarm=_time(clock_raw["prewarm"], "clock.prewarm"),
             minute_collection_start=_time(
                 clock_raw["minute_collection_start"],

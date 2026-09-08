@@ -129,7 +129,7 @@ def _rolling7_line(semantic: Mapping[str, Any]) -> str:
 
 def _entry_action_text(multiplier: float, *, on_time: bool) -> str:
     if not on_time:
-        return "⛔ 已过09:40：仅记入评价账本，今天不要追买"
+        return "⛔ 已超出原消息有效日期：仅供历史核查"
     mapping = {
         1.0: "✅ 100%标准批次：正常建立",
         0.5: "🟡 50%标准批次：防御建立",
@@ -379,7 +379,7 @@ def _render_manual_0939_chain_probe_for_operator(
             ),
             "",
             "安全边界：本次验收未修改正式决策、正式策略状态、订单、持仓或卖出信号。",
-            "明早执行口径：只认09:40前送达的“V20每日决策”；"
+            "明早执行口径：以当天完整计算的“V20每日决策”为准；"
             "本验收消息不能用于下单，迟到重算也不能追买。",
             "",
             (
@@ -619,7 +619,7 @@ def _render_frozen_entry_check_for_operator(
             source_message,
             _FROZEN_REPLAY_SOURCE_END,
             "",
-            "说明：封存原文只在当日09:40截止前有效；现在不能据此下单、补买或追买。",
+            "说明：本条为已提交决定的核查副本，不是新的入场通知。",
             f"交易日：{trade_date}｜来源事件：{source_event[:16]}｜事件：{event_id[:16]}",
         ]
     )
@@ -755,7 +755,7 @@ def render_entry_message(
     lines.extend(
         [
             "",
-            "有效期: 本入场建议仅在当日09:40前有效；迟到消息不得据此追买",
+            "适用交易日: 本条建议属于上述交易日；09:39是数据时点，计算和投递不设日内硬截止",
             f"数据边界: raw {semantic.get('last_complete_bar', '-')}结束标签",
             f"生成: {generated_at.isoformat()} | marker={commit_marker}",
             f"事件: {semantic.get('event_id', '-')}",
@@ -776,7 +776,7 @@ def render_expired_entry_delivery_message(semantic: Mapping[str, Any]) -> str:
     return "\n".join(
         [
             f"{title} ({semantic.get('trade_date', '-')})",
-            "⚠️ 投递时已经达到或超过09:40；本条只作审计，今天不要据此追买。",
+            "⚠️ 原消息已超出其有效日期或旧版有效期；本条只作历史核查。",
             (
                 f"原计算动作: {semantic.get('action', '-')} | "
                 f"原最终倍率: {_pct(semantic.get('final_multiplier'), 0)}"

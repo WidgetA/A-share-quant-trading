@@ -552,6 +552,13 @@ async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
     if wall < clock.publish_deadline:
         _kick_mews_for_selection_trigger(service, now)
         return await service.trigger_morning_selection(request_id)
+    # A missing same-day slot still runs the full live lane after 09:40/09:45.
+    # Terminal slots remain immutable; the operator can recompute those as a
+    # diagnostic without creating a second official decision.
+    status = await _today_terminal_entry(service, now)
+    if status is None:
+        _kick_mews_for_selection_trigger(service, now)
+        return await service.trigger_morning_selection(request_id)
     canonical_trigger = getattr(
         service,
         "trigger_canonical_selection_check_only",
@@ -602,9 +609,8 @@ def create_v20_router() -> APIRouter:
     ) -> Any:
         """Run the morning calculation and expose its result with the proper actionability.
 
-        Before cutoff this can commit the ordinary automatic entry message.
-        After cutoff it reuses the same strategy-output renderer inside a
-        clearly non-actionable, read-only operator wrapper.
+        An uncommitted same-day slot runs the complete ordinary decision lane.
+        An existing terminal slot is checked without rewriting its decision.
         """
 
         async for chunk in request.stream():

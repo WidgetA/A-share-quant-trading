@@ -1,5 +1,35 @@
 # V20 部署与运维手册
 
+## 2026-09-08 operator correction: do not truncate completion
+
+Remove intraday completion/submission/delivery expiry. Scheduled and manual
+selection may finish after 09:40 or 09:45 on their own trading date. Preserve
+09:39 input facts, full output, canonical validation, and first-terminal ledger
+semantics. A request without a terminal slot runs the normal decision lane;
+an existing terminal slot may be checked without rewriting it. Transport expiry
+now expresses the end of the recommendation's date, not a minute deadline.
+No old terminal slot is rewritten or retrospectively promoted on startup.
+
+## Morning history preparation (2026-09-08)
+
+The September 8 slot failed with `INPUT_TIME_BOUNDARY_VIOLATION`: the current-day
+minute acquisition finished at 09:40:05, historical daily preparation finished
+at 09:40:43, and selection formed at 09:40:54. The runtime remained healthy.
+The operator check succeeded and did not replace the failed official slot.
+
+V20 prepares its own current-day historical-adapter cache during 09:15–09:38,
+before the two realtime acquisitions. Preparation is bounded by the absolute
+09:38 boundary and is retried only while that preparation window remains open.
+The authoritative exchange calendar is supplied to that adapter so a confirmed
+closed weekday is not requested again for each 50-stock history batch. An empty
+open-day response remains an error. Preparation executes neither the selection
+scanner nor a realtime-minute request. The normal calculation still consumes
+the same history adapter and validates all canonical inputs.
+
+This removes avoidable historical work from the realtime calculation. The
+09:39 acquisition start and 40-request concurrency limit remain; a slow complete
+same-day result now commits normally without an intraday completion fence.
+
 ## Runtime failure recovery (2026-09-07)
 
 The host owns a supervisor outside the V20 scheduler task set. Fatal task exit
@@ -63,10 +93,9 @@ bootstrap.mode: EMPTY_FORWARD_SHADOW
 
 所有策略时间使用 `Asia/Shanghai`，行情原始分钟时间是分钟结束标签：
 
-1. 09:15 预热 V20 自有模型、股票池和历史输入；单次预热调用最多占用 60 秒并可重试，
-   且至少在 09:40 前预留 2 秒把控制权交回截止处理，不能由挂死的历史请求越过
-   每日“不买”终态。行情响应中的 `09:25/09:30` 集合竞价原始行必须保留并计入
-   开盘价、`early_volume` 和 `volume_937`；09:31 起采集连续交易分钟行情。
+1. 09:15 起预热 V20 自有历史输入，预热在 09:38 前结束或交回控制权；正式计算会
+   补齐尚未准备好的输入，不因预热耗时而产生“不买”。行情响应中的 09:25/09:30
+   集合竞价原始行必须保留并计入开盘价和成交量；V20 全量实时分钟获取从 09:39 开始。
 2. 先以交易所日历冻结 D0 前最近 37 个交易日。每只进入 V16 打分的代码必须逐日
    精确覆盖这 37 日的真实合法 OHLCV；缺任一日即排除该票。对于已经进入冻结 V16
    股票池的代码，停牌、新股和来源缺失都不得补零、前向填充、用更老的第 38 日替代，
@@ -204,12 +233,9 @@ V20 service 取得数据库 leader 后会启动五个相互独立的长期 `asyn
 这五项是同一专用进程内的独立任务，不是五个进程。慢预热、历史退出积压、旧 outbox
 密封或飞书投递不得排在当天止损及 09:40 入场之前；任一长期任务意外退出都会令整个
 runtime fail closed、停止其他任务，不能静默降级成只剩部分功能。
-decision scheduler 内置基于事件循环单调时钟的 09:40 截止看门狗：它会取消仍在执行的
-预热、扫描或账本对账，重新采样本机时钟，再由 PostgreSQL 时钟门控提交
-`INPUT_INVALID`。若有序账本的前序状态暂时使该槽无法提交，则先以稳定事件 ID 持久化
-`ENTRY_CUTOFF_NO_BUY`，明确“今天不买”，后续调度继续幂等重试并正常补槽。若首次
-交易日历请求也阻塞跨点，周一至周五先持久化 `ENTRY_CALENDAR_UNKNOWN_NO_BUY`；已由
-成功加载的交易日历确认休市则不报。
+decision scheduler 等待完整计算，不设置 09:40/09:45 完成看门狗，也不因跨点自动
+提交 INPUT_INVALID。真实输入失败明确告警并允许重试；leader 丢失仍停止不安全写入。
+慢取数完成后继续走相同校验、计算和原子提交，不截断推荐列表或切换成另一套算法。
 
 启动任务前，repository 必须持有 PostgreSQL session advisory lock。锁键只由公开
 `route_id` 决定，因此即使 stream 或 lineage 不同，同一个正式/影子公开 route 也只能
@@ -304,11 +330,9 @@ payload hash 必须冲突；它必须在真实飞书 API 接受后才返回
 accepted_at 和合法 delivery status。客户端只有在所有字段和时效关系精确成立时才把
 outbox 标为 SENT（布尔 `false` 不能冒充整数 code 0）。
 
-对于 `ACTIONABLE_ENTRY`，relay 必须在实际调用飞书之前按 relay 服务器时钟再次比较
-09:40：截止前发送原文，截止后只发送“已过期、今天不要追买”。客户端 HTTP 超时/取消
-只是延迟保护，不是安全边界。非入场消息单次 HTTP 最长 2 秒；超时、未知响应或错误
-回显均由 durable outbox 重试。在 relay 完成上述版本化、去重、过期和严格回显合同的
-端到端验收前，不得打开生产三重门。
+对于 `ACTIONABLE_ENTRY`，relay 在实际发送前按消息携带的 `action_expiry_ts`
+校验所属日期；新消息不再因日内跨过 09:40/09:45 改发过期文案。已有历史事件保留原始
+有效期。HTTP 超时、未知响应和错误回显仍由 durable outbox 幂等重试，不能虚报 SENT。
 
 ### 4.3 HTTP API 密钥
 
@@ -466,31 +490,20 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/v20/trigger-scan \
   -H "Idempotency-Key: $V20_TRIGGER_REQUEST_ID"
 ```
 
-接口不接受请求 body、调用方时间、交易日或 `force` 参数。09:15 至 09:40 前且当日尚无
-终态时，它运行自动 scheduler 的同一串行 official decision cycle；所有交易日历、原始
-09:39、覆盖率、leader、数据库时钟和 09:40 门禁仍然有效。此时不会另发人工回执：飞书
-正文就是生产 `ENTRY_DECISION`，`ENTER` 会在正式提交时建立模型批次和模型腿，从而启用
-D1/D2 盘中退出监控。若当日正式终态已经存在，接口只返回该终态；原 official outbox
-仍是唯一早盘事件。
+接口不接受请求 body、调用方时间、交易日或 `force` 参数。当天没有正式终态时，
+手动触发和自动 scheduler 使用同一条完整计算路径；跨过 09:40/09:45 不影响正常提交。
+成功的 ENTER 建立完整模型腿并发送正式 ENTRY_DECISION，不另发人工回执。
 
-09:40 起接口对正式策略状态只读，绝不会拿晚到行情替换或新建正式决定。已有正常正式
-结果时，接口从已密封 `ENTRY_DECISION` 复制 `payload.message`，UTF-8 字节必须完全相同，
-不添加任何人工触发包装。若正式结果是 `INPUT_INVALID` 或没有正常消息可复制，服务重拉
-分钟线后只保留 raw 09:31–09:39，按真实接收时间落库，再从持久化证据和失败槽冻结输入
-只读重算，并直接调用生产早盘渲染器。成功正文与早盘格式一致；HTTP 同时返回
-`retrospective_expired=true`、`manual_notice_actionable=false`，正文也保留“仅在 09:40
-前有效、迟到不得追买”。两条盘后路径都不创建模型腿、退出链或订单，official state
-保持不变；重算失败则发送失败报警。
+已有正式终态时可重新核查完整结果，但不重写原决定；核查消息明确其性质与来源，
+重算失败则报警。该分支由已有终态决定，不再把日内晚完成的首次结果强制降为核查。
 
 内嵌 forward-shadow 当前从 `EMPTY_FORWARD_SHADOW` 开始，因此 BASE 展示该 shadow
 lineage 的暖机状态。ROLLING7 不从交易/shadow ledger 或 lineage checkpoint 取值；它
 读取独立持久事实，并由非交易关键路径回填历史缺口。禁止把回顾性研究制品静默写进
 已经运行的 lineage。
 
-09:40 前不会再创建 `MANUAL_TRIGGER_RECEIPT`。09:40 后为完成一次可见验收，接口会创建
-`DATA_ALERT/OPERATOR_NOTIFICATION` 运输事件，但其可见正文只能是：已封存官方正文的
-逐字节副本、生产早盘渲染器的只读重算正文，或重算失败报警。运输事件的非交易属性、
-过期状态和来源绑定保留在 durable semantic 与 HTTP 响应中，不得污染可见早盘正文。
+首次正常决定使用唯一 official outbox；已有终态的核查使用独立 DATA_ALERT 运输
+事件，保持幂等、来源绑定和非交易属性。核查不会修改正式状态或自动创建第二批模型腿。
 
 典型首次响应为：
 
@@ -767,12 +780,9 @@ Python 源码或 Git 字节。以上任何一项都不能决定策略是否运�
   route/stream/lineage/config hash 与部署单一致。
 - 09:39 后：合法扫描代码都有完整 09:31..09:39 路径、总覆盖达到阈值，没有
   09:38 回退；缺失集合已进入快照，宽度集合没有混入 80% 分母。
-- 09:40 前：terminal guard 已放行；若没有正常决定，截止一到应立即出现 durable
-  `INPUT_INVALID`/不买终态。post-commit 密封若迟到，正式群只能收到不买或过期告警，
-  不能继续等待到 09:45 才作常规判断。故障演练必须覆盖预热或 missed-slot reconciliation
-  从 09:39 阻塞跨过 09:40，并验证任务被截止看门狗取消、数据库门禁不被本机时钟绕过；
-  若补槽暂时失败，则稳定 ID 的 `ENTRY_CUTOFF_NO_BUY` 必须先到达且可幂等重试；首次
-  日历加载跨点还须验证工作日发 `ENTRY_CALENDAR_UNKNOWN_NO_BUY`、周末和已确认休市不报。
+- 完成检查：让 09:39 取数在 09:47 才返回，验证没有取消、没有时间导致的
+  INPUT_INVALID，正常提交完整推荐及所有模型腿，并在真实 PostgreSQL/outbox 中
+  确认终态唯一、密封正常。自动和手动竞争不能重复拉取或提交；真实输入失败可重试。
 - 09:41 后：模型腿和 ROLLING7 的 D0 参考价均来自结束标签 09:41 的 open，不是 09:40
   标签；核对各自固定截止，并确认 ROLLING7 不依赖交易/shadow ledger。
 - D1/D2：每条模型腿均有明确退出求值；单分钟缺口不能关闭后续止损，触发后检查退出
