@@ -286,7 +286,7 @@ async def test_cutoff_waits_for_started_v20_calculation_and_never_schedules_repl
     release.set()
     await asyncio.wait_for(watchdog, timeout=1.0)
 
-    assert cutoff_calls == [now]
+    assert cutoff_calls == []
     assert service._late_0939_replay_task is None
     assert context.late_0939_replay_completed is False
     assert context.late_0939_replay_automatic_attempts == 0

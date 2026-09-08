@@ -50,6 +50,41 @@ JUST_BEFORE_CUTOFF = datetime.combine(TRADE_DATE, time(9, 39, 59), TZ)
 AT_CUTOFF = datetime.combine(TRADE_DATE, time(9, 40, 0), TZ)
 
 
+@pytest.mark.asyncio
+async def test_slow_0939_acquisition_finishes_after_0945_with_full_official_output(monkeypatch):
+    now = [AT_DECISION_BAR]
+    service, repository, _ = _service_and_artifact(monkeypatch, now=now[0], artifact_hit=False)
+    service._clock = lambda: now[0]
+    client = _install_real_current_day_acquisition_boundary(monkeypatch, service, repository)
+    client.started = asyncio.Event()
+    client.release = asyncio.Event()
+    task = asyncio.create_task(_scheduled(service, "slow-complete"))
+    try:
+        await asyncio.wait_for(client.started.wait(), timeout=1)
+        now[0] = datetime.combine(TRADE_DATE, time(9, 47), TZ)
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert repository.commit is None
+        client.release.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert repository.commit is not None
+        assert repository.commit.action == "ENTER"
+        assert repository.commit_entry_calls == 1
+        assert len(repository.commit.semantic["symbols"]) == 2
+        assert len(repository.commit.model_batch.legs) == 2
+        assert repository.outbox is not None and repository.outbox.payload is not None
+        assert "已过09:40" not in repository.outbox.payload["message"]
+        assert repository.outbox.action_expiry_ts.date() > TRADE_DATE
+        assert len(client.calls) == 1
+        assert client.historical_calls == []
+    finally:
+        client.release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await _drain_mews_kicks(service)
+
+
 class _CurrentDayRtMinDailyProbe:
     """Stand-in for one V20 service-level rt_min_daily acquisition.
 
@@ -268,8 +303,7 @@ async def test_failed_0939_full_acquisition_is_not_restarted_until_0940(
     assert client.calls == [(RAW_EVIDENCE_CODES, TRADE_DATE)]
     assert repository.commit_entry_calls == 0
 
-    # A post-cutoff check in the next provider minute may make one new
-    # non-actionable attempt, but still cannot write the official entry slot.
+    # The next provider minute may retry and commit a complete same-day result.
     now[0] = AT_CUTOFF
     result = await _manual(service, "retry-post-cutoff-next-minute")
     await _drain_mews_kicks(service)
@@ -278,8 +312,9 @@ async def test_failed_0939_full_acquisition_is_not_restarted_until_0940(
         (RAW_EVIDENCE_CODES, TRADE_DATE),
     ]
     assert client.historical_calls == []
-    assert result["non_actionable"] is True
-    assert repository.commit_entry_calls == 0
+    assert result["entry_action"] == "ENTER"
+    assert result["retrospective_expired"] is False
+    assert repository.commit_entry_calls == 1
 
 
 @pytest.mark.asyncio
@@ -570,8 +605,7 @@ async def test_same_input_has_identical_prepared_entry_and_formal_strategy_body(
     assert automatic_calculation.prepared == post_calculation.prepared
 
     await automatic._run_decision_iteration_with_cutoff(JUST_BEFORE_CUTOFF)
-    result = await _dispatch_manual_trigger(
-        post_cutoff,
+    result = await post_cutoff.trigger_canonical_selection_check_only(
         "manual-at-094000-body-parity",
     )
     await _drain_mews_kicks(post_cutoff)
@@ -1259,24 +1293,28 @@ async def test_current_state_head_is_only_a_readonly_concurrency_fence(
 
 
 @pytest.mark.asyncio
-async def test_094000_manual_is_read_only_for_every_official_effect(
+@pytest.mark.parametrize("wall", [time(9, 40), time(9, 46), time(10, 30), time(15, 30)])
+async def test_same_date_manual_completes_the_official_decision(
     monkeypatch: pytest.MonkeyPatch,
+    wall: time,
 ) -> None:
-    service, repository, _ = _service_and_artifact(monkeypatch, now=AT_CUTOFF)
-    state_before = repository.state
-    status_before = repository.status
-
-    result = await _dispatch_manual_trigger(service, "manual-at-094000-read-only")
+    service, repository, _ = _service_and_artifact(
+        monkeypatch, now=datetime.combine(TRADE_DATE, wall, TZ)
+    )
+    result = await _dispatch_manual_trigger(service, "manual-at-094000-complete")
     await _drain_mews_kicks(service)
-
-    assert result["non_actionable"] is True
-    assert result["official_state_changed"] is False
+    assert result["entry_action"] == "ENTER"
+    assert result["retrospective_expired"] is False
+    assert result["official_state_changed"] is True
     assert result["orders_changed"] is False
-    assert repository.state == state_before
-    assert repository.status == status_before
-    assert repository.commit is None
-    assert repository.commit_entry_calls == 0
+    assert repository.commit is not None
+    assert repository.commit_entry_calls == 1
     assert repository.forbidden_write_calls == []
+    assert repository.outbox is not None
+    assert repository.outbox.action_expiry_ts.date() > TRADE_DATE
+    assert repository.outbox.payload is not None
+    assert "仅在当日09:40前有效" not in repository.outbox.payload["message"]
+    assert "已过09:40" not in repository.outbox.payload["message"]
 
 
 @pytest.mark.asyncio

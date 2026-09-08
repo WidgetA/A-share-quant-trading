@@ -6,9 +6,10 @@ import os
 import re
 import uuid
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import pytest
@@ -77,6 +78,110 @@ async def repository():
     finally:
         await _drop_schema(pool, schema)
         await pool.close()
+
+
+async def test_same_date_entry_commits_with_full_legs_and_date_scoped_delivery(repository):
+    """Use real PostgreSQL terminal/seal clocks, including runs after 09:40/09:45."""
+    from src.common.v20_feishu import seal_v20_payload
+    from src.strategy.v20.models import V20_ENTRY_SEMANTIC_SCHEMA, V20_FEISHU_FORMATTER_PROFILE
+    from tests.unit.data.database.test_v20_repository_contract import _enter, _official_state
+
+    instance, pool, schema = repository
+    tz = ZoneInfo("Asia/Shanghai")
+    now = (await pool.fetchval("SELECT clock_timestamp()")).astimezone(tz)
+    today = now.date()
+    base = _enter(1.0, 2)
+    before = _official_state(0)
+    after = dict(base.next_state)
+    after["last_terminal_trade_date"] = today.isoformat()
+    snapshot = {**base.snapshot, "trade_date": today.isoformat()}
+    semantic = {
+        **base.semantic,
+        "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "deployment_mode": "forward_shadow",
+        "base_multiplier": 1.0,
+        "defense_multiplier": 1.0,
+        "health_state": "WARMUP",
+        "rolling7_state": "WARMUP",
+        "rolling7_r7": None,
+        "rolling7_l7": None,
+        "g_state": "NOT_EVALUATED",
+        "reason_codes": [],
+        "scheduled_exits_today": [],
+        "v16_funnel": {
+            "step0_universe_count": 2,
+            "step2_hot_board_count": 1,
+            "final_candidates": 2,
+        },
+        "v16_board_avg_gains": {"test board": 1.0},
+        "event_id": base.event_id,
+        "trade_date": today.isoformat(),
+        "symbols": [
+            {
+                "rank": rank,
+                "code": f"{rank:06d}",
+                "name": f"test {rank}",
+                "score": 1.0,
+                "snapshot_price": 10.0,
+                "boards": ["test board"],
+                "best_board": "test board",
+                "is_driver": False,
+                "cci": 0.0,
+                "volume_937": 1000.0,
+                "history_hash": "a" * 64,
+                "early_source_hash": "b" * 64,
+            }
+            for rank in (1, 2)
+        ],
+        "last_complete_bar": "09:39",
+    }
+    commit = replace(
+        base,
+        trade_date=today,
+        next_state=after,
+        next_state_hash=sha256_json(after),
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+        semantic=semantic,
+        semantic_content_hash=sha256_json(semantic),
+        action_expiry_ts=datetime.combine(today + timedelta(days=1), time.min, tz),
+        model_batch=replace(
+            base.model_batch,
+            legs=tuple(
+                replace(leg, d1=today + timedelta(days=1), d2=today + timedelta(days=2))
+                for leg in base.model_batch.legs
+            ),
+        ),
+    )
+    await pool.execute(
+        f"INSERT INTO {schema}.runtime_configs "
+        "(config_id,config_hash,strategy_version,deployment_mode,effective_trade_date,config_json) "
+        "VALUES ($1,$2,$3,'forward_shadow',$4,'{}')",
+        commit.config_id,
+        commit.config_hash,
+        commit.strategy_version,
+        today,
+    )
+    await pool.execute(
+        f"INSERT INTO {schema}.official_state (lineage_id,revision,state_hash,state_json) "
+        "VALUES ($1,0,$2,$3::jsonb)",
+        commit.lineage_id,
+        sha256_json(before),
+        json.dumps(before),
+    )
+    await instance.commit_entry(commit)
+    await instance.commit_entry(commit)  # identical retry cannot duplicate the batch
+    status = await instance.get_entry_status(commit.official_stream_id, today)
+    assert status.action == "ENTER"
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.model_legs") == 2
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 1
+    sealed = await instance.seal_event(commit.event_id, seal_v20_payload)
+    assert sealed.action_expiry_ts == commit.action_expiry_ts
+    assert sealed.payload["timeliness_status"] == "ON_TIME"
+    assert "000001" in sealed.payload["message"]
+    assert "000002" in sealed.payload["message"]
+    assert "已过09:40" not in sealed.payload["message"]
 
 
 async def test_disconnected_leader_can_be_replaced_without_duplicate_runtime():

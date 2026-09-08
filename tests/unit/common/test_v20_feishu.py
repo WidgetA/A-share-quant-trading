@@ -1166,7 +1166,7 @@ def test_late_entry_message_never_suggests_buying() -> None:
         on_time=False,
     )
 
-    assert "今天不要追买" in message
+    assert "仅供历史核查" in message
     assert "正常建立" not in message
 
 

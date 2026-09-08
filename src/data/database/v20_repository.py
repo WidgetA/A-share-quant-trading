@@ -130,7 +130,7 @@ class V20LeadershipLost(V20StateConflict):
 
 
 class V20EntryDeadlineExceeded(V20StateConflict):
-    """The database clock rejected a normal decision at the 09:40 boundary."""
+    """The database clock rejected a decision outside its effective date."""
 
 
 class V20SemanticConflict(V20RepositoryError):
@@ -2981,10 +2981,16 @@ class V20Repository:
             raise ValueError("entry action_expiry_ts is required")
         _require_aware(commit.action_expiry_ts, "action_expiry_ts")
         local_expiry = commit.action_expiry_ts.astimezone(BEIJING_TZ)
-        if local_expiry.date() != commit.trade_date:
-            raise ValueError("entry action_expiry_ts must belong to its trade date")
-        if local_expiry.timetz().replace(tzinfo=None) != _ENTRY_NORMAL_DEADLINE_WALL:
-            raise ValueError("entry action_expiry_ts must be the frozen 09:40 deadline")
+        same_date_expiry = datetime.combine(
+            commit.trade_date + timedelta(days=1), time.min, tzinfo=BEIJING_TZ
+        )
+        legacy_expiry = datetime.combine(
+            commit.trade_date, _ENTRY_NORMAL_DEADLINE_WALL, tzinfo=BEIJING_TZ
+        )
+        # Retain immutable old commit replay compatibility. New runtime commits
+        # use the date boundary, never the former 09:40 intraday fence.
+        if local_expiry not in {same_date_expiry, legacy_expiry}:
+            raise ValueError("entry action_expiry_ts must match its trading-date policy")
         if commit.action == "INPUT_INVALID":
             if commit.invalid_commit_not_before_ts is None:
                 raise ValueError("INPUT_INVALID requires an explicit commit-not-before clock")
@@ -3308,7 +3314,9 @@ class V20Repository:
                       AND (
                         ($6='INPUT_INVALID' AND $8::timestamptz IS NOT NULL
                             AND terminal_receipt.terminal_at >= $8)
-                        OR ($6<>'INPUT_INVALID' AND terminal_receipt.terminal_at < $7)
+                        OR ($6<>'INPUT_INVALID' AND terminal_receipt.terminal_at < $7
+                            AND (terminal_receipt.terminal_at AT TIME ZONE
+                                 'Asia/Shanghai')::date = slot.trade_date)
                       )
                     """,
                     terminal_status,

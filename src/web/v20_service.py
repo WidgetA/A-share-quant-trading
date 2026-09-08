@@ -61,7 +61,6 @@ from src.data.database.v20_repository import (
     OutboxRecord,
     SelectedMewsRecord,
     StateRecord,
-    V20EntryDeadlineExceeded,
     V20LeadershipLost,
     V20MinuteBarIntegrityConflict,
     V20Repository,
@@ -2821,7 +2820,7 @@ class V20Service:
             )
 
     async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
-        """Run the real pre-09:40 decision lane without a manual wrapper message.
+        """Run the complete same-date decision lane without a manual wrapper message.
 
         A successful new decision is the ordinary ``ENTRY_DECISION`` written by
         :meth:`_run_decision_iteration_with_cutoff`; consequently model legs and
@@ -2839,8 +2838,6 @@ class V20Service:
         await self._repository.assert_runtime_leader()
         now = self._aware_now()
         wall = now.timetz().replace(tzinfo=None)
-        if wall >= self.config.clock.publish_deadline:
-            raise V20StateConflict("live morning selection is outside the pre-09:40 window")
         if self._manual_trigger_lock.locked():
             raise V20StateConflict("another V20 manual trigger is already running")
 
@@ -2875,9 +2872,7 @@ class V20Service:
                 trade_date,
             )
             completed_at = self._aware_now()
-            retrospective_expired = (
-                completed_at.timetz().replace(tzinfo=None) >= self.config.clock.publish_deadline
-            )
+            retrospective_expired = completed_at.date() != trade_date
             if status_after is None:
                 context = (
                     self._context
@@ -2975,8 +2970,6 @@ class V20Service:
             )
         current = self._aware_now(now)
         trade_date = current.date()
-        if current < _local(trade_date, self.config.clock.publish_deadline):
-            raise V20StateConflict("canonical selection check-only is post-cutoff only")
         event_id_value = named_hash(
             "V20_CANONICAL_SELECTION_CHECK_ONLY_EVENT_ID_V1",
             {
@@ -3473,8 +3466,8 @@ class V20Service:
                 )
                 maturity_ready = maturity_phase_ready and context.maturity_done
 
-            # The daily slot has the only hard 09:40/09:45 deadlines.  It is never
-            # placed behind a stale exit leg, reminder, or reference-data error.
+            # Entry remains independent of stale exits and reference-data errors.
+            # A completed calculation is never rejected for intraday latency.
             if reconciliation_ready and (
                 maturity_ready
                 or current.timetz().replace(tzinfo=None) >= self.config.clock.publish_deadline
@@ -4462,50 +4455,14 @@ class V20Service:
         self,
         _sampled_at: datetime,
     ) -> None:
-        """Let a started calculation finish while retaining the write fence.
+        """Run the complete decision lane; 09:39 bounds data, not completion."""
 
-        The 09:40 boundary controls whether the computed proposal may commit;
-        it never cancels the data/validation/policy calculation itself.  The
-        commit path re-samples the wall clock after calculation, while the
-        database remains authoritative for the irreversible write boundary.
-        """
-
-        # This watchdog is allowed to bypass the normal ``run_once`` ordering at
-        # the hard deadline, so it must carry its own leader fence.  In
-        # particular, an old worker whose advisory-lock session has disappeared
-        # must not create a terminal slot or public outbox row before it notices
-        # that a replacement worker is now authoritative.
         await self._repository.assert_runtime_leader()
-        current = self._aware_now()
-        deadline = _local(current.date(), self.config.clock.publish_deadline)
-        if current >= deadline:
-            cutoff_reached = await self._enforce_or_alert_entry_cutoff(
-                current.date(),
-                now=current,
-            )
-            if not cutoff_reached:
-                # The application clock may be ahead of PostgreSQL.  Do not run
-                # any locally-post-cutoff phase until the authoritative database
-                # clock reaches the irreversible boundary.
-                return
-            await self.run_once(
-                current,
-                include_exit_cycles=False,
-                include_outbox_recovery=False,
-            )
-            return
-
         await self.run_once(
-            current,
+            self._aware_now(),
             include_exit_cycles=False,
             include_outbox_recovery=False,
         )
-        cutoff_now = self._aware_now()
-        if cutoff_now >= deadline:
-            await self._enforce_or_alert_entry_cutoff(
-                current.date(),
-                now=cutoff_now,
-            )
 
     async def _enforce_or_alert_entry_cutoff(
         self,
@@ -7955,20 +7912,14 @@ class V20Service:
             return
         await self._prewarm_canonical_history(context)
         wall = now.timetz().replace(tzinfo=None)
-        if (
-            wall < time.fromisoformat(self.config.clock.decision_bar_label)
-            or wall >= self.config.clock.decision_finalization_deadline
-        ):
+        if wall < time.fromisoformat(self.config.clock.decision_bar_label):
             return
         # MEWS is deliberately not an entry input.  Kick its independent
         # singleflight, then leave the complete V16 -> V20 calculation to
         # ``_attempt_entry``.  Keeping scanner execution out of collection is
         # what guarantees one scanner and one ``prepare_entry`` call per live
         # slot instead of a pre-compute followed by a second commit compute.
-        if (
-            wall < self.config.clock.decision_finalization_deadline
-            and self._mews_cached_for != context.trade_date
-        ):
+        if self._mews_cached_for != context.trade_date:
             self.kick_mews_for_selection_trigger(now)
 
     def _project_canonical_v16(
@@ -8161,87 +8112,25 @@ class V20Service:
             context.last_phase = "DECISION_COMMITTED"
             return
         wall = now.timetz().replace(tzinfo=None)
-        if wall < self.config.clock.prewarm:
+        if now.date() != context.trade_date or wall < self.config.clock.prewarm:
             return
-        if wall >= self.config.clock.decision_finalization_deadline:
-            await self._finalize_invalid_entry(
-                context,
-                now,
-                reason="SLOT_FINALIZED_FAILED",
-                detail="no durable normal entry decision existed before the 09:45 deadline",
-                invalid_commit_not_before_ts=_local(
-                    context.trade_date,
-                    self.config.clock.decision_finalization_deadline,
-                ),
-            )
-            return
-        if wall >= self.config.clock.publish_deadline:
-            # Once the strict buy boundary has arrived there is no legitimate
-            # reason to keep the user waiting for the 09:45 ledger backstop.
-            # The repository still gates this transition on its database clock,
-            # so a fast/skewed application clock cannot finalize early.
-            await self._finalize_invalid_entry(
-                context,
-                now,
-                reason="ENTRY_INPUT_UNAVAILABLE_BY_0940",
-                detail=(
-                    "no durable normal V16 decision existed at the strict 09:40 "
-                    "boundary; "
-                    + (context.last_entry_failure_detail or f"last_phase={context.last_phase}")
-                ),
-                invalid_commit_not_before_ts=_local(
-                    context.trade_date,
-                    self.config.clock.publish_deadline,
-                ),
-            )
-            return
-
-        # Trigger-side MEWS repair is also invoked independently before
-        # maturity and predecessor reconciliation.  Repeating the idempotent
-        # check here covers direct unit/manual invocations of the decision lane.
         await self._run_entry_collection_cycle(context, now)
-
-        if (
-            wall >= time.fromisoformat(self.config.clock.decision_bar_label)
-            and wall < self.config.clock.decision_finalization_deadline
-        ):
-            try:
-                await self._attempt_entry(context, now)
-            except Exception as exc:
-                context.last_phase = "ENTRY_RETRY"
-                context.last_entry_failure_detail = f"ENTRY_RETRY: {type(exc).__name__}: {exc}"
-                self._record_lane_error(
-                    "decision",
-                    f"ENTRY_RETRY: {type(exc).__name__}: {exc}",
-                    now,
-                )
-                if wall >= self.config.clock.decision_finalization_deadline:
-                    await self._finalize_invalid_entry(
-                        context,
-                        now,
-                        reason="SLOT_FINALIZED_FAILED",
-                        detail=f"{type(exc).__name__}: {exc}",
-                        invalid_commit_not_before_ts=_local(
-                            context.trade_date,
-                            self.config.clock.decision_finalization_deadline,
-                        ),
-                    )
-                else:
-                    logger.warning("V20 entry attempt will retry: %s", exc)
-
-        if (
-            context.entry_status is None
-            and wall >= self.config.clock.decision_finalization_deadline
-        ):
-            await self._finalize_invalid_entry(
-                context,
-                now,
-                reason="SLOT_FINALIZED_FAILED",
-                detail="exact raw 09:39 V16 decision was not durably committed by 09:45",
-                invalid_commit_not_before_ts=_local(
-                    context.trade_date,
-                    self.config.clock.decision_finalization_deadline,
-                ),
+        if wall < time.fromisoformat(self.config.clock.decision_bar_label):
+            return
+        try:
+            await self._attempt_entry(context, now)
+        except V20LeadershipLost:
+            raise
+        except Exception as exc:
+            context.last_phase = "ENTRY_RETRY"
+            context.last_entry_failure_detail = f"ENTRY_RETRY: {type(exc).__name__}: {exc}"
+            self._record_lane_error("decision", context.last_entry_failure_detail, now)
+            logger.warning("V20 entry attempt will retry: %s", exc)
+            await self._safe_alert(
+                code="ENTRY_CALCULATION_FAILED",
+                entity_id=context.trade_date.isoformat(),
+                message=context.last_entry_failure_detail,
+                now=self._aware_now(),
             )
 
     async def _poll_entry_market(self, context: _DayContext, now: datetime) -> None:
@@ -8302,52 +8191,19 @@ class V20Service:
         formed_at = resolved_bundle.frozen_at.astimezone(SHANGHAI)
         if formed_at.date() != context.trade_date:
             raise V20SemanticConflict("V16 decision formation date does not match its slot")
-        # ``now`` is the scheduler's start sample.  A slow but valid strategy
-        # calculation may finish after 09:40, so actionability must be decided
-        # from a fresh clock sample only after the shared calculation returns.
+        # Calculation latency does not invalidate correct 09:39 facts. Keep
+        # only the trading-date boundary, independently enforced by PostgreSQL.
         observed_at = self._aware_now()
-        normal_deadline = _local(context.trade_date, self.config.clock.publish_deadline)
         received_at = calculation.canonical_first_received_at
-        context.canonical_entry_mode = (
-            "ACTIONABLE" if received_at < normal_deadline else "CHECK_ONLY"
-        )
+        if received_at.astimezone(SHANGHAI).date() != context.trade_date:
+            raise V20SemanticConflict("canonical receipt date does not match its slot")
+        if observed_at.date() != context.trade_date:
+            raise V20StateConflict("entry calculation belongs to a previous trading date")
+        context.canonical_entry_mode = "ACTIONABLE"
         context.canonical_entry_action = (
             "NO_SIGNAL" if len(resolved_bundle.scan_result.recommended) == 0 else "CANDIDATES_READY"
         )
-        if (
-            formed_at >= normal_deadline
-            or received_at >= normal_deadline
-            or observed_at >= normal_deadline
-        ):
-            await self._finalize_invalid_entry(
-                context,
-                observed_at,
-                reason="INPUT_TIME_BOUNDARY_VIOLATION",
-                detail=(
-                    "normal V16 ENTER/BLOCK/NO_SIGNAL missed the strict 09:40 "
-                    f"formation/submission boundary: formed_at={formed_at.isoformat()}, "
-                    f"received_at={received_at.isoformat()}, "
-                    f"observed_at={observed_at.isoformat()}"
-                ),
-                invalid_commit_not_before_ts=normal_deadline,
-            )
-            return
-        try:
-            await self._repository.commit_entry(prepared.commit)
-        except V20EntryDeadlineExceeded:
-            rejected_at = self._aware_now()
-            await self._finalize_invalid_entry(
-                context,
-                rejected_at,
-                reason="INPUT_TIME_BOUNDARY_VIOLATION",
-                detail=(
-                    "database clock rejected normal V16 submission at the strict "
-                    f"09:40 boundary: formed_at={formed_at.isoformat()}, "
-                    f"rejected_at={rejected_at.isoformat()}"
-                ),
-                invalid_commit_not_before_ts=normal_deadline,
-            )
-            return
+        await self._repository.commit_entry(prepared.commit)
         status = await self._repository.get_entry_status(
             self.config.official_stream_id,
             context.trade_date,

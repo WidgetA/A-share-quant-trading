@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -7150,141 +7151,57 @@ class _LateNormalEntryRepository:
         ),
     ],
 )
-async def test_late_normal_v16_candidate_becomes_gap_without_consumable_batches(
+async def test_late_normal_v16_candidate_commits_without_intraday_rejection(
     monkeypatch: pytest.MonkeyPatch,
     formed_at: datetime,
     observed_at: datetime,
 ) -> None:
-    config = _config(monkeypatch)
-    repository = _LateNormalEntryRepository(config)
-
+    repository = SimpleNamespace(
+        commit_entry=AsyncMock(),
+        get_entry_status=AsyncMock(return_value=SimpleNamespace(action="ENTER")),
+        seal_event=AsyncMock(),
+    )
     service = _service(monkeypatch, repository)
     service._clock = lambda: observed_at
-    resolved_bundle = SimpleNamespace(
+    commit = SimpleNamespace(event_id="valid-late-entry")
+    bundle = SimpleNamespace(
         frozen_at=formed_at,
-        snapshot_hash="frozen-snapshot",
         scan_result=SimpleNamespace(recommended=[SimpleNamespace(code="000001")]),
     )
-
-    async def completed_calculation(_trade_date: date) -> Any:
-        return SimpleNamespace(
-            bundle=resolved_bundle,
-            prepared=None,
+    service._orchestrate_morning_selection = AsyncMock(
+        return_value=SimpleNamespace(
+            bundle=bundle,
+            prepared=SimpleNamespace(commit=commit),
             canonical_first_received_at=formed_at,
-            canonical_artifact_matches=True,
         )
-
-    monkeypatch.setattr(service, "_compute_morning_selection", completed_calculation)
-    collector = SimpleNamespace(
-        complete_codes=lambda: {"000001"},
-        codes_with_label=lambda label: {"000001"},
-        incomplete_codes=lambda: (),
-        freeze=lambda: object(),
-        freeze_terminal=lambda: object(),
     )
-    context = _DayContext(
-        trade_date=date(2026, 8, 31),
-        calendar=(
-            date(2026, 8, 28),
-            date(2026, 8, 31),
-            date(2026, 9, 1),
-            date(2026, 9, 2),
-        ),
-        canonical_bundle=None,
-        prewarmed=SimpleNamespace(
-            required_minute_codes=("000001", "600000"),
-            universe_codes=("000001",),
-        ),
-        collector=collector,
-        breadth_collector=collector,
-        early_stored_history_loaded=True,
-    )
-
-    await service._attempt_entry(
-        context,
-        observed_at,
-    )
-
-    assert len(repository.commits) == 1
-    commit = repository.commits[0]
-    assert commit.action == "INPUT_INVALID"
-    assert commit.semantic["reason_codes"] == ["INPUT_TIME_BOUNDARY_VIOLATION"]
-    assert commit.shadow_batches == ()
-    assert commit.model_batch is None
-    assert commit.invalid_commit_not_before_ts == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
-    assert commit.next_state["official_rolling_gaps"] == []
+    service._verify_entry_binding = lambda status: None
+    context = _DayContext(date(2026, 8, 31), ())
+    await service._attempt_entry(context, observed_at)
+    repository.commit_entry.assert_awaited_once_with(commit)
+    repository.seal_event.assert_awaited_once()
+    assert context.canonical_entry_mode == "ACTIONABLE"
+    assert context.last_phase == "DECISION_COMMITTED"
 
 
-async def test_missing_0939_coverage_finalizes_no_buy_at_0940_idempotently(
+async def test_missing_0939_coverage_remains_retryable_after_0940_and_0945(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(monkeypatch)
     repository = _LateNormalEntryRepository(config)
     service = _service(monkeypatch, repository)
-    service._repository_started = True
-    scan_called = False
-
-    async def no_collection(*_args, **_kwargs) -> None:
-        return None
-
-    async def scan_must_not_run(*_args, **_kwargs):
-        nonlocal scan_called
-        scan_called = True
-        raise AssertionError("a post-cutoff normal V16 scan must not run")
-
-    async def no_alert(*_args, **_kwargs) -> None:
-        return None
-
-    monkeypatch.setattr(
-        service_module,
-        "get_or_compute_canonical_v16",
-        scan_must_not_run,
-    )
-    monkeypatch.setattr(service, "_run_entry_collection_cycle", no_collection)
-    monkeypatch.setattr(service, "_safe_alert", no_alert)
-    collector = SimpleNamespace(
-        complete_codes=lambda: set(),
-        codes_with_label=lambda _label: set(),
-        incomplete_codes=lambda: ("000001",),
-    )
-    context = _DayContext(
-        trade_date=date(2026, 8, 31),
-        calendar=(
-            date(2026, 8, 28),
-            date(2026, 8, 31),
-            date(2026, 9, 1),
-            date(2026, 9, 2),
-        ),
-        prewarmed=SimpleNamespace(
-            required_minute_codes=("000001",),
-            universe_codes=("000001",),
-        ),
-        collector=collector,
-        breadth_collector=collector,
-        early_stored_history_loaded=True,
-        last_phase="COLLECTING_0939",
-    )
-
-    cutoff = datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
-    await service._run_entry_cycle(
-        context,
-        datetime(2026, 8, 31, 9, 39, 59, tzinfo=TZ),
-    )
+    context = _DayContext(date(2026, 8, 31), ())
+    service._run_entry_collection_cycle = AsyncMock()
+    service._attempt_entry = AsyncMock(side_effect=V20RepositoryError("missing 09:39 data"))
+    service._safe_alert = AsyncMock()
+    for minute in (39, 40, 46):
+        now = datetime(2026, 8, 31, 9, minute, tzinfo=TZ)
+        service._clock = lambda: now
+        await service._run_entry_cycle(context, now)
     assert repository.commits == []
+    assert service._attempt_entry.await_count == 3
+    assert service._safe_alert.await_count == 3
     assert context.last_phase == "ENTRY_RETRY"
-    await service._run_entry_cycle(context, cutoff)
-    await service._run_entry_cycle(context, cutoff.replace(second=1))
-
-    assert not scan_called
-    assert len(repository.commits) == 1
-    commit = repository.commits[0]
-    assert commit.action == "INPUT_INVALID"
-    assert commit.semantic["schema_version"] == V20_ENTRY_SEMANTIC_SCHEMA
-    assert commit.semantic["feishu_formatter_profile"] == V20_FEISHU_FORMATTER_PROFILE
-    assert commit.semantic["reason_codes"] == ["ENTRY_INPUT_UNAVAILABLE_BY_0940"]
-    assert "no durable normal V16 decision existed" in commit.semantic["failure_detail"]
-    assert commit.invalid_commit_not_before_ts == cutoff
-    assert repository.sealed == [commit.event_id]
 
 
 async def test_entry_collection_never_precomputes_canonical_selection(
@@ -7397,11 +7314,7 @@ async def test_decision_watchdog_does_not_cancel_work_started_before_0940(
     await watchdog
 
     assert cancelled is False
-    assert len(finalized) == 1
-    assert finalized[0]["context"] is context
-    assert finalized[0]["now"] == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
-    assert finalized[0]["reason"] == "ENTRY_INPUT_UNAVAILABLE_BY_0940"
-    assert finalized[0]["invalid_commit_not_before_ts"] == datetime(2026, 8, 31, 9, 40, tzinfo=TZ)
+    assert finalized == []
 
 
 async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutoff(
@@ -7496,7 +7409,7 @@ async def test_decision_watchdog_waits_for_started_calculation_then_checks_cutof
     assert reused.trade_date == trade_date
     assert compute_calls == 1
     assert master_cancelled is False
-    assert cutoff_calls == [cutoff]
+    assert cutoff_calls == []
     assert not any(
         task.get_name().startswith("v20-decision-")
         for task in asyncio.all_tasks()
@@ -7569,7 +7482,7 @@ async def test_decision_watchdog_boundary_completion_never_duplicates_terminal_e
     await service._run_decision_iteration_with_cutoff(before)
 
     assert terminal_commits == 1
-    assert cutoff_checks == 1
+    assert cutoff_checks == 0
     assert duplicate_alerts == 0
 
 
@@ -7641,14 +7554,8 @@ async def test_decision_watchdog_finishes_calendar_load_then_enforces_cutoff(
     await watchdog
 
     assert calendar_cancelled is False
-    assert len(alerts) == expected_alerts
-    if alerts:
-        assert alerts[0]["code"] == "ENTRY_CUTOFF_NO_BUY"
-        assert alerts[0]["entity_id"] == trade_date.isoformat()
-        assert "今天不买，不要追买" in alerts[0]["message"]
-        assert service._lane_health["decision"].error_revision == error_revision_before + 1
-    else:
-        assert service._lane_health["decision"].error_revision == error_revision_before
+    assert alerts == []
+    assert service._lane_health["decision"].error_revision == error_revision_before
 
 
 class _CutoffAlertRepository:
@@ -7884,9 +7791,9 @@ async def test_fast_application_clock_waits_for_database_before_cutoff_side_effe
 
     await service._run_decision_iteration_with_cutoff(cutoff)
 
-    assert leader_checks == 2
-    assert database_cutoffs == [cutoff]
-    assert side_effects == []
+    assert leader_checks == 1
+    assert database_cutoffs == []
+    assert side_effects == ["run_once"]
 
 
 async def test_entry_cutoff_commit_failure_emits_stable_idempotent_no_buy_alert(

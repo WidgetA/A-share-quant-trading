@@ -1,5 +1,9 @@
 # A-share-quant-trading
 
+V20 completes its full 09:39-data calculation even when acquisition, computation,
+or delivery continues after 09:40/09:45. Those times no longer invalidate a
+same-day result. Historical inputs are prepared before realtime acquisition.
+
 V20 has an independent runtime supervisor. A database disconnect stops unsafe
 work, sends a Feishu operational alert directly (without the database/outbox),
 and retries a fresh V20 runtime after cleanup. Recovery rechecks the exclusive

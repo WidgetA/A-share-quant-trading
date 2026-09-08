@@ -1,5 +1,15 @@
 # V20 部署与运维手册
 
+## 2026-09-08 operator correction: do not truncate completion
+
+Remove intraday completion/submission/delivery expiry. Scheduled and manual
+selection may finish after 09:40 or 09:45 on their own trading date. Preserve
+09:39 input facts, full output, canonical validation, and first-terminal ledger
+semantics. A request without a terminal slot runs the normal decision lane;
+an existing terminal slot may be checked without rewriting it. Transport expiry
+now expresses the end of the recommendation's date, not a minute deadline.
+No old terminal slot is rewritten or retrospectively promoted on startup.
+
 ## Morning history preparation (2026-09-08)
 
 The September 8 slot failed with `INPUT_TIME_BOUNDARY_VIOLATION`: the current-day
@@ -16,10 +26,9 @@ open-day response remains an error. Preparation executes neither the selection
 scanner nor a realtime-minute request. The normal calculation still consumes
 the same history adapter and validates all canonical inputs.
 
-This removes avoidable historical work from the critical minute; it cannot
-guarantee on-time delivery when the minute provider itself takes over a minute.
-The 09:39 acquisition start, 40-request concurrency limit, and 09:40 official
-commit fence remain in force. Late results remain non-actionable diagnostics.
+This removes avoidable historical work from the realtime calculation. The
+09:39 acquisition start and 40-request concurrency limit remain; a slow complete
+same-day result now commits normally without an intraday completion fence.
 
 ## Runtime failure recovery (2026-09-07)
 
