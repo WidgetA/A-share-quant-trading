@@ -4142,6 +4142,8 @@ async def test_morning_selection_trigger_uses_only_official_entry_message_lane(
         assert service._decision_cycle_lock.locked()
         decision_calls.append(now)
         status = _rich_entry_status(service.config)
+        semantic = {**status.semantic, "final_multiplier": 1.0}
+        status = replace(status, semantic=semantic, semantic_content_hash=sha256_json(semantic))
         repository.entry_status = status
         payload = {"message": "the automatic entry message"}
         repository.events[status.event_id] = OutboxRecord(

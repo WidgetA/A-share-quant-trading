@@ -187,20 +187,22 @@ async def test_same_date_entry_commits_with_full_legs_and_date_scoped_delivery(r
 
 @pytest.mark.parametrize("blocked", [False, True])
 @pytest.mark.parametrize("first_source", ["timer", "button"])
+@pytest.mark.parametrize("lose_rerun_response", [False, True])
 async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
-    repository, monkeypatch, blocked, first_source
+    repository, monkeypatch, blocked, first_source, lose_rerun_response
 ):
     """Exercise the real entry engine, transaction and publisher for both outcomes."""
     from types import SimpleNamespace
 
     import httpx
+    from fastapi import FastAPI
 
     from src.common import feishu_bot
     from src.common.v20_feishu import V20FeishuRoute, V20OutboxPublisher, seal_v20_payload
     from src.strategy.v20.artifacts import load_g_artifacts
     from src.strategy.v20.decision_engine import prepare_entry
     from src.web.v20_canonical_selection import V20CanonicalSelectionState
-    from src.web.v20_routes import _dispatch_manual_trigger
+    from src.web.v20_routes import _dispatch_manual_trigger, create_v20_router
     from src.web.v20_service import V20Service, _DayContext
     from tests.unit.strategy.test_v22_slim_entry import fixture
 
@@ -316,7 +318,26 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         first_event = first["entry_event_id"]
         assert first["official_state_changed"] is True
         assert first["task_success"] is False
-    rerun = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
+    api = FastAPI()
+    api.include_router(create_v20_router())
+    api.state.v20_service = service
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api), base_url="http://testserver"
+    ) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post(
+                    "/api/v20/trigger-scan",
+                    headers={"Idempotency-Key": "postgres-button-rerun-001"},
+                )
+                for _ in range(3)
+            )
+        )
+    assert [response.status_code for response in responses] == [202, 202, 202]
+    results = [response.json() for response in responses]
+    assert sum(result["created"] for result in results) == 1
+    assert len({result["entry_event_id"] for result in results}) == 1
+    rerun = results[0]
     second_event = rerun["entry_event_id"]
     assert rerun["official_state_changed"] is False
     assert rerun["task_success"] is False
@@ -342,6 +363,10 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
 
     def reply(request):
         posts.append(json.loads(request.content))
+        if lose_rerun_response and len(posts) == 2:
+            raise httpx.ReadTimeout(
+                "relay accepted the rerun but its reply was lost", request=request
+            )
         return httpx.Response(200, json={"code": 0, "msg": "success"})
 
     original_client = httpx.AsyncClient
@@ -367,7 +392,8 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         official_stream_id=config.official_stream_id,
         lineage_id=config.state_lineage_id,
     )
-    assert await publisher.publish_once() == 2
+    assert await publisher.publish_once() == 1
+    assert await publisher.publish_once() == (0 if lose_rerun_response else 1)
     assert await publisher.publish_once() == 0
     assert len(posts) == 2
     delivered = await instance.get_outbox_event(
@@ -383,10 +409,23 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         official_stream_id=config.official_stream_id,
         lineage_id=config.state_lineage_id,
     )
-    assert repeated_delivery.delivery_status == "SENT"
+    assert repeated_delivery.delivery_status == (
+        "DELIVERY_UNKNOWN" if lose_rerun_response else "SENT"
+    )
     delivered_result = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
-    assert delivered_result["task_success"] is True
-    assert delivered_result["feishu_delivery_confirmed"] is True
+    assert delivered_result["task_success"] is (not lose_rerun_response)
+    assert delivered_result["feishu_delivery_confirmed"] is (not lose_rerun_response)
+    # A restarted publisher must not resend a delivered or uncertain attempt.
+    for index in range(3):
+        restarted = V20OutboxPublisher(
+            instance,
+            {config.route_id: route},
+            worker_id=f"restart-{index}",
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        assert await restarted.publish_once() == 0
     assert calculations == [today, today] and len(posts) == 2
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
