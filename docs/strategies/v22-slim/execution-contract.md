@@ -40,4 +40,19 @@
 历史报告保留事实，但不得将旧“核查成功”解释为本合同通过。
 如后续修改改变上述合同，必须明确指出具体改变；不能暗中增加例外再写进文档。
 
-当前状态：正在补齐防回归检查与实现，尚未按本合同验收完成。
+## 实现与验收位置
+
+- 定时入口 `_commit_entry_from_bundle` 和按钮入口 `trigger_morning_selection` 都调用
+  `V20Service._execute_selection_task`。HTTP 路由不再判断早盘、盘后或当日是否已有结果。
+- `selection_runs` 保存每次新运行的输入、完整结果及对应推送事件。首次运行在同一
+  数据库事务内推进每日状态；之后的运行保存新的普通 `ENTRY_DECISION`，每日状态只推进一次。
+- 同编号重试读取已保存的本次运行。新编号重新计算、保存和发送；不是重发旧消息。
+- `accepted=true` 表示受理，`calculation_result=SUCCESS` 表示计算完成。
+  只有对应结果在生产投递器中达到 `SENT`，`task_success` 才为 `true`。
+  `PENDING` 或 `DELIVERY_UNKNOWN` 都不能作为上线验收成功。
+- `tests/unit/web/test_selection_task_contract.py` 保存原错误的行为回归检查。
+  `tests/integration/data/database/test_v20_outbox_postgres.py` 验证 V22 放行与阻断、
+  两种首次触发、并发同编号重试、事务回滚、普通推送及回执丢失。
+  真实市场取数与计算入口的对照另由现有 canonical / morning selection 测试覆盖。
+
+当前状态：实现已提交草稿 PR，等待全部 CI 与部署后完整任务投递验收。
