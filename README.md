@@ -1,5 +1,9 @@
 # A-share-quant-trading
 
+V22-slim replaces V20 morning selection with frozen V22
+ranking, the complete entry gates, and Top3 recommendations. See
+[scope and acceptance](docs/strategies/v22-slim/README.md).
+
 V16 notifications show each calculation price with its actual source minute.
 Report generation time is separate. Missing source times are explicitly unknown;
 they are never replaced with 09:39, 09:40, or the notification time.

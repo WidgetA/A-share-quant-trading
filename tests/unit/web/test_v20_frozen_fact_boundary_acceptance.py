@@ -104,6 +104,7 @@ def _seed_service(
     client = Client()
     service = object.__new__(V20Service)
     service._repository = repository
+    service.config = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1")
     service._scan_state = SimpleNamespace(realtime_client=client)
     service._clock = lambda: datetime(2026, 9, 3, 22, 0, tzinfo=TZ)
 
@@ -336,6 +337,7 @@ async def test_frozen_replay_reuses_d1_snapshot_at_artifact_cutoff_without_sourc
 
     service = object.__new__(V20Service)
     repository = Repository()
+    service.config = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1")
     service._repository = repository
     service._clock = lambda: datetime(2026, 9, 3, 22, 0, tzinfo=TZ)
     service._scan_state = SimpleNamespace(
@@ -416,6 +418,7 @@ async def test_frozen_replay_rejects_d1_snapshot_at_exact_artifact_timestamp(
 
     service = object.__new__(V20Service)
     service._repository = Repository()
+    service.config = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1")
     service._clock = lambda: datetime(2026, 9, 3, 22, 0, tzinfo=TZ)
     service._scan_state = SimpleNamespace(
         realtime_client=None,
@@ -514,6 +517,7 @@ async def test_resolver_passes_artifact_exact_boundary_to_scanner_recomputation(
         ),
         config=SimpleNamespace(
             official_stream_id="shadow",
+            strategy_version="V20_BAD_E50_G_BASE_V1",
             strategy_dependency_hashes={
                 "models/v20/lgbrank_latest.txt": "3" * 64,
                 "models/v20/feature_list.json": "4" * 64,
@@ -562,6 +566,7 @@ async def test_terminal_without_artifact_fails_closed_but_no_terminal_can_still_
         _project_canonical_v16=lambda _canonical, *, calendar: actual,
         config=SimpleNamespace(
             official_stream_id="shadow",
+            strategy_version="V20_BAD_E50_G_BASE_V1",
             strategy_dependency_hashes={
                 "models/v20/lgbrank_latest.txt": "3" * 64,
                 "models/v20/feature_list.json": "4" * 64,
@@ -627,6 +632,7 @@ async def test_input_invalid_ignores_legacy_artifact_and_keeps_comparison_unavai
         ),
         config=SimpleNamespace(
             official_stream_id="shadow",
+            strategy_version="V20_BAD_E50_G_BASE_V1",
             strategy_dependency_hashes={
                 "models/v20/lgbrank_latest.txt": "3" * 64,
                 "models/v20/feature_list.json": "4" * 64,
@@ -821,6 +827,7 @@ async def _replay_with_market_fact_hashes(
         ),
         config=SimpleNamespace(
             official_stream_id="shadow",
+            strategy_version="V20_BAD_E50_G_BASE_V1",
             strategy_dependency_hashes={
                 "models/v20/lgbrank_latest.txt": "3" * 64,
                 "models/v20/feature_list.json": "4" * 64,
@@ -931,6 +938,7 @@ async def test_d1_candidate_arriving_after_formal_compute_before_artifact_is_rej
     )
     assert early is not None
     service = object.__new__(V20Service)
+    service.config = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1")
     service._repository = Repository()
     service._clock = lambda: datetime(2026, 9, 3, 22, 0, tzinfo=TZ)
     service._scan_state = SimpleNamespace(

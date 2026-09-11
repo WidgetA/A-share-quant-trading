@@ -336,6 +336,8 @@ def create_router() -> APIRouter:
             "build_time": os.environ.get("BUILD_TIME", "unknown"),
             "v20": {
                 "configured": v20_service is not None,
+                "strategy_version": getattr(v20_config, "strategy_version", None),
+                "entry_only": getattr(v20_config, "strategy_version", None) == "V22-slim",
                 "enabled": getattr(v20_config, "enabled", False),
                 "mode": getattr(request.app.state, "v20_deployment_mode", None),
                 "started": bool(getattr(request.app.state, "v20_service_started", False)),

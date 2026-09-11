@@ -1,0 +1,30 @@
+[
+  {
+    "day": "20260907",
+    "action": "ENTER",
+    "all_gate_inputs_match": true,
+    "risk_before": 14,
+    "risk_after": 0
+  },
+  {
+    "day": "20260908",
+    "action": "BLOCK",
+    "all_gate_inputs_match": true,
+    "risk_before": 0,
+    "risk_after": 1
+  },
+  {
+    "day": "20260909",
+    "action": "BLOCK",
+    "all_gate_inputs_match": true,
+    "risk_before": 1,
+    "risk_after": 2
+  },
+  {
+    "day": "20260910",
+    "action": "NO_SIGNAL",
+    "all_gate_inputs_match": true,
+    "risk_before": 2,
+    "risk_after": 2
+  }
+]

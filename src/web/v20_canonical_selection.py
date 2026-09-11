@@ -54,6 +54,7 @@ class V20CanonicalSelectionState:
     """Resources and cache owned exclusively by one V20 service instance."""
 
     initialized: bool = False
+    selection_version: str = "V20"
     realtime_client: Any = None
     fundamentals_db: Any = None
     historical_adapter: Any = None
@@ -1625,11 +1626,22 @@ def derive_canonical_v16_universe(
         stock_filter=scan_state.stock_filter,
         scorer=scorer,
     )
+    if scan_state.selection_version == "V22-slim":
+        from src.strategy.v22_slim.selection import make_scanner
+
+        scanner, scorer, _boards = make_scanner()
     clean_boards_raw, universe_codes = (
         (dict(clean_boards_override), set(universe_override))
         if universe_override is not None and clean_boards_override is not None
         else scanner.get_universe()
     )
+    if scan_state.selection_version == "V22-slim":
+        frozen_boards, frozen_universe = scanner.get_universe()
+        if set(universe_codes) != frozen_universe or {
+            key: sorted(value) for key, value in clean_boards_raw.items()
+        } != {key: sorted(value) for key, value in frozen_boards.items()}:
+            raise ValueError("V22-slim replay universe differs from the frozen board asset")
+        clean_boards_raw = frozen_boards
     if not universe_codes:
         raise RuntimeError("V16 scan: universe is empty after board cleaning")
 
@@ -1637,6 +1649,8 @@ def derive_canonical_v16_universe(
     clean_boards_for_scan = {
         board: sorted(codes) for board, codes in sorted(clean_boards_raw.items())
     }
+    if scan_state.selection_version == "V22-slim":
+        clean_boards_for_scan = {board: list(codes) for board, codes in clean_boards_raw.items()}
     clean_boards = MappingProxyType(
         {board: tuple(codes) for board, codes in clean_boards_for_scan.items()}
     )
@@ -1704,7 +1718,8 @@ async def compute_canonical_v16_scan(
     )
     logger.info(f"V16 scan: universe = {len(universe_list)} stocks")
     clean_boards_for_scan = {board: list(codes) for board, codes in clean_boards.items()}
-    if st_eligible_codes_override is not None:
+    slim = scan_state.selection_version == "V22-slim"
+    if st_eligible_codes_override is not None and not slim:
         eligible = frozenset(st_eligible_codes_override)
         if any(code not in universe_list for code in eligible):
             raise CanonicalV16ScanError("V16 scan: frozen ST eligibility has unknown codes")
@@ -1793,6 +1808,16 @@ async def compute_canonical_v16_scan(
         )
     )
     early_universe = tuple(sorted(set(universe_list).union(breadth_universe)))
+    if slim and early_data_seed is not None:
+        # V22's whole-market capture also covers resumed 00/60 stocks absent
+        # from D-1 daily rows. Frozen receipt validation happens in the service.
+        extra_codes = set(early_data_seed)
+        if any(
+            len(code) != 6 or not code.isdigit() or not code.startswith(("00", "60"))
+            for code in extra_codes
+        ):
+            raise CanonicalV16ScanError("V22-slim whole-market seed has invalid codes")
+        early_universe = tuple(sorted(set(early_universe).union(extra_codes)))
 
     # Merge retained partial evidence and any caller-supplied seed with a fresh
     # pull of unresolved codes.  Conflicting retained/seeded provenance is a
@@ -1835,6 +1860,14 @@ async def compute_canonical_v16_scan(
         elif code in new_data:
             early_data[code] = new_data[code]
 
+    if slim:
+        from src.strategy.v22_slim.selection import exact_early
+
+        early_data = {
+            code: projected
+            for code, data in early_data.items()
+            if (projected := exact_early(data, trade_date)) is not None
+        }
     ready_set = _ready_codes(early_data, trade_date)
     breadth_ready = [code for code in breadth_universe if code in ready_set]
     breadth_valid_n = 0
@@ -1995,10 +2028,14 @@ async def compute_canonical_v16_scan(
             notify_detail=detail,
         )
 
-    # Batch fetch company names from fundamentals DB
+    # V22 uses the same versioned name/ST asset as the frozen research.
     fdb = scan_state.fundamentals_db
     name_map: dict[str, str] = {}
-    if names_override is not None:
+    if slim:
+        from src.strategy.v22_slim.selection import FrozenBoards
+
+        name_map = FrozenBoards().names
+    elif names_override is not None:
         name_map = dict(names_override)
     elif fdb:
         try:
@@ -2035,7 +2072,16 @@ async def compute_canonical_v16_scan(
             continue
 
         try:
-            sd = _build_stock_data(code, name_map.get(code, ""), stock_quote, pc, hr, trade_date)
+            if slim:
+                from src.strategy.v22_slim.selection import build_stock
+
+                sd = build_stock(
+                    code, name_map.get(code, ""), stock_quote, hr, tuple(calendar), trade_date
+                )
+            else:
+                sd = _build_stock_data(
+                    code, name_map.get(code, ""), stock_quote, pc, hr, trade_date
+                )
         except RuntimeError as e:
             errors_build.append(f"{code}: {e}")
             continue
@@ -2111,7 +2157,7 @@ async def compute_canonical_v16_scan(
         ) from e
 
     # Final name refresh is part of the canonical bundle (display only).
-    if names_override is None:
+    if names_override is None and not slim:
         await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
 
     computed_at = datetime.now(BEIJING_TZ)

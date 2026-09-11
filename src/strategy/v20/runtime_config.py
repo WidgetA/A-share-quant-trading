@@ -123,6 +123,11 @@ _ROUTE_BINDING_KEYS = {
 _STRATEGY_DEPENDENCY_FILES = (
     "models/v20/lgbrank_latest.txt",
     "models/v20/feature_list.json",
+    "models/v22_slim/lgbrank_latest.txt",
+    "models/v22_slim/feature_list.json",
+    "models/v22_slim/board_constituents.json",
+    "models/v22_slim/manifest.json",
+    "models/v22_slim/reference_checkpoint.json.gz",
     "data/sectors.json",
     "data/board_constituents.json",
     "data/v20_mews_bootstrap.json.gz",

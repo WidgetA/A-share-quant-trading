@@ -402,6 +402,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
 
     action = str(semantic.get("action", "INPUT_INVALID"))
     multiplier = float(semantic.get("final_multiplier", 0.0))
+    slim = semantic.get("entry_only") is True
     lines = [
         f"计算结论：{action}｜最终倍率 {_pct(multiplier, 0)}",
         (
@@ -418,12 +419,23 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
     reasons = semantic.get("reason_codes") or []
     if reasons:
         lines.append("原因: " + " / ".join(str(item) for item in reasons))
+    if slim:
+        market_gate = semantic.get("h90") or {}
+        lines.append(
+            f"H90: {'拦截' if market_gate.get('block') else '通过'} | "
+            f"10日比值 {_pct(market_gate.get('h10_ratio'))} | "
+            f"20日比值 {_pct(market_gate.get('h20_ratio'))}"
+        )
+        lines.append(
+            f"D0-N2: 昨日风险计数 {semantic.get('risk_streak_before', '-')} | "
+            f"盘前强条件 {'成立' if semantic.get('strong_gate_hit') else '不成立'}"
+        )
 
     funnel = semantic.get("v16_funnel") or {}
     if isinstance(funnel, Mapping) and funnel:
         lines.append(
-            "V16扫描: "
-            f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
+            ("V22-slim扫描: " if slim else "V16扫描: ")
+            + f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
             f"热门板块 {funnel.get('step2_hot_board_count', '-')}个 | "
             f"最终 {funnel.get('final_candidates', '-')}只"
         )
@@ -471,7 +483,9 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"V16完整推荐（{len(symbols)}只）:",
+                f"V22-slim推荐（{len(symbols)}只）:"
+                if slim
+                else f"V16完整推荐（{len(symbols)}只）:",
                 f"推荐 Top-1: {top1['code']} {top1.get('name', '')}",
                 (
                     f"  板块: {driver_tag(top1)}{format_boards(top1)} | "
@@ -480,7 +494,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
                     f"{optional_metrics(top1)}"
                 ),
                 "",
-                "评分前10:",
+                "推荐前3:" if semantic.get("entry_only") else "评分前10:",
             ]
         )
         for item in symbols:
@@ -500,10 +514,18 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
             )
         if multiplier > 0:
             per_leg = multiplier / len(symbols)
-            lines.append(f"每只模型腿相对份额: {_pct(per_leg)}（不代表账户金额或股数）")
+            lines.append(
+                f"每只占当天资金份: {_pct(per_leg)}"
+                if slim
+                else f"每只模型腿相对份额: {_pct(per_leg)}（不代表账户金额或股数）"
+            )
             lines.append("参考价规则: 使用原始09:41结束标签的bar.open锁定09:40参考价")
     else:
-        lines.append("今日V16完整扫描合法无票，不建立新模型批次")
+        if slim:
+            count = len(semantic.get("reference_symbols") or [])
+            lines.append(f"原始候选 {count} 只；今天不新开仓，保留现金。")
+        else:
+            lines.append("今日V16完整扫描合法无票，不建立新模型批次")
 
     scheduled_exits = semantic.get("scheduled_exits_today") or []
     if scheduled_exits:
@@ -574,7 +596,8 @@ def _render_manual_entry_check_for_operator(
     lines.extend(
         [
             "",
-            "策略计算结果（当前V20代码按正式分钟/D1边界重算，并核验重取的历史输入）：",
+            f"策略计算结果（当前{'V22-slim' if entry.get('entry_only') else 'V20'}代码"
+            "按正式分钟/D1边界重算，并核验重取的历史输入）：",
             _render_entry_strategy_body(entry),
         ]
     )
@@ -707,7 +730,8 @@ def render_entry_message(
     """Render the one daily V20 entry-decision message."""
     mode = str(semantic.get("deployment_mode", "forward_shadow"))
     shadow = mode == "forward_shadow"
-    title = "[V20][SHADOW] 每日决策" if shadow else "[V20] 每日决策"
+    version = "V22-slim" if semantic.get("strategy_version") == "V22-slim" else "V20"
+    title = f"[{version}][SHADOW] 每日决策" if shadow else f"[{version}] 每日决策"
     trade_date = str(semantic["trade_date"])
     action = str(semantic.get("action", "INPUT_INVALID"))
     multiplier = float(semantic.get("final_multiplier", 0.0))
@@ -751,6 +775,11 @@ def render_entry_message(
     if action != "NO_SIGNAL":
         lines.append(_entry_action_text(multiplier, on_time=on_time))
     lines.extend(["", _render_entry_strategy_body(semantic)])
+    if semantic.get("entry_only"):
+        lines.extend(["", "V22-slim：本次仅提供选股与开仓判断；放行使用当天资金份，非全账户满仓。"])
+        if action == "BLOCK":
+            lines.append("原始候选仅供观察，今天不新买。")
+        lines.append("本版本未启用 V22 卖出规则。")
 
     lines.extend(
         [
@@ -768,10 +797,11 @@ def render_expired_entry_delivery_message(semantic: Mapping[str, Any]) -> str:
     """Render a fail-closed notice when transport misses the entry expiry."""
 
     mode = str(semantic.get("deployment_mode", "forward_shadow"))
+    version = "V22-slim" if semantic.get("strategy_version") == "V22-slim" else "V20"
     title = (
-        "[V20][SHADOW] 入场消息投递已过期"
+        f"[{version}][SHADOW] 入场消息投递已过期"
         if mode == "forward_shadow"
-        else "[V20] 入场消息投递已过期"
+        else f"[{version}] 入场消息投递已过期"
     )
     return "\n".join(
         [
@@ -1538,10 +1568,11 @@ def seal_v20_payload(
 ) -> Mapping[str, Any]:
     semantic = dict(record.semantic)
     _validate_formatter_semantic(record, semantic)
+    version = "V22-slim" if semantic.get("strategy_version") == "V22-slim" else "V20"
     title_prefix = (
-        "[V20][SHADOW]"
+        f"[{version}][SHADOW]"
         if str(semantic.get("deployment_mode", "forward_shadow")) == "forward_shadow"
-        else "[V20]"
+        else f"[{version}]"
     )
     if record.event_type == "ENTRY_DECISION":
         message = render_entry_message(

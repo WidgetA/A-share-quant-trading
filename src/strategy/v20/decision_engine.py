@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -29,7 +29,9 @@ from .models import (
     V20_INVALID_INPUT_SNAPSHOT_SCHEMA,
     V20_V16_SNAPSHOT_SCHEMA,
     BreadthSnapshot,
+    EntryAction,
     GDecision,
+    GStatus,
     HealthObservation,
     HealthSnapshot,
     RollingBatch,
@@ -406,7 +408,19 @@ def prepare_entry(
         )
         for item in completed_health
     ]
-    health_after = advance_health_state(health_before, observations)
+    slim = config.strategy_version == "V22-slim"
+    inputs: Mapping[str, Any] = {}
+    if slim:
+        from src.strategy.v22_slim.policy import advance_health
+
+        raw_inputs = bundle.snapshot.get("v22_slim_inputs")
+        if not isinstance(raw_inputs, Mapping) or raw_inputs.get("schema") != "v22-slim-inputs/v1":
+            raise ValueError("V22-slim requires its complete causal input snapshot")
+        inputs = raw_inputs
+        health_before = deserialize_health_snapshot(inputs["health_before"])
+        health_after = advance_health(health_before, observations, today=bundle.trade_date)
+    else:
+        health_after = advance_health_state(health_before, observations)
     breadth = BreadthSnapshot(bundle.breadth_valid_n, bundle.breadth_down_n)
     base = decide_base(health_after, breadth)
 
@@ -456,6 +470,35 @@ def prepare_entry(
         rolling7=rolling,
         g=g,
     )
+    slim_gate = None
+    if slim:
+        from src.strategy.v22_slim.policy import entry_gate
+
+        # V22 preserves both intermediate multipliers even when BASE is zero
+        # or the scan has no picks; V20's early-return display loses this fact.
+        defense = (
+            (0.0 if g is not None and g.status is GStatus.TRIGGERED else 0.5)
+            if rolling.status.value == "BAD"
+            else 1.0
+        )
+        weight = base.multiplier * defense
+        slim_gate = entry_gate(
+            count=len(bundle.scan_result.recommended),
+            v20_weight=weight,
+            h90_block=inputs["h90"]["block"],
+            risk_before=inputs["risk_before"],
+            strong=inputs["strong"],
+        )
+        entry = replace(
+            entry,
+            action=EntryAction.ENTER
+            if slim_gate.final_open
+            else (EntryAction.BLOCK if bundle.scan_result.recommended else EntryAction.NO_SIGNAL),
+            final_multiplier=slim_gate.multiplier,
+            base_multiplier=base.multiplier,
+            defense_multiplier=defense,
+            reasons=tuple(entry.reasons) + slim_gate.reason_codes,
+        )
 
     policy_inputs = _policy_input_snapshot(
         completed_health=completed_health,
@@ -529,6 +572,18 @@ def prepare_entry(
         "state_before_hash": state.state_hash,
         "state_after_hash": next_state_hash,
     }
+    if slim_gate is not None:
+        semantic.update(
+            selection_version="V22-slim",
+            reference_symbols=semantic["symbols"],
+            symbols=semantic["symbols"][:3] if slim_gate.final_open else [],
+            normal_open=slim_gate.normal_open,
+            risk_streak_before=inputs["risk_before"],
+            h90=inputs["h90"],
+            strong_gate_hit=inputs["strong"],
+            health_after=serialize_health_snapshot(health_after),
+            entry_only=True,
+        )
     semantic_hash = sha256_json(semantic)
     snapshot_id = named_hash(
         "V20_V16_SNAPSHOT_ID_V1",
@@ -565,7 +620,7 @@ def prepare_entry(
         )
 
     model_write = None
-    if entry.final_multiplier > 0 and bundle.scan_result.recommended:
+    if entry.final_multiplier > 0 and bundle.scan_result.recommended and not slim:
         batch_identity = model_batch_id(decision)
         per_leg = entry.final_multiplier / len(bundle.scan_result.recommended)
         legs = tuple(
